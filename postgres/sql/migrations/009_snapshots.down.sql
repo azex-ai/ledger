@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS system_rollups CASCADE;
+DROP TABLE IF EXISTS balance_snapshots CASCADE;
