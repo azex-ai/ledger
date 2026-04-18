@@ -31,19 +31,7 @@ type Server struct {
 	systemRollup *service.SystemRollupService
 
 	// Query helpers (direct sqlcgen access for list queries)
-	queries QueryProvider
-}
-
-// QueryProvider exposes read-only list/get queries not covered by core interfaces.
-// Implemented by postgres stores via an adapter.
-type QueryProvider interface {
-	JournalQuerier
-	EntryQuerier
-	ReservationQuerier
-	DepositQuerier
-	WithdrawalQuerier
-	SnapshotQuerier
-	SystemRollupQuerier
+	queries core.QueryProvider
 }
 
 // Config holds server configuration.
@@ -65,7 +53,7 @@ func New(
 	reconciler core.Reconciler,
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
-	queries QueryProvider,
+	queries core.QueryProvider,
 ) *Server {
 	s := &Server{
 		journals:        journals,
@@ -83,11 +71,26 @@ func New(
 		queries:         queries,
 	}
 	s.router = chi.NewRouter()
+	s.router.Use(corsMiddleware)
 	s.router.Use(middleware.Logger)
 	s.router.Use(middleware.Recoverer)
 	s.router.Use(middleware.RequestID)
 	s.setupRoutes()
 	return s
+}
+
+// corsMiddleware handles CORS preflight and response headers.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ServeHTTP implements http.Handler.

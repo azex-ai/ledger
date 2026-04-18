@@ -2,13 +2,13 @@ package server
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 // --- Classification types ---
@@ -155,21 +155,25 @@ type previewEntryResponse struct {
 	Amount           string `json:"amount"`
 }
 
+type previewTemplateResponse struct {
+	Entries []previewEntryResponse `json:"entries"`
+}
+
 // --- Classification handlers ---
 
 func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Request) {
-	var req createClassificationRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[createClassificationRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Code == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "code and name required")
+		httpx.Error(w, httpx.ErrBadRequest("code and name required"))
 		return
 	}
 	ns := core.NormalSide(req.NormalSide)
 	if !ns.IsValid() {
-		writeError(w, http.StatusBadRequest, "invalid_params", "normal_side must be debit or credit")
+		httpx.Error(w, httpx.ErrBadRequest("normal_side must be debit or credit"))
 		return
 	}
 
@@ -180,49 +184,49 @@ func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Reque
 		IsSystem:   req.IsSystem,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toClassificationResponse(cls))
+	httpx.Created(w, toClassificationResponse(cls))
 }
 
 func (s *Server) handleDeactivateClassification(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid classification ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid classification ID"))
 		return
 	}
 	if err := s.classifications.DeactivateClassification(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
+	httpx.OK(w, map[string]string{"status": "deactivated"})
 }
 
 func (s *Server) handleListClassifications(w http.ResponseWriter, r *http.Request) {
 	activeOnly := r.URL.Query().Get("active_only") == "true"
 	list, err := s.classifications.ListClassifications(r.Context(), activeOnly)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 	data := make([]classificationResponse, len(list))
 	for i, c := range list {
 		data[i] = toClassificationResponse(&c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }
 
 // --- Journal Type handlers ---
 
 func (s *Server) handleCreateJournalType(w http.ResponseWriter, r *http.Request) {
-	var req createJournalTypeRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[createJournalTypeRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Code == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "code and name required")
+		httpx.Error(w, httpx.ErrBadRequest("code and name required"))
 		return
 	}
 
@@ -231,49 +235,49 @@ func (s *Server) handleCreateJournalType(w http.ResponseWriter, r *http.Request)
 		Name: req.Name,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toJournalTypeResponse(jt))
+	httpx.Created(w, toJournalTypeResponse(jt))
 }
 
 func (s *Server) handleDeactivateJournalType(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid journal type ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal type ID"))
 		return
 	}
 	if err := s.journalTypes.DeactivateJournalType(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
+	httpx.OK(w, map[string]string{"status": "deactivated"})
 }
 
 func (s *Server) handleListJournalTypes(w http.ResponseWriter, r *http.Request) {
 	activeOnly := r.URL.Query().Get("active_only") == "true"
 	list, err := s.journalTypes.ListJournalTypes(r.Context(), activeOnly)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 	data := make([]journalTypeResponse, len(list))
 	for i, jt := range list {
 		data[i] = toJournalTypeResponse(&jt)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }
 
 // --- Template handlers ---
 
 func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
-	var req createTemplateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[createTemplateRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Code == "" || req.Name == "" || req.JournalTypeID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "code, name, and journal_type_id required")
+		httpx.Error(w, httpx.ErrBadRequest("code, name, and journal_type_id required"))
 		return
 	}
 
@@ -295,41 +299,37 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		Lines:         lines,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toTemplateResponse(tmpl))
+	httpx.Created(w, toTemplateResponse(tmpl))
 }
 
 func (s *Server) handleDeactivateTemplate(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid template ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid template ID"))
 		return
 	}
 	if err := s.templates.DeactivateTemplate(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
+	httpx.OK(w, map[string]string{"status": "deactivated"})
 }
 
 func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 	code := chi.URLParam(r, "code")
 
-	var req previewTemplateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[previewTemplateRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	tmpl, err := s.templates.GetTemplate(r.Context(), code)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -337,7 +337,7 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Amounts {
 		d, err := decimal.NewFromString(v)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_amount", "amount "+v+" is not a valid decimal")
+			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
 			return
 		}
 		amounts[k] = d
@@ -352,7 +352,7 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 
 	input, err := tmpl.Render(params)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "template_error", err.Error())
+		httpx.Error(w, httpx.ErrBadRequest(err.Error()))
 		return
 	}
 
@@ -366,33 +366,33 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 			Amount:           e.Amount.String(),
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+	httpx.OK(w, previewTemplateResponse{Entries: entries})
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	activeOnly := r.URL.Query().Get("active_only") == "true"
 	list, err := s.templates.ListTemplates(r.Context(), activeOnly)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 	data := make([]templateResponse, len(list))
 	for i, t := range list {
 		data[i] = toTemplateResponse(&t)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }
 
 // --- Currency handlers ---
 
 func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
-	var req createCurrencyRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[createCurrencyRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Code == "" || req.Name == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "code and name required")
+		httpx.Error(w, httpx.ErrBadRequest("code and name required"))
 		return
 	}
 
@@ -401,21 +401,21 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		Name: req.Name,
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name})
+	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name})
 }
 
 func (s *Server) handleListCurrencies(w http.ResponseWriter, r *http.Request) {
 	list, err := s.currencies.ListCurrencies(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 	data := make([]currencyResponse, len(list))
 	for i, c := range list {
 		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }

@@ -69,22 +69,22 @@ func (j *JournalInput) Totals() (debit, credit decimal.Decimal) {
 
 func (j *JournalInput) Validate() error {
 	if j.IdempotencyKey == "" {
-		return fmt.Errorf("core: journal: idempotency key required")
+		return fmt.Errorf("core: journal: idempotency key required: %w", ErrInvalidInput)
 	}
 	if len(j.Entries) == 0 {
-		return fmt.Errorf("core: journal: entries must not be empty")
+		return fmt.Errorf("core: journal: entries must not be empty: %w", ErrInvalidInput)
 	}
 	for i, e := range j.Entries {
 		if !e.EntryType.IsValid() {
-			return fmt.Errorf("core: journal: entry[%d]: invalid entry type %q", i, e.EntryType)
+			return fmt.Errorf("core: journal: entry[%d]: invalid entry type %q: %w", i, e.EntryType, ErrInvalidInput)
 		}
 		if !e.Amount.IsPositive() {
-			return fmt.Errorf("core: journal: entry[%d]: amount must be positive", i)
+			return fmt.Errorf("core: journal: entry[%d]: amount must be positive: %w", i, ErrInvalidInput)
 		}
 	}
 	debit, credit := j.Totals()
 	if !debit.Equal(credit) {
-		return fmt.Errorf("core: journal: unbalanced — debit=%s credit=%s", debit, credit)
+		return fmt.Errorf("core: journal: unbalanced — debit=%s credit=%s: %w", debit, credit, ErrUnbalancedJournal)
 	}
 	return nil
 }

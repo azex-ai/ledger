@@ -134,14 +134,14 @@ func (s *WithdrawStore) transitionWithdrawal(
 	w, err := qtx.GetWithdrawalForUpdate(ctx, withdrawalID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: withdraw transition: withdrawal %d not found", withdrawalID)
+			return fmt.Errorf("postgres: withdraw transition: withdrawal %d: %w", withdrawalID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: withdraw transition: get: %w", err)
 	}
 
 	status := core.WithdrawStatus(w.Status)
 	if !status.CanTransitionTo(target) {
-		return fmt.Errorf("postgres: withdraw transition: invalid transition from %q to %q", w.Status, target)
+		return fmt.Errorf("postgres: withdraw transition: from %q to %q: %w", w.Status, target, core.ErrInvalidTransition)
 	}
 
 	if err := updateFn(qtx, w); err != nil {

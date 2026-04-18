@@ -163,7 +163,8 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 const listReservationsByAccount = `-- name: ListReservationsByAccount :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
 FROM reservations
-WHERE account_holder = $1 AND (status = $2 OR $2 = '')
+WHERE ($1::bigint = 0 OR account_holder = $1)
+  AND ($2::text = '' OR status = $2)
 ORDER BY created_at DESC
 LIMIT $3::int
 `

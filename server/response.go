@@ -3,43 +3,14 @@ package server
 import (
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"net/http"
 	"strconv"
 )
 
-// ErrorBody is the standard error response envelope.
-type ErrorBody struct {
-	Error ErrorDetail `json:"error"`
-}
-
-// ErrorDetail contains error code and message.
-type ErrorDetail struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-// PagedResponse wraps a list response with cursor pagination.
+// PagedResponse is a cursor-paginated list response.
 type PagedResponse[T any] struct {
 	Data       []T    `json:"data"`
 	NextCursor string `json:"next_cursor,omitempty"`
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, ErrorBody{
-		Error: ErrorDetail{Code: code, Message: message},
-	})
-}
-
-func decodeJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(v)
 }
 
 // encodeCursor encodes an int64 ID as a base64 cursor string.

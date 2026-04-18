@@ -1,12 +1,10 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import * as api from "@/lib/api";
 
-export function useReservations(params: { holder?: number; status?: string }, limit = 20) {
-  return useInfiniteQuery({
+export function useReservations(params: { holder?: number; status?: string }) {
+  return useQuery({
     queryKey: ["reservations", params],
-    queryFn: ({ pageParam }) => api.listReservations({ ...params, cursor: pageParam, limit }),
-    initialPageParam: "",
-    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
+    queryFn: () => api.listReservations(params),
   });
 }
 

@@ -37,7 +37,7 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore) *ReserverStore {
 // Idempotent: returns existing reservation if idempotency_key matches.
 func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
 	if !input.Amount.IsPositive() {
-		return nil, fmt.Errorf("postgres: reserve: amount must be positive")
+		return nil, fmt.Errorf("postgres: reserve: amount must be positive: %w", core.ErrInvalidInput)
 	}
 
 	// Check idempotency first (outside tx)
@@ -110,14 +110,14 @@ func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualA
 	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: settle: reservation %d not found", reservationID)
+			return fmt.Errorf("postgres: settle: reservation %d: %w", reservationID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: settle: get reservation: %w", err)
 	}
 
 	status := core.ReservationStatus(res.Status)
 	if !status.CanTransitionTo(core.ReservationStatusSettled) {
-		return fmt.Errorf("postgres: settle: invalid transition from %q to settled", res.Status)
+		return fmt.Errorf("postgres: settle: from %q to settled: %w", res.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateReservationSettle(ctx, sqlcgen.UpdateReservationSettleParams{
@@ -148,14 +148,14 @@ func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error 
 	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: release: reservation %d not found", reservationID)
+			return fmt.Errorf("postgres: release: reservation %d: %w", reservationID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: release: get reservation: %w", err)
 	}
 
 	status := core.ReservationStatus(res.Status)
 	if !status.CanTransitionTo(core.ReservationStatusReleased) {
-		return fmt.Errorf("postgres: release: invalid transition from %q to released", res.Status)
+		return fmt.Errorf("postgres: release: from %q to released: %w", res.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateReservationStatus(ctx, sqlcgen.UpdateReservationStatusParams{

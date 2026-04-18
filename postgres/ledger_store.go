@@ -125,7 +125,7 @@ func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, 
 	tmplRow, err := s.q.GetTemplateByCode(ctx, templateCode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: execute template: template %q not found", templateCode)
+			return nil, fmt.Errorf("postgres: execute template: template %q: %w", templateCode, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: execute template: get template: %w", err)
 	}
@@ -149,7 +149,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 	original, err := s.q.GetJournal(ctx, journalID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: reverse journal: journal %d not found", journalID)
+			return nil, fmt.Errorf("postgres: reverse journal: journal %d: %w", journalID, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: reverse journal: get journal: %w", err)
 	}

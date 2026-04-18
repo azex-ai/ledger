@@ -27,11 +27,12 @@ services:
       - "8080:8080"
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
     depends_on:
       - ledgerd
-    environment:
-      NEXT_PUBLIC_API_URL: http://ledgerd:8080
     ports:
       - "3000:3000"
 

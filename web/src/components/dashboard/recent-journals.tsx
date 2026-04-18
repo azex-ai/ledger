@@ -11,9 +11,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import Link from "next/link";
+import { AlertCircle } from "lucide-react";
 
 export function RecentJournals() {
-  const { data, isLoading } = useJournals(10);
+  const { data, isLoading, isError } = useJournals(10);
   const journals = data?.pages[0]?.data ?? [];
 
   return (
@@ -28,8 +29,13 @@ export function RecentJournals() {
               <div key={i} className="h-8 animate-pulse rounded bg-muted" />
             ))}
           </div>
+        ) : isError ? (
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4" />
+            Failed to load journals
+          </div>
         ) : journals.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No journals yet</p>
+          <p className="text-sm text-muted-foreground py-8 text-center">No journals yet</p>
         ) : (
           <Table>
             <TableHeader>

@@ -58,7 +58,7 @@ func (s *CurrencyStore) GetCurrency(ctx context.Context, id int64) (*core.Curren
 	row, err := s.q.GetCurrency(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get currency: id %d not found", id)
+			return nil, fmt.Errorf("postgres: get currency: id %d: %w", id, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: get currency: %w", err)
 	}

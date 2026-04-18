@@ -3,13 +3,13 @@ package server
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 type createReservationRequest struct {
@@ -59,15 +59,15 @@ func toReservationResponse(r *core.Reservation) reservationResponse {
 }
 
 func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request) {
-	var req createReservationRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[createReservationRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	amount, err := decimal.NewFromString(req.Amount)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_amount", "amount is not a valid decimal")
+		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 		return
 	}
 
@@ -83,86 +83,70 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 
 	reservation, err := s.reserver.Reserve(r.Context(), input)
 	if err != nil {
-		if strings.Contains(err.Error(), "must be positive") {
-			writeError(w, http.StatusBadRequest, "validation_error", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toReservationResponse(reservation))
+	httpx.Created(w, toReservationResponse(reservation))
 }
 
 func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid reservation ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
 		return
 	}
 
-	var req settleReservationRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[settleReservationRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	amount, err := decimal.NewFromString(req.ActualAmount)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_amount", "actual_amount is not a valid decimal")
+		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
 		return
 	}
 
 	if err := s.reserver.Settle(r.Context(), id, amount); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid transition") {
-			writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "settled"})
+	httpx.OK(w, map[string]string{"status": "settled"})
 }
 
 func (s *Server) handleReleaseReservation(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid reservation ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
 		return
 	}
 
 	if err := s.reserver.Release(r.Context(), id); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid transition") {
-			writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+	httpx.OK(w, map[string]string{"status": "released"})
 }
 
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	holder, err := strconv.ParseInt(q.Get("holder"), 10, 64)
-	if err != nil || holder == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder is required")
-		return
+	var holder int64
+	if h := q.Get("holder"); h != "" {
+		var err error
+		holder, err = strconv.ParseInt(h, 10, 64)
+		if err != nil {
+			httpx.Error(w, httpx.ErrBadRequest("holder must be a number"))
+			return
+		}
 	}
-	status := q.Get("status") // optional filter
+	status := q.Get("status")
 	limit := parsePageLimit(r)
 
 	reservations, err := s.queries.ListReservations(r.Context(), holder, status, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -170,5 +154,5 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 	for i, r := range reservations {
 		data[i] = toReservationResponse(&r)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }

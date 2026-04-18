@@ -83,7 +83,7 @@ func (s *TemplateStore) GetTemplate(ctx context.Context, code string) (*core.Ent
 	tmpl, err := s.q.GetTemplateByCode(ctx, code)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get template: %q not found", code)
+			return nil, fmt.Errorf("postgres: get template: %q: %w", code, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: get template: %w", err)
 	}

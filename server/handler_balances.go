@@ -6,6 +6,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
+
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 type balanceResponse struct {
@@ -23,19 +25,19 @@ type batchBalancesRequest struct {
 func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 	holder, err := parseIDParam(chi.URLParam(r, "holder"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid holder ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid holder ID"))
 		return
 	}
 
 	currencyID, _ := strconv.ParseInt(r.URL.Query().Get("currency_id"), 10, 64)
 	if currencyID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "currency_id query param is required")
+		httpx.Error(w, httpx.ErrBadRequest("currency_id query param is required"))
 		return
 	}
 
 	balances, err := s.balances.GetBalances(r.Context(), holder, currencyID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -48,24 +50,29 @@ func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 			Balance:          b.Balance.String(),
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
+}
+
+type balanceByCurrencyResponse struct {
+	Total           string            `json:"total"`
+	Classifications []balanceResponse `json:"classifications"`
 }
 
 func (s *Server) handleGetBalanceByCurrency(w http.ResponseWriter, r *http.Request) {
 	holder, err := parseIDParam(chi.URLParam(r, "holder"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid holder ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid holder ID"))
 		return
 	}
 	currencyID, err := parseIDParam(chi.URLParam(r, "currency"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid currency ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid currency ID"))
 		return
 	}
 
 	balances, err := s.balances.GetBalances(r.Context(), holder, currencyID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -81,30 +88,30 @@ func (s *Server) handleGetBalanceByCurrency(w http.ResponseWriter, r *http.Reque
 			Balance:          b.Balance.String(),
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"total":          total.String(),
-		"classifications": data,
+	httpx.OK(w, balanceByCurrencyResponse{
+		Total:           total.String(),
+		Classifications: data,
 	})
 }
 
 func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
-	var req batchBalancesRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[batchBalancesRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if len(req.HolderIDs) == 0 || req.CurrencyID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder_ids and currency_id required")
+		httpx.Error(w, httpx.ErrBadRequest("holder_ids and currency_id required"))
 		return
 	}
 	if len(req.HolderIDs) > 100 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "max 100 holder_ids per batch")
+		httpx.Error(w, httpx.ErrBadRequest("max 100 holder_ids per batch"))
 		return
 	}
 
 	result, err := s.balances.BatchGetBalances(r.Context(), req.HolderIDs, req.CurrencyID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -127,5 +134,5 @@ func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, hb)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }

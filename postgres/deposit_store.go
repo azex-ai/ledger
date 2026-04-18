@@ -58,14 +58,14 @@ func (s *DepositStore) ConfirmingDeposit(ctx context.Context, depositID int64, c
 	dep, err := qtx.GetDepositForUpdate(ctx, depositID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: confirming deposit: deposit %d not found", depositID)
+			return fmt.Errorf("postgres: confirming deposit: deposit %d: %w", depositID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: confirming deposit: get: %w", err)
 	}
 
 	status := core.DepositStatus(dep.Status)
 	if !status.CanTransitionTo(core.DepositStatusConfirming) {
-		return fmt.Errorf("postgres: confirming deposit: invalid transition from %q to confirming", dep.Status)
+		return fmt.Errorf("postgres: confirming deposit: from %q to confirming: %w", dep.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateDepositConfirming(ctx, sqlcgen.UpdateDepositConfirmingParams{
@@ -90,7 +90,7 @@ func (s *DepositStore) ConfirmDeposit(ctx context.Context, input core.ConfirmDep
 	dep, err := qtx.GetDepositForUpdate(ctx, input.DepositID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: confirm deposit: deposit %d not found", input.DepositID)
+			return fmt.Errorf("postgres: confirm deposit: deposit %d: %w", input.DepositID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: confirm deposit: get: %w", err)
 	}
@@ -102,7 +102,7 @@ func (s *DepositStore) ConfirmDeposit(ctx context.Context, input core.ConfirmDep
 
 	status := core.DepositStatus(dep.Status)
 	if !status.CanTransitionTo(core.DepositStatusConfirmed) {
-		return fmt.Errorf("postgres: confirm deposit: invalid transition from %q to confirmed", dep.Status)
+		return fmt.Errorf("postgres: confirm deposit: from %q to confirmed: %w", dep.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateDepositConfirm(ctx, sqlcgen.UpdateDepositConfirmParams{
@@ -129,14 +129,14 @@ func (s *DepositStore) FailDeposit(ctx context.Context, depositID int64, reason 
 	dep, err := qtx.GetDepositForUpdate(ctx, depositID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: fail deposit: deposit %d not found", depositID)
+			return fmt.Errorf("postgres: fail deposit: deposit %d: %w", depositID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: fail deposit: get: %w", err)
 	}
 
 	status := core.DepositStatus(dep.Status)
 	if !status.CanTransitionTo(core.DepositStatusFailed) {
-		return fmt.Errorf("postgres: fail deposit: invalid transition from %q to failed", dep.Status)
+		return fmt.Errorf("postgres: fail deposit: from %q to failed: %w", dep.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateDepositStatus(ctx, sqlcgen.UpdateDepositStatusParams{
@@ -161,14 +161,14 @@ func (s *DepositStore) ExpireDeposit(ctx context.Context, depositID int64) error
 	dep, err := qtx.GetDepositForUpdate(ctx, depositID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: expire deposit: deposit %d not found", depositID)
+			return fmt.Errorf("postgres: expire deposit: deposit %d: %w", depositID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: expire deposit: get: %w", err)
 	}
 
 	status := core.DepositStatus(dep.Status)
 	if !status.CanTransitionTo(core.DepositStatusExpired) {
-		return fmt.Errorf("postgres: expire deposit: invalid transition from %q to expired", dep.Status)
+		return fmt.Errorf("postgres: expire deposit: from %q to expired: %w", dep.Status, core.ErrInvalidTransition)
 	}
 
 	if err := qtx.UpdateDepositStatus(ctx, sqlcgen.UpdateDepositStatusParams{

@@ -2,13 +2,13 @@ package server
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 // --- JSON request/response types ---
@@ -101,9 +101,9 @@ func toEntryResponse(e *core.Entry) entryResponse {
 // --- Handlers ---
 
 func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
-	var req postJournalRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[postJournalRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
@@ -111,7 +111,7 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 	for i, e := range req.Entries {
 		amount, err := decimal.NewFromString(e.Amount)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_amount", "entry "+e.Amount+" is not a valid decimal")
+			httpx.Error(w, httpx.ErrBadRequest("entry "+e.Amount+" is not a valid decimal"))
 			return
 		}
 		entries[i] = core.EntryInput{
@@ -134,20 +134,16 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 
 	journal, err := s.journals.PostJournal(r.Context(), input)
 	if err != nil {
-		if strings.Contains(err.Error(), "unbalanced") || strings.Contains(err.Error(), "must be positive") || strings.Contains(err.Error(), "required") {
-			writeError(w, http.StatusBadRequest, "validation_error", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toJournalResponse(journal))
+	httpx.Created(w, toJournalResponse(journal))
 }
 
 func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
-	var req postTemplateRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[postTemplateRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
@@ -155,7 +151,7 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.Amounts {
 		d, err := decimal.NewFromString(v)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_amount", "amount "+v+" is not a valid decimal")
+			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
 			return
 		}
 		amounts[k] = d
@@ -173,59 +169,47 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 
 	journal, err := s.journals.ExecuteTemplate(r.Context(), req.TemplateCode, params)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "inactive") || strings.Contains(err.Error(), "missing amount") {
-			writeError(w, http.StatusBadRequest, "template_error", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toJournalResponse(journal))
+	httpx.Created(w, toJournalResponse(journal))
 }
 
 func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid journal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
 		return
 	}
 
-	var req reverseJournalRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[reverseJournalRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Reason == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "reason is required")
+		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
 		return
 	}
 
 	journal, err := s.journals.ReverseJournal(r.Context(), id, req.Reason)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toJournalResponse(journal))
+	httpx.Created(w, toJournalResponse(journal))
 }
 
 func (s *Server) handleGetJournal(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid journal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
 		return
 	}
 
 	journal, entries, err := s.queries.GetJournal(r.Context(), id)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -234,20 +218,20 @@ func (s *Server) handleGetJournal(w http.ResponseWriter, r *http.Request) {
 	for i, e := range entries {
 		resp.Entries[i] = toEntryResponse(&e)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpx.OK(w, resp)
 }
 
 func (s *Server) handleListJournals(w http.ResponseWriter, r *http.Request) {
 	cursor, err := decodeCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_cursor", "invalid cursor value")
+		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
 		return
 	}
 	limit := parsePageLimit(r)
 
 	journals, err := s.queries.ListJournals(r.Context(), cursor, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -260,7 +244,7 @@ func (s *Server) handleListJournals(w http.ResponseWriter, r *http.Request) {
 	if len(journals) == int(limit) {
 		resp.NextCursor = encodeCursor(journals[len(journals)-1].ID)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpx.OK(w, resp)
 }
 
 func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
@@ -268,25 +252,25 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 
 	holder, err := parseIDParam(q.Get("holder"))
 	if err != nil || holder == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder is required")
+		httpx.Error(w, httpx.ErrBadRequest("holder is required"))
 		return
 	}
 	currencyID, err := parseIDParam(q.Get("currency_id"))
 	if err != nil || currencyID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "currency_id is required")
+		httpx.Error(w, httpx.ErrBadRequest("currency_id is required"))
 		return
 	}
 
 	cursor, err := decodeCursor(q.Get("cursor"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_cursor", "invalid cursor value")
+		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
 		return
 	}
 	limit := parsePageLimit(r)
 
 	entries, err := s.queries.ListEntriesByAccount(r.Context(), holder, currencyID, cursor, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -299,5 +283,5 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	if len(entries) == int(limit) {
 		resp.NextCursor = encodeCursor(entries[len(entries)-1].ID)
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpx.OK(w, resp)
 }

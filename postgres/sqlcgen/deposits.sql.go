@@ -183,18 +183,20 @@ func (q *Queries) InsertDeposit(ctx context.Context, arg InsertDepositParams) (D
 const listDepositsByAccount = `-- name: ListDepositsByAccount :many
 SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
 FROM deposits
-WHERE account_holder = $1
+WHERE ($1::bigint = 0 OR account_holder = $1)
+  AND ($2::text = '' OR status = $2)
 ORDER BY created_at DESC
-LIMIT $2::int
+LIMIT $3::int
 `
 
 type ListDepositsByAccountParams struct {
-	AccountHolder int64 `json:"account_holder"`
-	PageLimit     int32 `json:"page_limit"`
+	AccountHolder int64  `json:"account_holder"`
+	FilterStatus  string `json:"filter_status"`
+	PageLimit     int32  `json:"page_limit"`
 }
 
 func (q *Queries) ListDepositsByAccount(ctx context.Context, arg ListDepositsByAccountParams) ([]Deposit, error) {
-	rows, err := q.db.Query(ctx, listDepositsByAccount, arg.AccountHolder, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listDepositsByAccount, arg.AccountHolder, arg.FilterStatus, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}

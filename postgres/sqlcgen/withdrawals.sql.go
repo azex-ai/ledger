@@ -162,18 +162,20 @@ func (q *Queries) InsertWithdrawal(ctx context.Context, arg InsertWithdrawalPara
 const listWithdrawalsByAccount = `-- name: ListWithdrawalsByAccount :many
 SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
 FROM withdrawals
-WHERE account_holder = $1
+WHERE ($1::bigint = 0 OR account_holder = $1)
+  AND ($2::text = '' OR status = $2)
 ORDER BY created_at DESC
-LIMIT $2::int
+LIMIT $3::int
 `
 
 type ListWithdrawalsByAccountParams struct {
-	AccountHolder int64 `json:"account_holder"`
-	PageLimit     int32 `json:"page_limit"`
+	AccountHolder int64  `json:"account_holder"`
+	FilterStatus  string `json:"filter_status"`
+	PageLimit     int32  `json:"page_limit"`
 }
 
 func (q *Queries) ListWithdrawalsByAccount(ctx context.Context, arg ListWithdrawalsByAccountParams) ([]Withdrawal, error) {
-	rows, err := q.db.Query(ctx, listWithdrawalsByAccount, arg.AccountHolder, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listWithdrawalsByAccount, arg.AccountHolder, arg.FilterStatus, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}

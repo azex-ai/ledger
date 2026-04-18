@@ -1,7 +1,7 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 export interface ApiError {
-  code: string;
+  code: number;
   message: string;
 }
 
@@ -13,6 +13,12 @@ export class ApiRequestError extends Error {
     super(apiError.message);
     this.name = "ApiRequestError";
   }
+}
+
+interface Envelope<T> {
+  code: number;
+  message: string;
+  data: T;
 }
 
 async function request<T>(
@@ -29,13 +35,19 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({
-      error: { code: "unknown", message: res.statusText },
+      code: 19999,
+      message: res.statusText,
     }));
-    throw new ApiRequestError(res.status, body.error ?? { code: "unknown", message: res.statusText });
+    throw new ApiRequestError(res.status, {
+      code: body.code ?? 19999,
+      message: body.message ?? res.statusText,
+    });
   }
 
   if (res.status === 204) return undefined as T;
-  return res.json();
+
+  const envelope: Envelope<T> = await res.json();
+  return envelope.data;
 }
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -231,7 +243,7 @@ function qs(params: Record<string, string | number | boolean | undefined>): stri
 
 // System
 export const getHealth = () => request<HealthStatus>("/api/v1/system/health");
-export const getSystemBalances = () => request<{ data: SystemBalance[] }>("/api/v1/system/balances");
+export const getSystemBalances = () => request<SystemBalance[]>("/api/v1/system/balances");
 
 // Journals
 export const listJournals = (params: { cursor?: string; limit?: number }) =>
@@ -275,10 +287,10 @@ export const listEntries = (params: { holder?: number; currency_id?: number; cur
 
 // Balances
 export const getBalances = (holder: number) =>
-  request<{ data: Balance[] }>(`/api/v1/balances/${holder}`);
+  request<Balance[]>(`/api/v1/balances/${holder}`);
 
 export const getBalancesByCurrency = (holder: number, currency: number) =>
-  request<{ data: Balance[] }>(`/api/v1/balances/${holder}/${currency}`);
+  request<Balance[]>(`/api/v1/balances/${holder}/${currency}`);
 
 export const batchBalances = (holderIds: number[], currencyId: number) =>
   request<Record<string, Balance[]>>("/api/v1/balances/batch", {
@@ -287,8 +299,8 @@ export const batchBalances = (holderIds: number[], currencyId: number) =>
   });
 
 // Reservations
-export const listReservations = (params: { holder?: number; status?: string; cursor?: string; limit?: number }) =>
-  request<PaginatedResponse<Reservation>>(`/api/v1/reservations${qs(params)}`);
+export const listReservations = (params: { holder?: number; status?: string; limit?: number }) =>
+  request<Reservation[]>(`/api/v1/reservations${qs(params)}`);
 
 export const createReservation = (body: {
   account_holder: number;
@@ -308,8 +320,8 @@ export const releaseReservation = (id: number) =>
   request<void>(`/api/v1/reservations/${id}/release`, { method: "POST" });
 
 // Deposits
-export const listDeposits = (params: { holder?: number; status?: string; cursor?: string; limit?: number }) =>
-  request<PaginatedResponse<Deposit>>(`/api/v1/deposits${qs(params)}`);
+export const listDeposits = (params: { holder?: number; status?: string; limit?: number }) =>
+  request<Deposit[]>(`/api/v1/deposits${qs(params)}`);
 
 export const createDeposit = (body: {
   account_holder: number;
@@ -339,8 +351,8 @@ export const failDeposit = (id: number, reason: string) =>
   });
 
 // Withdrawals
-export const listWithdrawals = (params: { holder?: number; status?: string; cursor?: string; limit?: number }) =>
-  request<PaginatedResponse<Withdrawal>>(`/api/v1/withdrawals${qs(params)}`);
+export const listWithdrawals = (params: { holder?: number; status?: string; limit?: number }) =>
+  request<Withdrawal[]>(`/api/v1/withdrawals${qs(params)}`);
 
 export const createWithdrawal = (body: {
   account_holder: number;
@@ -450,4 +462,4 @@ export const listSnapshots = (params: {
   currency_id?: number;
   start?: string;
   end?: string;
-}) => request<{ data: Snapshot[] }>(`/api/v1/snapshots${qs(params)}`);
+}) => request<Snapshot[]>(`/api/v1/snapshots${qs(params)}`);

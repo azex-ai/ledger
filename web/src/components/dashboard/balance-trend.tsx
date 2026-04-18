@@ -11,11 +11,12 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
+import { AlertCircle } from "lucide-react";
 
 export function BalanceTrend() {
-  const { data, isLoading } = useSystemBalances();
+  const { data, isLoading, isError } = useSystemBalances();
 
-  const chartData = (data?.data ?? []).map((b) => ({
+  const chartData = (data ?? []).map((b) => ({
     label: `C${b.classification_id} / Cur${b.currency_id}`,
     balance: parseFloat(b.total_balance),
   }));
@@ -28,6 +29,11 @@ export function BalanceTrend() {
       <CardContent>
         {isLoading ? (
           <div className="h-[300px] animate-pulse rounded bg-muted" />
+        ) : isError ? (
+          <div className="flex h-[300px] items-center justify-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4" />
+            Failed to load balances
+          </div>
         ) : chartData.length === 0 ? (
           <div className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
             No balance data yet

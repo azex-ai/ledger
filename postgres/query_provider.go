@@ -12,7 +12,6 @@ import (
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
-	"github.com/azex-ai/ledger/server"
 )
 
 // QueryStore implements server.QueryProvider for read-only list/get queries.
@@ -30,7 +29,7 @@ func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 }
 
 // Compile-time check.
-var _ server.QueryProvider = (*QueryStore)(nil)
+var _ core.QueryProvider = (*QueryStore)(nil)
 
 // --- JournalQuerier ---
 
@@ -38,7 +37,7 @@ func (s *QueryStore) GetJournal(ctx context.Context, id int64) (*core.Journal, [
 	row, err := s.q.GetJournal(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, fmt.Errorf("postgres: get journal: id %d not found", id)
+			return nil, nil, fmt.Errorf("postgres: get journal: id %d: %w", id, core.ErrNotFound)
 		}
 		return nil, nil, fmt.Errorf("postgres: get journal: %w", err)
 	}
@@ -120,9 +119,10 @@ func (s *QueryStore) ListReservations(ctx context.Context, holder int64, status 
 
 // --- DepositQuerier ---
 
-func (s *QueryStore) ListDeposits(ctx context.Context, holder int64, limit int32) ([]core.Deposit, error) {
+func (s *QueryStore) ListDeposits(ctx context.Context, holder int64, status string, limit int32) ([]core.Deposit, error) {
 	rows, err := s.q.ListDepositsByAccount(ctx, sqlcgen.ListDepositsByAccountParams{
 		AccountHolder: holder,
+		FilterStatus:  status,
 		PageLimit:     limit,
 	})
 	if err != nil {
@@ -137,9 +137,10 @@ func (s *QueryStore) ListDeposits(ctx context.Context, holder int64, limit int32
 
 // --- WithdrawalQuerier ---
 
-func (s *QueryStore) ListWithdrawals(ctx context.Context, holder int64, limit int32) ([]core.Withdrawal, error) {
+func (s *QueryStore) ListWithdrawals(ctx context.Context, holder int64, status string, limit int32) ([]core.Withdrawal, error) {
 	rows, err := s.q.ListWithdrawalsByAccount(ctx, sqlcgen.ListWithdrawalsByAccountParams{
 		AccountHolder: holder,
+		FilterStatus:  status,
 		PageLimit:     limit,
 	})
 	if err != nil {
@@ -179,18 +180,18 @@ func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder, curre
 
 // --- SystemRollupQuerier ---
 
-func (s *QueryStore) GetSystemRollups(ctx context.Context) ([]server.SystemRollupBalance, error) {
+func (s *QueryStore) GetSystemRollups(ctx context.Context) ([]core.SystemRollup, error) {
 	rows, err := s.q.GetSystemRollups(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get system rollups: %w", err)
 	}
-	result := make([]server.SystemRollupBalance, len(rows))
+	result := make([]core.SystemRollup, len(rows))
 	for i, r := range rows {
 		balance, err := numericToDecimal(r.TotalBalance)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: get system rollups: convert balance: %w", err)
 		}
-		result[i] = server.SystemRollupBalance{
+		result[i] = core.SystemRollup{
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,
 			TotalBalance:     balance,

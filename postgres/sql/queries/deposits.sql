@@ -27,7 +27,8 @@ FROM deposits WHERE channel_ref = $1;
 -- name: ListDepositsByAccount :many
 SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
 FROM deposits
-WHERE account_holder = $1
+WHERE (sqlc.arg(account_holder)::bigint = 0 OR account_holder = sqlc.arg(account_holder))
+  AND (sqlc.arg(filter_status)::text = '' OR status = sqlc.arg(filter_status))
 ORDER BY created_at DESC
 LIMIT sqlc.arg(page_limit)::int;
 

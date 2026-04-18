@@ -3,13 +3,13 @@ package server
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 type initWithdrawRequest struct {
@@ -74,15 +74,15 @@ func toWithdrawalResponse(w *core.Withdrawal) withdrawalResponse {
 }
 
 func (s *Server) handleInitWithdraw(w http.ResponseWriter, r *http.Request) {
-	var req initWithdrawRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[initWithdrawRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	amount, err := decimal.NewFromString(req.Amount)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_amount", "amount is not a valid decimal")
+		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 		return
 	}
 
@@ -90,7 +90,7 @@ func (s *Server) handleInitWithdraw(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt != nil {
 		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_params", "expires_at must be RFC3339 format")
+			httpx.Error(w, httpx.ErrBadRequest("expires_at must be RFC3339 format"))
 			return
 		}
 		expiresAt = &t
@@ -109,139 +109,144 @@ func (s *Server) handleInitWithdraw(w http.ResponseWriter, r *http.Request) {
 
 	withdrawal, err := s.withdrawer.InitWithdraw(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toWithdrawalResponse(withdrawal))
+	httpx.Created(w, toWithdrawalResponse(withdrawal))
 }
 
 func (s *Server) handleReserveWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
 	if err := s.withdrawer.ReserveWithdraw(r.Context(), id); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reserved"})
+	httpx.OK(w, map[string]string{"status": "reserved"})
 }
 
 func (s *Server) handleReviewWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
-	var req reviewWithdrawRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[reviewWithdrawRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	if err := s.withdrawer.ReviewWithdraw(r.Context(), id, req.Approved); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
 	status := "processing"
 	if !req.Approved {
 		status = "failed"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": status})
+	httpx.OK(w, map[string]string{"status": status})
 }
 
 func (s *Server) handleProcessWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
-	var req processWithdrawRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[processWithdrawRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.ChannelRef == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "channel_ref is required")
+		httpx.Error(w, httpx.ErrBadRequest("channel_ref is required"))
 		return
 	}
 
 	if err := s.withdrawer.ProcessWithdraw(r.Context(), id, req.ChannelRef); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "processing"})
+	httpx.OK(w, map[string]string{"status": "processing"})
 }
 
 func (s *Server) handleConfirmWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
 	if err := s.withdrawer.ConfirmWithdraw(r.Context(), id); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "confirmed"})
+	httpx.OK(w, map[string]string{"status": "confirmed"})
 }
 
 func (s *Server) handleFailWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
-	var req failWithdrawRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[failWithdrawRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Reason == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "reason is required")
+		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
 		return
 	}
 
 	if err := s.withdrawer.FailWithdraw(r.Context(), id, req.Reason); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "failed"})
+	httpx.OK(w, map[string]string{"status": "failed"})
 }
 
 func (s *Server) handleRetryWithdraw(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid withdrawal ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid withdrawal ID"))
 		return
 	}
 
 	if err := s.withdrawer.RetryWithdraw(r.Context(), id); err != nil {
-		s.writeWithdrawError(w, err)
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "reserved"})
+	httpx.OK(w, map[string]string{"status": "reserved"})
 }
 
 func (s *Server) handleListWithdrawals(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	holder, err := strconv.ParseInt(q.Get("holder"), 10, 64)
-	if err != nil || holder == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder is required")
-		return
+	var holder int64
+	if h := q.Get("holder"); h != "" {
+		var err error
+		holder, err = strconv.ParseInt(h, 10, 64)
+		if err != nil {
+			httpx.Error(w, httpx.ErrBadRequest("holder must be a number"))
+			return
+		}
 	}
+	status := q.Get("status")
 	limit := parsePageLimit(r)
 
-	withdrawals, err := s.queries.ListWithdrawals(r.Context(), holder, limit)
+	withdrawals, err := s.queries.ListWithdrawals(r.Context(), holder, status, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -249,19 +254,6 @@ func (s *Server) handleListWithdrawals(w http.ResponseWriter, r *http.Request) {
 	for i, wd := range withdrawals {
 		data[i] = toWithdrawalResponse(&wd)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }
 
-// writeWithdrawError handles common withdrawal error patterns.
-func (s *Server) writeWithdrawError(w http.ResponseWriter, err error) {
-	msg := err.Error()
-	if strings.Contains(msg, "not found") {
-		writeError(w, http.StatusNotFound, "not_found", msg)
-		return
-	}
-	if strings.Contains(msg, "invalid transition") {
-		writeError(w, http.StatusConflict, "invalid_transition", msg)
-		return
-	}
-	writeError(w, http.StatusInternalServerError, "internal", msg)
-}

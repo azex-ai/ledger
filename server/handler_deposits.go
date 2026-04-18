@@ -3,13 +3,13 @@ package server
 import (
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 type initDepositRequest struct {
@@ -76,15 +76,15 @@ func toDepositResponse(d *core.Deposit) depositResponse {
 }
 
 func (s *Server) handleInitDeposit(w http.ResponseWriter, r *http.Request) {
-	var req initDepositRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[initDepositRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	amount, err := decimal.NewFromString(req.ExpectedAmount)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_amount", "expected_amount is not a valid decimal")
+		httpx.Error(w, httpx.ErrBadRequest("expected_amount is not a valid decimal"))
 		return
 	}
 
@@ -92,7 +92,7 @@ func (s *Server) handleInitDeposit(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt != nil {
 		t, err := time.Parse(time.RFC3339, *req.ExpiresAt)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_params", "expires_at must be RFC3339 format")
+			httpx.Error(w, httpx.ErrBadRequest("expires_at must be RFC3339 format"))
 			return
 		}
 		expiresAt = &t
@@ -110,60 +110,52 @@ func (s *Server) handleInitDeposit(w http.ResponseWriter, r *http.Request) {
 
 	deposit, err := s.depositor.InitDeposit(r.Context(), input)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toDepositResponse(deposit))
+	httpx.Created(w, toDepositResponse(deposit))
 }
 
 func (s *Server) handleConfirmingDeposit(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid deposit ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid deposit ID"))
 		return
 	}
 
-	var req confirmingDepositRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[confirmingDepositRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.ChannelRef == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "channel_ref is required")
+		httpx.Error(w, httpx.ErrBadRequest("channel_ref is required"))
 		return
 	}
 
 	if err := s.depositor.ConfirmingDeposit(r.Context(), id, req.ChannelRef); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid transition") {
-			writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "confirming"})
+	httpx.OK(w, map[string]string{"status": "confirming"})
 }
 
 func (s *Server) handleConfirmDeposit(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid deposit ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid deposit ID"))
 		return
 	}
 
-	var req confirmDepositRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[confirmDepositRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 
 	actualAmount, err := decimal.NewFromString(req.ActualAmount)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_amount", "actual_amount is not a valid decimal")
+		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
 		return
 	}
 
@@ -174,65 +166,54 @@ func (s *Server) handleConfirmDeposit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.depositor.ConfirmDeposit(r.Context(), input); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid transition") {
-			writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "confirmed"})
+	httpx.OK(w, map[string]string{"status": "confirmed"})
 }
 
 func (s *Server) handleFailDeposit(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_id", "invalid deposit ID")
+		httpx.Error(w, httpx.ErrBadRequest("invalid deposit ID"))
 		return
 	}
 
-	var req failDepositRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[failDepositRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Reason == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "reason is required")
+		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
 		return
 	}
 
 	if err := s.depositor.FailDeposit(r.Context(), id, req.Reason); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid transition") {
-			writeError(w, http.StatusConflict, "invalid_transition", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "failed"})
+	httpx.OK(w, map[string]string{"status": "failed"})
 }
 
 func (s *Server) handleListDeposits(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	holder, err := strconv.ParseInt(q.Get("holder"), 10, 64)
-	if err != nil || holder == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder is required")
-		return
+	var holder int64
+	if h := q.Get("holder"); h != "" {
+		var err error
+		holder, err = strconv.ParseInt(h, 10, 64)
+		if err != nil {
+			httpx.Error(w, httpx.ErrBadRequest("holder must be a number"))
+			return
+		}
 	}
+	status := q.Get("status")
 	limit := parsePageLimit(r)
 
-	deposits, err := s.queries.ListDeposits(r.Context(), holder, limit)
+	deposits, err := s.queries.ListDeposits(r.Context(), holder, status, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -240,5 +221,5 @@ func (s *Server) handleListDeposits(w http.ResponseWriter, r *http.Request) {
 	for i, d := range deposits {
 		data[i] = toDepositResponse(&d)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }

@@ -24,7 +24,8 @@ UPDATE reservations SET status = 'settled', settled_amount = $2, journal_id = $3
 -- name: ListReservationsByAccount :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
 FROM reservations
-WHERE account_holder = $1 AND (status = sqlc.arg(filter_status) OR sqlc.arg(filter_status) = '')
+WHERE (sqlc.arg(account_holder)::bigint = 0 OR account_holder = sqlc.arg(account_holder))
+  AND (sqlc.arg(filter_status)::text = '' OR status = sqlc.arg(filter_status))
 ORDER BY created_at DESC
 LIMIT sqlc.arg(page_limit)::int;
 

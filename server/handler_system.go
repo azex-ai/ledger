@@ -4,10 +4,12 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
+	httpx.OK(w, map[string]string{
 		"status": "ok",
 		"time":   time.Now().UTC().Format(time.RFC3339),
 	})
@@ -16,21 +18,53 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 	rollups, err := s.queries.GetSystemRollups(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rollups})
+	httpx.OK(w, rollups)
 }
 
 // --- Reconciliation ---
 
+type reconcileDetailResponse struct {
+	AccountHolder    int64  `json:"account_holder"`
+	CurrencyID       int64  `json:"currency_id"`
+	ClassificationID int64  `json:"classification_id"`
+	Expected         string `json:"expected"`
+	Actual           string `json:"actual"`
+	Drift            string `json:"drift"`
+}
+
+type reconcileResponse struct {
+	Balanced  bool                      `json:"balanced"`
+	Gap       string                    `json:"gap"`
+	Details   []reconcileDetailResponse `json:"details"`
+	CheckedAt time.Time                 `json:"checked_at"`
+}
+
 func (s *Server) handleReconcileGlobal(w http.ResponseWriter, r *http.Request) {
 	result, err := s.reconciler.CheckAccountingEquation(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "reconcile_failed", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	details := make([]reconcileDetailResponse, len(result.Details))
+	for i, d := range result.Details {
+		details[i] = reconcileDetailResponse{
+			AccountHolder:    d.AccountHolder,
+			CurrencyID:       d.CurrencyID,
+			ClassificationID: d.ClassificationID,
+			Expected:         d.Expected.String(),
+			Actual:           d.Actual.String(),
+			Drift:            d.Drift.String(),
+		}
+	}
+	httpx.OK(w, reconcileResponse{
+		Balanced:  result.Balanced,
+		Gap:       result.Gap.String(),
+		Details:   details,
+		CheckedAt: result.CheckedAt,
+	})
 }
 
 type reconcileAccountRequest struct {
@@ -39,22 +73,38 @@ type reconcileAccountRequest struct {
 }
 
 func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) {
-	var req reconcileAccountRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+	req, err := httpx.Decode[reconcileAccountRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
 		return
 	}
 	if req.Holder == 0 || req.CurrencyID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder and currency_id required")
+		httpx.Error(w, httpx.ErrBadRequest("holder and currency_id required"))
 		return
 	}
 
 	result, err := s.reconciler.ReconcileAccount(r.Context(), req.Holder, req.CurrencyID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "reconcile_failed", err.Error())
+		httpx.Error(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	details := make([]reconcileDetailResponse, len(result.Details))
+	for i, d := range result.Details {
+		details[i] = reconcileDetailResponse{
+			AccountHolder:    d.AccountHolder,
+			CurrencyID:       d.CurrencyID,
+			ClassificationID: d.ClassificationID,
+			Expected:         d.Expected.String(),
+			Actual:           d.Actual.String(),
+			Drift:            d.Drift.String(),
+		}
+	}
+	httpx.OK(w, reconcileResponse{
+		Balanced:  result.Balanced,
+		Gap:       result.Gap.String(),
+		Details:   details,
+		CheckedAt: result.CheckedAt,
+	})
 }
 
 // --- Snapshots ---
@@ -64,35 +114,35 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 
 	holder, err := strconv.ParseInt(q.Get("holder"), 10, 64)
 	if err != nil || holder == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "holder is required")
+		httpx.Error(w, httpx.ErrBadRequest("holder is required"))
 		return
 	}
 	currencyID, err := strconv.ParseInt(q.Get("currency_id"), 10, 64)
 	if err != nil || currencyID == 0 {
-		writeError(w, http.StatusBadRequest, "invalid_params", "currency_id is required")
+		httpx.Error(w, httpx.ErrBadRequest("currency_id is required"))
 		return
 	}
 
 	startStr := q.Get("start")
 	endStr := q.Get("end")
 	if startStr == "" || endStr == "" {
-		writeError(w, http.StatusBadRequest, "invalid_params", "start and end date required (YYYY-MM-DD)")
+		httpx.Error(w, httpx.ErrBadRequest("start and end date required (YYYY-MM-DD)"))
 		return
 	}
 	start, err := time.Parse("2006-01-02", startStr)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_params", "invalid start date format")
+		httpx.Error(w, httpx.ErrBadRequest("invalid start date format"))
 		return
 	}
 	end, err := time.Parse("2006-01-02", endStr)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_params", "invalid end date format")
+		httpx.Error(w, httpx.ErrBadRequest("invalid end date format"))
 		return
 	}
 
 	snapshots, err := s.queries.ListSnapshotsByDateRange(r.Context(), holder, currencyID, start, end)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		httpx.Error(w, err)
 		return
 	}
 
@@ -113,5 +163,5 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 			Balance:          s.Balance.String(),
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+	httpx.OK(w, data)
 }

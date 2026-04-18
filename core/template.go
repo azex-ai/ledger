@@ -46,14 +46,14 @@ type TemplateParams struct {
 
 func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 	if !t.IsActive {
-		return nil, fmt.Errorf("core: template: %q is inactive", t.Code)
+		return nil, fmt.Errorf("core: template: %q is inactive: %w", t.Code, ErrInvalidInput)
 	}
 
 	entries := make([]EntryInput, 0, len(t.Lines))
 	for i, line := range t.Lines {
 		amount, ok := params.Amounts[line.AmountKey]
 		if !ok {
-			return nil, fmt.Errorf("core: template: line[%d]: missing amount key %q", i, line.AmountKey)
+			return nil, fmt.Errorf("core: template: line[%d]: missing amount key %q: %w", i, line.AmountKey, ErrInvalidInput)
 		}
 
 		var holder int64
@@ -63,7 +63,7 @@ func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 		case HolderRoleSystem:
 			holder = SystemAccountHolder(params.HolderID)
 		default:
-			return nil, fmt.Errorf("core: template: line[%d]: invalid holder role %q", i, line.HolderRole)
+			return nil, fmt.Errorf("core: template: line[%d]: invalid holder role %q: %w", i, line.HolderRole, ErrInvalidInput)
 		}
 
 		entries = append(entries, EntryInput{
