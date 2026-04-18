@@ -23,3 +23,22 @@ SELECT id, journal_id, account_holder, currency_id, classification_id, entry_typ
 FROM journal_entries
 WHERE journal_id = $1
 ORDER BY id;
+
+-- name: ListEntriesByAccount :many
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+FROM journal_entries
+WHERE account_holder = $1 AND currency_id = $2
+  AND id > sqlc.arg(cursor_id)::bigint
+ORDER BY id ASC
+LIMIT sqlc.arg(page_limit)::int;
+
+-- name: SumEntriesSinceCheckpoint :many
+SELECT
+  classification_id,
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND id > sqlc.arg(since_entry_id)::bigint
+GROUP BY classification_id, entry_type;

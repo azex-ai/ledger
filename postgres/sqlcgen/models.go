@@ -94,6 +94,17 @@ type Journal struct {
 	CreatedAt      time.Time      `json:"created_at"`
 }
 
+type JournalEntriesDefault struct {
+	ID               pgtype.Int8    `json:"id"`
+	JournalID        int64          `json:"journal_id"`
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	ClassificationID int64          `json:"classification_id"`
+	EntryType        string         `json:"entry_type"`
+	Amount           pgtype.Numeric `json:"amount"`
+	CreatedAt        time.Time      `json:"created_at"`
+}
+
 type JournalEntry struct {
 	ID               pgtype.Int8    `json:"id"`
 	JournalID        int64          `json:"journal_id"`

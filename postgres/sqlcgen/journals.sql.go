@@ -141,6 +141,56 @@ func (q *Queries) InsertJournalEntry(ctx context.Context, arg InsertJournalEntry
 	return i, err
 }
 
+const listEntriesByAccount = `-- name: ListEntriesByAccount :many
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+FROM journal_entries
+WHERE account_holder = $1 AND currency_id = $2
+  AND id > $3::bigint
+ORDER BY id ASC
+LIMIT $4::int
+`
+
+type ListEntriesByAccountParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+	CursorID      int64 `json:"cursor_id"`
+	PageLimit     int32 `json:"page_limit"`
+}
+
+func (q *Queries) ListEntriesByAccount(ctx context.Context, arg ListEntriesByAccountParams) ([]JournalEntry, error) {
+	rows, err := q.db.Query(ctx, listEntriesByAccount,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []JournalEntry{}
+	for rows.Next() {
+		var i JournalEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.JournalID,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ClassificationID,
+			&i.EntryType,
+			&i.Amount,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJournalEntries = `-- name: ListJournalEntries :many
 SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
 FROM journal_entries
@@ -167,6 +217,50 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Jo
 			&i.Amount,
 			&i.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumEntriesSinceCheckpoint = `-- name: SumEntriesSinceCheckpoint :many
+SELECT
+  classification_id,
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND id > $3::bigint
+GROUP BY classification_id, entry_type
+`
+
+type SumEntriesSinceCheckpointParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+	SinceEntryID  int64 `json:"since_entry_id"`
+}
+
+type SumEntriesSinceCheckpointRow struct {
+	ClassificationID int64       `json:"classification_id"`
+	EntryType        string      `json:"entry_type"`
+	Total            interface{} `json:"total"`
+}
+
+func (q *Queries) SumEntriesSinceCheckpoint(ctx context.Context, arg SumEntriesSinceCheckpointParams) ([]SumEntriesSinceCheckpointRow, error) {
+	rows, err := q.db.Query(ctx, sumEntriesSinceCheckpoint, arg.AccountHolder, arg.CurrencyID, arg.SinceEntryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumEntriesSinceCheckpointRow{}
+	for rows.Next() {
+		var i SumEntriesSinceCheckpointRow
+		if err := rows.Scan(&i.ClassificationID, &i.EntryType, &i.Total); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
