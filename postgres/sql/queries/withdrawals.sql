@@ -29,3 +29,9 @@ FROM withdrawals
 WHERE account_holder = $1
 ORDER BY created_at DESC
 LIMIT sqlc.arg(page_limit)::int;
+
+-- name: GetExpiredWithdrawals :many
+SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
+FROM withdrawals
+WHERE status = 'processing' AND expires_at IS NOT NULL AND expires_at < now()
+LIMIT $1;

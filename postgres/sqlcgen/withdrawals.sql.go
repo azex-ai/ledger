@@ -11,6 +11,49 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getExpiredWithdrawals = `-- name: GetExpiredWithdrawals :many
+SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
+FROM withdrawals
+WHERE status = 'processing' AND expires_at IS NOT NULL AND expires_at < now()
+LIMIT $1
+`
+
+func (q *Queries) GetExpiredWithdrawals(ctx context.Context, limit int32) ([]Withdrawal, error) {
+	rows, err := q.db.Query(ctx, getExpiredWithdrawals, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Withdrawal{}
+	for rows.Next() {
+		var i Withdrawal
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.Amount,
+			&i.Status,
+			&i.ChannelName,
+			&i.ChannelRef,
+			&i.ReservationID,
+			&i.JournalID,
+			&i.IdempotencyKey,
+			&i.Metadata,
+			&i.ReviewRequired,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getWithdrawal = `-- name: GetWithdrawal :one
 SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
 FROM withdrawals WHERE id = $1

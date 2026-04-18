@@ -30,3 +30,9 @@ FROM deposits
 WHERE account_holder = $1
 ORDER BY created_at DESC
 LIMIT sqlc.arg(page_limit)::int;
+
+-- name: GetExpiredDeposits :many
+SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+FROM deposits
+WHERE status IN ('pending', 'confirming') AND expires_at IS NOT NULL AND expires_at < now()
+LIMIT $1;

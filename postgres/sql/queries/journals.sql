@@ -42,3 +42,20 @@ WHERE account_holder = $1
   AND currency_id = $2
   AND id > sqlc.arg(since_entry_id)::bigint
 GROUP BY classification_id, entry_type;
+
+-- name: SumGlobalDebitCredit :many
+SELECT
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+GROUP BY entry_type;
+
+-- name: SumEntriesByAccountClassification :many
+SELECT
+  classification_id,
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+GROUP BY classification_id, entry_type;

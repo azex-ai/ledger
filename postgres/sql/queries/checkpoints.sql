@@ -35,3 +35,17 @@ SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL;
 
 -- name: GetMaxEntryID :one
 SELECT COALESCE(MAX(id), 0)::bigint as max_id FROM journal_entries;
+
+-- name: ListAllBalanceCheckpoints :many
+SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
+FROM balance_checkpoints
+ORDER BY account_holder, currency_id, classification_id;
+
+-- name: AggregateCheckpointsByClassification :many
+SELECT
+  currency_id,
+  classification_id,
+  COALESCE(SUM(balance), 0) as total_balance
+FROM balance_checkpoints
+GROUP BY currency_id, classification_id
+ORDER BY currency_id, classification_id;

@@ -227,6 +227,48 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Jo
 	return items, nil
 }
 
+const sumEntriesByAccountClassification = `-- name: SumEntriesByAccountClassification :many
+SELECT
+  classification_id,
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+GROUP BY classification_id, entry_type
+`
+
+type SumEntriesByAccountClassificationParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+}
+
+type SumEntriesByAccountClassificationRow struct {
+	ClassificationID int64       `json:"classification_id"`
+	EntryType        string      `json:"entry_type"`
+	Total            interface{} `json:"total"`
+}
+
+func (q *Queries) SumEntriesByAccountClassification(ctx context.Context, arg SumEntriesByAccountClassificationParams) ([]SumEntriesByAccountClassificationRow, error) {
+	rows, err := q.db.Query(ctx, sumEntriesByAccountClassification, arg.AccountHolder, arg.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumEntriesByAccountClassificationRow{}
+	for rows.Next() {
+		var i SumEntriesByAccountClassificationRow
+		if err := rows.Scan(&i.ClassificationID, &i.EntryType, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sumEntriesSinceCheckpoint = `-- name: SumEntriesSinceCheckpoint :many
 SELECT
   classification_id,
@@ -261,6 +303,39 @@ func (q *Queries) SumEntriesSinceCheckpoint(ctx context.Context, arg SumEntriesS
 	for rows.Next() {
 		var i SumEntriesSinceCheckpointRow
 		if err := rows.Scan(&i.ClassificationID, &i.EntryType, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumGlobalDebitCredit = `-- name: SumGlobalDebitCredit :many
+SELECT
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+GROUP BY entry_type
+`
+
+type SumGlobalDebitCreditRow struct {
+	EntryType string      `json:"entry_type"`
+	Total     interface{} `json:"total"`
+}
+
+func (q *Queries) SumGlobalDebitCredit(ctx context.Context) ([]SumGlobalDebitCreditRow, error) {
+	rows, err := q.db.Query(ctx, sumGlobalDebitCredit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumGlobalDebitCreditRow{}
+	for rows.Next() {
+		var i SumGlobalDebitCreditRow
+		if err := rows.Scan(&i.EntryType, &i.Total); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

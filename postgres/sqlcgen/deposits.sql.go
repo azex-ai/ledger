@@ -92,6 +92,48 @@ func (q *Queries) GetDepositForUpdate(ctx context.Context, id int64) (Deposit, e
 	return i, err
 }
 
+const getExpiredDeposits = `-- name: GetExpiredDeposits :many
+SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+FROM deposits
+WHERE status IN ('pending', 'confirming') AND expires_at IS NOT NULL AND expires_at < now()
+LIMIT $1
+`
+
+func (q *Queries) GetExpiredDeposits(ctx context.Context, limit int32) ([]Deposit, error) {
+	rows, err := q.db.Query(ctx, getExpiredDeposits, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Deposit{}
+	for rows.Next() {
+		var i Deposit
+		if err := rows.Scan(
+			&i.ID,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ExpectedAmount,
+			&i.ActualAmount,
+			&i.Status,
+			&i.ChannelName,
+			&i.ChannelRef,
+			&i.JournalID,
+			&i.IdempotencyKey,
+			&i.Metadata,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const insertDeposit = `-- name: InsertDeposit :one
 INSERT INTO deposits (account_holder, currency_id, expected_amount, channel_name, idempotency_key, metadata, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)

@@ -11,6 +11,42 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const aggregateCheckpointsByClassification = `-- name: AggregateCheckpointsByClassification :many
+SELECT
+  currency_id,
+  classification_id,
+  COALESCE(SUM(balance), 0) as total_balance
+FROM balance_checkpoints
+GROUP BY currency_id, classification_id
+ORDER BY currency_id, classification_id
+`
+
+type AggregateCheckpointsByClassificationRow struct {
+	CurrencyID       int64       `json:"currency_id"`
+	ClassificationID int64       `json:"classification_id"`
+	TotalBalance     interface{} `json:"total_balance"`
+}
+
+func (q *Queries) AggregateCheckpointsByClassification(ctx context.Context) ([]AggregateCheckpointsByClassificationRow, error) {
+	rows, err := q.db.Query(ctx, aggregateCheckpointsByClassification)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AggregateCheckpointsByClassificationRow{}
+	for rows.Next() {
+		var i AggregateCheckpointsByClassificationRow
+		if err := rows.Scan(&i.CurrencyID, &i.ClassificationID, &i.TotalBalance); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countPendingRollups = `-- name: CountPendingRollups :one
 SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL
 `
@@ -150,6 +186,40 @@ func (q *Queries) GetMaxEntryID(ctx context.Context) (int64, error) {
 	var max_id int64
 	err := row.Scan(&max_id)
 	return max_id, err
+}
+
+const listAllBalanceCheckpoints = `-- name: ListAllBalanceCheckpoints :many
+SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
+FROM balance_checkpoints
+ORDER BY account_holder, currency_id, classification_id
+`
+
+func (q *Queries) ListAllBalanceCheckpoints(ctx context.Context) ([]BalanceCheckpoint, error) {
+	rows, err := q.db.Query(ctx, listAllBalanceCheckpoints)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BalanceCheckpoint{}
+	for rows.Next() {
+		var i BalanceCheckpoint
+		if err := rows.Scan(
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ClassificationID,
+			&i.Balance,
+			&i.LastEntryID,
+			&i.LastEntryAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const markRollupProcessed = `-- name: MarkRollupProcessed :exec
