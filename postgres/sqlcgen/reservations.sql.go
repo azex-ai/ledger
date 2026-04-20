@@ -12,6 +12,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveReservations = `-- name: CountActiveReservations :one
+SELECT COUNT(*) FROM reservations WHERE status = 'active'
+`
+
+func (q *Queries) CountActiveReservations(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveReservations)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const getExpiredReservations = `-- name: GetExpiredReservations :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
 FROM reservations WHERE status = 'active' AND expires_at < now() LIMIT $1

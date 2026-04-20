@@ -177,6 +177,18 @@ func (q *Queries) GetBalanceCheckpoints(ctx context.Context, arg GetBalanceCheck
 	return items, nil
 }
 
+const getCheckpointMaxAgeSeconds = `-- name: GetCheckpointMaxAgeSeconds :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(updated_at)))::bigint, 0)::bigint as max_age_seconds
+FROM balance_checkpoints
+`
+
+func (q *Queries) GetCheckpointMaxAgeSeconds(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, getCheckpointMaxAgeSeconds)
+	var max_age_seconds int64
+	err := row.Scan(&max_age_seconds)
+	return max_age_seconds, err
+}
+
 const getMaxEntryID = `-- name: GetMaxEntryID :one
 SELECT COALESCE(MAX(id), 0)::bigint as max_id FROM journal_entries
 `

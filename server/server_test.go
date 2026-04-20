@@ -301,6 +301,14 @@ func (m *mockQueryProvider) GetSystemRollups(ctx context.Context) ([]core.System
 	}, nil
 }
 
+func (m *mockQueryProvider) GetHealthMetrics(ctx context.Context) (*core.HealthMetrics, error) {
+	return &core.HealthMetrics{
+		RollupQueueDepth:        3,
+		CheckpointMaxAgeSeconds: 12,
+		ActiveReservations:      5,
+	}, nil
+}
+
 // --- Test helper ---
 
 func newTestServer() *server.Server {

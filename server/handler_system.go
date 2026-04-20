@@ -8,10 +8,24 @@ import (
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
+type healthResponse struct {
+	Status                  string `json:"status"`
+	RollupQueueDepth        int64  `json:"rollup_queue_depth"`
+	CheckpointMaxAgeSeconds int    `json:"checkpoint_max_age_seconds"`
+	ActiveReservations      int64  `json:"active_reservations"`
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	httpx.OK(w, map[string]string{
-		"status": "ok",
-		"time":   time.Now().UTC().Format(time.RFC3339),
+	metrics, err := s.queries.GetHealthMetrics(r.Context())
+	if err != nil {
+		httpx.OK(w, healthResponse{Status: "degraded"})
+		return
+	}
+	httpx.OK(w, healthResponse{
+		Status:                  "ok",
+		RollupQueueDepth:        metrics.RollupQueueDepth,
+		CheckpointMaxAgeSeconds: metrics.CheckpointMaxAgeSeconds,
+		ActiveReservations:      metrics.ActiveReservations,
 	})
 }
 

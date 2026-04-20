@@ -14,6 +14,7 @@ type QueryProvider interface {
 	WithdrawalQuerier
 	SnapshotQuerier
 	SystemRollupQuerier
+	HealthQuerier
 }
 
 // JournalQuerier lists journals with cursor pagination.
@@ -50,4 +51,16 @@ type SnapshotQuerier interface {
 // SystemRollupQuerier reads system rollup balances.
 type SystemRollupQuerier interface {
 	GetSystemRollups(ctx context.Context) ([]SystemRollup, error)
+}
+
+// HealthQuerier provides system health metrics.
+type HealthQuerier interface {
+	GetHealthMetrics(ctx context.Context) (*HealthMetrics, error)
+}
+
+// HealthMetrics holds system health data points.
+type HealthMetrics struct {
+	RollupQueueDepth         int64
+	CheckpointMaxAgeSeconds  int
+	ActiveReservations       int64
 }

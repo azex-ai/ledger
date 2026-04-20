@@ -200,3 +200,28 @@ func (s *QueryStore) GetSystemRollups(ctx context.Context) ([]core.SystemRollup,
 	}
 	return result, nil
 }
+
+// --- HealthQuerier ---
+
+func (s *QueryStore) GetHealthMetrics(ctx context.Context) (*core.HealthMetrics, error) {
+	pendingRollups, err := s.q.CountPendingRollups(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: health: count pending rollups: %w", err)
+	}
+
+	maxAge, err := s.q.GetCheckpointMaxAgeSeconds(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: health: checkpoint max age: %w", err)
+	}
+
+	activeRes, err := s.q.CountActiveReservations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: health: count active reservations: %w", err)
+	}
+
+	return &core.HealthMetrics{
+		RollupQueueDepth:        pendingRollups,
+		CheckpointMaxAgeSeconds: int(maxAge),
+		ActiveReservations:      activeRes,
+	}, nil
+}

@@ -33,6 +33,10 @@ UPDATE rollup_queue SET processed_at = now() WHERE id = $1;
 -- name: CountPendingRollups :one
 SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL;
 
+-- name: GetCheckpointMaxAgeSeconds :one
+SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(updated_at)))::bigint, 0)::bigint as max_age_seconds
+FROM balance_checkpoints;
+
 -- name: GetMaxEntryID :one
 SELECT COALESCE(MAX(id), 0)::bigint as max_id FROM journal_entries;
 
