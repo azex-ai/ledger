@@ -3,9 +3,13 @@
 import { useHealth } from "@/lib/hooks/use-system";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Activity, Clock, Lock, Scale, AlertCircle } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export function HealthCards() {
   const { data, isLoading, isError } = useHealth();
+
+  const isHealthy = data?.status === "ok";
+  const isDegraded = data?.status === "degraded";
 
   const cards = [
     {
@@ -13,24 +17,28 @@ export function HealthCards() {
       value: data?.rollup_queue_depth ?? "-",
       icon: Activity,
       desc: "Pending rollups",
+      accent: data ? (Number(data.rollup_queue_depth) > 100 ? "border-t-amber-500" : "border-t-emerald-500") : "",
     },
     {
       title: "Checkpoint Age",
       value: data ? `${data.checkpoint_max_age_seconds}s` : "-",
       icon: Clock,
       desc: "Max age (seconds)",
+      accent: data ? (Number(data.checkpoint_max_age_seconds) > 300 ? "border-t-amber-500" : "border-t-emerald-500") : "",
     },
     {
       title: "Active Reservations",
       value: data?.active_reservations ?? "-",
       icon: Lock,
       desc: "Currently locked",
+      accent: data ? "border-t-blue-500" : "",
     },
     {
       title: "Status",
-      value: data?.status === "ok" ? "Healthy" : data?.status ?? "-",
+      value: data?.status === "ok" ? "Healthy" : data?.status === "degraded" ? "Degraded" : data?.status ?? "-",
       icon: Scale,
       desc: "System health",
+      accent: data ? (isHealthy ? "border-t-emerald-500" : isDegraded ? "border-t-amber-500" : "border-t-red-500") : "",
     },
   ];
 
@@ -51,7 +59,7 @@ export function HealthCards() {
       {cards.map((c) => {
         const Icon = c.icon;
         return (
-          <Card key={c.title}>
+          <Card key={c.title} className={cn("border-t-2", c.accent || "border-t-transparent")}>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
                 {c.title}
@@ -61,7 +69,7 @@ export function HealthCards() {
             <CardContent>
               <div className="text-2xl font-bold">
                 {isLoading ? (
-                  <span className="inline-block h-7 w-16 animate-pulse rounded bg-muted" />
+                  <span className="inline-block h-7 w-16 animate-shimmer rounded" />
                 ) : (
                   String(c.value)
                 )}

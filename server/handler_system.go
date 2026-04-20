@@ -35,7 +35,22 @@ func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.OK(w, rollups)
+	type systemBalanceResp struct {
+		CurrencyID       int64  `json:"currency_id"`
+		ClassificationID int64  `json:"classification_id"`
+		TotalBalance     string `json:"total_balance"`
+		UpdatedAt        string `json:"updated_at"`
+	}
+	data := make([]systemBalanceResp, len(rollups))
+	for i, r := range rollups {
+		data[i] = systemBalanceResp{
+			CurrencyID:       r.CurrencyID,
+			ClassificationID: r.ClassificationID,
+			TotalBalance:     r.TotalBalance.String(),
+			UpdatedAt:        r.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+	httpx.OK(w, data)
 }
 
 // --- Reconciliation ---

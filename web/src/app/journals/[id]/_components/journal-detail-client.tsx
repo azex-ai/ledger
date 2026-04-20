@@ -81,8 +81,8 @@ function ReverseDialog({ journalId }: { journalId: number }) {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Reason</Label>
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="duplicate deposit" />
+            <Label htmlFor="jd-reverse-reason">Reason</Label>
+            <Input id="jd-reverse-reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="duplicate deposit" />
           </div>
         </div>
         <DialogFooter>
@@ -106,13 +106,13 @@ function ReverseDialog({ journalId }: { journalId: number }) {
 
 export function JournalDetailClient({ params }: { params: Promise<{ id: string }> }) {
   const { id: idStr } = use(params);
-  const id = parseInt(idStr);
+  const id = parseInt(idStr, 10);
   const { data, isLoading, isError } = useJournal(id);
 
   if (isLoading) {
     return <div className="space-y-4">
-      <div className="h-8 w-48 animate-pulse rounded bg-muted" />
-      <div className="h-64 animate-pulse rounded bg-muted" />
+      <div className="h-8 w-48 animate-shimmer rounded" />
+      <div className="h-64 animate-shimmer rounded" />
     </div>;
   }
 

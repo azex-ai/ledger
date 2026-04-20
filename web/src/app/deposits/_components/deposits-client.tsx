@@ -61,8 +61,8 @@ function ConfirmingDialog({ id }: { id: number }) {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Channel Reference</Label>
-            <Input value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xabc... or tx hash" />
+            <Label htmlFor="dep-confirming-ref">Channel Reference</Label>
+            <Input id="dep-confirming-ref" value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xabc... or tx hash" />
           </div>
         </div>
         <DialogFooter>
@@ -98,22 +98,29 @@ function ConfirmDialog({ id }: { id: number }) {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Actual Amount</Label>
-            <Input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500.00" />
+            <Label htmlFor="dep-confirm-amount">Actual Amount</Label>
+            <Input id="dep-confirm-amount" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500.00" />
           </div>
           <div className="grid gap-2">
-            <Label>Channel Ref</Label>
-            <Input value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xabc..." />
+            <Label htmlFor="dep-confirm-ref">Channel Ref</Label>
+            <Input id="dep-confirm-ref" value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xabc..." />
           </div>
         </div>
         <DialogFooter>
           <Button
-            onClick={() => mutation.mutate({ id, actual_amount: amount, channel_ref: channelRef }, {
-              onSuccess: () => {
-                toast.success("Deposit confirmed");
-                setOpen(false);
-              },
-            })}
+            onClick={() => {
+              const DECIMAL_RE = /^\d+(\.\d+)?$/;
+              if (!DECIMAL_RE.test(amount)) {
+                toast.error("Amount must be a valid decimal number");
+                return;
+              }
+              mutation.mutate({ id, actual_amount: amount, channel_ref: channelRef }, {
+                onSuccess: () => {
+                  toast.success("Deposit confirmed");
+                  setOpen(false);
+                },
+              });
+            }}
             disabled={mutation.isPending || !amount || !channelRef}
           >
             {mutation.isPending ? "Confirming..." : "Confirm"}
@@ -139,8 +146,8 @@ function FailDialog({ id }: { id: number }) {
         <div className="grid gap-4 py-4">
           <p className="text-sm text-muted-foreground">This will mark the deposit as failed. This action cannot be undone.</p>
           <div className="grid gap-2">
-            <Label>Reason</Label>
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Invalid transaction, timeout, etc." />
+            <Label htmlFor="dep-fail-reason">Reason</Label>
+            <Input id="dep-fail-reason" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Invalid transaction, timeout, etc." />
           </div>
         </div>
         <DialogFooter>
@@ -194,7 +201,7 @@ export function DepositsClient() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-pulse rounded bg-muted" />
+            <div key={i} className="h-10 animate-shimmer rounded" />
           ))}
         </div>
       ) : isError ? (

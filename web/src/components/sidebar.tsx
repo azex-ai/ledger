@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
+import { prefetchRoute } from "@/lib/prefetch";
 import {
   LayoutDashboard,
   BookOpen,
@@ -40,6 +42,7 @@ const NAV_ITEMS = [
 
 function NavContent({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const qc = useQueryClient();
 
   return (
     <nav className="flex-1 overflow-y-auto p-2 space-y-0.5">
@@ -47,7 +50,7 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
         if ("type" in item) {
           return (
             <div key={i} className="pt-4 pb-1 px-3">
-              <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
                 {item.label}
               </span>
             </div>
@@ -60,11 +63,13 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
             key={item.href}
             href={item.href}
             onClick={onNavigate}
+            onMouseEnter={() => prefetchRoute(qc, item.href)}
+            onFocus={() => prefetchRoute(qc, item.href)}
             aria-current={active ? "page" : undefined}
             className={cn(
               "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors",
               active
-                ? "bg-accent text-accent-foreground font-medium"
+                ? "bg-accent text-accent-foreground font-medium border-l-2 border-primary"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
             )}
           >
@@ -91,7 +96,12 @@ export function Sidebar() {
         >
           <Menu className="h-5 w-5" />
         </button>
-        <h1 className="text-sm font-semibold tracking-tight">Ledger</h1>
+        <div className="flex items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground text-xs font-bold">
+            L
+          </div>
+          <h1 className="text-sm font-semibold tracking-tight">Ledger</h1>
+        </div>
       </div>
 
       {/* Mobile overlay */}
@@ -103,9 +113,14 @@ export function Sidebar() {
           />
           <aside className="relative z-50 w-64 bg-card border-r border-border flex flex-col">
             <div className="flex items-center justify-between p-4 border-b border-border">
-              <div>
-                <h1 className="text-lg font-semibold tracking-tight">Ledger</h1>
-                <p className="text-xs text-muted-foreground">Admin Dashboard</p>
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-bold">
+                  L
+                </div>
+                <div>
+                  <h1 className="text-sm font-semibold tracking-tight">Ledger</h1>
+                  <p className="text-[11px] text-muted-foreground">Admin Dashboard</p>
+                </div>
               </div>
               <button
                 onClick={() => setMobileOpen(false)}
@@ -116,6 +131,11 @@ export function Sidebar() {
               </button>
             </div>
             <NavContent onNavigate={() => setMobileOpen(false)} />
+            <div className="border-t border-border p-3">
+              <p className="text-[10px] text-muted-foreground/50 text-center">
+                Double-Entry Ledger Engine
+              </p>
+            </div>
           </aside>
         </div>
       )}
@@ -123,10 +143,22 @@ export function Sidebar() {
       {/* Desktop sidebar */}
       <aside className="hidden lg:flex w-56 shrink-0 border-r border-border bg-card flex-col">
         <div className="p-4 border-b border-border">
-          <h1 className="text-lg font-semibold tracking-tight">Ledger</h1>
-          <p className="text-xs text-muted-foreground">Admin Dashboard</p>
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-bold">
+              L
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold tracking-tight">Ledger</h1>
+              <p className="text-[11px] text-muted-foreground">Admin Dashboard</p>
+            </div>
+          </div>
         </div>
         <NavContent />
+        <div className="border-t border-border p-3">
+          <p className="text-[10px] text-muted-foreground/50 text-center">
+            Double-Entry Ledger Engine
+          </p>
+        </div>
       </aside>
     </>
   );

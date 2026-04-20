@@ -11,51 +11,63 @@ import {
   Tooltip,
   CartesianGrid,
 } from "recharts";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, TrendingUp } from "lucide-react";
 
 export function BalanceTrend() {
   const { data, isLoading, isError } = useSystemBalances();
 
   const chartData = (data ?? []).map((b) => ({
     label: `C${b.classification_id} / Cur${b.currency_id}`,
-    balance: parseFloat(b.total_balance),
+    balance: parseFloat(b.total_balance), // chart display only — intentional lossy conversion
   }));
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-sm font-medium">System Balances</CardTitle>
+        <TrendingUp className="h-4 w-4 text-muted-foreground" />
       </CardHeader>
       <CardContent>
         {isLoading ? (
-          <div className="h-[300px] animate-pulse rounded bg-muted" />
+          <div className="h-[300px] animate-shimmer rounded" />
         ) : isError ? (
-          <div className="flex h-[300px] items-center justify-center gap-2 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            Failed to load balances
+          <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-sm text-destructive">
+            <AlertCircle className="h-5 w-5" />
+            <span>Failed to load balances</span>
           </div>
         ) : chartData.length === 0 ? (
-          <div className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
-            No balance data yet
+          <div className="flex h-[300px] flex-col items-center justify-center gap-2">
+            <TrendingUp className="h-8 w-8 text-muted-foreground/50" />
+            <span className="text-sm text-muted-foreground">No balance data yet</span>
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+            <BarChart data={chartData} barCategoryGap="20%">
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
               <XAxis
                 dataKey="label"
-                tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }}
+                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+                axisLine={false}
+                tickLine={false}
               />
-              <YAxis tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }} />
+              <YAxis
+                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+                axisLine={false}
+                tickLine={false}
+                width={60}
+              />
               <Tooltip
+                cursor={{ fill: "hsl(var(--muted) / 0.5)" }}
                 contentStyle={{
-                  backgroundColor: "hsl(var(--card))",
+                  backgroundColor: "hsl(var(--popover))",
                   border: "1px solid hsl(var(--border))",
-                  borderRadius: "6px",
-                  color: "hsl(var(--card-foreground))",
+                  borderRadius: "8px",
+                  color: "hsl(var(--popover-foreground))",
+                  fontSize: "12px",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
                 }}
               />
-              <Bar dataKey="balance" fill="hsl(var(--chart-1))" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="balance" fill="hsl(var(--chart-1))" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}

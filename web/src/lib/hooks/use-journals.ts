@@ -3,7 +3,7 @@ import * as api from "@/lib/api";
 
 export function useJournals(limit = 20) {
   return useInfiniteQuery({
-    queryKey: ["journals"],
+    queryKey: ["journals", limit],
     queryFn: ({ pageParam }) => api.listJournals({ cursor: pageParam, limit }),
     initialPageParam: "",
     getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,

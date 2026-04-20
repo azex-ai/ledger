@@ -82,6 +82,34 @@ func (q *Queries) GetWithdrawal(ctx context.Context, id int64) (Withdrawal, erro
 	return i, err
 }
 
+const getWithdrawalByIdempotencyKey = `-- name: GetWithdrawalByIdempotencyKey :one
+SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
+FROM withdrawals WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetWithdrawalByIdempotencyKey(ctx context.Context, idempotencyKey string) (Withdrawal, error) {
+	row := q.db.QueryRow(ctx, getWithdrawalByIdempotencyKey, idempotencyKey)
+	var i Withdrawal
+	err := row.Scan(
+		&i.ID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.Amount,
+		&i.Status,
+		&i.ChannelName,
+		&i.ChannelRef,
+		&i.ReservationID,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.Metadata,
+		&i.ReviewRequired,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getWithdrawalForUpdate = `-- name: GetWithdrawalForUpdate :one
 SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
 FROM withdrawals WHERE id = $1 FOR UPDATE

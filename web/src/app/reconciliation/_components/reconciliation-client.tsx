@@ -70,21 +70,21 @@ export function ReconciliationClient() {
             </p>
             <div className="flex gap-2">
               <div className="grid gap-1">
-                <Label className="text-xs">Holder</Label>
-                <Input value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="1001" className="w-28" />
+                <Label htmlFor="recon-holder" className="text-xs">Holder</Label>
+                <Input id="recon-holder" value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="1001" className="w-28" />
               </div>
               <div className="grid gap-1">
-                <Label className="text-xs">Currency</Label>
-                <Input value={currencyId} onChange={(e) => setCurrencyId(e.target.value)} placeholder="1" className="w-28" />
+                <Label htmlFor="recon-currency" className="text-xs">Currency</Label>
+                <Input id="recon-currency" value={currencyId} onChange={(e) => setCurrencyId(e.target.value)} placeholder="1" className="w-28" />
               </div>
               <div className="flex items-end">
                 <Button
-                  onClick={() =>
-                    accountMutation.mutate({
-                      holder: parseInt(holder),
-                      currencyId: parseInt(currencyId),
-                    })
-                  }
+                  onClick={() => {
+                    const h = parseInt(holder, 10);
+                    const c = parseInt(currencyId, 10);
+                    if (isNaN(h) || isNaN(c)) return;
+                    accountMutation.mutate({ holder: h, currencyId: c });
+                  }}
                   disabled={accountMutation.isPending || !holder || !currencyId}
                 >
                   {accountMutation.isPending ? "Running..." : "Check"}
@@ -118,8 +118,8 @@ export function ReconciliationClient() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {accountResult.details.map((d, i) => (
-                        <TableRow key={i}>
+                      {accountResult.details.map((d) => (
+                        <TableRow key={`${d.account_holder}-${d.currency_id}-${d.classification_id}`}>
                           <TableCell>{d.account_holder}</TableCell>
                           <TableCell>{d.currency_id}</TableCell>
                           <TableCell>{d.classification_id}</TableCell>

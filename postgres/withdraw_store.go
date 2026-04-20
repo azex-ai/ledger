@@ -31,6 +31,15 @@ func NewWithdrawStore(pool *pgxpool.Pool) *WithdrawStore {
 
 // InitWithdraw creates a new withdrawal in locked status.
 func (s *WithdrawStore) InitWithdraw(ctx context.Context, input core.WithdrawInput) (*core.Withdrawal, error) {
+	// Check idempotency: return existing withdrawal if key matches
+	existing, err := s.q.GetWithdrawalByIdempotencyKey(ctx, input.IdempotencyKey)
+	if err == nil {
+		return withdrawalFromRow(existing), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: init withdraw: check idempotency: %w", err)
+	}
+
 	row, err := s.q.InsertWithdrawal(ctx, sqlcgen.InsertWithdrawalParams{
 		AccountHolder:  input.AccountHolder,
 		CurrencyID:     input.CurrencyID,

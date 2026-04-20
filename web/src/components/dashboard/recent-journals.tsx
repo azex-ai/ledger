@@ -11,7 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import Link from "next/link";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, BookOpen } from "lucide-react";
 
 export function RecentJournals() {
   const { data, isLoading, isError } = useJournals(10);
@@ -19,23 +19,32 @@ export function RecentJournals() {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-sm font-medium">Recent Journals</CardTitle>
+        <Link
+          href="/journals"
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          View all &rarr;
+        </Link>
       </CardHeader>
       <CardContent>
         {isLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-8 animate-pulse rounded bg-muted" />
+              <div key={i} className="h-8 animate-shimmer rounded" />
             ))}
           </div>
         ) : isError ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            Failed to load journals
+          <div className="flex flex-col items-center justify-center gap-2 py-8 text-sm text-destructive">
+            <AlertCircle className="h-5 w-5" />
+            <span>Failed to load journals</span>
           </div>
         ) : journals.length === 0 ? (
-          <p className="text-sm text-muted-foreground py-8 text-center">No journals yet</p>
+          <div className="flex flex-col items-center justify-center gap-2 py-8">
+            <BookOpen className="h-8 w-8 text-muted-foreground/50" />
+            <span className="text-sm text-muted-foreground">No journals yet</span>
+          </div>
         ) : (
           <Table>
             <TableHeader>
@@ -61,7 +70,7 @@ export function RecentJournals() {
                   <TableCell className="font-mono text-xs max-w-[200px] truncate">
                     {j.idempotency_key}
                   </TableCell>
-                  <TableCell>{j.source}</TableCell>
+                  <TableCell className="text-muted-foreground">{j.source}</TableCell>
                   <TableCell className="text-right font-mono">{j.total_debit}</TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {new Date(j.created_at).toLocaleString()}

@@ -21,6 +21,7 @@ import { toast } from "sonner";
 import type { PreviewResult } from "@/lib/api";
 
 interface LineForm {
+  _id: string;
   classification_id: string;
   entry_type: "debit" | "credit";
   holder_role: "user" | "system";
@@ -32,13 +33,14 @@ function CreateTemplateDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ code: "", name: "", journal_type_id: "" });
   const [lines, setLines] = useState<LineForm[]>([
-    { classification_id: "", entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
-    { classification_id: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
+    { _id: crypto.randomUUID(), classification_id: "", entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
+    { _id: crypto.randomUUID(), classification_id: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
   ]);
   const mutation = useCreateTemplate();
 
   function addLine() {
     setLines([...lines, {
+      _id: crypto.randomUUID(),
       classification_id: "",
       entry_type: "debit",
       holder_role: "user",
@@ -56,18 +58,26 @@ function CreateTemplateDialog() {
   }
 
   function handleSubmit() {
+    const journalTypeId = parseInt(form.journal_type_id, 10);
+    if (isNaN(journalTypeId)) {
+      toast.error("Journal Type ID must be a number");
+      return;
+    }
     mutation.mutate(
       {
         code: form.code,
         name: form.name,
-        journal_type_id: parseInt(form.journal_type_id),
-        lines: lines.map((l) => ({
-          classification_id: parseInt(l.classification_id),
-          entry_type: l.entry_type,
-          holder_role: l.holder_role,
-          amount_key: l.amount_key,
-          sort_order: l.sort_order,
-        })),
+        journal_type_id: journalTypeId,
+        lines: lines.map((l) => {
+          const classId = parseInt(l.classification_id, 10);
+          return {
+            classification_id: isNaN(classId) ? 0 : classId,
+            entry_type: l.entry_type,
+            holder_role: l.holder_role,
+            amount_key: l.amount_key,
+            sort_order: l.sort_order,
+          };
+        }),
       },
       {
         onSuccess: () => {
@@ -88,16 +98,16 @@ function CreateTemplateDialog() {
         <div className="grid gap-4 py-4">
           <div className="grid grid-cols-3 gap-4">
             <div className="grid gap-2">
-              <Label>Code</Label>
-              <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit_confirm" />
+              <Label htmlFor="tpl-code">Code</Label>
+              <Input id="tpl-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit_confirm" />
             </div>
             <div className="grid gap-2">
-              <Label>Name</Label>
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Confirm Deposit" />
+              <Label htmlFor="tpl-name">Name</Label>
+              <Input id="tpl-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Confirm Deposit" />
             </div>
             <div className="grid gap-2">
-              <Label>Journal Type ID</Label>
-              <Input value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
+              <Label htmlFor="tpl-jtype">Journal Type ID</Label>
+              <Input id="tpl-jtype" value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
             </div>
           </div>
 
@@ -111,7 +121,7 @@ function CreateTemplateDialog() {
               <div>
                 <p className="text-xs font-medium text-green-400 mb-2">DEBIT SIDE</p>
                 {lines.map((l, idx) => l.entry_type !== "debit" ? null : (
-                  <div key={idx} className="mb-2 rounded border border-green-500/20 bg-green-500/5 p-3 space-y-2">
+                  <div key={l._id} className="mb-2 rounded border border-green-500/20 bg-green-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
                       <Input placeholder="Class ID" value={l.classification_id} onChange={(e) => updateLine(idx, { classification_id: e.target.value })} className="w-24" />
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
@@ -130,7 +140,7 @@ function CreateTemplateDialog() {
               <div>
                 <p className="text-xs font-medium text-red-400 mb-2">CREDIT SIDE</p>
                 {lines.map((l, idx) => l.entry_type !== "credit" ? null : (
-                  <div key={idx} className="mb-2 rounded border border-red-500/20 bg-red-500/5 p-3 space-y-2">
+                  <div key={l._id} className="mb-2 rounded border border-red-500/20 bg-red-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
                       <Input placeholder="Class ID" value={l.classification_id} onChange={(e) => updateLine(idx, { classification_id: e.target.value })} className="w-24" />
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
@@ -210,8 +220,8 @@ function PreviewSection({ code }: { code: string }) {
           onClick={() =>
             previewMutation.mutate({
               code,
-              holder_id: parseInt(params.holder_id),
-              currency_id: parseInt(params.currency_id),
+              holder_id: parseInt(params.holder_id, 10),
+              currency_id: parseInt(params.currency_id, 10),
               amount: params.amount,
             })
           }
@@ -244,7 +254,7 @@ export function TemplatesClient() {
       <PageHeader title="Templates" description="Entry template definitions" actions={<CreateTemplateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-20 animate-pulse rounded bg-muted" />)}</div>
+        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-20 animate-shimmer rounded" />)}</div>
       ) : isError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
           <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />

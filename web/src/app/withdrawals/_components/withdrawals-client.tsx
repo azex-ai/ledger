@@ -104,17 +104,53 @@ function FailDialog({ id }: { id: number }) {
   );
 }
 
+function ReserveButton({ id }: { id: number }) {
+  const mutation = useReserveWithdraw();
+  return (
+    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal reserved") })} disabled={mutation.isPending}>
+      {mutation.isPending ? "Reserving..." : "Reserve"}
+    </Button>
+  );
+}
+
+function ReviewButtons({ id }: { id: number }) {
+  const mutation = useReviewWithdraw();
+  return (
+    <>
+      <Button size="sm" variant="outline" onClick={() => mutation.mutate({ id, approved: true }, { onSuccess: () => toast.success("Withdrawal approved") })} disabled={mutation.isPending}>
+        {mutation.isPending ? "..." : "Approve"}
+      </Button>
+      <Button size="sm" variant="ghost" onClick={() => mutation.mutate({ id, approved: false }, { onSuccess: () => toast.success("Withdrawal rejected") })} disabled={mutation.isPending}>
+        {mutation.isPending ? "..." : "Reject"}
+      </Button>
+    </>
+  );
+}
+
+function ConfirmButton({ id }: { id: number }) {
+  const mutation = useConfirmWithdraw();
+  return (
+    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal confirmed") })} disabled={mutation.isPending}>
+      {mutation.isPending ? "Confirming..." : "Confirm"}
+    </Button>
+  );
+}
+
+function RetryButton({ id }: { id: number }) {
+  const mutation = useRetryWithdraw();
+  return (
+    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal retrying") })} disabled={mutation.isPending}>
+      {mutation.isPending ? "Retrying..." : "Retry"}
+    </Button>
+  );
+}
+
 export function WithdrawalsClient() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const { data, isLoading, isError } = useWithdrawals({
     status: statusFilter || undefined,
   });
   const withdrawals = data ?? [];
-
-  const reserveMutation = useReserveWithdraw();
-  const reviewMutation = useReviewWithdraw();
-  const confirmMutation = useConfirmWithdraw();
-  const retryMutation = useRetryWithdraw();
 
   return (
     <div className="space-y-6">
@@ -140,7 +176,7 @@ export function WithdrawalsClient() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-pulse rounded bg-muted" />
+            <div key={i} className="h-10 animate-shimmer rounded" />
           ))}
         </div>
       ) : isError ? (
@@ -185,35 +221,16 @@ export function WithdrawalsClient() {
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">
-                      {w.status === "locked" && (
-                        <Button size="sm" variant="outline" onClick={() => reserveMutation.mutate(w.id, { onSuccess: () => toast.success("Withdrawal reserved") })} disabled={reserveMutation.isPending}>
-                          Reserve
-                        </Button>
-                      )}
-                      {w.status === "reviewing" && (
-                        <>
-                          <Button size="sm" variant="outline" onClick={() => reviewMutation.mutate({ id: w.id, approved: true }, { onSuccess: () => toast.success("Withdrawal approved") })} disabled={reviewMutation.isPending}>
-                            Approve
-                          </Button>
-                          <Button size="sm" variant="ghost" onClick={() => reviewMutation.mutate({ id: w.id, approved: false }, { onSuccess: () => toast.success("Withdrawal rejected") })} disabled={reviewMutation.isPending}>
-                            Reject
-                          </Button>
-                        </>
-                      )}
+                      {w.status === "locked" && <ReserveButton id={w.id} />}
+                      {w.status === "reviewing" && <ReviewButtons id={w.id} />}
                       {w.status === "reserved" && <ProcessDialog id={w.id} />}
                       {w.status === "processing" && (
                         <>
-                          <Button size="sm" variant="outline" onClick={() => confirmMutation.mutate(w.id, { onSuccess: () => toast.success("Withdrawal confirmed") })} disabled={confirmMutation.isPending}>
-                            Confirm
-                          </Button>
+                          <ConfirmButton id={w.id} />
                           <FailDialog id={w.id} />
                         </>
                       )}
-                      {w.status === "failed" && (
-                        <Button size="sm" variant="outline" onClick={() => retryMutation.mutate(w.id, { onSuccess: () => toast.success("Withdrawal retrying") })} disabled={retryMutation.isPending}>
-                          Retry
-                        </Button>
-                      )}
+                      {w.status === "failed" && <RetryButton id={w.id} />}
                     </div>
                   </TableCell>
                 </TableRow>

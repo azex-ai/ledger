@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AlertCircle } from "lucide-react";
 import { useSnapshots } from "@/lib/hooks/use-system";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -24,13 +25,13 @@ export function SnapshotsClient() {
     end?: string;
   }>({});
 
-  const { data, isLoading } = useSnapshots(query);
+  const { data, isLoading, isError } = useSnapshots(query);
   const snapshots = data ?? [];
 
   function handleSearch() {
     setQuery({
-      holder: form.holder ? parseInt(form.holder) : undefined,
-      currency_id: form.currency_id ? parseInt(form.currency_id) : undefined,
+      holder: form.holder ? parseInt(form.holder, 10) : undefined,
+      currency_id: form.currency_id ? parseInt(form.currency_id, 10) : undefined,
       start: form.start || undefined,
       end: form.end || undefined,
     });
@@ -61,7 +62,12 @@ export function SnapshotsClient() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-pulse rounded bg-muted" />)}</div>
+        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
+      ) : isError ? (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
+          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
+          <p className="text-sm font-medium">Failed to load snapshots</p>
+        </div>
       ) : snapshots.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           {Object.keys(query).length === 0 ? "Enter search criteria to view snapshots" : "No snapshots found"}
@@ -79,7 +85,7 @@ export function SnapshotsClient() {
           </TableHeader>
           <TableBody>
             {snapshots.map((s, i) => (
-              <TableRow key={i}>
+              <TableRow key={`${s.snapshot_date}-${s.account_holder}-${s.currency_id}-${s.classification_id}`}>
                 <TableCell>{s.snapshot_date}</TableCell>
                 <TableCell>{s.account_holder}</TableCell>
                 <TableCell>{s.currency_id}</TableCell>

@@ -3,6 +3,10 @@ INSERT INTO deposits (account_holder, currency_id, expected_amount, channel_name
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at;
 
+-- name: GetDepositByIdempotencyKey :one
+SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+FROM deposits WHERE idempotency_key = $1;
+
 -- name: GetDeposit :one
 SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
 FROM deposits WHERE id = $1;

@@ -21,12 +21,43 @@ const STATUS_COLORS: Record<string, string> = {
   credit: "bg-red-500/15 text-red-400 border-red-500/20",
 };
 
+const DOT_COLORS: Record<string, string> = {
+  active: "bg-green-400",
+  settled: "bg-blue-400",
+  settling: "bg-yellow-400",
+  released: "bg-zinc-400",
+  pending: "bg-yellow-400",
+  confirming: "bg-blue-400",
+  confirmed: "bg-green-400",
+  failed: "bg-red-400",
+  expired: "bg-zinc-400",
+  locked: "bg-orange-400",
+  reserved: "bg-purple-400",
+  reviewing: "bg-yellow-400",
+  processing: "bg-blue-400",
+  reversed: "bg-orange-400",
+  inactive: "bg-zinc-400",
+  debit: "bg-green-400",
+  credit: "bg-red-400",
+};
+
+// Statuses that should show an animated pulse (active/live states)
+const PULSE_STATUSES = new Set(["active", "confirming", "processing", "reviewing", "settling"]);
+
 export function StatusBadge({ status }: { status: string }) {
   return (
     <Badge
       variant="outline"
-      className={cn("text-xs font-medium", STATUS_COLORS[status] ?? "")}
+      className={cn("text-xs font-medium gap-1.5", STATUS_COLORS[status] ?? "")}
     >
+      <span
+        className={cn(
+          "inline-block h-1.5 w-1.5 rounded-full",
+          DOT_COLORS[status] ?? "bg-zinc-400",
+          PULSE_STATUSES.has(status) && "animate-pulse",
+        )}
+        aria-hidden="true"
+      />
       {status}
     </Badge>
   );

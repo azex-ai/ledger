@@ -29,12 +29,12 @@ function CreateDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Code</Label>
-            <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="USDT" />
+            <Label htmlFor="cur-code">Code</Label>
+            <Input id="cur-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="USDT" />
           </div>
           <div className="grid gap-2">
-            <Label>Name</Label>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Tether USD" />
+            <Label htmlFor="cur-name">Name</Label>
+            <Input id="cur-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Tether USD" />
           </div>
         </div>
         <DialogFooter>
@@ -61,7 +61,7 @@ export function CurrenciesClient() {
       <PageHeader title="Currencies" description="Supported currency definitions" actions={<CreateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-10 animate-pulse rounded bg-muted" />)}</div>
+        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
       ) : isError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
           <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />

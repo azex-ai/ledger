@@ -38,6 +38,6 @@ export function useSnapshots(params: {
   return useQuery({
     queryKey: ["snapshots", params],
     queryFn: () => api.listSnapshots(params),
-    enabled: !!params.holder || !!params.start,
+    enabled: !!params.holder,
   });
 }

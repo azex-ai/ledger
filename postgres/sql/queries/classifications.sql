@@ -6,6 +6,11 @@ RETURNING id, code, name, normal_side, is_system, is_active, created_at;
 -- name: DeactivateClassification :exec
 UPDATE classifications SET is_active = false WHERE id = $1;
 
+-- name: GetClassification :one
+SELECT id, code, name, normal_side, is_system, is_active, created_at
+FROM classifications
+WHERE id = $1;
+
 -- name: ListClassifications :many
 SELECT id, code, name, normal_side, is_system, is_active, created_at
 FROM classifications

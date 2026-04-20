@@ -55,29 +55,18 @@ func (s *QueryStore) GetJournal(ctx context.Context, id int64) (*core.Journal, [
 }
 
 func (s *QueryStore) ListJournals(ctx context.Context, cursorID int64, limit int32) ([]core.Journal, error) {
-	// Use raw query since sqlcgen doesn't have a cursor-based journal list.
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at
-		 FROM journals WHERE id > $1 ORDER BY id ASC LIMIT $2`,
-		cursorID, limit)
+	rows, err := s.q.ListJournalsCursor(ctx, sqlcgen.ListJournalsCursorParams{
+		CursorID:  cursorID,
+		PageLimit: limit,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list journals: %w", err)
 	}
-	defer rows.Close()
-
-	var result []core.Journal
-	for rows.Next() {
-		var j sqlcgen.Journal
-		if err := rows.Scan(
-			&j.ID, &j.JournalTypeID, &j.IdempotencyKey,
-			&j.TotalDebit, &j.TotalCredit, &j.Metadata,
-			&j.ActorID, &j.Source, &j.ReversalOf, &j.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("postgres: list journals: scan: %w", err)
-		}
-		result = append(result, *journalFromRow(j))
+	result := make([]core.Journal, len(rows))
+	for i, j := range rows {
+		result[i] = *journalFromRow(j)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
 // --- EntryQuerier ---

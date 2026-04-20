@@ -29,6 +29,11 @@ function PostJournalDialog() {
   const mutation = usePostJournal();
 
   function handleSubmit() {
+    const journalTypeId = parseInt(form.journal_type_id, 10);
+    if (isNaN(journalTypeId)) {
+      toast.error("Journal Type ID must be a number");
+      return;
+    }
     let entries;
     try {
       entries = JSON.parse(form.entries);
@@ -38,7 +43,7 @@ function PostJournalDialog() {
     }
     mutation.mutate(
       {
-        journal_type_id: parseInt(form.journal_type_id),
+        journal_type_id: journalTypeId,
         idempotency_key: form.idempotency_key,
         source: form.source,
         entries,
@@ -61,20 +66,21 @@ function PostJournalDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Journal Type ID</Label>
-            <Input value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
+            <Label htmlFor="pj-type-id">Journal Type ID</Label>
+            <Input id="pj-type-id" value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
           </div>
           <div className="grid gap-2">
-            <Label>Idempotency Key</Label>
-            <Input value={form.idempotency_key} onChange={(e) => setForm({ ...form, idempotency_key: e.target.value })} placeholder="deposit:user1001:1" />
+            <Label htmlFor="pj-idem-key">Idempotency Key</Label>
+            <Input id="pj-idem-key" value={form.idempotency_key} onChange={(e) => setForm({ ...form, idempotency_key: e.target.value })} placeholder="deposit:user1001:1" />
           </div>
           <div className="grid gap-2">
-            <Label>Source</Label>
-            <Input value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} />
+            <Label htmlFor="pj-source">Source</Label>
+            <Input id="pj-source" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} />
           </div>
           <div className="grid gap-2">
-            <Label>Entries (JSON array)</Label>
+            <Label htmlFor="pj-entries">Entries (JSON array)</Label>
             <Textarea
+              id="pj-entries"
               value={form.entries}
               onChange={(e) => setForm({ ...form, entries: e.target.value })}
               rows={6}
@@ -106,6 +112,12 @@ function TemplateJournalDialog() {
   const mutation = usePostTemplateJournal();
 
   function handleSubmit() {
+    const holderId = parseInt(form.holder_id, 10);
+    const currencyId = parseInt(form.currency_id, 10);
+    if (isNaN(holderId) || isNaN(currencyId)) {
+      toast.error("Holder ID and Currency ID must be numbers");
+      return;
+    }
     let amounts;
     try {
       amounts = JSON.parse(form.amounts);
@@ -116,8 +128,8 @@ function TemplateJournalDialog() {
     mutation.mutate(
       {
         template_code: form.template_code,
-        holder_id: parseInt(form.holder_id),
-        currency_id: parseInt(form.currency_id),
+        holder_id: holderId,
+        currency_id: currencyId,
         idempotency_key: form.idempotency_key,
         amounts,
         source: form.source || undefined,
@@ -140,26 +152,27 @@ function TemplateJournalDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Template Code</Label>
-            <Input value={form.template_code} onChange={(e) => setForm({ ...form, template_code: e.target.value })} placeholder="deposit_confirm" />
+            <Label htmlFor="tj-tpl-code">Template Code</Label>
+            <Input id="tj-tpl-code" value={form.template_code} onChange={(e) => setForm({ ...form, template_code: e.target.value })} placeholder="deposit_confirm" />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2">
-              <Label>Holder ID</Label>
-              <Input value={form.holder_id} onChange={(e) => setForm({ ...form, holder_id: e.target.value })} placeholder="1001" />
+              <Label htmlFor="tj-holder">Holder ID</Label>
+              <Input id="tj-holder" value={form.holder_id} onChange={(e) => setForm({ ...form, holder_id: e.target.value })} placeholder="1001" />
             </div>
             <div className="grid gap-2">
-              <Label>Currency ID</Label>
-              <Input value={form.currency_id} onChange={(e) => setForm({ ...form, currency_id: e.target.value })} placeholder="1" />
+              <Label htmlFor="tj-currency">Currency ID</Label>
+              <Input id="tj-currency" value={form.currency_id} onChange={(e) => setForm({ ...form, currency_id: e.target.value })} placeholder="1" />
             </div>
           </div>
           <div className="grid gap-2">
-            <Label>Idempotency Key</Label>
-            <Input value={form.idempotency_key} onChange={(e) => setForm({ ...form, idempotency_key: e.target.value })} />
+            <Label htmlFor="tj-idem-key">Idempotency Key</Label>
+            <Input id="tj-idem-key" value={form.idempotency_key} onChange={(e) => setForm({ ...form, idempotency_key: e.target.value })} />
           </div>
           <div className="grid gap-2">
-            <Label>Amounts (JSON object)</Label>
+            <Label htmlFor="tj-amounts">Amounts (JSON object)</Label>
             <Textarea
+              id="tj-amounts"
               value={form.amounts}
               onChange={(e) => setForm({ ...form, amounts: e.target.value })}
               rows={3}
@@ -197,7 +210,7 @@ export function JournalsClient() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="h-10 animate-pulse rounded bg-muted" />
+            <div key={i} className="h-10 animate-shimmer rounded" />
           ))}
         </div>
       ) : isError ? (

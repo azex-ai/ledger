@@ -3,6 +3,10 @@ INSERT INTO withdrawals (account_holder, currency_id, amount, channel_name, idem
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at;
 
+-- name: GetWithdrawalByIdempotencyKey :one
+SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
+FROM withdrawals WHERE idempotency_key = $1;
+
 -- name: GetWithdrawal :one
 SELECT id, account_holder, currency_id, amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, review_required, expires_at, created_at, updated_at
 FROM withdrawals WHERE id = $1;

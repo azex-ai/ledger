@@ -65,6 +65,33 @@ func (q *Queries) GetDepositByChannelRef(ctx context.Context, channelRef pgtype.
 	return i, err
 }
 
+const getDepositByIdempotencyKey = `-- name: GetDepositByIdempotencyKey :one
+SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+FROM deposits WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetDepositByIdempotencyKey(ctx context.Context, idempotencyKey string) (Deposit, error) {
+	row := q.db.QueryRow(ctx, getDepositByIdempotencyKey, idempotencyKey)
+	var i Deposit
+	err := row.Scan(
+		&i.ID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.ExpectedAmount,
+		&i.ActualAmount,
+		&i.Status,
+		&i.ChannelName,
+		&i.ChannelRef,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.Metadata,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getDepositForUpdate = `-- name: GetDepositForUpdate :one
 SELECT id, account_holder, currency_id, expected_amount, actual_amount, status, channel_name, channel_ref, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
 FROM deposits WHERE id = $1 FOR UPDATE

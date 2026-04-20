@@ -31,6 +31,15 @@ func NewDepositStore(pool *pgxpool.Pool) *DepositStore {
 
 // InitDeposit creates a new deposit in pending status.
 func (s *DepositStore) InitDeposit(ctx context.Context, input core.DepositInput) (*core.Deposit, error) {
+	// Check idempotency: return existing deposit if key matches
+	existing, err := s.q.GetDepositByIdempotencyKey(ctx, input.IdempotencyKey)
+	if err == nil {
+		return depositFromRow(existing), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: init deposit: check idempotency: %w", err)
+	}
+
 	row, err := s.q.InsertDeposit(ctx, sqlcgen.InsertDepositParams{
 		AccountHolder:  input.AccountHolder,
 		CurrencyID:     input.CurrencyID,

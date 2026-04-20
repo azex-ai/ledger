@@ -84,6 +84,27 @@ func (q *Queries) DeactivateJournalType(ctx context.Context, id int64) error {
 	return err
 }
 
+const getClassification = `-- name: GetClassification :one
+SELECT id, code, name, normal_side, is_system, is_active, created_at
+FROM classifications
+WHERE id = $1
+`
+
+func (q *Queries) GetClassification(ctx context.Context, id int64) (Classification, error) {
+	row := q.db.QueryRow(ctx, getClassification, id)
+	var i Classification
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.NormalSide,
+		&i.IsSystem,
+		&i.IsActive,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listClassifications = `-- name: ListClassifications :many
 SELECT id, code, name, normal_side, is_system, is_active, created_at
 FROM classifications

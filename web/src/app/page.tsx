@@ -5,7 +5,12 @@ import { RecentJournals } from "@/components/dashboard/recent-journals";
 export default function DashboardPage() {
   return (
     <div className="space-y-6">
-      <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
+      <div>
+        <h2 className="text-2xl font-bold tracking-tight">Dashboard</h2>
+        <p className="text-sm text-muted-foreground">
+          System overview and recent activity
+        </p>
+      </div>
       <HealthCards />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <BalanceTrend />

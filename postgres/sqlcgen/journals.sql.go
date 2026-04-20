@@ -11,6 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const distinctClassificationsForAccount = `-- name: DistinctClassificationsForAccount :many
+SELECT DISTINCT classification_id
+FROM journal_entries
+WHERE account_holder = $1 AND currency_id = $2
+ORDER BY classification_id
+`
+
+type DistinctClassificationsForAccountParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+}
+
+func (q *Queries) DistinctClassificationsForAccount(ctx context.Context, arg DistinctClassificationsForAccountParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, distinctClassificationsForAccount, arg.AccountHolder, arg.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var classification_id int64
+		if err := rows.Scan(&classification_id); err != nil {
+			return nil, err
+		}
+		items = append(items, classification_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getJournal = `-- name: GetJournal :one
 SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at
 FROM journals
@@ -227,6 +259,50 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Jo
 	return items, nil
 }
 
+const listJournalsCursor = `-- name: ListJournalsCursor :many
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at
+FROM journals
+WHERE id > $1::bigint
+ORDER BY id ASC
+LIMIT $2::int
+`
+
+type ListJournalsCursorParams struct {
+	CursorID  int64 `json:"cursor_id"`
+	PageLimit int32 `json:"page_limit"`
+}
+
+func (q *Queries) ListJournalsCursor(ctx context.Context, arg ListJournalsCursorParams) ([]Journal, error) {
+	rows, err := q.db.Query(ctx, listJournalsCursor, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Journal{}
+	for rows.Next() {
+		var i Journal
+		if err := rows.Scan(
+			&i.ID,
+			&i.JournalTypeID,
+			&i.IdempotencyKey,
+			&i.TotalDebit,
+			&i.TotalCredit,
+			&i.Metadata,
+			&i.ActorID,
+			&i.Source,
+			&i.ReversalOf,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sumEntriesByAccountClassification = `-- name: SumEntriesByAccountClassification :many
 SELECT
   classification_id,
@@ -303,6 +379,55 @@ func (q *Queries) SumEntriesSinceCheckpoint(ctx context.Context, arg SumEntriesS
 	for rows.Next() {
 		var i SumEntriesSinceCheckpointRow
 		if err := rows.Scan(&i.ClassificationID, &i.EntryType, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumEntriesSinceForClassification = `-- name: SumEntriesSinceForClassification :many
+SELECT
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND classification_id = $3
+  AND id > $4::bigint
+GROUP BY entry_type
+`
+
+type SumEntriesSinceForClassificationParams struct {
+	AccountHolder    int64 `json:"account_holder"`
+	CurrencyID       int64 `json:"currency_id"`
+	ClassificationID int64 `json:"classification_id"`
+	SinceEntryID     int64 `json:"since_entry_id"`
+}
+
+type SumEntriesSinceForClassificationRow struct {
+	EntryType string      `json:"entry_type"`
+	Total     interface{} `json:"total"`
+}
+
+func (q *Queries) SumEntriesSinceForClassification(ctx context.Context, arg SumEntriesSinceForClassificationParams) ([]SumEntriesSinceForClassificationRow, error) {
+	rows, err := q.db.Query(ctx, sumEntriesSinceForClassification,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.ClassificationID,
+		arg.SinceEntryID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumEntriesSinceForClassificationRow{}
+	for rows.Next() {
+		var i SumEntriesSinceForClassificationRow
+		if err := rows.Scan(&i.EntryType, &i.Total); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

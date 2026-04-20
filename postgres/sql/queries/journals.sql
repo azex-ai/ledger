@@ -43,6 +43,30 @@ WHERE account_holder = $1
   AND id > sqlc.arg(since_entry_id)::bigint
 GROUP BY classification_id, entry_type;
 
+-- name: DistinctClassificationsForAccount :many
+SELECT DISTINCT classification_id
+FROM journal_entries
+WHERE account_holder = $1 AND currency_id = $2
+ORDER BY classification_id;
+
+-- name: SumEntriesSinceForClassification :many
+SELECT
+  entry_type,
+  COALESCE(SUM(amount), 0) as total
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND classification_id = $3
+  AND id > sqlc.arg(since_entry_id)::bigint
+GROUP BY entry_type;
+
+-- name: ListJournalsCursor :many
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at
+FROM journals
+WHERE id > sqlc.arg(cursor_id)::bigint
+ORDER BY id ASC
+LIMIT sqlc.arg(page_limit)::int;
+
 -- name: SumGlobalDebitCredit :many
 SELECT
   entry_type,

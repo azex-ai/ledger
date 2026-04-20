@@ -33,18 +33,25 @@ function SettleDialog({ id }: { id: number }) {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Actual Amount</Label>
-            <Input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="95.50" />
+            <Label htmlFor="rsv-settle-amount">Actual Amount</Label>
+            <Input id="rsv-settle-amount" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="95.50" />
           </div>
         </div>
         <DialogFooter>
           <Button
-            onClick={() => mutation.mutate({ id, actualAmount: amount }, {
-              onSuccess: () => {
-                toast.success("Reservation settled");
-                setOpen(false);
-              },
-            })}
+            onClick={() => {
+              const DECIMAL_RE = /^\d+(\.\d+)?$/;
+              if (!DECIMAL_RE.test(amount)) {
+                toast.error("Amount must be a valid decimal number");
+                return;
+              }
+              mutation.mutate({ id, actualAmount: amount }, {
+                onSuccess: () => {
+                  toast.success("Reservation settled");
+                  setOpen(false);
+                },
+              });
+            }}
             disabled={mutation.isPending || !amount}
           >
             {mutation.isPending ? "Settling..." : "Settle"}
@@ -121,7 +128,7 @@ export function ReservationsClient() {
       {isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-pulse rounded bg-muted" />
+            <div key={i} className="h-10 animate-shimmer rounded" />
           ))}
         </div>
       ) : isError ? (

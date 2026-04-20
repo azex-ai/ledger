@@ -30,12 +30,12 @@ function CreateDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Code</Label>
-            <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit" />
+            <Label htmlFor="jt-code">Code</Label>
+            <Input id="jt-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit" />
           </div>
           <div className="grid gap-2">
-            <Label>Name</Label>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Deposit Confirmation" />
+            <Label htmlFor="jt-name">Name</Label>
+            <Input id="jt-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Deposit Confirmation" />
           </div>
         </div>
         <DialogFooter>
@@ -96,7 +96,7 @@ export function JournalTypesClient() {
       <PageHeader title="Journal Types" description="Journal type definitions" actions={<CreateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-pulse rounded bg-muted" />)}</div>
+        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
       ) : isError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
           <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />

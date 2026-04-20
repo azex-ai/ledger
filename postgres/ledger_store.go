@@ -239,17 +239,11 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	}
 
 	// Get classification to determine normal_side
-	cls, err := s.q.ListClassifications(ctx, false)
+	cls, err := s.q.GetClassification(ctx, classificationID)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("postgres: get balance: list classifications: %w", err)
+		return decimal.Zero, fmt.Errorf("postgres: get balance: get classification %d: %w", classificationID, err)
 	}
-	var normalSide core.NormalSide
-	for _, c := range cls {
-		if c.ID == classificationID {
-			normalSide = core.NormalSide(c.NormalSide)
-			break
-		}
-	}
+	normalSide := core.NormalSide(cls.NormalSide)
 
 	// Compute delta based on normal_side:
 	// debit-normal: balance increases with debits, decreases with credits
@@ -270,92 +264,26 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 
 // GetBalances returns balances across all classifications for a (holder, currency).
 func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyID int64) ([]core.Balance, error) {
-	// Get all checkpoints for this holder+currency
-	checkpoints, err := s.q.GetBalanceCheckpoints(ctx, sqlcgen.GetBalanceCheckpointsParams{
+	// Discover all classifications that have entries for this account
+	clsRows, err := s.q.DistinctClassificationsForAccount(ctx, sqlcgen.DistinctClassificationsForAccountParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: get balances: checkpoints: %w", err)
+		return nil, fmt.Errorf("postgres: get balances: list classifications: %w", err)
 	}
 
-	// Find the minimum sinceEntryID across all checkpoints (or 0)
-	cpMap := make(map[int64]decimal.Decimal) // classificationID -> balance
-	var minEntryID int64
-	for _, cp := range checkpoints {
-		bal := mustNumericToDecimal(cp.Balance)
-		cpMap[cp.ClassificationID] = bal
-		if minEntryID == 0 || cp.LastEntryID < minEntryID {
-			minEntryID = cp.LastEntryID
-		}
-	}
-
-	// Get entry sums since the earliest checkpoint
-	sums, err := s.q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
-		AccountHolder: holder,
-		CurrencyID:    currencyID,
-		SinceEntryID:  minEntryID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: get balances: sum entries: %w", err)
-	}
-
-	// Get classifications for normal_side
-	allCls, err := s.q.ListClassifications(ctx, false)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: get balances: classifications: %w", err)
-	}
-	normalSides := make(map[int64]core.NormalSide)
-	for _, c := range allCls {
-		normalSides[c.ID] = core.NormalSide(c.NormalSide)
-	}
-
-	// Build delta map: classificationID -> (debitSum, creditSum)
-	type sumPair struct{ debit, credit decimal.Decimal }
-	deltaMap := make(map[int64]sumPair)
-	for _, row := range sums {
-		amount, err := anyToDecimal(row.Total)
+	balances := make([]core.Balance, 0, len(clsRows))
+	for _, clsID := range clsRows {
+		bal, err := s.GetBalance(ctx, holder, currencyID, clsID)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: get balances: convert: %w", err)
-		}
-		sp := deltaMap[row.ClassificationID]
-		switch core.EntryType(row.EntryType) {
-		case core.EntryTypeDebit:
-			sp.debit = sp.debit.Add(amount)
-		case core.EntryTypeCredit:
-			sp.credit = sp.credit.Add(amount)
-		}
-		deltaMap[row.ClassificationID] = sp
-	}
-
-	// Collect all classification IDs
-	clsIDs := make(map[int64]struct{})
-	for id := range cpMap {
-		clsIDs[id] = struct{}{}
-	}
-	for id := range deltaMap {
-		clsIDs[id] = struct{}{}
-	}
-
-	var balances []core.Balance
-	for clsID := range clsIDs {
-		checkpoint := cpMap[clsID]
-		sp := deltaMap[clsID]
-		ns := normalSides[clsID]
-		var delta decimal.Decimal
-		switch ns {
-		case core.NormalSideDebit:
-			delta = sp.debit.Sub(sp.credit)
-		case core.NormalSideCredit:
-			delta = sp.credit.Sub(sp.debit)
-		default:
-			delta = sp.debit.Sub(sp.credit)
+			return nil, fmt.Errorf("postgres: get balances: classification %d: %w", clsID, err)
 		}
 		balances = append(balances, core.Balance{
 			AccountHolder:    holder,
 			CurrencyID:       currencyID,
 			ClassificationID: clsID,
-			Balance:          checkpoint.Add(delta),
+			Balance:          bal,
 		})
 	}
 

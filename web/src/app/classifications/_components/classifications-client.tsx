@@ -33,17 +33,17 @@ function CreateDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Code</Label>
-            <Input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="main_wallet" />
+            <Label htmlFor="cls-code">Code</Label>
+            <Input id="cls-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="main_wallet" />
           </div>
           <div className="grid gap-2">
-            <Label>Name</Label>
-            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Main Wallet" />
+            <Label htmlFor="cls-name">Name</Label>
+            <Input id="cls-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Main Wallet" />
           </div>
           <div className="grid gap-2">
-            <Label>Normal Side</Label>
+            <Label htmlFor="cls-normal-side">Normal Side</Label>
             <Select value={form.normal_side} onValueChange={(v) => { if (v) setForm({ ...form, normal_side: v as "debit" | "credit" }); }}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger id="cls-normal-side"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="debit">Debit</SelectItem>
                 <SelectItem value="credit">Credit</SelectItem>
@@ -109,7 +109,7 @@ export function ClassificationsClient() {
       <PageHeader title="Classifications" description="Account classification definitions" actions={<CreateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-pulse rounded bg-muted" />)}</div>
+        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
       ) : isError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
           <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />

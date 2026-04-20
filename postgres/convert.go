@@ -125,7 +125,10 @@ func metadataToJSON(m map[string]string) []byte {
 	if m == nil {
 		return []byte("{}")
 	}
-	b, _ := json.Marshal(m)
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
 	return b
 }
 
@@ -134,9 +137,7 @@ func jsonToMetadata(b []byte) map[string]string {
 		return nil
 	}
 	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil
-	}
+	_ = json.Unmarshal(b, &m) // Returns nil map on corrupt data; acceptable for metadata
 	return m
 }
 
