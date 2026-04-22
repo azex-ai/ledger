@@ -35,13 +35,13 @@ type EntryTemplateLine struct {
 }
 
 type TemplateParams struct {
-	HolderID       int64
-	CurrencyID     int64
-	IdempotencyKey string
-	Amounts        map[string]decimal.Decimal
-	ActorID        *int64
-	Source         string
-	Metadata       map[string]string
+	HolderID       int64                     `json:"holder_id"`
+	CurrencyID     int64                     `json:"currency_id"`
+	IdempotencyKey string                    `json:"idempotency_key"`
+	Amounts        map[string]decimal.Decimal `json:"amounts"`
+	ActorID        int64                     `json:"actor_id"`
+	Source         string                    `json:"source"`
+	Metadata       map[string]string         `json:"metadata"`
 }
 
 func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {

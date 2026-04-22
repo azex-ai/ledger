@@ -28,31 +28,27 @@ type Reserver interface {
 	Release(ctx context.Context, reservationID int64) error
 }
 
-// Depositor handles deposit state machine.
-type Depositor interface {
-	InitDeposit(ctx context.Context, input DepositInput) (*Deposit, error)
-	ConfirmingDeposit(ctx context.Context, depositID int64, channelRef string) error
-	ConfirmDeposit(ctx context.Context, input ConfirmDepositInput) error
-	FailDeposit(ctx context.Context, depositID int64, reason string) error
-	ExpireDeposit(ctx context.Context, depositID int64) error
+// Operator handles classification-driven operation lifecycle.
+type Operator interface {
+	CreateOperation(ctx context.Context, input CreateOperationInput) (*Operation, error)
+	Transition(ctx context.Context, input TransitionInput) (*Event, error)
 }
 
-// Withdrawer handles withdrawal state machine.
-type Withdrawer interface {
-	InitWithdraw(ctx context.Context, input WithdrawInput) (*Withdrawal, error)
-	ReserveWithdraw(ctx context.Context, withdrawalID int64) error
-	ReviewWithdraw(ctx context.Context, withdrawalID int64, approved bool) error
-	ProcessWithdraw(ctx context.Context, withdrawalID int64, channelRef string) error
-	ConfirmWithdraw(ctx context.Context, withdrawalID int64) error
-	FailWithdraw(ctx context.Context, withdrawalID int64, reason string) error
-	RetryWithdraw(ctx context.Context, withdrawalID int64) error
+// OperationReader handles operation queries.
+type OperationReader interface {
+	GetOperation(ctx context.Context, id int64) (*Operation, error)
+	ListOperations(ctx context.Context, filter OperationFilter) ([]Operation, error)
 }
 
-// ChannelAdapter abstracts a deposit/withdraw channel.
-type ChannelAdapter interface {
-	Name() string
-	SupportsDeposit() bool
-	SupportsWithdraw() bool
+// EventReader handles event queries.
+type EventReader interface {
+	GetEvent(ctx context.Context, id int64) (*Event, error)
+	ListEvents(ctx context.Context, filter EventFilter) ([]Event, error)
+}
+
+// EventDeliverer delivers events to external consumers (webhooks, queues, etc.).
+type EventDeliverer interface {
+	Deliver(ctx context.Context, event Event) error
 }
 
 // RollupWorker processes async checkpoint updates.
@@ -92,6 +88,7 @@ type Snapshotter interface {
 // ClassificationStore manages dynamic classifications.
 type ClassificationStore interface {
 	CreateClassification(ctx context.Context, input ClassificationInput) (*Classification, error)
+	GetByCode(ctx context.Context, code string) (*Classification, error)
 	DeactivateClassification(ctx context.Context, id int64) error
 	ListClassifications(ctx context.Context, activeOnly bool) ([]Classification, error)
 }

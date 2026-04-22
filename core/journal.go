@@ -9,48 +9,50 @@ import (
 
 // Journal is a persisted balanced journal.
 type Journal struct {
-	ID             int64
-	JournalTypeID  int64
-	IdempotencyKey string
-	TotalDebit     decimal.Decimal
-	TotalCredit    decimal.Decimal
-	Metadata       map[string]string
-	ActorID        *int64
-	Source         string
-	ReversalOf     *int64
-	CreatedAt      time.Time
+	ID             int64             `json:"id"`
+	JournalTypeID  int64             `json:"journal_type_id"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	TotalDebit     decimal.Decimal   `json:"total_debit"`
+	TotalCredit    decimal.Decimal   `json:"total_credit"`
+	Metadata       map[string]string `json:"metadata"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
+	ReversalOf     int64             `json:"reversal_of"`
+	EventID        int64             `json:"event_id"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 // Entry is a single debit or credit line in a journal.
 type Entry struct {
-	ID               int64
-	JournalID        int64
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	EntryType        EntryType
-	Amount           decimal.Decimal
-	CreatedAt        time.Time
+	ID               int64           `json:"id"`
+	JournalID        int64           `json:"journal_id"`
+	AccountHolder    int64           `json:"account_holder"`
+	CurrencyID       int64           `json:"currency_id"`
+	ClassificationID int64           `json:"classification_id"`
+	EntryType        EntryType       `json:"entry_type"`
+	Amount           decimal.Decimal `json:"amount"`
+	CreatedAt        time.Time       `json:"created_at"`
 }
 
 // EntryInput is the input for a single entry line.
 type EntryInput struct {
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	EntryType        EntryType
-	Amount           decimal.Decimal
+	AccountHolder    int64           `json:"account_holder"`
+	CurrencyID       int64           `json:"currency_id"`
+	ClassificationID int64           `json:"classification_id"`
+	EntryType        EntryType       `json:"entry_type"`
+	Amount           decimal.Decimal `json:"amount"`
 }
 
 // JournalInput is the input to post a journal.
 type JournalInput struct {
-	JournalTypeID  int64
-	IdempotencyKey string
-	Entries        []EntryInput
-	Metadata       map[string]string
-	ActorID        *int64
-	Source         string
-	ReversalOf     *int64
+	JournalTypeID  int64             `json:"journal_type_id"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Entries        []EntryInput      `json:"entries"`
+	Metadata       map[string]string `json:"metadata"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
+	ReversalOf     int64             `json:"reversal_of"`
+	EventID        int64             `json:"event_id"`
 }
 
 func (j *JournalInput) Totals() (debit, credit decimal.Decimal) {
