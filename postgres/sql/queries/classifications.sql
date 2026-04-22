@@ -1,19 +1,19 @@
 -- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system)
-VALUES ($1, $2, $3, $4)
-RETURNING id, code, name, normal_side, is_system, is_active, created_at;
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING *;
 
 -- name: DeactivateClassification :exec
 UPDATE classifications SET is_active = false WHERE id = $1;
 
 -- name: GetClassification :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at
-FROM classifications
-WHERE id = $1;
+SELECT * FROM classifications WHERE id = $1;
+
+-- name: GetClassificationByCode :one
+SELECT * FROM classifications WHERE code = $1;
 
 -- name: ListClassifications :many
-SELECT id, code, name, normal_side, is_system, is_active, created_at
-FROM classifications
+SELECT * FROM classifications
 WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;
 

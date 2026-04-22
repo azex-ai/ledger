@@ -13,7 +13,8 @@ import (
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
-var _ core.Withdrawer = (*WithdrawStore)(nil)
+// Note: core.Withdrawer was removed in v2 refactor. WithdrawStore is legacy code.
+// var _ core.Withdrawer = (*WithdrawStore)(nil)
 
 // WithdrawStore implements core.Withdrawer using PostgreSQL.
 type WithdrawStore struct {

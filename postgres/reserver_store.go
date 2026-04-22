@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -123,7 +122,7 @@ func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualA
 	if err := qtx.UpdateReservationSettle(ctx, sqlcgen.UpdateReservationSettleParams{
 		ID:            reservationID,
 		SettledAmount: decimalToNumeric(actualAmount),
-		JournalID:     pgtype.Int8{Valid: false},
+		JournalID:     0,
 	}); err != nil {
 		return fmt.Errorf("postgres: settle: update: %w", err)
 	}

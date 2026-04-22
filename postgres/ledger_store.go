@@ -69,9 +69,10 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 		TotalDebit:     decimalToNumeric(debit),
 		TotalCredit:    decimalToNumeric(credit),
 		Metadata:       metadataToJSON(input.Metadata),
-		ActorID:        int64ToInt8(input.ActorID),
-		Source:         stringToText(input.Source),
-		ReversalOf:     int64ToInt8(input.ReversalOf),
+		ActorID:        input.ActorID,
+		Source:         input.Source,
+		ReversalOf:     input.ReversalOf,
+		EventID:        input.EventID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: post journal: insert journal: %w", err)
@@ -175,13 +176,12 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 		}
 	}
 
-	reversalOf := journalID
 	input := core.JournalInput{
 		JournalTypeID:  original.JournalTypeID,
 		IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason),
 		Entries:        reversedEntries,
 		Source:         "reversal",
-		ReversalOf:     &reversalOf,
+		ReversalOf:     journalID,
 		Metadata:       map[string]string{"reason": reason},
 	}
 

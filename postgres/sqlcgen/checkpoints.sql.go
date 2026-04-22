@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -251,12 +252,12 @@ DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at =
 `
 
 type UpsertBalanceCheckpointParams struct {
-	AccountHolder    int64              `json:"account_holder"`
-	CurrencyID       int64              `json:"currency_id"`
-	ClassificationID int64              `json:"classification_id"`
-	Balance          pgtype.Numeric     `json:"balance"`
-	LastEntryID      int64              `json:"last_entry_id"`
-	LastEntryAt      pgtype.Timestamptz `json:"last_entry_at"`
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	ClassificationID int64          `json:"classification_id"`
+	Balance          pgtype.Numeric `json:"balance"`
+	LastEntryID      int64          `json:"last_entry_id"`
+	LastEntryAt      time.Time      `json:"last_entry_at"`
 }
 
 func (q *Queries) UpsertBalanceCheckpoint(ctx context.Context, arg UpsertBalanceCheckpointParams) error {

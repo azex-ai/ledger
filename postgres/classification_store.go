@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger/core"
@@ -31,14 +34,37 @@ func NewClassificationStore(pool *pgxpool.Pool) *ClassificationStore {
 
 // CreateClassification inserts a new classification.
 func (s *ClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
+	var lifecycle []byte
+	if input.Lifecycle != nil {
+		var err error
+		lifecycle, err = json.Marshal(input.Lifecycle)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: create classification: marshal lifecycle: %w", err)
+		}
+	} else {
+		lifecycle = []byte("{}")
+	}
 	row, err := s.q.CreateClassification(ctx, sqlcgen.CreateClassificationParams{
 		Code:       input.Code,
 		Name:       input.Name,
 		NormalSide: string(input.NormalSide),
 		IsSystem:   input.IsSystem,
+		Lifecycle:  lifecycle,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: create classification: %w", err)
+	}
+	return classificationFromRow(row), nil
+}
+
+// GetByCode returns a classification by its unique code.
+func (s *ClassificationStore) GetByCode(ctx context.Context, code string) (*core.Classification, error) {
+	row, err := s.q.GetClassificationByCode(ctx, code)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: get classification by code %q: %w", code, core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: get classification by code %q: %w", code, err)
 	}
 	return classificationFromRow(row), nil
 }

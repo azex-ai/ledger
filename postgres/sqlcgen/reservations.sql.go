@@ -243,7 +243,7 @@ UPDATE reservations SET status = 'settled', settled_amount = $2, journal_id = $3
 type UpdateReservationSettleParams struct {
 	ID            int64          `json:"id"`
 	SettledAmount pgtype.Numeric `json:"settled_amount"`
-	JournalID     pgtype.Int8    `json:"journal_id"`
+	JournalID     int64          `json:"journal_id"`
 }
 
 func (q *Queries) UpdateReservationSettle(ctx context.Context, arg UpdateReservationSettleParams) error {

@@ -89,17 +89,13 @@ func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, c
 		}
 		return nil, fmt.Errorf("postgres: get checkpoint: %w", err)
 	}
-	var lastEntryAt time.Time
-	if row.LastEntryAt.Valid {
-		lastEntryAt = row.LastEntryAt.Time
-	}
 	return &core.BalanceCheckpoint{
 		AccountHolder:    row.AccountHolder,
 		CurrencyID:       row.CurrencyID,
 		ClassificationID: row.ClassificationID,
 		Balance:          mustNumericToDecimal(row.Balance),
 		LastEntryID:      row.LastEntryID,
-		LastEntryAt:      lastEntryAt,
+		LastEntryAt:      row.LastEntryAt,
 		UpdatedAt:        row.UpdatedAt,
 	}, nil
 }
@@ -111,7 +107,7 @@ func (a *RollupAdapter) UpsertCheckpoint(ctx context.Context, cp core.BalanceChe
 		ClassificationID: cp.ClassificationID,
 		Balance:          decimalToNumeric(cp.Balance),
 		LastEntryID:      cp.LastEntryID,
-		LastEntryAt:      pgtype.Timestamptz{Time: cp.LastEntryAt, Valid: !cp.LastEntryAt.IsZero()},
+		LastEntryAt:      cp.LastEntryAt,
 	})
 }
 
@@ -216,17 +212,13 @@ func (a *RollupAdapter) GetCheckpoints(ctx context.Context, holder, currencyID i
 	}
 	result := make([]core.BalanceCheckpoint, len(rows))
 	for i, r := range rows {
-		var lastEntryAt time.Time
-		if r.LastEntryAt.Valid {
-			lastEntryAt = r.LastEntryAt.Time
-		}
 		result[i] = core.BalanceCheckpoint{
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,
 			Balance:          mustNumericToDecimal(r.Balance),
 			LastEntryID:      r.LastEntryID,
-			LastEntryAt:      lastEntryAt,
+			LastEntryAt:      r.LastEntryAt,
 			UpdatedAt:        r.UpdatedAt,
 		}
 	}
@@ -242,17 +234,13 @@ func (a *RollupAdapter) ListAllCheckpoints(ctx context.Context) ([]core.BalanceC
 	}
 	result := make([]core.BalanceCheckpoint, len(rows))
 	for i, r := range rows {
-		var lastEntryAt time.Time
-		if r.LastEntryAt.Valid {
-			lastEntryAt = r.LastEntryAt.Time
-		}
 		result[i] = core.BalanceCheckpoint{
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,
 			Balance:          mustNumericToDecimal(r.Balance),
 			LastEntryID:      r.LastEntryID,
-			LastEntryAt:      lastEntryAt,
+			LastEntryAt:      r.LastEntryAt,
 			UpdatedAt:        r.UpdatedAt,
 		}
 	}

@@ -13,7 +13,8 @@ import (
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
-var _ core.Depositor = (*DepositStore)(nil)
+// Note: core.Depositor was removed in v2 refactor. DepositStore is legacy code.
+// var _ core.Depositor = (*DepositStore)(nil)
 
 // DepositStore implements core.Depositor using PostgreSQL.
 type DepositStore struct {

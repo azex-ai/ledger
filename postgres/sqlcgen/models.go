@@ -11,13 +11,13 @@ import (
 )
 
 type BalanceCheckpoint struct {
-	AccountHolder    int64              `json:"account_holder"`
-	CurrencyID       int64              `json:"currency_id"`
-	ClassificationID int64              `json:"classification_id"`
-	Balance          pgtype.Numeric     `json:"balance"`
-	LastEntryID      int64              `json:"last_entry_id"`
-	LastEntryAt      pgtype.Timestamptz `json:"last_entry_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	ClassificationID int64          `json:"classification_id"`
+	Balance          pgtype.Numeric `json:"balance"`
+	LastEntryID      int64          `json:"last_entry_id"`
+	LastEntryAt      time.Time      `json:"last_entry_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 type BalanceSnapshot struct {
@@ -37,6 +37,7 @@ type Classification struct {
 	IsSystem   bool      `json:"is_system"`
 	IsActive   bool      `json:"is_active"`
 	CreatedAt  time.Time `json:"created_at"`
+	Lifecycle  []byte    `json:"lifecycle"`
 }
 
 type Currency struct {
@@ -81,6 +82,27 @@ type EntryTemplateLine struct {
 	SortOrder        int32  `json:"sort_order"`
 }
 
+type Event struct {
+	ID                 int64          `json:"id"`
+	ClassificationCode string         `json:"classification_code"`
+	OperationID        int64          `json:"operation_id"`
+	AccountHolder      int64          `json:"account_holder"`
+	CurrencyID         int64          `json:"currency_id"`
+	FromStatus         string         `json:"from_status"`
+	ToStatus           string         `json:"to_status"`
+	Amount             pgtype.Numeric `json:"amount"`
+	SettledAmount      pgtype.Numeric `json:"settled_amount"`
+	JournalID          int64          `json:"journal_id"`
+	Metadata           []byte         `json:"metadata"`
+	OccurredAt         time.Time      `json:"occurred_at"`
+	DeliveryStatus     string         `json:"delivery_status"`
+	Attempts           int32          `json:"attempts"`
+	MaxAttempts        int32          `json:"max_attempts"`
+	NextAttemptAt      time.Time      `json:"next_attempt_at"`
+	DeliveredAt        time.Time      `json:"delivered_at"`
+	CreatedAt          time.Time      `json:"created_at"`
+}
+
 type Journal struct {
 	ID             int64          `json:"id"`
 	JournalTypeID  int64          `json:"journal_type_id"`
@@ -88,10 +110,11 @@ type Journal struct {
 	TotalDebit     pgtype.Numeric `json:"total_debit"`
 	TotalCredit    pgtype.Numeric `json:"total_credit"`
 	Metadata       []byte         `json:"metadata"`
-	ActorID        pgtype.Int8    `json:"actor_id"`
-	Source         pgtype.Text    `json:"source"`
-	ReversalOf     pgtype.Int8    `json:"reversal_of"`
+	ActorID        int64          `json:"actor_id"`
+	Source         string         `json:"source"`
+	ReversalOf     int64          `json:"reversal_of"`
 	CreatedAt      time.Time      `json:"created_at"`
+	EventID        int64          `json:"event_id"`
 }
 
 type JournalEntriesDefault struct {
@@ -124,6 +147,25 @@ type JournalType struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Operation struct {
+	ID               int64          `json:"id"`
+	ClassificationID int64          `json:"classification_id"`
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	Amount           pgtype.Numeric `json:"amount"`
+	SettledAmount    pgtype.Numeric `json:"settled_amount"`
+	Status           string         `json:"status"`
+	ChannelName      string         `json:"channel_name"`
+	ChannelRef       string         `json:"channel_ref"`
+	ReservationID    int64          `json:"reservation_id"`
+	JournalID        int64          `json:"journal_id"`
+	IdempotencyKey   string         `json:"idempotency_key"`
+	Metadata         []byte         `json:"metadata"`
+	ExpiresAt        time.Time      `json:"expires_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
 type Reservation struct {
 	ID             int64          `json:"id"`
 	AccountHolder  int64          `json:"account_holder"`
@@ -131,7 +173,7 @@ type Reservation struct {
 	ReservedAmount pgtype.Numeric `json:"reserved_amount"`
 	SettledAmount  pgtype.Numeric `json:"settled_amount"`
 	Status         string         `json:"status"`
-	JournalID      pgtype.Int8    `json:"journal_id"`
+	JournalID      int64          `json:"journal_id"`
 	IdempotencyKey string         `json:"idempotency_key"`
 	ExpiresAt      time.Time      `json:"expires_at"`
 	CreatedAt      time.Time      `json:"created_at"`
@@ -152,6 +194,17 @@ type SystemRollup struct {
 	ClassificationID int64          `json:"classification_id"`
 	TotalBalance     pgtype.Numeric `json:"total_balance"`
 	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
+type WebhookSubscriber struct {
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Url            string    `json:"url"`
+	Secret         string    `json:"secret"`
+	FilterClass    string    `json:"filter_class"`
+	FilterToStatus string    `json:"filter_to_status"`
+	IsActive       bool      `json:"is_active"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type Withdrawal struct {

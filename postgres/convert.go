@@ -177,9 +177,10 @@ func journalFromRow(row sqlcgen.Journal) *core.Journal {
 		TotalDebit:     mustNumericToDecimal(row.TotalDebit),
 		TotalCredit:    mustNumericToDecimal(row.TotalCredit),
 		Metadata:       jsonToMetadata(row.Metadata),
-		ActorID:        int8ToInt64Ptr(row.ActorID),
-		Source:         textToString(row.Source),
-		ReversalOf:     int8ToInt64Ptr(row.ReversalOf),
+		ActorID:        row.ActorID,
+		Source:         row.Source,
+		ReversalOf:     row.ReversalOf,
+		EventID:        row.EventID,
 		CreatedAt:      row.CreatedAt,
 	}
 }
@@ -202,6 +203,13 @@ func entryFromRow(row sqlcgen.JournalEntry) *core.Entry {
 }
 
 func classificationFromRow(row sqlcgen.Classification) *core.Classification {
+	var lifecycle *core.Lifecycle
+	if len(row.Lifecycle) > 2 { // skip empty "{}"
+		var lc core.Lifecycle
+		if err := json.Unmarshal(row.Lifecycle, &lc); err == nil && lc.Initial != "" {
+			lifecycle = &lc
+		}
+	}
 	return &core.Classification{
 		ID:         row.ID,
 		Code:       row.Code,
@@ -209,6 +217,7 @@ func classificationFromRow(row sqlcgen.Classification) *core.Classification {
 		NormalSide: core.NormalSide(row.NormalSide),
 		IsSystem:   row.IsSystem,
 		IsActive:   row.IsActive,
+		Lifecycle:  lifecycle,
 		CreatedAt:  row.CreatedAt,
 	}
 }
@@ -256,6 +265,10 @@ func templateFromRow(row sqlcgen.EntryTemplate, lines []sqlcgen.EntryTemplateLin
 }
 
 func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
+	var journalID *int64
+	if row.JournalID != 0 {
+		journalID = &row.JournalID
+	}
 	return &core.Reservation{
 		ID:             row.ID,
 		AccountHolder:  row.AccountHolder,
@@ -263,7 +276,7 @@ func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
 		ReservedAmount: mustNumericToDecimal(row.ReservedAmount),
 		SettledAmount:  numericPtrToDecimalPtr(row.SettledAmount),
 		Status:         core.ReservationStatus(row.Status),
-		JournalID:      int8ToInt64Ptr(row.JournalID),
+		JournalID:      journalID,
 		IdempotencyKey: row.IdempotencyKey,
 		ExpiresAt:      row.ExpiresAt,
 		CreatedAt:      row.CreatedAt,
@@ -288,6 +301,64 @@ func depositFromRow(row sqlcgen.Deposit) *core.Deposit {
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
 	}
+}
+
+func operationFromRow(row sqlcgen.Operation) *core.Operation {
+	return &core.Operation{
+		ID:               row.ID,
+		ClassificationID: row.ClassificationID,
+		AccountHolder:    row.AccountHolder,
+		CurrencyID:       row.CurrencyID,
+		Amount:           mustNumericToDecimal(row.Amount),
+		SettledAmount:    mustNumericToDecimal(row.SettledAmount),
+		Status:           core.Status(row.Status),
+		ChannelName:      row.ChannelName,
+		ChannelRef:       row.ChannelRef,
+		ReservationID:    row.ReservationID,
+		JournalID:        row.JournalID,
+		IdempotencyKey:   row.IdempotencyKey,
+		Metadata:         jsonToAnyMetadata(row.Metadata),
+		ExpiresAt:        row.ExpiresAt,
+		CreatedAt:        row.CreatedAt,
+		UpdatedAt:        row.UpdatedAt,
+	}
+}
+
+func eventFromRow(row sqlcgen.Event) *core.Event {
+	return &core.Event{
+		ID:                 row.ID,
+		ClassificationCode: row.ClassificationCode,
+		OperationID:        row.OperationID,
+		AccountHolder:      row.AccountHolder,
+		CurrencyID:         row.CurrencyID,
+		FromStatus:         core.Status(row.FromStatus),
+		ToStatus:           core.Status(row.ToStatus),
+		Amount:             mustNumericToDecimal(row.Amount),
+		SettledAmount:      mustNumericToDecimal(row.SettledAmount),
+		JournalID:          row.JournalID,
+		Metadata:           jsonToAnyMetadata(row.Metadata),
+		OccurredAt:         row.OccurredAt,
+	}
+}
+
+func jsonToAnyMetadata(b []byte) map[string]any {
+	if len(b) == 0 {
+		return nil
+	}
+	var m map[string]any
+	_ = json.Unmarshal(b, &m)
+	return m
+}
+
+func anyMetadataToJSON(m map[string]any) []byte {
+	if m == nil {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
 }
 
 func withdrawalFromRow(row sqlcgen.Withdrawal) *core.Withdrawal {

@@ -218,8 +218,8 @@ func TestLedgerStore_ReverseJournal(t *testing.T) {
 
 	rev, err := store.ReverseJournal(ctx, j.ID, "test-reversal")
 	require.NoError(t, err)
-	assert.NotNil(t, rev.ReversalOf)
-	assert.Equal(t, j.ID, *rev.ReversalOf)
+	assert.NotZero(t, rev.ReversalOf)
+	assert.Equal(t, j.ID, rev.ReversalOf)
 
 	// After reversal, balance should be zero
 	bal, err := store.GetBalance(ctx, 1, curID, clsWallet)

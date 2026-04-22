@@ -10,9 +10,9 @@ import (
 )
 
 const createClassification = `-- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system)
-VALUES ($1, $2, $3, $4)
-RETURNING id, code, name, normal_side, is_system, is_active, created_at
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle
 `
 
 type CreateClassificationParams struct {
@@ -20,6 +20,7 @@ type CreateClassificationParams struct {
 	Name       string `json:"name"`
 	NormalSide string `json:"normal_side"`
 	IsSystem   bool   `json:"is_system"`
+	Lifecycle  []byte `json:"lifecycle"`
 }
 
 func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassificationParams) (Classification, error) {
@@ -28,6 +29,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		arg.Name,
 		arg.NormalSide,
 		arg.IsSystem,
+		arg.Lifecycle,
 	)
 	var i Classification
 	err := row.Scan(
@@ -38,6 +40,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		&i.IsSystem,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Lifecycle,
 	)
 	return i, err
 }
@@ -85,9 +88,7 @@ func (q *Queries) DeactivateJournalType(ctx context.Context, id int64) error {
 }
 
 const getClassification = `-- name: GetClassification :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at
-FROM classifications
-WHERE id = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications WHERE id = $1
 `
 
 func (q *Queries) GetClassification(ctx context.Context, id int64) (Classification, error) {
@@ -101,13 +102,33 @@ func (q *Queries) GetClassification(ctx context.Context, id int64) (Classificati
 		&i.IsSystem,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Lifecycle,
+	)
+	return i, err
+}
+
+const getClassificationByCode = `-- name: GetClassificationByCode :one
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications WHERE code = $1
+`
+
+func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Classification, error) {
+	row := q.db.QueryRow(ctx, getClassificationByCode, code)
+	var i Classification
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.NormalSide,
+		&i.IsSystem,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.Lifecycle,
 	)
 	return i, err
 }
 
 const listClassifications = `-- name: ListClassifications :many
-SELECT id, code, name, normal_side, is_system, is_active, created_at
-FROM classifications
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -129,6 +150,7 @@ func (q *Queries) ListClassifications(ctx context.Context, activeOnly bool) ([]C
 			&i.IsSystem,
 			&i.IsActive,
 			&i.CreatedAt,
+			&i.Lifecycle,
 		); err != nil {
 			return nil, err
 		}

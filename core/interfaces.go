@@ -98,6 +98,7 @@ type ClassificationInput struct {
 	Name       string
 	NormalSide NormalSide
 	IsSystem   bool
+	Lifecycle  *Lifecycle
 }
 
 // JournalTypeStore manages dynamic journal types.
