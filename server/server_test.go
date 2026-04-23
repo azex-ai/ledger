@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
@@ -45,7 +46,7 @@ func (m *mockJournalWriter) ReverseJournal(ctx context.Context, journalID int64,
 	if m.reverseFn != nil {
 		return m.reverseFn(ctx, journalID, reason)
 	}
-	return &core.Journal{ID: 3, JournalTypeID: 1, IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason), ReversalOf: &journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+	return &core.Journal{ID: 3, JournalTypeID: 1, IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason), ReversalOf: journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
 type mockBalanceReader struct{}
@@ -98,84 +99,95 @@ func (m *mockReserver) Release(ctx context.Context, reservationID int64) error {
 	return nil
 }
 
-type mockDepositor struct {
-	initFn        func(ctx context.Context, input core.DepositInput) (*core.Deposit, error)
-	confirmingFn  func(ctx context.Context, depositID int64, channelRef string) error
-	confirmFn     func(ctx context.Context, input core.ConfirmDepositInput) error
-	failFn        func(ctx context.Context, depositID int64, reason string) error
-	expireFn      func(ctx context.Context, depositID int64) error
+type mockOperator struct {
+	createFn     func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error)
+	transitionFn func(ctx context.Context, input core.TransitionInput) (*core.Event, error)
 }
 
-func (m *mockDepositor) InitDeposit(ctx context.Context, input core.DepositInput) (*core.Deposit, error) {
-	if m.initFn != nil {
-		return m.initFn(ctx, input)
+func (m *mockOperator) CreateOperation(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
+	if m.createFn != nil {
+		return m.createFn(ctx, input)
 	}
-	return &core.Deposit{ID: 1, AccountHolder: input.AccountHolder, CurrencyID: input.CurrencyID, ExpectedAmount: input.ExpectedAmount, Status: core.DepositStatusPending, ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey, CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
+	return &core.Operation{
+		ID: 1, ClassificationID: 1, AccountHolder: input.AccountHolder,
+		CurrencyID: input.CurrencyID, Amount: input.Amount, Status: "pending",
+		ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey,
+		Metadata: input.Metadata, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil
 }
 
-func (m *mockDepositor) ConfirmingDeposit(ctx context.Context, depositID int64, channelRef string) error {
-	if m.confirmingFn != nil {
-		return m.confirmingFn(ctx, depositID, channelRef)
+func (m *mockOperator) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+	if m.transitionFn != nil {
+		return m.transitionFn(ctx, input)
 	}
-	return nil
+	return &core.Event{
+		ID: 1, ClassificationCode: "deposit", OperationID: input.OperationID,
+		AccountHolder: 100, CurrencyID: 1,
+		FromStatus: "pending", ToStatus: input.ToStatus,
+		Amount: input.Amount, OccurredAt: time.Now(),
+	}, nil
 }
 
-func (m *mockDepositor) ConfirmDeposit(ctx context.Context, input core.ConfirmDepositInput) error {
-	if m.confirmFn != nil {
-		return m.confirmFn(ctx, input)
+type mockOperationReader struct {
+	getFn  func(ctx context.Context, id int64) (*core.Operation, error)
+	listFn func(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error)
+}
+
+func (m *mockOperationReader) GetOperation(ctx context.Context, id int64) (*core.Operation, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, id)
 	}
-	return nil
+	return &core.Operation{
+		ID: id, ClassificationID: 1, AccountHolder: 100,
+		CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending",
+		ChannelName: "crypto", IdempotencyKey: "op-1",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil
 }
 
-func (m *mockDepositor) FailDeposit(ctx context.Context, depositID int64, reason string) error {
-	if m.failFn != nil {
-		return m.failFn(ctx, depositID, reason)
+func (m *mockOperationReader) ListOperations(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error) {
+	if m.listFn != nil {
+		return m.listFn(ctx, filter)
 	}
-	return nil
+	return []core.Operation{
+		{ID: 1, ClassificationID: 1, AccountHolder: 100, CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}, nil
 }
 
-func (m *mockDepositor) ExpireDeposit(ctx context.Context, depositID int64) error {
-	if m.expireFn != nil {
-		return m.expireFn(ctx, depositID)
+type mockEventReader struct {
+	getFn  func(ctx context.Context, id int64) (*core.Event, error)
+	listFn func(ctx context.Context, filter core.EventFilter) ([]core.Event, error)
+}
+
+func (m *mockEventReader) GetEvent(ctx context.Context, id int64) (*core.Event, error) {
+	if m.getFn != nil {
+		return m.getFn(ctx, id)
 	}
-	return nil
+	return &core.Event{
+		ID: id, ClassificationCode: "deposit", OperationID: 1,
+		AccountHolder: 100, CurrencyID: 1,
+		FromStatus: "pending", ToStatus: "confirmed",
+		Amount: decimal.NewFromInt(500), OccurredAt: time.Now(),
+	}, nil
 }
 
-type mockWithdrawer struct {
-	initFn    func(ctx context.Context, input core.WithdrawInput) (*core.Withdrawal, error)
-	reserveFn func(ctx context.Context, withdrawalID int64) error
-}
-
-func (m *mockWithdrawer) InitWithdraw(ctx context.Context, input core.WithdrawInput) (*core.Withdrawal, error) {
-	if m.initFn != nil {
-		return m.initFn(ctx, input)
+func (m *mockEventReader) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, error) {
+	if m.listFn != nil {
+		return m.listFn(ctx, filter)
 	}
-	return &core.Withdrawal{ID: 1, AccountHolder: input.AccountHolder, CurrencyID: input.CurrencyID, Amount: input.Amount, Status: core.WithdrawStatusLocked, ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey, ReviewRequired: input.ReviewRequired, CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
+	return []core.Event{
+		{ID: 1, ClassificationCode: "deposit", OperationID: 1, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
+	}, nil
 }
-
-func (m *mockWithdrawer) ReserveWithdraw(ctx context.Context, withdrawalID int64) error {
-	if m.reserveFn != nil {
-		return m.reserveFn(ctx, withdrawalID)
-	}
-	return nil
-}
-
-func (m *mockWithdrawer) ReviewWithdraw(ctx context.Context, withdrawalID int64, approved bool) error {
-	return nil
-}
-func (m *mockWithdrawer) ProcessWithdraw(ctx context.Context, withdrawalID int64, channelRef string) error {
-	return nil
-}
-func (m *mockWithdrawer) ConfirmWithdraw(ctx context.Context, withdrawalID int64) error { return nil }
-func (m *mockWithdrawer) FailWithdraw(ctx context.Context, withdrawalID int64, reason string) error {
-	return nil
-}
-func (m *mockWithdrawer) RetryWithdraw(ctx context.Context, withdrawalID int64) error { return nil }
 
 type mockClassificationStore struct{}
 
 func (m *mockClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
 	return &core.Classification{ID: 1, Code: input.Code, Name: input.Name, NormalSide: input.NormalSide, IsSystem: input.IsSystem, IsActive: true, CreatedAt: time.Now()}, nil
+}
+
+func (m *mockClassificationStore) GetByCode(ctx context.Context, code string) (*core.Classification, error) {
+	return &core.Classification{ID: 1, Code: code, Name: code, NormalSide: core.NormalSideDebit, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
 func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, id int64) error {
@@ -316,17 +328,65 @@ func newTestServer() *server.Server {
 		&mockJournalWriter{},
 		&mockBalanceReader{},
 		&mockReserver{},
-		&mockDepositor{},
-		&mockWithdrawer{},
+		&mockOperator{},
+		&mockOperationReader{},
+		&mockEventReader{},
 		&mockClassificationStore{},
 		&mockJournalTypeStore{},
 		&mockTemplateStore{},
 		&mockCurrencyStore{},
+		nil, // channels
 		&mockReconciler{},
 		&mockSnapshotter{},
 		(*service.SystemRollupService)(nil), // not used directly
 		&mockQueryProvider{},
 	)
+}
+
+// newTestServerWith creates a test server with custom overrides.
+func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
+	o := &testServerOpts{
+		journals:        &mockJournalWriter{},
+		balances:        &mockBalanceReader{},
+		reserver:        &mockReserver{},
+		operator:        &mockOperator{},
+		operationReader: &mockOperationReader{},
+		eventReader:     &mockEventReader{},
+		classifications: &mockClassificationStore{},
+		journalTypes:    &mockJournalTypeStore{},
+		templates:       &mockTemplateStore{},
+		currencies:      &mockCurrencyStore{},
+		reconciler:      &mockReconciler{},
+		snapshotter:     &mockSnapshotter{},
+		queries:         &mockQueryProvider{},
+	}
+	for _, fn := range opts {
+		fn(o)
+	}
+	return server.New(
+		o.journals, o.balances, o.reserver,
+		o.operator, o.operationReader, o.eventReader,
+		o.classifications, o.journalTypes, o.templates, o.currencies,
+		o.channels,
+		o.reconciler, o.snapshotter, nil, o.queries,
+	)
+}
+
+type testServerOpts struct {
+	journals        core.JournalWriter
+	balances        core.BalanceReader
+	reserver        core.Reserver
+	operator        core.Operator
+	operationReader core.OperationReader
+	eventReader     core.EventReader
+	classifications core.ClassificationStore
+	journalTypes    core.JournalTypeStore
+	templates       core.TemplateStore
+	currencies      core.CurrencyStore
+	channels        map[string]channel.Adapter
+	reconciler      core.Reconciler
+	snapshotter     core.Snapshotter
+	queries         core.QueryProvider
 }
 
 func doRequest(srv http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -389,16 +449,13 @@ func TestPostJournal(t *testing.T) {
 }
 
 func TestPostJournalUnbalanced(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 				return nil, fmt.Errorf("core: journal: unbalanced — debit=100 credit=50: %w", core.ErrUnbalancedJournal)
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
 		"journal_type_id":  1,
 		"idempotency_key":  "test-unbalanced",
@@ -482,74 +539,84 @@ func TestReleaseReservation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestDepositLifecycle(t *testing.T) {
-	srv := newTestServer()
+// --- Operation lifecycle tests ---
 
-	// Init
+func TestCreateOperation(t *testing.T) {
+	srv := newTestServer()
 	body := map[string]any{
-		"account_holder":  100,
-		"currency_id":     1,
-		"expected_amount": "500.00",
-		"channel_name":    "crypto",
-		"idempotency_key": "dep-1",
+		"classification_code": "deposit",
+		"account_holder":      100,
+		"currency_id":         1,
+		"amount":              "500.00",
+		"channel_name":        "crypto",
+		"idempotency_key":     "op-1",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/deposits", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
 	assert.Equal(t, http.StatusCreated, w.Code)
 
-	// Confirming
-	w = doRequest(srv, http.MethodPost, "/api/v1/deposits/1/confirming", map[string]any{"channel_ref": "tx-abc"})
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	// Confirm
-	w = doRequest(srv, http.MethodPost, "/api/v1/deposits/1/confirm", map[string]any{"actual_amount": "500.00", "channel_ref": "tx-abc"})
-	assert.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, float64(1), data["id"])
+	assert.Equal(t, "pending", data["status"])
 }
 
-func TestWithdrawalLifecycle(t *testing.T) {
+func TestTransitionOperation(t *testing.T) {
 	srv := newTestServer()
-
-	// Init
 	body := map[string]any{
-		"account_holder":  100,
-		"currency_id":     1,
-		"amount":          "200.00",
-		"channel_name":    "crypto",
-		"idempotency_key": "wd-1",
+		"to_status":   "confirmed",
+		"channel_ref": "tx-abc",
+		"amount":      "500.00",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/withdrawals", body)
-	assert.Equal(t, http.StatusCreated, w.Code)
-
-	// Reserve
-	w = doRequest(srv, http.MethodPost, "/api/v1/withdrawals/1/reserve", nil)
+	w := doRequest(srv, http.MethodPost, "/api/v1/operations/1/transition", body)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Process
-	w = doRequest(srv, http.MethodPost, "/api/v1/withdrawals/1/process", map[string]any{"channel_ref": "tx-xyz"})
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	// Confirm
-	w = doRequest(srv, http.MethodPost, "/api/v1/withdrawals/1/confirm", nil)
-	assert.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "confirmed", data["to_status"])
 }
 
-func TestWithdrawalWithReview(t *testing.T) {
+func TestGetOperation(t *testing.T) {
 	srv := newTestServer()
-
-	body := map[string]any{
-		"account_holder":  100,
-		"currency_id":     1,
-		"amount":          "1000.00",
-		"channel_name":    "crypto",
-		"idempotency_key": "wd-review",
-		"review_required": true,
-	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/withdrawals", body)
-	assert.Equal(t, http.StatusCreated, w.Code)
-
-	// Review approve
-	w = doRequest(srv, http.MethodPost, "/api/v1/withdrawals/1/review", map[string]any{"approved": true})
+	w := doRequest(srv, http.MethodGet, "/api/v1/operations/1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, float64(1), data["id"])
 }
+
+func TestListOperations(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/operations?holder=100&status=pending", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	ops, ok := data["data"].([]any)
+	require.True(t, ok)
+	assert.Len(t, ops, 1)
+}
+
+// --- Event tests ---
+
+func TestGetEvent(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/events/1", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, float64(1), data["id"])
+	assert.Equal(t, "confirmed", data["to_status"])
+}
+
+func TestListEvents(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/events?operation_id=1", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	events, ok := data["data"].([]any)
+	require.True(t, ok)
+	assert.Len(t, events, 1)
+}
+
+// --- Metadata tests ---
 
 func TestClassificationCRUD(t *testing.T) {
 	srv := newTestServer()
@@ -687,48 +754,29 @@ func TestMissingRequiredParams(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestPostJournalNotFound(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+// --- Error path tests ---
+
+func TestPostJournal_NotFound(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			reverseFn: func(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
 				return nil, fmt.Errorf("postgres: reverse journal: journal %d: %w", journalID, core.ErrNotFound)
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{"reason": "error correction"}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals/999/reverse", body)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-func TestDepositInvalidTransition(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{}, &mockReserver{},
-		&mockDepositor{},
-		&mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
-	// Fail deposit with invalid body (missing reason)
-	w := doRequest(srv, http.MethodPost, "/api/v1/deposits/1/fail", map[string]any{"reason": ""})
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-// --- Error path tests ---
-
 func TestPostJournal_InvalidInput(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 				return nil, fmt.Errorf("validation: %w", core.ErrInvalidInput)
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
 		"journal_type_id": 1,
 		"idempotency_key": "test-invalid-input",
@@ -742,16 +790,13 @@ func TestPostJournal_InvalidInput(t *testing.T) {
 }
 
 func TestPostJournal_DuplicateJournal(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 				return nil, fmt.Errorf("idempotency: %w", core.ErrDuplicateJournal)
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
 		"journal_type_id": 1,
 		"idempotency_key": "test-duplicate",
@@ -765,16 +810,13 @@ func TestPostJournal_DuplicateJournal(t *testing.T) {
 }
 
 func TestPostJournal_InternalError(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 				return nil, fmt.Errorf("database connection failed")
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
 		"journal_type_id": 1,
 		"idempotency_key": "test-internal",
@@ -788,16 +830,13 @@ func TestPostJournal_InternalError(t *testing.T) {
 }
 
 func TestReverseJournal_NotFound(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
 			reverseFn: func(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
 				return nil, fmt.Errorf("postgres: reverse journal: %w", core.ErrNotFound)
 			},
-		},
-		&mockBalanceReader{}, &mockReserver{}, &mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals/42/reverse", map[string]any{"reason": "not found test"})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
@@ -809,49 +848,37 @@ func TestReverseJournal_MissingReason(t *testing.T) {
 }
 
 func TestSettleReservation_NotFound(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{},
-		&mockReserver{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.reserver = &mockReserver{
 			settleFn: func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
 				return fmt.Errorf("postgres: settle reservation: %w", core.ErrNotFound)
 			},
-		},
-		&mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/99/settle", map[string]any{"actual_amount": "50.00"})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestSettleReservation_InvalidTransition(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{},
-		&mockReserver{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.reserver = &mockReserver{
 			settleFn: func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
 				return fmt.Errorf("service: settle: %w", core.ErrInvalidTransition)
 			},
-		},
-		&mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/settle", map[string]any{"actual_amount": "50.00"})
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
 func TestCreateReservation_InvalidInput(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{},
-		&mockReserver{
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.reserver = &mockReserver{
 			reserveFn: func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
 				return nil, fmt.Errorf("service: reserve: %w", core.ErrInvalidInput)
 			},
-		},
-		&mockDepositor{}, &mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
 		"account_holder":  100,
 		"currency_id":     1,
@@ -862,71 +889,81 @@ func TestCreateReservation_InvalidInput(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestConfirmDeposit_NotFound(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{}, &mockReserver{},
-		&mockDepositor{
-			confirmFn: func(ctx context.Context, input core.ConfirmDepositInput) error {
-				return fmt.Errorf("postgres: confirm deposit: %w", core.ErrNotFound)
-			},
-		},
-		&mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
-	w := doRequest(srv, http.MethodPost, "/api/v1/deposits/99/confirm", map[string]any{"actual_amount": "500.00", "channel_ref": "tx-abc"})
-	assert.Equal(t, http.StatusNotFound, w.Code)
-}
+// --- Operation error path tests ---
 
-func TestConfirmDeposit_InvalidTransition(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{}, &mockReserver{},
-		&mockDepositor{
-			confirmFn: func(ctx context.Context, input core.ConfirmDepositInput) error {
-				return fmt.Errorf("service: confirm deposit: %w", core.ErrInvalidTransition)
+func TestCreateOperation_NotFound(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.operator = &mockOperator{
+			createFn: func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
+				return nil, fmt.Errorf("service: create operation: classification not found: %w", core.ErrNotFound)
 			},
-		},
-		&mockWithdrawer{},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
-	w := doRequest(srv, http.MethodPost, "/api/v1/deposits/1/confirm", map[string]any{"actual_amount": "500.00", "channel_ref": "tx-abc"})
-	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
-}
-
-func TestInitWithdraw_InsufficientBalance(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{}, &mockReserver{}, &mockDepositor{},
-		&mockWithdrawer{
-			initFn: func(ctx context.Context, input core.WithdrawInput) (*core.Withdrawal, error) {
-				return nil, fmt.Errorf("service: init withdraw: %w", core.ErrInsufficientBalance)
-			},
-		},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
+		}
+	})
 	body := map[string]any{
-		"account_holder":  100,
-		"currency_id":     1,
-		"amount":          "99999.00",
-		"channel_name":    "crypto",
-		"idempotency_key": "wd-insufficient",
+		"classification_code": "unknown",
+		"account_holder":      100,
+		"currency_id":         1,
+		"amount":              "500.00",
+		"idempotency_key":     "op-notfound",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/withdrawals", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestTransition_InvalidTransition(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.operator = &mockOperator{
+			transitionFn: func(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+				return nil, fmt.Errorf("service: transition: %w", core.ErrInvalidTransition)
+			},
+		}
+	})
+	body := map[string]any{
+		"to_status": "confirmed",
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/operations/1/transition", body)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
-func TestReserveWithdraw_NotFound(t *testing.T) {
-	srv := server.New(
-		&mockJournalWriter{}, &mockBalanceReader{}, &mockReserver{}, &mockDepositor{},
-		&mockWithdrawer{
-			reserveFn: func(ctx context.Context, withdrawalID int64) error {
-				return fmt.Errorf("postgres: reserve withdraw: %w", core.ErrNotFound)
+func TestGetOperation_NotFound(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.operationReader = &mockOperationReader{
+			getFn: func(ctx context.Context, id int64) (*core.Operation, error) {
+				return nil, fmt.Errorf("postgres: get operation: %w", core.ErrNotFound)
 			},
-		},
-		&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{}, &mockCurrencyStore{},
-		&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
-	)
-	w := doRequest(srv, http.MethodPost, "/api/v1/withdrawals/99/reserve", nil)
+		}
+	})
+	w := doRequest(srv, http.MethodGet, "/api/v1/operations/999", nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestGetEvent_NotFound(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.eventReader = &mockEventReader{
+			getFn: func(ctx context.Context, id int64) (*core.Event, error) {
+				return nil, fmt.Errorf("postgres: get event: %w", core.ErrNotFound)
+			},
+		}
+	})
+	w := doRequest(srv, http.MethodGet, "/api/v1/events/999", nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestCreateOperation_InsufficientBalance(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.operator = &mockOperator{
+			createFn: func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
+				return nil, fmt.Errorf("service: create operation: %w", core.ErrInsufficientBalance)
+			},
+		}
+	})
+	body := map[string]any{
+		"classification_code": "withdrawal",
+		"account_holder":      100,
+		"currency_id":         1,
+		"amount":              "99999.00",
+		"idempotency_key":     "op-insufficient",
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
+	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }

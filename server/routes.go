@@ -29,22 +29,18 @@ func (s *Server) setupRoutes() {
 		r.Post("/reservations/{id}/release", s.handleReleaseReservation)
 		r.Get("/reservations", s.handleListReservations)
 
-		// Deposits
-		r.Post("/deposits", s.handleInitDeposit)
-		r.Post("/deposits/{id}/confirming", s.handleConfirmingDeposit)
-		r.Post("/deposits/{id}/confirm", s.handleConfirmDeposit)
-		r.Post("/deposits/{id}/fail", s.handleFailDeposit)
-		r.Get("/deposits", s.handleListDeposits)
+		// Operations (unified — replaces deposits + withdrawals)
+		r.Post("/operations", s.handleCreateOperation)
+		r.Post("/operations/{id}/transition", s.handleTransition)
+		r.Get("/operations/{id}", s.handleGetOperation)
+		r.Get("/operations", s.handleListOperations)
 
-		// Withdrawals
-		r.Post("/withdrawals", s.handleInitWithdraw)
-		r.Post("/withdrawals/{id}/reserve", s.handleReserveWithdraw)
-		r.Post("/withdrawals/{id}/review", s.handleReviewWithdraw)
-		r.Post("/withdrawals/{id}/process", s.handleProcessWithdraw)
-		r.Post("/withdrawals/{id}/confirm", s.handleConfirmWithdraw)
-		r.Post("/withdrawals/{id}/fail", s.handleFailWithdraw)
-		r.Post("/withdrawals/{id}/retry", s.handleRetryWithdraw)
-		r.Get("/withdrawals", s.handleListWithdrawals)
+		// Webhooks (inbound channel callbacks)
+		r.Post("/webhooks/{channel}", s.handleWebhookCallback)
+
+		// Events (outbound)
+		r.Get("/events", s.handleListEvents)
+		r.Get("/events/{id}", s.handleGetEvent)
 
 		// Metadata — Classifications
 		r.Post("/classifications", s.handleCreateClassification)

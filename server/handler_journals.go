@@ -18,7 +18,7 @@ type postJournalRequest struct {
 	IdempotencyKey string            `json:"idempotency_key"`
 	Entries        []entryInputJSON  `json:"entries"`
 	Metadata       map[string]string `json:"metadata"`
-	ActorID        *int64            `json:"actor_id"`
+	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
 }
 
@@ -36,7 +36,7 @@ type postTemplateRequest struct {
 	CurrencyID     int64             `json:"currency_id"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	Amounts        map[string]string `json:"amounts"`
-	ActorID        *int64            `json:"actor_id"`
+	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
 	Metadata       map[string]string `json:"metadata"`
 }
@@ -52,9 +52,9 @@ type journalResponse struct {
 	TotalDebit     string            `json:"total_debit"`
 	TotalCredit    string            `json:"total_credit"`
 	Metadata       map[string]string `json:"metadata"`
-	ActorID        *int64            `json:"actor_id"`
+	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
-	ReversalOf     *int64            `json:"reversal_of,omitempty"`
+	ReversalOf     int64             `json:"reversal_of,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
 	Entries        []entryResponse   `json:"entries,omitempty"`
 }

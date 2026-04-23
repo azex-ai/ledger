@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/service"
 )
@@ -19,12 +20,14 @@ type Server struct {
 	journals        core.JournalWriter
 	balances        core.BalanceReader
 	reserver        core.Reserver
-	depositor       core.Depositor
-	withdrawer      core.Withdrawer
+	operator        core.Operator
+	operationReader core.OperationReader
+	eventReader     core.EventReader
 	classifications core.ClassificationStore
 	journalTypes    core.JournalTypeStore
 	templates       core.TemplateStore
 	currencies      core.CurrencyStore
+	channels        map[string]channel.Adapter // channel name → adapter
 
 	// Services (injected)
 	reconciler   core.Reconciler
@@ -45,12 +48,14 @@ func New(
 	journals core.JournalWriter,
 	balances core.BalanceReader,
 	reserver core.Reserver,
-	depositor core.Depositor,
-	withdrawer core.Withdrawer,
+	operator core.Operator,
+	operationReader core.OperationReader,
+	eventReader core.EventReader,
 	classifications core.ClassificationStore,
 	journalTypes core.JournalTypeStore,
 	templates core.TemplateStore,
 	currencies core.CurrencyStore,
+	channels map[string]channel.Adapter,
 	reconciler core.Reconciler,
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
@@ -60,12 +65,14 @@ func New(
 		journals:        journals,
 		balances:        balances,
 		reserver:        reserver,
-		depositor:       depositor,
-		withdrawer:      withdrawer,
+		operator:        operator,
+		operationReader: operationReader,
+		eventReader:     eventReader,
 		classifications: classifications,
 		journalTypes:    journalTypes,
 		templates:       templates,
 		currencies:      currencies,
+		channels:        channels,
 		reconciler:      reconciler,
 		snapshotter:     snapshotter,
 		systemRollup:    systemRollup,
