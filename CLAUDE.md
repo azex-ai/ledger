@@ -23,8 +23,8 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
 ### Core Concepts
 
 - **Classification (科目)** — the primary entity. Each classification can have a Lifecycle (state machine).
-- **Operation** — an instance of a classification's lifecycle (replaces v1 Deposit/Withdrawal).
-- **Event** — atomic record of state transitions, written with the operation update.
+- **Booking** — an instance of a classification's lifecycle (replaces v1 Deposit/Withdrawal). "Book a deposit", "book a withdrawal" is standard banking terminology.
+- **Event** — atomic record of state transitions, written with the booking update.
 - **Journal** — double-entry accounting record, linked to the triggering event via `event_id`.
 - **Reservation** — cross-classification fund locking mechanism.
 - **Presets** — deposit/withdrawal are pre-built classification lifecycle configs in `presets/`.
@@ -57,8 +57,8 @@ docker compose up --build
 ```
 1. Define lifecycle in presets/ (or register at runtime via API)
 2. Create classification via API or Go code with lifecycle JSON
-3. Create operations against that classification
-4. Transition operations through lifecycle states
+3. Create bookings against that classification
+4. Transition bookings through lifecycle states
 5. Post journals when accounting is needed (caller orchestrates)
 6. Events are emitted automatically on every transition
 ```
@@ -99,37 +99,36 @@ docker compose up --build
 | Path | Purpose |
 |------|---------|
 | `core/types.go` | Currency, Classification + Lifecycle, JournalType, Balance, Status |
-| `core/operation.go` | Operation, CreateOperationInput, TransitionInput |
+| `core/booking.go` | Booking, CreateBookingInput, TransitionInput |
 | `core/event.go` | Event, EventFilter |
 | `core/journal.go` | Journal, Entry, JournalInput + validation |
 | `core/template.go` | EntryTemplate, Render() |
 | `core/reserve.go` | Reservation state machine |
 | `core/checkpoint.go` | BalanceCheckpoint, RollupQueueItem, BalanceSnapshot |
-| `core/interfaces.go` | Operator, EventReader, JournalWriter, BalanceReader, etc. |
+| `core/interfaces.go` | Booker, EventReader, JournalWriter, BalanceReader, etc. |
 | `presets/` | Deposit + Withdrawal lifecycle presets |
 | `channel/adapter.go` | ChannelAdapter interface for inbound webhooks |
 | `channel/onchain/evm.go` | Demo EVM adapter with HMAC verification |
 | `postgres/sql/migrations/` | Schema migrations (embed.FS) |
 | `postgres/sql/queries/` | sqlc query files |
 | `postgres/sqlcgen/` | Generated code (do not edit) |
-| `postgres/operation_store.go` | Operator + OperationReader implementation |
+| `postgres/booking_store.go` | Booker + BookingReader implementation |
 | `postgres/event_store.go` | EventReader + delivery polling |
 | `server/routes.go` | All endpoint definitions |
-| `server/handler_operations.go` | Unified operation endpoints |
+| `server/handler_bookings.go` | Unified booking endpoints |
 | `server/handler_webhooks.go` | Inbound channel callbacks |
 | `server/handler_events.go` | Event query endpoints |
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
-| `docs/plans/2026-04-22-ledger-v2-design.md` | V2 design document |
 
 ## HTTP API Quick Reference
 
 ```
-# Operations (unified — replaces deposits + withdrawals)
-POST   /api/v1/operations                    — Create operation
-POST   /api/v1/operations/{id}/transition    — State transition
-GET    /api/v1/operations/{id}               — Get operation
-GET    /api/v1/operations                    — List operations
+# Bookings (unified — replaces deposits + withdrawals)
+POST   /api/v1/bookings                    — Create booking
+POST   /api/v1/bookings/{id}/transition    — State transition
+GET    /api/v1/bookings/{id}               — Get booking
+GET    /api/v1/bookings                    — List bookings
 
 # Webhooks (inbound channel callbacks)
 POST   /api/v1/webhooks/{channel}            — Receive channel callback
@@ -149,5 +148,5 @@ GET    /api/v1/events                        — List events
 - sqlc config is at `postgres/sqlc.yaml`, run sqlc from `postgres/` dir.
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.
 - `web/` is a separate Next.js project with its own `CLAUDE.md`.
-- Lifecycle is optional on Classification — nil means label-only (no operations).
+- Lifecycle is optional on Classification — nil means label-only (no bookings).
 - `failed` is NOT terminal in withdrawal preset (has retry path to `reserved`).

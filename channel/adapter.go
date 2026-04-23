@@ -8,7 +8,7 @@ import (
 
 // CallbackPayload is the standardized result of parsing a channel webhook callback.
 type CallbackPayload struct {
-	OperationID  int64
+	BookingID    int64
 	ChannelRef   string
 	Status       string
 	ActualAmount decimal.Decimal

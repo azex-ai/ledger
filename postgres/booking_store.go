@@ -13,45 +13,45 @@ import (
 )
 
 var (
-	_ core.Operator        = (*OperationStore)(nil)
-	_ core.OperationReader = (*OperationStore)(nil)
+	_ core.Booker        = (*BookingStore)(nil)
+	_ core.BookingReader = (*BookingStore)(nil)
 )
 
-// OperationStore implements core.Operator and core.OperationReader using PostgreSQL.
-type OperationStore struct {
+// BookingStore implements core.Booker and core.BookingReader using PostgreSQL.
+type BookingStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
 }
 
-// NewOperationStore creates a new OperationStore.
-func NewOperationStore(pool *pgxpool.Pool, q *sqlcgen.Queries) *OperationStore {
-	return &OperationStore{pool: pool, q: q}
+// NewBookingStore creates a new BookingStore.
+func NewBookingStore(pool *pgxpool.Pool, q *sqlcgen.Queries) *BookingStore {
+	return &BookingStore{pool: pool, q: q}
 }
 
-// CreateOperation creates a new operation with initial status from the classification lifecycle.
-// Idempotent: returns existing operation if idempotency_key already exists.
-func (s *OperationStore) CreateOperation(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
+// CreateBooking creates a new booking with initial status from the classification lifecycle.
+// Idempotent: returns existing booking if idempotency_key already exists.
+func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
 	// Check idempotency
-	existing, err := s.q.GetOperationByIdempotencyKey(ctx, input.IdempotencyKey)
+	existing, err := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return operationFromRow(existing), nil
+		return bookingFromRow(existing), nil
 	}
 
 	// Load classification to get lifecycle
 	class, err := s.q.GetClassificationByCode(ctx, input.ClassificationCode)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create operation: classification %q: %w", input.ClassificationCode, err)
+		return nil, fmt.Errorf("postgres: create booking: classification %q: %w", input.ClassificationCode, err)
 	}
 
 	var lifecycle core.Lifecycle
 	if len(class.Lifecycle) <= 2 {
-		return nil, fmt.Errorf("postgres: create operation: classification %q has no lifecycle", input.ClassificationCode)
+		return nil, fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
 	}
 	if err := json.Unmarshal(class.Lifecycle, &lifecycle); err != nil {
-		return nil, fmt.Errorf("postgres: create operation: unmarshal lifecycle: %w", err)
+		return nil, fmt.Errorf("postgres: create booking: unmarshal lifecycle: %w", err)
 	}
 
-	row, err := s.q.InsertOperation(ctx, sqlcgen.InsertOperationParams{
+	row, err := s.q.InsertBooking(ctx, sqlcgen.InsertBookingParams{
 		ClassificationID: class.ID,
 		AccountHolder:    input.AccountHolder,
 		CurrencyID:       input.CurrencyID,
@@ -63,13 +63,13 @@ func (s *OperationStore) CreateOperation(ctx context.Context, input core.CreateO
 		ExpiresAt:        input.ExpiresAt,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create operation: %w", err)
+		return nil, fmt.Errorf("postgres: create booking: %w", err)
 	}
-	return operationFromRow(row), nil
+	return bookingFromRow(row), nil
 }
 
-// Transition advances an operation's status and records an event atomically.
-func (s *OperationStore) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+// Transition advances a booking's status and records an event atomically.
+func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: transition: begin: %w", err)
@@ -78,10 +78,10 @@ func (s *OperationStore) Transition(ctx context.Context, input core.TransitionIn
 
 	qtx := s.q.WithTx(tx)
 
-	// Lock operation
-	op, err := qtx.GetOperationForUpdate(ctx, input.OperationID)
+	// Lock booking
+	op, err := qtx.GetBookingForUpdate(ctx, input.BookingID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: transition: get operation %d: %w", input.OperationID, err)
+		return nil, fmt.Errorf("postgres: transition: get booking %d: %w", input.BookingID, err)
 	}
 
 	// Load classification for lifecycle validation
@@ -121,8 +121,8 @@ func (s *OperationStore) Transition(ctx context.Context, input core.TransitionIn
 		channelRef = input.ChannelRef
 	}
 
-	// Update operation
-	err = qtx.UpdateOperationTransition(ctx, sqlcgen.UpdateOperationTransitionParams{
+	// Update booking
+	err = qtx.UpdateBookingTransition(ctx, sqlcgen.UpdateBookingTransitionParams{
 		ID:            op.ID,
 		Status:        string(input.ToStatus),
 		ChannelRef:    channelRef,
@@ -137,7 +137,7 @@ func (s *OperationStore) Transition(ctx context.Context, input core.TransitionIn
 	// Insert event (atomic with transition)
 	eventRow, err := qtx.InsertEvent(ctx, sqlcgen.InsertEventParams{
 		ClassificationCode: class.Code,
-		OperationID:        op.ID,
+		BookingID:          op.ID,
 		AccountHolder:      op.AccountHolder,
 		CurrencyID:         op.CurrencyID,
 		FromStatus:         op.Status,
@@ -159,31 +159,31 @@ func (s *OperationStore) Transition(ctx context.Context, input core.TransitionIn
 	return eventFromRow(eventRow), nil
 }
 
-// GetOperation returns an operation by ID.
-func (s *OperationStore) GetOperation(ctx context.Context, id int64) (*core.Operation, error) {
-	row, err := s.q.GetOperation(ctx, id)
+// GetBooking returns a booking by ID.
+func (s *BookingStore) GetBooking(ctx context.Context, id int64) (*core.Booking, error) {
+	row, err := s.q.GetBooking(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: get operation %d: %w", id, err)
+		return nil, fmt.Errorf("postgres: get booking %d: %w", id, err)
 	}
-	return operationFromRow(row), nil
+	return bookingFromRow(row), nil
 }
 
-// ListExpiredOperations returns non-terminal operations past their expiration time.
-func (s *OperationStore) ListExpiredOperations(ctx context.Context, limit int) ([]core.Operation, error) {
-	rows, err := s.q.ListExpiredOperations(ctx, int32(limit))
+// ListExpiredBookings returns non-terminal bookings past their expiration time.
+func (s *BookingStore) ListExpiredBookings(ctx context.Context, limit int) ([]core.Booking, error) {
+	rows, err := s.q.ListExpiredBookings(ctx, int32(limit))
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list expired operations: %w", err)
+		return nil, fmt.Errorf("postgres: list expired bookings: %w", err)
 	}
-	ops := make([]core.Operation, len(rows))
+	ops := make([]core.Booking, len(rows))
 	for i, row := range rows {
-		ops[i] = *operationFromRow(row)
+		ops[i] = *bookingFromRow(row)
 	}
 	return ops, nil
 }
 
-// ListOperations returns operations matching the filter.
-func (s *OperationStore) ListOperations(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error) {
-	rows, err := s.q.ListOperationsByFilter(ctx, sqlcgen.ListOperationsByFilterParams{
+// ListBookings returns bookings matching the filter.
+func (s *BookingStore) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error) {
+	rows, err := s.q.ListBookingsByFilter(ctx, sqlcgen.ListBookingsByFilterParams{
 		AccountHolder:    filter.AccountHolder,
 		ClassificationID: filter.ClassificationID,
 		Status:           filter.Status,
@@ -191,11 +191,11 @@ func (s *OperationStore) ListOperations(ctx context.Context, filter core.Operati
 		Limit:            int32(filter.Limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list operations: %w", err)
+		return nil, fmt.Errorf("postgres: list bookings: %w", err)
 	}
-	ops := make([]core.Operation, len(rows))
+	ops := make([]core.Booking, len(rows))
 	for i, row := range rows {
-		ops[i] = *operationFromRow(row)
+		ops[i] = *bookingFromRow(row)
 	}
 	return ops, nil
 }

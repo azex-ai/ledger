@@ -1,7 +1,7 @@
 CREATE TABLE events (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     classification_code TEXT NOT NULL,
-    operation_id        BIGINT NOT NULL DEFAULT 0,
+    booking_id          BIGINT NOT NULL DEFAULT 0,
     account_holder      BIGINT NOT NULL DEFAULT 0,
     currency_id         BIGINT NOT NULL DEFAULT 0,
     from_status         TEXT NOT NULL DEFAULT '',
@@ -24,6 +24,6 @@ CREATE INDEX idx_events_delivery_pending
     ON events (next_attempt_at)
     WHERE delivery_status = 'pending';
 
-CREATE INDEX idx_events_operation
-    ON events (operation_id)
-    WHERE operation_id != 0;
+CREATE INDEX idx_events_booking
+    ON events (booking_id)
+    WHERE booking_id != 0;

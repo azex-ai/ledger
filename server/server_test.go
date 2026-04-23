@@ -99,16 +99,16 @@ func (m *mockReserver) Release(ctx context.Context, reservationID int64) error {
 	return nil
 }
 
-type mockOperator struct {
-	createFn     func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error)
+type mockBooker struct {
+	createFn     func(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error)
 	transitionFn func(ctx context.Context, input core.TransitionInput) (*core.Event, error)
 }
 
-func (m *mockOperator) CreateOperation(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
+func (m *mockBooker) CreateBooking(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
 	if m.createFn != nil {
 		return m.createFn(ctx, input)
 	}
-	return &core.Operation{
+	return &core.Booking{
 		ID: 1, ClassificationID: 1, AccountHolder: input.AccountHolder,
 		CurrencyID: input.CurrencyID, Amount: input.Amount, Status: "pending",
 		ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey,
@@ -116,28 +116,28 @@ func (m *mockOperator) CreateOperation(ctx context.Context, input core.CreateOpe
 	}, nil
 }
 
-func (m *mockOperator) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+func (m *mockBooker) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
 	if m.transitionFn != nil {
 		return m.transitionFn(ctx, input)
 	}
 	return &core.Event{
-		ID: 1, ClassificationCode: "deposit", OperationID: input.OperationID,
+		ID: 1, ClassificationCode: "deposit", BookingID: input.BookingID,
 		AccountHolder: 100, CurrencyID: 1,
 		FromStatus: "pending", ToStatus: input.ToStatus,
 		Amount: input.Amount, OccurredAt: time.Now(),
 	}, nil
 }
 
-type mockOperationReader struct {
-	getFn  func(ctx context.Context, id int64) (*core.Operation, error)
-	listFn func(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error)
+type mockBookingReader struct {
+	getFn  func(ctx context.Context, id int64) (*core.Booking, error)
+	listFn func(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error)
 }
 
-func (m *mockOperationReader) GetOperation(ctx context.Context, id int64) (*core.Operation, error) {
+func (m *mockBookingReader) GetBooking(ctx context.Context, id int64) (*core.Booking, error) {
 	if m.getFn != nil {
 		return m.getFn(ctx, id)
 	}
-	return &core.Operation{
+	return &core.Booking{
 		ID: id, ClassificationID: 1, AccountHolder: 100,
 		CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending",
 		ChannelName: "crypto", IdempotencyKey: "op-1",
@@ -145,11 +145,11 @@ func (m *mockOperationReader) GetOperation(ctx context.Context, id int64) (*core
 	}, nil
 }
 
-func (m *mockOperationReader) ListOperations(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error) {
+func (m *mockBookingReader) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error) {
 	if m.listFn != nil {
 		return m.listFn(ctx, filter)
 	}
-	return []core.Operation{
+	return []core.Booking{
 		{ID: 1, ClassificationID: 1, AccountHolder: 100, CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending", CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	}, nil
 }
@@ -164,7 +164,7 @@ func (m *mockEventReader) GetEvent(ctx context.Context, id int64) (*core.Event, 
 		return m.getFn(ctx, id)
 	}
 	return &core.Event{
-		ID: id, ClassificationCode: "deposit", OperationID: 1,
+		ID: id, ClassificationCode: "deposit", BookingID: 1,
 		AccountHolder: 100, CurrencyID: 1,
 		FromStatus: "pending", ToStatus: "confirmed",
 		Amount: decimal.NewFromInt(500), OccurredAt: time.Now(),
@@ -176,7 +176,7 @@ func (m *mockEventReader) ListEvents(ctx context.Context, filter core.EventFilte
 		return m.listFn(ctx, filter)
 	}
 	return []core.Event{
-		{ID: 1, ClassificationCode: "deposit", OperationID: 1, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
+		{ID: 1, ClassificationCode: "deposit", BookingID: 1, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
 	}, nil
 }
 
@@ -320,8 +320,8 @@ func newTestServer() *server.Server {
 		&mockJournalWriter{},
 		&mockBalanceReader{},
 		&mockReserver{},
-		&mockOperator{},
-		&mockOperationReader{},
+		&mockBooker{},
+		&mockBookingReader{},
 		&mockEventReader{},
 		&mockClassificationStore{},
 		&mockJournalTypeStore{},
@@ -341,8 +341,8 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		journals:        &mockJournalWriter{},
 		balances:        &mockBalanceReader{},
 		reserver:        &mockReserver{},
-		operator:        &mockOperator{},
-		operationReader: &mockOperationReader{},
+		booker:        &mockBooker{},
+		bookingReader: &mockBookingReader{},
 		eventReader:     &mockEventReader{},
 		classifications: &mockClassificationStore{},
 		journalTypes:    &mockJournalTypeStore{},
@@ -357,7 +357,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 	}
 	return server.New(
 		o.journals, o.balances, o.reserver,
-		o.operator, o.operationReader, o.eventReader,
+		o.booker, o.bookingReader, o.eventReader,
 		o.classifications, o.journalTypes, o.templates, o.currencies,
 		o.channels,
 		o.reconciler, o.snapshotter, nil, o.queries,
@@ -368,8 +368,8 @@ type testServerOpts struct {
 	journals        core.JournalWriter
 	balances        core.BalanceReader
 	reserver        core.Reserver
-	operator        core.Operator
-	operationReader core.OperationReader
+	booker        core.Booker
+	bookingReader core.BookingReader
 	eventReader     core.EventReader
 	classifications core.ClassificationStore
 	journalTypes    core.JournalTypeStore
@@ -531,9 +531,9 @@ func TestReleaseReservation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-// --- Operation lifecycle tests ---
+// --- Booking lifecycle tests ---
 
-func TestCreateOperation(t *testing.T) {
+func TestCreateBooking(t *testing.T) {
 	srv := newTestServer()
 	body := map[string]any{
 		"classification_code": "deposit",
@@ -543,7 +543,7 @@ func TestCreateOperation(t *testing.T) {
 		"channel_name":        "crypto",
 		"idempotency_key":     "op-1",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
 	assert.Equal(t, http.StatusCreated, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
@@ -551,32 +551,32 @@ func TestCreateOperation(t *testing.T) {
 	assert.Equal(t, "pending", data["status"])
 }
 
-func TestTransitionOperation(t *testing.T) {
+func TestTransitionBooking(t *testing.T) {
 	srv := newTestServer()
 	body := map[string]any{
 		"to_status":   "confirmed",
 		"channel_ref": "tx-abc",
 		"amount":      "500.00",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/operations/1/transition", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings/1/transition", body)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, "confirmed", data["to_status"])
 }
 
-func TestGetOperation(t *testing.T) {
+func TestGetBooking(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/operations/1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/bookings/1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, float64(1), data["id"])
 }
 
-func TestListOperations(t *testing.T) {
+func TestListBookings(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/operations?holder=100&status=pending", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/bookings?holder=100&status=pending", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
@@ -599,7 +599,7 @@ func TestGetEvent(t *testing.T) {
 
 func TestListEvents(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/events?operation_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/events?booking_id=1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
@@ -881,13 +881,13 @@ func TestCreateReservation_InvalidInput(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// --- Operation error path tests ---
+// --- Booking error path tests ---
 
-func TestCreateOperation_NotFound(t *testing.T) {
+func TestCreateBooking_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.operator = &mockOperator{
-			createFn: func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
-				return nil, fmt.Errorf("service: create operation: classification not found: %w", core.ErrNotFound)
+		o.booker = &mockBooker{
+			createFn: func(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
+				return nil, fmt.Errorf("service: create booking: classification not found: %w", core.ErrNotFound)
 			},
 		}
 	})
@@ -898,13 +898,13 @@ func TestCreateOperation_NotFound(t *testing.T) {
 		"amount":              "500.00",
 		"idempotency_key":     "op-notfound",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
 func TestTransition_InvalidTransition(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.operator = &mockOperator{
+		o.booker = &mockBooker{
 			transitionFn: func(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
 				return nil, fmt.Errorf("service: transition: %w", core.ErrInvalidTransition)
 			},
@@ -913,19 +913,19 @@ func TestTransition_InvalidTransition(t *testing.T) {
 	body := map[string]any{
 		"to_status": "confirmed",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/operations/1/transition", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings/1/transition", body)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
-func TestGetOperation_NotFound(t *testing.T) {
+func TestGetBooking_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.operationReader = &mockOperationReader{
-			getFn: func(ctx context.Context, id int64) (*core.Operation, error) {
-				return nil, fmt.Errorf("postgres: get operation: %w", core.ErrNotFound)
+		o.bookingReader = &mockBookingReader{
+			getFn: func(ctx context.Context, id int64) (*core.Booking, error) {
+				return nil, fmt.Errorf("postgres: get booking: %w", core.ErrNotFound)
 			},
 		}
 	})
-	w := doRequest(srv, http.MethodGet, "/api/v1/operations/999", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/bookings/999", nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
@@ -941,11 +941,11 @@ func TestGetEvent_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
-func TestCreateOperation_InsufficientBalance(t *testing.T) {
+func TestCreateBooking_InsufficientBalance(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.operator = &mockOperator{
-			createFn: func(ctx context.Context, input core.CreateOperationInput) (*core.Operation, error) {
-				return nil, fmt.Errorf("service: create operation: %w", core.ErrInsufficientBalance)
+		o.booker = &mockBooker{
+			createFn: func(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
+				return nil, fmt.Errorf("service: create booking: %w", core.ErrInsufficientBalance)
 			},
 		}
 	})
@@ -956,6 +956,6 @@ func TestCreateOperation_InsufficientBalance(t *testing.T) {
 		"amount":              "99999.00",
 		"idempotency_key":     "op-insufficient",
 	}
-	w := doRequest(srv, http.MethodPost, "/api/v1/operations", body)
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }

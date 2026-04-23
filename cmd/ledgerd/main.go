@@ -89,7 +89,7 @@ func run() error {
 	ledgerStore := postgres.NewLedgerStore(pool)
 	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
 	q := sqlcgen.New(pool)
-	operationStore := postgres.NewOperationStore(pool, q)
+	bookingStore := postgres.NewBookingStore(pool, q)
 	eventStore := postgres.NewEventStore(pool, q)
 	classStore := postgres.NewClassificationStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
@@ -99,7 +99,7 @@ func run() error {
 	// Create services
 	rollupAdapter := postgres.NewRollupAdapter(pool)
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, operationStore, operationStore, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, bookingStore, bookingStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
@@ -124,8 +124,8 @@ func run() error {
 		ledgerStore,    // JournalWriter
 		ledgerStore,    // BalanceReader
 		reserverStore,  // Reserver
-		operationStore, // Operator
-		operationStore, // OperationReader
+		bookingStore, // Booker
+		bookingStore, // BookingReader
 		eventStore,     // EventReader
 		classStore,     // ClassificationStore
 		classStore,     // JournalTypeStore

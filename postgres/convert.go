@@ -285,8 +285,8 @@ func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
 }
 
 
-func operationFromRow(row sqlcgen.Operation) *core.Operation {
-	return &core.Operation{
+func bookingFromRow(row sqlcgen.Booking) *core.Booking {
+	return &core.Booking{
 		ID:               row.ID,
 		ClassificationID: row.ClassificationID,
 		AccountHolder:    row.AccountHolder,
@@ -310,7 +310,7 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 	return &core.Event{
 		ID:                 row.ID,
 		ClassificationCode: row.ClassificationCode,
-		OperationID:        row.OperationID,
+		BookingID:          row.BookingID,
 		AccountHolder:      row.AccountHolder,
 		CurrencyID:         row.CurrencyID,
 		FromStatus:         core.Status(row.FromStatus),

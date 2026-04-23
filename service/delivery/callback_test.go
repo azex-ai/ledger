@@ -14,7 +14,7 @@ func TestCallbackDeliverer_Deliver(t *testing.T) {
 	ctx := context.Background()
 	event := core.Event{
 		ClassificationCode: "deposit",
-		OperationID:        1,
+		BookingID:        1,
 		FromStatus:         "pending",
 		ToStatus:           "confirmed",
 	}
@@ -34,7 +34,7 @@ func TestCallbackDeliverer_Deliver(t *testing.T) {
 
 		err := d.Deliver(ctx, event)
 		require.NoError(t, err)
-		assert.Equal(t, event.OperationID, received.OperationID)
+		assert.Equal(t, event.BookingID, received.BookingID)
 		assert.Equal(t, event.ToStatus, received.ToStatus)
 	})
 

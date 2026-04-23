@@ -1,6 +1,6 @@
 -- name: InsertEvent :one
 INSERT INTO events (
-    classification_code, operation_id, account_holder, currency_id,
+    classification_code, booking_id, account_holder, currency_id,
     from_status, to_status, amount, settled_amount, journal_id,
     metadata, occurred_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -12,7 +12,7 @@ SELECT * FROM events WHERE id = $1;
 -- name: ListEventsByFilter :many
 SELECT * FROM events
 WHERE (classification_code = $1 OR $1 = '')
-  AND (operation_id = $2 OR $2 = 0)
+  AND (booking_id = $2 OR $2 = 0)
   AND (to_status = $3 OR $3 = '')
   AND id > $4
 ORDER BY id

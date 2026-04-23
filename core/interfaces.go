@@ -28,16 +28,16 @@ type Reserver interface {
 	Release(ctx context.Context, reservationID int64) error
 }
 
-// Operator handles classification-driven operation lifecycle.
-type Operator interface {
-	CreateOperation(ctx context.Context, input CreateOperationInput) (*Operation, error)
+// Booker handles classification-driven booking lifecycle.
+type Booker interface {
+	CreateBooking(ctx context.Context, input CreateBookingInput) (*Booking, error)
 	Transition(ctx context.Context, input TransitionInput) (*Event, error)
 }
 
-// OperationReader handles operation queries.
-type OperationReader interface {
-	GetOperation(ctx context.Context, id int64) (*Operation, error)
-	ListOperations(ctx context.Context, filter OperationFilter) ([]Operation, error)
+// BookingReader handles booking queries.
+type BookingReader interface {
+	GetBooking(ctx context.Context, id int64) (*Booking, error)
+	ListBookings(ctx context.Context, filter BookingFilter) ([]Booking, error)
 }
 
 // EventReader handles event queries.

@@ -30,12 +30,12 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	classificationCode := q.Get("classification_code")
 
-	var operationID int64
-	if o := q.Get("operation_id"); o != "" {
+	var bookingID int64
+	if o := q.Get("booking_id"); o != "" {
 		var err error
-		operationID, err = strconv.ParseInt(o, 10, 64)
+		bookingID, err = strconv.ParseInt(o, 10, 64)
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("operation_id must be a number"))
+			httpx.Error(w, httpx.ErrBadRequest("booking_id must be a number"))
 			return
 		}
 	}
@@ -52,7 +52,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	filter := core.EventFilter{
 		ClassificationCode: classificationCode,
-		OperationID:        operationID,
+		BookingID:          bookingID,
 		ToStatus:           toStatus,
 		Cursor:             cursor,
 		Limit:              int(limit),

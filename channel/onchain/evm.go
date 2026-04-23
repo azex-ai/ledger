@@ -41,7 +41,7 @@ func (a *EVMAdapter) VerifySignature(header http.Header, body []byte) error {
 func (a *EVMAdapter) ParseCallback(header http.Header, body []byte) (*channel.CallbackPayload, error) {
 	var raw struct {
 		TxHash        string `json:"tx_hash"`
-		OperationID   int64  `json:"operation_id"`
+		BookingID     int64  `json:"booking_id"`
 		Amount        string `json:"amount"`
 		Confirmations int    `json:"confirmations"`
 		Status        string `json:"status"`
@@ -54,7 +54,7 @@ func (a *EVMAdapter) ParseCallback(header http.Header, body []byte) (*channel.Ca
 		return nil, fmt.Errorf("channel: evm: invalid amount %q: %w", raw.Amount, err)
 	}
 	return &channel.CallbackPayload{
-		OperationID:  raw.OperationID,
+		BookingID:    raw.BookingID,
 		ChannelRef:   raw.TxHash,
 		Status:       raw.Status,
 		ActualAmount: amount,

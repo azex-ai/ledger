@@ -29,6 +29,25 @@ type BalanceSnapshot struct {
 	CreatedAt        time.Time      `json:"created_at"`
 }
 
+type Booking struct {
+	ID               int64          `json:"id"`
+	ClassificationID int64          `json:"classification_id"`
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	Amount           pgtype.Numeric `json:"amount"`
+	SettledAmount    pgtype.Numeric `json:"settled_amount"`
+	Status           string         `json:"status"`
+	ChannelName      string         `json:"channel_name"`
+	ChannelRef       string         `json:"channel_ref"`
+	ReservationID    int64          `json:"reservation_id"`
+	JournalID        int64          `json:"journal_id"`
+	IdempotencyKey   string         `json:"idempotency_key"`
+	Metadata         []byte         `json:"metadata"`
+	ExpiresAt        time.Time      `json:"expires_at"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
 type Classification struct {
 	ID         int64     `json:"id"`
 	Code       string    `json:"code"`
@@ -85,7 +104,7 @@ type EntryTemplateLine struct {
 type Event struct {
 	ID                 int64          `json:"id"`
 	ClassificationCode string         `json:"classification_code"`
-	OperationID        int64          `json:"operation_id"`
+	BookingID          int64          `json:"booking_id"`
 	AccountHolder      int64          `json:"account_holder"`
 	CurrencyID         int64          `json:"currency_id"`
 	FromStatus         string         `json:"from_status"`
@@ -145,25 +164,6 @@ type JournalType struct {
 	Name      string    `json:"name"`
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-type Operation struct {
-	ID               int64          `json:"id"`
-	ClassificationID int64          `json:"classification_id"`
-	AccountHolder    int64          `json:"account_holder"`
-	CurrencyID       int64          `json:"currency_id"`
-	Amount           pgtype.Numeric `json:"amount"`
-	SettledAmount    pgtype.Numeric `json:"settled_amount"`
-	Status           string         `json:"status"`
-	ChannelName      string         `json:"channel_name"`
-	ChannelRef       string         `json:"channel_ref"`
-	ReservationID    int64          `json:"reservation_id"`
-	JournalID        int64          `json:"journal_id"`
-	IdempotencyKey   string         `json:"idempotency_key"`
-	Metadata         []byte         `json:"metadata"`
-	ExpiresAt        time.Time      `json:"expires_at"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
 type Reservation struct {

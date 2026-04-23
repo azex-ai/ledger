@@ -20,8 +20,8 @@ type Server struct {
 	journals        core.JournalWriter
 	balances        core.BalanceReader
 	reserver        core.Reserver
-	operator        core.Operator
-	operationReader core.OperationReader
+	booker        core.Booker
+	bookingReader core.BookingReader
 	eventReader     core.EventReader
 	classifications core.ClassificationStore
 	journalTypes    core.JournalTypeStore
@@ -48,8 +48,8 @@ func New(
 	journals core.JournalWriter,
 	balances core.BalanceReader,
 	reserver core.Reserver,
-	operator core.Operator,
-	operationReader core.OperationReader,
+	booker core.Booker,
+	bookingReader core.BookingReader,
 	eventReader core.EventReader,
 	classifications core.ClassificationStore,
 	journalTypes core.JournalTypeStore,
@@ -65,8 +65,8 @@ func New(
 		journals:        journals,
 		balances:        balances,
 		reserver:        reserver,
-		operator:        operator,
-		operationReader: operationReader,
+		booker:        booker,
+		bookingReader: bookingReader,
 		eventReader:     eventReader,
 		classifications: classifications,
 		journalTypes:    journalTypes,

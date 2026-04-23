@@ -1,4 +1,4 @@
-CREATE TABLE operations (
+CREATE TABLE bookings (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     classification_id BIGINT NOT NULL,
     account_holder    BIGINT NOT NULL,
@@ -16,16 +16,16 @@ CREATE TABLE operations (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT uq_operations_idempotency UNIQUE (idempotency_key)
+    CONSTRAINT uq_bookings_idempotency UNIQUE (idempotency_key)
 );
 
-CREATE UNIQUE INDEX uq_operations_channel_ref
-    ON operations (channel_name, channel_ref)
+CREATE UNIQUE INDEX uq_bookings_channel_ref
+    ON bookings (channel_name, channel_ref)
     WHERE channel_ref != '';
 
-CREATE INDEX idx_operations_holder_class
-    ON operations (account_holder, classification_id, status);
+CREATE INDEX idx_bookings_holder_class
+    ON bookings (account_holder, classification_id, status);
 
-CREATE INDEX idx_operations_expires
-    ON operations (expires_at)
+CREATE INDEX idx_bookings_expires
+    ON bookings (expires_at)
     WHERE expires_at != 'epoch';

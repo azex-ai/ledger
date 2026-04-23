@@ -37,7 +37,7 @@ func (s *EventStore) GetEvent(ctx context.Context, id int64) (*core.Event, error
 func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, error) {
 	rows, err := s.q.ListEventsByFilter(ctx, sqlcgen.ListEventsByFilterParams{
 		ClassificationCode: filter.ClassificationCode,
-		OperationID:        filter.OperationID,
+		BookingID:          filter.BookingID,
 		ToStatus:           filter.ToStatus,
 		ID:                 filter.Cursor,
 		Limit:              int32(filter.Limit),

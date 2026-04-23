@@ -13,7 +13,7 @@ import (
 )
 
 const getEvent = `-- name: GetEvent :one
-SELECT id, classification_code, operation_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events WHERE id = $1
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events WHERE id = $1
 `
 
 func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
@@ -22,7 +22,7 @@ func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
 	err := row.Scan(
 		&i.ID,
 		&i.ClassificationCode,
-		&i.OperationID,
+		&i.BookingID,
 		&i.AccountHolder,
 		&i.CurrencyID,
 		&i.FromStatus,
@@ -43,7 +43,7 @@ func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
 }
 
 const getPendingEvents = `-- name: GetPendingEvents :many
-SELECT id, classification_code, operation_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
 WHERE delivery_status = 'pending'
   AND next_attempt_at <= now()
 ORDER BY next_attempt_at
@@ -63,7 +63,7 @@ func (q *Queries) GetPendingEvents(ctx context.Context, limit int32) ([]Event, e
 		if err := rows.Scan(
 			&i.ID,
 			&i.ClassificationCode,
-			&i.OperationID,
+			&i.BookingID,
 			&i.AccountHolder,
 			&i.CurrencyID,
 			&i.FromStatus,
@@ -92,16 +92,16 @@ func (q *Queries) GetPendingEvents(ctx context.Context, limit int32) ([]Event, e
 
 const insertEvent = `-- name: InsertEvent :one
 INSERT INTO events (
-    classification_code, operation_id, account_holder, currency_id,
+    classification_code, booking_id, account_holder, currency_id,
     from_status, to_status, amount, settled_amount, journal_id,
     metadata, occurred_at
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, classification_code, operation_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at
+RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at
 `
 
 type InsertEventParams struct {
 	ClassificationCode string         `json:"classification_code"`
-	OperationID        int64          `json:"operation_id"`
+	BookingID          int64          `json:"booking_id"`
 	AccountHolder      int64          `json:"account_holder"`
 	CurrencyID         int64          `json:"currency_id"`
 	FromStatus         string         `json:"from_status"`
@@ -116,7 +116,7 @@ type InsertEventParams struct {
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event, error) {
 	row := q.db.QueryRow(ctx, insertEvent,
 		arg.ClassificationCode,
-		arg.OperationID,
+		arg.BookingID,
 		arg.AccountHolder,
 		arg.CurrencyID,
 		arg.FromStatus,
@@ -131,7 +131,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 	err := row.Scan(
 		&i.ID,
 		&i.ClassificationCode,
-		&i.OperationID,
+		&i.BookingID,
 		&i.AccountHolder,
 		&i.CurrencyID,
 		&i.FromStatus,
@@ -152,9 +152,9 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 }
 
 const listEventsByFilter = `-- name: ListEventsByFilter :many
-SELECT id, classification_code, operation_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
 WHERE (classification_code = $1 OR $1 = '')
-  AND (operation_id = $2 OR $2 = 0)
+  AND (booking_id = $2 OR $2 = 0)
   AND (to_status = $3 OR $3 = '')
   AND id > $4
 ORDER BY id
@@ -163,7 +163,7 @@ LIMIT $5
 
 type ListEventsByFilterParams struct {
 	ClassificationCode string `json:"classification_code"`
-	OperationID        int64  `json:"operation_id"`
+	BookingID          int64  `json:"booking_id"`
 	ToStatus           string `json:"to_status"`
 	ID                 int64  `json:"id"`
 	Limit              int32  `json:"limit"`
@@ -172,7 +172,7 @@ type ListEventsByFilterParams struct {
 func (q *Queries) ListEventsByFilter(ctx context.Context, arg ListEventsByFilterParams) ([]Event, error) {
 	rows, err := q.db.Query(ctx, listEventsByFilter,
 		arg.ClassificationCode,
-		arg.OperationID,
+		arg.BookingID,
 		arg.ToStatus,
 		arg.ID,
 		arg.Limit,
@@ -187,7 +187,7 @@ func (q *Queries) ListEventsByFilter(ctx context.Context, arg ListEventsByFilter
 		if err := rows.Scan(
 			&i.ID,
 			&i.ClassificationCode,
-			&i.OperationID,
+			&i.BookingID,
 			&i.AccountHolder,
 			&i.CurrencyID,
 			&i.FromStatus,

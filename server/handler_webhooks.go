@@ -35,8 +35,8 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	evt, err := s.operator.Transition(r.Context(), core.TransitionInput{
-		OperationID: payload.OperationID,
+	evt, err := s.booker.Transition(r.Context(), core.TransitionInput{
+		BookingID: payload.BookingID,
 		ToStatus:    core.Status(payload.Status),
 		ChannelRef:  payload.ChannelRef,
 		Amount:      payload.ActualAmount,

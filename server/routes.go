@@ -29,11 +29,11 @@ func (s *Server) setupRoutes() {
 		r.Post("/reservations/{id}/release", s.handleReleaseReservation)
 		r.Get("/reservations", s.handleListReservations)
 
-		// Operations (unified — replaces deposits + withdrawals)
-		r.Post("/operations", s.handleCreateOperation)
-		r.Post("/operations/{id}/transition", s.handleTransition)
-		r.Get("/operations/{id}", s.handleGetOperation)
-		r.Get("/operations", s.handleListOperations)
+		// Bookings (unified — replaces deposits + withdrawals)
+		r.Post("/bookings", s.handleCreateBooking)
+		r.Post("/bookings/{id}/transition", s.handleTransition)
+		r.Get("/bookings/{id}", s.handleGetBooking)
+		r.Get("/bookings", s.handleListBookings)
 
 		// Webhooks (inbound channel callbacks)
 		r.Post("/webhooks/{channel}", s.handleWebhookCallback)

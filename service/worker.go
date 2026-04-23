@@ -100,8 +100,8 @@ func (w *Worker) Run(ctx context.Context) error {
 			if _, err := w.expiration.ExpireStaleReservations(ctx, w.config.ExpirationBatchSize); err != nil {
 				w.logger.Error("worker: expire reservations failed", "error", err)
 			}
-			if _, err := w.expiration.ExpireStaleOperations(ctx, w.config.ExpirationBatchSize); err != nil {
-				w.logger.Error("worker: expire operations failed", "error", err)
+			if _, err := w.expiration.ExpireStaleBookings(ctx, w.config.ExpirationBatchSize); err != nil {
+				w.logger.Error("worker: expire bookings failed", "error", err)
 			}
 		})
 	})

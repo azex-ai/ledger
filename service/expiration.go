@@ -17,22 +17,22 @@ type ReservationReleaser interface {
 	Release(ctx context.Context, reservationID int64) error
 }
 
-// ExpiredOperationFinder finds expired active operations.
-type ExpiredOperationFinder interface {
-	ListExpiredOperations(ctx context.Context, limit int) ([]core.Operation, error)
+// ExpiredBookingFinder finds expired active bookings.
+type ExpiredBookingFinder interface {
+	ListExpiredBookings(ctx context.Context, limit int) ([]core.Booking, error)
 }
 
-// OperationTransitioner transitions an operation's status.
-type OperationTransitioner interface {
+// BookingTransitioner transitions a booking's status.
+type BookingTransitioner interface {
 	Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error)
 }
 
-// ExpirationService cleans up stale reservations and operations.
+// ExpirationService cleans up stale reservations and bookings.
 type ExpirationService struct {
 	reservationFinder  ExpiredReservationFinder
 	reservationRelease ReservationReleaser
-	operationFinder    ExpiredOperationFinder
-	operationTransit   OperationTransitioner
+	bookingFinder      ExpiredBookingFinder
+	bookingTransit     BookingTransitioner
 	logger             core.Logger
 	metrics            core.Metrics
 }
@@ -41,15 +41,15 @@ type ExpirationService struct {
 func NewExpirationService(
 	reservationFinder ExpiredReservationFinder,
 	reservationRelease ReservationReleaser,
-	operationFinder ExpiredOperationFinder,
-	operationTransit OperationTransitioner,
+	bookingFinder ExpiredBookingFinder,
+	bookingTransit BookingTransitioner,
 	engine *core.Engine,
 ) *ExpirationService {
 	return &ExpirationService{
 		reservationFinder:  reservationFinder,
 		reservationRelease: reservationRelease,
-		operationFinder:    operationFinder,
-		operationTransit:   operationTransit,
+		bookingFinder:      bookingFinder,
+		bookingTransit:     bookingTransit,
 		logger:             engine.Logger(),
 		metrics:            engine.Metrics(),
 	}
@@ -80,26 +80,26 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 	return released, nil
 }
 
-// ExpireStaleOperations finds and expires stale operations via state transition.
-func (s *ExpirationService) ExpireStaleOperations(ctx context.Context, batchSize int) (int, error) {
-	if s.operationFinder == nil {
+// ExpireStaleBookings finds and expires stale bookings via state transition.
+func (s *ExpirationService) ExpireStaleBookings(ctx context.Context, batchSize int) (int, error) {
+	if s.bookingFinder == nil {
 		return 0, nil
 	}
 
-	ops, err := s.operationFinder.ListExpiredOperations(ctx, batchSize)
+	bookings, err := s.bookingFinder.ListExpiredBookings(ctx, batchSize)
 	if err != nil {
-		return 0, fmt.Errorf("service: expiration: find expired operations: %w", err)
+		return 0, fmt.Errorf("service: expiration: find expired bookings: %w", err)
 	}
 
 	expired := 0
-	for _, op := range ops {
-		_, err := s.operationTransit.Transition(ctx, core.TransitionInput{
-			OperationID: op.ID,
-			ToStatus:    "expired",
+	for _, b := range bookings {
+		_, err := s.bookingTransit.Transition(ctx, core.TransitionInput{
+			BookingID: b.ID,
+			ToStatus:  "expired",
 		})
 		if err != nil {
-			s.logger.Error("service: expiration: expire operation failed",
-				"operation_id", op.ID,
+			s.logger.Error("service: expiration: expire booking failed",
+				"booking_id", b.ID,
 				"error", err,
 			)
 			continue

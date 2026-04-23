@@ -14,7 +14,7 @@ import (
 
 // --- JSON request/response types ---
 
-type createOperationRequest struct {
+type createBookingRequest struct {
 	ClassificationCode string         `json:"classification_code"`
 	AccountHolder      int64          `json:"account_holder"`
 	CurrencyID         int64          `json:"currency_id"`
@@ -33,7 +33,7 @@ type transitionRequest struct {
 	ActorID    int64          `json:"actor_id"`
 }
 
-type operationResponse struct {
+type bookingResponse struct {
 	ID               int64          `json:"id"`
 	ClassificationID int64          `json:"classification_id"`
 	AccountHolder    int64          `json:"account_holder"`
@@ -55,7 +55,7 @@ type operationResponse struct {
 type eventResponse struct {
 	ID                 int64          `json:"id"`
 	ClassificationCode string         `json:"classification_code"`
-	OperationID        int64          `json:"operation_id"`
+	BookingID          int64          `json:"booking_id"`
 	AccountHolder      int64          `json:"account_holder"`
 	CurrencyID         int64          `json:"currency_id"`
 	FromStatus         string         `json:"from_status"`
@@ -69,8 +69,8 @@ type eventResponse struct {
 
 // --- Conversion helpers ---
 
-func operationToResponse(op *core.Operation) operationResponse {
-	resp := operationResponse{
+func bookingToResponse(op *core.Booking) bookingResponse {
+	resp := bookingResponse{
 		ID:               op.ID,
 		ClassificationID: op.ClassificationID,
 		AccountHolder:    op.AccountHolder,
@@ -97,7 +97,7 @@ func eventToResponse(evt *core.Event) eventResponse {
 	return eventResponse{
 		ID:                 evt.ID,
 		ClassificationCode: evt.ClassificationCode,
-		OperationID:        evt.OperationID,
+		BookingID:          evt.BookingID,
 		AccountHolder:      evt.AccountHolder,
 		CurrencyID:         evt.CurrencyID,
 		FromStatus:         string(evt.FromStatus),
@@ -112,8 +112,8 @@ func eventToResponse(evt *core.Event) eventResponse {
 
 // --- Handlers ---
 
-func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
-	req, err := httpx.Decode[createOperationRequest](r)
+func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
+	req, err := httpx.Decode[createBookingRequest](r)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -134,7 +134,7 @@ func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	input := core.CreateOperationInput{
+	input := core.CreateBookingInput{
 		ClassificationCode: req.ClassificationCode,
 		AccountHolder:      req.AccountHolder,
 		CurrencyID:         req.CurrencyID,
@@ -145,18 +145,18 @@ func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:          expiresAt,
 	}
 
-	op, err := s.operator.CreateOperation(r.Context(), input)
+	op, err := s.booker.CreateBooking(r.Context(), input)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.Created(w, operationToResponse(op))
+	httpx.Created(w, bookingToResponse(op))
 }
 
 func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid operation ID"))
+		httpx.Error(w, httpx.ErrBadRequest("invalid booking ID"))
 		return
 	}
 
@@ -176,15 +176,15 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := core.TransitionInput{
-		OperationID: id,
-		ToStatus:    core.Status(req.ToStatus),
-		ChannelRef:  req.ChannelRef,
-		Amount:      amount,
-		Metadata:    req.Metadata,
-		ActorID:     req.ActorID,
+		BookingID:  id,
+		ToStatus:   core.Status(req.ToStatus),
+		ChannelRef: req.ChannelRef,
+		Amount:     amount,
+		Metadata:   req.Metadata,
+		ActorID:    req.ActorID,
 	}
 
-	evt, err := s.operator.Transition(r.Context(), input)
+	evt, err := s.booker.Transition(r.Context(), input)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -192,22 +192,22 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, eventToResponse(evt))
 }
 
-func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleGetBooking(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDParam(chi.URLParam(r, "id"))
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid operation ID"))
+		httpx.Error(w, httpx.ErrBadRequest("invalid booking ID"))
 		return
 	}
 
-	op, err := s.operationReader.GetOperation(r.Context(), id)
+	op, err := s.bookingReader.GetBooking(r.Context(), id)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.OK(w, operationToResponse(op))
+	httpx.OK(w, bookingToResponse(op))
 }
 
-func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleListBookings(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	var holder int64
@@ -240,7 +240,7 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 
 	limit := parsePageLimit(r)
 
-	filter := core.OperationFilter{
+	filter := core.BookingFilter{
 		AccountHolder:    holder,
 		ClassificationID: classificationID,
 		Status:           status,
@@ -248,20 +248,20 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 		Limit:            int(limit),
 	}
 
-	operations, err := s.operationReader.ListOperations(r.Context(), filter)
+	bookings, err := s.bookingReader.ListBookings(r.Context(), filter)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
-	resp := PagedResponse[operationResponse]{
-		Data: make([]operationResponse, len(operations)),
+	resp := PagedResponse[bookingResponse]{
+		Data: make([]bookingResponse, len(bookings)),
 	}
-	for i, op := range operations {
-		resp.Data[i] = operationToResponse(&op)
+	for i, op := range bookings {
+		resp.Data[i] = bookingToResponse(&op)
 	}
-	if len(operations) == int(limit) {
-		resp.NextCursor = encodeCursor(operations[len(operations)-1].ID)
+	if len(bookings) == int(limit) {
+		resp.NextCursor = encodeCursor(bookings[len(bookings)-1].ID)
 	}
 	httpx.OK(w, resp)
 }
