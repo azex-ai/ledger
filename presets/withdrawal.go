@@ -7,7 +7,7 @@ import "github.com/azex-ai/ledger/core"
 // Retry: failed -> reserved
 var WithdrawalLifecycle = &core.Lifecycle{
 	Initial:  "locked",
-	Terminal: []core.Status{"confirmed", "failed", "expired"},
+	Terminal: []core.Status{"confirmed", "expired"},
 	Transitions: map[core.Status][]core.Status{
 		"locked":     {"reserved"},
 		"reserved":   {"reviewing", "processing"},
