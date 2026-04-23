@@ -30,6 +30,7 @@ func TestWorker_StartsAndStops(t *testing.T) {
 		&mockDepositExpirer{},
 		&mockExpiredWithdrawalFinder{},
 		&mockWithdrawalFailer{},
+		nil, nil,
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(
@@ -89,6 +90,7 @@ func TestWorker_RollupRunsAtInterval(t *testing.T) {
 		&mockDepositExpirer{},
 		&mockExpiredWithdrawalFinder{},
 		&mockWithdrawalFailer{},
+		nil, nil,
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(

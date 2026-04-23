@@ -97,7 +97,7 @@ func run() error {
 	// For now, we create a rollup adapter from the pool.
 	rollupAdapter := postgres.NewRollupAdapter(pool)
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, rollupAdapter, depositStore, rollupAdapter, withdrawStore, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, rollupAdapter, depositStore, rollupAdapter, withdrawStore, nil, nil, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)

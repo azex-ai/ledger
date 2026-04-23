@@ -37,7 +37,17 @@ type WithdrawalFailer interface {
 	FailWithdraw(ctx context.Context, withdrawalID int64, reason string) error
 }
 
-// ExpirationService cleans up stale reservations, deposits, and withdrawals.
+// ExpiredOperationFinder finds expired active operations.
+type ExpiredOperationFinder interface {
+	ListExpiredOperations(ctx context.Context, limit int) ([]core.Operation, error)
+}
+
+// OperationTransitioner transitions an operation's status.
+type OperationTransitioner interface {
+	Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error)
+}
+
+// ExpirationService cleans up stale reservations, deposits, withdrawals, and operations.
 type ExpirationService struct {
 	reservationFinder  ExpiredReservationFinder
 	reservationRelease ReservationReleaser
@@ -45,6 +55,8 @@ type ExpirationService struct {
 	depositExpire      DepositExpirer
 	withdrawalFinder   ExpiredWithdrawalFinder
 	withdrawalFail     WithdrawalFailer
+	operationFinder    ExpiredOperationFinder
+	operationTransit   OperationTransitioner
 	logger             core.Logger
 	metrics            core.Metrics
 }
@@ -57,6 +69,8 @@ func NewExpirationService(
 	depositExpire DepositExpirer,
 	withdrawalFinder ExpiredWithdrawalFinder,
 	withdrawalFail WithdrawalFailer,
+	operationFinder ExpiredOperationFinder,
+	operationTransit OperationTransitioner,
 	engine *core.Engine,
 ) *ExpirationService {
 	return &ExpirationService{
@@ -66,6 +80,8 @@ func NewExpirationService(
 		depositExpire:      depositExpire,
 		withdrawalFinder:   withdrawalFinder,
 		withdrawalFail:     withdrawalFail,
+		operationFinder:    operationFinder,
+		operationTransit:   operationTransit,
 		logger:             engine.Logger(),
 		metrics:            engine.Metrics(),
 	}
@@ -147,4 +163,38 @@ func (s *ExpirationService) ExpireStaleWithdrawals(ctx context.Context, batchSiz
 	}
 
 	return failed, nil
+}
+
+// ExpireStaleOperations finds and expires stale operations via state transition.
+func (s *ExpirationService) ExpireStaleOperations(ctx context.Context, batchSize int) (int, error) {
+	if s.operationFinder == nil {
+		return 0, nil
+	}
+
+	ops, err := s.operationFinder.ListExpiredOperations(ctx, batchSize)
+	if err != nil {
+		return 0, fmt.Errorf("service: expiration: find expired operations: %w", err)
+	}
+
+	expired := 0
+	for _, op := range ops {
+		_, err := s.operationTransit.Transition(ctx, core.TransitionInput{
+			OperationID: op.ID,
+			ToStatus:    "expired",
+		})
+		if err != nil {
+			s.logger.Error("service: expiration: expire operation failed",
+				"operation_id", op.ID,
+				"error", err,
+			)
+			continue
+		}
+		expired++
+		s.logger.Info("service: expiration: operation expired",
+			"operation_id", op.ID,
+			"holder", op.AccountHolder,
+		)
+	}
+
+	return expired, nil
 }

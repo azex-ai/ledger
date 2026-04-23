@@ -168,6 +168,19 @@ func (s *OperationStore) GetOperation(ctx context.Context, id int64) (*core.Oper
 	return operationFromRow(row), nil
 }
 
+// ListExpiredOperations returns non-terminal operations past their expiration time.
+func (s *OperationStore) ListExpiredOperations(ctx context.Context, limit int) ([]core.Operation, error) {
+	rows, err := s.q.ListExpiredOperations(ctx, int32(limit))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list expired operations: %w", err)
+	}
+	ops := make([]core.Operation, len(rows))
+	for i, row := range rows {
+		ops[i] = *operationFromRow(row)
+	}
+	return ops, nil
+}
+
 // ListOperations returns operations matching the filter.
 func (s *OperationStore) ListOperations(ctx context.Context, filter core.OperationFilter) ([]core.Operation, error) {
 	rows, err := s.q.ListOperationsByFilter(ctx, sqlcgen.ListOperationsByFilterParams{

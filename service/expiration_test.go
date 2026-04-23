@@ -92,7 +92,7 @@ func TestExpirationService_ExpiredReservations(t *testing.T) {
 	releaser := &mockReservationReleaser{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, engine)
+	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, nil, nil, engine)
 
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestExpirationService_NonExpiredUntouched(t *testing.T) {
 	releaser := &mockReservationReleaser{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, engine)
+	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, nil, nil, engine)
 
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
@@ -124,7 +124,7 @@ func TestExpirationService_ExpiredDeposits(t *testing.T) {
 	expirer := &mockDepositExpirer{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(nil, nil, finder, expirer, nil, nil, engine)
+	svc := NewExpirationService(nil, nil, finder, expirer, nil, nil, nil, nil, engine)
 
 	count, err := svc.ExpireStaleDeposits(context.Background(), 10)
 	require.NoError(t, err)
@@ -142,7 +142,7 @@ func TestExpirationService_ExpiredWithdrawals(t *testing.T) {
 	failer := &mockWithdrawalFailer{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(nil, nil, nil, nil, finder, failer, engine)
+	svc := NewExpirationService(nil, nil, nil, nil, finder, failer, nil, nil, engine)
 
 	count, err := svc.ExpireStaleWithdrawals(context.Background(), 10)
 	require.NoError(t, err)
