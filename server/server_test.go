@@ -295,14 +295,6 @@ func (m *mockQueryProvider) ListReservations(ctx context.Context, holder int64, 
 	return []core.Reservation{}, nil
 }
 
-func (m *mockQueryProvider) ListDeposits(ctx context.Context, holder int64, status string, limit int32) ([]core.Deposit, error) {
-	return []core.Deposit{}, nil
-}
-
-func (m *mockQueryProvider) ListWithdrawals(ctx context.Context, holder int64, status string, limit int32) ([]core.Withdrawal, error) {
-	return []core.Withdrawal{}, nil
-}
-
 func (m *mockQueryProvider) ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]core.BalanceSnapshot, error) {
 	return []core.BalanceSnapshot{}, nil
 }

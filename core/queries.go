@@ -10,8 +10,6 @@ type QueryProvider interface {
 	JournalQuerier
 	EntryQuerier
 	ReservationQuerier
-	DepositQuerier
-	WithdrawalQuerier
 	SnapshotQuerier
 	SystemRollupQuerier
 	HealthQuerier
@@ -33,15 +31,6 @@ type ReservationQuerier interface {
 	ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]Reservation, error)
 }
 
-// DepositQuerier lists deposits.
-type DepositQuerier interface {
-	ListDeposits(ctx context.Context, holder int64, status string, limit int32) ([]Deposit, error)
-}
-
-// WithdrawalQuerier lists withdrawals.
-type WithdrawalQuerier interface {
-	ListWithdrawals(ctx context.Context, holder int64, status string, limit int32) ([]Withdrawal, error)
-}
 
 // SnapshotQuerier queries snapshots by date range.
 type SnapshotQuerier interface {

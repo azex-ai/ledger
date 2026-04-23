@@ -17,26 +17,6 @@ type ReservationReleaser interface {
 	Release(ctx context.Context, reservationID int64) error
 }
 
-// ExpiredDepositFinder finds expired pending/confirming deposits.
-type ExpiredDepositFinder interface {
-	GetExpiredDeposits(ctx context.Context, limit int) ([]core.Deposit, error)
-}
-
-// DepositExpirer expires a deposit by ID.
-type DepositExpirer interface {
-	ExpireDeposit(ctx context.Context, depositID int64) error
-}
-
-// ExpiredWithdrawalFinder finds expired processing withdrawals.
-type ExpiredWithdrawalFinder interface {
-	GetExpiredWithdrawals(ctx context.Context, limit int) ([]core.Withdrawal, error)
-}
-
-// WithdrawalFailer fails a withdrawal by ID.
-type WithdrawalFailer interface {
-	FailWithdraw(ctx context.Context, withdrawalID int64, reason string) error
-}
-
 // ExpiredOperationFinder finds expired active operations.
 type ExpiredOperationFinder interface {
 	ListExpiredOperations(ctx context.Context, limit int) ([]core.Operation, error)
@@ -47,14 +27,10 @@ type OperationTransitioner interface {
 	Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error)
 }
 
-// ExpirationService cleans up stale reservations, deposits, withdrawals, and operations.
+// ExpirationService cleans up stale reservations and operations.
 type ExpirationService struct {
 	reservationFinder  ExpiredReservationFinder
 	reservationRelease ReservationReleaser
-	depositFinder      ExpiredDepositFinder
-	depositExpire      DepositExpirer
-	withdrawalFinder   ExpiredWithdrawalFinder
-	withdrawalFail     WithdrawalFailer
 	operationFinder    ExpiredOperationFinder
 	operationTransit   OperationTransitioner
 	logger             core.Logger
@@ -65,10 +41,6 @@ type ExpirationService struct {
 func NewExpirationService(
 	reservationFinder ExpiredReservationFinder,
 	reservationRelease ReservationReleaser,
-	depositFinder ExpiredDepositFinder,
-	depositExpire DepositExpirer,
-	withdrawalFinder ExpiredWithdrawalFinder,
-	withdrawalFail WithdrawalFailer,
 	operationFinder ExpiredOperationFinder,
 	operationTransit OperationTransitioner,
 	engine *core.Engine,
@@ -76,10 +48,6 @@ func NewExpirationService(
 	return &ExpirationService{
 		reservationFinder:  reservationFinder,
 		reservationRelease: reservationRelease,
-		depositFinder:      depositFinder,
-		depositExpire:      depositExpire,
-		withdrawalFinder:   withdrawalFinder,
-		withdrawalFail:     withdrawalFail,
 		operationFinder:    operationFinder,
 		operationTransit:   operationTransit,
 		logger:             engine.Logger(),
@@ -89,6 +57,9 @@ func NewExpirationService(
 
 // ExpireStaleReservations finds and releases expired active reservations.
 func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSize int) (int, error) {
+	if s.reservationFinder == nil {
+		return 0, nil
+	}
 	reservations, err := s.reservationFinder.GetExpiredReservations(ctx, batchSize)
 	if err != nil {
 		return 0, fmt.Errorf("service: expiration: find expired reservations: %w", err)
@@ -104,65 +75,9 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 			continue
 		}
 		released++
-		s.logger.Info("service: expiration: reservation released",
-			"reservation_id", r.ID,
-			"holder", r.AccountHolder,
-		)
 	}
 
 	return released, nil
-}
-
-// ExpireStaleDeposits finds and expires stale pending/confirming deposits.
-func (s *ExpirationService) ExpireStaleDeposits(ctx context.Context, batchSize int) (int, error) {
-	deposits, err := s.depositFinder.GetExpiredDeposits(ctx, batchSize)
-	if err != nil {
-		return 0, fmt.Errorf("service: expiration: find expired deposits: %w", err)
-	}
-
-	expired := 0
-	for _, d := range deposits {
-		if err := s.depositExpire.ExpireDeposit(ctx, d.ID); err != nil {
-			s.logger.Error("service: expiration: expire deposit failed",
-				"deposit_id", d.ID,
-				"error", err,
-			)
-			continue
-		}
-		expired++
-		s.logger.Info("service: expiration: deposit expired",
-			"deposit_id", d.ID,
-			"holder", d.AccountHolder,
-		)
-	}
-
-	return expired, nil
-}
-
-// ExpireStaleWithdrawals finds and fails stale processing withdrawals.
-func (s *ExpirationService) ExpireStaleWithdrawals(ctx context.Context, batchSize int) (int, error) {
-	withdrawals, err := s.withdrawalFinder.GetExpiredWithdrawals(ctx, batchSize)
-	if err != nil {
-		return 0, fmt.Errorf("service: expiration: find expired withdrawals: %w", err)
-	}
-
-	failed := 0
-	for _, w := range withdrawals {
-		if err := s.withdrawalFail.FailWithdraw(ctx, w.ID, "expired"); err != nil {
-			s.logger.Error("service: expiration: fail withdrawal failed",
-				"withdrawal_id", w.ID,
-				"error", err,
-			)
-			continue
-		}
-		failed++
-		s.logger.Info("service: expiration: withdrawal expired",
-			"withdrawal_id", w.ID,
-			"holder", w.AccountHolder,
-		)
-	}
-
-	return failed, nil
 }
 
 // ExpireStaleOperations finds and expires stale operations via state transition.
@@ -190,10 +105,6 @@ func (s *ExpirationService) ExpireStaleOperations(ctx context.Context, batchSize
 			continue
 		}
 		expired++
-		s.logger.Info("service: expiration: operation expired",
-			"operation_id", op.ID,
-			"holder", op.AccountHolder,
-		)
 	}
 
 	return expired, nil

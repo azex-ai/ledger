@@ -26,10 +26,6 @@ func TestWorker_StartsAndStops(t *testing.T) {
 	expirationSvc := NewExpirationService(
 		&mockExpiredReservationFinder{},
 		&mockReservationReleaser{},
-		&mockExpiredDepositFinder{},
-		&mockDepositExpirer{},
-		&mockExpiredWithdrawalFinder{},
-		&mockWithdrawalFailer{},
 		nil, nil,
 		engine,
 	)
@@ -86,10 +82,6 @@ func TestWorker_RollupRunsAtInterval(t *testing.T) {
 	expirationSvc := NewExpirationService(
 		&mockExpiredReservationFinder{},
 		&mockReservationReleaser{},
-		&mockExpiredDepositFinder{},
-		&mockDepositExpirer{},
-		&mockExpiredWithdrawalFinder{},
-		&mockWithdrawalFailer{},
 		nil, nil,
 		engine,
 	)

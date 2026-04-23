@@ -29,8 +29,6 @@ var (
 	_ service.CheckpointAggregator = (*RollupAdapter)(nil)
 	_ service.SystemRollupWriter   = (*RollupAdapter)(nil)
 	_ service.ExpiredReservationFinder = (*RollupAdapter)(nil)
-	_ service.ExpiredDepositFinder     = (*RollupAdapter)(nil)
-	_ service.ExpiredWithdrawalFinder  = (*RollupAdapter)(nil)
 )
 
 // RollupAdapter implements all service-layer store interfaces needed for background services.
@@ -326,30 +324,3 @@ func (a *RollupAdapter) GetExpiredReservations(ctx context.Context, limit int) (
 	return result, nil
 }
 
-// --- ExpiredDepositFinder ---
-
-func (a *RollupAdapter) GetExpiredDeposits(ctx context.Context, limit int) ([]core.Deposit, error) {
-	rows, err := a.q.GetExpiredDeposits(ctx, int32(limit))
-	if err != nil {
-		return nil, fmt.Errorf("postgres: get expired deposits: %w", err)
-	}
-	result := make([]core.Deposit, len(rows))
-	for i, r := range rows {
-		result[i] = *depositFromRow(r)
-	}
-	return result, nil
-}
-
-// --- ExpiredWithdrawalFinder ---
-
-func (a *RollupAdapter) GetExpiredWithdrawals(ctx context.Context, limit int) ([]core.Withdrawal, error) {
-	rows, err := a.q.GetExpiredWithdrawals(ctx, int32(limit))
-	if err != nil {
-		return nil, fmt.Errorf("postgres: get expired withdrawals: %w", err)
-	}
-	result := make([]core.Withdrawal, len(rows))
-	for i, r := range rows {
-		result[i] = *withdrawalFromRow(r)
-	}
-	return result, nil
-}

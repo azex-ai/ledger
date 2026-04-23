@@ -14,10 +14,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/azex-ai/ledger/channel"
+	chanOnchain "github.com/azex-ai/ledger/channel/onchain"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
+	"github.com/azex-ai/ledger/service/delivery"
 )
 
 // slogAdapter adapts slog.Logger to core.Logger.
@@ -84,41 +88,52 @@ func run() error {
 	// Create stores
 	ledgerStore := postgres.NewLedgerStore(pool)
 	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
-	depositStore := postgres.NewDepositStore(pool)
-	withdrawStore := postgres.NewWithdrawStore(pool)
+	q := sqlcgen.New(pool)
+	operationStore := postgres.NewOperationStore(pool, q)
+	eventStore := postgres.NewEventStore(pool, q)
 	classStore := postgres.NewClassificationStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	queryStore := postgres.NewQueryStore(pool)
 
 	// Create services
-	// For rollup service, we need the RollupQueuer, CheckpointReadWriter, EntrySummer interfaces.
-	// These are implemented in the integration_test but we need a rollup store.
-	// For now, we create a rollup adapter from the pool.
 	rollupAdapter := postgres.NewRollupAdapter(pool)
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, rollupAdapter, depositStore, rollupAdapter, withdrawStore, nil, nil, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, operationStore, operationStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 
-	// Create worker
+	// Create worker with event delivery
 	workerCfg := service.DefaultWorkerConfig()
 	worker := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, workerCfg, engine)
 
+	// Set up webhook delivery (service mode)
+	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, nil, coreLogger)
+	worker.SetEventDeliverer(webhookDeliverer)
+
+	// Channel adapters
+	channels := map[string]channel.Adapter{}
+	evmSigningKey := os.Getenv("EVM_WEBHOOK_SECRET")
+	if evmSigningKey != "" {
+		channels["evm"] = chanOnchain.New([]byte(evmSigningKey))
+	}
+
 	// Create HTTP server
 	srv := server.New(
-		ledgerStore,   // JournalWriter
-		ledgerStore,   // BalanceReader
-		reserverStore, // Reserver
-		depositStore,  // Depositor
-		withdrawStore, // Withdrawer
-		classStore,    // ClassificationStore
-		classStore,    // JournalTypeStore
-		tmplStore,     // TemplateStore
-		currencyStore, // CurrencyStore
-		reconcileSvc,  // Reconciler
-		snapshotSvc,   // Snapshotter
+		ledgerStore,    // JournalWriter
+		ledgerStore,    // BalanceReader
+		reserverStore,  // Reserver
+		operationStore, // Operator
+		operationStore, // OperationReader
+		eventStore,     // EventReader
+		classStore,     // ClassificationStore
+		classStore,     // JournalTypeStore
+		tmplStore,      // TemplateStore
+		currencyStore,  // CurrencyStore
+		channels,       // Channel adapters
+		reconcileSvc,   // Reconciler
+		snapshotSvc,    // Snapshotter
 		systemRollupSvc,
 		queryStore, // QueryProvider
 	)

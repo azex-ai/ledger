@@ -106,42 +106,6 @@ func (s *QueryStore) ListReservations(ctx context.Context, holder int64, status 
 	return result, nil
 }
 
-// --- DepositQuerier ---
-
-func (s *QueryStore) ListDeposits(ctx context.Context, holder int64, status string, limit int32) ([]core.Deposit, error) {
-	rows, err := s.q.ListDepositsByAccount(ctx, sqlcgen.ListDepositsByAccountParams{
-		AccountHolder: holder,
-		FilterStatus:  status,
-		PageLimit:     limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: list deposits: %w", err)
-	}
-	result := make([]core.Deposit, len(rows))
-	for i, d := range rows {
-		result[i] = *depositFromRow(d)
-	}
-	return result, nil
-}
-
-// --- WithdrawalQuerier ---
-
-func (s *QueryStore) ListWithdrawals(ctx context.Context, holder int64, status string, limit int32) ([]core.Withdrawal, error) {
-	rows, err := s.q.ListWithdrawalsByAccount(ctx, sqlcgen.ListWithdrawalsByAccountParams{
-		AccountHolder: holder,
-		FilterStatus:  status,
-		PageLimit:     limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: list withdrawals: %w", err)
-	}
-	result := make([]core.Withdrawal, len(rows))
-	for i, w := range rows {
-		result[i] = *withdrawalFromRow(w)
-	}
-	return result, nil
-}
-
 // --- SnapshotQuerier ---
 
 func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]core.BalanceSnapshot, error) {

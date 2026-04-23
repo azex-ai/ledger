@@ -39,46 +39,6 @@ func (m *mockReservationReleaser) Release(_ context.Context, id int64) error {
 	return nil
 }
 
-type mockExpiredDepositFinder struct {
-	deposits []core.Deposit
-}
-
-func (m *mockExpiredDepositFinder) GetExpiredDeposits(_ context.Context, limit int) ([]core.Deposit, error) {
-	if limit > len(m.deposits) {
-		limit = len(m.deposits)
-	}
-	return m.deposits[:limit], nil
-}
-
-type mockDepositExpirer struct {
-	expired []int64
-}
-
-func (m *mockDepositExpirer) ExpireDeposit(_ context.Context, id int64) error {
-	m.expired = append(m.expired, id)
-	return nil
-}
-
-type mockExpiredWithdrawalFinder struct {
-	withdrawals []core.Withdrawal
-}
-
-func (m *mockExpiredWithdrawalFinder) GetExpiredWithdrawals(_ context.Context, limit int) ([]core.Withdrawal, error) {
-	if limit > len(m.withdrawals) {
-		limit = len(m.withdrawals)
-	}
-	return m.withdrawals[:limit], nil
-}
-
-type mockWithdrawalFailer struct {
-	failed []int64
-}
-
-func (m *mockWithdrawalFailer) FailWithdraw(_ context.Context, id int64, _ string) error {
-	m.failed = append(m.failed, id)
-	return nil
-}
-
 // --- Tests ---
 
 func TestExpirationService_ExpiredReservations(t *testing.T) {
@@ -92,7 +52,7 @@ func TestExpirationService_ExpiredReservations(t *testing.T) {
 	releaser := &mockReservationReleaser{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, nil, nil, engine)
+	svc := NewExpirationService(finder, releaser, nil, nil, engine)
 
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
@@ -106,46 +66,10 @@ func TestExpirationService_NonExpiredUntouched(t *testing.T) {
 	releaser := &mockReservationReleaser{}
 	engine := core.NewEngine()
 
-	svc := NewExpirationService(finder, releaser, nil, nil, nil, nil, nil, nil, engine)
+	svc := NewExpirationService(finder, releaser, nil, nil, engine)
 
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
 	assert.Empty(t, releaser.released)
-}
-
-func TestExpirationService_ExpiredDeposits(t *testing.T) {
-	past := time.Now().Add(-time.Hour)
-	finder := &mockExpiredDepositFinder{
-		deposits: []core.Deposit{
-			{ID: 10, AccountHolder: 100, Status: core.DepositStatusPending, ExpiresAt: &past},
-		},
-	}
-	expirer := &mockDepositExpirer{}
-	engine := core.NewEngine()
-
-	svc := NewExpirationService(nil, nil, finder, expirer, nil, nil, nil, nil, engine)
-
-	count, err := svc.ExpireStaleDeposits(context.Background(), 10)
-	require.NoError(t, err)
-	assert.Equal(t, 1, count)
-	assert.Equal(t, []int64{10}, expirer.expired)
-}
-
-func TestExpirationService_ExpiredWithdrawals(t *testing.T) {
-	past := time.Now().Add(-time.Hour)
-	finder := &mockExpiredWithdrawalFinder{
-		withdrawals: []core.Withdrawal{
-			{ID: 20, AccountHolder: 100, Status: core.WithdrawStatusProcessing, ExpiresAt: &past},
-		},
-	}
-	failer := &mockWithdrawalFailer{}
-	engine := core.NewEngine()
-
-	svc := NewExpirationService(nil, nil, nil, nil, finder, failer, nil, nil, engine)
-
-	count, err := svc.ExpireStaleWithdrawals(context.Background(), 10)
-	require.NoError(t, err)
-	assert.Equal(t, 1, count)
-	assert.Equal(t, []int64{20}, failer.failed)
 }

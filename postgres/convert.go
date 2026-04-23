@@ -284,24 +284,6 @@ func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
 	}
 }
 
-func depositFromRow(row sqlcgen.Deposit) *core.Deposit {
-	return &core.Deposit{
-		ID:             row.ID,
-		AccountHolder:  row.AccountHolder,
-		CurrencyID:     row.CurrencyID,
-		ExpectedAmount: mustNumericToDecimal(row.ExpectedAmount),
-		ActualAmount:   numericPtrToDecimalPtr(row.ActualAmount),
-		Status:         core.DepositStatus(row.Status),
-		ChannelName:    row.ChannelName,
-		ChannelRef:     textToStringPtr(row.ChannelRef),
-		JournalID:      int8ToInt64Ptr(row.JournalID),
-		IdempotencyKey: row.IdempotencyKey,
-		Metadata:       jsonToMetadata(row.Metadata),
-		ExpiresAt:      timestamptzToTimePtr(row.ExpiresAt),
-		CreatedAt:      row.CreatedAt,
-		UpdatedAt:      row.UpdatedAt,
-	}
-}
 
 func operationFromRow(row sqlcgen.Operation) *core.Operation {
 	return &core.Operation{
@@ -361,22 +343,3 @@ func anyMetadataToJSON(m map[string]any) []byte {
 	return b
 }
 
-func withdrawalFromRow(row sqlcgen.Withdrawal) *core.Withdrawal {
-	return &core.Withdrawal{
-		ID:             row.ID,
-		AccountHolder:  row.AccountHolder,
-		CurrencyID:     row.CurrencyID,
-		Amount:         mustNumericToDecimal(row.Amount),
-		Status:         core.WithdrawStatus(row.Status),
-		ChannelName:    row.ChannelName,
-		ChannelRef:     textToStringPtr(row.ChannelRef),
-		ReservationID:  int8ToInt64Ptr(row.ReservationID),
-		JournalID:      int8ToInt64Ptr(row.JournalID),
-		IdempotencyKey: row.IdempotencyKey,
-		Metadata:       jsonToMetadata(row.Metadata),
-		ReviewRequired: row.ReviewRequired,
-		ExpiresAt:      timestamptzToTimePtr(row.ExpiresAt),
-		CreatedAt:      row.CreatedAt,
-		UpdatedAt:      row.UpdatedAt,
-	}
-}

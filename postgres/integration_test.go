@@ -20,7 +20,6 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	// Create stores
 	ledgerStore := postgres.NewLedgerStore(pool)
 	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
-	depositStore := postgres.NewDepositStore(pool)
 	classStore := postgres.NewClassificationStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
@@ -71,18 +70,6 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	userID := int64(42)
 
 	// Step 4: Execute deposit via template
-	dep, err := depositStore.InitDeposit(ctx, core.DepositInput{
-		AccountHolder:  userID,
-		CurrencyID:     usdt.ID,
-		ExpectedAmount: decimal.NewFromInt(1000),
-		ChannelName:    "evm",
-		IdempotencyKey: uniqueKey("integ-dep"),
-	})
-	require.NoError(t, err)
-
-	err = depositStore.ConfirmingDeposit(ctx, dep.ID, "0xabc")
-	require.NoError(t, err)
-
 	j, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     usdt.ID,
@@ -92,13 +79,6 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, j.TotalDebit.Equal(decimal.NewFromInt(1000)))
-
-	err = depositStore.ConfirmDeposit(ctx, core.ConfirmDepositInput{
-		DepositID:    dep.ID,
-		ActualAmount: decimal.NewFromInt(1000),
-		ChannelRef:   "0xabc",
-	})
-	require.NoError(t, err)
 
 	// Step 5: Verify balances
 	walletBal, err := ledgerStore.GetBalance(ctx, userID, usdt.ID, mainWallet.ID)
