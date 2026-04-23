@@ -1,6 +1,6 @@
 # azex-ai/ledger
 
-Production-grade double-entry ledger engine for Go. Dual-mode: importable library or standalone HTTP service.
+Production-grade double-entry ledger engine for Go. Classification-driven architecture — deposit/withdrawal are preset configurations, not hardcoded types. Dual-mode: importable library or standalone HTTP service.
 
 ## Tech Stack
 
@@ -16,6 +16,19 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
 - Interfaces defined in `core/interfaces.go`, consumer-side, -er suffix.
 - Account dimensions: `(AccountHolder int64, CurrencyID int64, ClassificationID int64)`. Positive holder = user, negative = system counterpart.
 - All amounts: `shopspring/decimal.Decimal` in Go, `NUMERIC(30,18)` in SQL, string in JSON.
+- **No NULL**: All DB columns NOT NULL with meaningful defaults (0, '', 'epoch', '{}').
+- **Single-direction data flow**: Ledger never calls external systems. Commands in, events out.
+- **Event-Journal atomicity**: Events and journals are written in the same transaction. Events are the "reason" a journal exists.
+
+### Core Concepts
+
+- **Classification (科目)** — the primary entity. Each classification can have a Lifecycle (state machine).
+- **Operation** — an instance of a classification's lifecycle (replaces v1 Deposit/Withdrawal).
+- **Event** — atomic record of state transitions, written with the operation update.
+- **Journal** — double-entry accounting record, linked to the triggering event via `event_id`.
+- **Reservation** — cross-classification fund locking mechanism.
+- **Presets** — deposit/withdrawal are pre-built classification lifecycle configs in `presets/`.
+- **Channel Adapter** — inbound webhook parsing for external systems (in `channel/`).
 
 ## Key Commands
 
@@ -26,17 +39,28 @@ go build ./...
 # Test (requires PostgreSQL — uses testcontainers, no mocks)
 go test ./... -race -count=1
 
+# Unit tests only (no DB needed)
+go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1
+
 # sqlc (run from postgres/ directory)
 cd postgres && sqlc generate
-
-# Check sqlc drift
-sqlc diff
 
 # Lint
 go vet ./...
 
 # Docker (full stack)
 docker compose up --build
+```
+
+## Workflow: Adding a New Classification
+
+```
+1. Define lifecycle in presets/ (or register at runtime via API)
+2. Create classification via API or Go code with lifecycle JSON
+3. Create operations against that classification
+4. Transition operations through lifecycle states
+5. Post journals when accounting is needed (caller orchestrates)
+6. Events are emitted automatically on every transition
 ```
 
 ## Workflow: Adding Features
@@ -56,6 +80,7 @@ docker compose up --build
 - Struct JSON tags: snake_case, all exported fields must have tags
 - Error wrapping: `fmt.Errorf("module: action: %w", err)`
 - Never discard errors (except in tests)
+- **No NULL**: All DB columns NOT NULL, all Go fields are value types (int64, string, time.Time), never pointers. Use 0/''/epoch/{} as defaults.
 - Idempotency: every mutation requires an `idempotency_key` (UNIQUE index)
 - Journal entries: append-only, corrections via reversal journal only
 - Balance: `checkpoint.balance + SUM(entries WHERE id > checkpoint.last_entry_id)`
@@ -66,33 +91,63 @@ docker compose up --build
 
 - Integration tests use `testcontainers-go` with real PostgreSQL — no mocked DB.
 - Test files: `postgres/*_test.go` for store tests, `service/*_test.go` for service tests.
+- Unit tests: `core/*_test.go`, `presets/*_test.go`, `channel/onchain/*_test.go`.
 - CI runs: `go vet`, `golangci-lint`, `go test -race`, `sqlc diff`, `go build`.
 
 ## File Layout Quick Reference
 
 | Path | Purpose |
 |------|---------|
-| `core/types.go` | Currency, Classification, JournalType, Balance |
+| `core/types.go` | Currency, Classification + Lifecycle, JournalType, Balance, Status |
+| `core/operation.go` | Operation, CreateOperationInput, TransitionInput |
+| `core/event.go` | Event, EventFilter |
 | `core/journal.go` | Journal, Entry, JournalInput + validation |
 | `core/template.go` | EntryTemplate, Render() |
 | `core/reserve.go` | Reservation state machine |
-| `core/deposit.go` | Deposit state machine |
-| `core/withdraw.go` | Withdrawal state machine |
 | `core/checkpoint.go` | BalanceCheckpoint, RollupQueueItem, BalanceSnapshot |
-| `core/interfaces.go` | All store interfaces |
+| `core/interfaces.go` | Operator, EventReader, JournalWriter, BalanceReader, etc. |
+| `presets/` | Deposit + Withdrawal lifecycle presets |
+| `channel/adapter.go` | ChannelAdapter interface for inbound webhooks |
+| `channel/onchain/evm.go` | Demo EVM adapter with HMAC verification |
 | `postgres/sql/migrations/` | Schema migrations (embed.FS) |
 | `postgres/sql/queries/` | sqlc query files |
 | `postgres/sqlcgen/` | Generated code (do not edit) |
+| `postgres/operation_store.go` | Operator + OperationReader implementation |
+| `postgres/event_store.go` | EventReader + delivery polling |
 | `server/routes.go` | All endpoint definitions |
-| `server/handler_*.go` | Handlers by resource |
+| `server/handler_operations.go` | Unified operation endpoints |
+| `server/handler_webhooks.go` | Inbound channel callbacks |
+| `server/handler_events.go` | Event query endpoints |
+| `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
-| `docs/plans/2026-04-17-design.md` | Full design document |
-| `docs/api.md` | HTTP API reference |
+| `docs/plans/2026-04-22-ledger-v2-design.md` | V2 design document |
+
+## HTTP API Quick Reference
+
+```
+# Operations (unified — replaces deposits + withdrawals)
+POST   /api/v1/operations                    — Create operation
+POST   /api/v1/operations/{id}/transition    — State transition
+GET    /api/v1/operations/{id}               — Get operation
+GET    /api/v1/operations                    — List operations
+
+# Webhooks (inbound channel callbacks)
+POST   /api/v1/webhooks/{channel}            — Receive channel callback
+
+# Events (outbound)
+GET    /api/v1/events/{id}                   — Get event
+GET    /api/v1/events                        — List events
+
+# Journals, Entries, Balances, Reservations — unchanged from v1
+# Classifications, Journal Types, Templates, Currencies — unchanged
+# Reconciliation, Snapshots, System — unchanged
+```
 
 ## Gotchas
 
 - `postgres/sqlcgen/` is generated — never edit manually, always `sqlc generate`.
 - sqlc config is at `postgres/sqlc.yaml`, run sqlc from `postgres/` dir.
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.
-- No Makefile yet — commands run directly.
 - `web/` is a separate Next.js project with its own `CLAUDE.md`.
+- Lifecycle is optional on Classification — nil means label-only (no operations).
+- `failed` is NOT terminal in withdrawal preset (has retry path to `reserved`).
