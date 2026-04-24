@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -69,6 +70,26 @@ func (j *JournalInput) Totals() (debit, credit decimal.Decimal) {
 	return debit, credit
 }
 
+type currencyTotals struct {
+	debit  decimal.Decimal
+	credit decimal.Decimal
+}
+
+func (j *JournalInput) totalsByCurrency() map[int64]currencyTotals {
+	totals := make(map[int64]currencyTotals)
+	for _, e := range j.Entries {
+		current := totals[e.CurrencyID]
+		switch e.EntryType {
+		case EntryTypeDebit:
+			current.debit = current.debit.Add(e.Amount)
+		case EntryTypeCredit:
+			current.credit = current.credit.Add(e.Amount)
+		}
+		totals[e.CurrencyID] = current
+	}
+	return totals
+}
+
 func (j *JournalInput) Validate() error {
 	if j.IdempotencyKey == "" {
 		return fmt.Errorf("core: journal: idempotency key required: %w", ErrInvalidInput)
@@ -84,9 +105,24 @@ func (j *JournalInput) Validate() error {
 			return fmt.Errorf("core: journal: entry[%d]: amount must be positive: %w", i, ErrInvalidInput)
 		}
 	}
-	debit, credit := j.Totals()
-	if !debit.Equal(credit) {
-		return fmt.Errorf("core: journal: unbalanced — debit=%s credit=%s: %w", debit, credit, ErrUnbalancedJournal)
+	totalsByCurrency := j.totalsByCurrency()
+	currencyIDs := make([]int64, 0, len(totalsByCurrency))
+	for currencyID := range totalsByCurrency {
+		currencyIDs = append(currencyIDs, currencyID)
+	}
+	sort.Slice(currencyIDs, func(i, k int) bool { return currencyIDs[i] < currencyIDs[k] })
+
+	for _, currencyID := range currencyIDs {
+		totals := totalsByCurrency[currencyID]
+		if !totals.debit.Equal(totals.credit) {
+			return fmt.Errorf(
+				"core: journal: currency %d unbalanced — debit=%s credit=%s: %w",
+				currencyID,
+				totals.debit,
+				totals.credit,
+				ErrUnbalancedJournal,
+			)
+		}
 	}
 	return nil
 }

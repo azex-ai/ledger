@@ -104,6 +104,7 @@ type ClassificationInput struct {
 // JournalTypeStore manages dynamic journal types.
 type JournalTypeStore interface {
 	CreateJournalType(ctx context.Context, input JournalTypeInput) (*JournalType, error)
+	GetJournalTypeByCode(ctx context.Context, code string) (*JournalType, error)
 	DeactivateJournalType(ctx context.Context, id int64) error
 	ListJournalTypes(ctx context.Context, activeOnly bool) ([]JournalType, error)
 }

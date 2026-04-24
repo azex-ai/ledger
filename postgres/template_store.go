@@ -30,6 +30,10 @@ func NewTemplateStore(pool *pgxpool.Pool) *TemplateStore {
 
 // CreateTemplate inserts a template with its lines in a transaction.
 func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateInput) (*core.EntryTemplate, error) {
+	if err := input.Validate(); err != nil {
+		return nil, fmt.Errorf("postgres: create template: %w", err)
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: create template: begin tx: %w", err)
@@ -44,7 +48,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateI
 		JournalTypeID: input.JournalTypeID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create template: insert: %w", err)
+		return nil, wrapStoreError("postgres: create template: insert", err)
 	}
 
 	sqlcLines := make([]sqlcgen.EntryTemplateLine, len(input.Lines))
@@ -58,7 +62,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateI
 			SortOrder:        int32(l.SortOrder),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("postgres: create template: insert line[%d]: %w", i, err)
+			return nil, wrapStoreError(fmt.Sprintf("postgres: create template: insert line[%d]", i), err)
 		}
 		sqlcLines[i] = line
 	}
@@ -73,7 +77,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateI
 // DeactivateTemplate marks a template as inactive.
 func (s *TemplateStore) DeactivateTemplate(ctx context.Context, id int64) error {
 	if err := s.q.DeactivateTemplate(ctx, id); err != nil {
-		return fmt.Errorf("postgres: deactivate template: %w", err)
+		return wrapStoreError("postgres: deactivate template", err)
 	}
 	return nil
 }

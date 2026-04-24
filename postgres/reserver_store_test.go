@@ -61,7 +61,7 @@ func TestReserverStore_Reserve_Release(t *testing.T) {
 	// Cannot settle after release
 	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid transition")
+	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
 
 func TestReserverStore_Reserve_Idempotent(t *testing.T) {
@@ -154,5 +154,5 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	// Settle again should fail
 	err = store.Settle(ctx, res.ID, decimal.NewFromInt(100))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid transition")
+	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }

@@ -5,23 +5,32 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var _ core.EventReader = (*EventStore)(nil)
 
+const eventClaimLease = 2 * time.Minute
+
 // EventStore implements core.EventReader and event delivery helpers.
 type EventStore struct {
-	pool *pgxpool.Pool
-	q    *sqlcgen.Queries
+	pool       *pgxpool.Pool
+	q          *sqlcgen.Queries
+	claimLease time.Duration
 }
 
 // NewEventStore creates a new EventStore.
 func NewEventStore(pool *pgxpool.Pool, q *sqlcgen.Queries) *EventStore {
-	return &EventStore{pool: pool, q: q}
+	return &EventStore{pool: pool, q: q, claimLease: eventClaimLease}
+}
+
+// SetClaimLease overrides the default event delivery lease duration.
+func (s *EventStore) SetClaimLease(d time.Duration) {
+	if d > 0 {
+		s.claimLease = d
+	}
 }
 
 // GetEvent returns an event by ID.
@@ -54,13 +63,17 @@ func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([
 
 // GetPendingEvents returns events that are pending delivery.
 func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]core.Event, error) {
-	rows, err := s.q.GetPendingEvents(ctx, int32(limit))
+	rows, err := s.q.GetPendingEvents(ctx, sqlcgen.GetPendingEventsParams{
+		Limit:         int32(limit),
+		NextAttemptAt: time.Now().Add(s.claimLease),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get pending events: %w", err)
 	}
-	events := make([]core.Event, len(rows))
-	for i, row := range rows {
-		events[i] = *eventFromRow(row)
+
+	events := make([]core.Event, 0, limit)
+	for _, row := range rows {
+		events = append(events, *eventFromRow(row))
 	}
 	return events, nil
 }
@@ -72,10 +85,13 @@ func (s *EventStore) MarkDelivered(ctx context.Context, id int64) error {
 
 // MarkRetry schedules an event for retry at the given time.
 func (s *EventStore) MarkRetry(ctx context.Context, id int64, nextAttempt time.Time) error {
-	return s.q.UpdateEventRetry(ctx, sqlcgen.UpdateEventRetryParams{
+	if err := s.q.UpdateEventRetry(ctx, sqlcgen.UpdateEventRetryParams{
 		ID:            id,
 		NextAttemptAt: nextAttempt,
-	})
+	}); err != nil {
+		return fmt.Errorf("postgres: mark event retry: %w", err)
+	}
+	return nil
 }
 
 // MarkDead marks an event as permanently failed.

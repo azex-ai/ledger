@@ -131,7 +131,7 @@ type Journal struct {
 	Metadata       []byte         `json:"metadata"`
 	ActorID        int64          `json:"actor_id"`
 	Source         string         `json:"source"`
-	ReversalOf     int64          `json:"reversal_of"`
+	ReversalOf     pgtype.Int8    `json:"reversal_of"`
 	CreatedAt      time.Time      `json:"created_at"`
 	EventID        int64          `json:"event_id"`
 }
@@ -185,6 +185,7 @@ type RollupQueue struct {
 	AccountHolder    int64              `json:"account_holder"`
 	CurrencyID       int64              `json:"currency_id"`
 	ClassificationID int64              `json:"classification_id"`
+	ClaimedUntil     pgtype.Timestamptz `json:"claimed_until"`
 	ProcessedAt      pgtype.Timestamptz `json:"processed_at"`
 	CreatedAt        time.Time          `json:"created_at"`
 }

@@ -7,11 +7,6 @@ ALTER TABLE journals ALTER COLUMN source SET DEFAULT '';
 UPDATE journals SET source = '' WHERE source IS NULL;
 ALTER TABLE journals ALTER COLUMN source SET NOT NULL;
 
-ALTER TABLE journals ALTER COLUMN reversal_of SET DEFAULT 0;
-UPDATE journals SET reversal_of = 0 WHERE reversal_of IS NULL;
-ALTER TABLE journals ALTER COLUMN reversal_of SET NOT NULL;
-ALTER TABLE journals DROP CONSTRAINT IF EXISTS journals_reversal_of_fkey;
-
 -- reservations: settled_amount nullable → NOT NULL DEFAULT 0
 UPDATE reservations SET settled_amount = 0 WHERE settled_amount IS NULL;
 ALTER TABLE reservations ALTER COLUMN settled_amount SET NOT NULL;

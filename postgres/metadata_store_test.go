@@ -29,7 +29,8 @@ func TestClassificationStore_CRUD(t *testing.T) {
 	// List active only
 	list, err := store.ListClassifications(ctx, true)
 	require.NoError(t, err)
-	assert.Len(t, list, 1)
+	require.GreaterOrEqual(t, len(list), 1)
+	assert.Contains(t, classificationCodes(list), cls.Code)
 
 	// Deactivate
 	err = store.DeactivateClassification(ctx, cls.ID)
@@ -38,13 +39,44 @@ func TestClassificationStore_CRUD(t *testing.T) {
 	// Active-only should be empty now
 	list, err = store.ListClassifications(ctx, true)
 	require.NoError(t, err)
-	assert.Len(t, list, 0)
+	assert.NotContains(t, classificationCodes(list), cls.Code)
 
 	// Include inactive should still show it
 	list, err = store.ListClassifications(ctx, false)
 	require.NoError(t, err)
-	assert.Len(t, list, 1)
-	assert.False(t, list[0].IsActive)
+	require.GreaterOrEqual(t, len(list), 1)
+	found := false
+	for _, item := range list {
+		if item.Code == cls.Code {
+			found = true
+			assert.False(t, item.IsActive)
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestClassificationStore_CreateWithLifecycle(t *testing.T) {
+	pool := setupTestDB(t)
+	store := postgres.NewClassificationStore(pool)
+	ctx := context.Background()
+
+	lifecycle := &core.Lifecycle{
+		Initial:  "pending",
+		Terminal: []core.Status{"confirmed", "expired"},
+		Transitions: map[core.Status][]core.Status{
+			"pending": {"confirmed", "expired"},
+		},
+	}
+
+	cls, err := store.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "deposit_test",
+		Name:       "Deposit Test",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  lifecycle,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cls.Lifecycle)
+	assert.Equal(t, lifecycle.Initial, cls.Lifecycle.Initial)
 }
 
 func TestJournalTypeStore_CRUD(t *testing.T) {
@@ -138,4 +170,28 @@ func TestTemplateStore_CRUD(t *testing.T) {
 	list, err = tmplStore.ListTemplates(ctx, true)
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
+}
+
+func TestTemplateStore_RejectsEmptyLines(t *testing.T) {
+	pool := setupTestDB(t)
+	tmplStore := postgres.NewTemplateStore(pool)
+	ctx := context.Background()
+
+	jtID := seedJournalType(t, pool, "deposit", "Deposit")
+
+	_, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
+		Code:          "broken",
+		Name:          "Broken",
+		JournalTypeID: jtID,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
+func classificationCodes(list []core.Classification) []string {
+	codes := make([]string, 0, len(list))
+	for _, item := range list {
+		codes = append(codes, item.Code)
+	}
+	return codes
 }

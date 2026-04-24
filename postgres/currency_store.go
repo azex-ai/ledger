@@ -35,7 +35,7 @@ func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyI
 		Name: input.Name,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create currency: %w", err)
+		return nil, wrapStoreError("postgres: create currency", err)
 	}
 	return currencyFromRow(row), nil
 }

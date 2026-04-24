@@ -9,6 +9,7 @@ import (
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/httpx"
+	"github.com/azex-ai/ledger/presets"
 )
 
 // --- JSON request/response types ---
@@ -45,6 +46,18 @@ type reverseJournalRequest struct {
 	Reason string `json:"reason"`
 }
 
+type postDepositToleranceRequest struct {
+	HolderID       int64             `json:"holder_id"`
+	CurrencyID     int64             `json:"currency_id"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ExpectedAmount string            `json:"expected_amount"`
+	ActualAmount   string            `json:"actual_amount"`
+	Tolerance      string            `json:"tolerance"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
+	Metadata       map[string]string `json:"metadata"`
+}
+
 type journalResponse struct {
 	ID             int64             `json:"id"`
 	JournalTypeID  int64             `json:"journal_type_id"`
@@ -68,6 +81,16 @@ type entryResponse struct {
 	EntryType        string    `json:"entry_type"`
 	Amount           string    `json:"amount"`
 	CreatedAt        time.Time `json:"created_at"`
+}
+
+type depositToleranceResponse struct {
+	Outcome              string            `json:"outcome"`
+	ExpectedAmount       string            `json:"expected_amount"`
+	ActualAmount         string            `json:"actual_amount"`
+	Tolerance            string            `json:"tolerance"`
+	Delta                string            `json:"delta"`
+	RequiresManualReview bool              `json:"requires_manual_review"`
+	Journals             []journalResponse `json:"journals"`
 }
 
 func toJournalResponse(j *core.Journal) journalResponse {
@@ -173,6 +196,65 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.Created(w, toJournalResponse(journal))
+}
+
+func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Request) {
+	req, err := httpx.Decode[postDepositToleranceRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+
+	expectedAmount, err := decimal.NewFromString(req.ExpectedAmount)
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("expected_amount is not a valid decimal"))
+		return
+	}
+	actualAmount, err := decimal.NewFromString(req.ActualAmount)
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
+		return
+	}
+	toleranceAmount, err := decimal.NewFromString(req.Tolerance)
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("tolerance is not a valid decimal"))
+		return
+	}
+
+	plan, err := presets.BuildDepositTolerancePlan(expectedAmount, actualAmount, presets.DepositToleranceConfig{
+		Amount: toleranceAmount,
+	})
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+
+	journals, err := presets.ExecuteDepositTolerancePlan(r.Context(), s.journals, core.TemplateParams{
+		HolderID:       req.HolderID,
+		CurrencyID:     req.CurrencyID,
+		IdempotencyKey: req.IdempotencyKey,
+		ActorID:        req.ActorID,
+		Source:         req.Source,
+		Metadata:       req.Metadata,
+	}, plan)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+
+	resp := depositToleranceResponse{
+		Outcome:              string(plan.Outcome),
+		ExpectedAmount:       plan.ExpectedAmount.String(),
+		ActualAmount:         plan.ActualAmount.String(),
+		Tolerance:            plan.ToleranceAmount.String(),
+		Delta:                plan.Delta.String(),
+		RequiresManualReview: plan.RequiresManualReview,
+		Journals:             make([]journalResponse, len(journals)),
+	}
+	for i, journal := range journals {
+		resp.Journals[i] = toJournalResponse(journal)
+	}
+	httpx.Created(w, resp)
 }
 
 func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {

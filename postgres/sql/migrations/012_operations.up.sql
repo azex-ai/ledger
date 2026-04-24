@@ -16,7 +16,9 @@ CREATE TABLE bookings (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT uq_bookings_idempotency UNIQUE (idempotency_key)
+    CONSTRAINT uq_bookings_idempotency UNIQUE (idempotency_key),
+    CONSTRAINT chk_bookings_amount_positive CHECK (amount > 0),
+    CONSTRAINT chk_bookings_settled_non_negative CHECK (settled_amount >= 0)
 );
 
 CREATE UNIQUE INDEX uq_bookings_channel_ref

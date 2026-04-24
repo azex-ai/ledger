@@ -16,7 +16,7 @@ const (
 )
 
 var reservationTransitions = map[ReservationStatus][]ReservationStatus{
-	ReservationStatusActive:   {ReservationStatusSettling, ReservationStatusReleased},
+	ReservationStatusActive:   {ReservationStatusSettling, ReservationStatusSettled, ReservationStatusReleased},
 	ReservationStatusSettling: {ReservationStatusSettled, ReservationStatusReleased},
 }
 

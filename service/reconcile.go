@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -10,9 +11,15 @@ import (
 	"github.com/azex-ai/ledger/core"
 )
 
-// GlobalSummer sums all debits and credits globally.
+type CurrencyReconcileTotals struct {
+	CurrencyID int64
+	Debit      decimal.Decimal
+	Credit     decimal.Decimal
+}
+
+// GlobalSummer sums all debits and credits globally, grouped by currency.
 type GlobalSummer interface {
-	SumGlobalDebitCredit(ctx context.Context) (debit, credit decimal.Decimal, err error)
+	SumGlobalDebitCreditByCurrency(ctx context.Context) ([]CurrencyReconcileTotals, error)
 }
 
 // AccountEntrySummer sums all entries for a specific account (no checkpoint filter).
@@ -55,30 +62,42 @@ func NewReconciliationService(
 
 // CheckAccountingEquation verifies SUM(all debits) == SUM(all credits).
 func (s *ReconciliationService) CheckAccountingEquation(ctx context.Context) (*core.ReconcileResult, error) {
-	debit, credit, err := s.global.SumGlobalDebitCredit(ctx)
+	totals, err := s.global.SumGlobalDebitCreditByCurrency(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("service: reconcile: sum global: %w", err)
 	}
 
-	gap := debit.Sub(credit)
-	balanced := gap.IsZero()
-
 	result := &core.ReconcileResult{
-		Balanced:  balanced,
-		Gap:       gap,
+		Balanced:  true,
+		Gap:       decimal.Zero,
 		CheckedAt: time.Now(),
 	}
 
-	if !balanced {
+	for _, total := range totals {
+		gap := total.Debit.Sub(total.Credit)
+		if gap.IsZero() {
+			continue
+		}
+
+		result.Balanced = false
+		result.Gap = result.Gap.Add(gap.Abs())
+		result.Details = append(result.Details, core.ReconcileDetail{
+			CurrencyID: total.CurrencyID,
+			Expected:   total.Debit,
+			Actual:     total.Credit,
+			Drift:      gap,
+		})
+
 		s.logger.Warn("service: reconcile: accounting equation imbalance",
-			"debit_total", debit.String(),
-			"credit_total", credit.String(),
+			"currency_id", total.CurrencyID,
+			"debit_total", total.Debit.String(),
+			"credit_total", total.Credit.String(),
 			"gap", gap.String(),
 		)
-		s.metrics.ReconcileGap(0, gap) // currencyID=0 for global
+		s.metrics.ReconcileGap(total.CurrencyID, gap)
 	}
 
-	s.metrics.ReconcileCompleted(balanced)
+	s.metrics.ReconcileCompleted(result.Balanced)
 	return result, nil
 }
 
@@ -112,13 +131,33 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 		CheckedAt: time.Now(),
 	}
 
-	// For each checkpoint, compute expected balance from entries and compare
+	checkpointByClass := make(map[int64]core.BalanceCheckpoint, len(cps))
+	classificationSet := make(map[int64]struct{}, len(cps)+len(debitByClass)+len(creditByClass))
 	for _, cp := range cps {
-		debit := debitByClass[cp.ClassificationID]
-		credit := creditByClass[cp.ClassificationID]
+		checkpointByClass[cp.ClassificationID] = cp
+		classificationSet[cp.ClassificationID] = struct{}{}
+	}
+	for classID := range debitByClass {
+		classificationSet[classID] = struct{}{}
+	}
+	for classID := range creditByClass {
+		classificationSet[classID] = struct{}{}
+	}
+
+	classificationIDs := make([]int64, 0, len(classificationSet))
+	for classID := range classificationSet {
+		classificationIDs = append(classificationIDs, classID)
+	}
+	sort.Slice(classificationIDs, func(i, j int) bool { return classificationIDs[i] < classificationIDs[j] })
+
+	// For each classification referenced by either checkpoints or entries, compute the
+	// expected balance from entries and compare it to the checkpointed balance.
+	for _, classID := range classificationIDs {
+		debit := debitByClass[classID]
+		credit := creditByClass[classID]
 
 		var expected decimal.Decimal
-		ns := normalSides[cp.ClassificationID]
+		ns := normalSides[classID]
 		switch ns {
 		case core.NormalSideDebit:
 			expected = debit.Sub(credit)
@@ -128,25 +167,30 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 			expected = debit.Sub(credit)
 		}
 
-		drift := cp.Balance.Sub(expected)
+		actual := decimal.Zero
+		if cp, ok := checkpointByClass[classID]; ok {
+			actual = cp.Balance
+		}
+
+		drift := actual.Sub(expected)
 		if !drift.IsZero() {
 			result.Balanced = false
 			result.Gap = result.Gap.Add(drift.Abs())
 			result.Details = append(result.Details, core.ReconcileDetail{
 				AccountHolder:    holder,
 				CurrencyID:       currencyID,
-				ClassificationID: cp.ClassificationID,
+				ClassificationID: classID,
 				Expected:         expected,
-				Actual:           cp.Balance,
+				Actual:           actual,
 				Drift:            drift,
 			})
 
 			s.logger.Warn("service: reconcile account: checkpoint drift",
 				"holder", holder,
 				"currency_id", currencyID,
-				"classification_id", cp.ClassificationID,
+				"classification_id", classID,
 				"expected", expected.String(),
-				"actual", cp.Balance.String(),
+				"actual", actual.String(),
 				"drift", drift.String(),
 			)
 			s.metrics.ReconcileGap(currencyID, drift)

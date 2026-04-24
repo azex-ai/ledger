@@ -35,6 +35,22 @@ func TestJournalInput_Validate_Unbalanced(t *testing.T) {
 	assert.Contains(t, err.Error(), "unbalanced")
 }
 
+func TestJournalInput_Validate_PerCurrencyBalance(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-currency-balance",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 2, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrUnbalancedJournal), "expected ErrUnbalancedJournal, got: %v", err)
+	assert.Contains(t, err.Error(), "currency 1 unbalanced")
+}
+
 func TestJournalInput_Validate_EmptyEntries(t *testing.T) {
 	input := JournalInput{
 		JournalTypeID:  1,

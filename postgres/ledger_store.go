@@ -16,7 +16,7 @@ import (
 // Compile-time interface assertions.
 var (
 	_ core.JournalWriter = (*LedgerStore)(nil)
-	_ core.BalanceReader  = (*LedgerStore)(nil)
+	_ core.BalanceReader = (*LedgerStore)(nil)
 )
 
 // LedgerStore implements JournalWriter and BalanceReader using PostgreSQL.
@@ -71,17 +71,27 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 		Metadata:       metadataToJSON(input.Metadata),
 		ActorID:        input.ActorID,
 		Source:         input.Source,
-		ReversalOf:     input.ReversalOf,
+		ReversalOf:     int64ToInt8(zeroInt64ToNil(input.ReversalOf)),
 		EventID:        input.EventID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: post journal: insert journal: %w", err)
+		existing, lookupErr := qtx.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
+		if lookupErr == nil {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("postgres: post journal: commit idempotent after insert race: %w", err)
+			}
+			return journalFromRow(existing), nil
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
+		}
+		return nil, wrapStoreError("postgres: post journal: insert journal", err)
 	}
 
 	// Track unique (holder, currency, classification) for rollup enqueue
 	type rollupKey struct {
-		holder         int64
-		currencyID     int64
+		holder           int64
+		currencyID       int64
 		classificationID int64
 	}
 	seen := make(map[rollupKey]struct{})
@@ -96,7 +106,7 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 			Amount:           decimalToNumeric(e.Amount),
 		})
 		if err != nil {
-			return nil, fmt.Errorf("postgres: post journal: insert entry[%d]: %w", i, err)
+			return nil, wrapStoreError(fmt.Sprintf("postgres: post journal: insert entry[%d]", i), err)
 		}
 
 		key := rollupKey{e.AccountHolder, e.CurrencyID, e.ClassificationID}
@@ -110,7 +120,7 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 			CurrencyID:       key.currencyID,
 			ClassificationID: key.classificationID,
 		}); err != nil {
-			return nil, fmt.Errorf("postgres: post journal: enqueue rollup: %w", err)
+			return nil, wrapStoreError("postgres: post journal: enqueue rollup", err)
 		}
 	}
 
@@ -153,6 +163,17 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 			return nil, fmt.Errorf("postgres: reverse journal: journal %d: %w", journalID, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: reverse journal: get journal: %w", err)
+	}
+	if original.ReversalOf.Valid {
+		return nil, fmt.Errorf("postgres: reverse journal: journal %d is already a reversal: %w", journalID, core.ErrConflict)
+	}
+
+	existingReversal, err := s.q.GetReversalByOriginalJournalID(ctx, int64ToInt8(&journalID))
+	if err == nil {
+		return nil, fmt.Errorf("postgres: reverse journal: journal %d already reversed by %d: %w", journalID, existingReversal.ID, core.ErrConflict)
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: reverse journal: lookup reversal: %w", err)
 	}
 
 	entries, err := s.q.ListJournalEntries(ctx, journalID)

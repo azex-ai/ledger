@@ -14,11 +14,11 @@ import (
 // --- Mocks ---
 
 type mockGlobalSummer struct {
-	debit, credit decimal.Decimal
+	totals []CurrencyReconcileTotals
 }
 
-func (m *mockGlobalSummer) SumGlobalDebitCredit(_ context.Context) (decimal.Decimal, decimal.Decimal, error) {
-	return m.debit, m.credit, nil
+func (m *mockGlobalSummer) SumGlobalDebitCreditByCurrency(_ context.Context) ([]CurrencyReconcileTotals, error) {
+	return m.totals, nil
 }
 
 type mockAccountEntrySummer struct {
@@ -42,8 +42,9 @@ func (m *mockCheckpointReader) GetCheckpoints(_ context.Context, _, _ int64) ([]
 
 func TestReconciliationService_BalancedSystem(t *testing.T) {
 	global := &mockGlobalSummer{
-		debit:  decimal.NewFromInt(1000),
-		credit: decimal.NewFromInt(1000),
+		totals: []CurrencyReconcileTotals{
+			{CurrencyID: 1, Debit: decimal.NewFromInt(1000), Credit: decimal.NewFromInt(1000)},
+		},
 	}
 	engine := core.NewEngine()
 	svc := NewReconciliationService(global, nil, nil, nil, engine)
@@ -56,8 +57,9 @@ func TestReconciliationService_BalancedSystem(t *testing.T) {
 
 func TestReconciliationService_Imbalanced(t *testing.T) {
 	global := &mockGlobalSummer{
-		debit:  decimal.NewFromInt(1000),
-		credit: decimal.NewFromInt(999),
+		totals: []CurrencyReconcileTotals{
+			{CurrencyID: 1, Debit: decimal.NewFromInt(1000), Credit: decimal.NewFromInt(999)},
+		},
 	}
 	engine := core.NewEngine()
 	svc := NewReconciliationService(global, nil, nil, nil, engine)
@@ -66,6 +68,23 @@ func TestReconciliationService_Imbalanced(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.Balanced)
 	assert.True(t, result.Gap.Equal(decimal.NewFromInt(1)))
+}
+
+func TestReconciliationService_CrossCurrencyMismatch(t *testing.T) {
+	global := &mockGlobalSummer{
+		totals: []CurrencyReconcileTotals{
+			{CurrencyID: 1, Debit: decimal.NewFromInt(100), Credit: decimal.Zero},
+			{CurrencyID: 2, Debit: decimal.Zero, Credit: decimal.NewFromInt(100)},
+		},
+	}
+	engine := core.NewEngine()
+	svc := NewReconciliationService(global, nil, nil, nil, engine)
+
+	result, err := svc.CheckAccountingEquation(context.Background())
+	require.NoError(t, err)
+	assert.False(t, result.Balanced)
+	assert.True(t, result.Gap.Equal(decimal.NewFromInt(200)))
+	assert.Len(t, result.Details, 2)
 }
 
 func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
@@ -98,4 +117,28 @@ func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
 	assert.False(t, result.Balanced)
 	assert.Equal(t, 1, len(result.Details))
 	assert.True(t, result.Details[0].Drift.Equal(decimal.NewFromInt(100)))
+}
+
+func TestReconciliationService_AccountMissingCheckpoint(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(50)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	engine := core.NewEngine()
+	svc := NewReconciliationService(nil, accountEntries, cpReader, cls, engine)
+
+	result, err := svc.ReconcileAccount(context.Background(), 100, 1)
+	require.NoError(t, err)
+	assert.False(t, result.Balanced)
+	assert.Equal(t, 1, len(result.Details))
+	assert.True(t, result.Details[0].Expected.Equal(decimal.NewFromInt(50)))
+	assert.True(t, result.Details[0].Actual.IsZero())
+	assert.True(t, result.Details[0].Drift.Equal(decimal.NewFromInt(-50)))
 }

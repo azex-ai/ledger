@@ -227,6 +227,34 @@ func TestLedgerStore_ReverseJournal(t *testing.T) {
 	assert.True(t, bal.IsZero(), "expected 0 after reversal, got %s", bal)
 }
 
+func TestLedgerStore_ReverseJournal_AlreadyReversed(t *testing.T) {
+	pool := setupTestDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := seedJournalType(t, pool, "transfer", "Transfer")
+	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	j, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  jtID,
+		IdempotencyKey: uniqueKey("rev-once"),
+		Entries: []core.EntryInput{
+			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = store.ReverseJournal(ctx, j.ID, "first")
+	require.NoError(t, err)
+
+	_, err = store.ReverseJournal(ctx, j.ID, "second")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+}
+
 func TestLedgerStore_ExecuteTemplate(t *testing.T) {
 	pool := setupTestDB(t)
 	ledgerStore := postgres.NewLedgerStore(pool)

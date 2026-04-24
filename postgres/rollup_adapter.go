@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,55 +19,82 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ service.RollupQueuer         = (*RollupAdapter)(nil)
-	_ service.CheckpointReadWriter = (*RollupAdapter)(nil)
-	_ service.EntrySummer          = (*RollupAdapter)(nil)
-	_ service.GlobalSummer         = (*RollupAdapter)(nil)
-	_ service.AccountEntrySummer   = (*RollupAdapter)(nil)
-	_ service.CheckpointReader     = (*RollupAdapter)(nil)
-	_ service.CheckpointLister     = (*RollupAdapter)(nil)
-	_ service.SnapshotWriter       = (*RollupAdapter)(nil)
-	_ service.CheckpointAggregator = (*RollupAdapter)(nil)
-	_ service.SystemRollupWriter   = (*RollupAdapter)(nil)
+	_ service.RollupQueuer             = (*RollupAdapter)(nil)
+	_ service.CheckpointReadWriter     = (*RollupAdapter)(nil)
+	_ service.EntrySummer              = (*RollupAdapter)(nil)
+	_ service.GlobalSummer             = (*RollupAdapter)(nil)
+	_ service.AccountEntrySummer       = (*RollupAdapter)(nil)
+	_ service.CheckpointReader         = (*RollupAdapter)(nil)
+	_ service.HistoricalBalanceLister  = (*RollupAdapter)(nil)
+	_ service.SnapshotWriter           = (*RollupAdapter)(nil)
+	_ service.CheckpointAggregator     = (*RollupAdapter)(nil)
+	_ service.SystemRollupWriter       = (*RollupAdapter)(nil)
 	_ service.ExpiredReservationFinder = (*RollupAdapter)(nil)
 )
 
 // RollupAdapter implements all service-layer store interfaces needed for background services.
 type RollupAdapter struct {
-	pool *pgxpool.Pool
-	q    *sqlcgen.Queries
+	pool       *pgxpool.Pool
+	q          *sqlcgen.Queries
+	claimLease time.Duration
 }
+
+const rollupClaimLease = 2 * time.Minute
 
 // NewRollupAdapter creates a new RollupAdapter.
 func NewRollupAdapter(pool *pgxpool.Pool) *RollupAdapter {
 	return &RollupAdapter{
-		pool: pool,
-		q:    sqlcgen.New(pool),
+		pool:       pool,
+		q:          sqlcgen.New(pool),
+		claimLease: rollupClaimLease,
+	}
+}
+
+// SetClaimLease overrides the default rollup claim lease duration.
+func (a *RollupAdapter) SetClaimLease(d time.Duration) {
+	if d > 0 {
+		a.claimLease = d
 	}
 }
 
 // --- RollupQueuer ---
 
 func (a *RollupAdapter) DequeueRollupBatch(ctx context.Context, batchSize int) ([]core.RollupQueueItem, error) {
-	rows, err := a.q.DequeueRollupBatch(ctx, int32(batchSize))
+	rows, err := a.q.DequeueRollupBatch(ctx, sqlcgen.DequeueRollupBatchParams{
+		Limit:        int32(batchSize),
+		ClaimedUntil: timeToTimestamptz(time.Now().Add(a.claimLease)),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: dequeue rollup batch: %w", err)
 	}
-	items := make([]core.RollupQueueItem, len(rows))
-	for i, r := range rows {
-		items[i] = core.RollupQueueItem{
-			ID:               r.ID,
-			AccountHolder:    r.AccountHolder,
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			CreatedAt:        r.CreatedAt,
+
+	items := make([]core.RollupQueueItem, 0, batchSize)
+	for _, row := range rows {
+		item := core.RollupQueueItem{
+			ID:               row.ID,
+			AccountHolder:    row.AccountHolder,
+			CurrencyID:       row.CurrencyID,
+			ClassificationID: row.ClassificationID,
+			CreatedAt:        row.CreatedAt,
 		}
+		items = append(items, item)
 	}
+
 	return items, nil
 }
 
 func (a *RollupAdapter) MarkRollupProcessed(ctx context.Context, id int64) error {
-	return a.q.MarkRollupProcessed(ctx, id)
+	if err := a.q.MarkRollupProcessed(ctx, id); err != nil {
+		return fmt.Errorf("postgres: mark rollup processed: %w", err)
+	}
+	return nil
+}
+
+func (a *RollupAdapter) ReleaseRollupClaim(ctx context.Context, id int64) error {
+	if err := a.q.ReleaseRollupClaim(ctx, id); err != nil {
+		return fmt.Errorf("postgres: release rollup claim: %w", err)
+	}
+	return nil
 }
 
 func (a *RollupAdapter) CountPendingRollups(ctx context.Context) (int64, error) {
@@ -137,37 +165,58 @@ func (a *RollupAdapter) SumEntriesSince(ctx context.Context, holder, currencyID,
 		}
 	}
 
-	// Get max entry ID
-	maxID, err := a.q.GetMaxEntryID(ctx)
+	maxRow, err := a.q.GetMaxEntryForAccountCurrencySince(ctx, sqlcgen.GetMaxEntryForAccountCurrencySinceParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+		ID:            pgtype.Int8{Int64: sinceEntryID, Valid: true},
+	})
 	if err != nil {
 		return nil, nil, 0, time.Time{}, fmt.Errorf("postgres: sum entries since: max entry: %w", err)
 	}
-	maxEntryID = maxID
-	maxEntryAt = time.Now() // approximate
+	maxEntryID = maxRow.MaxEntryID
+	maxEntryAt, err = anyToTime(maxRow.MaxEntryAt)
+	if err != nil {
+		return nil, nil, 0, time.Time{}, fmt.Errorf("postgres: sum entries since: max entry convert: %w", err)
+	}
+	if maxEntryID == 0 {
+		maxEntryAt = time.Time{}
+	}
 
 	return debitByClass, creditByClass, maxEntryID, maxEntryAt, nil
 }
 
 // --- GlobalSummer ---
 
-func (a *RollupAdapter) SumGlobalDebitCredit(ctx context.Context) (debit, credit decimal.Decimal, err error) {
-	rows, err := a.q.SumGlobalDebitCredit(ctx)
+func (a *RollupAdapter) SumGlobalDebitCreditByCurrency(ctx context.Context) ([]service.CurrencyReconcileTotals, error) {
+	rows, err := a.q.SumGlobalDebitCreditByCurrency(ctx)
 	if err != nil {
-		return decimal.Zero, decimal.Zero, fmt.Errorf("postgres: sum global: %w", err)
+		return nil, fmt.Errorf("postgres: sum global by currency: %w", err)
 	}
-	for _, r := range rows {
-		amount, err := anyToDecimal(r.Total)
+
+	totalsByCurrency := make(map[int64]service.CurrencyReconcileTotals)
+	for _, row := range rows {
+		amount, err := numericToDecimal(row.Total)
 		if err != nil {
-			return decimal.Zero, decimal.Zero, fmt.Errorf("postgres: sum global: convert: %w", err)
+			return nil, fmt.Errorf("postgres: sum global by currency: convert: %w", err)
 		}
-		switch core.EntryType(r.EntryType) {
+
+		current := totalsByCurrency[row.CurrencyID]
+		current.CurrencyID = row.CurrencyID
+		switch core.EntryType(row.EntryType) {
 		case core.EntryTypeDebit:
-			debit = debit.Add(amount)
+			current.Debit = current.Debit.Add(amount)
 		case core.EntryTypeCredit:
-			credit = credit.Add(amount)
+			current.Credit = current.Credit.Add(amount)
 		}
+		totalsByCurrency[row.CurrencyID] = current
 	}
-	return debit, credit, nil
+
+	result := make([]service.CurrencyReconcileTotals, 0, len(totalsByCurrency))
+	for _, totals := range totalsByCurrency {
+		result = append(result, totals)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CurrencyID < result[j].CurrencyID })
+	return result, nil
 }
 
 // --- AccountEntrySummer ---
@@ -247,7 +296,27 @@ func (a *RollupAdapter) ListAllCheckpoints(ctx context.Context) ([]core.BalanceC
 
 // --- SnapshotWriter ---
 
-func (a *RollupAdapter) InsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error {
+func (a *RollupAdapter) ListBalancesAt(ctx context.Context, cutoff time.Time) ([]core.Balance, error) {
+	rows, err := a.q.ListBalancesAt(ctx, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list balances at %s: %w", cutoff.Format(time.RFC3339), err)
+	}
+
+	balances := make([]core.Balance, 0, len(rows))
+	for _, row := range rows {
+		balance := core.Balance{
+			AccountHolder:    row.AccountHolder,
+			CurrencyID:       row.CurrencyID,
+			ClassificationID: row.ClassificationID,
+			Balance:          mustNumericToDecimal(row.Balance),
+		}
+		balances = append(balances, balance)
+	}
+
+	return balances, nil
+}
+
+func (a *RollupAdapter) UpsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error {
 	return a.q.InsertSnapshot(ctx, sqlcgen.InsertSnapshotParams{
 		AccountHolder:    snap.AccountHolder,
 		CurrencyID:       snap.CurrencyID,
@@ -323,4 +392,3 @@ func (a *RollupAdapter) GetExpiredReservations(ctx context.Context, limit int) (
 	}
 	return result, nil
 }
-

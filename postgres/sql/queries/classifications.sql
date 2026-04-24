@@ -22,6 +22,11 @@ INSERT INTO journal_types (code, name)
 VALUES ($1, $2)
 RETURNING id, code, name, is_active, created_at;
 
+-- name: GetJournalTypeByCode :one
+SELECT id, code, name, is_active, created_at
+FROM journal_types
+WHERE code = $1;
+
 -- name: DeactivateJournalType :exec
 UPDATE journal_types SET is_active = false WHERE id = $1;
 

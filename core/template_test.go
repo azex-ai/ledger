@@ -13,6 +13,7 @@ func TestEntryTemplate_Render(t *testing.T) {
 	tmpl := EntryTemplate{
 		ID:            1,
 		Code:          "deposit_confirm",
+		Name:          "Deposit Confirm",
 		JournalTypeID: 1,
 		IsActive:      true,
 		Lines: []EntryTemplateLine{
@@ -49,9 +50,11 @@ func TestEntryTemplate_Render(t *testing.T) {
 
 func TestEntryTemplate_Render_MissingAmountKey(t *testing.T) {
 	tmpl := EntryTemplate{
-		ID:       1,
-		Code:     "test",
-		IsActive: true,
+		ID:            1,
+		Code:          "test",
+		Name:          "Test",
+		JournalTypeID: 1,
+		IsActive:      true,
 		Lines: []EntryTemplateLine{
 			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
 		},
@@ -71,6 +74,7 @@ func TestEntryTemplate_Render_Inactive(t *testing.T) {
 	tmpl := EntryTemplate{
 		ID:       1,
 		Code:     "test",
+		Name:     "Test",
 		IsActive: false,
 		Lines:    []EntryTemplateLine{},
 	}
@@ -81,8 +85,8 @@ func TestEntryTemplate_Render_Inactive(t *testing.T) {
 
 func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 	cases := []struct {
-		name string
-		tmpl EntryTemplate
+		name   string
+		tmpl   EntryTemplate
 		params TemplateParams
 	}{
 		{
@@ -90,6 +94,7 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 			tmpl: EntryTemplate{
 				ID:       1,
 				Code:     "inactive_tmpl",
+				Name:     "Inactive",
 				IsActive: false,
 				Lines:    []EntryTemplateLine{},
 			},
@@ -100,6 +105,7 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 			tmpl: EntryTemplate{
 				ID:       2,
 				Code:     "active_tmpl",
+				Name:     "Active",
 				IsActive: true,
 				Lines: []EntryTemplateLine{
 					{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
@@ -117,6 +123,7 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 			tmpl: EntryTemplate{
 				ID:       3,
 				Code:     "active_tmpl2",
+				Name:     "Active 2",
 				IsActive: true,
 				Lines: []EntryTemplateLine{
 					{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRole("admin"), AmountKey: "amount"},
@@ -140,4 +147,59 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 			assert.True(t, errors.Is(err, ErrInvalidInput), "expected ErrInvalidInput, got: %v", err)
 		})
 	}
+}
+
+func TestTemplateInput_Validate(t *testing.T) {
+	valid := TemplateInput{
+		Code:          "deposit_confirm",
+		Name:          "Deposit Confirm",
+		JournalTypeID: 1,
+		Lines: []TemplateLineInput{
+			{
+				ClassificationID: 1,
+				EntryType:        EntryTypeDebit,
+				HolderRole:       HolderRoleUser,
+				AmountKey:        "amount",
+			},
+		},
+	}
+
+	require.NoError(t, valid.Validate())
+
+	invalid := valid
+	invalid.Lines = nil
+	err := invalid.Validate()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidInput))
+
+	invalid = valid
+	invalid.Lines = []TemplateLineInput{{
+		ClassificationID: 0,
+		EntryType:        EntryTypeDebit,
+		HolderRole:       HolderRoleUser,
+		AmountKey:        "amount",
+	}}
+	err = invalid.Validate()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidInput))
+}
+
+func TestEntryTemplate_Render_RejectsEmptyLines(t *testing.T) {
+	tmpl := EntryTemplate{
+		ID:            1,
+		Code:          "broken",
+		Name:          "Broken",
+		JournalTypeID: 1,
+		IsActive:      true,
+	}
+
+	_, err := tmpl.Render(TemplateParams{
+		HolderID:       42,
+		CurrencyID:     1,
+		IdempotencyKey: "preview",
+		Amounts:        map[string]decimal.Decimal{},
+	})
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidInput))
+	assert.Contains(t, err.Error(), "lines")
 }

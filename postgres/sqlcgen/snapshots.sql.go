@@ -83,7 +83,8 @@ func (q *Queries) GetSystemRollups(ctx context.Context) ([]SystemRollup, error) 
 const insertSnapshot = `-- name: InsertSnapshot :exec
 INSERT INTO balance_snapshots (account_holder, currency_id, classification_id, snapshot_date, balance)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (account_holder, currency_id, classification_id, snapshot_date) DO NOTHING
+ON CONFLICT (account_holder, currency_id, classification_id, snapshot_date)
+DO UPDATE SET balance = EXCLUDED.balance
 `
 
 type InsertSnapshotParams struct {

@@ -14,6 +14,9 @@ SELECT * FROM journals WHERE id = $1;
 -- name: GetJournalByIdempotencyKey :one
 SELECT * FROM journals WHERE idempotency_key = $1;
 
+-- name: GetReversalByOriginalJournalID :one
+SELECT * FROM journals WHERE reversal_of = $1;
+
 -- name: ListJournalEntries :many
 SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
 FROM journal_entries

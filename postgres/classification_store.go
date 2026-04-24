@@ -34,8 +34,18 @@ func NewClassificationStore(pool *pgxpool.Pool) *ClassificationStore {
 
 // CreateClassification inserts a new classification.
 func (s *ClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
+	if input.Code == "" || input.Name == "" {
+		return nil, fmt.Errorf("postgres: create classification: code and name required: %w", core.ErrInvalidInput)
+	}
+	if !input.NormalSide.IsValid() {
+		return nil, fmt.Errorf("postgres: create classification: invalid normal side %q: %w", input.NormalSide, core.ErrInvalidInput)
+	}
+
 	var lifecycle []byte
 	if input.Lifecycle != nil {
+		if err := input.Lifecycle.Validate(); err != nil {
+			return nil, fmt.Errorf("postgres: create classification: invalid lifecycle: %w", err)
+		}
 		var err error
 		lifecycle, err = json.Marshal(input.Lifecycle)
 		if err != nil {
@@ -52,7 +62,7 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 		Lifecycle:  lifecycle,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create classification: %w", err)
+		return nil, wrapStoreError("postgres: create classification", err)
 	}
 	return classificationFromRow(row), nil
 }
@@ -72,7 +82,7 @@ func (s *ClassificationStore) GetByCode(ctx context.Context, code string) (*core
 // DeactivateClassification marks a classification as inactive.
 func (s *ClassificationStore) DeactivateClassification(ctx context.Context, id int64) error {
 	if err := s.q.DeactivateClassification(ctx, id); err != nil {
-		return fmt.Errorf("postgres: deactivate classification: %w", err)
+		return wrapStoreError("postgres: deactivate classification", err)
 	}
 	return nil
 }
@@ -97,7 +107,19 @@ func (s *ClassificationStore) CreateJournalType(ctx context.Context, input core.
 		Name: input.Name,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: create journal type: %w", err)
+		return nil, wrapStoreError("postgres: create journal type", err)
+	}
+	return journalTypeFromRow(row), nil
+}
+
+// GetJournalTypeByCode returns a journal type by its unique code.
+func (s *ClassificationStore) GetJournalTypeByCode(ctx context.Context, code string) (*core.JournalType, error) {
+	row, err := s.q.GetJournalTypeByCode(ctx, code)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: get journal type by code %q: %w", code, core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: get journal type by code %q: %w", code, err)
 	}
 	return journalTypeFromRow(row), nil
 }
@@ -105,7 +127,7 @@ func (s *ClassificationStore) CreateJournalType(ctx context.Context, input core.
 // DeactivateJournalType marks a journal type as inactive.
 func (s *ClassificationStore) DeactivateJournalType(ctx context.Context, id int64) error {
 	if err := s.q.DeactivateJournalType(ctx, id); err != nil {
-		return fmt.Errorf("postgres: deactivate journal type: %w", err)
+		return wrapStoreError("postgres: deactivate journal type", err)
 	}
 	return nil
 }

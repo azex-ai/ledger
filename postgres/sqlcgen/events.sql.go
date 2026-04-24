@@ -42,17 +42,63 @@ func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
 	return i, err
 }
 
-const getPendingEvents = `-- name: GetPendingEvents :many
+const getLatestEventForBooking = `-- name: GetLatestEventForBooking :one
 SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
-WHERE delivery_status = 'pending'
-  AND next_attempt_at <= now()
-ORDER BY next_attempt_at
-LIMIT $1
-FOR UPDATE SKIP LOCKED
+WHERE booking_id = $1
+ORDER BY id DESC
+LIMIT 1
 `
 
-func (q *Queries) GetPendingEvents(ctx context.Context, limit int32) ([]Event, error) {
-	rows, err := q.db.Query(ctx, getPendingEvents, limit)
+func (q *Queries) GetLatestEventForBooking(ctx context.Context, bookingID int64) (Event, error) {
+	row := q.db.QueryRow(ctx, getLatestEventForBooking, bookingID)
+	var i Event
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationCode,
+		&i.BookingID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.FromStatus,
+		&i.ToStatus,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.JournalID,
+		&i.Metadata,
+		&i.OccurredAt,
+		&i.DeliveryStatus,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.NextAttemptAt,
+		&i.DeliveredAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getPendingEvents = `-- name: GetPendingEvents :many
+WITH claimed AS (
+    SELECT id
+    FROM events
+    WHERE delivery_status = 'pending'
+      AND next_attempt_at <= now()
+    ORDER BY next_attempt_at, id
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE events AS e
+SET next_attempt_at = $2
+FROM claimed
+WHERE e.id = claimed.id
+RETURNING e.id, e.classification_code, e.booking_id, e.account_holder, e.currency_id, e.from_status, e.to_status, e.amount, e.settled_amount, e.journal_id, e.metadata, e.occurred_at, e.delivery_status, e.attempts, e.max_attempts, e.next_attempt_at, e.delivered_at, e.created_at
+`
+
+type GetPendingEventsParams struct {
+	Limit         int32     `json:"limit"`
+	NextAttemptAt time.Time `json:"next_attempt_at"`
+}
+
+func (q *Queries) GetPendingEvents(ctx context.Context, arg GetPendingEventsParams) ([]Event, error) {
+	rows, err := q.db.Query(ctx, getPendingEvents, arg.Limit, arg.NextAttemptAt)
 	if err != nil {
 		return nil, err
 	}
@@ -238,9 +284,15 @@ func (q *Queries) UpdateEventDelivered(ctx context.Context, id int64) error {
 
 const updateEventRetry = `-- name: UpdateEventRetry :exec
 UPDATE events
-SET delivery_status = 'pending',
-    attempts = attempts + 1,
-    next_attempt_at = $2
+SET attempts = attempts + 1,
+    delivery_status = CASE
+        WHEN attempts + 1 >= max_attempts THEN 'dead'
+        ELSE 'pending'
+    END,
+    next_attempt_at = CASE
+        WHEN attempts + 1 >= max_attempts THEN next_attempt_at
+        ELSE $2
+    END
 WHERE id = $1
 `
 

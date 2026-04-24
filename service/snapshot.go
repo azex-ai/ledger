@@ -8,69 +8,70 @@ import (
 	"github.com/azex-ai/ledger/core"
 )
 
-// CheckpointLister lists all balance checkpoints.
-type CheckpointLister interface {
-	ListAllCheckpoints(ctx context.Context) ([]core.BalanceCheckpoint, error)
+// HistoricalBalanceLister lists balances as of an exclusive upper-bound timestamp.
+type HistoricalBalanceLister interface {
+	ListBalancesAt(ctx context.Context, cutoff time.Time) ([]core.Balance, error)
 }
 
 // SnapshotWriter writes and reads balance snapshots.
 type SnapshotWriter interface {
-	InsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error
+	UpsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error
 	GetSnapshotBalances(ctx context.Context, holder, currencyID int64, date time.Time) ([]core.Balance, error)
 }
 
 // SnapshotService handles daily balance snapshots.
 type SnapshotService struct {
-	checkpoints CheckpointLister
-	snapshots   SnapshotWriter
-	logger      core.Logger
-	metrics     core.Metrics
+	balances  HistoricalBalanceLister
+	snapshots SnapshotWriter
+	logger    core.Logger
+	metrics   core.Metrics
 }
 
 // NewSnapshotService creates a new SnapshotService.
 func NewSnapshotService(
-	checkpoints CheckpointLister,
+	balances HistoricalBalanceLister,
 	snapshots SnapshotWriter,
 	engine *core.Engine,
 ) *SnapshotService {
 	return &SnapshotService{
-		checkpoints: checkpoints,
-		snapshots:   snapshots,
-		logger:      engine.Logger(),
-		metrics:     engine.Metrics(),
+		balances:  balances,
+		snapshots: snapshots,
+		logger:    engine.Logger(),
+		metrics:   engine.Metrics(),
 	}
 }
 
-// CreateDailySnapshot reads all balance_checkpoints and inserts them as snapshots for the given date.
+// CreateDailySnapshot recomputes balances as of the end of the given day and stores them as snapshots.
 func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Time) error {
 	start := time.Now()
 
-	cps, err := s.checkpoints.ListAllCheckpoints(ctx)
+	// Normalize date to midnight and snapshot balances as of the next midnight.
+	snapshotDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	cutoff := snapshotDate.AddDate(0, 0, 1)
+
+	balances, err := s.balances.ListBalancesAt(ctx, cutoff)
 	if err != nil {
-		return fmt.Errorf("service: snapshot: list checkpoints: %w", err)
+		return fmt.Errorf("service: snapshot: list balances at %s: %w", cutoff.Format(time.RFC3339), err)
 	}
 
-	// Normalize date to midnight
-	snapshotDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
-
-	for _, cp := range cps {
+	for _, balance := range balances {
 		snap := core.BalanceSnapshot{
-			AccountHolder:    cp.AccountHolder,
-			CurrencyID:       cp.CurrencyID,
-			ClassificationID: cp.ClassificationID,
+			AccountHolder:    balance.AccountHolder,
+			CurrencyID:       balance.CurrencyID,
+			ClassificationID: balance.ClassificationID,
 			SnapshotDate:     snapshotDate,
-			Balance:          cp.Balance,
+			Balance:          balance.Balance,
 		}
-		if err := s.snapshots.InsertSnapshot(ctx, snap); err != nil {
+		if err := s.snapshots.UpsertSnapshot(ctx, snap); err != nil {
 			return fmt.Errorf("service: snapshot: insert: holder=%d currency=%d class=%d: %w",
-				cp.AccountHolder, cp.CurrencyID, cp.ClassificationID, err)
+				balance.AccountHolder, balance.CurrencyID, balance.ClassificationID, err)
 		}
 	}
 
 	s.metrics.SnapshotLatency(time.Since(start))
 	s.logger.Info("service: snapshot: daily snapshot created",
 		"date", snapshotDate.Format("2006-01-02"),
-		"count", len(cps),
+		"count", len(balances),
 	)
 
 	return nil

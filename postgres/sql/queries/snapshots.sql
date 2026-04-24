@@ -1,7 +1,8 @@
 -- name: InsertSnapshot :exec
 INSERT INTO balance_snapshots (account_holder, currency_id, classification_id, snapshot_date, balance)
 VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (account_holder, currency_id, classification_id, snapshot_date) DO NOTHING;
+ON CONFLICT (account_holder, currency_id, classification_id, snapshot_date)
+DO UPDATE SET balance = EXCLUDED.balance;
 
 -- name: GetSnapshotBalances :many
 SELECT account_holder, currency_id, classification_id, snapshot_date, balance, created_at

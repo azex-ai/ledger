@@ -69,6 +69,13 @@ var retryIntervals = []time.Duration{
 // ProcessBatch polls pending events and delivers them to subscribers.
 // Returns the number of events successfully delivered.
 func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int, error) {
+	if d.poller == nil {
+		return 0, fmt.Errorf("delivery: webhook: event poller is nil")
+	}
+	if d.subscribers == nil {
+		return 0, fmt.Errorf("delivery: webhook: subscriber lister is nil")
+	}
+
 	events, err := d.poller.GetPendingEvents(ctx, batchSize)
 	if err != nil {
 		return 0, fmt.Errorf("delivery: webhook: poll: %w", err)
@@ -125,10 +132,7 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 	}
 
 	// At least one subscriber failed — schedule retry with exponential backoff.
-	// The DB tracks attempts; pick interval based on simple capped index.
-	// Since core.Event doesn't expose Attempts, use the first interval.
-	// The DB's UpdateEventRetry increments the attempt counter, and
-	// UpdateEventDead is used when max_attempts is exceeded (handled by the query).
+	// The store increments attempts and transitions the event to dead when max_attempts is exceeded.
 	return d.poller.MarkRetry(ctx, evt.ID, time.Now().Add(retryIntervals[0]))
 }
 

@@ -13,13 +13,15 @@ import (
 type WorkerConfig struct {
 	RollupInterval         time.Duration // default: 5s
 	RollupBatchSize        int           // default: 100
+	RollupClaimLease       time.Duration // default: 2m
 	ExpirationInterval     time.Duration // default: 30s
 	ExpirationBatchSize    int           // default: 50
 	ReconcileInterval      time.Duration // default: 6h
-	SnapshotInterval       time.Duration // default: 24h (run at 02:00)
+	SnapshotInterval       time.Duration // default: 24h
 	SystemRollupInterval   time.Duration // default: 1m
 	EventDeliveryInterval  time.Duration // default: 5s
 	EventDeliveryBatchSize int           // default: 100
+	EventClaimLease        time.Duration // default: 2m
 }
 
 // DefaultWorkerConfig returns the default WorkerConfig.
@@ -27,6 +29,7 @@ func DefaultWorkerConfig() WorkerConfig {
 	return WorkerConfig{
 		RollupInterval:         5 * time.Second,
 		RollupBatchSize:        100,
+		RollupClaimLease:       2 * time.Minute,
 		ExpirationInterval:     30 * time.Second,
 		ExpirationBatchSize:    50,
 		ReconcileInterval:      6 * time.Hour,
@@ -34,6 +37,7 @@ func DefaultWorkerConfig() WorkerConfig {
 		SystemRollupInterval:   time.Minute,
 		EventDeliveryInterval:  5 * time.Second,
 		EventDeliveryBatchSize: 100,
+		EventClaimLease:        2 * time.Minute,
 	}
 }
 
@@ -116,7 +120,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	g.Go(func() error {
 		return w.runLoop(ctx, "snapshot", w.config.SnapshotInterval, func(ctx context.Context) {
-			yesterday := time.Now().AddDate(0, 0, -1)
+			yesterday := time.Now().UTC().AddDate(0, 0, -1)
 			if err := w.snapshot.CreateDailySnapshot(ctx, yesterday); err != nil {
 				w.logger.Error("worker: snapshot failed", "error", err)
 			}

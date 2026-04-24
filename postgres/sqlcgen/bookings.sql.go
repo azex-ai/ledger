@@ -215,7 +215,7 @@ const listExpiredBookings = `-- name: ListExpiredBookings :many
 SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings
 WHERE expires_at != 'epoch'
   AND expires_at < now()
-  AND status NOT IN ('confirmed', 'failed', 'expired', 'settled', 'released')
+  AND status NOT IN ('confirmed', 'expired', 'failed', 'settled', 'released')
 LIMIT $1
 `
 

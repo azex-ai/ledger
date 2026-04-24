@@ -11,6 +11,7 @@ func (s *Server) setupRoutes() {
 		// Journals
 		r.Post("/journals", s.handlePostJournal)
 		r.Post("/journals/template", s.handlePostTemplate)
+		r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
 		r.Post("/journals/{id}/reverse", s.handleReverseJournal)
 		r.Get("/journals/{id}", s.handleGetJournal)
 		r.Get("/journals", s.handleListJournals)

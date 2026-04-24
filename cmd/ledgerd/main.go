@@ -19,6 +19,7 @@ import (
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
 	"github.com/azex-ai/ledger/service/delivery"
@@ -91,13 +92,23 @@ func run() error {
 	q := sqlcgen.New(pool)
 	bookingStore := postgres.NewBookingStore(pool, q)
 	eventStore := postgres.NewEventStore(pool, q)
+	webhookSubscriberStore := postgres.NewWebhookSubscriberStore(pool)
 	classStore := postgres.NewClassificationStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	queryStore := postgres.NewQueryStore(pool)
 
+	workerCfg := service.DefaultWorkerConfig()
+	eventStore.SetClaimLease(workerCfg.EventClaimLease)
+
+	if err := presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore); err != nil {
+		return fmt.Errorf("install default template presets: %w", err)
+	}
+	logger.Info("default template presets installed")
+
 	// Create services
 	rollupAdapter := postgres.NewRollupAdapter(pool)
+	rollupAdapter.SetClaimLease(workerCfg.RollupClaimLease)
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, bookingStore, bookingStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
@@ -105,11 +116,10 @@ func run() error {
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 
 	// Create worker with event delivery
-	workerCfg := service.DefaultWorkerConfig()
 	worker := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, workerCfg, engine)
 
 	// Set up webhook delivery (service mode)
-	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, nil, coreLogger)
+	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, webhookSubscriberStore, coreLogger)
 	worker.SetEventDeliverer(webhookDeliverer)
 
 	// Channel adapters
@@ -121,19 +131,19 @@ func run() error {
 
 	// Create HTTP server
 	srv := server.New(
-		ledgerStore,    // JournalWriter
-		ledgerStore,    // BalanceReader
-		reserverStore,  // Reserver
-		bookingStore, // Booker
-		bookingStore, // BookingReader
-		eventStore,     // EventReader
-		classStore,     // ClassificationStore
-		classStore,     // JournalTypeStore
-		tmplStore,      // TemplateStore
-		currencyStore,  // CurrencyStore
-		channels,       // Channel adapters
-		reconcileSvc,   // Reconciler
-		snapshotSvc,    // Snapshotter
+		ledgerStore,   // JournalWriter
+		ledgerStore,   // BalanceReader
+		reserverStore, // Reserver
+		bookingStore,  // Booker
+		bookingStore,  // BookingReader
+		eventStore,    // EventReader
+		classStore,    // ClassificationStore
+		classStore,    // JournalTypeStore
+		tmplStore,     // TemplateStore
+		currencyStore, // CurrencyStore
+		channels,      // Channel adapters
+		reconcileSvc,  // Reconciler
+		snapshotSvc,   // Snapshotter
 		systemRollupSvc,
 		queryStore, // QueryProvider
 	)

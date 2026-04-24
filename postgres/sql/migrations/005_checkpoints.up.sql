@@ -14,9 +14,13 @@ CREATE TABLE rollup_queue (
     account_holder    BIGINT NOT NULL,
     currency_id       BIGINT NOT NULL,
     classification_id BIGINT NOT NULL,
+    claimed_until     TIMESTAMPTZ,
     processed_at      TIMESTAMPTZ,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (account_holder, currency_id, classification_id)
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_rollup_queue_pending ON rollup_queue (created_at) WHERE processed_at IS NULL;
+CREATE UNIQUE INDEX uq_rollup_queue_pending_dimension
+    ON rollup_queue (account_holder, currency_id, classification_id)
+    WHERE processed_at IS NULL;
+
+CREATE INDEX idx_rollup_queue_pending ON rollup_queue (created_at, id) WHERE processed_at IS NULL;

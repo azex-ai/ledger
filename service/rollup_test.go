@@ -17,6 +17,7 @@ import (
 type mockRollupQueuer struct {
 	items     []core.RollupQueueItem
 	processed []int64
+	released  []int64
 	pending   int64
 }
 
@@ -31,6 +32,11 @@ func (m *mockRollupQueuer) DequeueRollupBatch(_ context.Context, batchSize int) 
 
 func (m *mockRollupQueuer) MarkRollupProcessed(_ context.Context, id int64) error {
 	m.processed = append(m.processed, id)
+	return nil
+}
+
+func (m *mockRollupQueuer) ReleaseRollupClaim(_ context.Context, id int64) error {
+	m.released = append(m.released, id)
 	return nil
 }
 
@@ -67,10 +73,11 @@ type mockEntrySummer struct {
 	creditByClass map[int64]decimal.Decimal
 	maxEntryID    int64
 	maxEntryAt    time.Time
+	err           error
 }
 
 func (m *mockEntrySummer) SumEntriesSince(_ context.Context, _, _, _ int64) (map[int64]decimal.Decimal, map[int64]decimal.Decimal, int64, time.Time, error) {
-	return m.debitByClass, m.creditByClass, m.maxEntryID, m.maxEntryAt, nil
+	return m.debitByClass, m.creditByClass, m.maxEntryID, m.maxEntryAt, m.err
 }
 
 type mockClassificationLister struct {
@@ -218,6 +225,31 @@ func TestRollupService_DriftDetection(t *testing.T) {
 	assert.True(t, metrics.balanceDriftCalled)
 }
 
+func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []core.RollupQueueItem{
+			{ID: 4, AccountHolder: 400, CurrencyID: 1, ClassificationID: 40},
+		},
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &mockEntrySummer{
+		err: assert.AnError,
+	}
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 40, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+
+	engine := core.NewEngine()
+	svc := NewRollupService(queue, cpRW, entries, cls, engine)
+
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Zero(t, processed)
+	assert.Equal(t, []int64{4}, queue.released)
+}
+
 // recordingMetrics captures specific metric calls for testing.
 type recordingMetrics struct {
 	core.Metrics
@@ -225,24 +257,26 @@ type recordingMetrics struct {
 	rollupProcessed    int
 }
 
-func (m *recordingMetrics) JournalPosted(string)                              {}
-func (m *recordingMetrics) JournalFailed(string, string)                      {}
-func (m *recordingMetrics) ReserveCreated()                                   {}
-func (m *recordingMetrics) ReserveSettled()                                   {}
-func (m *recordingMetrics) ReserveReleased()                                  {}
-func (m *recordingMetrics) ReconcileCompleted(bool)                           {}
-func (m *recordingMetrics) IdempotencyCollision(string)                       {}
-func (m *recordingMetrics) TemplateFailed(string, string)                     {}
-func (m *recordingMetrics) DepositConfirmed(string)                           {}
-func (m *recordingMetrics) WithdrawConfirmed(string)                          {}
-func (m *recordingMetrics) JournalLatency(time.Duration)                      {}
-func (m *recordingMetrics) SnapshotLatency(time.Duration)                     {}
-func (m *recordingMetrics) JournalEntryCount(string, int)                     {}
-func (m *recordingMetrics) PendingRollups(int64)                              {}
-func (m *recordingMetrics) ActiveReservations(int64)                          {}
-func (m *recordingMetrics) CheckpointAge(string, time.Duration)               {}
-func (m *recordingMetrics) ReconcileGap(int64, decimal.Decimal)               {}
-func (m *recordingMetrics) ReservedAmount(int64, decimal.Decimal)             {}
-func (m *recordingMetrics) RollupProcessed(count int)                         { m.rollupProcessed += count }
-func (m *recordingMetrics) RollupLatency(time.Duration)                       {}
-func (m *recordingMetrics) BalanceDrift(_ string, _ int64, _ decimal.Decimal) { m.balanceDriftCalled = true }
+func (m *recordingMetrics) JournalPosted(string)                  {}
+func (m *recordingMetrics) JournalFailed(string, string)          {}
+func (m *recordingMetrics) ReserveCreated()                       {}
+func (m *recordingMetrics) ReserveSettled()                       {}
+func (m *recordingMetrics) ReserveReleased()                      {}
+func (m *recordingMetrics) ReconcileCompleted(bool)               {}
+func (m *recordingMetrics) IdempotencyCollision(string)           {}
+func (m *recordingMetrics) TemplateFailed(string, string)         {}
+func (m *recordingMetrics) DepositConfirmed(string)               {}
+func (m *recordingMetrics) WithdrawConfirmed(string)              {}
+func (m *recordingMetrics) JournalLatency(time.Duration)          {}
+func (m *recordingMetrics) SnapshotLatency(time.Duration)         {}
+func (m *recordingMetrics) JournalEntryCount(string, int)         {}
+func (m *recordingMetrics) PendingRollups(int64)                  {}
+func (m *recordingMetrics) ActiveReservations(int64)              {}
+func (m *recordingMetrics) CheckpointAge(string, time.Duration)   {}
+func (m *recordingMetrics) ReconcileGap(int64, decimal.Decimal)   {}
+func (m *recordingMetrics) ReservedAmount(int64, decimal.Decimal) {}
+func (m *recordingMetrics) RollupProcessed(count int)             { m.rollupProcessed += count }
+func (m *recordingMetrics) RollupLatency(time.Duration)           {}
+func (m *recordingMetrics) BalanceDrift(_ string, _ int64, _ decimal.Decimal) {
+	m.balanceDriftCalled = true
+}

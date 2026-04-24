@@ -14,6 +14,7 @@ import (
 type RollupQueuer interface {
 	DequeueRollupBatch(ctx context.Context, batchSize int) ([]core.RollupQueueItem, error)
 	MarkRollupProcessed(ctx context.Context, id int64) error
+	ReleaseRollupClaim(ctx context.Context, id int64) error
 	CountPendingRollups(ctx context.Context) (int64, error)
 }
 
@@ -78,6 +79,14 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	// Load classifications for normal_side lookup
 	clsList, err := s.classifications.ListClassifications(ctx, false)
 	if err != nil {
+		for _, item := range items {
+			if releaseErr := s.queue.ReleaseRollupClaim(ctx, item.ID); releaseErr != nil {
+				s.logger.Error("service: rollup: release claim failed",
+					"item_id", item.ID,
+					"error", releaseErr,
+				)
+			}
+		}
 		return 0, fmt.Errorf("service: rollup: list classifications: %w", err)
 	}
 	normalSides := make(map[int64]core.NormalSide, len(clsList))
@@ -90,6 +99,12 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	processed := 0
 	for _, item := range items {
 		if err := s.processItem(ctx, item, normalSides, classCodeMap); err != nil {
+			if releaseErr := s.queue.ReleaseRollupClaim(ctx, item.ID); releaseErr != nil {
+				s.logger.Error("service: rollup: release claim failed",
+					"item_id", item.ID,
+					"error", releaseErr,
+				)
+			}
 			s.logger.Error("service: rollup: process item failed",
 				"item_id", item.ID,
 				"holder", item.AccountHolder,

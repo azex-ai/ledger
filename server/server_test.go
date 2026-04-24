@@ -183,7 +183,16 @@ func (m *mockEventReader) ListEvents(ctx context.Context, filter core.EventFilte
 type mockClassificationStore struct{}
 
 func (m *mockClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
-	return &core.Classification{ID: 1, Code: input.Code, Name: input.Name, NormalSide: input.NormalSide, IsSystem: input.IsSystem, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.Classification{
+		ID:         1,
+		Code:       input.Code,
+		Name:       input.Name,
+		NormalSide: input.NormalSide,
+		IsSystem:   input.IsSystem,
+		IsActive:   true,
+		Lifecycle:  input.Lifecycle,
+		CreatedAt:  time.Now(),
+	}, nil
 }
 
 func (m *mockClassificationStore) GetByCode(ctx context.Context, code string) (*core.Classification, error) {
@@ -207,6 +216,10 @@ func (m *mockJournalTypeStore) CreateJournalType(ctx context.Context, input core
 	return &core.JournalType{ID: 1, Code: input.Code, Name: input.Name, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
+func (m *mockJournalTypeStore) GetJournalTypeByCode(ctx context.Context, code string) (*core.JournalType, error) {
+	return &core.JournalType{ID: 1, Code: code, Name: code, IsActive: true, CreatedAt: time.Now()}, nil
+}
+
 func (m *mockJournalTypeStore) DeactivateJournalType(ctx context.Context, id int64) error {
 	return nil
 }
@@ -218,6 +231,9 @@ func (m *mockJournalTypeStore) ListJournalTypes(ctx context.Context, activeOnly 
 type mockTemplateStore struct{}
 
 func (m *mockTemplateStore) CreateTemplate(ctx context.Context, input core.TemplateInput) (*core.EntryTemplate, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
 	return &core.EntryTemplate{ID: 1, Code: input.Code, Name: input.Name, JournalTypeID: input.JournalTypeID, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
@@ -341,8 +357,8 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		journals:        &mockJournalWriter{},
 		balances:        &mockBalanceReader{},
 		reserver:        &mockReserver{},
-		booker:        &mockBooker{},
-		bookingReader: &mockBookingReader{},
+		booker:          &mockBooker{},
+		bookingReader:   &mockBookingReader{},
 		eventReader:     &mockEventReader{},
 		classifications: &mockClassificationStore{},
 		journalTypes:    &mockJournalTypeStore{},
@@ -368,8 +384,8 @@ type testServerOpts struct {
 	journals        core.JournalWriter
 	balances        core.BalanceReader
 	reserver        core.Reserver
-	booker        core.Booker
-	bookingReader core.BookingReader
+	booker          core.Booker
+	bookingReader   core.BookingReader
 	eventReader     core.EventReader
 	classifications core.ClassificationStore
 	journalTypes    core.JournalTypeStore
@@ -429,8 +445,8 @@ func TestHealthEndpoint(t *testing.T) {
 func TestPostJournal(t *testing.T) {
 	srv := newTestServer()
 	body := map[string]any{
-		"journal_type_id":  1,
-		"idempotency_key":  "test-123",
+		"journal_type_id": 1,
+		"idempotency_key": "test-123",
 		"entries": []map[string]any{
 			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
 			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
@@ -438,6 +454,50 @@ func TestPostJournal(t *testing.T) {
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
 	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+func TestPostDepositTolerance(t *testing.T) {
+	var calls []string
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
+			templateFn: func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+				calls = append(calls, code)
+				return &core.Journal{
+					ID:             int64(len(calls)),
+					JournalTypeID:  1,
+					IdempotencyKey: params.IdempotencyKey,
+					Metadata:       params.Metadata,
+					TotalDebit:     decimal.NewFromInt(100),
+					TotalCredit:    decimal.NewFromInt(100),
+					CreatedAt:      time.Now(),
+				}, nil
+			},
+		}
+	})
+
+	body := map[string]any{
+		"holder_id":       100,
+		"currency_id":     1,
+		"idempotency_key": "dep-tol-1",
+		"expected_amount": "100",
+		"actual_amount":   "98",
+		"tolerance":       "5",
+		"source":          "deposit",
+		"metadata":        map[string]string{"request_id": "req-1"},
+	}
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/deposit-tolerance", body)
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "shortfall_auto_released", data["outcome"])
+	assert.Equal(t, "2", data["delta"])
+	assert.Equal(t, false, data["requires_manual_review"])
+
+	journals, ok := data["journals"].([]any)
+	require.True(t, ok)
+	assert.Len(t, journals, 2)
+	assert.Equal(t, []string{"deposit_confirm_pending", "deposit_release_pending"}, calls)
 }
 
 func TestPostJournalUnbalanced(t *testing.T) {
@@ -449,8 +509,8 @@ func TestPostJournalUnbalanced(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id":  1,
-		"idempotency_key":  "test-unbalanced",
+		"journal_type_id": 1,
+		"idempotency_key": "test-unbalanced",
 		"entries": []map[string]any{
 			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
 			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "50"},
@@ -627,6 +687,30 @@ func TestClassificationCRUD(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestCreateClassification_WithLifecycle(t *testing.T) {
+	srv := newTestServer()
+
+	body := map[string]any{
+		"code":        "deposit",
+		"name":        "Deposit",
+		"normal_side": "credit",
+		"lifecycle": map[string]any{
+			"initial":  "pending",
+			"terminal": []string{"confirmed", "expired"},
+			"transitions": map[string]any{
+				"pending": []string{"confirmed", "expired"},
+			},
+		},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/classifications", body)
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	lifecycle, ok := data["lifecycle"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "pending", lifecycle["initial"])
+}
+
 func TestJournalTypeCRUD(t *testing.T) {
 	srv := newTestServer()
 
@@ -655,6 +739,19 @@ func TestTemplateCRUD(t *testing.T) {
 
 	w = doRequest(srv, http.MethodGet, "/api/v1/templates?active_only=true", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestTemplateCreate_RejectsEmptyLines(t *testing.T) {
+	srv := newTestServer()
+
+	body := map[string]any{
+		"code":            "broken",
+		"name":            "Broken",
+		"journal_type_id": 1,
+		"lines":           []map[string]any{},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/templates", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestTemplatePreview(t *testing.T) {

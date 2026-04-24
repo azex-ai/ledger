@@ -82,6 +82,13 @@ func int8ToInt64Ptr(v pgtype.Int8) *int64 {
 	return &v.Int64
 }
 
+func zeroInt64ToNil(v int64) *int64 {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
 func stringToText(s string) pgtype.Text {
 	if s == "" {
 		return pgtype.Text{Valid: false}
@@ -167,9 +174,39 @@ func anyToDecimal(v interface{}) (decimal.Decimal, error) {
 	}
 }
 
+func anyToTime(v interface{}) (time.Time, error) {
+	if v == nil {
+		return time.Time{}, nil
+	}
+	switch val := v.(type) {
+	case time.Time:
+		return val, nil
+	case pgtype.Timestamptz:
+		if !val.Valid {
+			return time.Time{}, nil
+		}
+		return val.Time, nil
+	case string:
+		return time.Parse(time.RFC3339Nano, val)
+	default:
+		var ts pgtype.Timestamptz
+		if err := ts.Scan(v); err == nil {
+			if !ts.Valid {
+				return time.Time{}, nil
+			}
+			return ts.Time, nil
+		}
+		return time.Time{}, fmt.Errorf("postgres: convert: unsupported type %T for time", v)
+	}
+}
+
 // --- sqlcgen model -> core model converters ---
 
 func journalFromRow(row sqlcgen.Journal) *core.Journal {
+	reversalOf := int64(0)
+	if row.ReversalOf.Valid {
+		reversalOf = row.ReversalOf.Int64
+	}
 	return &core.Journal{
 		ID:             row.ID,
 		JournalTypeID:  row.JournalTypeID,
@@ -179,7 +216,7 @@ func journalFromRow(row sqlcgen.Journal) *core.Journal {
 		Metadata:       jsonToMetadata(row.Metadata),
 		ActorID:        row.ActorID,
 		Source:         row.Source,
-		ReversalOf:     row.ReversalOf,
+		ReversalOf:     reversalOf,
 		EventID:        row.EventID,
 		CreatedAt:      row.CreatedAt,
 	}
@@ -284,7 +321,6 @@ func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
 	}
 }
 
-
 func bookingFromRow(row sqlcgen.Booking) *core.Booking {
 	return &core.Booking{
 		ID:               row.ID,
@@ -342,4 +378,3 @@ func anyMetadataToJSON(m map[string]any) []byte {
 	}
 	return b
 }
-

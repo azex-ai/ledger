@@ -127,6 +127,25 @@ func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Cla
 	return i, err
 }
 
+const getJournalTypeByCode = `-- name: GetJournalTypeByCode :one
+SELECT id, code, name, is_active, created_at
+FROM journal_types
+WHERE code = $1
+`
+
+func (q *Queries) GetJournalTypeByCode(ctx context.Context, code string) (JournalType, error) {
+	row := q.db.QueryRow(ctx, getJournalTypeByCode, code)
+	var i JournalType
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.IsActive,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listClassifications = `-- name: ListClassifications :many
 SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications
 WHERE ($1::boolean = false OR is_active = true)

@@ -30,14 +30,14 @@ func TestWorker_StartsAndStops(t *testing.T) {
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(
-		&mockGlobalSummer{debit: decimal.Zero, credit: decimal.Zero},
+		&mockGlobalSummer{totals: []CurrencyReconcileTotals{{CurrencyID: 1, Debit: decimal.Zero, Credit: decimal.Zero}}},
 		&mockAccountEntrySummer{},
 		&mockCheckpointReader{},
 		&mockClassificationLister{},
 		engine,
 	)
 	snapshotSvc := NewSnapshotService(
-		&mockCheckpointLister{},
+		&mockHistoricalBalanceLister{},
 		&mockSnapshotWriter{},
 		engine,
 	)
@@ -86,14 +86,14 @@ func TestWorker_RollupRunsAtInterval(t *testing.T) {
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(
-		&mockGlobalSummer{debit: decimal.Zero, credit: decimal.Zero},
+		&mockGlobalSummer{totals: []CurrencyReconcileTotals{{CurrencyID: 1, Debit: decimal.Zero, Credit: decimal.Zero}}},
 		&mockAccountEntrySummer{},
 		&mockCheckpointReader{},
 		&mockClassificationLister{},
 		engine,
 	)
 	snapshotSvc := NewSnapshotService(
-		&mockCheckpointLister{},
+		&mockHistoricalBalanceLister{},
 		&mockSnapshotWriter{},
 		engine,
 	)
@@ -135,4 +135,5 @@ func (c *countingRollupQueuer) DequeueRollupBatch(_ context.Context, _ int) ([]c
 }
 
 func (c *countingRollupQueuer) MarkRollupProcessed(_ context.Context, _ int64) error { return nil }
+func (c *countingRollupQueuer) ReleaseRollupClaim(_ context.Context, _ int64) error  { return nil }
 func (c *countingRollupQueuer) CountPendingRollups(_ context.Context) (int64, error) { return 0, nil }

@@ -83,6 +83,41 @@ curl -X POST http://localhost:8080/api/v1/journals/template \
 
 **Response** `201 Created` -- same as POST /journals.
 
+### POST /journals/deposit-tolerance
+
+Apply deposit tolerance settlement for a staged deposit. The server will execute one or more preset templates based on `expected_amount`, `actual_amount`, and `tolerance`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/journals/deposit-tolerance \
+  -H "Content-Type: application/json" \
+  -d '{
+    "holder_id": 1001,
+    "currency_id": 1,
+    "idempotency_key": "deposit_tol:0xabc...",
+    "expected_amount": "100.00",
+    "actual_amount": "98.00",
+    "tolerance": "5.00",
+    "source": "deposit_confirm"
+  }'
+```
+
+**Response** `201 Created`
+
+```json
+{
+  "outcome": "shortfall_auto_released",
+  "expected_amount": "100.00",
+  "actual_amount": "98.00",
+  "tolerance": "5.00",
+  "delta": "2.00",
+  "requires_manual_review": false,
+  "journals": [
+    {"id": 10, "idempotency_key": "deposit_tol:0xabc...:confirm-pending"},
+    {"id": 11, "idempotency_key": "deposit_tol:0xabc...:release-shortfall"}
+  ]
+}
+```
+
 ### POST /journals/:id/reverse
 
 Create a reversal journal (swaps all debit/credit entries).

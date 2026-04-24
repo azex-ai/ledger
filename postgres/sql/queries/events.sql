@@ -9,6 +9,12 @@ RETURNING *;
 -- name: GetEvent :one
 SELECT * FROM events WHERE id = $1;
 
+-- name: GetLatestEventForBooking :one
+SELECT * FROM events
+WHERE booking_id = $1
+ORDER BY id DESC
+LIMIT 1;
+
 -- name: ListEventsByFilter :many
 SELECT * FROM events
 WHERE (classification_code = $1 OR $1 = '')
@@ -19,12 +25,20 @@ ORDER BY id
 LIMIT $5;
 
 -- name: GetPendingEvents :many
-SELECT * FROM events
-WHERE delivery_status = 'pending'
-  AND next_attempt_at <= now()
-ORDER BY next_attempt_at
-LIMIT $1
-FOR UPDATE SKIP LOCKED;
+WITH claimed AS (
+    SELECT id
+    FROM events
+    WHERE delivery_status = 'pending'
+      AND next_attempt_at <= now()
+    ORDER BY next_attempt_at, id
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE events AS e
+SET next_attempt_at = $2
+FROM claimed
+WHERE e.id = claimed.id
+RETURNING e.*;
 
 -- name: UpdateEventDelivered :exec
 UPDATE events
@@ -33,9 +47,15 @@ WHERE id = $1;
 
 -- name: UpdateEventRetry :exec
 UPDATE events
-SET delivery_status = 'pending',
-    attempts = attempts + 1,
-    next_attempt_at = $2
+SET attempts = attempts + 1,
+    delivery_status = CASE
+        WHEN attempts + 1 >= max_attempts THEN 'dead'
+        ELSE 'pending'
+    END,
+    next_attempt_at = CASE
+        WHEN attempts + 1 >= max_attempts THEN next_attempt_at
+        ELSE $2
+    END
 WHERE id = $1;
 
 -- name: UpdateEventDead :exec

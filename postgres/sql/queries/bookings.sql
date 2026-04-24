@@ -33,5 +33,5 @@ LIMIT $5;
 SELECT * FROM bookings
 WHERE expires_at != 'epoch'
   AND expires_at < now()
-  AND status NOT IN ('confirmed', 'failed', 'expired', 'settled', 'released')
+  AND status NOT IN ('confirmed', 'expired', 'failed', 'settled', 'released')
 LIMIT $1;

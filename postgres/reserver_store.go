@@ -86,7 +86,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		ExpiresAt:      expiresAt,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: insert: %w", err)
+		return nil, wrapStoreError("postgres: reserve: insert", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -124,7 +124,7 @@ func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualA
 		SettledAmount: decimalToNumeric(actualAmount),
 		JournalID:     0,
 	}); err != nil {
-		return fmt.Errorf("postgres: settle: update: %w", err)
+		return wrapStoreError("postgres: settle: update", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -161,7 +161,7 @@ func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error 
 		ID:     reservationID,
 		Status: string(core.ReservationStatusReleased),
 	}); err != nil {
-		return fmt.Errorf("postgres: release: update: %w", err)
+		return wrapStoreError("postgres: release: update", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

@@ -14,20 +14,22 @@ import (
 // --- Classification types ---
 
 type createClassificationRequest struct {
-	Code       string `json:"code"`
-	Name       string `json:"name"`
-	NormalSide string `json:"normal_side"`
-	IsSystem   bool   `json:"is_system"`
+	Code       string          `json:"code"`
+	Name       string          `json:"name"`
+	NormalSide string          `json:"normal_side"`
+	IsSystem   bool            `json:"is_system"`
+	Lifecycle  *core.Lifecycle `json:"lifecycle"`
 }
 
 type classificationResponse struct {
-	ID         int64     `json:"id"`
-	Code       string    `json:"code"`
-	Name       string    `json:"name"`
-	NormalSide string    `json:"normal_side"`
-	IsSystem   bool      `json:"is_system"`
-	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         int64           `json:"id"`
+	Code       string          `json:"code"`
+	Name       string          `json:"name"`
+	NormalSide string          `json:"normal_side"`
+	IsSystem   bool            `json:"is_system"`
+	IsActive   bool            `json:"is_active"`
+	Lifecycle  *core.Lifecycle `json:"lifecycle,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
 }
 
 func toClassificationResponse(c *core.Classification) classificationResponse {
@@ -38,6 +40,7 @@ func toClassificationResponse(c *core.Classification) classificationResponse {
 		NormalSide: string(c.NormalSide),
 		IsSystem:   c.IsSystem,
 		IsActive:   c.IsActive,
+		Lifecycle:  c.Lifecycle,
 		CreatedAt:  c.CreatedAt,
 	}
 }
@@ -182,6 +185,7 @@ func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Reque
 		Name:       req.Name,
 		NormalSide: ns,
 		IsSystem:   req.IsSystem,
+		Lifecycle:  req.Lifecycle,
 	})
 	if err != nil {
 		httpx.Error(w, err)
@@ -292,12 +296,14 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tmpl, err := s.templates.CreateTemplate(r.Context(), core.TemplateInput{
+	input := core.TemplateInput{
 		Code:          req.Code,
 		Name:          req.Name,
 		JournalTypeID: req.JournalTypeID,
 		Lines:         lines,
-	})
+	}
+
+	tmpl, err := s.templates.CreateTemplate(r.Context(), input)
 	if err != nil {
 		httpx.Error(w, err)
 		return

@@ -16,6 +16,7 @@ func TestReservationStatus_IsValid(t *testing.T) {
 
 func TestReservationStatus_CanTransition(t *testing.T) {
 	assert.True(t, ReservationStatusActive.CanTransitionTo(ReservationStatusSettling))
+	assert.True(t, ReservationStatusActive.CanTransitionTo(ReservationStatusSettled))
 	assert.True(t, ReservationStatusActive.CanTransitionTo(ReservationStatusReleased))
 	assert.True(t, ReservationStatusSettling.CanTransitionTo(ReservationStatusSettled))
 	assert.True(t, ReservationStatusSettling.CanTransitionTo(ReservationStatusReleased))

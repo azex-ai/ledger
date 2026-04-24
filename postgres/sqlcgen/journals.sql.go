@@ -89,6 +89,29 @@ func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey
 	return i, err
 }
 
+const getReversalByOriginalJournalID = `-- name: GetReversalByOriginalJournalID :one
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE reversal_of = $1
+`
+
+func (q *Queries) GetReversalByOriginalJournalID(ctx context.Context, reversalOf pgtype.Int8) (Journal, error) {
+	row := q.db.QueryRow(ctx, getReversalByOriginalJournalID, reversalOf)
+	var i Journal
+	err := row.Scan(
+		&i.ID,
+		&i.JournalTypeID,
+		&i.IdempotencyKey,
+		&i.TotalDebit,
+		&i.TotalCredit,
+		&i.Metadata,
+		&i.ActorID,
+		&i.Source,
+		&i.ReversalOf,
+		&i.CreatedAt,
+		&i.EventID,
+	)
+	return i, err
+}
+
 const insertJournal = `-- name: InsertJournal :one
 INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -103,7 +126,7 @@ type InsertJournalParams struct {
 	Metadata       []byte         `json:"metadata"`
 	ActorID        int64          `json:"actor_id"`
 	Source         string         `json:"source"`
-	ReversalOf     int64          `json:"reversal_of"`
+	ReversalOf     pgtype.Int8    `json:"reversal_of"`
 	EventID        int64          `json:"event_id"`
 }
 
