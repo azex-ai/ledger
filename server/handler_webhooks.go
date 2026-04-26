@@ -18,7 +18,7 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB limit
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("read body failed"))
 		return

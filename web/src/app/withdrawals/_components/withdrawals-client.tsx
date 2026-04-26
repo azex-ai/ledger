@@ -10,6 +10,7 @@ import {
   useFailWithdraw,
   useRetryWithdraw,
 } from "@/lib/hooks/use-withdrawals";
+import { formatAmount, formatUTC } from "@/lib/utils";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
@@ -22,10 +23,18 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, ArrowUpFromLine } from "lucide-react";
+import { ArrowUpFromLine } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 const WITHDRAW_STATES = ["locked", "reserved", "reviewing", "processing", "confirmed", "failed", "expired"];
 
@@ -78,7 +87,9 @@ function FailDialog({ id }: { id: number }) {
           <DialogTitle>Fail Withdrawal #{id}</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4 py-4">
-          <p className="text-sm text-muted-foreground">This will mark the withdrawal as failed.</p>
+          <p className="text-sm text-muted-foreground">
+            This will mark the withdrawal as failed. You can retry from the failed state.
+          </p>
           <div className="grid gap-2">
             <Label>Reason</Label>
             <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Insufficient gas, timeout, etc." />
@@ -107,9 +118,25 @@ function FailDialog({ id }: { id: number }) {
 function ReserveButton({ id }: { id: number }) {
   const mutation = useReserveWithdraw();
   return (
-    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal reserved") })} disabled={mutation.isPending}>
-      {mutation.isPending ? "Reserving..." : "Reserve"}
-    </Button>
+    <AlertDialog>
+      <AlertDialogTrigger render={<Button size="sm" variant="outline" disabled={mutation.isPending} />}>
+        {mutation.isPending ? "Reserving..." : "Reserve"}
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Reserve Withdrawal #{id}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This will lock funds for this withdrawal. The reserved amount will be deducted from available balance.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal reserved") })}>
+            Reserve
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -117,12 +144,44 @@ function ReviewButtons({ id }: { id: number }) {
   const mutation = useReviewWithdraw();
   return (
     <>
-      <Button size="sm" variant="outline" onClick={() => mutation.mutate({ id, approved: true }, { onSuccess: () => toast.success("Withdrawal approved") })} disabled={mutation.isPending}>
-        {mutation.isPending ? "..." : "Approve"}
-      </Button>
-      <Button size="sm" variant="ghost" onClick={() => mutation.mutate({ id, approved: false }, { onSuccess: () => toast.success("Withdrawal rejected") })} disabled={mutation.isPending}>
-        {mutation.isPending ? "..." : "Reject"}
-      </Button>
+      <AlertDialog>
+        <AlertDialogTrigger render={<Button size="sm" variant="outline" disabled={mutation.isPending} />}>
+          {mutation.isPending ? "..." : "Approve"}
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Approve Withdrawal #{id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will approve the withdrawal for processing.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => mutation.mutate({ id, approved: true }, { onSuccess: () => toast.success("Withdrawal approved") })}>
+              Approve
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog>
+        <AlertDialogTrigger render={<Button size="sm" variant="ghost" disabled={mutation.isPending} />}>
+          {mutation.isPending ? "..." : "Reject"}
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reject Withdrawal #{id}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will reject the withdrawal.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => mutation.mutate({ id, approved: false }, { onSuccess: () => toast.success("Withdrawal rejected") })}>
+              Reject
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
@@ -130,18 +189,50 @@ function ReviewButtons({ id }: { id: number }) {
 function ConfirmButton({ id }: { id: number }) {
   const mutation = useConfirmWithdraw();
   return (
-    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal confirmed") })} disabled={mutation.isPending}>
-      {mutation.isPending ? "Confirming..." : "Confirm"}
-    </Button>
+    <AlertDialog>
+      <AlertDialogTrigger render={<Button size="sm" variant="outline" disabled={mutation.isPending} />}>
+        {mutation.isPending ? "Confirming..." : "Confirm"}
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Confirm Withdrawal #{id}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This will confirm the withdrawal as completed. This action cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal confirmed") })}>
+            Confirm
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
 function RetryButton({ id }: { id: number }) {
   const mutation = useRetryWithdraw();
   return (
-    <Button size="sm" variant="outline" onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal retrying") })} disabled={mutation.isPending}>
-      {mutation.isPending ? "Retrying..." : "Retry"}
-    </Button>
+    <AlertDialog>
+      <AlertDialogTrigger render={<Button size="sm" variant="outline" disabled={mutation.isPending} />}>
+        {mutation.isPending ? "Retrying..." : "Retry"}
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Retry Withdrawal #{id}?</AlertDialogTitle>
+          <AlertDialogDescription>
+            This will retry the failed withdrawal by re-reserving funds.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal retrying") })}>
+            Retry
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -174,24 +265,15 @@ export function WithdrawalsClient() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-shimmer rounded" />
-          ))}
-        </div>
+        <TableSkeleton rows={5} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load withdrawals</p>
-        </div>
+        <ErrorState message="Failed to load withdrawals" />
       ) : withdrawals.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <ArrowUpFromLine className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No withdrawals found</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {statusFilter ? "Try a different status filter." : "No withdrawals have been created yet."}
-          </p>
-        </div>
+        <EmptyState
+          icon={ArrowUpFromLine}
+          title="No withdrawals found"
+          description={statusFilter ? "Try a different status filter." : "No withdrawals have been created yet."}
+        />
       ) : (
         <>
           <Table>
@@ -213,11 +295,11 @@ export function WithdrawalsClient() {
                   <TableCell>#{w.id}</TableCell>
                   <TableCell>{w.account_holder}</TableCell>
                   <TableCell>{w.channel_name}</TableCell>
-                  <TableCell className="text-right font-mono">{w.amount}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(w.amount)}</TableCell>
                   <TableCell><StatusBadge status={w.status} /></TableCell>
                   <TableCell>{w.review_required ? "Required" : "Auto"}</TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
-                    {new Date(w.created_at).toLocaleString()}
+                    {formatUTC(w.created_at)}
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">

@@ -1,4 +1,5 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
+import { useLedgerMutation } from "./use-ledger-mutation";
 import * as api from "@/lib/api";
 
 export function useWithdrawals(params: { holder?: number; status?: string }) {
@@ -9,52 +10,46 @@ export function useWithdrawals(params: { holder?: number; status?: string }) {
 }
 
 export function useReserveWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.reserveWithdraw(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+  return useLedgerMutation(
+    (id: number) => api.reserveWithdraw(id),
+    ["withdrawals"],
+  );
 }
 
 export function useReviewWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, approved }: { id: number; approved: boolean }) =>
+  return useLedgerMutation(
+    ({ id, approved }: { id: number; approved: boolean }) =>
       api.reviewWithdraw(id, approved),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+    ["withdrawals"],
+  );
 }
 
 export function useProcessWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, channelRef }: { id: number; channelRef: string }) =>
+  return useLedgerMutation(
+    ({ id, channelRef }: { id: number; channelRef: string }) =>
       api.processWithdraw(id, channelRef),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+    ["withdrawals"],
+  );
 }
 
 export function useConfirmWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.confirmWithdraw(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+  return useLedgerMutation(
+    (id: number) => api.confirmWithdraw(id),
+    ["withdrawals"],
+  );
 }
 
 export function useFailWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
+  return useLedgerMutation(
+    ({ id, reason }: { id: number; reason: string }) =>
       api.failWithdraw(id, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+    ["withdrawals"],
+  );
 }
 
 export function useRetryWithdraw() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.retryWithdraw(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["withdrawals"] }),
-  });
+  return useLedgerMutation(
+    (id: number) => api.retryWithdraw(id),
+    ["withdrawals"],
+  );
 }

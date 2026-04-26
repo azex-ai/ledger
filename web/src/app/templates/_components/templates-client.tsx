@@ -16,8 +16,11 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, FileCode2 } from "lucide-react";
+import { FileCode2 } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 import type { PreviewResult } from "@/lib/api";
 
 interface LineForm {
@@ -254,18 +257,15 @@ export function TemplatesClient() {
       <PageHeader title="Templates" description="Entry template definitions" actions={<CreateTemplateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-20 animate-shimmer rounded" />)}</div>
+        <TableSkeleton rows={3} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load templates</p>
-        </div>
+        <ErrorState message="Failed to load templates" />
       ) : templates.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <FileCode2 className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No templates yet</p>
-          <p className="text-xs text-muted-foreground mt-1">Create your first template to define reusable journal recipes.</p>
-        </div>
+        <EmptyState
+          icon={FileCode2}
+          title="No templates yet"
+          description="Create your first template to define reusable journal recipes."
+        />
       ) : (
         <div className="space-y-4">
           {templates.map((t) => (

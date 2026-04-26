@@ -240,7 +240,7 @@ func (s *BookingStore) GetBooking(ctx context.Context, id int64) (*core.Booking,
 	return bookingFromRow(row), nil
 }
 
-// ListExpiredBookings returns non-terminal bookings past their expiration time.
+// ListExpiredBookings returns bookings past their expiration time that can transition to expired.
 func (s *BookingStore) ListExpiredBookings(ctx context.Context, limit int) ([]core.Booking, error) {
 	rows, err := s.q.ListExpiredBookings(ctx, int32(limit))
 	if err != nil {

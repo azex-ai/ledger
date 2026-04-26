@@ -30,8 +30,10 @@ ORDER BY id
 LIMIT $5;
 
 -- name: ListExpiredBookings :many
-SELECT * FROM bookings
-WHERE expires_at != 'epoch'
-  AND expires_at < now()
-  AND status NOT IN ('confirmed', 'expired', 'failed', 'settled', 'released')
+SELECT b.*
+FROM bookings b
+INNER JOIN classifications c ON c.id = b.classification_id
+WHERE b.expires_at != 'epoch'
+  AND b.expires_at < now()
+  AND COALESCE(c.lifecycle -> 'transitions' -> b.status, '[]'::jsonb) ? 'expired'
 LIMIT $1;

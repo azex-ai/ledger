@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatAmount, validateAmount } from "@/lib/utils";
 import { useDeposits, useConfirmingDeposit, useConfirmDeposit, useFailDeposit } from "@/lib/hooks/use-deposits";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -16,8 +17,11 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, ArrowDownToLine } from "lucide-react";
+import { ArrowDownToLine } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 const DEPOSIT_STATES = ["pending", "confirming", "confirmed", "failed", "expired"];
 
@@ -109,9 +113,9 @@ function ConfirmDialog({ id }: { id: number }) {
         <DialogFooter>
           <Button
             onClick={() => {
-              const DECIMAL_RE = /^\d+(\.\d+)?$/;
-              if (!DECIMAL_RE.test(amount)) {
-                toast.error("Amount must be a valid decimal number");
+              const amountErr = validateAmount(amount);
+              if (amountErr) {
+                toast.error(amountErr);
                 return;
               }
               mutation.mutate({ id, actual_amount: amount, channel_ref: channelRef }, {
@@ -199,24 +203,15 @@ export function DepositsClient() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-shimmer rounded" />
-          ))}
-        </div>
+        <TableSkeleton rows={5} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load deposits</p>
-        </div>
+        <ErrorState message="Failed to load deposits" />
       ) : deposits.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <ArrowDownToLine className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No deposits found</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {statusFilter ? "Try a different status filter." : "No deposits have been created yet."}
-          </p>
-        </div>
+        <EmptyState
+          icon={ArrowDownToLine}
+          title="No deposits found"
+          description={statusFilter ? "Try a different status filter." : "No deposits have been created yet."}
+        />
       ) : (
         <>
           <Table>
@@ -238,8 +233,8 @@ export function DepositsClient() {
                   <TableCell>#{d.id}</TableCell>
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
-                  <TableCell className="text-right font-mono">{d.expected_amount}</TableCell>
-                  <TableCell className="text-right font-mono">{d.actual_amount ?? "-"}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(d.expected_amount)}</TableCell>
+                  <TableCell className="text-right font-mono">{d.actual_amount ? formatAmount(d.actual_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={d.status} /></TableCell>
                   <TableCell><DepositStepper status={d.status} /></TableCell>
                   <TableCell>

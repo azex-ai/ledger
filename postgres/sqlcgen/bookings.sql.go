@@ -212,10 +212,12 @@ func (q *Queries) ListBookingsByFilter(ctx context.Context, arg ListBookingsByFi
 }
 
 const listExpiredBookings = `-- name: ListExpiredBookings :many
-SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings
-WHERE expires_at != 'epoch'
-  AND expires_at < now()
-  AND status NOT IN ('confirmed', 'expired', 'failed', 'settled', 'released')
+SELECT b.id, b.classification_id, b.account_holder, b.currency_id, b.amount, b.settled_amount, b.status, b.channel_name, b.channel_ref, b.reservation_id, b.journal_id, b.idempotency_key, b.metadata, b.expires_at, b.created_at, b.updated_at
+FROM bookings b
+INNER JOIN classifications c ON c.id = b.classification_id
+WHERE b.expires_at != 'epoch'
+  AND b.expires_at < now()
+  AND COALESCE(c.lifecycle -> 'transitions' -> b.status, '[]'::jsonb) ? 'expired'
 LIMIT $1
 `
 

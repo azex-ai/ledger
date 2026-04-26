@@ -13,8 +13,11 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
-import { AlertCircle, FileType2 } from "lucide-react";
+import { FileType2 } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
@@ -96,18 +99,15 @@ export function JournalTypesClient() {
       <PageHeader title="Journal Types" description="Journal type definitions" actions={<CreateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
+        <TableSkeleton rows={5} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load journal types</p>
-        </div>
+        <ErrorState message="Failed to load journal types" />
       ) : types.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <FileType2 className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No journal types yet</p>
-          <p className="text-xs text-muted-foreground mt-1">Create your first journal type to get started.</p>
-        </div>
+        <EmptyState
+          icon={FileType2}
+          title="No journal types yet"
+          description="Create your first journal type to get started."
+        />
       ) : (
         <Table>
           <TableHeader>

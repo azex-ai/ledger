@@ -15,14 +15,20 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ core.JournalWriter = (*LedgerStore)(nil)
-	_ core.BalanceReader = (*LedgerStore)(nil)
+	_ core.JournalWriter         = (*LedgerStore)(nil)
+	_ core.TemplateBatchExecutor = (*LedgerStore)(nil)
+	_ core.BalanceReader         = (*LedgerStore)(nil)
 )
 
 // LedgerStore implements JournalWriter and BalanceReader using PostgreSQL.
 type LedgerStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+}
+
+type queryProvider interface {
+	GetTemplateByCode(ctx context.Context, code string) (sqlcgen.EntryTemplate, error)
+	GetTemplateLines(ctx context.Context, templateID int64) ([]sqlcgen.EntryTemplateLine, error)
 }
 
 // NewLedgerStore creates a new LedgerStore.
@@ -36,10 +42,6 @@ func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
 // PostJournal posts a balanced journal within a transaction.
 // Idempotent: returns existing journal if idempotency_key already exists.
 func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
-	if err := input.Validate(); err != nil {
-		return nil, fmt.Errorf("postgres: post journal: %w", err)
-	}
-
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: post journal: begin tx: %w", err)
@@ -47,112 +49,64 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-
-	// Check idempotency
-	existing, err := qtx.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
-	if err == nil {
-		// Already exists — return it
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("postgres: post journal: commit idempotent: %w", err)
-		}
-		return journalFromRow(existing), nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("postgres: post journal: check idempotency: %w", err)
-	}
-
-	debit, credit := input.Totals()
-
-	row, err := qtx.InsertJournal(ctx, sqlcgen.InsertJournalParams{
-		JournalTypeID:  input.JournalTypeID,
-		IdempotencyKey: input.IdempotencyKey,
-		TotalDebit:     decimalToNumeric(debit),
-		TotalCredit:    decimalToNumeric(credit),
-		Metadata:       metadataToJSON(input.Metadata),
-		ActorID:        input.ActorID,
-		Source:         input.Source,
-		ReversalOf:     int64ToInt8(zeroInt64ToNil(input.ReversalOf)),
-		EventID:        input.EventID,
-	})
+	journal, err := s.postJournalWithQueries(ctx, qtx, input)
 	if err != nil {
-		existing, lookupErr := qtx.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
-		if lookupErr == nil {
-			if err := tx.Commit(ctx); err != nil {
-				return nil, fmt.Errorf("postgres: post journal: commit idempotent after insert race: %w", err)
-			}
-			return journalFromRow(existing), nil
-		}
-		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
-		}
-		return nil, wrapStoreError("postgres: post journal: insert journal", err)
-	}
-
-	// Track unique (holder, currency, classification) for rollup enqueue
-	type rollupKey struct {
-		holder           int64
-		currencyID       int64
-		classificationID int64
-	}
-	seen := make(map[rollupKey]struct{})
-
-	for i, e := range input.Entries {
-		_, err := qtx.InsertJournalEntry(ctx, sqlcgen.InsertJournalEntryParams{
-			JournalID:        row.ID,
-			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
-			EntryType:        string(e.EntryType),
-			Amount:           decimalToNumeric(e.Amount),
-		})
-		if err != nil {
-			return nil, wrapStoreError(fmt.Sprintf("postgres: post journal: insert entry[%d]", i), err)
-		}
-
-		key := rollupKey{e.AccountHolder, e.CurrencyID, e.ClassificationID}
-		seen[key] = struct{}{}
-	}
-
-	// Enqueue rollup for each unique dimension
-	for key := range seen {
-		if err := qtx.EnqueueRollup(ctx, sqlcgen.EnqueueRollupParams{
-			AccountHolder:    key.holder,
-			CurrencyID:       key.currencyID,
-			ClassificationID: key.classificationID,
-		}); err != nil {
-			return nil, wrapStoreError("postgres: post journal: enqueue rollup", err)
-		}
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: commit: %w", err)
 	}
 
-	return journalFromRow(row), nil
+	return journal, nil
 }
 
 // ExecuteTemplate loads a template by code, renders it, and posts the journal.
 func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (*core.Journal, error) {
-	tmplRow, err := s.q.GetTemplateByCode(ctx, templateCode)
+	input, err := s.renderTemplate(ctx, s.q, templateCode, params)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: execute template: template %q: %w", templateCode, core.ErrNotFound)
-		}
-		return nil, fmt.Errorf("postgres: execute template: get template: %w", err)
-	}
-
-	lines, err := s.q.GetTemplateLines(ctx, tmplRow.ID)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: execute template: get lines: %w", err)
-	}
-
-	tmpl := templateFromRow(tmplRow, lines)
-	input, err := tmpl.Render(params)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: execute template: render: %w", err)
+		return nil, err
 	}
 
 	return s.PostJournal(ctx, *input)
+}
+
+// ExecuteTemplateBatch renders and posts multiple templates in a single transaction.
+func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: execute template batch: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+	inputs := make([]core.JournalInput, len(requests))
+	for i, req := range requests {
+		input, err := s.renderTemplate(ctx, qtx, req.TemplateCode, req.Params)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
+		}
+		inputs[i] = *input
+	}
+
+	journals := make([]*core.Journal, 0, len(inputs))
+	for i, input := range inputs {
+		journal, err := s.postJournalWithQueries(ctx, qtx, input)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
+		}
+		journals = append(journals, journal)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: execute template batch: commit: %w", err)
+	}
+
+	return journals, nil
 }
 
 // ReverseJournal creates a reversal journal for the given journal ID.
@@ -209,15 +163,121 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 	return s.PostJournal(ctx, input)
 }
 
+func (s *LedgerStore) renderTemplate(ctx context.Context, q queryProvider, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
+	tmplRow, err := q.GetTemplateByCode(ctx, templateCode)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: execute template: template %q: %w", templateCode, core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: execute template: get template: %w", err)
+	}
+
+	lines, err := q.GetTemplateLines(ctx, tmplRow.ID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: execute template: get lines: %w", err)
+	}
+
+	tmpl := templateFromRow(tmplRow, lines)
+	input, err := tmpl.Render(params)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: execute template: render: %w", err)
+	}
+	return input, nil
+}
+
+func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput) (*core.Journal, error) {
+	if err := input.Validate(); err != nil {
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
+
+	existing, err := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
+	if err == nil {
+		return journalFromRow(existing), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: post journal: check idempotency: %w", err)
+	}
+
+	debit, credit := input.Totals()
+
+	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{
+		JournalTypeID:  input.JournalTypeID,
+		IdempotencyKey: input.IdempotencyKey,
+		TotalDebit:     decimalToNumeric(debit),
+		TotalCredit:    decimalToNumeric(credit),
+		Metadata:       metadataToJSON(input.Metadata),
+		ActorID:        input.ActorID,
+		Source:         input.Source,
+		ReversalOf:     int64ToInt8(zeroInt64ToNil(input.ReversalOf)),
+		EventID:        input.EventID,
+	})
+	if err != nil {
+		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
+		if lookupErr == nil {
+			return journalFromRow(existing), nil
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
+		}
+		return nil, wrapStoreError("postgres: post journal: insert journal", err)
+	}
+
+	type rollupKey struct {
+		holder           int64
+		currencyID       int64
+		classificationID int64
+	}
+	seen := make(map[rollupKey]struct{})
+
+	for i, e := range input.Entries {
+		_, err := q.InsertJournalEntry(ctx, sqlcgen.InsertJournalEntryParams{
+			JournalID:        row.ID,
+			AccountHolder:    e.AccountHolder,
+			CurrencyID:       e.CurrencyID,
+			ClassificationID: e.ClassificationID,
+			EntryType:        string(e.EntryType),
+			Amount:           decimalToNumeric(e.Amount),
+		})
+		if err != nil {
+			return nil, wrapStoreError(fmt.Sprintf("postgres: post journal: insert entry[%d]", i), err)
+		}
+
+		key := rollupKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID}
+		seen[key] = struct{}{}
+	}
+
+	for key := range seen {
+		if err := q.EnqueueRollup(ctx, sqlcgen.EnqueueRollupParams{
+			AccountHolder:    key.holder,
+			CurrencyID:       key.currencyID,
+			ClassificationID: key.classificationID,
+		}); err != nil {
+			return nil, wrapStoreError("postgres: post journal: enqueue rollup", err)
+		}
+	}
+
+	return journalFromRow(row), nil
+}
+
 // GetBalance computes balance for a single (holder, currency, classification) dimension.
 // Balance = checkpoint.balance + delta (entries since checkpoint).
 // Delta computation respects normal_side of the classification.
+// Both queries run inside a REPEATABLE READ transaction to prevent phantom reads
+// from concurrent journal writes between the two queries.
 func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: get balance: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+
 	// Get checkpoint (may not exist yet)
 	var checkpointBalance decimal.Decimal
 	var sinceEntryID int64
 
-	cp, err := s.q.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
+	cp, err := qtx.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
 		AccountHolder:    holder,
 		CurrencyID:       currencyID,
 		ClassificationID: classificationID,
@@ -231,7 +291,7 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	}
 
 	// Get entry sums since checkpoint
-	sums, err := s.q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
+	sums, err := qtx.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
 		SinceEntryID:  sinceEntryID,
@@ -260,7 +320,7 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	}
 
 	// Get classification to determine normal_side
-	cls, err := s.q.GetClassification(ctx, classificationID)
+	cls, err := qtx.GetClassification(ctx, classificationID)
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("postgres: get balance: get classification %d: %w", classificationID, err)
 	}

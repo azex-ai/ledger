@@ -21,6 +21,9 @@ type Event struct {
 	JournalID          int64           `json:"journal_id"`
 	Metadata           map[string]any  `json:"metadata"`
 	OccurredAt         time.Time       `json:"occurred_at"`
+	Attempts           int32           `json:"-"`
+	MaxAttempts        int32           `json:"-"`
+	NextAttemptAt      time.Time       `json:"-"`
 }
 
 // EventFilter is the filter for listing events.

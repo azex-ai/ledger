@@ -1,6 +1,7 @@
 "use client";
 
 import { useJournals } from "@/lib/hooks/use-journals";
+import { formatAmount, formatUTC } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
@@ -71,9 +72,9 @@ export function RecentJournals() {
                     {j.idempotency_key}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{j.source}</TableCell>
-                  <TableCell className="text-right font-mono">{j.total_debit}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(j.total_debit)}</TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
-                    {new Date(j.created_at).toLocaleString()}
+                    {formatUTC(j.created_at)}
                   </TableCell>
                 </TableRow>
               ))}

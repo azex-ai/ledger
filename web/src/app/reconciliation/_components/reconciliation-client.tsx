@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatAmount, formatSignedAmount, formatUTC, cn } from "@/lib/utils";
 import { useReconcileGlobal, useReconcileAccount } from "@/lib/hooks/use-system";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -53,7 +54,7 @@ export function ReconciliationClient() {
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Checked at {new Date(globalResult.checked_at).toLocaleString()}
+                  Checked at {formatUTC(globalResult.checked_at)}
                 </p>
               </div>
             )}
@@ -123,9 +124,18 @@ export function ReconciliationClient() {
                           <TableCell>{d.account_holder}</TableCell>
                           <TableCell>{d.currency_id}</TableCell>
                           <TableCell>{d.classification_id}</TableCell>
-                          <TableCell className="text-right font-mono">{d.expected}</TableCell>
-                          <TableCell className="text-right font-mono">{d.actual}</TableCell>
-                          <TableCell className="text-right font-mono text-red-400">{d.drift}</TableCell>
+                          <TableCell className="text-right font-mono">{formatAmount(d.expected)}</TableCell>
+                          <TableCell className="text-right font-mono">{formatAmount(d.actual)}</TableCell>
+                          <TableCell className="text-right font-mono">
+                            {(() => {
+                              const drift = formatSignedAmount(d.drift);
+                              return (
+                                <span className={cn(drift.isPositive && "text-emerald-400", drift.isNegative && "text-red-400")}>
+                                  {drift.isPositive ? "+" : ""}{drift.text}
+                                </span>
+                              );
+                            })()}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>

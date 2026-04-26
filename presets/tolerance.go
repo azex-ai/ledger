@@ -146,19 +146,30 @@ func ExecuteDepositTolerancePlan(
 	}
 
 	journals := make([]*core.Journal, 0, len(plan.Steps))
+	requests := make([]core.TemplateExecutionRequest, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		params := core.TemplateParams{
-			HolderID:       base.HolderID,
-			CurrencyID:     base.CurrencyID,
-			IdempotencyKey: fmt.Sprintf("%s:%s", base.IdempotencyKey, step.IdempotencySuffix),
-			Amounts:        copyDecimalMap(step.Amounts),
-			ActorID:        base.ActorID,
-			Source:         base.Source,
-			Metadata:       buildToleranceMetadata(base.Metadata, step.TemplateCode, plan),
-		}
-		journal, err := writer.ExecuteTemplate(ctx, step.TemplateCode, params)
+		requests = append(requests, core.TemplateExecutionRequest{
+			TemplateCode: step.TemplateCode,
+			Params: core.TemplateParams{
+				HolderID:       base.HolderID,
+				CurrencyID:     base.CurrencyID,
+				IdempotencyKey: fmt.Sprintf("%s:%s", base.IdempotencyKey, step.IdempotencySuffix),
+				Amounts:        copyDecimalMap(step.Amounts),
+				ActorID:        base.ActorID,
+				Source:         base.Source,
+				Metadata:       buildToleranceMetadata(base.Metadata, step.TemplateCode, plan),
+			},
+		})
+	}
+
+	if batchWriter, ok := writer.(core.TemplateBatchExecutor); ok {
+		return batchWriter.ExecuteTemplateBatch(ctx, requests)
+	}
+
+	for _, req := range requests {
+		journal, err := writer.ExecuteTemplate(ctx, req.TemplateCode, req.Params)
 		if err != nil {
-			return journals, fmt.Errorf("presets: execute tolerance step %q: %w", step.TemplateCode, err)
+			return journals, fmt.Errorf("presets: execute tolerance step %q: %w", req.TemplateCode, err)
 		}
 		journals = append(journals, journal)
 	}

@@ -1,4 +1,5 @@
-import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
+import { useLedgerMutation } from "./use-ledger-mutation";
 import * as api from "@/lib/api";
 
 export function useJournals(limit = 20) {
@@ -19,29 +20,23 @@ export function useJournal(id: number) {
 }
 
 export function usePostJournal() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: api.postJournal,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["journals"] }),
-  });
+  return useLedgerMutation(api.postJournal, ["journals"]);
 }
 
 export function usePostTemplateJournal() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: Parameters<typeof api.postTemplateJournal>[0]) =>
+  return useLedgerMutation(
+    (body: Parameters<typeof api.postTemplateJournal>[0]) =>
       api.postTemplateJournal(body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["journals"] }),
-  });
+    ["journals"],
+  );
 }
 
 export function useReverseJournal() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
+  return useLedgerMutation(
+    ({ id, reason }: { id: number; reason: string }) =>
       api.reverseJournal(id, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["journals"] }),
-  });
+    ["journals"],
+  );
 }
 
 export function useEntries(params: { holder?: number; currency_id?: number }, limit = 50) {

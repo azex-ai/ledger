@@ -54,8 +54,10 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	}
 	defer tx.Rollback(ctx)
 
-	// Advisory lock on account_holder to serialize concurrent reserves
-	_, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", input.AccountHolder)
+	// Advisory lock per (account_holder, currency_id) to serialize concurrent reserves.
+	// XOR-shift combines both dimensions into a single bigint key.
+	lockKey := input.AccountHolder ^ (input.CurrencyID << 32)
+	_, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", lockKey)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reserve: advisory lock: %w", err)
 	}
@@ -71,6 +73,35 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: reserve: check idempotency in tx: %w", err)
+	}
+
+	// Check sufficient balance before reserving.
+	// The advisory lock above serializes concurrent reserves for the same (holder, currency),
+	// so this read is safe against TOCTOU races.
+	balances, err := s.ledger.GetBalances(ctx, input.AccountHolder, input.CurrencyID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reserve: get balances: %w", err)
+	}
+	var totalBalance decimal.Decimal
+	for _, b := range balances {
+		totalBalance = totalBalance.Add(b.Balance)
+	}
+
+	activeReserved, err := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
+		AccountHolder: input.AccountHolder,
+		CurrencyID:    input.CurrencyID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reserve: sum active reservations: %w", err)
+	}
+	activeReservedDecimal, err := anyToDecimal(activeReserved)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reserve: convert active reservations: %w", err)
+	}
+
+	available := totalBalance.Sub(activeReservedDecimal)
+	if available.LessThan(input.Amount) {
+		return nil, fmt.Errorf("postgres: reserve: available %s < requested %s: %w", available.String(), input.Amount.String(), core.ErrInsufficientBalance)
 	}
 
 	expiresAt := time.Now().Add(input.ExpiresIn)

@@ -48,6 +48,11 @@ type TemplateParams struct {
 	Metadata       map[string]string          `json:"metadata"`
 }
 
+type TemplateExecutionRequest struct {
+	TemplateCode string         `json:"template_code"`
+	Params       TemplateParams `json:"params"`
+}
+
 func (t TemplateInput) Validate() error {
 	if t.Code == "" {
 		return fmt.Errorf("core: template: code required: %w", ErrInvalidInput)

@@ -12,8 +12,11 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
 } from "@/components/ui/dialog";
-import { AlertCircle, Coins } from "lucide-react";
+import { Coins } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
@@ -61,18 +64,15 @@ export function CurrenciesClient() {
       <PageHeader title="Currencies" description="Supported currency definitions" actions={<CreateDialog />} />
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
+        <TableSkeleton rows={3} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load currencies</p>
-        </div>
+        <ErrorState message="Failed to load currencies" />
       ) : currencies.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <Coins className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No currencies yet</p>
-          <p className="text-xs text-muted-foreground mt-1">Create your first currency to get started.</p>
-        </div>
+        <EmptyState
+          icon={Coins}
+          title="No currencies yet"
+          description="Create your first currency to get started."
+        />
       ) : (
         <Table>
           <TableHeader>

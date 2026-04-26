@@ -314,3 +314,75 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, overSuspenseBal.IsZero())
 }
+
+func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+	ledgerStore := postgres.NewLedgerStore(pool)
+
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+
+	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	mainWallet, err := classStore.GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+	pending, err := classStore.GetByCode(ctx, "pending")
+	require.NoError(t, err)
+	suspense, err := classStore.GetByCode(ctx, "suspense")
+	require.NoError(t, err)
+	custodial, err := classStore.GetByCode(ctx, "custodial")
+	require.NoError(t, err)
+
+	userID := int64(777)
+	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
+		HolderID:       userID,
+		CurrencyID:     curID,
+		IdempotencyKey: uniqueKey("tolerance-batch-pending"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
+		HolderID:       userID,
+		CurrencyID:     curID,
+		IdempotencyKey: uniqueKey("tolerance-batch-fail"),
+		Source:         "test",
+	}, &presets.DepositTolerancePlan{
+		ExpectedAmount:  decimal.NewFromInt(100),
+		ActualAmount:    decimal.NewFromInt(100),
+		ToleranceAmount: decimal.Zero,
+		Outcome:         presets.DepositToleranceExactMatch,
+		Steps: []presets.TemplateExecution{
+			{
+				TemplateCode:      "deposit_confirm_pending",
+				IdempotencySuffix: "confirm-pending",
+				Amounts:           map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
+			},
+			{
+				TemplateCode:      "missing_template",
+				IdempotencySuffix: "missing-step",
+				Amounts:           map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+			},
+		},
+	})
+	require.Error(t, err)
+
+	walletBal, err := ledgerStore.GetBalance(ctx, userID, curID, mainWallet.ID)
+	require.NoError(t, err)
+	assert.True(t, walletBal.IsZero())
+
+	pendingBal, err := ledgerStore.GetBalance(ctx, userID, curID, pending.ID)
+	require.NoError(t, err)
+	assert.True(t, pendingBal.Equal(decimal.NewFromInt(100)))
+
+	suspenseBal, err := ledgerStore.GetBalance(ctx, -userID, curID, suspense.ID)
+	require.NoError(t, err)
+	assert.True(t, suspenseBal.Equal(decimal.NewFromInt(100)))
+
+	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, curID, custodial.ID)
+	require.NoError(t, err)
+	assert.True(t, custodialBal.IsZero())
+}

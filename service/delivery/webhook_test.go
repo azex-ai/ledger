@@ -63,3 +63,22 @@ func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T)
 	assert.Equal(t, []int64{42}, poller.delivered)
 	assert.Empty(t, poller.retried)
 }
+
+func TestRetryDelay(t *testing.T) {
+	tests := []struct {
+		name     string
+		attempts int32
+		want     time.Duration
+	}{
+		{name: "first failure", attempts: 0, want: time.Minute},
+		{name: "second failure", attempts: 1, want: 5 * time.Minute},
+		{name: "third failure", attempts: 2, want: 30 * time.Minute},
+		{name: "caps at max interval", attempts: 99, want: 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, retryDelay(tt.attempts))
+		})
+	}
+}

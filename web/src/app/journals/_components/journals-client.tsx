@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatAmount, formatUTC } from "@/lib/utils";
 import { useJournals, usePostJournal, usePostTemplateJournal } from "@/lib/hooks/use-journals";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -15,8 +16,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import Link from "next/link";
-import { AlertCircle, BookOpen } from "lucide-react";
+import { BookOpen } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 function PostJournalDialog() {
   const [open, setOpen] = useState(false);
@@ -208,23 +212,15 @@ export function JournalsClient() {
         }
       />
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="h-10 animate-shimmer rounded" />
-          ))}
-        </div>
+        <TableSkeleton rows={8} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load journals</p>
-          <p className="text-xs text-muted-foreground mt-1">Check that the API is running and try again.</p>
-        </div>
+        <ErrorState message="Failed to load journals" />
       ) : journals.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <BookOpen className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No journals yet</p>
-          <p className="text-xs text-muted-foreground mt-1">Post your first journal to get started.</p>
-        </div>
+        <EmptyState
+          icon={BookOpen}
+          title="No journals yet"
+          description="Post your first journal to get started."
+        />
       ) : (
         <>
           <Table>
@@ -251,15 +247,15 @@ export function JournalsClient() {
                   <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.idempotency_key}</TableCell>
                   <TableCell>{j.journal_type_id}</TableCell>
                   <TableCell>{j.source}</TableCell>
-                  <TableCell className="text-right font-mono">{j.total_debit}</TableCell>
-                  <TableCell className="text-right font-mono">{j.total_credit}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(j.total_debit)}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(j.total_credit)}</TableCell>
                   <TableCell>
                     {j.reversal_of ? (
                       <StatusBadge status="reversed" />
                     ) : null}
                   </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
-                    {new Date(j.created_at).toLocaleString()}
+                    {formatUTC(j.created_at)}
                   </TableCell>
                 </TableRow>
               ))}

@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { AlertCircle } from "lucide-react";
+import { formatAmount } from "@/lib/utils";
 import { useSnapshots } from "@/lib/hooks/use-system";
+import { ErrorState } from "@/components/error-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,12 +64,9 @@ export function SnapshotsClient() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <div key={i} className="h-10 animate-shimmer rounded" />)}</div>
+        <TableSkeleton rows={5} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load snapshots</p>
-        </div>
+        <ErrorState message="Failed to load snapshots" />
       ) : snapshots.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           {Object.keys(query).length === 0 ? "Enter search criteria to view snapshots" : "No snapshots found"}
@@ -90,7 +89,7 @@ export function SnapshotsClient() {
                 <TableCell>{s.account_holder}</TableCell>
                 <TableCell>{s.currency_id}</TableCell>
                 <TableCell>{s.classification_id}</TableCell>
-                <TableCell className="text-right font-mono">{s.balance}</TableCell>
+                <TableCell className="text-right font-mono">{formatAmount(s.balance)}</TableCell>
               </TableRow>
             ))}
           </TableBody>

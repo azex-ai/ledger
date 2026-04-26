@@ -2,6 +2,7 @@ package presets
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -110,6 +111,31 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	assert.Equal(t, "req-1", writer.calls[1].params.Metadata["request_id"])
 }
 
+func TestExecuteDepositTolerancePlan_UsesBatchExecutorWhenAvailable(t *testing.T) {
+	writer := &fakeBatchToleranceJournalWriter{}
+	plan, err := BuildDepositTolerancePlan(
+		decimal.NewFromInt(100),
+		decimal.NewFromInt(98),
+		DepositToleranceConfig{Amount: decimal.NewFromInt(5)},
+	)
+	require.NoError(t, err)
+
+	journals, err := ExecuteDepositTolerancePlan(context.Background(), writer, core.TemplateParams{
+		HolderID:       42,
+		CurrencyID:     1,
+		IdempotencyKey: "dep-42",
+		Source:         "deposit",
+	}, plan)
+	require.NoError(t, err)
+	require.Len(t, journals, 2)
+	require.Len(t, writer.requests, 2)
+	assert.Equal(t, "deposit_confirm_pending", writer.requests[0].TemplateCode)
+	assert.Equal(t, "dep-42:confirm-pending", writer.requests[0].Params.IdempotencyKey)
+	assert.Equal(t, "deposit_release_pending", writer.requests[1].TemplateCode)
+	assert.Equal(t, "dep-42:release-shortfall", writer.requests[1].Params.IdempotencyKey)
+	assert.Zero(t, len(writer.singleCalls))
+}
+
 type fakeToleranceJournalWriter struct {
 	calls []fakeToleranceJournalCall
 }
@@ -136,5 +162,39 @@ func (f *fakeToleranceJournalWriter) PostJournal(context.Context, core.JournalIn
 }
 
 func (f *fakeToleranceJournalWriter) ReverseJournal(context.Context, int64, string) (*core.Journal, error) {
+	return nil, nil
+}
+
+type fakeBatchToleranceJournalWriter struct {
+	requests    []core.TemplateExecutionRequest
+	singleCalls []fakeToleranceJournalCall
+}
+
+func (f *fakeBatchToleranceJournalWriter) ExecuteTemplateBatch(_ context.Context, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
+	f.requests = append(f.requests, requests...)
+	journals := make([]*core.Journal, 0, len(requests))
+	for i, req := range requests {
+		journals = append(journals, &core.Journal{
+			ID:             int64(i + 1),
+			IdempotencyKey: req.Params.IdempotencyKey,
+			Metadata:       req.Params.Metadata,
+		})
+	}
+	return journals, nil
+}
+
+func (f *fakeBatchToleranceJournalWriter) ExecuteTemplate(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+	f.singleCalls = append(f.singleCalls, fakeToleranceJournalCall{
+		templateCode: code,
+		params:       params,
+	})
+	return nil, fmt.Errorf("unexpected single template execution")
+}
+
+func (f *fakeBatchToleranceJournalWriter) PostJournal(context.Context, core.JournalInput) (*core.Journal, error) {
+	return nil, nil
+}
+
+func (f *fakeBatchToleranceJournalWriter) ReverseJournal(context.Context, int64, string) (*core.Journal, error) {
 	return nil, nil
 }

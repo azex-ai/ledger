@@ -3,6 +3,7 @@ package postgres
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -46,6 +47,7 @@ func numericToDecimal(n pgtype.Numeric) (decimal.Decimal, error) {
 func mustNumericToDecimal(n pgtype.Numeric) decimal.Decimal {
 	d, err := numericToDecimal(n)
 	if err != nil {
+		slog.Error("postgres: mustNumericToDecimal: conversion failed, this should not happen with valid DB constraints", "error", err, "numeric", n)
 		panic(err)
 	}
 	return d
@@ -144,7 +146,9 @@ func jsonToMetadata(b []byte) map[string]string {
 		return nil
 	}
 	var m map[string]string
-	_ = json.Unmarshal(b, &m) // Returns nil map on corrupt data; acceptable for metadata
+	if err := json.Unmarshal(b, &m); err != nil {
+		slog.Warn("postgres: jsonToMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
+	}
 	return m
 }
 
@@ -161,6 +165,7 @@ func anyToDecimal(v interface{}) (decimal.Decimal, error) {
 	case int64:
 		return decimal.NewFromInt(val), nil
 	case float64:
+		slog.Warn("postgres: anyToDecimal: float64 path hit, possible precision loss", "value", val)
 		return decimal.NewFromFloat(val), nil
 	case string:
 		return decimal.NewFromString(val)
@@ -356,6 +361,9 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 		JournalID:          row.JournalID,
 		Metadata:           jsonToAnyMetadata(row.Metadata),
 		OccurredAt:         row.OccurredAt,
+		Attempts:           row.Attempts,
+		MaxAttempts:        row.MaxAttempts,
+		NextAttemptAt:      row.NextAttemptAt,
 	}
 }
 
@@ -364,7 +372,9 @@ func jsonToAnyMetadata(b []byte) map[string]any {
 		return nil
 	}
 	var m map[string]any
-	_ = json.Unmarshal(b, &m)
+	if err := json.Unmarshal(b, &m); err != nil {
+		slog.Warn("postgres: jsonToAnyMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
+	}
 	return m
 }
 

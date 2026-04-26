@@ -14,6 +14,11 @@ type JournalWriter interface {
 	ReverseJournal(ctx context.Context, journalID int64, reason string) (*Journal, error)
 }
 
+// TemplateBatchExecutor executes multiple templates atomically when supported.
+type TemplateBatchExecutor interface {
+	ExecuteTemplateBatch(ctx context.Context, requests []TemplateExecutionRequest) ([]*Journal, error)
+}
+
 // BalanceReader handles balance queries.
 type BalanceReader interface {
 	GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error)

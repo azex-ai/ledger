@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useState } from "react";
+import { formatAmount, formatUTC } from "@/lib/utils";
 import { useJournal, useReverseJournal } from "@/lib/hooks/use-journals";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
@@ -15,8 +16,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusBadge } from "@/components/status-badge";
 import Link from "next/link";
-import { AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
 import type { Entry } from "@/lib/api";
 
 function EntryFlow({ entries }: { entries: Entry[] }) {
@@ -36,7 +37,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
               <div key={e.id} className="rounded border border-green-500/20 bg-green-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-green-400">{e.amount}</span>
+                  <span className="font-mono text-sm text-green-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_id} / Currency {e.currency_id}
@@ -53,7 +54,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
               <div key={e.id} className="rounded border border-red-500/20 bg-red-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-red-400">{e.amount}</span>
+                  <span className="font-mono text-sm text-red-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_id} / Currency {e.currency_id}
@@ -117,13 +118,7 @@ export function JournalDetailClient({ params }: { params: Promise<{ id: string }
   }
 
   if (isError) {
-    return (
-      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-        <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-        <p className="text-sm font-medium">Failed to load journal</p>
-        <p className="text-xs text-muted-foreground mt-1">The journal may not exist or the API may be unreachable.</p>
-      </div>
-    );
+    return <ErrorState message="Failed to load journal" />;
   }
 
   if (!data) {
@@ -164,13 +159,13 @@ export function JournalDetailClient({ params }: { params: Promise<{ id: string }
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Total Debit</p>
-            <p className="text-lg font-bold font-mono">{j.total_debit}</p>
+            <p className="text-lg font-bold font-mono">{formatAmount(j.total_debit)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Total Credit</p>
-            <p className="text-lg font-bold font-mono">{j.total_credit}</p>
+            <p className="text-lg font-bold font-mono">{formatAmount(j.total_credit)}</p>
           </CardContent>
         </Card>
       </div>
@@ -186,7 +181,7 @@ export function JournalDetailClient({ params }: { params: Promise<{ id: string }
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Created At</span>
-            <span>{new Date(j.created_at).toLocaleString()}</span>
+            <span>{formatUTC(j.created_at)}</span>
           </div>
           {j.actor_id && (
             <div className="flex justify-between">
@@ -233,7 +228,7 @@ export function JournalDetailClient({ params }: { params: Promise<{ id: string }
                   <TableCell>
                     <StatusBadge status={e.entry_type} />
                   </TableCell>
-                  <TableCell className="text-right font-mono">{e.amount}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(e.amount)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

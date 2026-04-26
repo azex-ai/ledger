@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatAmount, validateAmount, formatUTC } from "@/lib/utils";
 import { useReservations, useSettleReservation, useReleaseReservation } from "@/lib/hooks/use-reservations";
 import { PageHeader } from "@/components/page-header";
 import { StatusBadge } from "@/components/status-badge";
@@ -16,8 +17,11 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, Lock } from "lucide-react";
+import { Lock } from "lucide-react";
 import { toast } from "sonner";
+import { ErrorState } from "@/components/error-state";
+import { EmptyState } from "@/components/empty-state";
+import { TableSkeleton } from "@/components/loading-skeleton";
 
 function SettleDialog({ id }: { id: number }) {
   const [open, setOpen] = useState(false);
@@ -40,9 +44,9 @@ function SettleDialog({ id }: { id: number }) {
         <DialogFooter>
           <Button
             onClick={() => {
-              const DECIMAL_RE = /^\d+(\.\d+)?$/;
-              if (!DECIMAL_RE.test(amount)) {
-                toast.error("Amount must be a valid decimal number");
+              const amountErr = validateAmount(amount);
+              if (amountErr) {
+                toast.error(amountErr);
                 return;
               }
               mutation.mutate({ id, actualAmount: amount }, {
@@ -126,24 +130,15 @@ export function ReservationsClient() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-10 animate-shimmer rounded" />
-          ))}
-        </div>
+        <TableSkeleton rows={5} />
       ) : isError ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-          <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-          <p className="text-sm font-medium">Failed to load reservations</p>
-        </div>
+        <ErrorState message="Failed to load reservations" />
       ) : reservations.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-12 text-center">
-          <Lock className="mx-auto h-8 w-8 text-muted-foreground mb-2" />
-          <p className="text-sm font-medium">No reservations found</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {statusFilter ? "Try a different status filter." : "No reservations have been created yet."}
-          </p>
-        </div>
+        <EmptyState
+          icon={Lock}
+          title="No reservations found"
+          description={statusFilter ? "Try a different status filter." : "No reservations have been created yet."}
+        />
       ) : (
         <>
           <Table>
@@ -165,11 +160,11 @@ export function ReservationsClient() {
                   <TableCell>#{r.id}</TableCell>
                   <TableCell>{r.account_holder}</TableCell>
                   <TableCell>{r.currency_id}</TableCell>
-                  <TableCell className="text-right font-mono">{r.reserved_amount}</TableCell>
-                  <TableCell className="text-right font-mono">{r.settled_amount ?? "-"}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(r.reserved_amount)}</TableCell>
+                  <TableCell className="text-right font-mono">{r.settled_amount ? formatAmount(r.settled_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {new Date(r.expires_at).toLocaleString()}
+                    {formatUTC(r.expires_at)}
                   </TableCell>
                   <TableCell>
                     {r.status === "active" && (

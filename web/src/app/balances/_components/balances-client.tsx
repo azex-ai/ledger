@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatAmount } from "@/lib/utils";
 import { useBalances } from "@/lib/hooks/use-balances";
 import { useSnapshots } from "@/lib/hooks/use-system";
 import { PageHeader } from "@/components/page-header";
@@ -13,7 +14,7 @@ import {
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
 } from "recharts";
-import { AlertCircle } from "lucide-react";
+import { ErrorState } from "@/components/error-state";
 
 export function BalancesClient() {
   const [holderInput, setHolderInput] = useState("");
@@ -65,10 +66,7 @@ export function BalancesClient() {
           {isLoading ? (
             <div className="h-40 animate-shimmer rounded" />
           ) : isError ? (
-            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-8 text-center">
-              <AlertCircle className="mx-auto h-8 w-8 text-destructive mb-2" />
-              <p className="text-sm font-medium">Failed to load balances</p>
-            </div>
+            <ErrorState message="Failed to load balances" />
           ) : balances.length === 0 ? (
             <p className="text-sm text-muted-foreground">No balances found for holder {holder}</p>
           ) : (
@@ -92,7 +90,7 @@ export function BalancesClient() {
                       <TableRow key={`${b.currency_id}-${b.classification_id}`}>
                         <TableCell>{b.currency_id}</TableCell>
                         <TableCell>{b.classification_id}</TableCell>
-                        <TableCell className="text-right font-mono">{b.balance}</TableCell>
+                        <TableCell className="text-right font-mono">{formatAmount(b.balance)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

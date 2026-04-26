@@ -66,6 +66,17 @@ var retryIntervals = []time.Duration{
 	24 * time.Hour,
 }
 
+func retryDelay(attempts int32) time.Duration {
+	if attempts <= 0 {
+		return retryIntervals[0]
+	}
+	idx := int(attempts)
+	if idx >= len(retryIntervals) {
+		idx = len(retryIntervals) - 1
+	}
+	return retryIntervals[idx]
+}
+
 // ProcessBatch polls pending events and delivers them to subscribers.
 // Returns the number of events successfully delivered.
 func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int, error) {
@@ -133,7 +144,7 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 
 	// At least one subscriber failed — schedule retry with exponential backoff.
 	// The store increments attempts and transitions the event to dead when max_attempts is exceeded.
-	return d.poller.MarkRetry(ctx, evt.ID, time.Now().Add(retryIntervals[0]))
+	return d.poller.MarkRetry(ctx, evt.ID, time.Now().Add(retryDelay(evt.Attempts)))
 }
 
 func (d *WebhookDeliverer) matchSubscribers(evt core.Event, subs []WebhookSubscriber) []WebhookSubscriber {
