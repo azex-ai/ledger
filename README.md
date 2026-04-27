@@ -183,11 +183,23 @@ The service entry point reads:
 |----------|-------------|---------|
 | `DATABASE_URL` | PostgreSQL connection string (`postgres://` or `postgresql://`) | (required) |
 | `HTTP_PORT` | HTTP server listen port | `8080` |
-| `CORS_ALLOWED_ORIGIN` | Allowed CORS origin; logs a warning when unset | `*` |
+| `ENV` | Deployment environment; anything other than `dev` enables production guards | `production` |
+| `CORS_ALLOWED_ORIGIN` | Allowed CORS origin. Required in non-dev `ENV` -- the service refuses to boot without it. Dev falls back to `*` without credentials. | (required outside dev) |
+| `API_KEYS` | Comma-separated bearer-token keys for mutating endpoints (POST/PUT/PATCH/DELETE). GETs are open. | (none) |
+| `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
+| `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter. Webhooks must include `X-Timestamp` and `X-Signature` headers; signatures over 5 minutes old are rejected. | (channel disabled when empty) |
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences,
 withdrawal review threshold) are configured in code at `cmd/ledgerd/main.go` and can be
 exposed as env vars when needed -- there is intentionally no default magic.
+
+### Security notes
+
+- **Authentication**: bearer-token API keys via `Authorization: Bearer <key>`. Constant-time compare; only required for state-changing methods.
+- **Rate limits**: in-memory per-IP token bucket -- 100 req/min mutations, 1000 req/min reads. Single-instance only; deploy behind a sticky load balancer or replace with a Redis-backed limiter for HA.
+- **Body size**: every request is capped at `MAX_BODY_BYTES` via `http.MaxBytesReader`.
+- **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected.
+- **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure; `/api/v1/system/ready` returns 503 until migrations + worker have booted.
 
 ## Testing
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -51,8 +52,14 @@ func run() error {
 		httpPort = "8080"
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	// Server config — fails fast on missing CORS_ALLOWED_ORIGIN in production.
+	srvCfg, err := server.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("server config: %w", err)
+	}
+
+	rootCtx, rootCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer rootCancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	coreLogger := &slogAdapter{l: logger}
@@ -70,13 +77,14 @@ func run() error {
 	}
 
 	// Create connection pool
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := pgxpool.New(rootCtx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("create pool: %w", err)
 	}
+	// pool.Close() must run last — after HTTP shutdown and worker drain.
 	defer pool.Close()
 
-	if err := pool.Ping(ctx); err != nil {
+	if err := pool.Ping(rootCtx); err != nil {
 		return fmt.Errorf("ping db: %w", err)
 	}
 	logger.Info("database connected")
@@ -101,7 +109,7 @@ func run() error {
 	workerCfg := service.DefaultWorkerConfig()
 	eventStore.SetClaimLease(workerCfg.EventClaimLease)
 
-	if err := presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore); err != nil {
+	if err := presets.InstallDefaultTemplatePresets(rootCtx, classStore, classStore, tmplStore); err != nil {
 		return fmt.Errorf("install default template presets: %w", err)
 	}
 	logger.Info("default template presets installed")
@@ -130,7 +138,8 @@ func run() error {
 	}
 
 	// Create HTTP server
-	srv := server.New(
+	srv := server.NewWithConfig(
+		srvCfg,
 		ledgerStore,   // JournalWriter
 		ledgerStore,   // BalanceReader
 		reserverStore, // Reserver
@@ -148,38 +157,71 @@ func run() error {
 		queryStore, // QueryProvider
 	)
 
+	// Rate limiter GC loop — stopped when rateLimiterStop is closed.
+	rateLimiterStop := make(chan struct{})
+	srv.StartRateLimiterGC(rateLimiterStop)
+
 	httpServer := &http.Server{
 		Addr:              ":" + httpPort,
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Start worker in background
+	// Worker runs under its own derived context so we can drain it
+	// independently of HTTP shutdown.
+	workerCtx, workerCancel := context.WithCancel(rootCtx)
+	workerDone := make(chan error, 1)
 	go func() {
 		logger.Info("worker starting")
-		if err := worker.Run(ctx); err != nil {
-			logger.Error("worker error", "error", err)
-		}
+		workerDone <- worker.Run(workerCtx)
 	}()
+
+	// Mark ready after worker is launched (migrations already applied above).
+	srv.SetReady(true)
 
 	// Start HTTP server
+	httpDone := make(chan error, 1)
 	go func() {
 		logger.Info("HTTP server starting", "port", httpPort)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("HTTP server error", "error", err)
-			cancel()
+		err := httpServer.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			httpDone <- err
+			rootCancel()
+			return
 		}
+		httpDone <- nil
 	}()
 
-	// Wait for shutdown signal
-	<-ctx.Done()
-	logger.Info("shutting down")
+	// Block until signal or HTTP server errors out.
+	select {
+	case <-rootCtx.Done():
+		logger.Info("shutdown signal received")
+	case err := <-httpDone:
+		if err != nil {
+			logger.Error("HTTP server error", "error", err)
+		}
+	}
+	srv.SetReady(false)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer shutdownCancel()
+	// Step 1: stop accepting new connections, drain in-flight requests (15s).
+	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer httpShutdownCancel()
+	if err := httpServer.Shutdown(httpShutdownCtx); err != nil {
+		logger.Error("http shutdown failed", "error", err)
+	}
 
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("http shutdown: %w", err)
+	// Step 2: cancel worker; wait up to 30s for in-flight jobs to finish.
+	workerCancel()
+	close(rateLimiterStop)
+	select {
+	case err := <-workerDone:
+		if err != nil {
+			logger.Error("worker exited with error", "error", err)
+		} else {
+			logger.Info("worker drained cleanly")
+		}
+	case <-time.After(30 * time.Second):
+		logger.Warn("worker drain timed out after 30s; abandoning in-flight jobs")
 	}
 
 	logger.Info("shutdown complete")

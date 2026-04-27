@@ -10,23 +10,43 @@ import (
 
 type healthResponse struct {
 	Status                  string `json:"status"`
+	DB                      string `json:"db"`
 	RollupQueueDepth        int64  `json:"rollup_queue_depth"`
 	CheckpointMaxAgeSeconds int    `json:"checkpoint_max_age_seconds"`
 	ActiveReservations      int64  `json:"active_reservations"`
 }
 
+// handleHealth returns 200 only when the DB ping succeeds; otherwise 503.
+// A 200 with status="degraded" used to mask DB outages from upstream load
+// balancers — that's a real production hazard.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	metrics, err := s.queries.GetHealthMetrics(r.Context())
 	if err != nil {
-		httpx.OK(w, healthResponse{Status: "degraded"})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"degraded","db":"down"}`))
 		return
 	}
 	httpx.OK(w, healthResponse{
 		Status:                  "ok",
+		DB:                      "up",
 		RollupQueueDepth:        metrics.RollupQueueDepth,
 		CheckpointMaxAgeSeconds: metrics.CheckpointMaxAgeSeconds,
 		ActiveReservations:      metrics.ActiveReservations,
 	})
+}
+
+// handleReady returns 200 only after migrations + worker have booted.
+// Kubernetes-style readiness probe: keep the pod out of the load-balancer
+// rotation until we're actually serving.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if !s.IsReady() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"starting"}`))
+		return
+	}
+	httpx.OK(w, map[string]string{"status": "ready"})
 }
 
 func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {

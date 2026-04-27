@@ -46,6 +46,8 @@ func (e *AppError) HTTPStatus() int {
 		return 404 // Not Found
 	case e.Code >= 10300 && e.Code <= 10399:
 		return 409 // Conflict — already exists
+	case e.Code >= 10400 && e.Code <= 10499:
+		return 429 // Too Many Requests — rate limiting
 	case e.Code >= 10900 && e.Code <= 10999:
 		return 409 // Conflict — state conflict
 	case e.Code >= 14000 && e.Code <= 14999:
@@ -87,7 +89,9 @@ var displayMessages = map[int]string{
 	10150: "You don't have permission",
 	10201: "The requested resource was not found",
 	10301: "This resource already exists",
+	10401: "Rate limit exceeded, please retry later",
 	10901: "Operation conflicts with current state",
+	18101: "Service is starting or temporarily unavailable",
 	14001: "Insufficient balance for this operation",
 	14002: "This operation has already been processed",
 	14003: "Journal entries are not balanced",

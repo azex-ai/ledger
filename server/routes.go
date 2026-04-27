@@ -6,6 +6,7 @@ func (s *Server) setupRoutes() {
 	s.router.Route("/api/v1", func(r chi.Router) {
 		// System
 		r.Get("/system/health", s.handleHealth)
+		r.Get("/system/ready", s.handleReady)
 		r.Get("/system/balances", s.handleSystemBalances)
 
 		// Journals
