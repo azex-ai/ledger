@@ -15,25 +15,18 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/channel"
 	chanOnchain "github.com/azex-ai/ledger/channel/onchain"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/observability"
+	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/postgres"
-	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
 	"github.com/azex-ai/ledger/service/delivery"
 )
-
-// slogAdapter adapts slog.Logger to core.Logger.
-type slogAdapter struct {
-	l *slog.Logger
-}
-
-func (s *slogAdapter) Info(msg string, args ...any)  { s.l.Info(msg, args...) }
-func (s *slogAdapter) Warn(msg string, args ...any)  { s.l.Warn(msg, args...) }
-func (s *slogAdapter) Error(msg string, args ...any) { s.l.Error(msg, args...) }
 
 func main() {
 	if err := run(); err != nil {
@@ -62,7 +55,7 @@ func run() error {
 	defer rootCancel()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	coreLogger := &slogAdapter{l: logger}
+	coreLogger := slogadapter.New(logger)
 
 	// Run migrations (convert postgres:// to pgx5:// for migrate)
 	migrateURL := databaseURL
@@ -89,22 +82,28 @@ func run() error {
 	}
 	logger.Info("database connected")
 
+	// Prometheus observability — wired so /metrics serves real numbers.
+	promMetrics := observability.NewPrometheusMetrics()
+
 	// Create engine
 	engine := core.NewEngine(
 		core.WithLogger(coreLogger),
+		core.WithMetrics(promMetrics),
 	)
 
-	// Create stores
-	ledgerStore := postgres.NewLedgerStore(pool)
-	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
-	q := sqlcgen.New(pool)
-	bookingStore := postgres.NewBookingStore(pool, q)
-	eventStore := postgres.NewEventStore(pool, q)
+	// Top-level facade builds all the canonical postgres stores.
+	svc, err := ledger.New(pool, ledger.WithLogger(coreLogger), ledger.WithMetrics(promMetrics))
+	if err != nil {
+		return fmt.Errorf("ledger facade: %w", err)
+	}
+
+	// Concrete store handles still needed by adapter-only consumers (worker
+	// claim lease tuning, webhook subscriber store).
+	bookingStore := postgres.NewBookingStore(pool)
+	eventStore := postgres.NewEventStore(pool)
 	webhookSubscriberStore := postgres.NewWebhookSubscriberStore(pool)
 	classStore := postgres.NewClassificationStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
-	currencyStore := postgres.NewCurrencyStore(pool)
-	queryStore := postgres.NewQueryStore(pool)
 
 	workerCfg := service.DefaultWorkerConfig()
 	eventStore.SetClaimLease(workerCfg.EventClaimLease)
@@ -118,7 +117,7 @@ func run() error {
 	rollupAdapter := postgres.NewRollupAdapter(pool)
 	rollupAdapter.SetClaimLease(workerCfg.RollupClaimLease)
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, reserverStore, bookingStore, bookingStore, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, svc.Reserver(), bookingStore, bookingStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
@@ -140,22 +139,23 @@ func run() error {
 	// Create HTTP server
 	srv := server.NewWithConfig(
 		srvCfg,
-		ledgerStore,   // JournalWriter
-		ledgerStore,   // BalanceReader
-		reserverStore, // Reserver
-		bookingStore,  // Booker
-		bookingStore,  // BookingReader
-		eventStore,    // EventReader
-		classStore,    // ClassificationStore
-		classStore,    // JournalTypeStore
-		tmplStore,     // TemplateStore
-		currencyStore, // CurrencyStore
-		channels,      // Channel adapters
-		reconcileSvc,  // Reconciler
-		snapshotSvc,   // Snapshotter
+		svc.JournalWriter(),
+		svc.BalanceReader(),
+		svc.Reserver(),
+		bookingStore, // also Booker; concrete handle reused above for store-only access
+		bookingStore, // also BookingReader
+		eventStore,   // EventReader (concrete handle for SetClaimLease)
+		classStore,
+		classStore, // JournalTypeStore (same impl)
+		tmplStore,
+		svc.Currencies(),
+		channels,
+		reconcileSvc,
+		snapshotSvc,
 		systemRollupSvc,
-		queryStore, // QueryProvider
+		svc.Queries(),
 	)
+	srv.SetMetricsHandler(promMetrics.Handler())
 
 	// Rate limiter GC loop — stopped when rateLimiterStop is closed.
 	rateLimiterStop := make(chan struct{})

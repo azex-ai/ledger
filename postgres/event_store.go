@@ -21,9 +21,11 @@ type EventStore struct {
 	claimLease time.Duration
 }
 
-// NewEventStore creates a new EventStore.
-func NewEventStore(pool *pgxpool.Pool, q *sqlcgen.Queries) *EventStore {
-	return &EventStore{pool: pool, q: q, claimLease: eventClaimLease}
+// NewEventStore creates a new EventStore. The internal sqlc Queries instance
+// is built from pool so library consumers don't need to import the generated
+// sqlcgen package.
+func NewEventStore(pool *pgxpool.Pool) *EventStore {
+	return &EventStore{pool: pool, q: sqlcgen.New(pool), claimLease: eventClaimLease}
 }
 
 // SetClaimLease overrides the default event delivery lease duration.

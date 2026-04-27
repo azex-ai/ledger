@@ -10,16 +10,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
-	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
 func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	classStore := postgres.NewClassificationStore(pool)
-	bookingStore := postgres.NewBookingStore(pool, sqlcgen.New(pool))
+	bookingStore := postgres.NewBookingStore(pool)
 
 	lifecycle := &core.Lifecycle{
 		Initial:  "pending",
@@ -38,14 +38,14 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 
 	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      42,
 		CurrencyID:         curID,
 		Amount:             decimal.NewFromInt(100),
-		IdempotencyKey:     uniqueKey("booking-failed-expiry"),
+		IdempotencyKey:     postgrestest.UniqueKey("booking-failed-expiry"),
 		ChannelName:        "test",
 		ExpiresAt:          time.Now().Add(-time.Hour),
 	})
@@ -64,11 +64,11 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 }
 
 func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	classStore := postgres.NewClassificationStore(pool)
-	bookingStore := postgres.NewBookingStore(pool, sqlcgen.New(pool))
+	bookingStore := postgres.NewBookingStore(pool)
 
 	lifecycle := &core.Lifecycle{
 		Initial:  "pending",
@@ -86,14 +86,14 @@ func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing
 	})
 	require.NoError(t, err)
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 
 	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      43,
 		CurrencyID:         curID,
 		Amount:             decimal.NewFromInt(100),
-		IdempotencyKey:     uniqueKey("booking-done-expiry"),
+		IdempotencyKey:     postgrestest.UniqueKey("booking-done-expiry"),
 		ChannelName:        "test",
 		ExpiresAt:          time.Now().Add(-time.Hour),
 	})

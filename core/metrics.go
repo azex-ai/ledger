@@ -20,8 +20,11 @@ type Metrics interface {
 	ReconcileCompleted(success bool)
 	IdempotencyCollision(journalTypeCode string)
 	TemplateFailed(templateCode string, reason string)
-	DepositConfirmed(channelName string)
-	WithdrawConfirmed(channelName string)
+	// BookingTransitioned is emitted whenever a booking moves to a new lifecycle
+	// state. classCode is the classification code (e.g. "deposit"), toStatus is
+	// the destination state (e.g. "confirmed"). Both should come from a bounded
+	// set of values to keep Prometheus cardinality in check.
+	BookingTransitioned(classCode string, toStatus string)
 
 	// Histograms
 	JournalLatency(d time.Duration)
@@ -51,8 +54,7 @@ func (nopMetrics) RollupProcessed(int)                               {}
 func (nopMetrics) ReconcileCompleted(bool)                           {}
 func (nopMetrics) IdempotencyCollision(string)                       {}
 func (nopMetrics) TemplateFailed(string, string)                     {}
-func (nopMetrics) DepositConfirmed(string)                           {}
-func (nopMetrics) WithdrawConfirmed(string)                          {}
+func (nopMetrics) BookingTransitioned(string, string)                {}
 func (nopMetrics) JournalLatency(time.Duration)                      {}
 func (nopMetrics) RollupLatency(time.Duration)                       {}
 func (nopMetrics) SnapshotLatency(time.Duration)                     {}

@@ -26,9 +26,11 @@ type BookingStore struct {
 	q    *sqlcgen.Queries
 }
 
-// NewBookingStore creates a new BookingStore.
-func NewBookingStore(pool *pgxpool.Pool, q *sqlcgen.Queries) *BookingStore {
-	return &BookingStore{pool: pool, q: q}
+// NewBookingStore creates a new BookingStore. The internal sqlc Queries
+// instance is built from pool so library consumers don't need to import the
+// generated sqlcgen package.
+func NewBookingStore(pool *pgxpool.Pool) *BookingStore {
+	return &BookingStore{pool: pool, q: sqlcgen.New(pool)}
 }
 
 // CreateBooking creates a new booking with initial status from the classification lifecycle.

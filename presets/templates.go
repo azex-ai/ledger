@@ -35,17 +35,42 @@ type TemplatePreset struct {
 	Lines           []TemplateLinePreset
 }
 
-var DefaultTemplateClassifications = []ClassificationPreset{
+// TemplateBundle is a self-contained set of classifications, journal types,
+// and templates that can be installed together. Library consumers can pick
+// just the deposit bundle, just the withdrawal bundle, or compose their own.
+type TemplateBundle struct {
+	Classifications []ClassificationPreset
+	JournalTypes    []JournalTypePreset
+	Templates       []TemplatePreset
+}
+
+// sharedTemplateClassifications are referenced by both deposit and withdrawal
+// templates. Installing either bundle pulls them in.
+var sharedTemplateClassifications = []ClassificationPreset{
 	{Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit},
-	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit},
-	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit},
-	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit},
 	{Code: "suspense", Name: "Suspense", NormalSide: core.NormalSideDebit, IsSystem: true},
 	{Code: "custodial", Name: "Custodial", NormalSide: core.NormalSideCredit, IsSystem: true},
+}
+
+var depositOnlyClassifications = []ClassificationPreset{
+	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit},
+}
+
+var withdrawalOnlyClassifications = []ClassificationPreset{
+	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit},
+	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit},
 	{Code: "fee_revenue", Name: "Fee Revenue", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
 
-var DefaultTemplateJournalTypes = []JournalTypePreset{
+// DefaultTemplateClassifications keeps backward compatibility for callers that
+// installed the full template suite previously.
+var DefaultTemplateClassifications = combineClassifications(
+	sharedTemplateClassifications,
+	depositOnlyClassifications,
+	withdrawalOnlyClassifications,
+)
+
+var depositJournalTypes = []JournalTypePreset{
 	{Code: "deposit_pending", Name: "Deposit Pending"},
 	{Code: "deposit_confirm", Name: "Deposit Confirm"},
 	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending"},
@@ -53,11 +78,16 @@ var DefaultTemplateJournalTypes = []JournalTypePreset{
 	{Code: "deposit_record_overage", Name: "Deposit Record Overage"},
 	{Code: "deposit_resolve_overage", Name: "Deposit Resolve Overage"},
 	{Code: "deposit_release_overage", Name: "Deposit Release Overage"},
+}
+
+var withdrawalJournalTypes = []JournalTypePreset{
 	{Code: "lock_funds", Name: "Lock Funds"},
 	{Code: "unlock_funds", Name: "Unlock Funds"},
 	{Code: "withdraw_confirm", Name: "Withdraw Confirm"},
 	{Code: "withdraw_fee", Name: "Withdraw Fee"},
 }
+
+var DefaultTemplateJournalTypes = combineJournalTypes(depositJournalTypes, withdrawalJournalTypes)
 
 var DefaultTemplatePresets = []TemplatePreset{
 	{
@@ -165,6 +195,49 @@ var DefaultTemplatePresets = []TemplatePreset{
 	},
 }
 
+// DepositBundle returns the classifications, journal types, and templates
+// required to run the deposit lifecycle preset. Use it when you only want
+// deposit-related accounting wired up (no withdrawals, no fees).
+func DepositBundle() TemplateBundle {
+	return TemplateBundle{
+		Classifications: combineClassifications(sharedTemplateClassifications, depositOnlyClassifications),
+		JournalTypes:    cloneJournalTypes(depositJournalTypes),
+		Templates:       filterTemplatesByJournalTypes(DefaultTemplatePresets, depositJournalTypes),
+	}
+}
+
+// WithdrawalBundle returns the classifications, journal types, and templates
+// required to run the withdrawal lifecycle preset (locking + fee accounting).
+func WithdrawalBundle() TemplateBundle {
+	return TemplateBundle{
+		Classifications: combineClassifications(sharedTemplateClassifications, withdrawalOnlyClassifications),
+		JournalTypes:    cloneJournalTypes(withdrawalJournalTypes),
+		Templates:       filterTemplatesByJournalTypes(DefaultTemplatePresets, withdrawalJournalTypes),
+	}
+}
+
+// InstallTemplateBundle installs a single bundle. Safe to call repeatedly —
+// existing rows are validated against the bundle and reused.
+func InstallTemplateBundle(
+	ctx context.Context,
+	classifications core.ClassificationStore,
+	journalTypes core.JournalTypeStore,
+	templates core.TemplateStore,
+	bundle TemplateBundle,
+) error {
+	return InstallTemplatePresets(
+		ctx,
+		classifications,
+		journalTypes,
+		templates,
+		bundle.Classifications,
+		bundle.JournalTypes,
+		bundle.Templates,
+	)
+}
+
+// InstallDefaultTemplatePresets installs both deposit and withdrawal bundles.
+// Convenience for callers that want the full set out of the box.
 func InstallDefaultTemplatePresets(
 	ctx context.Context,
 	classifications core.ClassificationStore,
@@ -180,6 +253,56 @@ func InstallDefaultTemplatePresets(
 		DefaultTemplateJournalTypes,
 		DefaultTemplatePresets,
 	)
+}
+
+func combineClassifications(groups ...[]ClassificationPreset) []ClassificationPreset {
+	seen := make(map[string]struct{})
+	out := make([]ClassificationPreset, 0)
+	for _, g := range groups {
+		for _, p := range g {
+			if _, ok := seen[p.Code]; ok {
+				continue
+			}
+			seen[p.Code] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func combineJournalTypes(groups ...[]JournalTypePreset) []JournalTypePreset {
+	seen := make(map[string]struct{})
+	out := make([]JournalTypePreset, 0)
+	for _, g := range groups {
+		for _, p := range g {
+			if _, ok := seen[p.Code]; ok {
+				continue
+			}
+			seen[p.Code] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func cloneJournalTypes(in []JournalTypePreset) []JournalTypePreset {
+	out := make([]JournalTypePreset, len(in))
+	copy(out, in)
+	return out
+}
+
+func filterTemplatesByJournalTypes(all []TemplatePreset, allowed []JournalTypePreset) []TemplatePreset {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, jt := range allowed {
+		allowedSet[jt.Code] = struct{}{}
+	}
+	out := make([]TemplatePreset, 0, len(all))
+	for _, t := range all {
+		if _, ok := allowedSet[t.JournalTypeCode]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func InstallTemplatePresets(

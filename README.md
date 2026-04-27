@@ -39,21 +39,33 @@ postgres.Migrate("pgx5://user:pass@host/db?sslmode=disable")
 **3. Install presets and use**
 
 ```go
-q := sqlcgen.New(pool)
-ledgerStore  := postgres.NewLedgerStore(pool)
-bookingStore := postgres.NewBookingStore(pool, q)
-classStore   := postgres.NewClassificationStore(pool)
-jtStore      := postgres.NewJournalTypeStore(pool)
-tmplStore    := postgres.NewTemplateStore(pool)
+import "github.com/azex-ai/ledger"
+
+// One call wires every postgres-backed store and returns a Service. Pull the
+// interfaces you need; everything else stays out of your import graph.
+svc, err := ledger.New(pool)
+if err != nil {
+    return err
+}
+
+booker   := svc.Booker()
+balances := svc.BalanceReader()
 
 // Install built-in classifications, journal types, and templates (idempotent).
-// Deposit + withdrawal lifecycles are also exposed as presets.DepositLifecycle / presets.WithdrawalLifecycle.
-if err := presets.InstallDefaultTemplatePresets(ctx, classStore, jtStore, tmplStore); err != nil {
+// Deposit + withdrawal lifecycles are also exposed as
+// presets.DepositLifecycle / presets.WithdrawalLifecycle, and you can install
+// just one bundle with presets.InstallTemplateBundle(...).
+if err := presets.InstallDefaultTemplatePresets(
+    ctx,
+    svc.Classifications(), // satisfies ClassificationStore
+    svc.JournalTypes(),    // satisfies JournalTypeStore
+    svc.Templates(),
+); err != nil {
     return err
 }
 
 // Book a deposit
-booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+booking, err := booker.CreateBooking(ctx, core.CreateBookingInput{
     ClassificationCode: "deposit",
     AccountHolder:      userID,
     CurrencyID:         usdtID,
@@ -64,14 +76,23 @@ booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 })
 
 // Drive the lifecycle (each transition emits an event in the same tx as the journal)
-_, err = bookingStore.Transition(ctx, core.TransitionInput{
+_, err = booker.Transition(ctx, core.TransitionInput{
     BookingID: booking.ID,
     ToStatus:  "confirming",
-    ActorID:   0, // system actor
 })
 
 // Query balance (snapshot-consistent)
-balance, err := ledgerStore.GetBalance(ctx, userID, usdtID, booking.ClassificationID)
+balance, err := balances.GetBalance(ctx, userID, usdtID, booking.ClassificationID)
+```
+
+Need observability? Add a Prometheus collector:
+
+```go
+import "github.com/azex-ai/ledger/observability"
+
+prom := observability.NewPrometheusMetrics()
+svc, _ := ledger.New(pool, ledger.WithMetrics(prom))
+http.Handle("/metrics", prom.Handler())
 ```
 
 ## Quick Start -- As a Service

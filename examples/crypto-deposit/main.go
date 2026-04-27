@@ -19,9 +19,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
-	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/azex-ai/ledger/presets"
 )
 
@@ -48,18 +48,24 @@ func run() error {
 	}
 	defer pool.Close()
 
-	q := sqlcgen.New(pool)
-	classStore := postgres.NewClassificationStore(pool)
-	tmplStore := postgres.NewTemplateStore(pool)
-	bookingStore := postgres.NewBookingStore(pool, q)
-
-	// ClassificationStore satisfies both ClassificationStore and JournalTypeStore.
-	if err := presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore); err != nil {
-		return fmt.Errorf("install presets: %w", err)
+	// One-line ledger wiring via the top-level facade.
+	svc, err := ledger.New(pool)
+	if err != nil {
+		return fmt.Errorf("ledger facade: %w", err)
 	}
 
+	// Presets need the concrete store handles. ClassificationStore satisfies
+	// both ClassificationStore and JournalTypeStore.
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+	if err := presets.InstallTemplateBundle(ctx, classStore, classStore, tmplStore, presets.DepositBundle()); err != nil {
+		return fmt.Errorf("install deposit bundle: %w", err)
+	}
+
+	booker := svc.Booker()
+
 	// 1. Book the deposit (status = pending, channel = evm).
-	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+	booking, err := booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: "deposit",
 		AccountHolder:      1001,
 		CurrencyID:         1,
@@ -74,7 +80,7 @@ func run() error {
 	fmt.Printf("created booking id=%d status=%s\n", booking.ID, booking.Status)
 
 	// 2. Mempool sighting -> confirming.
-	if _, err := bookingStore.Transition(ctx, core.TransitionInput{
+	if _, err := booker.Transition(ctx, core.TransitionInput{
 		BookingID:  booking.ID,
 		ToStatus:   "confirming",
 		ChannelRef: "0xabc123",
@@ -83,7 +89,7 @@ func run() error {
 	}
 
 	// 3. Enough confirmations -> confirmed (this is where journals post in real flow).
-	evt, err := bookingStore.Transition(ctx, core.TransitionInput{
+	evt, err := booker.Transition(ctx, core.TransitionInput{
 		BookingID:  booking.ID,
 		ToStatus:   "confirmed",
 		ChannelRef: "0xabc123",

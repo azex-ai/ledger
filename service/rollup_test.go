@@ -265,8 +265,7 @@ func (m *recordingMetrics) ReserveReleased()                      {}
 func (m *recordingMetrics) ReconcileCompleted(bool)               {}
 func (m *recordingMetrics) IdempotencyCollision(string)           {}
 func (m *recordingMetrics) TemplateFailed(string, string)         {}
-func (m *recordingMetrics) DepositConfirmed(string)               {}
-func (m *recordingMetrics) WithdrawConfirmed(string)              {}
+func (m *recordingMetrics) BookingTransitioned(string, string)    {}
 func (m *recordingMetrics) JournalLatency(time.Duration)          {}
 func (m *recordingMetrics) SnapshotLatency(time.Duration)         {}
 func (m *recordingMetrics) JournalEntryCount(string, int)         {}

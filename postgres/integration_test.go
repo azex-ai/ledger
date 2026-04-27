@@ -10,11 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 )
 
 func TestIntegration_FullLedgerFlow(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	// Create stores
@@ -73,7 +74,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	j, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     usdt.ID,
-		IdempotencyKey: uniqueKey("integ-dep-journal"),
+		IdempotencyKey: postgrestest.UniqueKey("integ-dep-journal"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(1000)},
 		Source:         "deposit",
 	})
@@ -93,7 +94,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	// First, create a lock journal: wallet credit 200, locked debit 200
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtTransfer.ID,
-		IdempotencyKey: uniqueKey("integ-lock"),
+		IdempotencyKey: postgrestest.UniqueKey("integ-lock"),
 		Entries: []core.EntryInput{
 			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
 			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: locked.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
@@ -106,7 +107,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 		AccountHolder:  userID,
 		CurrencyID:     usdt.ID,
 		Amount:         decimal.NewFromInt(200),
-		IdempotencyKey: uniqueKey("integ-reserve"),
+		IdempotencyKey: postgrestest.UniqueKey("integ-reserve"),
 		ExpiresIn:      10 * time.Minute,
 	})
 	require.NoError(t, err)

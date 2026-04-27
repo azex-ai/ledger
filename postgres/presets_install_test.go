@@ -9,12 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/presets"
 )
 
 func TestInstallDefaultTemplatePresets(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	classStore := postgres.NewClassificationStore(pool)
@@ -48,13 +49,13 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, stagedDepositTemplate.Lines, 4)
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 	userID := int64(42)
 
 	journal, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-deposit"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-deposit"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(500)},
 		Source:         "test",
 	})
@@ -64,7 +65,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-lock-release"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-lock-release"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(40)},
 		Source:         "test",
 	})
@@ -73,7 +74,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "unlock_funds", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-unlock"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-unlock"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(40)},
 		Source:         "test",
 	})
@@ -82,7 +83,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-lock-withdraw"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-lock-withdraw"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(105)},
 		Source:         "test",
 	})
@@ -91,7 +92,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "withdraw_fee", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-withdraw-fee"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-withdraw-fee"),
 		Amounts:        map[string]decimal.Decimal{"fee": decimal.NewFromInt(5)},
 		Source:         "test",
 	})
@@ -100,7 +101,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "withdraw_confirm", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-withdraw-confirm"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-withdraw-confirm"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
 	})
@@ -146,7 +147,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-staged-deposit-pending"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
 	})
@@ -155,7 +156,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_confirm_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-staged-deposit-confirm"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-confirm"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(95)},
 		Source:         "test",
 	})
@@ -180,7 +181,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_release_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("preset-staged-deposit-release"),
+		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-release"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(5)},
 		Source:         "test",
 	})
@@ -196,7 +197,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 }
 
 func TestExecuteDepositTolerancePlan(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	classStore := postgres.NewClassificationStore(pool)
@@ -205,7 +206,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 
 	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 	mainWallet, err := classStore.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
 	pending, err := classStore.GetByCode(ctx, "pending")
@@ -219,7 +220,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       shortUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-short-pending"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-short-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
 	})
@@ -234,7 +235,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       shortUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-short"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-short"),
 		Source:         "test",
 	}, shortPlan)
 	require.NoError(t, err)
@@ -259,7 +260,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       overUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-over-pending"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-over-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
 	})
@@ -276,7 +277,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       overUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-over"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-over"),
 		Source:         "test",
 	}, overPlan)
 	require.NoError(t, err)
@@ -300,7 +301,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_resolve_overage", core.TemplateParams{
 		HolderID:       overUserID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-over-resolve"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-over-resolve"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(10)},
 		Source:         "test",
 	})
@@ -316,7 +317,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 }
 
 func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
 	classStore := postgres.NewClassificationStore(pool)
@@ -325,7 +326,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 
 	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 	mainWallet, err := classStore.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
 	pending, err := classStore.GetByCode(ctx, "pending")
@@ -339,7 +340,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-batch-pending"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-batch-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
 	})
@@ -348,7 +349,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       userID,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tolerance-batch-fail"),
+		IdempotencyKey: postgrestest.UniqueKey("tolerance-batch-fail"),
 		Source:         "test",
 	}, &presets.DepositTolerancePlan{
 		ExpectedAmount:  decimal.NewFromInt(100),

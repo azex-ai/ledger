@@ -8,11 +8,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 )
 
 func TestClassificationStore_CRUD(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewClassificationStore(pool)
 	ctx := context.Background()
 
@@ -56,7 +57,7 @@ func TestClassificationStore_CRUD(t *testing.T) {
 }
 
 func TestClassificationStore_CreateWithLifecycle(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewClassificationStore(pool)
 	ctx := context.Background()
 
@@ -80,7 +81,7 @@ func TestClassificationStore_CreateWithLifecycle(t *testing.T) {
 }
 
 func TestJournalTypeStore_CRUD(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewClassificationStore(pool)
 	ctx := context.Background()
 
@@ -109,7 +110,7 @@ func TestJournalTypeStore_CRUD(t *testing.T) {
 }
 
 func TestCurrencyStore_CRUD(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewCurrencyStore(pool)
 	ctx := context.Background()
 
@@ -130,12 +131,12 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 }
 
 func TestTemplateStore_CRUD(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	tmplStore := postgres.NewTemplateStore(pool)
 	ctx := context.Background()
 
-	jtID := seedJournalType(t, pool, "deposit", "Deposit")
-	clsID := seedClassification(t, pool, "wallet", "Wallet", "debit", false)
+	jtID := postgrestest.SeedJournalType(t, pool, "deposit", "Deposit")
+	clsID := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 
 	tmpl, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
 		Code:          "deposit_confirm",
@@ -173,11 +174,11 @@ func TestTemplateStore_CRUD(t *testing.T) {
 }
 
 func TestTemplateStore_RejectsEmptyLines(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	tmplStore := postgres.NewTemplateStore(pool)
 	ctx := context.Background()
 
-	jtID := seedJournalType(t, pool, "deposit", "Deposit")
+	jtID := postgrestest.SeedJournalType(t, pool, "deposit", "Deposit")
 
 	_, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
 		Code:          "broken",

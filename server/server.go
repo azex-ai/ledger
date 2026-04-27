@@ -46,7 +46,17 @@ type Server struct {
 
 	// Rate limiter — held so its GC loop can be stopped on shutdown.
 	rateLimiter *rateLimiter
+
+	// Optional Prometheus /metrics handler. Mounted outside chi's middleware
+	// chain so it bypasses auth + rate limiting (scrapers usually live on
+	// the internal network and authenticate by host/port).
+	metricsHandler http.Handler
 }
+
+// SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
+// for any GET on /metrics, completely bypassing auth and rate-limit
+// middleware. Pass nil to disable.
+func (s *Server) SetMetricsHandler(h http.Handler) { s.metricsHandler = h }
 
 // Config holds server configuration loaded from environment.
 type Config struct {
@@ -225,7 +235,13 @@ func corsMiddleware(cfg *Config) func(http.Handler) http.Handler {
 	}
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. /metrics is dispatched to the optional
+// Prometheus handler before any chi middleware (auth, rate limit, body limit)
+// runs — Prometheus scrapers should not present API keys.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.metricsHandler != nil && r.Method == http.MethodGet && r.URL.Path == "/metrics" {
+		s.metricsHandler.ServeHTTP(w, r)
+		return
+	}
 	s.router.ServeHTTP(w, r)
 }

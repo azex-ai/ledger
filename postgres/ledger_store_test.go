@@ -9,22 +9,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 )
 
 func TestLedgerStore_PostJournal_Balanced(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Internal Transfer")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Internal Transfer")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	input := core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("post-balanced"),
+		IdempotencyKey: postgrestest.UniqueKey("post-balanced"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
@@ -41,16 +42,16 @@ func TestLedgerStore_PostJournal_Balanced(t *testing.T) {
 }
 
 func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	clsA := seedClassification(t, pool, "wallet", "Wallet", "debit", false)
-	clsB := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	clsA := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
+	clsB := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
-	key := uniqueKey("idem")
+	key := postgrestest.UniqueKey("idem")
 	input := core.JournalInput{
 		JournalTypeID:  jtID,
 		IdempotencyKey: key,
@@ -69,17 +70,17 @@ func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
 }
 
 func TestLedgerStore_PostJournal_Unbalanced(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	cls := seedClassification(t, pool, "wallet", "Wallet", "debit", false)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	cls := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 
 	input := core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("unbalanced"),
+		IdempotencyKey: postgrestest.UniqueKey("unbalanced"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: cls, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: cls, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
@@ -92,19 +93,19 @@ func TestLedgerStore_PostJournal_Unbalanced(t *testing.T) {
 }
 
 func TestLedgerStore_GetBalance(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "deposit", "Deposit")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "deposit", "Deposit")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	// Post a deposit journal: debit wallet, credit custodial
 	_, err := store.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("bal-deposit"),
+		IdempotencyKey: postgrestest.UniqueKey("bal-deposit"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
@@ -124,20 +125,20 @@ func TestLedgerStore_GetBalance(t *testing.T) {
 }
 
 func TestLedgerStore_GetBalance_MultipleJournals(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	// Post two journals
 	for i := range 3 {
 		_, err := store.PostJournal(ctx, core.JournalInput{
 			JournalTypeID:  jtID,
-			IdempotencyKey: uniqueKey("multi"),
+			IdempotencyKey: postgrestest.UniqueKey("multi"),
 			Entries: []core.EntryInput{
 				{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 				{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
@@ -152,20 +153,20 @@ func TestLedgerStore_GetBalance_MultipleJournals(t *testing.T) {
 }
 
 func TestLedgerStore_GetBalances(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsLocked := seedClassification(t, pool, "locked", "Locked", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsLocked := postgrestest.SeedClassification(t, pool, "locked", "Locked", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	// Deposit 200 to wallet
 	_, err := store.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("bals-1"),
+		IdempotencyKey: postgrestest.UniqueKey("bals-1"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
@@ -176,7 +177,7 @@ func TestLedgerStore_GetBalances(t *testing.T) {
 	// Lock 50 from wallet
 	_, err = store.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("bals-2"),
+		IdempotencyKey: postgrestest.UniqueKey("bals-2"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsLocked, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
@@ -197,18 +198,18 @@ func TestLedgerStore_GetBalances(t *testing.T) {
 }
 
 func TestLedgerStore_ReverseJournal(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("rev-orig"),
+		IdempotencyKey: postgrestest.UniqueKey("rev-orig"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
@@ -228,18 +229,18 @@ func TestLedgerStore_ReverseJournal(t *testing.T) {
 }
 
 func TestLedgerStore_ReverseJournal_AlreadyReversed(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	store := postgres.NewLedgerStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "transfer", "Transfer")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
-		IdempotencyKey: uniqueKey("rev-once"),
+		IdempotencyKey: postgrestest.UniqueKey("rev-once"),
 		Entries: []core.EntryInput{
 			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
@@ -256,15 +257,15 @@ func TestLedgerStore_ReverseJournal_AlreadyReversed(t *testing.T) {
 }
 
 func TestLedgerStore_ExecuteTemplate(t *testing.T) {
-	pool := setupTestDB(t)
+	pool := postgrestest.SetupDB(t)
 	ledgerStore := postgres.NewLedgerStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
 	ctx := context.Background()
 
-	curID := seedCurrency(t, pool, "USDT", "Tether USD")
-	jtID := seedJournalType(t, pool, "deposit_confirm", "Deposit Confirm")
-	clsWallet := seedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
-	clsCustodial := seedClassification(t, pool, "custodial", "Custodial", "credit", true)
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "deposit_confirm", "Deposit Confirm")
+	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	// Create template
 	_, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
@@ -282,7 +283,7 @@ func TestLedgerStore_ExecuteTemplate(t *testing.T) {
 	j, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       42,
 		CurrencyID:     curID,
-		IdempotencyKey: uniqueKey("tmpl-exec"),
+		IdempotencyKey: postgrestest.UniqueKey("tmpl-exec"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(250)},
 		Source:         "test",
 	})
