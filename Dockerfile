@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1.7
 # ---- Builder ----
-# NOTE: tag-only ref. Pin via @sha256 digest in a follow-up for full supply-chain
-# integrity once the digest is captured from the registry.
-FROM golang:1.26.1-alpine AS builder
+# Build on the host arch (faster, no QEMU), cross-compile to the target arch.
+# Works with `docker buildx build --platform linux/amd64,linux/arm64`.
+FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
 
 # git: needed for some module fetches that resolve via VCS
 # ca-certificates: TLS roots used during `go mod download`
@@ -17,7 +20,7 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build \
         -ldflags "-s -w" \
         -trimpath \
