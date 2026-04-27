@@ -65,6 +65,13 @@ function ProcessDialog({ id }: { id: number }) {
               },
             })}
             disabled={mutation.isPending || !channelRef}
+            title={
+              mutation.isPending
+                ? "Submitting…"
+                : !channelRef
+                  ? "Enter the on-chain channel reference (tx hash)"
+                  : undefined
+            }
           >
             {mutation.isPending ? "Processing..." : "Submit"}
           </Button>
@@ -284,7 +291,7 @@ export function WithdrawalsClient() {
                 <TableHead>Channel</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Review</TableHead>
+                <TableHead>Channel Ref</TableHead>
                 <TableHead className="text-right">Created</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
@@ -297,7 +304,9 @@ export function WithdrawalsClient() {
                   <TableCell>{w.channel_name}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(w.amount)}</TableCell>
                   <TableCell><StatusBadge status={w.status} /></TableCell>
-                  <TableCell>{w.review_required ? "Required" : "Auto"}</TableCell>
+                  <TableCell className="font-mono text-xs max-w-[160px] truncate">
+                    {w.channel_ref || "—"}
+                  </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {formatUTC(w.created_at)}
                   </TableCell>

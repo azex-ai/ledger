@@ -34,16 +34,16 @@ function DepositStepper({ status }: { status: string }) {
           <div
             className={`h-2 w-2 rounded-full ${
               i < idx
-                ? "bg-green-400"
+                ? "bg-emerald-400"
                 : i === idx && (status === "failed" || status === "expired")
-                  ? "bg-red-400"
+                  ? "bg-rose-400"
                   : i === idx
-                    ? "bg-green-400"
+                    ? "bg-emerald-400"
                     : "bg-muted"
             }`}
           />
           {i < DEPOSIT_STATES.length - 1 && (
-            <div className={`h-px w-4 ${i < idx ? "bg-green-400" : "bg-muted"}`} />
+            <div className={`h-px w-4 ${i < idx ? "bg-emerald-400" : "bg-muted"}`} />
           )}
         </div>
       ))}
@@ -126,6 +126,15 @@ function ConfirmDialog({ id }: { id: number }) {
               });
             }}
             disabled={mutation.isPending || !amount || !channelRef}
+            title={
+              mutation.isPending
+                ? "Submitting…"
+                : !amount
+                  ? "Enter the actual settled amount"
+                  : !channelRef
+                    ? "Enter the channel reference (tx hash)"
+                    : undefined
+            }
           >
             {mutation.isPending ? "Confirming..." : "Confirm"}
           </Button>
@@ -233,8 +242,10 @@ export function DepositsClient() {
                   <TableCell>#{d.id}</TableCell>
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(d.expected_amount)}</TableCell>
-                  <TableCell className="text-right font-mono">{d.actual_amount ? formatAmount(d.actual_amount) : "-"}</TableCell>
+                  <TableCell className="text-right font-mono">{formatAmount(d.amount)}</TableCell>
+                  <TableCell className="text-right font-mono">
+                    {d.settled_amount && d.settled_amount !== "0" ? formatAmount(d.settled_amount) : "—"}
+                  </TableCell>
                   <TableCell><StatusBadge status={d.status} /></TableCell>
                   <TableCell><DepositStepper status={d.status} /></TableCell>
                   <TableCell>

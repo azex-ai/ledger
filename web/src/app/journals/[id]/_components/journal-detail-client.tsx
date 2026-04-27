@@ -34,10 +34,10 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Debit</p>
             {debits.map((e) => (
-              <div key={e.id} className="rounded border border-green-500/20 bg-green-500/5 p-3">
+              <div key={e.id} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-green-400">{formatAmount(e.amount)}</span>
+                  <span className="font-mono text-sm text-emerald-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_id} / Currency {e.currency_id}
@@ -51,10 +51,10 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Credit</p>
             {credits.map((e) => (
-              <div key={e.id} className="rounded border border-red-500/20 bg-red-500/5 p-3">
+              <div key={e.id} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-red-400">{formatAmount(e.amount)}</span>
+                  <span className="font-mono text-sm text-rose-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_id} / Currency {e.currency_id}
@@ -183,7 +183,7 @@ export function JournalDetailClient({ params }: { params: Promise<{ id: string }
             <span className="text-muted-foreground">Created At</span>
             <span>{formatUTC(j.created_at)}</span>
           </div>
-          {j.actor_id && (
+          {j.actor_id !== 0 && (
             <div className="flex justify-between">
               <span className="text-muted-foreground">Actor ID</span>
               <span>{j.actor_id}</span>

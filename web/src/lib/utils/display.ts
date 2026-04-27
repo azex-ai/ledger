@@ -7,7 +7,7 @@
  *   >= 1000   → 1 decimal, thousands separator  (72,845.3)
  *   >= 1      → 4 decimals                      (1.2345)
  *   >= 0.01   → 5 decimals                      (0.01234)
- *   >= 0.0001 → 5 decimals                      (0.00012)
+ *   >= 0.0001 → 6 decimals                      (0.000123)
  *   < 0.0001  → subscript notation               (0.0₆712)
  *   zero      → "0.00"
  */
@@ -18,6 +18,7 @@ import { leadingZeros, significantDigits } from "./decimal";
 // Pre-computed thresholds (BigInt, 18 decimals)
 const T_1000 = parseUnits("1000", 18);
 const T_1 = parseUnits("1", 18);
+const T_001 = parseUnits("0.01", 18);
 const T_00001 = parseUnits("0.0001", 18);
 
 // ─── Subscript digits ───────────────────────────────────────────────
@@ -72,7 +73,8 @@ export function formatAmount(value: string): string {
 
   if (a >= T_1000) return prefix + toFixed(a, 1, true);
   if (a >= T_1) return prefix + toFixed(a, 4, false);
-  if (a >= T_00001) return prefix + toFixed(a, 5, false);
+  if (a >= T_001) return prefix + toFixed(a, 5, false);
+  if (a >= T_00001) return prefix + toFixed(a, 6, false);
 
   // Subscript notation for very small values
   const zeros = leadingZeros(a);
@@ -131,7 +133,10 @@ export function formatCompact(value: string): string {
   if (raw === 0n) return "0";
 
   // For compact notation, lossy Number conversion is acceptable
-  // (we're reducing to 3 significant digits anyway)
+  // (we're reducing to 3 significant digits anyway).
+  //
+  // Cap: values up to ~$1e15 (Number.MAX_SAFE_INTEGER ≈ 9e15) are safe.
+  // Beyond that the Number conversion overflows; callers must clamp first.
   const num = Number(formatUnits(raw < 0n ? -raw : raw, 18));
   const prefix = raw < 0n ? "-" : "";
 

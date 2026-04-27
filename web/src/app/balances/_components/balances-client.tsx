@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { formatAmount } from "@/lib/utils";
 import { useBalances } from "@/lib/hooks/use-balances";
 import { useSnapshots } from "@/lib/hooks/use-system";
@@ -22,8 +22,17 @@ export function BalancesClient() {
   const { data, isLoading, isError } = useBalances(holder);
   const balances = data ?? [];
 
-  const today = new Date().toISOString().slice(0, 10);
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+  // Memo so the dates are stable across re-renders. Without this, useSnapshots
+  // sees a new `start`/`end` every render and refetches forever.
+  const { today, thirtyDaysAgo } = useMemo(() => {
+    const now = new Date();
+    return {
+      today: now.toISOString().slice(0, 10),
+      thirtyDaysAgo: new Date(now.getTime() - 30 * 86400000)
+        .toISOString()
+        .slice(0, 10),
+    };
+  }, []);
   const { data: snapData } = useSnapshots({
     holder: holder || undefined,
     start: thirtyDaysAgo,
@@ -42,8 +51,8 @@ export function BalancesClient() {
   const classIds = [...new Set(snapshots.map((s) => s.classification_id))];
 
   const COLORS = [
-    "hsl(var(--chart-1))", "hsl(var(--chart-2))", "hsl(var(--chart-3))",
-    "hsl(var(--chart-4))", "hsl(var(--chart-5))",
+    "var(--chart-1)", "var(--chart-2)", "var(--chart-3)",
+    "var(--chart-4)", "var(--chart-5)",
   ];
 
   return (
@@ -107,15 +116,15 @@ export function BalancesClient() {
               <CardContent>
                 <ResponsiveContainer width="100%" height={300}>
                   <LineChart data={chartArray}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} />
-                    <YAxis tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="date" tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
+                    <YAxis tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} />
                     <Tooltip
                       contentStyle={{
-                        backgroundColor: "hsl(var(--card))",
-                        border: "1px solid hsl(var(--border))",
+                        backgroundColor: "var(--card)",
+                        border: "1px solid var(--border)",
                         borderRadius: "6px",
-                        color: "hsl(var(--card-foreground))",
+                        color: "var(--card-foreground)",
                       }}
                     />
                     {classIds.map((cid, i) => (

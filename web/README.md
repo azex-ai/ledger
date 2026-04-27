@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Configuration
+
+The dashboard talks to the Go ledger backend via HTTP. Two env vars control it:
+
+| Var | Required | Description |
+|-----|----------|-------------|
+| `NEXT_PUBLIC_API_URL` | yes (production) | Base URL of the ledger API, e.g. `https://ledger.internal.example.com`. In production builds the client throws on the first API call if this is unset. |
+| `NEXT_PUBLIC_API_KEY` | yes (any mutating call) | Bearer token sent on `POST` / `PUT` / `PATCH` / `DELETE` requests in `Authorization: Bearer <key>`. The backend rejects mutations without a valid key. |
+
+In production deployments use a dedicated dashboard API key (don't reuse a
+worker / service key). Read-only access (GET) does not require a key.
+
 ## Getting Started
 
 First, run the development server:

@@ -1,4 +1,22 @@
+// In production, NEXT_PUBLIC_API_URL must be configured explicitly so the
+// dashboard never silently calls localhost. In development the fallback
+// keeps the local workflow zero-config. The check fires at the first API
+// call (not module-load) so Next.js can still prerender static pages
+// during the production build with no API key configured.
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY ?? "";
+
+function assertProductionConfig(): void {
+  if (
+    !process.env.NEXT_PUBLIC_API_URL &&
+    process.env.NODE_ENV === "production" &&
+    typeof window !== "undefined"
+  ) {
+    throw new Error(
+      "NEXT_PUBLIC_API_URL must be set in production builds (no localhost fallback)",
+    );
+  }
+}
 
 export interface ApiError {
   code: number;
@@ -21,16 +39,22 @@ interface Envelope<T> {
   data: T;
 }
 
-async function request<T>(
-  path: string,
-  init?: RequestInit,
-): Promise<T> {
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  assertProductionConfig();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  if (MUTATING_METHODS.has(method) && API_KEY) {
+    headers["Authorization"] = `Bearer ${API_KEY}`;
+  }
+
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
+    headers,
   });
 
   if (!res.ok) {
@@ -58,10 +82,10 @@ export interface Journal {
   idempotency_key: string;
   total_debit: string;
   total_credit: string;
-  metadata: Record<string, string>;
-  actor_id?: number;
+  metadata: Record<string, unknown>;
+  actor_id: number;
   source: string;
-  reversal_of?: number;
+  reversal_of: number | null;
   created_at: string;
 }
 
@@ -93,48 +117,57 @@ export interface Reservation {
   account_holder: number;
   currency_id: number;
   reserved_amount: string;
-  settled_amount?: string;
+  settled_amount: string;
   status: "active" | "settling" | "settled" | "released";
-  journal_id?: number;
+  journal_id: number | null;
   idempotency_key: string;
   expires_at: string;
   created_at: string;
   updated_at: string;
 }
 
-export interface Deposit {
+export interface Lifecycle {
+  initial: string;
+  terminal: string[];
+  transitions: Record<string, string[]>;
+}
+
+// Booking is the unified record replacing v1 Deposit/Withdrawal.
+// Its lifecycle is governed by the classification.
+export interface Booking {
   id: number;
+  classification_id: number;
   account_holder: number;
   currency_id: number;
-  expected_amount: string;
-  actual_amount?: string;
-  status: "pending" | "confirming" | "confirmed" | "failed" | "expired";
+  amount: string;
+  settled_amount: string;
+  status: string;
   channel_name: string;
-  channel_ref?: string;
-  journal_id?: number;
+  channel_ref: string;
+  // ReservationID and JournalID are nullable on the backend (NULL means
+  // not yet linked). The remaining fields are NOT NULL.
+  reservation_id: number | null;
+  journal_id: number | null;
   idempotency_key: string;
-  metadata: Record<string, string>;
-  expires_at?: string;
+  metadata: Record<string, unknown>;
+  expires_at: string;
   created_at: string;
   updated_at: string;
 }
 
-export interface Withdrawal {
+export interface Event {
   id: number;
+  classification_code: string;
+  booking_id: number;
   account_holder: number;
   currency_id: number;
+  from_status: string;
+  to_status: string;
   amount: string;
-  status: "locked" | "reserved" | "reviewing" | "processing" | "confirmed" | "failed" | "expired";
-  channel_name: string;
-  channel_ref?: string;
-  reservation_id?: number;
-  journal_id?: number;
-  idempotency_key: string;
-  metadata: Record<string, string>;
-  review_required: boolean;
-  expires_at?: string;
-  created_at: string;
-  updated_at: string;
+  settled_amount: string;
+  journal_id: number | null;
+  metadata: Record<string, unknown>;
+  occurred_at: string;
 }
 
 export interface Classification {
@@ -144,6 +177,7 @@ export interface Classification {
   normal_side: "debit" | "credit";
   is_system: boolean;
   is_active: boolean;
+  lifecycle: Lifecycle | null;
   created_at: string;
 }
 
@@ -197,7 +231,7 @@ export interface SystemBalance {
 export interface ReconcileResult {
   balanced: boolean;
   gap: string;
-  details?: Array<{
+  details: Array<{
     account_holder: number;
     currency_id: number;
     classification_id: number;
@@ -235,15 +269,23 @@ export interface PreviewResult {
 
 // ─── API Functions ───────────────────────────────────────────────────
 
-function qs(params: Record<string, string | number | boolean | undefined>): string {
-  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
+function qs(
+  params: Record<string, string | number | boolean | undefined>,
+): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== undefined && v !== "",
+  );
   if (entries.length === 0) return "";
-  return "?" + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString();
+  return (
+    "?" +
+    new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString()
+  );
 }
 
 // System
 export const getHealth = () => request<HealthStatus>("/api/v1/system/health");
-export const getSystemBalances = () => request<SystemBalance[]>("/api/v1/system/balances");
+export const getSystemBalances = () =>
+  request<SystemBalance[]>("/api/v1/system/balances");
 
 // Journals
 export const listJournals = (params: { cursor?: string; limit?: number }) =>
@@ -264,7 +306,11 @@ export const postJournal = (body: {
   }>;
   source?: string;
   metadata?: Record<string, string>;
-}) => request<Journal>("/api/v1/journals", { method: "POST", body: JSON.stringify(body) });
+}) =>
+  request<Journal>("/api/v1/journals", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const postTemplateJournal = (body: {
   template_code: string;
@@ -273,7 +319,11 @@ export const postTemplateJournal = (body: {
   idempotency_key: string;
   amounts: Record<string, string>;
   source?: string;
-}) => request<Journal>("/api/v1/journals/template", { method: "POST", body: JSON.stringify(body) });
+}) =>
+  request<Journal>("/api/v1/journals/template", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const reverseJournal = (id: number, reason: string) =>
   request<Journal>(`/api/v1/journals/${id}/reverse`, {
@@ -282,7 +332,12 @@ export const reverseJournal = (id: number, reason: string) =>
   });
 
 // Entries
-export const listEntries = (params: { holder?: number; currency_id?: number; cursor?: string; limit?: number }) =>
+export const listEntries = (params: {
+  holder?: number;
+  currency_id?: number;
+  cursor?: string;
+  limit?: number;
+}) =>
   request<PaginatedResponse<Entry>>(`/api/v1/entries${qs(params)}`);
 
 // Balances
@@ -299,7 +354,11 @@ export const batchBalances = (holderIds: number[], currencyId: number) =>
   });
 
 // Reservations
-export const listReservations = (params: { holder?: number; status?: string; limit?: number }) =>
+export const listReservations = (params: {
+  holder?: number;
+  status?: string;
+  limit?: number;
+}) =>
   request<Reservation[]>(`/api/v1/reservations${qs(params)}`);
 
 export const createReservation = (body: {
@@ -308,7 +367,11 @@ export const createReservation = (body: {
   amount: string;
   idempotency_key: string;
   expires_in?: string;
-}) => request<Reservation>("/api/v1/reservations", { method: "POST", body: JSON.stringify(body) });
+}) =>
+  request<Reservation>("/api/v1/reservations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const settleReservation = (id: number, actualAmount: string) =>
   request<void>(`/api/v1/reservations/${id}/settle`, {
@@ -319,97 +382,96 @@ export const settleReservation = (id: number, actualAmount: string) =>
 export const releaseReservation = (id: number) =>
   request<void>(`/api/v1/reservations/${id}/release`, { method: "POST" });
 
-// Deposits
-export const listDeposits = (params: { holder?: number; status?: string; limit?: number }) =>
-  request<Deposit[]>(`/api/v1/deposits${qs(params)}`);
-
-export const createDeposit = (body: {
+// Bookings (unified — replaces v1 deposits + withdrawals)
+export interface CreateBookingBody {
+  classification_code: string;
   account_holder: number;
   currency_id: number;
-  expected_amount: string;
-  channel_name: string;
+  amount: string;
   idempotency_key: string;
-  metadata?: Record<string, string>;
-}) => request<Deposit>("/api/v1/deposits", { method: "POST", body: JSON.stringify(body) });
+  channel_name: string;
+  metadata?: Record<string, unknown>;
+  expires_at?: string;
+}
 
-export const confirmingDeposit = (id: number, channelRef: string) =>
-  request<void>(`/api/v1/deposits/${id}/confirming`, {
-    method: "POST",
-    body: JSON.stringify({ channel_ref: channelRef }),
-  });
+export interface TransitionBookingBody {
+  to_status: string;
+  channel_ref?: string;
+  amount?: string;
+  metadata?: Record<string, unknown>;
+  actor_id?: number;
+}
 
-export const confirmDeposit = (id: number, body: { actual_amount: string; channel_ref: string }) =>
-  request<void>(`/api/v1/deposits/${id}/confirm`, {
+export interface ListBookingsParams {
+  holder?: number;
+  classification_id?: number;
+  status?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export const createBooking = (body: CreateBookingBody) =>
+  request<Booking>("/api/v1/bookings", {
     method: "POST",
     body: JSON.stringify(body),
   });
 
-export const failDeposit = (id: number, reason: string) =>
-  request<void>(`/api/v1/deposits/${id}/fail`, {
+export const transitionBooking = (id: number, body: TransitionBookingBody) =>
+  request<Event>(`/api/v1/bookings/${id}/transition`, {
     method: "POST",
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify(body),
   });
 
-// Withdrawals
-export const listWithdrawals = (params: { holder?: number; status?: string; limit?: number }) =>
-  request<Withdrawal[]>(`/api/v1/withdrawals${qs(params)}`);
+export const getBooking = (id: number) =>
+  request<Booking>(`/api/v1/bookings/${id}`);
 
-export const createWithdrawal = (body: {
-  account_holder: number;
-  currency_id: number;
-  amount: string;
-  channel_name: string;
-  idempotency_key: string;
-  review_required?: boolean;
-}) => request<Withdrawal>("/api/v1/withdrawals", { method: "POST", body: JSON.stringify(body) });
+export const listBookings = (params: ListBookingsParams) =>
+  request<PaginatedResponse<Booking>>(
+    `/api/v1/bookings${qs(params as Record<string, string | number | undefined>)}`,
+  );
 
-export const reserveWithdraw = (id: number) =>
-  request<void>(`/api/v1/withdrawals/${id}/reserve`, { method: "POST" });
+// Events (outbound)
+export const getEvent = (id: number) => request<Event>(`/api/v1/events/${id}`);
 
-export const reviewWithdraw = (id: number, approved: boolean) =>
-  request<void>(`/api/v1/withdrawals/${id}/review`, {
-    method: "POST",
-    body: JSON.stringify({ approved }),
-  });
-
-export const processWithdraw = (id: number, channelRef: string) =>
-  request<void>(`/api/v1/withdrawals/${id}/process`, {
-    method: "POST",
-    body: JSON.stringify({ channel_ref: channelRef }),
-  });
-
-export const confirmWithdraw = (id: number) =>
-  request<void>(`/api/v1/withdrawals/${id}/confirm`, { method: "POST" });
-
-export const failWithdraw = (id: number, reason: string) =>
-  request<void>(`/api/v1/withdrawals/${id}/fail`, {
-    method: "POST",
-    body: JSON.stringify({ reason }),
-  });
-
-export const retryWithdraw = (id: number) =>
-  request<void>(`/api/v1/withdrawals/${id}/retry`, { method: "POST" });
+export const listEvents = (params: {
+  classification_code?: string;
+  booking_id?: number;
+  to_status?: string;
+  cursor?: string;
+  limit?: number;
+}) => request<PaginatedResponse<Event>>(`/api/v1/events${qs(params)}`);
 
 // Classifications
 export const listClassifications = (activeOnly?: boolean) =>
-  request<Classification[]>(`/api/v1/classifications${qs({ active_only: activeOnly })}`);
+  request<Classification[]>(
+    `/api/v1/classifications${qs({ active_only: activeOnly })}`,
+  );
 
 export const createClassification = (body: {
   code: string;
   name: string;
   normal_side: "debit" | "credit";
   is_system: boolean;
-}) => request<Classification>("/api/v1/classifications", { method: "POST", body: JSON.stringify(body) });
+}) =>
+  request<Classification>("/api/v1/classifications", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const deactivateClassification = (id: number) =>
   request<void>(`/api/v1/classifications/${id}/deactivate`, { method: "POST" });
 
 // Journal Types
 export const listJournalTypes = (activeOnly?: boolean) =>
-  request<JournalType[]>(`/api/v1/journal-types${qs({ active_only: activeOnly })}`);
+  request<JournalType[]>(
+    `/api/v1/journal-types${qs({ active_only: activeOnly })}`,
+  );
 
 export const createJournalType = (body: { code: string; name: string }) =>
-  request<JournalType>("/api/v1/journal-types", { method: "POST", body: JSON.stringify(body) });
+  request<JournalType>("/api/v1/journal-types", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const deactivateJournalType = (id: number) =>
   request<void>(`/api/v1/journal-types/${id}/deactivate`, { method: "POST" });
@@ -429,12 +491,22 @@ export const createTemplate = (body: {
     amount_key: string;
     sort_order: number;
   }>;
-}) => request<EntryTemplate>("/api/v1/templates", { method: "POST", body: JSON.stringify(body) });
+}) =>
+  request<EntryTemplate>("/api/v1/templates", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const deactivateTemplate = (id: number) =>
   request<void>(`/api/v1/templates/${id}/deactivate`, { method: "POST" });
 
-export const previewTemplate = (code: string, params: { holder_id: number; currency_id: number } & Record<string, string | number>) =>
+export const previewTemplate = (
+  code: string,
+  params: { holder_id: number; currency_id: number } & Record<
+    string,
+    string | number
+  >,
+) =>
   request<PreviewResult>(`/api/v1/templates/${code}/preview`, {
     method: "POST",
     body: JSON.stringify(params),
@@ -444,7 +516,10 @@ export const previewTemplate = (code: string, params: { holder_id: number; curre
 export const listCurrencies = () => request<Currency[]>("/api/v1/currencies");
 
 export const createCurrency = (body: { code: string; name: string }) =>
-  request<Currency>("/api/v1/currencies", { method: "POST", body: JSON.stringify(body) });
+  request<Currency>("/api/v1/currencies", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 // Reconciliation
 export const reconcileGlobal = () =>

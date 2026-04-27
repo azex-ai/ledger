@@ -43,31 +43,31 @@ export function BalanceTrend() {
         ) : (
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={chartData} barCategoryGap="20%">
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
               <XAxis
                 dataKey="label"
-                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+                tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
                 axisLine={false}
                 tickLine={false}
               />
               <YAxis
-                tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
+                tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
                 axisLine={false}
                 tickLine={false}
                 width={60}
               />
               <Tooltip
-                cursor={{ fill: "hsl(var(--muted) / 0.5)" }}
+                cursor={{ fill: "color-mix(in oklch, var(--muted) 50%, transparent)" }}
                 contentStyle={{
-                  backgroundColor: "hsl(var(--popover))",
-                  border: "1px solid hsl(var(--border))",
+                  backgroundColor: "var(--popover)",
+                  border: "1px solid var(--border)",
                   borderRadius: "8px",
-                  color: "hsl(var(--popover-foreground))",
+                  color: "var(--popover-foreground)",
                   fontSize: "12px",
                   boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
                 }}
               />
-              <Bar dataKey="balance" fill="hsl(var(--chart-1))" radius={[6, 6, 0, 0]} />
+              <Bar dataKey="balance" fill="var(--chart-1)" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}

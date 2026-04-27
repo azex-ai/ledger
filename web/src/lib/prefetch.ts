@@ -42,15 +42,18 @@ const ROUTE_PREFETCHERS: Record<string, (qc: QueryClient) => void> = {
     });
   },
   "/deposits": (qc) => {
+    // The deposits screen filters bookings by classification_id at runtime,
+    // but the classification list is itself the gate. Warm both so the
+    // first paint has data.
     qc.prefetchQuery({
-      queryKey: ["deposits", { status: undefined }],
-      queryFn: () => api.listDeposits({}),
+      queryKey: ["classifications", true],
+      queryFn: () => api.listClassifications(true),
     });
   },
   "/withdrawals": (qc) => {
     qc.prefetchQuery({
-      queryKey: ["withdrawals", { status: undefined }],
-      queryFn: () => api.listWithdrawals({}),
+      queryKey: ["classifications", true],
+      queryFn: () => api.listClassifications(true),
     });
   },
   "/reservations": (qc) => {

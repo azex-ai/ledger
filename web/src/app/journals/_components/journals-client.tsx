@@ -22,6 +22,53 @@ import { ErrorState } from "@/components/error-state";
 import { EmptyState } from "@/components/empty-state";
 import { TableSkeleton } from "@/components/loading-skeleton";
 
+interface RawEntry {
+  account_holder?: unknown;
+  currency_id?: unknown;
+  classification_id?: unknown;
+  entry_type?: unknown;
+  amount?: unknown;
+}
+
+type ValidEntry = {
+  account_holder: number;
+  currency_id: number;
+  classification_id: number;
+  entry_type: "debit" | "credit";
+  amount: string;
+};
+
+function validateEntries(input: unknown): ValidEntry[] | string {
+  if (!Array.isArray(input)) {
+    return "Entries must be a JSON array";
+  }
+  if (input.length === 0) {
+    return "Entries array must not be empty";
+  }
+  const out: ValidEntry[] = [];
+  for (let i = 0; i < input.length; i++) {
+    const e = input[i] as RawEntry;
+    if (!e || typeof e !== "object") return `Entry ${i}: must be an object`;
+    if (typeof e.account_holder !== "number") return `Entry ${i}: account_holder must be a number`;
+    if (typeof e.currency_id !== "number") return `Entry ${i}: currency_id must be a number`;
+    if (typeof e.classification_id !== "number") return `Entry ${i}: classification_id must be a number`;
+    if (e.entry_type !== "debit" && e.entry_type !== "credit") {
+      return `Entry ${i}: entry_type must be "debit" or "credit"`;
+    }
+    if (typeof e.amount !== "string" || e.amount === "") {
+      return `Entry ${i}: amount must be a non-empty string`;
+    }
+    out.push({
+      account_holder: e.account_holder,
+      currency_id: e.currency_id,
+      classification_id: e.classification_id,
+      entry_type: e.entry_type,
+      amount: e.amount,
+    });
+  }
+  return out;
+}
+
 function PostJournalDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
@@ -38,11 +85,16 @@ function PostJournalDialog() {
       toast.error("Journal Type ID must be a number");
       return;
     }
-    let entries;
+    let parsed: unknown;
     try {
-      entries = JSON.parse(form.entries);
+      parsed = JSON.parse(form.entries);
     } catch {
       toast.error("Invalid JSON in entries field");
+      return;
+    }
+    const entries = validateEntries(parsed);
+    if (typeof entries === "string") {
+      toast.error(entries);
       return;
     }
     mutation.mutate(
@@ -122,20 +174,30 @@ function TemplateJournalDialog() {
       toast.error("Holder ID and Currency ID must be numbers");
       return;
     }
-    let amounts;
+    let amounts: unknown;
     try {
       amounts = JSON.parse(form.amounts);
     } catch {
       toast.error("Invalid JSON in amounts field");
       return;
     }
+    if (
+      !amounts ||
+      typeof amounts !== "object" ||
+      Array.isArray(amounts) ||
+      !Object.values(amounts).every((v) => typeof v === "string")
+    ) {
+      toast.error("Amounts must be a JSON object with string values");
+      return;
+    }
+    const amountsRecord = amounts as Record<string, string>;
     mutation.mutate(
       {
         template_code: form.template_code,
         holder_id: holderId,
         currency_id: currencyId,
         idempotency_key: form.idempotency_key,
-        amounts,
+        amounts: amountsRecord,
         source: form.source || undefined,
       },
       {

@@ -2,14 +2,14 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const STATUS_COLORS: Record<string, string> = {
-  active: "bg-green-500/15 text-green-400 border-green-500/20",
+  active: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
   settled: "bg-blue-500/15 text-blue-400 border-blue-500/20",
   settling: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20",
   released: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20",
   pending: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20",
   confirming: "bg-blue-500/15 text-blue-400 border-blue-500/20",
-  confirmed: "bg-green-500/15 text-green-400 border-green-500/20",
-  failed: "bg-red-500/15 text-red-400 border-red-500/20",
+  confirmed: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+  failed: "bg-rose-500/15 text-rose-400 border-rose-500/20",
   expired: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20",
   locked: "bg-orange-500/15 text-orange-400 border-orange-500/20",
   reserved: "bg-purple-500/15 text-purple-400 border-purple-500/20",
@@ -17,19 +17,19 @@ const STATUS_COLORS: Record<string, string> = {
   processing: "bg-blue-500/15 text-blue-400 border-blue-500/20",
   reversed: "bg-orange-500/15 text-orange-400 border-orange-500/20",
   inactive: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20",
-  debit: "bg-green-500/15 text-green-400 border-green-500/20",
-  credit: "bg-red-500/15 text-red-400 border-red-500/20",
+  debit: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
+  credit: "bg-rose-500/15 text-rose-400 border-rose-500/20",
 };
 
 const DOT_COLORS: Record<string, string> = {
-  active: "bg-green-400",
+  active: "bg-emerald-400",
   settled: "bg-blue-400",
   settling: "bg-yellow-400",
   released: "bg-zinc-400",
   pending: "bg-yellow-400",
   confirming: "bg-blue-400",
-  confirmed: "bg-green-400",
-  failed: "bg-red-400",
+  confirmed: "bg-emerald-400",
+  failed: "bg-rose-400",
   expired: "bg-zinc-400",
   locked: "bg-orange-400",
   reserved: "bg-purple-400",
@@ -37,8 +37,8 @@ const DOT_COLORS: Record<string, string> = {
   processing: "bg-blue-400",
   reversed: "bg-orange-400",
   inactive: "bg-zinc-400",
-  debit: "bg-green-400",
-  credit: "bg-red-400",
+  debit: "bg-emerald-400",
+  credit: "bg-rose-400",
 };
 
 // Statuses that should show an animated pulse (active/live states)

@@ -13,6 +13,7 @@ export function Providers({ children }: { children: ReactNode }) {
         defaultOptions: {
           queries: {
             staleTime: 30_000,
+            gcTime: 5 * 60_000,
             retry: 1,
           },
         },
@@ -41,9 +42,9 @@ export function Providers({ children }: { children: ReactNode }) {
           position="bottom-right"
           toastOptions={{
             style: {
-              background: "hsl(var(--card))",
-              border: "1px solid hsl(var(--border))",
-              color: "hsl(var(--card-foreground))",
+              background: "var(--card)",
+              border: "1px solid var(--border)",
+              color: "var(--card-foreground)",
             },
           }}
         />

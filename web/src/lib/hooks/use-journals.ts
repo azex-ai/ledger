@@ -13,7 +13,10 @@ export function useJournals(limit = 20) {
 
 export function useJournal(id: number) {
   return useQuery({
-    queryKey: ["journals", id],
+    // Detail uses singular ["journal", id] so invalidation of the list
+    // namespace ["journals"] (e.g. on reverse) doesn't force every detail
+    // page to refetch.
+    queryKey: ["journal", id],
     queryFn: () => api.getJournal(id),
     enabled: id > 0,
   });
