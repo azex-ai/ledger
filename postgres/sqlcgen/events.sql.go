@@ -154,7 +154,7 @@ type InsertEventParams struct {
 	ToStatus           string         `json:"to_status"`
 	Amount             pgtype.Numeric `json:"amount"`
 	SettledAmount      pgtype.Numeric `json:"settled_amount"`
-	JournalID          int64          `json:"journal_id"`
+	JournalID          pgtype.Int8    `json:"journal_id"`
 	Metadata           []byte         `json:"metadata"`
 	OccurredAt         time.Time      `json:"occurred_at"`
 }

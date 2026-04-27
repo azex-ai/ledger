@@ -11,6 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const acquireBalanceLock = `-- name: AcquireBalanceLock :exec
+SELECT pg_advisory_xact_lock($1::int4, $2::int4)
+`
+
+type AcquireBalanceLockParams struct {
+	Holder     int32 `json:"holder"`
+	CurrencyID int32 `json:"currency_id"`
+}
+
+// Take a transaction-scoped advisory lock on a (holder, currency_id) pair so
+// concurrent reserves and journal posts that touch the same pair serialize.
+// Uses the two-arg form to avoid the XOR collisions a single-key form would
+// have (holder ^ (currency_id << 32) collides whenever two pairs differ only
+// in the high bits of holder).
+func (q *Queries) AcquireBalanceLock(ctx context.Context, arg AcquireBalanceLockParams) error {
+	_, err := q.db.Exec(ctx, acquireBalanceLock, arg.Holder, arg.CurrencyID)
+	return err
+}
+
 const distinctClassificationsForAccount = `-- name: DistinctClassificationsForAccount :many
 SELECT DISTINCT classification_id
 FROM journal_entries
@@ -493,4 +512,23 @@ func (q *Queries) SumGlobalDebitCredit(ctx context.Context) ([]SumGlobalDebitCre
 		return nil, err
 	}
 	return items, nil
+}
+
+const verifyJournalBalanced = `-- name: VerifyJournalBalanced :one
+SELECT currency_id
+FROM journal_entries
+WHERE journal_id = $1
+GROUP BY currency_id
+HAVING SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END) <> 0
+LIMIT 1
+`
+
+// Returns the first currency_id that does not net to zero across the journal's
+// entries, or NULL if the journal is balanced. Run inside the same transaction
+// as the entry inserts; replaces the per-row CONSTRAINT TRIGGER dropped in 018.
+func (q *Queries) VerifyJournalBalanced(ctx context.Context, journalID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, verifyJournalBalanced, journalID)
+	var currency_id int64
+	err := row.Scan(&currency_id)
+	return currency_id, err
 }

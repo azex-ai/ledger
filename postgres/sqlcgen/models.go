@@ -39,8 +39,8 @@ type Booking struct {
 	Status           string         `json:"status"`
 	ChannelName      string         `json:"channel_name"`
 	ChannelRef       string         `json:"channel_ref"`
-	ReservationID    int64          `json:"reservation_id"`
-	JournalID        int64          `json:"journal_id"`
+	ReservationID    pgtype.Int8    `json:"reservation_id"`
+	JournalID        pgtype.Int8    `json:"journal_id"`
 	IdempotencyKey   string         `json:"idempotency_key"`
 	Metadata         []byte         `json:"metadata"`
 	ExpiresAt        time.Time      `json:"expires_at"`
@@ -111,7 +111,7 @@ type Event struct {
 	ToStatus           string         `json:"to_status"`
 	Amount             pgtype.Numeric `json:"amount"`
 	SettledAmount      pgtype.Numeric `json:"settled_amount"`
-	JournalID          int64          `json:"journal_id"`
+	JournalID          pgtype.Int8    `json:"journal_id"`
 	Metadata           []byte         `json:"metadata"`
 	OccurredAt         time.Time      `json:"occurred_at"`
 	DeliveryStatus     string         `json:"delivery_status"`
@@ -188,6 +188,7 @@ type RollupQueue struct {
 	ClaimedUntil     pgtype.Timestamptz `json:"claimed_until"`
 	ProcessedAt      pgtype.Timestamptz `json:"processed_at"`
 	CreatedAt        time.Time          `json:"created_at"`
+	FailedAttempts   int32              `json:"failed_attempts"`
 }
 
 type SystemRollup struct {

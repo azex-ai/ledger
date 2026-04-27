@@ -307,10 +307,9 @@ func templateFromRow(row sqlcgen.EntryTemplate, lines []sqlcgen.EntryTemplateLin
 }
 
 func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
-	var journalID *int64
-	if row.JournalID != 0 {
-		journalID = &row.JournalID
-	}
+	// reservations.journal_id is still a NOT NULL DEFAULT 0 column (no FK);
+	// migration 017 forced that. Map sentinel 0 -> nil pointer for callers.
+	journalID := zeroInt64ToNil(row.JournalID)
 	return &core.Reservation{
 		ID:             row.ID,
 		AccountHolder:  row.AccountHolder,
@@ -337,8 +336,8 @@ func bookingFromRow(row sqlcgen.Booking) *core.Booking {
 		Status:           core.Status(row.Status),
 		ChannelName:      row.ChannelName,
 		ChannelRef:       row.ChannelRef,
-		ReservationID:    row.ReservationID,
-		JournalID:        row.JournalID,
+		ReservationID:    int8ToInt64Ptr(row.ReservationID),
+		JournalID:        int8ToInt64Ptr(row.JournalID),
 		IdempotencyKey:   row.IdempotencyKey,
 		Metadata:         jsonToAnyMetadata(row.Metadata),
 		ExpiresAt:        row.ExpiresAt,
@@ -358,7 +357,7 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 		ToStatus:           core.Status(row.ToStatus),
 		Amount:             mustNumericToDecimal(row.Amount),
 		SettledAmount:      mustNumericToDecimal(row.SettledAmount),
-		JournalID:          row.JournalID,
+		JournalID:          int8ToInt64Ptr(row.JournalID),
 		Metadata:           jsonToAnyMetadata(row.Metadata),
 		OccurredAt:         row.OccurredAt,
 		Attempts:           row.Attempts,

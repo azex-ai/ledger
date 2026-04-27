@@ -54,16 +54,21 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	}
 	defer tx.Rollback(ctx)
 
-	// Advisory lock per (account_holder, currency_id) to serialize concurrent reserves.
-	// XOR-shift combines both dimensions into a single bigint key.
-	lockKey := input.AccountHolder ^ (input.CurrencyID << 32)
-	_, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", lockKey)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: advisory lock: %w", err)
+	qtx := s.q.WithTx(tx)
+
+	// Invariant (matches LedgerStore.PostJournal): all balance-mutating tx must
+	// take pg_advisory_xact_lock(holder, currency_id) for every affected pair,
+	// in sorted order. Reserve only ever touches a single pair, but we still
+	// route through the same helper so the lock space (two-arg int4 form) stays
+	// consistent across reserve and post-journal.
+	if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
+		holder:     input.AccountHolder,
+		currencyID: input.CurrencyID,
+	}}); err != nil {
+		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
 
 	// Double-check idempotency inside lock
-	qtx := s.q.WithTx(tx)
 	existing, err = qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
 		if err := tx.Commit(ctx); err != nil {

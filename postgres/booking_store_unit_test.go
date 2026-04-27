@@ -23,7 +23,7 @@ func TestIdempotentTransitionEvent(t *testing.T) {
 		ToStatus:  "confirmed",
 		Amount:    decimal.NewFromInt(100),
 		Metadata:  map[string]any{"tx_hash": "tx-1"},
-		JournalID: 0,
+		JournalID: nil,
 	}
 
 	t.Run("reuse matching transition", func(t *testing.T) {

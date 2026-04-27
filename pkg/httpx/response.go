@@ -104,6 +104,7 @@ func Decode[T any](r *http.Request) (T, error) {
 // --- Shortcut constructors ---
 
 func ErrBadRequest(msg string) *bizcode.AppError  { return bizcode.New(10001, msg) }
+func ErrForbidden(msg string) *bizcode.AppError    { return bizcode.New(10150, msg) }
 func ErrNotFound(msg string) *bizcode.AppError     { return bizcode.New(10201, msg) }
 func ErrConflict(msg string) *bizcode.AppError     { return bizcode.New(10901, msg) }
 func ErrInternal(msg string) *bizcode.AppError     { return bizcode.New(19999, msg) }

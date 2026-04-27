@@ -81,3 +81,22 @@ FROM journal_entries
 WHERE account_holder = $1
   AND currency_id = $2
 GROUP BY classification_id, entry_type;
+
+-- name: VerifyJournalBalanced :one
+-- Returns the first currency_id that does not net to zero across the journal's
+-- entries, or NULL if the journal is balanced. Run inside the same transaction
+-- as the entry inserts; replaces the per-row CONSTRAINT TRIGGER dropped in 018.
+SELECT currency_id
+FROM journal_entries
+WHERE journal_id = $1
+GROUP BY currency_id
+HAVING SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END) <> 0
+LIMIT 1;
+
+-- name: AcquireBalanceLock :exec
+-- Take a transaction-scoped advisory lock on a (holder, currency_id) pair so
+-- concurrent reserves and journal posts that touch the same pair serialize.
+-- Uses the two-arg form to avoid the XOR collisions a single-key form would
+-- have (holder ^ (currency_id << 32) collides whenever two pairs differ only
+-- in the high bits of holder).
+SELECT pg_advisory_xact_lock(sqlc.arg(holder)::int4, sqlc.arg(currency_id)::int4);

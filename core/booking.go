@@ -19,8 +19,11 @@ type Booking struct {
 	Status           Status          `json:"status"`
 	ChannelName      string          `json:"channel_name"`
 	ChannelRef       string          `json:"channel_ref"`
-	ReservationID    int64           `json:"reservation_id"`
-	JournalID        int64           `json:"journal_id"`
+	// ReservationID and JournalID are nullable: NULL means "no reservation /
+	// journal linked yet". Sentinel 0 cannot be used because Postgres needs a
+	// real NULL to skip FK enforcement.
+	ReservationID    *int64          `json:"reservation_id,omitempty"`
+	JournalID        *int64          `json:"journal_id,omitempty"`
 	IdempotencyKey   string          `json:"idempotency_key"`
 	Metadata         map[string]any  `json:"metadata"`
 	ExpiresAt        time.Time       `json:"expires_at"`

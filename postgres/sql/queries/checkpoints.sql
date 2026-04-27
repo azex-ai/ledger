@@ -20,11 +20,14 @@ VALUES ($1, $2, $3)
 ON CONFLICT (account_holder, currency_id, classification_id) WHERE processed_at IS NULL DO NOTHING;
 
 -- name: DequeueRollupBatch :many
+-- Skip items that have failed too many times (failed_attempts >= 10) — they
+-- need operator attention, not another retry loop.
 WITH claimed AS (
     SELECT id
     FROM rollup_queue
     WHERE processed_at IS NULL
       AND (claimed_until IS NULL OR claimed_until < now())
+      AND failed_attempts < 10
     ORDER BY created_at, id
     LIMIT $1
     FOR UPDATE SKIP LOCKED
@@ -41,8 +44,11 @@ SET processed_at = now(), claimed_until = NULL
 WHERE id = $1;
 
 -- name: ReleaseRollupClaim :exec
+-- Release the claim *and* bump failed_attempts so a permanently-failing item
+-- can be detected and excluded from future batches (see DequeueRollupBatch).
 UPDATE rollup_queue
-SET claimed_until = NULL
+SET claimed_until = NULL,
+    failed_attempts = failed_attempts + 1
 WHERE id = $1
   AND processed_at IS NULL;
 

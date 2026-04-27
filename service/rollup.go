@@ -164,7 +164,10 @@ func (s *RollupService) processItem(
 		return nil
 	}
 
-	// Compute delta respecting normal_side
+	// Compute delta respecting normal_side. Unknown normal_side is fatal —
+	// silently treating it as debit-normal would corrupt the checkpoint and is
+	// a class of bug that has happened before. The caller releases the rollup
+	// queue claim so the item retries on the next batch.
 	debit := debitByClass[item.ClassificationID]
 	credit := creditByClass[item.ClassificationID]
 
@@ -176,7 +179,7 @@ func (s *RollupService) processItem(
 	case core.NormalSideCredit:
 		delta = credit.Sub(debit)
 	default:
-		delta = debit.Sub(credit)
+		return fmt.Errorf("service: rollup: unknown normal_side %q for classification %d: %w", ns, item.ClassificationID, core.ErrInvalidInput)
 	}
 
 	newBalance := currentBalance.Add(delta)

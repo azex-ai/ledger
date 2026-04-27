@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger/core"
@@ -174,7 +175,9 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 		channelRef = input.ChannelRef
 	}
 
-	// Update booking
+	// Update booking. Preserve the existing journal_id (may be NULL) — only the
+	// PostJournal flow is allowed to attach a journal_id, and it does so via a
+	// dedicated update path rather than through transitions.
 	err = qtx.UpdateBookingTransition(ctx, sqlcgen.UpdateBookingTransitionParams{
 		ID:            op.ID,
 		Status:        string(input.ToStatus),
@@ -187,7 +190,8 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 		return nil, wrapStoreError("postgres: transition: update", err)
 	}
 
-	// Insert event (atomic with transition)
+	// Insert event (atomic with transition). journal_id is NULL for now —
+	// it gets backfilled when/if a journal is posted for this transition.
 	eventRow, err := qtx.InsertEvent(ctx, sqlcgen.InsertEventParams{
 		ClassificationCode: class.Code,
 		BookingID:          op.ID,
@@ -197,7 +201,7 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 		ToStatus:           string(input.ToStatus),
 		Amount:             op.Amount,
 		SettledAmount:      decimalToNumeric(settledAmount),
-		JournalID:          0,
+		JournalID:          pgtype.Int8{Valid: false},
 		Metadata:           anyMetadataToJSON(metadata),
 		OccurredAt:         time.Now(),
 	})

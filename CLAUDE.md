@@ -16,7 +16,7 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
 - Interfaces defined in `core/interfaces.go`, consumer-side, -er suffix.
 - Account dimensions: `(AccountHolder int64, CurrencyID int64, ClassificationID int64)`. Positive holder = user, negative = system counterpart.
 - All amounts: `shopspring/decimal.Decimal` in Go, `NUMERIC(30,18)` in SQL, string in JSON.
-- **No NULL**: All DB columns NOT NULL with meaningful defaults (0, '', 'epoch', '{}'). Exception: `journals.reversal_of` remains nullable so PostgreSQL can enforce "at most one reversal" via a partial unique index on non-NULL rows.
+- **No NULL**: All DB columns NOT NULL with meaningful defaults (0, '', 'epoch', '{}'). **Exceptions** (FK target columns where 0 means "absent" must be nullable so PostgreSQL can enforce referential integrity): `journals.reversal_of`, `bookings.journal_id`, `bookings.reservation_id`, `events.journal_id`.
 - **Single-direction data flow**: Ledger never calls external systems. Commands in, events out.
 - **Event-Journal atomicity**: Events and journals are written in the same transaction. Events are the "reason" a journal exists.
 
@@ -80,7 +80,7 @@ docker compose up --build
 - Struct JSON tags: snake_case, all exported fields must have tags
 - Error wrapping: `fmt.Errorf("module: action: %w", err)`
 - Never discard errors (except in tests)
-- **No NULL**: All DB columns NOT NULL, all Go fields are value types (int64, string, time.Time), never pointers. Use 0/''/epoch/{} as defaults. Exception: `journals.reversal_of` is nullable for the partial unique index that prevents duplicate reversals.
+- **No NULL**: All DB columns NOT NULL, all Go fields are value types (int64, string, time.Time), never pointers. Use 0/''/epoch/{} as defaults. **Exceptions** (FK target columns where 0 means "absent" must be nullable so PostgreSQL can enforce referential integrity): `journals.reversal_of`, `bookings.journal_id`, `bookings.reservation_id`, `events.journal_id`. The corresponding Go fields on `core.Booking`, `core.Event`, `core.Reservation` are `*int64`.
 - Idempotency: every mutation requires an `idempotency_key` (UNIQUE index)
 - Journal entries: append-only, corrections via reversal journal only
 - Balance: `checkpoint.balance + SUM(entries WHERE id > checkpoint.last_entry_id)`

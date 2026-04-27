@@ -164,7 +164,7 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 		case core.NormalSideCredit:
 			expected = credit.Sub(debit)
 		default:
-			expected = debit.Sub(credit)
+			return nil, fmt.Errorf("service: reconcile account: unknown normal_side %q for classification %d: %w", ns, classID, core.ErrInvalidInput)
 		}
 
 		actual := decimal.Zero

@@ -19,23 +19,23 @@ func (r HolderRole) IsValid() bool {
 }
 
 type EntryTemplate struct {
-	ID            int64
-	Code          string
-	Name          string
-	JournalTypeID int64
-	IsActive      bool
-	Lines         []EntryTemplateLine
-	CreatedAt     time.Time
+	ID            int64               `json:"id"`
+	Code          string              `json:"code"`
+	Name          string              `json:"name"`
+	JournalTypeID int64               `json:"journal_type_id"`
+	IsActive      bool                `json:"is_active"`
+	Lines         []EntryTemplateLine `json:"lines"`
+	CreatedAt     time.Time           `json:"created_at"`
 }
 
 type EntryTemplateLine struct {
-	ID               int64
-	TemplateID       int64
-	ClassificationID int64
-	EntryType        EntryType
-	HolderRole       HolderRole
-	AmountKey        string
-	SortOrder        int
+	ID               int64      `json:"id"`
+	TemplateID       int64      `json:"template_id"`
+	ClassificationID int64      `json:"classification_id"`
+	EntryType        EntryType  `json:"entry_type"`
+	HolderRole       HolderRole `json:"holder_role"`
+	AmountKey        string     `json:"amount_key"`
+	SortOrder        int        `json:"sort_order"`
 }
 
 type TemplateParams struct {

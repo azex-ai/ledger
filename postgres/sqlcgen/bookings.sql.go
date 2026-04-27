@@ -270,7 +270,7 @@ type UpdateBookingTransitionParams struct {
 	Status        string         `json:"status"`
 	ChannelRef    string         `json:"channel_ref"`
 	SettledAmount pgtype.Numeric `json:"settled_amount"`
-	JournalID     int64          `json:"journal_id"`
+	JournalID     pgtype.Int8    `json:"journal_id"`
 	Metadata      []byte         `json:"metadata"`
 }
 

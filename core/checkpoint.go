@@ -8,37 +8,37 @@ import (
 
 // BalanceCheckpoint stores the materialized balance at a point in time.
 type BalanceCheckpoint struct {
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	Balance          decimal.Decimal
-	LastEntryID      int64
-	LastEntryAt      time.Time
-	UpdatedAt        time.Time
+	AccountHolder    int64           `json:"account_holder"`
+	CurrencyID       int64           `json:"currency_id"`
+	ClassificationID int64           `json:"classification_id"`
+	Balance          decimal.Decimal `json:"balance"`
+	LastEntryID      int64           `json:"last_entry_id"`
+	LastEntryAt      time.Time       `json:"last_entry_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 // RollupQueueItem represents a pending rollup work item.
 type RollupQueueItem struct {
-	ID               int64
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	CreatedAt        time.Time
+	ID               int64     `json:"id"`
+	AccountHolder    int64     `json:"account_holder"`
+	CurrencyID       int64     `json:"currency_id"`
+	ClassificationID int64     `json:"classification_id"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // BalanceSnapshot stores a historical daily balance.
 type BalanceSnapshot struct {
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	SnapshotDate     time.Time
-	Balance          decimal.Decimal
+	AccountHolder    int64           `json:"account_holder"`
+	CurrencyID       int64           `json:"currency_id"`
+	ClassificationID int64           `json:"classification_id"`
+	SnapshotDate     time.Time       `json:"snapshot_date"`
+	Balance          decimal.Decimal `json:"balance"`
 }
 
 // SystemRollup stores aggregated system-wide balances.
 type SystemRollup struct {
-	CurrencyID       int64
-	ClassificationID int64
-	TotalBalance     decimal.Decimal
-	UpdatedAt        time.Time
+	CurrencyID       int64           `json:"currency_id"`
+	ClassificationID int64           `json:"classification_id"`
+	TotalBalance     decimal.Decimal `json:"total_balance"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }

@@ -43,8 +43,8 @@ type bookingResponse struct {
 	Status           string         `json:"status"`
 	ChannelName      string         `json:"channel_name"`
 	ChannelRef       string         `json:"channel_ref"`
-	ReservationID    int64          `json:"reservation_id"`
-	JournalID        int64          `json:"journal_id"`
+	ReservationID    *int64         `json:"reservation_id,omitempty"`
+	JournalID        *int64         `json:"journal_id,omitempty"`
 	IdempotencyKey   string         `json:"idempotency_key"`
 	Metadata         map[string]any `json:"metadata"`
 	ExpiresAt        string         `json:"expires_at"`
@@ -62,7 +62,7 @@ type eventResponse struct {
 	ToStatus           string         `json:"to_status"`
 	Amount             string         `json:"amount"`
 	SettledAmount      string         `json:"settled_amount"`
-	JournalID          int64          `json:"journal_id"`
+	JournalID          *int64         `json:"journal_id,omitempty"`
 	Metadata           map[string]any `json:"metadata"`
 	OccurredAt         string         `json:"occurred_at"`
 }

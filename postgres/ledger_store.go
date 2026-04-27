@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +26,59 @@ var (
 type LedgerStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+}
+
+// balancePair identifies a (holder, currency_id) pair targeted by an advisory
+// lock. Used to dedupe + sort the entries in a journal before locking.
+type balancePair struct {
+	holder     int64
+	currencyID int64
+}
+
+// balancePairsFromEntries returns the unique (holder, currency_id) pairs in
+// entries, sorted lexicographically. Sorted order is required to take advisory
+// locks in the same global order across concurrent transactions, otherwise
+// deadlocks become possible (tx A locks pair P1 then P2 while tx B locks P2
+// then P1).
+func balancePairsFromEntries(entries []core.EntryInput) []balancePair {
+	seen := make(map[balancePair]struct{}, len(entries))
+	pairs := make([]balancePair, 0, len(entries))
+	for _, e := range entries {
+		p := balancePair{holder: e.AccountHolder, currencyID: e.CurrencyID}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		pairs = append(pairs, p)
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].holder != pairs[j].holder {
+			return pairs[i].holder < pairs[j].holder
+		}
+		return pairs[i].currencyID < pairs[j].currencyID
+	})
+	return pairs
+}
+
+// acquireBalanceLocks takes pg_advisory_xact_lock(int4, int4) on every
+// (holder, currency_id) pair in pairs. Pairs must be presorted (see
+// balancePairsFromEntries). The locks are tx-scoped and released at COMMIT/ROLLBACK.
+func acquireBalanceLocks(ctx context.Context, q *sqlcgen.Queries, pairs []balancePair) error {
+	for _, p := range pairs {
+		if p.holder > math.MaxInt32 || p.holder < math.MinInt32 {
+			return fmt.Errorf("postgres: post journal: holder %d does not fit in int32 for advisory lock: %w", p.holder, core.ErrInvalidInput)
+		}
+		if p.currencyID > math.MaxInt32 || p.currencyID < math.MinInt32 {
+			return fmt.Errorf("postgres: post journal: currency_id %d does not fit in int32 for advisory lock: %w", p.currencyID, core.ErrInvalidInput)
+		}
+		if err := q.AcquireBalanceLock(ctx, sqlcgen.AcquireBalanceLockParams{
+			Holder:     int32(p.holder),
+			CurrencyID: int32(p.currencyID),
+		}); err != nil {
+			return fmt.Errorf("postgres: post journal: advisory lock (%d,%d): %w", p.holder, p.currencyID, err)
+		}
+	}
+	return nil
 }
 
 type queryProvider interface {
@@ -198,6 +253,16 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: post journal: check idempotency: %w", err)
 	}
 
+	// Invariant: every balance-mutating tx must take pg_advisory_xact_lock(holder,
+	// currency_id) for every affected (holder, currency_id) pair, in sorted order.
+	// This serializes against ReserverStore.Reserve (which takes the same lock),
+	// preventing TOCTOU races where a reserve reads stale balance while a journal
+	// is being committed. Locks are taken in lexicographic (holder, currency_id)
+	// order to avoid deadlocks when two journals touch overlapping pairs.
+	if err := acquireBalanceLocks(ctx, q, balancePairsFromEntries(input.Entries)); err != nil {
+		return nil, err
+	}
+
 	debit, credit := input.Totals()
 
 	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{
@@ -254,6 +319,18 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		}); err != nil {
 			return nil, wrapStoreError("postgres: post journal: enqueue rollup", err)
 		}
+	}
+
+	// Per-currency balance check (replaces the dropped per-row CONSTRAINT
+	// TRIGGER from migration 004). One query per posted journal — O(1) per
+	// journal versus the trigger's O(N^2). Runs in the same transaction so a
+	// failure rolls back the journal and entries together.
+	badCurrency, err := q.VerifyJournalBalanced(ctx, row.ID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, wrapStoreError("postgres: post journal: verify balanced", err)
+	}
+	if err == nil {
+		return nil, fmt.Errorf("postgres: post journal: journal %d unbalanced in currency %d: %w", row.ID, badCurrency, core.ErrUnbalancedJournal)
 	}
 
 	return journalFromRow(row), nil

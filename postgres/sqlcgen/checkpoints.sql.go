@@ -65,6 +65,7 @@ WITH claimed AS (
     FROM rollup_queue
     WHERE processed_at IS NULL
       AND (claimed_until IS NULL OR claimed_until < now())
+      AND failed_attempts < 10
     ORDER BY created_at, id
     LIMIT $1
     FOR UPDATE SKIP LOCKED
@@ -89,6 +90,8 @@ type DequeueRollupBatchRow struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
+// Skip items that have failed too many times (failed_attempts >= 10) — they
+// need operator attention, not another retry loop.
 func (q *Queries) DequeueRollupBatch(ctx context.Context, arg DequeueRollupBatchParams) ([]DequeueRollupBatchRow, error) {
 	rows, err := q.db.Query(ctx, dequeueRollupBatch, arg.Limit, arg.ClaimedUntil)
 	if err != nil {
@@ -348,11 +351,14 @@ func (q *Queries) MarkRollupProcessed(ctx context.Context, id int64) error {
 
 const releaseRollupClaim = `-- name: ReleaseRollupClaim :exec
 UPDATE rollup_queue
-SET claimed_until = NULL
+SET claimed_until = NULL,
+    failed_attempts = failed_attempts + 1
 WHERE id = $1
   AND processed_at IS NULL
 `
 
+// Release the claim *and* bump failed_attempts so a permanently-failing item
+// can be detected and excluded from future batches (see DequeueRollupBatch).
 func (q *Queries) ReleaseRollupClaim(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, releaseRollupClaim, id)
 	return err

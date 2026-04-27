@@ -18,7 +18,10 @@ type Event struct {
 	ToStatus           Status          `json:"to_status"`
 	Amount             decimal.Decimal `json:"amount"`
 	SettledAmount      decimal.Decimal `json:"settled_amount"`
-	JournalID          int64           `json:"journal_id"`
+	// JournalID is nullable: NULL means the event has not (yet) caused a journal
+	// posting. Sentinel 0 cannot be used because Postgres enforces an FK on this
+	// column to journals(id).
+	JournalID          *int64          `json:"journal_id,omitempty"`
 	Metadata           map[string]any  `json:"metadata"`
 	OccurredAt         time.Time       `json:"occurred_at"`
 	Attempts           int32           `json:"-"`
