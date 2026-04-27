@@ -1,3 +1,34 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Local secrets / env files (keep .env.example available for templating)
+.env
+.env.*
+!.env.example
+
+# Worktrees and team scratch dirs
+.worktrees/
+.team/
+
+# Compiled binaries (root and examples)
+ledgerd
+dist/
+build/
+examples/*/main
+
+# Test artefacts
+coverage.out
+*.test
+internal/postgrestest/
+
+# Frontend artefacts
 web/node_modules
 web/.next
-.git
+web/out
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/

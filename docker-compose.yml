@@ -1,36 +1,55 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17.2-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ledger
       POSTGRES_USER: ledger
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledger"]
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
       interval: 5s
       timeout: 3s
       retries: 5
+      start_period: 10s
+    # Resource templates (uncomment to enforce):
+    # mem_limit: 512m
+    # cpus: '1.0'
 
   ledgerd:
     build: .
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://ledger:${POSTGRES_PASSWORD:-ledger}@postgres:5432/ledger?sslmode=disable
+      DATABASE_URL: postgres://ledger:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/ledger?sslmode=disable
       HTTP_PORT: "8080"
+      ENV: ${ENV:?ENV must be set (dev|production)}
+      API_KEYS: ${API_KEYS:?API_KEYS must be set (comma-separated bearer tokens)}
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:?CORS_ALLOWED_ORIGIN must be set}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-262144}
+      EVM_WEBHOOK_SECRET: ${EVM_WEBHOOK_SECRET:?EVM_WEBHOOK_SECRET must be set}
     ports:
       - "8080:8080"
+    # The runtime image is distroless/static — no shell, no wget/curl — so an
+    # in-container HTTP healthcheck is not practical. Compose relies on
+    # depends_on for ordering; external orchestrators (k8s, ECS) should probe
+    # GET /api/v1/system/health directly.
+    # Resource templates (uncomment to enforce):
+    # mem_limit: 512m
+    # cpus: '1.0'
 
   web:
     build:
       context: ./web
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8080
+    restart: unless-stopped
     depends_on:
       - ledgerd
     ports:
