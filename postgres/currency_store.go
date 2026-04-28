@@ -15,7 +15,12 @@ import (
 var _ core.CurrencyStore = (*CurrencyStore)(nil)
 
 // CurrencyStore implements core.CurrencyStore using PostgreSQL.
+//
+// In pool mode (constructed via NewCurrencyStore), queries run against the
+// pool. In tx mode (bound via withDB), queries participate in the caller's
+// transaction.
 type CurrencyStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
 }
@@ -25,6 +30,14 @@ func NewCurrencyStore(pool *pgxpool.Pool) *CurrencyStore {
 	return &CurrencyStore{
 		pool: pool,
 		q:    sqlcgen.New(pool),
+	}
+}
+
+// WithDB returns a clone of the CurrencyStore bound to an existing transaction.
+func (s *CurrencyStore) WithDB(db DBTX) *CurrencyStore {
+	return &CurrencyStore{
+		pool: nil, // tx mode
+		q:    sqlcgen.New(db),
 	}
 }
 

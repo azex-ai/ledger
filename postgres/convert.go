@@ -61,13 +61,6 @@ func numericPtrToDecimalPtr(n pgtype.Numeric) *decimal.Decimal {
 	return &d
 }
 
-func decimalPtrToNumeric(d *decimal.Decimal) pgtype.Numeric {
-	if d == nil {
-		return pgtype.Numeric{Valid: false}
-	}
-	return decimalToNumeric(*d)
-}
-
 // --- pgtype nullable helpers ---
 
 func int64ToInt8(v *int64) pgtype.Int8 {
@@ -91,43 +84,8 @@ func zeroInt64ToNil(v int64) *int64 {
 	return &v
 }
 
-func stringToText(s string) pgtype.Text {
-	if s == "" {
-		return pgtype.Text{Valid: false}
-	}
-	return pgtype.Text{String: s, Valid: true}
-}
-
-func textToStringPtr(t pgtype.Text) *string {
-	if !t.Valid {
-		return nil
-	}
-	return &t.String
-}
-
-func textToString(t pgtype.Text) string {
-	if !t.Valid {
-		return ""
-	}
-	return t.String
-}
-
 func timeToTimestamptz(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}
-}
-
-func timePtrToTimestamptz(t *time.Time) pgtype.Timestamptz {
-	if t == nil {
-		return pgtype.Timestamptz{Valid: false}
-	}
-	return pgtype.Timestamptz{Time: *t, Valid: true}
-}
-
-func timestamptzToTimePtr(t pgtype.Timestamptz) *time.Time {
-	if !t.Valid {
-		return nil
-	}
-	return &t.Time
 }
 
 func metadataToJSON(m map[string]string) []byte {
@@ -152,8 +110,8 @@ func jsonToMetadata(b []byte) map[string]string {
 	return m
 }
 
-// anyToDecimal converts the interface{} returned by COALESCE(SUM(...), 0) to decimal.
-func anyToDecimal(v interface{}) (decimal.Decimal, error) {
+// anyToDecimal converts the any value returned by COALESCE(SUM(...), 0) to decimal.
+func anyToDecimal(v any) (decimal.Decimal, error) {
 	if v == nil {
 		return decimal.Zero, nil
 	}
@@ -179,7 +137,7 @@ func anyToDecimal(v interface{}) (decimal.Decimal, error) {
 	}
 }
 
-func anyToTime(v interface{}) (time.Time, error) {
+func anyToTime(v any) (time.Time, error) {
 	if v == nil {
 		return time.Time{}, nil
 	}

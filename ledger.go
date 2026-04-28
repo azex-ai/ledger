@@ -10,11 +10,27 @@
 //
 // All accessors return interfaces from the core package so application code
 // can depend on core/* without importing the postgres adapter directly.
+//
+// # Transaction composition
+//
+// Use RunInTx to combine ledger writes with your own database writes in a
+// single atomic transaction:
+//
+//	err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
+//	    _, err := tx.JournalWriter().PostJournal(ctx, journalInput)
+//	    return err
+//	})
+//
+// When the callback returns nil the transaction is committed; any non-nil
+// error (or a panic) triggers a rollback. The *Service passed to the callback
+// is a short-lived clone; do not retain it after the callback returns.
 package ledger
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger/core"
@@ -133,3 +149,78 @@ func (s *Service) Currencies() core.CurrencyStore { return s.currencyStore }
 
 // Queries returns the read-only query provider used by the HTTP layer.
 func (s *Service) Queries() core.QueryProvider { return s.queryStore }
+
+// RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
+// clone with every store rebound to that transaction, and calls fn with the
+// clone. If fn returns nil the transaction is committed; any non-nil error
+// (including a panic recovered internally) causes a rollback.
+//
+// The *Service passed to fn is valid only for the duration of fn — do not
+// store it or use it after fn returns.
+//
+// Callers that need a specific isolation level should use Pool().BeginTx and
+// call the individual store methods directly; RunInTx always uses the default
+// READ COMMITTED isolation level.
+//
+// Caveats when operating inside a RunInTx callback:
+//   - GetBalance does NOT start its own REPEATABLE READ sub-transaction; the
+//     transaction's isolation level (READ COMMITTED by default) applies.
+//   - Advisory locks acquired inside fn are held until commit/rollback — this
+//     is correct behaviour for the balance-locking invariant.
+func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("ledger: RunInTx: begin: %w", err)
+	}
+
+	// Ensure rollback on any exit path (commit below overrides this on success).
+	committed := false
+	defer func() {
+		if !committed {
+			// Ignore rollback error — original error is more informative.
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	// Recover panics so we always roll back before re-panicking.
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("ledger: RunInTx: panic: %v", r)
+			}
+		}()
+		callErr = fn(s.withTx(tx))
+	}()
+
+	if callErr != nil {
+		return callErr
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ledger: RunInTx: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// withTx returns a short-lived Service clone with every store rebound to tx.
+// The clone shares pool and options with the original; only the store handles
+// change. The caller (RunInTx) owns the transaction lifecycle.
+// pgx.Tx satisfies postgres.DBTX (it has Exec, Query, QueryRow, and Begin).
+func (s *Service) withTx(tx pgx.Tx) *Service {
+	ls := s.ledgerStore.WithDB(tx)
+	return &Service{
+		pool:          s.pool,
+		logger:        s.logger,
+		metrics:       s.metrics,
+		ledgerStore:   ls,
+		reserverStore: s.reserverStore.WithDB(tx, ls),
+		bookingStore:  s.bookingStore.WithDB(tx),
+		eventStore:    s.eventStore.WithDB(tx),
+		classStore:    s.classStore.WithDB(tx),
+		tmplStore:     s.tmplStore.WithDB(tx),
+		currencyStore: s.currencyStore.WithDB(tx),
+		queryStore:    s.queryStore.WithDB(tx),
+	}
+}

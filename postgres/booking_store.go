@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,16 +22,32 @@ var (
 )
 
 // BookingStore implements core.Booker and core.BookingReader using PostgreSQL.
+//
+// In pool mode (constructed via NewBookingStore), each write operation starts
+// its own transaction. In tx mode (bound via withDB), write operations
+// participate in the caller's transaction — commit/rollback is the caller's
+// responsibility.
 type BookingStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
+	db   DBTX
 	q    *sqlcgen.Queries
 }
 
-// NewBookingStore creates a new BookingStore. The internal sqlc Queries
-// instance is built from pool so library consumers don't need to import the
-// generated sqlcgen package.
+// NewBookingStore creates a new BookingStore backed by a connection pool. The
+// internal sqlc Queries instance is built from pool so library consumers don't
+// need to import the generated sqlcgen package.
 func NewBookingStore(pool *pgxpool.Pool) *BookingStore {
-	return &BookingStore{pool: pool, q: sqlcgen.New(pool)}
+	return &BookingStore{pool: pool, db: pool, q: sqlcgen.New(pool)}
+}
+
+// WithDB returns a clone of the BookingStore bound to an existing transaction.
+func (s *BookingStore) WithDB(db DBTX) *BookingStore {
+	return &BookingStore{
+		pool: nil, // tx mode
+		db:   db,
+		q:    sqlcgen.New(db),
+	}
 }
 
 // CreateBooking creates a new booking with initial status from the classification lifecycle.
@@ -85,7 +102,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		if lookupErr == nil {
 			return bookingFromRow(existing), nil
 		}
-		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: create booking: insert: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
 		}
 		return nil, wrapStoreError("postgres: create booking", err)
@@ -94,19 +111,40 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 }
 
 // Transition advances a booking's status and records an event atomically.
+//
+// In pool mode a new transaction is started and committed here.
+// In tx mode (bound via withDB) the transition is written into the caller's
+// transaction; commit/rollback is the caller's responsibility.
 func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: transition: %w", err)
 	}
 
+	if s.pool == nil {
+		// Tx mode: use the caller's transaction directly.
+		return s.transitionWithQueries(ctx, s.q, input)
+	}
+
+	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: transition: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	qtx := s.q.WithTx(tx)
+	evt, err := s.transitionWithQueries(ctx, s.q.WithTx(tx), input)
+	if err != nil {
+		return nil, err
+	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: transition: commit: %w", err)
+	}
+
+	return evt, nil
+}
+
+func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TransitionInput) (*core.Event, error) {
 	// Lock booking
 	op, err := qtx.GetBookingForUpdate(ctx, input.BookingID)
 	if err != nil {
@@ -145,9 +183,6 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 				return nil, reuseErr
 			}
 			if reused != nil {
-				if err := tx.Commit(ctx); err != nil {
-					return nil, fmt.Errorf("postgres: transition: commit idempotent: %w", err)
-				}
 				return reused, nil
 			}
 		}
@@ -161,9 +196,7 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
-	for k, v := range input.Metadata {
-		metadata[k] = v
-	}
+	maps.Copy(metadata, input.Metadata)
 
 	// Determine settled_amount: use input if non-zero, else keep existing
 	settledAmount := mustNumericToDecimal(op.SettledAmount)
@@ -209,10 +242,6 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: transition: insert event", err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: transition: commit: %w", err)
 	}
 
 	return eventFromRow(eventRow), nil

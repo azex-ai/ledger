@@ -15,7 +15,12 @@ import (
 )
 
 // QueryStore implements server.QueryProvider for read-only list/get queries.
+//
+// In pool mode (constructed via NewQueryStore), queries run against the pool.
+// In tx mode (bound via withDB), queries participate in the caller's
+// transaction.
 type QueryStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
 }
@@ -25,6 +30,14 @@ func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 	return &QueryStore{
 		pool: pool,
 		q:    sqlcgen.New(pool),
+	}
+}
+
+// WithDB returns a clone of the QueryStore bound to an existing transaction.
+func (s *QueryStore) WithDB(db DBTX) *QueryStore {
+	return &QueryStore{
+		pool: nil, // tx mode
+		q:    sqlcgen.New(db),
 	}
 }
 

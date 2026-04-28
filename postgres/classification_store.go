@@ -19,7 +19,12 @@ var (
 )
 
 // ClassificationStore implements ClassificationStore and JournalTypeStore.
+//
+// In pool mode (constructed via NewClassificationStore), queries run against
+// the pool. In tx mode (bound via withDB), queries participate in the caller's
+// transaction.
 type ClassificationStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
 }
@@ -29,6 +34,15 @@ func NewClassificationStore(pool *pgxpool.Pool) *ClassificationStore {
 	return &ClassificationStore{
 		pool: pool,
 		q:    sqlcgen.New(pool),
+	}
+}
+
+// WithDB returns a clone of the ClassificationStore bound to an existing
+// transaction.
+func (s *ClassificationStore) WithDB(db DBTX) *ClassificationStore {
+	return &ClassificationStore{
+		pool: nil, // tx mode
+		q:    sqlcgen.New(db),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -90,12 +91,10 @@ func SeedJournalType(t *testing.T, pool *pgxpool.Pool, code, name string) int64 
 }
 
 // keyCounter generates monotonically-increasing suffixes for idempotency keys
-// inside a single test binary. Tests are not concurrent w.r.t. this counter,
-// which is fine — every call inside one test process gets a unique key.
-var keyCounter int
+// inside a single test binary. Atomic so concurrent tests can call it safely.
+var keyCounter atomic.Int64
 
 // UniqueKey returns a unique idempotency key by appending a counter to prefix.
 func UniqueKey(prefix string) string {
-	keyCounter++
-	return fmt.Sprintf("%s-%d", prefix, keyCounter)
+	return fmt.Sprintf("%s-%d", prefix, keyCounter.Add(1))
 }

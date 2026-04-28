@@ -15,7 +15,11 @@ var _ core.EventReader = (*EventStore)(nil)
 const eventClaimLease = 2 * time.Minute
 
 // EventStore implements core.EventReader and event delivery helpers.
+//
+// In pool mode (constructed via NewEventStore), queries run against the pool.
+// In tx mode (bound via withDB), queries participate in the caller's transaction.
 type EventStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool       *pgxpool.Pool
 	q          *sqlcgen.Queries
 	claimLease time.Duration
@@ -26,6 +30,15 @@ type EventStore struct {
 // sqlcgen package.
 func NewEventStore(pool *pgxpool.Pool) *EventStore {
 	return &EventStore{pool: pool, q: sqlcgen.New(pool), claimLease: eventClaimLease}
+}
+
+// WithDB returns a clone of the EventStore bound to an existing transaction.
+func (s *EventStore) WithDB(db DBTX) *EventStore {
+	return &EventStore{
+		pool:       nil, // tx mode
+		q:          sqlcgen.New(db),
+		claimLease: s.claimLease,
+	}
 }
 
 // SetClaimLease overrides the default event delivery lease duration.

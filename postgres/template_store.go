@@ -15,7 +15,12 @@ import (
 var _ core.TemplateStore = (*TemplateStore)(nil)
 
 // TemplateStore implements core.TemplateStore using PostgreSQL.
+//
+// In pool mode (constructed via NewTemplateStore), CreateTemplate starts and
+// commits its own transaction. In tx mode (bound via withDB), it writes into
+// the caller's transaction — commit/rollback is the caller's responsibility.
 type TemplateStore struct {
+	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
 }
@@ -28,20 +33,49 @@ func NewTemplateStore(pool *pgxpool.Pool) *TemplateStore {
 	}
 }
 
+// WithDB returns a clone of the TemplateStore bound to an existing transaction.
+func (s *TemplateStore) WithDB(db DBTX) *TemplateStore {
+	return &TemplateStore{
+		pool: nil, // tx mode
+		q:    sqlcgen.New(db),
+	}
+}
+
 // CreateTemplate inserts a template with its lines in a transaction.
+//
+// In pool mode a new transaction is started and committed here.
+// In tx mode (bound via withDB) the writes participate in the caller's
+// transaction; commit/rollback is the caller's responsibility.
 func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateInput) (*core.EntryTemplate, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: create template: %w", err)
 	}
 
+	if s.pool == nil {
+		// Tx mode: write directly into caller's transaction.
+		return s.createTemplateWithQueries(ctx, s.q, input)
+	}
+
+	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: create template: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	qtx := s.q.WithTx(tx)
+	result, err := s.createTemplateWithQueries(ctx, s.q.WithTx(tx), input)
+	if err != nil {
+		return nil, err
+	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: create template: commit: %w", err)
+	}
+
+	return result, nil
+}
+
+func (s *TemplateStore) createTemplateWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TemplateInput) (*core.EntryTemplate, error) {
 	tmpl, err := qtx.CreateTemplate(ctx, sqlcgen.CreateTemplateParams{
 		Code:          input.Code,
 		Name:          input.Name,
@@ -65,10 +99,6 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateI
 			return nil, wrapStoreError(fmt.Sprintf("postgres: create template: insert line[%d]", i), err)
 		}
 		sqlcLines[i] = line
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: create template: commit: %w", err)
 	}
 
 	return templateFromRow(tmpl, sqlcLines), nil

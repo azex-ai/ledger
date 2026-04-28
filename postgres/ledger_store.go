@@ -15,6 +15,9 @@ import (
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
+// Compile-time check: *pgxpool.Pool satisfies DBTX.
+var _ DBTX = (*pgxpool.Pool)(nil)
+
 // Compile-time interface assertions.
 var (
 	_ core.JournalWriter         = (*LedgerStore)(nil)
@@ -23,8 +26,23 @@ var (
 )
 
 // LedgerStore implements JournalWriter and BalanceReader using PostgreSQL.
+//
+// In pool mode (constructed via NewLedgerStore), every write operation that
+// requires atomicity starts its own transaction. GetBalance wraps its two
+// queries in a REPEATABLE READ transaction to prevent phantom reads.
+//
+// In tx mode (constructed via NewLedgerStore then bound via withDB), the store
+// participates in the caller's transaction. Write operations that previously
+// started their own transaction now use the provided pgx.Tx directly (they do
+// not call Commit/Rollback — the caller owns the transaction lifecycle).
+// GetBalance does NOT start a REPEATABLE READ sub-transaction; the caller's
+// transaction isolation level applies instead.
 type LedgerStore struct {
+	// pool is non-nil only in pool mode. It is used for BeginTx when an
+	// explicit isolation level (e.g. REPEATABLE READ for GetBalance) is needed.
+	// When nil, the store is tx-bound and must use db directly.
 	pool *pgxpool.Pool
+	db   DBTX
 	q    *sqlcgen.Queries
 }
 
@@ -86,17 +104,42 @@ type queryProvider interface {
 	GetTemplateLines(ctx context.Context, templateID int64) ([]sqlcgen.EntryTemplateLine, error)
 }
 
-// NewLedgerStore creates a new LedgerStore.
+// NewLedgerStore creates a new LedgerStore backed by a connection pool. The
+// store starts its own transactions for write operations and uses REPEATABLE
+// READ isolation for GetBalance.
 func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
 	return &LedgerStore{
 		pool: pool,
+		db:   pool,
 		q:    sqlcgen.New(pool),
+	}
+}
+
+// WithDB returns a clone of the LedgerStore bound to an existing transaction
+// (or any DBTX implementor). The clone shares no mutable state with the
+// original and is safe for concurrent use alongside it. The caller owns the
+// transaction lifecycle (commit/rollback).
+func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
+	return &LedgerStore{
+		pool: nil, // tx mode: pool deliberately nil
+		db:   db,
+		q:    sqlcgen.New(db),
 	}
 }
 
 // PostJournal posts a balanced journal within a transaction.
 // Idempotent: returns existing journal if idempotency_key already exists.
+//
+// In pool mode a new transaction is started and committed here.
+// In tx mode (store bound via withDB) the journal is written directly into
+// the caller's transaction; commit/rollback is the caller's responsibility.
 func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
+	if s.pool == nil {
+		// Tx mode: use the caller's transaction directly.
+		return s.postJournalWithQueries(ctx, s.q, input)
+	}
+
+	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: post journal: begin tx: %w", err)
@@ -127,11 +170,21 @@ func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, 
 }
 
 // ExecuteTemplateBatch renders and posts multiple templates in a single transaction.
+//
+// In pool mode a new transaction is started and committed here (all-or-nothing).
+// In tx mode (store bound via withDB) all journals are written directly into
+// the caller's transaction; commit/rollback is the caller's responsibility.
 func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	if len(requests) == 0 {
 		return nil, nil
 	}
 
+	if s.pool == nil {
+		// Tx mode: write directly into caller's transaction.
+		return s.executeTemplateBatchWithQueries(ctx, s.q, requests)
+	}
+
+	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: execute template batch: begin tx: %w", err)
@@ -139,9 +192,22 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
+	journals, err := s.executeTemplateBatchWithQueries(ctx, qtx, requests)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: execute template batch: commit: %w", err)
+	}
+
+	return journals, nil
+}
+
+func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sqlcgen.Queries, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	inputs := make([]core.JournalInput, len(requests))
 	for i, req := range requests {
-		input, err := s.renderTemplate(ctx, qtx, req.TemplateCode, req.Params)
+		input, err := s.renderTemplate(ctx, q, req.TemplateCode, req.Params)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
 		}
@@ -150,17 +216,12 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 
 	journals := make([]*core.Journal, 0, len(inputs))
 	for i, input := range inputs {
-		journal, err := s.postJournalWithQueries(ctx, qtx, input)
+		journal, err := s.postJournalWithQueries(ctx, q, input)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
 		}
 		journals = append(journals, journal)
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: execute template batch: commit: %w", err)
-	}
-
 	return journals, nil
 }
 
@@ -181,7 +242,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 	if err == nil {
 		return nil, fmt.Errorf("postgres: reverse journal: journal %d already reversed by %d: %w", journalID, existingReversal.ID, core.ErrConflict)
 	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: reverse journal: lookup reversal: %w", err)
 	}
 
@@ -281,7 +342,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		if lookupErr == nil {
 			return journalFromRow(existing), nil
 		}
-		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
 		}
 		return nil, wrapStoreError("postgres: post journal: insert journal", err)
@@ -339,9 +400,22 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 // GetBalance computes balance for a single (holder, currency, classification) dimension.
 // Balance = checkpoint.balance + delta (entries since checkpoint).
 // Delta computation respects normal_side of the classification.
-// Both queries run inside a REPEATABLE READ transaction to prevent phantom reads
-// from concurrent journal writes between the two queries.
+//
+// In pool mode, both queries run inside a REPEATABLE READ transaction to
+// prevent phantom reads from concurrent journal writes between the two queries.
+//
+// In tx mode (store bound via withDB), no sub-transaction is started; the
+// caller's transaction isolation level applies. If the caller requires
+// snapshot consistency, it should begin its transaction with REPEATABLE READ
+// before calling GetBalance.
 func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error) {
+	if s.pool == nil {
+		// Tx mode: use the caller's transaction directly — no inner tx.
+		return s.getBalanceWithQueries(ctx, s.q, holder, currencyID, classificationID)
+	}
+
+	// Pool mode: wrap in REPEATABLE READ to prevent phantom reads between the
+	// checkpoint query and the entry-sum query.
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("postgres: get balance: begin tx: %w", err)
@@ -349,12 +423,18 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
+	return s.getBalanceWithQueries(ctx, qtx, holder, currencyID, classificationID)
+}
 
+// getBalanceWithQueries is the shared inner implementation of GetBalance. It
+// executes against whichever *sqlcgen.Queries is provided (pool-backed or
+// tx-backed). The caller is responsible for transaction lifecycle.
+func (s *LedgerStore) getBalanceWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, classificationID int64) (decimal.Decimal, error) {
 	// Get checkpoint (may not exist yet)
 	var checkpointBalance decimal.Decimal
 	var sinceEntryID int64
 
-	cp, err := qtx.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
+	cp, err := q.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
 		AccountHolder:    holder,
 		CurrencyID:       currencyID,
 		ClassificationID: classificationID,
@@ -368,7 +448,7 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	}
 
 	// Get entry sums since checkpoint
-	sums, err := qtx.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
+	sums, err := q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
 		SinceEntryID:  sinceEntryID,
@@ -397,7 +477,7 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 	}
 
 	// Get classification to determine normal_side
-	cls, err := qtx.GetClassification(ctx, classificationID)
+	cls, err := q.GetClassification(ctx, classificationID)
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("postgres: get balance: get classification %d: %w", classificationID, err)
 	}
