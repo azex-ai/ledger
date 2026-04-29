@@ -35,6 +35,7 @@ import (
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/service"
 )
 
 // Service bundles every store the ledger exposes as a library. Constructed
@@ -46,14 +47,15 @@ type Service struct {
 	logger  core.Logger
 	metrics core.Metrics
 
-	ledgerStore   *postgres.LedgerStore
-	reserverStore *postgres.ReserverStore
-	bookingStore  *postgres.BookingStore
-	eventStore    *postgres.EventStore
-	classStore    *postgres.ClassificationStore
-	tmplStore     *postgres.TemplateStore
-	currencyStore *postgres.CurrencyStore
-	queryStore    *postgres.QueryStore
+	ledgerStore        *postgres.LedgerStore
+	reserverStore      *postgres.ReserverStore
+	bookingStore       *postgres.BookingStore
+	eventStore         *postgres.EventStore
+	classStore         *postgres.ClassificationStore
+	tmplStore          *postgres.TemplateStore
+	currencyStore      *postgres.CurrencyStore
+	queryStore         *postgres.QueryStore
+	snapshotExtraStore *postgres.SnapshotExtraStore
 }
 
 // Option mutates a Service during construction.
@@ -104,6 +106,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.tmplStore = postgres.NewTemplateStore(pool)
 	s.currencyStore = postgres.NewCurrencyStore(pool)
 	s.queryStore = postgres.NewQueryStore(pool)
+	s.snapshotExtraStore = postgres.NewSnapshotExtraStore(pool)
 
 	return s, nil
 }
@@ -149,6 +152,17 @@ func (s *Service) Currencies() core.CurrencyStore { return s.currencyStore }
 
 // Queries returns the read-only query provider used by the HTTP layer.
 func (s *Service) Queries() core.QueryProvider { return s.queryStore }
+
+// SnapshotBackfiller returns a core.SnapshotBackfiller that fills historical
+// snapshot gaps.  The returned service uses sparse storage (only inserts when
+// the balance has changed) and can detect gaps on startup via
+// (*service.SnapshotBackfillService).CheckAndBackfillOnStartup.
+func (s *Service) SnapshotBackfiller() core.SnapshotBackfiller {
+	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
+	rollup := postgres.NewRollupAdapter(s.pool)
+	svc := service.NewSnapshotBackfillService(rollup, s.snapshotExtraStore, s.snapshotExtraStore, engine)
+	return svc
+}
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the

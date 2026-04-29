@@ -11,6 +11,69 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countSnapshotsTotal = `-- name: CountSnapshotsTotal :one
+SELECT COUNT(*)::bigint FROM balance_snapshots
+`
+
+func (q *Queries) CountSnapshotsTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countSnapshotsTotal)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const getEarliestJournalDate = `-- name: GetEarliestJournalDate :one
+SELECT COALESCE(MIN(created_at), 'epoch'::timestamptz) AS earliest_at
+FROM journal_entries
+`
+
+// Returns the earliest journal_entries created_at, or the epoch sentinel when the table is empty.
+func (q *Queries) GetEarliestJournalDate(ctx context.Context) (interface{}, error) {
+	row := q.db.QueryRow(ctx, getEarliestJournalDate)
+	var earliest_at interface{}
+	err := row.Scan(&earliest_at)
+	return earliest_at, err
+}
+
+const getLatestSnapshotBefore = `-- name: GetLatestSnapshotBefore :one
+SELECT account_holder, currency_id, classification_id, snapshot_date, balance, created_at
+FROM balance_snapshots
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND classification_id = $3
+  AND snapshot_date < $4
+ORDER BY snapshot_date DESC
+LIMIT 1
+`
+
+type GetLatestSnapshotBeforeParams struct {
+	AccountHolder    int64       `json:"account_holder"`
+	CurrencyID       int64       `json:"currency_id"`
+	ClassificationID int64       `json:"classification_id"`
+	SnapshotDate     pgtype.Date `json:"snapshot_date"`
+}
+
+// Returns the most recent snapshot row for a given account before a given date.
+// Used by sparse storage to skip insert when balance is unchanged.
+func (q *Queries) GetLatestSnapshotBefore(ctx context.Context, arg GetLatestSnapshotBeforeParams) (BalanceSnapshot, error) {
+	row := q.db.QueryRow(ctx, getLatestSnapshotBefore,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.ClassificationID,
+		arg.SnapshotDate,
+	)
+	var i BalanceSnapshot
+	err := row.Scan(
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.ClassificationID,
+		&i.SnapshotDate,
+		&i.Balance,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getSnapshotBalances = `-- name: GetSnapshotBalances :many
 SELECT account_holder, currency_id, classification_id, snapshot_date, balance, created_at
 FROM balance_snapshots
