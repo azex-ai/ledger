@@ -4,9 +4,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/service/delivery"
 )
 
 // WorkerConfig holds configuration for the background Worker.
@@ -42,21 +44,23 @@ func DefaultWorkerConfig() WorkerConfig {
 }
 
 // EventBatchProcessor processes a batch of pending events.
-// Implemented by delivery.WebhookDeliverer.
+// Implemented by delivery.WebhookDeliverer and delivery.LocalDispatcher.
 type EventBatchProcessor interface {
 	ProcessBatch(ctx context.Context, batchSize int) (int, error)
 }
 
 // Worker runs background jobs on configurable intervals.
 type Worker struct {
-	rollup         *RollupService
-	expiration     *ExpirationService
-	reconcile      *ReconciliationService
-	snapshot       *SnapshotService
-	systemRollup   *SystemRollupService
-	eventDeliverer EventBatchProcessor // nil = skip event delivery (library mode)
-	config         WorkerConfig
-	logger         core.Logger
+	rollup                 *RollupService
+	expiration             *ExpirationService
+	reconcile              *ReconciliationService
+	snapshot               *SnapshotService
+	systemRollup           *SystemRollupService
+	eventDeliverer         EventBatchProcessor // nil = skip webhook delivery (library mode)
+	localDeliverer         *delivery.LocalDispatcher
+	pool                   *pgxpool.Pool // nil = no advisory locks (single-replica mode)
+	config                 WorkerConfig
+	logger                 core.Logger
 }
 
 // NewWorker creates a new Worker.
@@ -86,6 +90,41 @@ func (w *Worker) SetEventDeliverer(d EventBatchProcessor) {
 	w.eventDeliverer = d
 }
 
+// SetPool attaches a *pgxpool.Pool used for pg_try_advisory_lock-based leader
+// election on the reconcile and system_rollup jobs.  When nil (the default),
+// those jobs run on every pod — safe for single-replica deployments.
+func (w *Worker) SetPool(pool *pgxpool.Pool) {
+	w.pool = pool
+}
+
+// Subscribe registers an in-process handler that receives every emitted event.
+// Handlers are invoked from a background poll loop ("event_callback").  If a
+// handler returns an error the event is logged and still marked delivered —
+// blocking the queue on a buggy handler is worse than a missed notification.
+//
+// Subscribe wires a delivery.LocalDispatcher the first time it is called.
+// localPoller must be non-nil when Subscribe is used; pass it via
+// SetLocalPoller before calling Run.
+func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) {
+	if w.localDeliverer == nil {
+		// Lazily create — the poller will be set when SetLocalPoller is called.
+		// If the caller never sets a poller, ProcessBatch will return an error
+		// on the first tick, which the worker will log but not crash on.
+		w.localDeliverer = delivery.NewLocalDispatcher(nil, w.logger)
+	}
+	w.localDeliverer.OnEvent(handler)
+}
+
+// SetLocalPoller wires the EventPoller that backs the in-process event
+// subscription loop.  Must be called before Run() when Subscribe() is used.
+func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
+	if w.localDeliverer == nil {
+		w.localDeliverer = delivery.NewLocalDispatcher(poller, w.logger)
+	} else {
+		w.localDeliverer.SetPoller(poller)
+	}
+}
+
 // Run starts all background jobs and blocks until ctx is cancelled.
 // Returns nil when all goroutines exit cleanly after context cancellation.
 func (w *Worker) Run(ctx context.Context) error {
@@ -110,14 +149,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		})
 	})
 
+	// reconcile — advisory-locked so only one replica runs per tick.
+	reconcileJob := NewLockedJob("reconcile", func(ctx context.Context) error {
+		_, err := w.reconcile.CheckAccountingEquation(ctx)
+		return err
+	}, w.pool, w.logger)
 	g.Go(func() error {
 		return w.runLoop(ctx, "reconcile", w.config.ReconcileInterval, func(ctx context.Context) {
-			if _, err := w.reconcile.CheckAccountingEquation(ctx); err != nil {
-				w.logger.Error("worker: reconcile failed", "error", err)
-			}
+			reconcileJob.Run(ctx)
 		})
 	})
 
+	// snapshot — advisory lock is handled inside CreateDailySnapshot via WithPool.
 	g.Go(func() error {
 		return w.runLoop(ctx, "snapshot", w.config.SnapshotInterval, func(ctx context.Context) {
 			yesterday := time.Now().UTC().AddDate(0, 0, -1)
@@ -127,11 +170,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		})
 	})
 
+	// system_rollup — advisory-locked so only one replica runs per tick.
+	sysRollupJob := NewLockedJob("system_rollup", func(ctx context.Context) error {
+		return w.systemRollup.RefreshSystemRollups(ctx)
+	}, w.pool, w.logger)
 	g.Go(func() error {
 		return w.runLoop(ctx, "system_rollup", w.config.SystemRollupInterval, func(ctx context.Context) {
-			if err := w.systemRollup.RefreshSystemRollups(ctx); err != nil {
-				w.logger.Error("worker: system rollup failed", "error", err)
-			}
+			sysRollupJob.Run(ctx)
 		})
 	})
 
@@ -140,6 +185,16 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.runLoop(ctx, "event_delivery", w.config.EventDeliveryInterval, func(ctx context.Context) {
 				if _, err := w.eventDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
 					w.logger.Error("worker: event delivery failed", "error", err)
+				}
+			})
+		})
+	}
+
+	if w.localDeliverer != nil {
+		g.Go(func() error {
+			return w.runLoop(ctx, "event_callback", w.config.EventDeliveryInterval, func(ctx context.Context) {
+				if _, err := w.localDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
+					w.logger.Error("worker: event callback delivery failed", "error", err)
 				}
 			})
 		})
