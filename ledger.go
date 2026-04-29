@@ -47,18 +47,19 @@ type Service struct {
 	logger  core.Logger
 	metrics core.Metrics
 
-	ledgerStore        *postgres.LedgerStore
-	reserverStore      *postgres.ReserverStore
-	bookingStore       *postgres.BookingStore
-	eventStore         *postgres.EventStore
-	classStore         *postgres.ClassificationStore
-	tmplStore          *postgres.TemplateStore
-	currencyStore      *postgres.CurrencyStore
-	queryStore         *postgres.QueryStore
-	snapshotExtraStore *postgres.SnapshotExtraStore
-	balanceTrendsStore *postgres.BalanceTrendsStore
-	auditStore         *postgres.AuditStore
-	pendingStore       *postgres.PendingStore
+	ledgerStore          *postgres.LedgerStore
+	reserverStore        *postgres.ReserverStore
+	bookingStore         *postgres.BookingStore
+	eventStore           *postgres.EventStore
+	classStore           *postgres.ClassificationStore
+	tmplStore            *postgres.TemplateStore
+	currencyStore        *postgres.CurrencyStore
+	queryStore           *postgres.QueryStore
+	snapshotExtraStore   *postgres.SnapshotExtraStore
+	balanceTrendsStore   *postgres.BalanceTrendsStore
+	auditStore           *postgres.AuditStore
+	pendingStore         *postgres.PendingStore
+	platformBalanceStore *postgres.PlatformBalanceStore
 }
 
 // Option mutates a Service during construction.
@@ -113,6 +114,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.balanceTrendsStore = postgres.NewBalanceTrendsStore(pool, s.ledgerStore)
 	s.auditStore = postgres.NewAuditStore(pool)
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
+	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 
 	return s, nil
 }
@@ -177,6 +179,17 @@ func (s *Service) PendingBalanceWriter() core.PendingBalanceWriter { return s.pe
 // PendingTimeoutSweeper returns the sweeper that expires stale pending deposits.
 // Requires the pending bundle to be installed (presets.InstallPendingBundle).
 func (s *Service) PendingTimeoutSweeper() core.PendingTimeoutSweeper { return s.pendingStore }
+
+// PlatformBalanceReader returns the structured platform-balance read API.
+// Use this to retrieve per-classification breakdowns split by user-side vs
+// system-side holders, and to compute total liability by currency.
+func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
+	return s.platformBalanceStore
+}
+
+// SolvencyChecker returns the solvency check API for a single currency.
+// It compares total user-side liability against the custodial system balance.
+func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
@@ -246,20 +259,21 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
 	cs := s.classStore.WithDB(tx)
 	return &Service{
-		pool:               s.pool,
-		logger:             s.logger,
-		metrics:            s.metrics,
-		ledgerStore:        ls,
-		reserverStore:      s.reserverStore.WithDB(tx, ls),
-		bookingStore:       s.bookingStore.WithDB(tx),
-		eventStore:         s.eventStore.WithDB(tx),
-		classStore:         cs,
-		tmplStore:          s.tmplStore.WithDB(tx),
-		currencyStore:      s.currencyStore.WithDB(tx),
-		queryStore:         s.queryStore.WithDB(tx),
-		snapshotExtraStore: s.snapshotExtraStore,
-		balanceTrendsStore: s.balanceTrendsStore.WithDB(tx, ls),
-		auditStore:         s.auditStore.WithDB(tx),
-		pendingStore:       s.pendingStore.WithDB(tx, ls, cs),
+		pool:                 s.pool,
+		logger:               s.logger,
+		metrics:              s.metrics,
+		ledgerStore:          ls,
+		reserverStore:        s.reserverStore.WithDB(tx, ls),
+		bookingStore:         s.bookingStore.WithDB(tx),
+		eventStore:           s.eventStore.WithDB(tx),
+		classStore:           cs,
+		tmplStore:            s.tmplStore.WithDB(tx),
+		currencyStore:        s.currencyStore.WithDB(tx),
+		queryStore:           s.queryStore.WithDB(tx),
+		snapshotExtraStore:   s.snapshotExtraStore,
+		balanceTrendsStore:   s.balanceTrendsStore.WithDB(tx, ls),
+		auditStore:           s.auditStore.WithDB(tx),
+		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
+		platformBalanceStore: s.platformBalanceStore, // read-only, pool-backed is fine
 	}
 }

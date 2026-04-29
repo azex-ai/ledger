@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/azex-ai/ledger/core"
 )
 
@@ -18,10 +20,19 @@ type SystemRollupWriter interface {
 	UpsertSystemRollup(ctx context.Context, rollup core.SystemRollup) error
 }
 
+// PlatformBalanceQuerier reads raw platform balance rows from the store.
+// Implemented by postgres.PlatformBalanceStore.
+type PlatformBalanceQuerier interface {
+	GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error)
+	GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error)
+	SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error)
+}
+
 // SystemRollupService aggregates balance_checkpoints into system_rollups for O(1) queries.
 type SystemRollupService struct {
 	aggregator CheckpointAggregator
 	writer     SystemRollupWriter
+	pbQuerier  PlatformBalanceQuerier
 	logger     core.Logger
 	metrics    core.Metrics
 }
@@ -38,6 +49,14 @@ func NewSystemRollupService(
 		logger:     engine.Logger(),
 		metrics:    engine.Metrics(),
 	}
+}
+
+// WithPlatformBalanceQuerier attaches a querier for the platform-balance read
+// API. Call this after NewSystemRollupService when you need GetPlatformBalances,
+// GetTotalLiabilityByAsset, or SolvencyCheck.
+func (s *SystemRollupService) WithPlatformBalanceQuerier(q PlatformBalanceQuerier) *SystemRollupService {
+	s.pbQuerier = q
+	return s
 }
 
 // RefreshSystemRollups aggregates all balance_checkpoints by (currency_id, classification_id)
@@ -66,3 +85,44 @@ func (s *SystemRollupService) RefreshSystemRollups(ctx context.Context) error {
 	return nil
 }
 
+// GetPlatformBalances returns a structured per-classification breakdown for the
+// given currency. See core.PlatformBalance for field semantics.
+// Returns an error if WithPlatformBalanceQuerier has not been called.
+func (s *SystemRollupService) GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error) {
+	if s.pbQuerier == nil {
+		return nil, fmt.Errorf("service: system rollup: platform balance querier not configured")
+	}
+	pb, err := s.pbQuerier.GetPlatformBalances(ctx, currencyID)
+	if err != nil {
+		return nil, fmt.Errorf("service: system rollup: get platform balances currency=%d: %w", currencyID, err)
+	}
+	return pb, nil
+}
+
+// GetTotalLiabilityByAsset returns the sum of all user-side (holder > 0) balances
+// across all classifications for the given currency.
+// Returns an error if WithPlatformBalanceQuerier has not been called.
+func (s *SystemRollupService) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
+	if s.pbQuerier == nil {
+		return decimal.Zero, fmt.Errorf("service: system rollup: platform balance querier not configured")
+	}
+	total, err := s.pbQuerier.GetTotalLiabilityByAsset(ctx, currencyID)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("service: system rollup: total liability currency=%d: %w", currencyID, err)
+	}
+	return total, nil
+}
+
+// SolvencyCheck computes a solvency report for the given currency.
+// See core.SolvencyReport for field semantics.
+// Returns an error if WithPlatformBalanceQuerier has not been called.
+func (s *SystemRollupService) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+	if s.pbQuerier == nil {
+		return nil, fmt.Errorf("service: system rollup: platform balance querier not configured")
+	}
+	report, err := s.pbQuerier.SolvencyCheck(ctx, currencyID)
+	if err != nil {
+		return nil, fmt.Errorf("service: system rollup: solvency check currency=%d: %w", currencyID, err)
+	}
+	return report, nil
+}
