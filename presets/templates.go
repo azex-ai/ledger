@@ -305,6 +305,34 @@ func filterTemplatesByJournalTypes(all []TemplatePreset, allowed []JournalTypePr
 	return out
 }
 
+// InstallExtendedPresets installs all bundles: the default deposit + withdrawal
+// set plus transfer, fee, capital, settlement, card, and spread. Safe to call
+// alongside or after InstallDefaultTemplatePresets — duplicate rows are
+// validated and skipped.
+func InstallExtendedPresets(
+	ctx context.Context,
+	classifications core.ClassificationStore,
+	journalTypes core.JournalTypeStore,
+	templates core.TemplateStore,
+) error {
+	bundles := []TemplateBundle{
+		DepositBundle(),
+		WithdrawalBundle(),
+		TransferBundle(),
+		FeeBundle(),
+		CapitalBundle(),
+		SettlementBundle(),
+		CardBundle(),
+		SpreadBundle(),
+	}
+	for _, b := range bundles {
+		if err := InstallTemplateBundle(ctx, classifications, journalTypes, templates, b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func InstallTemplatePresets(
 	ctx context.Context,
 	classifications core.ClassificationStore,
