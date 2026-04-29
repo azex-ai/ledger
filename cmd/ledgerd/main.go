@@ -16,13 +16,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger"
-	"github.com/azex-ai/ledger/channel"
 	chanOnchain "github.com/azex-ai/ledger/channel/onchain"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/observability"
 	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/postgres"
-	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
 	"github.com/azex-ai/ledger/service/delivery"
@@ -97,44 +95,36 @@ func run() error {
 		return fmt.Errorf("ledger facade: %w", err)
 	}
 
-	// Concrete store handles still needed by adapter-only consumers (worker
-	// claim lease tuning, webhook subscriber store).
-	bookingStore := postgres.NewBookingStore(pool)
-	eventStore := postgres.NewEventStore(pool)
-	webhookSubscriberStore := postgres.NewWebhookSubscriberStore(pool)
-	classStore := postgres.NewClassificationStore(pool)
-	tmplStore := postgres.NewTemplateStore(pool)
-
-	workerCfg := service.DefaultWorkerConfig()
-	eventStore.SetClaimLease(workerCfg.EventClaimLease)
-
-	if err := presets.InstallDefaultTemplatePresets(rootCtx, classStore, classStore, tmplStore); err != nil {
+	// Install default presets via facade (idempotent — safe to call on every start).
+	if err := svc.InstallDefaultPresets(rootCtx); err != nil {
 		return fmt.Errorf("install default template presets: %w", err)
 	}
 	logger.Info("default template presets installed")
 
-	// Create services
-	rollupAdapter := postgres.NewRollupAdapter(pool)
-	rollupAdapter.SetClaimLease(workerCfg.RollupClaimLease)
-	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, svc.Reserver(), bookingStore, bookingStore, engine)
-	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
-	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
-	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
+	// Build worker via facade — claim leases are configured from the config.
+	workerCfg := service.DefaultWorkerConfig()
+	worker := svc.Worker(workerCfg)
 
-	// Create worker with event delivery
-	worker := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, workerCfg, engine)
-
-	// Set up webhook delivery (service mode)
+	// Set up webhook delivery (service mode).
+	// EventStore and WebhookSubscriberStore are still allocated directly because
+	// the webhook deliverer needs store-level access not exposed through core interfaces.
+	eventStore := postgres.NewEventStore(pool)
+	webhookSubscriberStore := postgres.NewWebhookSubscriberStore(pool)
 	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, webhookSubscriberStore, coreLogger)
 	worker.SetEventDeliverer(webhookDeliverer)
 
-	// Channel adapters
-	channels := map[string]channel.Adapter{}
+	// Register channel adapters via facade.
 	evmSigningKey := os.Getenv("EVM_WEBHOOK_SECRET")
 	if evmSigningKey != "" {
-		channels["evm"] = chanOnchain.New([]byte(evmSigningKey))
+		svc.RegisterChannel("evm", chanOnchain.New([]byte(evmSigningKey)))
 	}
+
+	// Build reconcile/snapshot/systemRollup services for the HTTP server.
+	// These are lightweight (no state) and share the same rollup adapter.
+	rollupAdapter := postgres.NewRollupAdapter(pool)
+	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, postgres.NewClassificationStore(pool), engine)
+	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
+	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 
 	// Create HTTP server
 	srv := server.NewWithConfig(
@@ -142,14 +132,14 @@ func run() error {
 		svc.JournalWriter(),
 		svc.BalanceReader(),
 		svc.Reserver(),
-		bookingStore, // also Booker; concrete handle reused above for store-only access
-		bookingStore, // also BookingReader
-		eventStore,   // EventReader (concrete handle for SetClaimLease)
-		classStore,
-		classStore, // JournalTypeStore (same impl)
-		tmplStore,
+		svc.Booker(),
+		svc.BookingReader(),
+		svc.EventReader(),
+		svc.Classifications(),
+		svc.JournalTypes(),
+		svc.Templates(),
 		svc.Currencies(),
-		channels,
+		svc.Channels(),
 		reconcileSvc,
 		snapshotSvc,
 		systemRollupSvc,

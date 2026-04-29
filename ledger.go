@@ -29,12 +29,15 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/service"
 )
 
@@ -61,6 +64,9 @@ type Service struct {
 	pendingStore         *postgres.PendingStore
 	platformBalanceStore *postgres.PlatformBalanceStore
 	reconcileAdapter     *postgres.ReconcileAdapter
+
+	channelsMu sync.RWMutex
+	channels   map[string]channel.Adapter
 }
 
 // Option mutates a Service during construction.
@@ -95,9 +101,10 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	}
 
 	s := &Service{
-		pool:    pool,
-		logger:  core.NopLogger(),
-		metrics: core.NopMetrics(),
+		pool:     pool,
+		logger:   core.NopLogger(),
+		metrics:  core.NopMetrics(),
+		channels: make(map[string]channel.Adapter),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -287,5 +294,117 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore, // read-only, pool-backed is fine
 		reconcileAdapter:     s.reconcileAdapter,     // read-only, pool-backed is fine
+		channels:             s.channels,             // shared snapshot; no mutations inside tx
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Migrate — package-level thin alias for postgres.Migrate
+// ---------------------------------------------------------------------------
+
+// Migrate runs all pending schema migrations against the given database URL.
+// It is a thin re-export of postgres.Migrate so consumers only need to import
+// this package:
+//
+//	if err := ledger.Migrate("pgx5://user:pass@host/db"); err != nil { ... }
+func Migrate(databaseURL string) error {
+	return postgres.Migrate(databaseURL)
+}
+
+// ---------------------------------------------------------------------------
+// Preset installation
+// ---------------------------------------------------------------------------
+
+// InstallDefaultPresets installs the deposit and withdrawal classification,
+// journal-type, and template presets. Safe to call on every startup — existing
+// rows are validated and reused.
+func (s *Service) InstallDefaultPresets(ctx context.Context) error {
+	if err := presets.InstallDefaultTemplatePresets(ctx, s.classStore, s.classStore, s.tmplStore); err != nil {
+		return fmt.Errorf("ledger: install default presets: %w", err)
+	}
+	return nil
+}
+
+// InstallExtendedPresets installs the full preset suite: deposit, withdrawal,
+// transfer, fee, capital, settlement, card, and spread bundles. Safe to call
+// alongside or after InstallDefaultPresets — duplicate rows are validated and
+// skipped.
+func (s *Service) InstallExtendedPresets(ctx context.Context) error {
+	if err := presets.InstallExtendedPresets(ctx, s.classStore, s.classStore, s.tmplStore); err != nil {
+		return fmt.Errorf("ledger: install extended presets: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Channel registry
+// ---------------------------------------------------------------------------
+
+// RegisterChannel registers an inbound-webhook channel adapter under name.
+// Call before starting the HTTP server. Safe to call from a single goroutine
+// during startup; concurrent registrations are serialised by a mutex.
+func (s *Service) RegisterChannel(name string, adapter channel.Adapter) {
+	s.channelsMu.Lock()
+	defer s.channelsMu.Unlock()
+	s.channels[name] = adapter
+}
+
+// Channels returns a snapshot of all registered channel adapters. The returned
+// map is a copy — mutations do not affect the registry.
+func (s *Service) Channels() map[string]channel.Adapter {
+	s.channelsMu.RLock()
+	defer s.channelsMu.RUnlock()
+	out := make(map[string]channel.Adapter, len(s.channels))
+	for k, v := range s.channels {
+		out[k] = v
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Worker accessor
+// ---------------------------------------------------------------------------
+
+// Worker builds a fully-wired background Worker from the internal stores and
+// the provided WorkerConfig. The caller is responsible for running it:
+//
+//	worker := svc.Worker(service.DefaultWorkerConfig())
+//	go worker.Run(ctx)
+//
+// The EventStore claim-lease is configured from cfg.EventClaimLease. The
+// RollupAdapter claim-lease is configured from cfg.RollupClaimLease.
+func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
+	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
+
+	rollupAdapter := postgres.NewRollupAdapter(s.pool)
+	rollupAdapter.SetClaimLease(cfg.RollupClaimLease)
+
+	s.eventStore.SetClaimLease(cfg.EventClaimLease)
+
+	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.bookingStore, s.bookingStore, engine)
+	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
+	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
+
+	return service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, cfg, engine)
+}
+
+// ---------------------------------------------------------------------------
+// Health check
+// ---------------------------------------------------------------------------
+
+// Ping verifies the database connection by acquiring a connection from the pool
+// and executing SELECT 1. Returns a wrapped error on failure.
+func (s *Service) Ping(ctx context.Context) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("ledger: ping: acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
+		return fmt.Errorf("ledger: ping: %w", err)
+	}
+	return nil
 }
