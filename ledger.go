@@ -60,6 +60,7 @@ type Service struct {
 	auditStore           *postgres.AuditStore
 	pendingStore         *postgres.PendingStore
 	platformBalanceStore *postgres.PlatformBalanceStore
+	reconcileAdapter     *postgres.ReconcileAdapter
 }
 
 // Option mutates a Service during construction.
@@ -115,6 +116,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.auditStore = postgres.NewAuditStore(pool)
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
+	s.reconcileAdapter = postgres.NewReconcileAdapter(pool)
 
 	return s, nil
 }
@@ -190,6 +192,15 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 // SolvencyChecker returns the solvency check API for a single currency.
 // It compares total user-side liability against the custodial system balance.
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
+
+// FullReconciler returns a core.FullReconciler that runs the complete 10-check
+// reconciliation suite. cfg is optional; zero-value uses sensible defaults.
+func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
+	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
+	rollupAdapter := postgres.NewRollupAdapter(s.pool)
+	basic := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	return service.NewFullReconciliationService(basic, s.reconcileAdapter, cfg, engine)
+}
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
@@ -275,5 +286,6 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		auditStore:           s.auditStore.WithDB(tx),
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore, // read-only, pool-backed is fine
+		reconcileAdapter:     s.reconcileAdapter,     // read-only, pool-backed is fine
 	}
 }
