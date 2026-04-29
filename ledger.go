@@ -54,6 +54,7 @@ type Service struct {
 	tmplStore     *postgres.TemplateStore
 	currencyStore *postgres.CurrencyStore
 	queryStore    *postgres.QueryStore
+	pendingStore  *postgres.PendingStore
 }
 
 // Option mutates a Service during construction.
@@ -104,6 +105,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.tmplStore = postgres.NewTemplateStore(pool)
 	s.currencyStore = postgres.NewCurrencyStore(pool)
 	s.queryStore = postgres.NewQueryStore(pool)
+	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 
 	return s, nil
 }
@@ -149,6 +151,14 @@ func (s *Service) Currencies() core.CurrencyStore { return s.currencyStore }
 
 // Queries returns the read-only query provider used by the HTTP layer.
 func (s *Service) Queries() core.QueryProvider { return s.queryStore }
+
+// PendingBalanceWriter returns the two-phase pending balance writer.
+// Requires the pending bundle to be installed (presets.InstallPendingBundle).
+func (s *Service) PendingBalanceWriter() core.PendingBalanceWriter { return s.pendingStore }
+
+// PendingTimeoutSweeper returns the sweeper that expires stale pending deposits.
+// Requires the pending bundle to be installed (presets.InstallPendingBundle).
+func (s *Service) PendingTimeoutSweeper() core.PendingTimeoutSweeper { return s.pendingStore }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
@@ -210,6 +220,7 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 // pgx.Tx satisfies postgres.DBTX (it has Exec, Query, QueryRow, and Begin).
 func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
+	cs := s.classStore.WithDB(tx)
 	return &Service{
 		pool:          s.pool,
 		logger:        s.logger,
@@ -218,9 +229,10 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		reserverStore: s.reserverStore.WithDB(tx, ls),
 		bookingStore:  s.bookingStore.WithDB(tx),
 		eventStore:    s.eventStore.WithDB(tx),
-		classStore:    s.classStore.WithDB(tx),
+		classStore:    cs,
 		tmplStore:     s.tmplStore.WithDB(tx),
 		currencyStore: s.currencyStore.WithDB(tx),
 		queryStore:    s.queryStore.WithDB(tx),
+		pendingStore:  s.pendingStore.WithDB(tx, ls, cs),
 	}
 }
