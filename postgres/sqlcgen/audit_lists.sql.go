@@ -211,7 +211,7 @@ func (q *Queries) ListJournalsByTimeRange(ctx context.Context, arg ListJournalsB
 }
 
 const traceBookingEvents = `-- name: TraceBookingEvents :many
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
 FROM events
 WHERE booking_id = $1
 ORDER BY id ASC
@@ -246,6 +246,8 @@ func (q *Queries) TraceBookingEvents(ctx context.Context, bookingID int64) ([]Ev
 			&i.NextAttemptAt,
 			&i.DeliveredAt,
 			&i.CreatedAt,
+			&i.ActorID,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}

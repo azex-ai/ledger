@@ -2,8 +2,8 @@
 INSERT INTO events (
     classification_code, booking_id, account_holder, currency_id,
     from_status, to_status, amount, settled_amount, journal_id,
-    metadata, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    metadata, occurred_at, actor_id, source
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING *;
 
 -- name: GetEvent :one

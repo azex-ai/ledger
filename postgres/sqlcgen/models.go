@@ -120,6 +120,8 @@ type Event struct {
 	NextAttemptAt      time.Time      `json:"next_attempt_at"`
 	DeliveredAt        time.Time      `json:"delivered_at"`
 	CreatedAt          time.Time      `json:"created_at"`
+	ActorID            int64          `json:"actor_id"`
+	Source             string         `json:"source"`
 }
 
 type Journal struct {

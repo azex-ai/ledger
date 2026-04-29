@@ -70,6 +70,8 @@ type TransitionInput struct {
 	Amount     decimal.Decimal `json:"amount"`
 	Metadata   map[string]any  `json:"metadata"`
 	ActorID    int64           `json:"actor_id"`
+	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
+	Source     string          `json:"source"`
 }
 
 func (i TransitionInput) Validate() error {

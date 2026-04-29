@@ -11,8 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/azex-ai/ledger/core"
+	ledgerotel "github.com/azex-ai/ledger/pkg/otel"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
@@ -53,7 +55,17 @@ func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 // CreateBooking creates a new booking with initial status from the classification lifecycle.
 // Idempotent: returns existing booking if idempotency_key already exists.
 func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.create_booking",
+		attribute.String("classification_code", input.ClassificationCode),
+		attribute.Int64("account_holder", input.AccountHolder),
+		attribute.Int64("currency_id", input.CurrencyID),
+		attribute.String("idempotency_key", input.IdempotencyKey),
+		attribute.String("amount", input.Amount.String()),
+	)
+	defer span.End()
+
 	if err := input.Validate(); err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: create booking: %w", err)
 	}
 
@@ -63,27 +75,39 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		return bookingFromRow(existing), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("postgres: create booking: check idempotency: %w", err)
+		retErr := fmt.Errorf("postgres: create booking: check idempotency: %w", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 
 	// Load classification to get lifecycle
 	class, err := s.q.GetClassificationByCode(ctx, input.ClassificationCode)
 	if err != nil {
+		var retErr error
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: create booking: classification %q: %w", input.ClassificationCode, core.ErrNotFound)
+			retErr = fmt.Errorf("postgres: create booking: classification %q: %w", input.ClassificationCode, core.ErrNotFound)
+		} else {
+			retErr = fmt.Errorf("postgres: create booking: classification %q: %w", input.ClassificationCode, err)
 		}
-		return nil, fmt.Errorf("postgres: create booking: classification %q: %w", input.ClassificationCode, err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 
 	var lifecycle core.Lifecycle
 	if len(class.Lifecycle) <= 2 {
-		return nil, fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
+		retErr := fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 	if err := json.Unmarshal(class.Lifecycle, &lifecycle); err != nil {
-		return nil, fmt.Errorf("postgres: create booking: unmarshal lifecycle: %w", err)
+		retErr := fmt.Errorf("postgres: create booking: unmarshal lifecycle: %w", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 	if err := lifecycle.Validate(); err != nil {
-		return nil, fmt.Errorf("postgres: create booking: invalid lifecycle: %w", err)
+		retErr := fmt.Errorf("postgres: create booking: invalid lifecycle: %w", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 
 	row, err := s.q.InsertBooking(ctx, sqlcgen.InsertBookingParams{
@@ -102,10 +126,14 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		if lookupErr == nil {
 			return bookingFromRow(existing), nil
 		}
+		var retErr error
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: create booking: insert: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
+			retErr = fmt.Errorf("postgres: create booking: insert: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
+		} else {
+			retErr = wrapStoreError("postgres: create booking", err)
 		}
-		return nil, wrapStoreError("postgres: create booking", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 	return bookingFromRow(row), nil
 }
@@ -116,28 +144,43 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 // In tx mode (bound via withDB) the transition is written into the caller's
 // transaction; commit/rollback is the caller's responsibility.
 func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.transition",
+		attribute.Int64("booking_id", input.BookingID),
+		attribute.String("to_status", string(input.ToStatus)),
+		attribute.Int64("actor_id", input.ActorID),
+		attribute.String("source", input.Source),
+	)
+	defer span.End()
+
 	if err := input.Validate(); err != nil {
-		return nil, fmt.Errorf("postgres: transition: %w", err)
+		retErr := fmt.Errorf("postgres: transition: %w", err)
+		ledgerotel.RecordError(span, retErr)
+		return nil, retErr
 	}
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		return s.transitionWithQueries(ctx, s.q, input)
+		evt, err := s.transitionWithQueries(ctx, s.q, input)
+		ledgerotel.RecordError(span, err)
+		return evt, err
 	}
 
 	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: transition: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	evt, err := s.transitionWithQueries(ctx, s.q.WithTx(tx), input)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: transition: commit: %w", err)
 	}
 
@@ -239,6 +282,8 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		JournalID:          pgtype.Int8{Valid: false},
 		Metadata:           anyMetadataToJSON(metadata),
 		OccurredAt:         time.Now(),
+		ActorID:            input.ActorID,
+		Source:             input.Source,
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: transition: insert event", err)
