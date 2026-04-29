@@ -46,14 +46,15 @@ type Service struct {
 	logger  core.Logger
 	metrics core.Metrics
 
-	ledgerStore   *postgres.LedgerStore
-	reserverStore *postgres.ReserverStore
-	bookingStore  *postgres.BookingStore
-	eventStore    *postgres.EventStore
-	classStore    *postgres.ClassificationStore
-	tmplStore     *postgres.TemplateStore
-	currencyStore *postgres.CurrencyStore
-	queryStore    *postgres.QueryStore
+	ledgerStore          *postgres.LedgerStore
+	reserverStore        *postgres.ReserverStore
+	bookingStore         *postgres.BookingStore
+	eventStore           *postgres.EventStore
+	classStore           *postgres.ClassificationStore
+	tmplStore            *postgres.TemplateStore
+	currencyStore        *postgres.CurrencyStore
+	queryStore           *postgres.QueryStore
+	platformBalanceStore *postgres.PlatformBalanceStore
 }
 
 // Option mutates a Service during construction.
@@ -104,6 +105,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.tmplStore = postgres.NewTemplateStore(pool)
 	s.currencyStore = postgres.NewCurrencyStore(pool)
 	s.queryStore = postgres.NewQueryStore(pool)
+	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 
 	return s, nil
 }
@@ -149,6 +151,17 @@ func (s *Service) Currencies() core.CurrencyStore { return s.currencyStore }
 
 // Queries returns the read-only query provider used by the HTTP layer.
 func (s *Service) Queries() core.QueryProvider { return s.queryStore }
+
+// PlatformBalanceReader returns the structured platform-balance read API.
+// Use this to retrieve per-classification breakdowns split by user-side vs
+// system-side holders, and to compute total liability by currency.
+func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
+	return s.platformBalanceStore
+}
+
+// SolvencyChecker returns the solvency check API for a single currency.
+// It compares total user-side liability against the custodial system balance.
+func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
@@ -211,16 +224,17 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
 	return &Service{
-		pool:          s.pool,
-		logger:        s.logger,
-		metrics:       s.metrics,
-		ledgerStore:   ls,
-		reserverStore: s.reserverStore.WithDB(tx, ls),
-		bookingStore:  s.bookingStore.WithDB(tx),
-		eventStore:    s.eventStore.WithDB(tx),
-		classStore:    s.classStore.WithDB(tx),
-		tmplStore:     s.tmplStore.WithDB(tx),
-		currencyStore: s.currencyStore.WithDB(tx),
-		queryStore:    s.queryStore.WithDB(tx),
+		pool:                 s.pool,
+		logger:               s.logger,
+		metrics:              s.metrics,
+		ledgerStore:          ls,
+		reserverStore:        s.reserverStore.WithDB(tx, ls),
+		bookingStore:         s.bookingStore.WithDB(tx),
+		eventStore:           s.eventStore.WithDB(tx),
+		classStore:           s.classStore.WithDB(tx),
+		tmplStore:            s.tmplStore.WithDB(tx),
+		currencyStore:        s.currencyStore.WithDB(tx),
+		queryStore:           s.queryStore.WithDB(tx),
+		platformBalanceStore: s.platformBalanceStore, // read-only, pool-backed is fine
 	}
 }
