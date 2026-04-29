@@ -58,6 +58,7 @@ type Service struct {
 	snapshotExtraStore *postgres.SnapshotExtraStore
 	balanceTrendsStore *postgres.BalanceTrendsStore
 	auditStore         *postgres.AuditStore
+	pendingStore       *postgres.PendingStore
 }
 
 // Option mutates a Service during construction.
@@ -111,6 +112,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.snapshotExtraStore = postgres.NewSnapshotExtraStore(pool)
 	s.balanceTrendsStore = postgres.NewBalanceTrendsStore(pool, s.ledgerStore)
 	s.auditStore = postgres.NewAuditStore(pool)
+	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 
 	return s, nil
 }
@@ -167,6 +169,14 @@ func (s *Service) SnapshotBackfiller() core.SnapshotBackfiller {
 	svc := service.NewSnapshotBackfillService(rollup, s.snapshotExtraStore, s.snapshotExtraStore, engine)
 	return svc
 }
+
+// PendingBalanceWriter returns the two-phase pending balance writer.
+// Requires the pending bundle to be installed (presets.InstallPendingBundle).
+func (s *Service) PendingBalanceWriter() core.PendingBalanceWriter { return s.pendingStore }
+
+// PendingTimeoutSweeper returns the sweeper that expires stale pending deposits.
+// Requires the pending bundle to be installed (presets.InstallPendingBundle).
+func (s *Service) PendingTimeoutSweeper() core.PendingTimeoutSweeper { return s.pendingStore }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
@@ -234,6 +244,7 @@ func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
 // pgx.Tx satisfies postgres.DBTX (it has Exec, Query, QueryRow, and Begin).
 func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
+	cs := s.classStore.WithDB(tx)
 	return &Service{
 		pool:               s.pool,
 		logger:             s.logger,
@@ -242,11 +253,13 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		reserverStore:      s.reserverStore.WithDB(tx, ls),
 		bookingStore:       s.bookingStore.WithDB(tx),
 		eventStore:         s.eventStore.WithDB(tx),
-		classStore:         s.classStore.WithDB(tx),
+		classStore:         cs,
 		tmplStore:          s.tmplStore.WithDB(tx),
 		currencyStore:      s.currencyStore.WithDB(tx),
 		queryStore:         s.queryStore.WithDB(tx),
+		snapshotExtraStore: s.snapshotExtraStore,
 		balanceTrendsStore: s.balanceTrendsStore.WithDB(tx, ls),
 		auditStore:         s.auditStore.WithDB(tx),
+		pendingStore:       s.pendingStore.WithDB(tx, ls, cs),
 	}
 }
