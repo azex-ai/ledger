@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/azex-ai/ledger/core"
+	ledgerotel "github.com/azex-ai/ledger/pkg/otel"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -59,6 +62,15 @@ func (s *EventStore) GetEvent(ctx context.Context, id int64) (*core.Event, error
 
 // ListEvents returns events matching the filter.
 func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.event.list_events",
+		attribute.String("classification_code", filter.ClassificationCode),
+		attribute.Int64("booking_id", filter.BookingID),
+		attribute.String("to_status", filter.ToStatus),
+		attribute.Int64("cursor", filter.Cursor),
+		attribute.Int("limit", filter.Limit),
+	)
+	defer span.End()
+
 	rows, err := s.q.ListEventsByFilter(ctx, sqlcgen.ListEventsByFilterParams{
 		ClassificationCode: filter.ClassificationCode,
 		BookingID:          filter.BookingID,
@@ -67,6 +79,7 @@ func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([
 		Limit:              int32(filter.Limit),
 	})
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: list events: %w", err)
 	}
 	events := make([]core.Event, len(rows))

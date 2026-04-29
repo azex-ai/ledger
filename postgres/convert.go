@@ -318,6 +318,8 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 		JournalID:          int8ToInt64Ptr(row.JournalID),
 		Metadata:           jsonToAnyMetadata(row.Metadata),
 		OccurredAt:         row.OccurredAt,
+		ActorID:            row.ActorID,
+		Source:             row.Source,
 		Attempts:           row.Attempts,
 		MaxAttempts:        row.MaxAttempts,
 		NextAttemptAt:      row.NextAttemptAt,

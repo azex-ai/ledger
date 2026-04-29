@@ -9,8 +9,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/azex-ai/ledger/core"
+	ledgerotel "github.com/azex-ai/ledger/pkg/otel"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
@@ -59,8 +61,18 @@ func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 // In tx mode (bound via withDB) the reservation is written into the caller's
 // transaction; commit/rollback is the caller's responsibility.
 func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.reserve",
+		attribute.Int64("account_holder", input.AccountHolder),
+		attribute.Int64("currency_id", input.CurrencyID),
+		attribute.String("idempotency_key", input.IdempotencyKey),
+		attribute.String("amount", input.Amount.String()),
+	)
+	defer span.End()
+
 	if !input.Amount.IsPositive() {
-		return nil, fmt.Errorf("postgres: reserve: amount must be positive: %w", core.ErrInvalidInput)
+		err := fmt.Errorf("postgres: reserve: amount must be positive: %w", core.ErrInvalidInput)
+		ledgerotel.RecordError(span, err)
+		return nil, err
 	}
 
 	// Check idempotency first (outside tx / on the current db handle).
@@ -69,17 +81,21 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		return reservationFromRow(existing), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: reserve: check idempotency: %w", err)
 	}
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		return s.reserveWithQueries(ctx, s.q, input)
+		res, err := s.reserveWithQueries(ctx, s.q, input)
+		ledgerotel.RecordError(span, err)
+		return res, err
 	}
 
 	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: reserve: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
@@ -87,10 +103,12 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	qtx := s.q.WithTx(tx)
 	res, err := s.reserveWithQueries(ctx, qtx, input)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: reserve: commit: %w", err)
 	}
 
@@ -173,22 +191,33 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 // In tx mode (bound via withDB) the update is applied to the caller's
 // transaction; commit/rollback is the caller's responsibility.
 func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle",
+		attribute.Int64("reservation_id", reservationID),
+		attribute.String("actual_amount", actualAmount.String()),
+	)
+	defer span.End()
+
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		return s.settleWithQueries(ctx, s.q, reservationID, actualAmount)
+		err := s.settleWithQueries(ctx, s.q, reservationID, actualAmount)
+		ledgerotel.RecordError(span, err)
+		return err
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return fmt.Errorf("postgres: settle: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), reservationID, actualAmount); err != nil {
+		ledgerotel.RecordError(span, err)
 		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
 		return fmt.Errorf("postgres: settle: commit: %w", err)
 	}
 
@@ -226,22 +255,32 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 // In tx mode (bound via withDB) the update is applied to the caller's
 // transaction; commit/rollback is the caller's responsibility.
 func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.release",
+		attribute.Int64("reservation_id", reservationID),
+	)
+	defer span.End()
+
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		return s.releaseWithQueries(ctx, s.q, reservationID)
+		err := s.releaseWithQueries(ctx, s.q, reservationID)
+		ledgerotel.RecordError(span, err)
+		return err
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return fmt.Errorf("postgres: release: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), reservationID); err != nil {
+		ledgerotel.RecordError(span, err)
 		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
 		return fmt.Errorf("postgres: release: commit: %w", err)
 	}
 

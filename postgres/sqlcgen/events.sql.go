@@ -13,7 +13,7 @@ import (
 )
 
 const getEvent = `-- name: GetEvent :one
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events WHERE id = $1
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events WHERE id = $1
 `
 
 func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
@@ -38,12 +38,14 @@ func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
 		&i.NextAttemptAt,
 		&i.DeliveredAt,
 		&i.CreatedAt,
+		&i.ActorID,
+		&i.Source,
 	)
 	return i, err
 }
 
 const getLatestEventForBooking = `-- name: GetLatestEventForBooking :one
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events
 WHERE booking_id = $1
 ORDER BY id DESC
 LIMIT 1
@@ -71,6 +73,8 @@ func (q *Queries) GetLatestEventForBooking(ctx context.Context, bookingID int64)
 		&i.NextAttemptAt,
 		&i.DeliveredAt,
 		&i.CreatedAt,
+		&i.ActorID,
+		&i.Source,
 	)
 	return i, err
 }
@@ -89,7 +93,7 @@ UPDATE events AS e
 SET next_attempt_at = $2
 FROM claimed
 WHERE e.id = claimed.id
-RETURNING e.id, e.classification_code, e.booking_id, e.account_holder, e.currency_id, e.from_status, e.to_status, e.amount, e.settled_amount, e.journal_id, e.metadata, e.occurred_at, e.delivery_status, e.attempts, e.max_attempts, e.next_attempt_at, e.delivered_at, e.created_at
+RETURNING e.id, e.classification_code, e.booking_id, e.account_holder, e.currency_id, e.from_status, e.to_status, e.amount, e.settled_amount, e.journal_id, e.metadata, e.occurred_at, e.delivery_status, e.attempts, e.max_attempts, e.next_attempt_at, e.delivered_at, e.created_at, e.actor_id, e.source
 `
 
 type GetPendingEventsParams struct {
@@ -125,6 +129,8 @@ func (q *Queries) GetPendingEvents(ctx context.Context, arg GetPendingEventsPara
 			&i.NextAttemptAt,
 			&i.DeliveredAt,
 			&i.CreatedAt,
+			&i.ActorID,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}
@@ -140,9 +146,9 @@ const insertEvent = `-- name: InsertEvent :one
 INSERT INTO events (
     classification_code, booking_id, account_holder, currency_id,
     from_status, to_status, amount, settled_amount, journal_id,
-    metadata, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at
+    metadata, occurred_at, actor_id, source
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
 `
 
 type InsertEventParams struct {
@@ -157,6 +163,8 @@ type InsertEventParams struct {
 	JournalID          pgtype.Int8    `json:"journal_id"`
 	Metadata           []byte         `json:"metadata"`
 	OccurredAt         time.Time      `json:"occurred_at"`
+	ActorID            int64          `json:"actor_id"`
+	Source             string         `json:"source"`
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event, error) {
@@ -172,6 +180,8 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 		arg.JournalID,
 		arg.Metadata,
 		arg.OccurredAt,
+		arg.ActorID,
+		arg.Source,
 	)
 	var i Event
 	err := row.Scan(
@@ -193,12 +203,14 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 		&i.NextAttemptAt,
 		&i.DeliveredAt,
 		&i.CreatedAt,
+		&i.ActorID,
+		&i.Source,
 	)
 	return i, err
 }
 
 const listEventsByFilter = `-- name: ListEventsByFilter :many
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events
 WHERE (classification_code = $1 OR $1 = '')
   AND (booking_id = $2 OR $2 = 0)
   AND (to_status = $3 OR $3 = '')
@@ -249,6 +261,8 @@ func (q *Queries) ListEventsByFilter(ctx context.Context, arg ListEventsByFilter
 			&i.NextAttemptAt,
 			&i.DeliveredAt,
 			&i.CreatedAt,
+			&i.ActorID,
+			&i.Source,
 		); err != nil {
 			return nil, err
 		}

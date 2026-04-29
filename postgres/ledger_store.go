@@ -10,8 +10,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/azex-ai/ledger/core"
+	ledgerotel "github.com/azex-ai/ledger/pkg/otel"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
@@ -134,14 +136,25 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 // In tx mode (store bound via withDB) the journal is written directly into
 // the caller's transaction; commit/rollback is the caller's responsibility.
 func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.post_journal",
+		attribute.String("idempotency_key", input.IdempotencyKey),
+		attribute.Int64("journal_type_id", input.JournalTypeID),
+		attribute.Int64("actor_id", input.ActorID),
+		attribute.String("source", input.Source),
+	)
+	defer span.End()
+
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		return s.postJournalWithQueries(ctx, s.q, input)
+		j, err := s.postJournalWithQueries(ctx, s.q, input)
+		ledgerotel.RecordError(span, err)
+		return j, err
 	}
 
 	// Pool mode: own the transaction lifecycle.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: post journal: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
@@ -149,10 +162,12 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	qtx := s.q.WithTx(tx)
 	journal, err := s.postJournalWithQueries(ctx, qtx, input)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: post journal: commit: %w", err)
 	}
 
@@ -161,12 +176,20 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 
 // ExecuteTemplate loads a template by code, renders it, and posts the journal.
 func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (*core.Journal, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.execute_template",
+		attribute.String("template_code", templateCode),
+	)
+	defer span.End()
+
 	input, err := s.renderTemplate(ctx, s.q, templateCode, params)
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
 
-	return s.PostJournal(ctx, *input)
+	j, err := s.PostJournal(ctx, *input)
+	ledgerotel.RecordError(span, err)
+	return j, err
 }
 
 // ExecuteTemplateBatch renders and posts multiple templates in a single transaction.
@@ -409,21 +432,33 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 // snapshot consistency, it should begin its transaction with REPEATABLE READ
 // before calling GetBalance.
 func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.get_balance",
+		attribute.Int64("account_holder", holder),
+		attribute.Int64("currency_id", currencyID),
+		attribute.Int64("classification_id", classificationID),
+	)
+	defer span.End()
+
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly — no inner tx.
-		return s.getBalanceWithQueries(ctx, s.q, holder, currencyID, classificationID)
+		bal, err := s.getBalanceWithQueries(ctx, s.q, holder, currencyID, classificationID)
+		ledgerotel.RecordError(span, err)
+		return bal, err
 	}
 
 	// Pool mode: wrap in REPEATABLE READ to prevent phantom reads between the
 	// checkpoint query and the entry-sum query.
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return decimal.Zero, fmt.Errorf("postgres: get balance: begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	return s.getBalanceWithQueries(ctx, qtx, holder, currencyID, classificationID)
+	bal, err := s.getBalanceWithQueries(ctx, qtx, holder, currencyID, classificationID)
+	ledgerotel.RecordError(span, err)
+	return bal, err
 }
 
 // getBalanceWithQueries is the shared inner implementation of GetBalance. It
