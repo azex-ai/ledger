@@ -46,14 +46,16 @@ type Service struct {
 	logger  core.Logger
 	metrics core.Metrics
 
-	ledgerStore   *postgres.LedgerStore
-	reserverStore *postgres.ReserverStore
-	bookingStore  *postgres.BookingStore
-	eventStore    *postgres.EventStore
-	classStore    *postgres.ClassificationStore
-	tmplStore     *postgres.TemplateStore
-	currencyStore *postgres.CurrencyStore
-	queryStore    *postgres.QueryStore
+	ledgerStore        *postgres.LedgerStore
+	reserverStore      *postgres.ReserverStore
+	bookingStore       *postgres.BookingStore
+	eventStore         *postgres.EventStore
+	classStore         *postgres.ClassificationStore
+	tmplStore          *postgres.TemplateStore
+	currencyStore      *postgres.CurrencyStore
+	queryStore         *postgres.QueryStore
+	balanceTrendsStore *postgres.BalanceTrendsStore
+	auditStore         *postgres.AuditStore
 }
 
 // Option mutates a Service during construction.
@@ -104,6 +106,8 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.tmplStore = postgres.NewTemplateStore(pool)
 	s.currencyStore = postgres.NewCurrencyStore(pool)
 	s.queryStore = postgres.NewQueryStore(pool)
+	s.balanceTrendsStore = postgres.NewBalanceTrendsStore(pool, s.ledgerStore)
+	s.auditStore = postgres.NewAuditStore(pool)
 
 	return s, nil
 }
@@ -204,6 +208,12 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 	return nil
 }
 
+// BalanceTrends returns the historical balance trend reader.
+func (s *Service) BalanceTrends() core.BalanceTrendReader { return s.balanceTrendsStore }
+
+// Audit returns the read-only audit query interface.
+func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -211,16 +221,18 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
 	return &Service{
-		pool:          s.pool,
-		logger:        s.logger,
-		metrics:       s.metrics,
-		ledgerStore:   ls,
-		reserverStore: s.reserverStore.WithDB(tx, ls),
-		bookingStore:  s.bookingStore.WithDB(tx),
-		eventStore:    s.eventStore.WithDB(tx),
-		classStore:    s.classStore.WithDB(tx),
-		tmplStore:     s.tmplStore.WithDB(tx),
-		currencyStore: s.currencyStore.WithDB(tx),
-		queryStore:    s.queryStore.WithDB(tx),
+		pool:               s.pool,
+		logger:             s.logger,
+		metrics:            s.metrics,
+		ledgerStore:        ls,
+		reserverStore:      s.reserverStore.WithDB(tx, ls),
+		bookingStore:       s.bookingStore.WithDB(tx),
+		eventStore:         s.eventStore.WithDB(tx),
+		classStore:         s.classStore.WithDB(tx),
+		tmplStore:          s.tmplStore.WithDB(tx),
+		currencyStore:      s.currencyStore.WithDB(tx),
+		queryStore:         s.queryStore.WithDB(tx),
+		balanceTrendsStore: s.balanceTrendsStore.WithDB(tx, ls),
+		auditStore:         s.auditStore.WithDB(tx),
 	}
 }
