@@ -220,7 +220,7 @@ ledger/
     withdrawal.go        locked → reserved → reviewing → processing → confirmed | failed
     templates.go         Default deposit/withdrawal templates; InstallExtendedPresets
     tolerance.go         Deposit tolerance: confirm-pending + release-shortfall (atomic batch)
-    fee.go, transfer.go, capital.go, settlement.go, card.go, spread.go
+    fee.go, transfer.go, capital.go, settlement.go, card.go, spread.go, fx.go
 
   channel/             Inbound channel adapters
     adapter.go           ChannelAdapter interface (parse + verify webhooks)
@@ -246,6 +246,9 @@ ledger/
   web/                 Next.js 16 management dashboard (shadcn/ui, viem-based BigInt utils)
 
   cmd/ledgerd/         Service entry point
+  cmd/ledger-cli/      Read-only investigation CLI (balance, journals, trace, reconcile, solvency)
+
+  deploy/helm/ledger/  Kubernetes Helm chart (deployment + service + ingress + secrets)
 
   ledger.go            Top-level Service facade
   idempotency.go       NewIdempotencyKey helper
@@ -285,10 +288,18 @@ GET    /api/v1/events
 All list endpoints use cursor-based pagination (`?cursor=...&limit=50`).
 Error responses use a consistent envelope: `{"code": <int>, "message": "..."}`.
 
-See [docs/api.md](docs/api.md) for the complete reference with request/response examples.
+See [docs/api.md](docs/api.md) for the complete reference with request/response examples, and [docs/openapi.yaml](docs/openapi.yaml) for the machine-readable OpenAPI 3.1 schema.
+
+## Documentation
+
+- [**INVARIANTS.md**](docs/INVARIANTS.md) -- The 13 invariants the ledger guarantees (per-currency balance, append-only, idempotency, TOCTOU-safe reserve, money conservation, partition coverage, …) with `Why / Enforced by / Pinned by` for each.
+- [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
+- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (32 paths, 34 schemas).
+- [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 
 ## Examples
 
+- [**embed**](examples/embed/) -- Minimum-viable library embed: PostJournal + GetBalance with no templates, no presets, no HTTP layer.
 - [**crypto-deposit**](examples/crypto-deposit/) -- Full EVM CREATE2 deposit lifecycle: classification install, booking creation, channel-adapter webhook, template-based journaling, reserve/settle, balance queries, and reconciliation.
 - [**billing**](examples/billing/) -- SaaS-style metered billing: top-up wallet, reserve budget, deduct actual cost, release remainder.
 - [**event-subscribe**](examples/event-subscribe/) -- In-process event subscription: Worker.Subscribe, graceful shutdown.
@@ -300,8 +311,9 @@ The current release series is **v0.x**. No API stability guarantees are made bet
 
 **v1.0 milestone criteria**:
 - All five dimensions (冲/提/费/安全/审计) have been exercised in at least one production deployment
-- HTTP API reaches OpenAPI 3.1 full coverage (all endpoints documented in `openapi.yaml`)
+- HTTP API at OpenAPI 3.1 full coverage — see [docs/openapi.yaml](docs/openapi.yaml) (in progress)
 - The `core/` interface set is stable for at least two minor versions without breaking changes
+- INVARIANTS.md complete with every invariant pinned by a regression test — see [docs/INVARIANTS.md](docs/INVARIANTS.md)
 
 **Deprecation policy (post v1.0)**: deprecated items will carry a `// Deprecated:` godoc comment for at least one minor version before removal. Breaking changes are only made in major version bumps.
 
@@ -341,7 +353,16 @@ go test ./... -race -count=1
 
 # Unit-only (no DB)
 go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1
+
+# Fuzz the validators (Go 1.18+ built-in fuzzing)
+go test ./core -run=^$ -fuzz=FuzzJournalValidate   -fuzztime=30s
+go test ./core -run=^$ -fuzz=FuzzLifecycleValidate -fuzztime=30s
+
+# Benchmarks (requires Docker)
+go test ./postgres/ -bench=. -benchtime=3s -run=^$
 ```
+
+Every invariant in [docs/INVARIANTS.md](docs/INVARIANTS.md) names the test(s) that pin it (the "Pinned by" section). When the contract changes, that doc and the named tests must change together.
 
 ## License
 

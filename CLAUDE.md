@@ -106,7 +106,8 @@ docker compose up --build
 | `core/reserve.go` | Reservation state machine |
 | `core/checkpoint.go` | BalanceCheckpoint, RollupQueueItem, BalanceSnapshot |
 | `core/interfaces.go` | Booker, EventReader, JournalWriter, BalanceReader, etc. |
-| `presets/` | Deposit + Withdrawal lifecycle presets |
+| `presets/` | Deposit + Withdrawal + Transfer + Fee + Capital + Settlement + Card + Spread + FX bundles |
+| `presets/fx.go` | Cross-currency FX preset (sell + buy templates, settlement absorbs net) |
 | `channel/adapter.go` | ChannelAdapter interface for inbound webhooks |
 | `channel/onchain/evm.go` | Demo EVM adapter with HMAC verification |
 | `postgres/sql/migrations/` | Schema migrations (embed.FS) |
@@ -114,12 +115,21 @@ docker compose up --build
 | `postgres/sqlcgen/` | Generated code (do not edit) |
 | `postgres/booking_store.go` | Booker + BookingReader implementation |
 | `postgres/event_store.go` | EventReader + delivery polling |
+| `postgres/invariants_test.go` | Postgres-backed pins for I-2 / I-3 / I-12 / I-13 |
+| `postgres/benchmarks_test.go` | Bench: PostJournal / GetBalance / Reserve+Settle |
+| `observability/prometheus.go` | core.Metrics impl on prometheus/client_golang |
 | `server/routes.go` | All endpoint definitions |
 | `server/handler_bookings.go` | Unified booking endpoints |
 | `server/handler_webhooks.go` | Inbound channel callbacks |
 | `server/handler_events.go` | Event query endpoints |
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
+| `cmd/ledgerd/` | HTTP service entry point |
+| `cmd/ledger-cli/` | Read-only investigation CLI (balance, journals, trace, reconcile, solvency) |
+| `deploy/helm/ledger/` | Kubernetes Helm chart |
+| `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
+| `docs/RUNBOOK.md` | Operational guide for on-call engineers |
+| `docs/openapi.yaml` | Machine-readable OpenAPI 3.1 spec |
 
 ## HTTP API Quick Reference
 

@@ -742,6 +742,11 @@ Kubernetes-style readiness probe. Returns 200 once migrations + worker have boot
 ### GET /system/balances
 
 Aggregate system-wide balances by `(currency_id, classification_id)`.
+This endpoint is a realtime ledger snapshot: each row is computed as
+`checkpoint.balance + delta` across every contributing account, so fresh
+journals are visible immediately without waiting for the rollup worker.
+`updated_at` is the timestamp of the query snapshot returned by the API, not
+the refresh time of the `system_rollups` table.
 
 ```json
 {

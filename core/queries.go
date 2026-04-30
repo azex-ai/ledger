@@ -31,13 +31,13 @@ type ReservationQuerier interface {
 	ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]Reservation, error)
 }
 
-
 // SnapshotQuerier queries snapshots by date range.
 type SnapshotQuerier interface {
 	ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]BalanceSnapshot, error)
 }
 
-// SystemRollupQuerier reads system rollup balances.
+// SystemRollupQuerier reads aggregated system-wide balances in the response
+// shape historically used for rollup snapshots.
 type SystemRollupQuerier interface {
 	GetSystemRollups(ctx context.Context) ([]SystemRollup, error)
 }
@@ -49,7 +49,7 @@ type HealthQuerier interface {
 
 // HealthMetrics holds system health data points.
 type HealthMetrics struct {
-	RollupQueueDepth         int64
-	CheckpointMaxAgeSeconds  int
-	ActiveReservations       int64
+	RollupQueueDepth        int64
+	CheckpointMaxAgeSeconds int
+	ActiveReservations      int64
 }

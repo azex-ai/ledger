@@ -324,6 +324,7 @@ func InstallExtendedPresets(
 		SettlementBundle(),
 		CardBundle(),
 		SpreadBundle(),
+		FXBundle(),
 	}
 	for _, b := range bundles {
 		if err := InstallTemplateBundle(ctx, classifications, journalTypes, templates, b); err != nil {

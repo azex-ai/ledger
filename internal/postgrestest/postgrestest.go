@@ -24,7 +24,9 @@ import (
 // a *pgxpool.Pool. The test is skipped (not failed) when the Docker daemon
 // isn't available so contributors can still run unit tests on machines
 // without Docker.
-func SetupDB(t *testing.T) *pgxpool.Pool {
+//
+// Accepts testing.TB so it can be reused from benchmarks as well as tests.
+func SetupDB(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 

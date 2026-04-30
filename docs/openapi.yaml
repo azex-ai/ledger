@@ -1,0 +1,937 @@
+openapi: 3.1.0
+info:
+  title: azex-ai/ledger HTTP API
+  description: |
+    Production-grade double-entry ledger service. Classification-driven
+    architecture: deposit / withdrawal / transfer are preset configurations
+    of a generic Booking lifecycle, not hardcoded types.
+
+    Companion docs:
+      - `docs/api.md`         — long-form prose
+      - `docs/INVARIANTS.md`  — what the ledger guarantees
+      - `docs/RUNBOOK.md`     — incident response
+  version: "1.0.0"
+  license:
+    name: Apache-2.0
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local dev
+  - url: https://ledger.example.com/api/v1
+    description: Production (your deployment)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: System
+    description: Health, readiness, system-wide rollups.
+  - name: Journals
+    description: Append-only double-entry records.
+  - name: Balances
+    description: Real-time balance reads (checkpoint + delta).
+  - name: Reservations
+    description: TOCTOU-safe budget locking for reserve/settle flows.
+  - name: Bookings
+    description: Classification-driven lifecycle records.
+  - name: Events
+    description: State-transition events emitted by booking transitions.
+  - name: Webhooks
+    description: Inbound channel callbacks (e.g. on-chain deposits).
+  - name: Metadata
+    description: Classifications, journal types, templates, currencies.
+  - name: Reconciliation
+    description: Accounting-equation checks and snapshots.
+
+paths:
+  /system/health:
+    get:
+      tags: [System]
+      summary: Liveness probe (no auth)
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+  /system/ready:
+    get:
+      tags: [System]
+      summary: Readiness probe — DB connectivity + worker status.
+      security: []
+      responses:
+        "200":
+          description: Ready.
+        "503":
+          description: Not ready.
+  /system/balances:
+    get:
+      tags: [System]
+      summary: Aggregated system rollups.
+      responses:
+        "200":
+          description: List of system rollups by classification × currency.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemRollupsEnvelope" }
+
+  /journals:
+    get:
+      tags: [Journals]
+      summary: List journals (cursor-paginated, descending id).
+      parameters:
+        - in: query
+          name: cursor
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Journals page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalListEnvelope" }
+    post:
+      tags: [Journals]
+      summary: Post a balanced journal.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JournalInput" }
+      responses:
+        "201":
+          description: Journal created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalEnvelope" }
+        "422":
+          $ref: "#/components/responses/DomainError"
+  /journals/template:
+    post:
+      tags: [Journals]
+      summary: Render a template into a journal and post it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateExecutionRequest" }
+      responses:
+        "201":
+          description: Journal created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalEnvelope" }
+        "422":
+          $ref: "#/components/responses/DomainError"
+  /journals/deposit-tolerance:
+    post:
+      tags: [Journals]
+      summary: Resolve deposit shortfall / overage atomically.
+      responses:
+        "201":
+          description: Plan executed.
+        "422":
+          $ref: "#/components/responses/DomainError"
+  /journals/{id}:
+    get:
+      tags: [Journals]
+      summary: Get one journal with all its entries.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Journal + entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalWithEntriesEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /journals/{id}/reverse:
+    post:
+      tags: [Journals]
+      summary: Post the reversal of an existing journal.
+      description: A journal can only be reversed once. Re-attempt returns 409.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, idempotency_key]
+              properties:
+                reason: { type: string }
+                idempotency_key: { type: string }
+      responses:
+        "201": { description: Reversal posted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Already reversed.
+
+  /entries:
+    get:
+      tags: [Journals]
+      summary: List entries on one account dimension (cursor-paginated).
+      parameters:
+        - in: query
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: currency
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: cursor
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Entries page.
+
+  /balances/{holder}:
+    get:
+      tags: [Balances]
+      summary: All balances for one holder across currencies.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Balances.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BalancesEnvelope" }
+  /balances/{holder}/{currency}:
+    get:
+      tags: [Balances]
+      summary: Balances for one holder × currency.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: path
+          name: currency
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Balance list.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BalancesEnvelope" }
+  /balances/batch:
+    post:
+      tags: [Balances]
+      summary: Batch balance lookup.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [holders, currency_id]
+              properties:
+                holders:
+                  type: array
+                  items: { type: integer, format: int64 }
+                currency_id: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Map of holder → balances.
+
+  /reservations:
+    get:
+      tags: [Reservations]
+      summary: List reservations.
+      responses:
+        "200": { description: Reservations. }
+    post:
+      tags: [Reservations]
+      summary: Reserve funds (TOCTOU-safe).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReserveInput" }
+      responses:
+        "201":
+          description: Reservation created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReservationEnvelope" }
+        "422":
+          $ref: "#/components/responses/DomainError"
+  /reservations/{id}/settle:
+    post:
+      tags: [Reservations]
+      summary: Settle reservation with actual amount; remainder auto-released.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actual_amount]
+              properties:
+                actual_amount: { type: string, description: Decimal as string. }
+      responses:
+        "200": { description: Settled. }
+        "422": { $ref: "#/components/responses/DomainError" }
+  /reservations/{id}/release:
+    post:
+      tags: [Reservations]
+      summary: Release a reservation without settling.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Released. }
+        "422": { $ref: "#/components/responses/DomainError" }
+
+  /bookings:
+    get:
+      tags: [Bookings]
+      summary: List bookings.
+      responses:
+        "200": { description: Bookings page. }
+    post:
+      tags: [Bookings]
+      summary: Create a booking against a classification's lifecycle.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateBookingInput" }
+      responses:
+        "201":
+          description: Booking created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "422": { $ref: "#/components/responses/DomainError" }
+  /bookings/{id}:
+    get:
+      tags: [Bookings]
+      summary: Get one booking.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Booking.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /bookings/{id}/transition:
+    post:
+      tags: [Bookings]
+      summary: Advance a booking's lifecycle state.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransitionInput" }
+      responses:
+        "200":
+          description: Event for the transition.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventEnvelope" }
+
+  /events:
+    get:
+      tags: [Events]
+      summary: List events.
+      responses:
+        "200": { description: Events page. }
+  /events/{id}:
+    get:
+      tags: [Events]
+      summary: Get one event.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Event.
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /webhooks/{channel}:
+    post:
+      tags: [Webhooks]
+      summary: Inbound channel callback (e.g. on-chain deposit).
+      description: Body shape and signing are channel-specific. Hot path is HMAC-verified.
+      security: []
+      parameters:
+        - in: path
+          name: channel
+          required: true
+          schema: { type: string, enum: [evm, btc, custom] }
+      responses:
+        "204": { description: Accepted. }
+        "401": { description: HMAC verification failed. }
+
+  /classifications:
+    get:
+      tags: [Metadata]
+      summary: List classifications.
+      responses:
+        "200": { description: Classifications. }
+    post:
+      tags: [Metadata]
+      summary: Create a classification (with optional lifecycle).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClassificationInput" }
+      responses:
+        "201": { description: Created. }
+  /classifications/{id}/deactivate:
+    post:
+      tags: [Metadata]
+      summary: Deactivate a classification.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Deactivated. }
+
+  /journal-types:
+    get:
+      tags: [Metadata]
+      summary: List journal types.
+      responses:
+        "200": { description: Journal types. }
+    post:
+      tags: [Metadata]
+      summary: Create a journal type.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name]
+              properties:
+                code: { type: string }
+                name: { type: string }
+      responses:
+        "201": { description: Created. }
+  /journal-types/{id}/deactivate:
+    post:
+      tags: [Metadata]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Deactivated. }
+
+  /templates:
+    get:
+      tags: [Metadata]
+      summary: List entry templates.
+      responses:
+        "200": { description: Templates. }
+    post:
+      tags: [Metadata]
+      summary: Create an entry template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateInput" }
+      responses:
+        "201": { description: Created. }
+  /templates/{code}/preview:
+    post:
+      tags: [Metadata]
+      summary: Render a template without posting.
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TemplateParams" }
+      responses:
+        "200": { description: Rendered JournalInput. }
+  /templates/{id}/deactivate:
+    post:
+      tags: [Metadata]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Deactivated. }
+
+  /currencies:
+    get:
+      tags: [Metadata]
+      responses:
+        "200": { description: Currencies. }
+    post:
+      tags: [Metadata]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name]
+              properties:
+                code: { type: string }
+                name: { type: string }
+      responses:
+        "201": { description: Created. }
+
+  /reconcile:
+    post:
+      tags: [Reconciliation]
+      summary: Run global accounting-equation check.
+      responses:
+        "200":
+          description: Reconciliation result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconcileResult" }
+  /reconcile/account:
+    post:
+      tags: [Reconciliation]
+      summary: Reconcile a single account dimension.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [holder, currency_id]
+              properties:
+                holder: { type: integer, format: int64 }
+                currency_id: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Reconciliation result.
+
+  /snapshots:
+    get:
+      tags: [Reconciliation]
+      summary: List balance snapshots for an account dimension.
+      parameters:
+        - in: query
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: currency
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: from
+          schema: { type: string, format: date }
+        - in: query
+          name: to
+          schema: { type: string, format: date }
+      responses:
+        "200": { description: Snapshots. }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+
+  responses:
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    DomainError:
+      description: Ledger / domain invariant violation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  schemas:
+    Decimal:
+      type: string
+      description: 'Arbitrary-precision decimal as a string (e.g. 123.456789). NUMERIC(30,18) on the wire.'
+      example: "100.00"
+    Timestamp:
+      type: string
+      format: date-time
+      example: "2026-04-29T10:00:00Z"
+
+    Envelope:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: integer, example: 0 }
+        message: { type: string, example: "ok" }
+
+    ErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            code: { type: integer, example: 14001 }
+            message: { type: string, example: "Insufficient balance for this operation" }
+
+    EntryType:
+      type: string
+      enum: [debit, credit]
+    NormalSide:
+      type: string
+      enum: [debit, credit]
+    HolderRole:
+      type: string
+      enum: [user, system]
+
+    EntryInput:
+      type: object
+      required: [account_holder, currency_id, classification_id, entry_type, amount]
+      properties:
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        amount:     { $ref: "#/components/schemas/Decimal" }
+
+    JournalInput:
+      type: object
+      required: [journal_type_id, idempotency_key, entries]
+      properties:
+        journal_type_id: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+        entries:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/EntryInput" }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        actor_id: { type: integer, format: int64 }
+        source:   { type: string }
+
+    Journal:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        journal_type_id: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+        total_debit:  { $ref: "#/components/schemas/Decimal" }
+        total_credit: { $ref: "#/components/schemas/Decimal" }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        actor_id:    { type: integer, format: int64 }
+        source:      { type: string }
+        reversal_of: { type: integer, format: int64, nullable: true }
+        event_id:    { type: integer, format: int64, nullable: true }
+        created_at:  { $ref: "#/components/schemas/Timestamp" }
+    Entry:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        journal_id: { type: integer, format: int64 }
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        amount:     { $ref: "#/components/schemas/Decimal" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+
+    JournalEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Journal" }
+    JournalListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Journal" }
+    JournalWithEntriesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                journal: { $ref: "#/components/schemas/Journal" }
+                entries:
+                  type: array
+                  items: { $ref: "#/components/schemas/Entry" }
+
+    Balance:
+      type: object
+      properties:
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        balance: { $ref: "#/components/schemas/Decimal" }
+    BalancesEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/Balance" }
+
+    SystemRollup:
+      type: object
+      properties:
+        currency_id: { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        total_balance: { $ref: "#/components/schemas/Decimal" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    SystemRollupsEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/SystemRollup" }
+
+    ReserveInput:
+      type: object
+      required: [account_holder, currency_id, amount, idempotency_key]
+      properties:
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        amount:         { $ref: "#/components/schemas/Decimal" }
+        idempotency_key: { type: string }
+        expires_in:     { type: string, description: 'Go duration string (e.g. 1h, 30m).' }
+    Reservation:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        reserved_amount: { $ref: "#/components/schemas/Decimal" }
+        settled_amount:  { $ref: "#/components/schemas/Decimal", nullable: true }
+        status:
+          type: string
+          enum: [active, settling, settled, released]
+        journal_id: { type: integer, format: int64, nullable: true }
+        idempotency_key: { type: string }
+        expires_at: { $ref: "#/components/schemas/Timestamp" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    ReservationEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Reservation" }
+
+    CreateBookingInput:
+      type: object
+      required: [classification_code, account_holder, currency_id, amount, idempotency_key]
+      properties:
+        classification_code: { type: string }
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        amount:         { $ref: "#/components/schemas/Decimal" }
+        idempotency_key: { type: string }
+        channel_name:    { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        expires_at: { $ref: "#/components/schemas/Timestamp" }
+    TransitionInput:
+      type: object
+      required: [to_status]
+      properties:
+        to_status: { type: string }
+        channel_ref: { type: string }
+        amount: { $ref: "#/components/schemas/Decimal" }
+        metadata:
+          type: object
+          additionalProperties: true
+        actor_id: { type: integer, format: int64 }
+        source:   { type: string }
+    Booking:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        account_holder: { type: integer, format: int64 }
+        currency_id: { type: integer, format: int64 }
+        amount: { $ref: "#/components/schemas/Decimal" }
+        settled_amount: { $ref: "#/components/schemas/Decimal" }
+        status: { type: string }
+        channel_name: { type: string }
+        channel_ref:  { type: string }
+        reservation_id: { type: integer, format: int64, nullable: true }
+        journal_id:     { type: integer, format: int64, nullable: true }
+        idempotency_key: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+        expires_at: { $ref: "#/components/schemas/Timestamp" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    BookingEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Booking" }
+
+    Event:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        classification_code: { type: string }
+        booking_id: { type: integer, format: int64 }
+        account_holder: { type: integer, format: int64 }
+        currency_id: { type: integer, format: int64 }
+        from_status: { type: string }
+        to_status:   { type: string }
+        amount: { $ref: "#/components/schemas/Decimal" }
+        settled_amount: { $ref: "#/components/schemas/Decimal" }
+        journal_id: { type: integer, format: int64, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+        occurred_at: { $ref: "#/components/schemas/Timestamp" }
+        actor_id: { type: integer, format: int64 }
+        source: { type: string }
+    EventEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Event" }
+
+    Lifecycle:
+      type: object
+      required: [initial, transitions]
+      properties:
+        initial: { type: string }
+        terminal:
+          type: array
+          items: { type: string }
+        transitions:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+    ClassificationInput:
+      type: object
+      required: [code, name, normal_side]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        normal_side: { $ref: "#/components/schemas/NormalSide" }
+        is_system: { type: boolean }
+        lifecycle: { $ref: "#/components/schemas/Lifecycle" }
+
+    TemplateLineInput:
+      type: object
+      required: [classification_id, entry_type, holder_role, amount_key]
+      properties:
+        classification_id: { type: integer, format: int64 }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        holder_role: { $ref: "#/components/schemas/HolderRole" }
+        amount_key: { type: string }
+        sort_order: { type: integer }
+    TemplateInput:
+      type: object
+      required: [code, name, journal_type_id, lines]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        journal_type_id: { type: integer, format: int64 }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/TemplateLineInput" }
+
+    TemplateParams:
+      type: object
+      required: [holder_id, currency_id, idempotency_key, amounts]
+      properties:
+        holder_id: { type: integer, format: int64 }
+        currency_id: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+        amounts:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Decimal" }
+        actor_id: { type: integer, format: int64 }
+        source: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+    TemplateExecutionRequest:
+      type: object
+      required: [template_code, params]
+      properties:
+        template_code: { type: string }
+        params: { $ref: "#/components/schemas/TemplateParams" }
+
+    ReconcileResult:
+      type: object
+      properties:
+        balanced: { type: boolean }
+        gap: { $ref: "#/components/schemas/Decimal" }
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              account_holder: { type: integer, format: int64 }
+              currency_id: { type: integer, format: int64 }
+              classification_id: { type: integer, format: int64 }
+              expected: { $ref: "#/components/schemas/Decimal" }
+              actual:   { $ref: "#/components/schemas/Decimal" }
+              drift:    { $ref: "#/components/schemas/Decimal" }
+        checked_at: { $ref: "#/components/schemas/Timestamp" }

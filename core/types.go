@@ -30,8 +30,9 @@ func (l *Lifecycle) Validate() error {
 		terminalSet[s] = true
 	}
 
-	// Initial must have outgoing transitions.
-	if _, ok := l.Transitions[l.Initial]; !ok {
+	// Initial must have outgoing transitions. An empty slice still counts as
+	// "no transitions" — the FSM would have nowhere to go from initial.
+	if outs, ok := l.Transitions[l.Initial]; !ok || len(outs) == 0 {
 		return fmt.Errorf("core: lifecycle: initial status %q must have outgoing transitions: %w", l.Initial, ErrInvalidInput)
 	}
 

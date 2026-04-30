@@ -22,6 +22,7 @@ import (
 type QueryStore struct {
 	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
+	db   DBTX
 	q    *sqlcgen.Queries
 }
 
@@ -29,6 +30,7 @@ type QueryStore struct {
 func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 	return &QueryStore{
 		pool: pool,
+		db:   pool,
 		q:    sqlcgen.New(pool),
 	}
 }
@@ -37,6 +39,7 @@ func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 func (s *QueryStore) WithDB(db DBTX) *QueryStore {
 	return &QueryStore{
 		pool: nil, // tx mode
+		db:   db,
 		q:    sqlcgen.New(db),
 	}
 }
@@ -147,22 +150,73 @@ func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder, curre
 // --- SystemRollupQuerier ---
 
 func (s *QueryStore) GetSystemRollups(ctx context.Context) ([]core.SystemRollup, error) {
-	rows, err := s.q.GetSystemRollups(ctx)
+	const realtimeSystemRollupsSQL = `
+WITH active AS (
+  SELECT DISTINCT account_holder, currency_id, classification_id
+  FROM journal_entries
+),
+realtime AS (
+  SELECT
+    a.currency_id,
+    a.classification_id,
+    COALESCE(bc.balance, 0) + COALESCE(d.delta, 0) AS balance
+  FROM active a
+  INNER JOIN classifications c ON c.id = a.classification_id
+  LEFT JOIN balance_checkpoints bc
+         ON bc.account_holder    = a.account_holder
+        AND bc.currency_id       = a.currency_id
+        AND bc.classification_id = a.classification_id
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(SUM(
+      CASE
+        WHEN (c.normal_side = 'debit'  AND je.entry_type = 'debit')
+          OR (c.normal_side = 'credit' AND je.entry_type = 'credit')
+        THEN je.amount
+        ELSE -je.amount
+      END
+    ), 0)::numeric AS delta
+    FROM journal_entries je
+    WHERE je.account_holder    = a.account_holder
+      AND je.currency_id       = a.currency_id
+      AND je.classification_id = a.classification_id
+      AND je.id                > COALESCE(bc.last_entry_id, 0)
+  ) d ON TRUE
+)
+SELECT currency_id, classification_id, COALESCE(SUM(balance), 0)::numeric AS total_balance, now() AS updated_at
+FROM realtime
+GROUP BY currency_id, classification_id
+ORDER BY currency_id, classification_id`
+
+	rows, err := s.db.Query(ctx, realtimeSystemRollupsSQL)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get system rollups: %w", err)
 	}
-	result := make([]core.SystemRollup, len(rows))
-	for i, r := range rows {
-		balance, err := numericToDecimal(r.TotalBalance)
+	defer rows.Close()
+
+	result := make([]core.SystemRollup, 0)
+	for rows.Next() {
+		var (
+			currencyID       int64
+			classificationID int64
+			totalBalance     pgtype.Numeric
+			updatedAt        time.Time
+		)
+		if err := rows.Scan(&currencyID, &classificationID, &totalBalance, &updatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: get system rollups: scan: %w", err)
+		}
+		balance, err := numericToDecimal(totalBalance)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: get system rollups: convert balance: %w", err)
 		}
-		result[i] = core.SystemRollup{
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
+		result = append(result, core.SystemRollup{
+			CurrencyID:       currencyID,
+			ClassificationID: classificationID,
 			TotalBalance:     balance,
-			UpdatedAt:        r.UpdatedAt,
-		}
+			UpdatedAt:        updatedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: get system rollups: rows: %w", err)
 	}
 	return result, nil
 }

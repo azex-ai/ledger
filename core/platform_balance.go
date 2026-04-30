@@ -7,7 +7,7 @@ import (
 )
 
 // PlatformBalance is a structured per-currency breakdown of system-wide balances
-// read from the system_rollups materialized view.
+// read in real time from the ledger.
 //
 // UserSide contains totals for accounts with positive holder IDs (holder > 0),
 // keyed by classification code.
@@ -15,12 +15,10 @@ import (
 // SystemSide contains totals for accounts with negative holder IDs (holder < 0),
 // keyed by classification code.
 //
-// Amounts are the sum of balance_checkpoints for each (currency, classification)
-// group, as last refreshed by RefreshSystemRollups.
-//
-// Note: system_rollups does NOT distinguish holder sign — it aggregates all
-// holders for a given (currency_id, classification_id). The split into UserSide
-// vs SystemSide is performed at query time using separate SQL predicates.
+// Amounts are computed as `checkpoint.balance + delta`, where delta is the net
+// of journal_entries posted after each account checkpoint's last_entry_id.
+// Reads therefore reflect every committed journal immediately, without waiting
+// for the rollup worker.
 type PlatformBalance struct {
 	CurrencyID int64                      `json:"currency_id"`
 	UserSide   map[string]decimal.Decimal `json:"user_side"`   // classification code → total
@@ -51,7 +49,7 @@ type SolvencyReport struct {
 }
 
 // PlatformBalanceReader reads structured platform-wide balance breakdowns from
-// the system_rollups table.
+// the ledger in real time.
 type PlatformBalanceReader interface {
 	// GetPlatformBalances returns a per-classification breakdown for the given
 	// currency. Both UserSide and SystemSide maps are keyed by classification
@@ -68,6 +66,7 @@ type SolvencyChecker interface {
 	// SolvencyCheck returns a SolvencyReport for the given currency.
 	// Custodial is the total of system-side "custodial" classification balances.
 	// Liability is the total of all user-side balances.
-	// The check is O(1) — it reads from the system_rollups materialized table.
+	// Implementations should ensure the custodial and liability figures describe
+	// the same point in time.
 	SolvencyCheck(ctx context.Context, currencyID int64) (*SolvencyReport, error)
 }

@@ -1,0 +1,24 @@
+apiVersion: v2
+name: ledger
+description: |
+  Production-grade double-entry ledger engine. Classification-driven
+  architecture; deposit/withdrawal/transfer are preset configurations of a
+  generic Booking lifecycle, not hardcoded types.
+
+  This chart deploys ledgerd (the HTTP service binary) and assumes you have
+  a managed PostgreSQL 17 instance reachable from the cluster. Database
+  migrations run automatically on container start.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+icon: https://raw.githubusercontent.com/azex-ai/ledger/main/.github/icon.png
+keywords:
+  - ledger
+  - accounting
+  - double-entry
+  - financial
+home: https://github.com/azex-ai/ledger
+sources:
+  - https://github.com/azex-ai/ledger
+maintainers:
+  - name: azex-ai

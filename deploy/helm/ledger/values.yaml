@@ -1,0 +1,82 @@
+# Default values for ledger.
+# Override with `helm install ledger ./deploy/helm/ledger -f my-values.yaml`.
+
+image:
+  repository: ghcr.io/azex-ai/ledger
+  tag: ""           # falls back to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+# Number of HTTP+worker replicas. The ledger uses advisory locks + SKIP LOCKED
+# so multiple replicas safely share rollup/expiration/snapshot workloads.
+replicaCount: 2
+
+env: production    # used to gate CORS / API key requirement
+
+# DATABASE_URL is sourced from a Kubernetes Secret. Either:
+#   1. let this chart create the Secret (set databaseUrl below), or
+#   2. point at an existing one (set existingSecret + existingSecretKey)
+existingSecret: ""
+existingSecretKey: DATABASE_URL
+databaseUrl: ""
+
+# Comma-separated API keys. If empty, mutating endpoints will be unauthenticated
+# (loud warning logged). Production deployments MUST set this.
+apiKeys: ""
+
+# CORS — required when env != "dev". Set to your frontend origin.
+corsAllowedOrigin: ""
+
+# Optional Prometheus scrape annotations on the Service.
+metrics:
+  enabled: true
+  port: 8080
+  path: /metrics
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ledger.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: "1"
+    memory: 512Mi
+  requests:
+    cpu: "100m"
+    memory: 128Mi
+
+# Pod-level
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 65532
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+  runAsUser: 65532
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+probes:
+  liveness:
+    path: /api/v1/system/health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  readiness:
+    path: /api/v1/system/ready
+    initialDelaySeconds: 3
+    periodSeconds: 5
