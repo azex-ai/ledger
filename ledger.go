@@ -292,7 +292,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		balanceTrendsStore:   s.balanceTrendsStore.WithDB(tx, ls),
 		auditStore:           s.auditStore.WithDB(tx),
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
-		platformBalanceStore: s.platformBalanceStore, // read-only, pool-backed is fine
+		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
 		reconcileAdapter:     s.reconcileAdapter,     // read-only, pool-backed is fine
 		channels:             s.channels,             // shared snapshot; no mutations inside tx
 	}

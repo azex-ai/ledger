@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -17,18 +18,40 @@ var (
 	_ core.SolvencyChecker       = (*PlatformBalanceStore)(nil)
 )
 
-// PlatformBalanceStore reads structured platform-wide balance breakdowns.
-// It reads directly from balance_checkpoints (not system_rollups) so that
-// user-side (holder > 0) and system-side (holder < 0) totals can be separated
-// per classification. The queries are O(C) where C is the number of distinct
-// active classifications — safe for frequent reads.
+// PlatformBalanceStore reads structured platform-wide balance breakdowns in
+// real time. Every query computes `checkpoint.balance + delta` where delta is
+// the net of journal_entries past the checkpoint's last_entry_id, so reads
+// reflect every committed write immediately — no waiting for the rollup
+// worker.
+//
+// Single-statement queries (GetPlatformBalances, GetTotalLiabilityByAsset)
+// rely on PostgreSQL statement-level snapshot consistency. Multi-statement
+// reads (SolvencyCheck) wrap in REPEATABLE READ to keep the liability and
+// custodial figures from drifting against each other.
 type PlatformBalanceStore struct {
-	q *sqlcgen.Queries
+	pool *pgxpool.Pool
+	db   DBTX
+	q    *sqlcgen.Queries
 }
 
-// NewPlatformBalanceStore creates a new PlatformBalanceStore.
+// NewPlatformBalanceStore creates a new PlatformBalanceStore bound to a pool.
 func NewPlatformBalanceStore(pool *pgxpool.Pool) *PlatformBalanceStore {
-	return &PlatformBalanceStore{q: sqlcgen.New(pool)}
+	return &PlatformBalanceStore{
+		pool: pool,
+		db:   pool,
+		q:    sqlcgen.New(pool),
+	}
+}
+
+// WithDB returns a clone bound to db (a *pgxpool.Pool or pgx.Tx). When passed
+// a tx the store reads inside the caller's transaction and SolvencyCheck
+// skips its own REPEATABLE READ wrap (the caller's isolation applies).
+func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
+	return &PlatformBalanceStore{
+		pool: nil, // tx mode — disables inner BeginTx
+		db:   db,
+		q:    sqlcgen.New(db),
+	}
 }
 
 // GetPlatformBalances returns a structured per-classification balance breakdown
@@ -64,8 +87,8 @@ func (s *PlatformBalanceStore) GetPlatformBalances(ctx context.Context, currency
 	return pb, nil
 }
 
-// GetTotalLiabilityByAsset returns the sum of all user-side (holder > 0)
-// checkpoint balances for the given currency, across all classifications.
+// GetTotalLiabilityByAsset returns the realtime sum of all user-side
+// (holder > 0) balances for the given currency, across all classifications.
 // This is the aggregate liability — what the platform owes users in total.
 func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
 	raw, err := s.q.GetTotalUserSideBalance(ctx, currencyID)
@@ -81,15 +104,39 @@ func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, cur
 
 // SolvencyCheck computes a solvency report for the given currency.
 //
-// Liability = sum of user-side (holder > 0) checkpoint balances.
-// Custodial = sum of system-side (holder < 0) balances for code="custodial".
+// Liability = realtime sum of user-side (holder > 0) balances.
+// Custodial = realtime sum of system-side (holder < 0) balances for code="custodial".
 // Solvent   = Custodial >= Liability.
 // Margin    = Custodial - Liability (positive = surplus, negative = shortfall).
 //
-// This reads the in-DB picture. Comparing the custodial figure to an off-chain
-// custody position is the consumer's responsibility.
+// Both figures come from one REPEATABLE READ transaction so they describe a
+// single point in time. Comparing the custodial figure to an off-chain custody
+// position is the consumer's responsibility.
 func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
-	liabilityRaw, err := s.q.GetTotalUserSideBalance(ctx, currencyID)
+	if s.pool == nil {
+		// Tx mode: caller's transaction provides isolation; query directly.
+		return s.solvencyCheckWithQueries(ctx, s.q, currencyID)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: platform balance: solvency: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := sqlcgen.New(tx)
+	report, err := s.solvencyCheckWithQueries(ctx, q, currencyID)
+	if err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *sqlcgen.Queries, currencyID int64) (*core.SolvencyReport, error) {
+	liabilityRaw, err := q.GetTotalUserSideBalance(ctx, currencyID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: platform balance: solvency liability currency=%d: %w", currencyID, err)
 	}
@@ -98,7 +145,7 @@ func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyID int
 		return nil, fmt.Errorf("postgres: platform balance: solvency liability convert: %w", err)
 	}
 
-	custodialRaw, err := s.q.GetSystemSideCustodialBalance(ctx, currencyID)
+	custodialRaw, err := q.GetSystemSideCustodialBalance(ctx, currencyID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: platform balance: solvency custodial currency=%d: %w", currencyID, err)
 	}

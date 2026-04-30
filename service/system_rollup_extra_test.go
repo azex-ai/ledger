@@ -199,6 +199,7 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
+	ledgerStore := postgres.NewLedgerStore(pool)
 	classStore := postgres.NewClassificationStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
@@ -207,40 +208,58 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 	require.NoError(t, err)
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
-		Code: "mw_lb1", Name: "Main Wallet LB1", NormalSide: core.NormalSideDebit,
+		Code: "mw_lb1", Name: "Main Wallet LB1", NormalSide: core.NormalSideCredit,
 	})
 	require.NoError(t, err)
 
 	locked, err := classStore.CreateClassification(ctx, core.ClassificationInput{
-		Code: "locked_lb1", Name: "Locked LB1", NormalSide: core.NormalSideDebit,
+		Code: "locked_lb1", Name: "Locked LB1", NormalSide: core.NormalSideCredit,
 	})
 	require.NoError(t, err)
 
-	// Edge case: zero liability when no checkpoints exist
+	custodial, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "custodial_lb1", Name: "Custodial LB1", NormalSide: core.NormalSideDebit, IsSystem: true,
+	})
+	require.NoError(t, err)
+
+	jt, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{Code: "deposit_lb1", Name: "Deposit LB1"})
+	require.NoError(t, err)
+
+	// Edge case: zero liability when no journals exist
 	total, err := pbStore.GetTotalLiabilityByAsset(ctx, usdt.ID)
 	require.NoError(t, err)
 	assert.True(t, total.IsZero(), "expected zero with no data, got %s", total)
 
-	// Two user-side checkpoints (300 + 100) and one system-side (400, excluded)
-	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 1, now())",
-		int64(2001), usdt.ID, mainWallet.ID, "300",
-	)
+	// Real journals: user gets 300 in main_wallet + 100 in locked = 400 total liability.
+	// System side: custodial = 400 (matches the deposits) — excluded from liability.
+	user := int64(2001)
+	sys := core.SystemAccountHolder(user)
+
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  jt.ID,
+		IdempotencyKey: postgrestest.UniqueKey("lb1-deposit-mw"),
+		Entries: []core.EntryInput{
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(300)},
+			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(300)},
+		},
+		Source: "test",
+	})
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 2, now())",
-		int64(2001), usdt.ID, locked.ID, "100",
-	)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 3, now())",
-		int64(-2001), usdt.ID, mainWallet.ID, "400", // system side — must be excluded
-	)
+
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  jt.ID,
+		IdempotencyKey: postgrestest.UniqueKey("lb1-deposit-locked"),
+		Entries: []core.EntryInput{
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: locked.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+		Source: "test",
+	})
 	require.NoError(t, err)
 
 	total, err = pbStore.GetTotalLiabilityByAsset(ctx, usdt.ID)
 	require.NoError(t, err)
-	// Only user-side rows: 300 + 100 = 400
+	// Only user-side: 300 + 100 = 400. System custodial (400) is excluded.
 	assert.True(t, total.Equal(decimal.NewFromInt(400)),
 		"expected 400, got %s", total)
 }
@@ -249,6 +268,7 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
+	ledgerStore := postgres.NewLedgerStore(pool)
 	classStore := postgres.NewClassificationStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
@@ -256,46 +276,84 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-SC1", Name: "Tether USD SC1"})
 	require.NoError(t, err)
 
+	// Liability account (credit-normal — what we owe users).
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
-		Code: "mw_sc1", Name: "Main Wallet SC1", NormalSide: core.NormalSideDebit,
+		Code: "mw_sc1", Name: "Main Wallet SC1", NormalSide: core.NormalSideCredit,
 	})
 	require.NoError(t, err)
-
-	// "custodial" code is required by SolvencyCheck
-	custodialClass, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+	// "custodial" code is required by SolvencyCheck (debit-normal asset).
+	custodial, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "custodial", Name: "Custodial SC1", NormalSide: core.NormalSideDebit, IsSystem: true,
 	})
 	require.NoError(t, err)
-
-	// Seed: user liability 800, custodial 1000 → solvent, margin +200
-	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 1, now())",
-		int64(3001), usdt.ID, mainWallet.ID, "800",
-	)
+	// A non-custodial system asset where we can move funds out to break solvency.
+	hotWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "hot_wallet_sc1", Name: "Hot Wallet SC1", NormalSide: core.NormalSideDebit, IsSystem: true,
+	})
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 2, now())",
-		int64(-3001), usdt.ID, custodialClass.ID, "1000",
-	)
+
+	jt, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{Code: "deposit_sc1", Name: "Deposit SC1"})
+	require.NoError(t, err)
+	xferType, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{Code: "internal_xfer_sc1", Name: "Internal Transfer SC1"})
+	require.NoError(t, err)
+
+	user := int64(3001)
+	sys := core.SystemAccountHolder(user)
+
+	// Deposit: DR custodial 1000, CR main_wallet 800 + DR custodial 200... no wait:
+	// We want liability=800, custodial=1000. So that's two journals:
+	// 1. Deposit 800 (custodial+800, mw+800)
+	// 2. House top-up: custodial+200 from somewhere — using a "founders_capital" credit-normal source.
+	founders, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "founders_capital_sc1", Name: "Founders Capital SC1", NormalSide: core.NormalSideCredit, IsSystem: true,
+	})
+	require.NoError(t, err)
+
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  jt.ID,
+		IdempotencyKey: postgrestest.UniqueKey("sc1-deposit"),
+		Entries: []core.EntryInput{
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(800)},
+			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(800)},
+		},
+		Source: "test",
+	})
+	require.NoError(t, err)
+
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  jt.ID,
+		IdempotencyKey: postgrestest.UniqueKey("sc1-house-topup"),
+		Entries: []core.EntryInput{
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: founders.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+		},
+		Source: "test",
+	})
 	require.NoError(t, err)
 
 	report, err := pbStore.SolvencyCheck(ctx, usdt.ID)
 	require.NoError(t, err)
-	assert.True(t, report.Solvent, "expected solvent when custodial >= liability")
+	assert.True(t, report.Solvent, "expected solvent when custodial >= liability: %+v", report)
 	assert.True(t, report.Liability.Equal(decimal.NewFromInt(800)), "liability: %s", report.Liability)
 	assert.True(t, report.Custodial.Equal(decimal.NewFromInt(1000)), "custodial: %s", report.Custodial)
 	assert.True(t, report.Margin.Equal(decimal.NewFromInt(200)), "margin: %s", report.Margin)
 
-	// Reduce custodial to 500 → insolvent, margin -300
-	_, err = pool.Exec(ctx,
-		"UPDATE balance_checkpoints SET balance = $1 WHERE account_holder = $2 AND currency_id = $3 AND classification_id = $4",
-		"500", int64(-3001), usdt.ID, custodialClass.ID,
-	)
+	// Move 500 of custodial out to hot_wallet (still on books, just not in
+	// "custodial" classification). custodial drops to 500 → insolvent, margin -300.
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeID:  xferType.ID,
+		IdempotencyKey: postgrestest.UniqueKey("sc1-xfer-out"),
+		Entries: []core.EntryInput{
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: hotWallet.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+		},
+		Source: "test",
+	})
 	require.NoError(t, err)
 
 	report, err = pbStore.SolvencyCheck(ctx, usdt.ID)
 	require.NoError(t, err)
-	assert.False(t, report.Solvent, "expected insolvent when custodial < liability")
+	assert.False(t, report.Solvent, "expected insolvent when custodial < liability: %+v", report)
 	assert.True(t, report.Margin.IsNegative(), "margin should be negative: %s", report.Margin)
 	assert.True(t, report.Margin.Equal(decimal.NewFromInt(-300)), "margin: %s", report.Margin)
 }
