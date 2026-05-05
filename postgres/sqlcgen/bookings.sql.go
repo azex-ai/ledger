@@ -150,6 +150,43 @@ func (q *Queries) InsertBooking(ctx context.Context, arg InsertBookingParams) (B
 	return i, err
 }
 
+const linkBookingJournal = `-- name: LinkBookingJournal :one
+UPDATE bookings
+SET journal_id = $2, updated_at = now()
+WHERE id = $1
+  AND journal_id IS NULL
+RETURNING id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+`
+
+type LinkBookingJournalParams struct {
+	ID        int64       `json:"id"`
+	JournalID pgtype.Int8 `json:"journal_id"`
+}
+
+func (q *Queries) LinkBookingJournal(ctx context.Context, arg LinkBookingJournalParams) (Booking, error) {
+	row := q.db.QueryRow(ctx, linkBookingJournal, arg.ID, arg.JournalID)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.Status,
+		&i.ChannelName,
+		&i.ChannelRef,
+		&i.ReservationID,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.Metadata,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listBookingsByFilter = `-- name: ListBookingsByFilter :many
 SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings
 WHERE (account_holder = $1 OR $1 = 0)

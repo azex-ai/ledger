@@ -209,6 +209,47 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 	return i, err
 }
 
+const linkEventJournal = `-- name: LinkEventJournal :one
+UPDATE events
+SET journal_id = $2
+WHERE id = $1
+  AND journal_id IS NULL
+RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
+`
+
+type LinkEventJournalParams struct {
+	ID        int64       `json:"id"`
+	JournalID pgtype.Int8 `json:"journal_id"`
+}
+
+func (q *Queries) LinkEventJournal(ctx context.Context, arg LinkEventJournalParams) (Event, error) {
+	row := q.db.QueryRow(ctx, linkEventJournal, arg.ID, arg.JournalID)
+	var i Event
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationCode,
+		&i.BookingID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.FromStatus,
+		&i.ToStatus,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.JournalID,
+		&i.Metadata,
+		&i.OccurredAt,
+		&i.DeliveryStatus,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.NextAttemptAt,
+		&i.DeliveredAt,
+		&i.CreatedAt,
+		&i.ActorID,
+		&i.Source,
+	)
+	return i, err
+}
+
 const listEventsByFilter = `-- name: ListEventsByFilter :many
 SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events
 WHERE (classification_code = $1 OR $1 = '')

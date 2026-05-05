@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -57,4 +58,20 @@ type ReserveInput struct {
 	Amount         decimal.Decimal `json:"amount"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	ExpiresIn      time.Duration   `json:"expires_in"`
+}
+
+func (i ReserveInput) Validate() error {
+	if i.AccountHolder == 0 {
+		return fmt.Errorf("core: reserve: account_holder required: %w", ErrInvalidInput)
+	}
+	if i.CurrencyID <= 0 {
+		return fmt.Errorf("core: reserve: currency_id must be positive: %w", ErrInvalidInput)
+	}
+	if !i.Amount.IsPositive() {
+		return fmt.Errorf("core: reserve: amount must be positive: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: reserve: idempotency key required: %w", ErrInvalidInput)
+	}
+	return nil
 }

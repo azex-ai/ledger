@@ -253,8 +253,10 @@ that moves real money.
 
 ### Investigate
 
-A collision means two posts arrived with the same `idempotency_key`. The
-second one returned `ErrDuplicateJournal` (correct behaviour). Causes:
+A collision means two posts arrived with the same `idempotency_key`. For a
+same-payload replay, the second call should return the original journal/result
+without posting again. If the second call returned `ErrConflict`, the same key
+was reused with a different payload. Causes:
 
 1. **Client retry logic working as designed** — expected, low rate.
 2. **Bad client generating non-unique keys** — e.g. a timestamp-based key

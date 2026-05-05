@@ -88,6 +88,22 @@ func TestJournalInput_Validate_NoIdempotencyKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "idempotency")
 }
 
+func TestJournalInput_Validate_ZeroHolderRejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-zero-holder",
+		Entries: []EntryInput{
+			{AccountHolder: 0, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "account_holder")
+}
+
 func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name  string

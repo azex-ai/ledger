@@ -1,6 +1,6 @@
 CREATE TABLE reservations (
     id              BIGSERIAL PRIMARY KEY,
-    account_holder  BIGINT NOT NULL,
+    account_holder  BIGINT NOT NULL CHECK (account_holder <> 0),
     currency_id     BIGINT NOT NULL REFERENCES currencies(id),
     reserved_amount NUMERIC(30,18) NOT NULL CHECK (reserved_amount > 0),
     settled_amount  NUMERIC(30,18),

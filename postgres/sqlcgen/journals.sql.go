@@ -30,6 +30,18 @@ func (q *Queries) AcquireBalanceLock(ctx context.Context, arg AcquireBalanceLock
 	return err
 }
 
+const acquireIdempotencyLock = `-- name: AcquireIdempotencyLock :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+`
+
+// Serialize concurrent requests that present the same idempotency key, even if
+// they touch different account dimensions. Collisions in the hash only reduce
+// concurrency; they do not affect correctness.
+func (q *Queries) AcquireIdempotencyLock(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, acquireIdempotencyLock, key)
+	return err
+}
+
 const distinctClassificationsForAccount = `-- name: DistinctClassificationsForAccount :many
 SELECT DISTINCT classification_id
 FROM journal_entries

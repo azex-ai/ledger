@@ -58,8 +58,10 @@ ledger. Allowing `UPDATE` would let a bug or bad actor edit history silently.
 
 ## I-3: Idempotency on every mutation
 
-Every state-changing operation requires an `idempotency_key`. The same key
-applied twice produces the same result and side-effect-set as applying it once.
+Every state-changing operation requires an `idempotency_key`. Replaying the
+same key with the same payload returns the original result and produces no
+additional side effects. Reusing the same key with a different payload is a
+conflict.
 
 **Why**: in distributed systems, every retry path needs a deterministic
 "is this the same thing I already did?" answer. Without it, network-flaky
@@ -70,9 +72,9 @@ clients double-charge / double-credit users.
 - `UNIQUE` constraint on `reservations.idempotency_key`.
 - `UNIQUE` constraint on `bookings.idempotency_key`.
 - Each `Validate()` method rejects empty idempotency keys at the Go boundary.
-- The store layer detects PG `23505` unique-violation and returns
-  `ErrDuplicateJournal` so callers can distinguish "already done" from "real
-  conflict". See `postgres/errors.go`.
+- The store layer re-reads the persisted row after a `23505` race:
+  if payload matches, it returns the original record; if payload diverges,
+  it returns `ErrConflict`.
 
 **Pinned by**:
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
@@ -201,18 +203,23 @@ encode any platform-specific ID-space transform.
 
 ## I-10: Events and journals share a transaction
 
-When a booking transition causes accounting (a journal posting), the event row
-and the journal row are written in the **same** Postgres transaction. The
-event has `event.journal_id` populated, and the journal has `journal.event_id`
-populated. There is no window where one exists without the other.
+When a booking transition causes accounting (a journal posting), the caller can
+compose the transition and the journal post inside `ledger.Service.RunInTx`.
+When the journal is posted with `JournalInput.EventID` / `TemplateParams.EventID`,
+the event row and the journal row are written in the **same** Postgres
+transaction, `event.journal_id` is backfilled, and the booking's `journal_id`
+is linked before commit. There is no committed window where one exists without
+the other.
 
 **Why**: consumers reading the event stream need to be able to fetch the
 matching journal in a follow-up query without race-window logic. Reverse
 also holds: an audit trail starting from the journal can always find its
 "reason" event.
 
-**Enforced by**: `postgres.BookingStore.Transition` posts both rows inside a
-single `WithTx` block. Migration `014_journal_event_id` adds the back-link.
+**Enforced by**:
+- `postgres.BookingStore.Transition` inserts the event inside the caller tx.
+- `postgres.LedgerStore.PostJournal` links `events.journal_id` and `bookings.journal_id` when `EventID` is supplied.
+- `ledger.Service.RunInTx` provides the shared transaction boundary.
 
 **Pinned by**:
 - `postgres.TestAudit_TraceBooking` (booking → events → journals stitch)

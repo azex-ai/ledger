@@ -20,6 +20,13 @@ SET status = $2, channel_ref = $3, settled_amount = $4,
     journal_id = $5, metadata = $6, updated_at = now()
 WHERE id = $1;
 
+-- name: LinkBookingJournal :one
+UPDATE bookings
+SET journal_id = $2, updated_at = now()
+WHERE id = $1
+  AND journal_id IS NULL
+RETURNING *;
+
 -- name: ListBookingsByFilter :many
 SELECT * FROM bookings
 WHERE (account_holder = $1 OR $1 = 0)

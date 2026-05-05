@@ -15,7 +15,7 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ core.PendingBalanceWriter = (*PendingStore)(nil)
+	_ core.PendingBalanceWriter  = (*PendingStore)(nil)
 	_ core.PendingTimeoutSweeper = (*PendingStore)(nil)
 )
 
@@ -32,11 +32,11 @@ var (
 //   - pool mode: each public method starts its own transaction.
 //   - tx mode  : obtained via WithDB; callers own the transaction lifecycle.
 type PendingStore struct {
-	pool        *pgxpool.Pool
-	db          DBTX
-	q           *sqlcgen.Queries
-	ledger      *LedgerStore
-	classStore  *ClassificationStore
+	pool       *pgxpool.Pool
+	db         DBTX
+	q          *sqlcgen.Queries
+	ledger     *LedgerStore
+	classStore *ClassificationStore
 
 	// resolved IDs — populated by NewPendingStore or lazily on first use
 	pendingClassID  int64
@@ -148,10 +148,21 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 		return nil, fmt.Errorf("pending: confirm: %w", err)
 	}
 
+	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_confirm_pending")
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("pending: confirm: journal type 'deposit_confirm_pending' not found: %w", core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("pending: confirm: resolve journal type: %w", err)
+	}
+
+	input := s.buildConfirmPendingJournalInput(in, clsIDs)
+	input.JournalTypeID = jtID
+
 	// Idempotency check first — avoid the balance query if already posted.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
-		return journalFromRow(existing), nil
+		return ensureJournalMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("pending: confirm: idempotency check: %w", err)
@@ -168,58 +179,6 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 			pendingBal, in.Amount, core.ErrInsufficientBalance,
 		)
 	}
-
-	systemHolder := core.SystemAccountHolder(in.AccountHolder)
-
-	input := core.JournalInput{
-		IdempotencyKey: in.IdempotencyKey,
-		ActorID:        in.ActorID,
-		Source:         in.Source,
-		Metadata:       in.Metadata,
-		Entries: []core.EntryInput{
-			// DR pending (user) — clears pending
-			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.pending,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
-			},
-			// DR main_wallet (user) — credits spendable wallet
-			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.mainWallet,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
-			},
-			// CR suspense (system) — clears suspense
-			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.suspense,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
-			},
-			// CR custodial (system) — platform gains custody
-			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.custodial,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
-			},
-		},
-	}
-
-	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_confirm_pending")
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("pending: confirm: journal type 'deposit_confirm_pending' not found: %w", core.ErrNotFound)
-		}
-		return nil, fmt.Errorf("pending: confirm: resolve journal type: %w", err)
-	}
-	input.JournalTypeID = jtID
 
 	return s.ledger.PostJournal(ctx, input)
 }
@@ -239,10 +198,21 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 		return nil, fmt.Errorf("pending: cancel: %w", err)
 	}
 
+	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_release_pending")
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("pending: cancel: journal type 'deposit_release_pending' not found: %w", core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("pending: cancel: resolve journal type: %w", err)
+	}
+
+	input := s.buildCancelPendingJournalInput(in, clsIDs)
+	input.JournalTypeID = jtID
+
 	// Idempotency check.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
-		return journalFromRow(existing), nil
+		return ensureJournalMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("pending: cancel: idempotency check: %w", err)
@@ -260,26 +230,17 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 		)
 	}
 
-	reason := in.Reason
-	if reason == "" {
-		reason = "cancelled"
-	}
+	return s.ledger.PostJournal(ctx, input)
+}
 
+func (s *PendingStore) buildConfirmPendingJournalInput(in core.ConfirmPendingInput, clsIDs pendingClassIDs) core.JournalInput {
 	systemHolder := core.SystemAccountHolder(in.AccountHolder)
-
-	meta := in.Metadata
-	if meta == nil {
-		meta = make(map[string]string)
-	}
-	meta["reason"] = reason
-
-	input := core.JournalInput{
+	return core.JournalInput{
 		IdempotencyKey: in.IdempotencyKey,
 		ActorID:        in.ActorID,
 		Source:         in.Source,
-		Metadata:       meta,
+		Metadata:       in.Metadata,
 		Entries: []core.EntryInput{
-			// DR pending (user) — clears pending balance
 			{
 				AccountHolder:    in.AccountHolder,
 				CurrencyID:       in.CurrencyID,
@@ -287,7 +248,57 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 				EntryType:        core.EntryTypeDebit,
 				Amount:           in.Amount,
 			},
-			// CR suspense (system) — clears suspense
+			{
+				AccountHolder:    in.AccountHolder,
+				CurrencyID:       in.CurrencyID,
+				ClassificationID: clsIDs.mainWallet,
+				EntryType:        core.EntryTypeDebit,
+				Amount:           in.Amount,
+			},
+			{
+				AccountHolder:    systemHolder,
+				CurrencyID:       in.CurrencyID,
+				ClassificationID: clsIDs.suspense,
+				EntryType:        core.EntryTypeCredit,
+				Amount:           in.Amount,
+			},
+			{
+				AccountHolder:    systemHolder,
+				CurrencyID:       in.CurrencyID,
+				ClassificationID: clsIDs.custodial,
+				EntryType:        core.EntryTypeCredit,
+				Amount:           in.Amount,
+			},
+		},
+	}
+}
+
+func (s *PendingStore) buildCancelPendingJournalInput(in core.CancelPendingInput, clsIDs pendingClassIDs) core.JournalInput {
+	reason := in.Reason
+	if reason == "" {
+		reason = "cancelled"
+	}
+
+	meta := make(map[string]string, len(in.Metadata)+1)
+	for k, v := range in.Metadata {
+		meta[k] = v
+	}
+	meta["reason"] = reason
+
+	systemHolder := core.SystemAccountHolder(in.AccountHolder)
+	return core.JournalInput{
+		IdempotencyKey: in.IdempotencyKey,
+		ActorID:        in.ActorID,
+		Source:         in.Source,
+		Metadata:       meta,
+		Entries: []core.EntryInput{
+			{
+				AccountHolder:    in.AccountHolder,
+				CurrencyID:       in.CurrencyID,
+				ClassificationID: clsIDs.pending,
+				EntryType:        core.EntryTypeDebit,
+				Amount:           in.Amount,
+			},
 			{
 				AccountHolder:    systemHolder,
 				CurrencyID:       in.CurrencyID,
@@ -297,17 +308,6 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 			},
 		},
 	}
-
-	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_release_pending")
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("pending: cancel: journal type 'deposit_release_pending' not found: %w", core.ErrNotFound)
-		}
-		return nil, fmt.Errorf("pending: cancel: resolve journal type: %w", err)
-	}
-	input.JournalTypeID = jtID
-
-	return s.ledger.PostJournal(ctx, input)
 }
 
 // ExpirePendingOlderThan finds all user accounts with a pending balance

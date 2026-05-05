@@ -6,6 +6,13 @@ INSERT INTO events (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING *;
 
+-- name: LinkEventJournal :one
+UPDATE events
+SET journal_id = $2
+WHERE id = $1
+  AND journal_id IS NULL
+RETURNING *;
+
 -- name: GetEvent :one
 SELECT * FROM events WHERE id = $1;
 

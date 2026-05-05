@@ -55,7 +55,8 @@ func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 }
 
 // Reserve creates an amount reservation with advisory lock serialization.
-// Idempotent: returns existing reservation if idempotency_key matches.
+// Idempotent: same key + same payload returns the existing reservation;
+// divergent payload returns ErrConflict.
 //
 // In pool mode a new transaction is started and committed here.
 // In tx mode (bound via withDB) the reservation is written into the caller's
@@ -69,8 +70,8 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	)
 	defer span.End()
 
-	if !input.Amount.IsPositive() {
-		err := fmt.Errorf("postgres: reserve: amount must be positive: %w", core.ErrInvalidInput)
+	if err := input.Validate(); err != nil {
+		err := fmt.Errorf("postgres: reserve: %w", err)
 		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
@@ -78,7 +79,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// Check idempotency first (outside tx / on the current db handle).
 	existing, err := s.q.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return reservationFromRow(existing), nil
+		return ensureReservationMatchesInput(existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		ledgerotel.RecordError(span, err)
@@ -116,6 +117,18 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 }
 
 func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput) (*core.Reservation, error) {
+	if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
+		return nil, fmt.Errorf("postgres: reserve: %w", err)
+	}
+
+	existing, err := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
+	if err == nil {
+		return ensureReservationMatchesInput(existing, input)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: reserve: check idempotency in tx: %w", err)
+	}
+
 	// Invariant (matches LedgerStore.PostJournal): all balance-mutating tx must
 	// take pg_advisory_xact_lock(holder, currency_id) for every affected pair,
 	// in sorted order. Reserve only ever touches a single pair, but we still
@@ -128,14 +141,9 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
 
-	// Double-check idempotency inside lock.
-	existing, err := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
-	if err == nil {
-		return reservationFromRow(existing), nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("postgres: reserve: check idempotency in tx: %w", err)
-	}
+	// No second idempotency recheck needed: the advisory lock from
+	// acquireIdempotencyLock above already serializes all same-key transactions,
+	// so nothing could have inserted a matching row between then and now.
 
 	// Check sufficient balance before reserving.
 	// The advisory lock above serializes concurrent reserves for the same (holder, currency),
@@ -179,6 +187,13 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		ExpiresAt:      expiresAt,
 	})
 	if err != nil {
+		existing, lookupErr := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
+		if lookupErr == nil {
+			return ensureReservationMatchesInput(existing, input)
+		}
+		if !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: reserve: insert: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
+		}
 		return nil, wrapStoreError("postgres: reserve: insert", err)
 	}
 

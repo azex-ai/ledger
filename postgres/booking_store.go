@@ -53,7 +53,8 @@ func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 }
 
 // CreateBooking creates a new booking with initial status from the classification lifecycle.
-// Idempotent: returns existing booking if idempotency_key already exists.
+// Idempotent: same key + same payload returns the existing booking; divergent
+// payload returns ErrConflict.
 func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.create_booking",
 		attribute.String("classification_code", input.ClassificationCode),
@@ -72,7 +73,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 	// Check idempotency
 	existing, err := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return bookingFromRow(existing), nil
+		return ensureBookingMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		retErr := fmt.Errorf("postgres: create booking: check idempotency: %w", err)
@@ -124,7 +125,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 	if err != nil {
 		existing, lookupErr := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 		if lookupErr == nil {
-			return bookingFromRow(existing), nil
+			return ensureBookingMatchesInput(ctx, s.q, existing, input)
 		}
 		var retErr error
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {

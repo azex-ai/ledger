@@ -101,6 +101,13 @@ func acquireBalanceLocks(ctx context.Context, q *sqlcgen.Queries, pairs []balanc
 	return nil
 }
 
+func acquireIdempotencyLock(ctx context.Context, q *sqlcgen.Queries, key string) error {
+	if err := q.AcquireIdempotencyLock(ctx, key); err != nil {
+		return fmt.Errorf("postgres: idempotency lock %q: %w", key, err)
+	}
+	return nil
+}
+
 type queryProvider interface {
 	GetTemplateByCode(ctx context.Context, code string) (sqlcgen.EntryTemplate, error)
 	GetTemplateLines(ctx context.Context, templateID int64) ([]sqlcgen.EntryTemplateLine, error)
@@ -130,7 +137,8 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 }
 
 // PostJournal posts a balanced journal within a transaction.
-// Idempotent: returns existing journal if idempotency_key already exists.
+// Idempotent: same key + same payload returns the existing journal; divergent
+// payload returns ErrConflict.
 //
 // In pool mode a new transaction is started and committed here.
 // In tx mode (store bound via withDB) the journal is written directly into
@@ -331,10 +339,22 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 
 	existing, err := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return journalFromRow(existing), nil
+		return ensureJournalMatchesInput(ctx, q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: post journal: check idempotency: %w", err)
+	}
+
+	if err := acquireIdempotencyLock(ctx, q, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+
+	existing, err = q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
+	if err == nil {
+		return ensureJournalMatchesInput(ctx, q, existing, input)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: post journal: check idempotency after lock: %w", err)
 	}
 
 	// Invariant: every balance-mutating tx must take pg_advisory_xact_lock(holder,
@@ -363,7 +383,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	if err != nil {
 		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 		if lookupErr == nil {
-			return journalFromRow(existing), nil
+			return ensureJournalMatchesInput(ctx, q, existing, input)
 		}
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
@@ -417,7 +437,75 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: post journal: journal %d unbalanced in currency %d: %w", row.ID, badCurrency, core.ErrUnbalancedJournal)
 	}
 
+	if input.EventID != 0 {
+		if err := s.linkJournalToEventAndBooking(ctx, q, input.EventID, row.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	return journalFromRow(row), nil
+}
+
+func (s *LedgerStore) linkJournalToEventAndBooking(ctx context.Context, q *sqlcgen.Queries, eventID, journalID int64) error {
+	event, err := q.GetEvent(ctx, eventID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: post journal: event %d: %w", eventID, core.ErrNotFound)
+		}
+		return fmt.Errorf("postgres: post journal: get event %d: %w", eventID, err)
+	}
+	if event.JournalID.Valid && event.JournalID.Int64 != journalID {
+		return fmt.Errorf("postgres: post journal: event %d already linked to journal %d: %w", eventID, event.JournalID.Int64, core.ErrConflict)
+	}
+
+	if _, err := q.LinkEventJournal(ctx, sqlcgen.LinkEventJournalParams{
+		ID:        eventID,
+		JournalID: int64ToInt8(&journalID),
+	}); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return wrapStoreError("postgres: post journal: link event journal", err)
+		}
+		current, getErr := q.GetEvent(ctx, eventID)
+		if getErr != nil {
+			return fmt.Errorf("postgres: post journal: recheck event %d: %w", eventID, getErr)
+		}
+		if !current.JournalID.Valid || current.JournalID.Int64 != journalID {
+			return fmt.Errorf("postgres: post journal: event %d already linked to a different journal: %w", eventID, core.ErrConflict)
+		}
+	}
+
+	if event.BookingID == 0 {
+		return nil
+	}
+
+	booking, err := q.GetBooking(ctx, event.BookingID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: post journal: booking %d from event %d: %w", event.BookingID, eventID, core.ErrNotFound)
+		}
+		return fmt.Errorf("postgres: post journal: get booking %d: %w", event.BookingID, err)
+	}
+	if booking.JournalID.Valid && booking.JournalID.Int64 != journalID {
+		return fmt.Errorf("postgres: post journal: booking %d already linked to journal %d: %w", event.BookingID, booking.JournalID.Int64, core.ErrConflict)
+	}
+
+	if _, err := q.LinkBookingJournal(ctx, sqlcgen.LinkBookingJournalParams{
+		ID:        event.BookingID,
+		JournalID: int64ToInt8(&journalID),
+	}); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return wrapStoreError("postgres: post journal: link booking journal", err)
+		}
+		current, getErr := q.GetBooking(ctx, event.BookingID)
+		if getErr != nil {
+			return fmt.Errorf("postgres: post journal: recheck booking %d: %w", event.BookingID, getErr)
+		}
+		if !current.JournalID.Valid || current.JournalID.Int64 != journalID {
+			return fmt.Errorf("postgres: post journal: booking %d already linked to a different journal: %w", event.BookingID, core.ErrConflict)
+		}
+	}
+
+	return nil
 }
 
 // GetBalance computes balance for a single (holder, currency, classification) dimension.

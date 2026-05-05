@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -67,6 +68,88 @@ func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
 	j2, err := store.PostJournal(ctx, input)
 	require.NoError(t, err)
 	assert.Equal(t, j1.ID, j2.ID)
+}
+
+func TestLedgerStore_PostJournal_ConcurrentSameKey(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-CONCURRENT", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer-concurrent", "Transfer")
+	clsA := postgrestest.SeedClassification(t, pool, "wallet-concurrent", "Wallet", "debit", false)
+	clsB := postgrestest.SeedClassification(t, pool, "custodial-concurrent", "Custodial", "credit", true)
+
+	key := postgrestest.UniqueKey("idem-concurrent")
+	input := core.JournalInput{
+		JournalTypeID:  jtID,
+		IdempotencyKey: key,
+		Entries: []core.EntryInput{
+			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(75)},
+			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(75)},
+		},
+		Source: "test",
+	}
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	results := make([]*core.Journal, concurrency)
+	errs := make([]error, concurrency)
+	for i := range concurrency {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			j, err := store.PostJournal(ctx, input)
+			results[idx] = j
+			errs[idx] = err
+		}(i)
+	}
+	wg.Wait()
+
+	var firstID int64
+	for i, j := range results {
+		require.NoError(t, errs[i], "goroutine %d", i)
+		require.NotNil(t, j, "goroutine %d", i)
+		if firstID == 0 {
+			firstID = j.ID
+		}
+		assert.Equal(t, firstID, j.ID, "goroutine %d returned a different journal ID", i)
+	}
+}
+
+func TestLedgerStore_PostJournal_IdempotentPayloadMismatch(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-IDEM-MISMATCH", "Tether USD")
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer-idem-mismatch", "Transfer")
+	clsA := postgrestest.SeedClassification(t, pool, "wallet-idem-mismatch", "Wallet", "debit", false)
+	clsB := postgrestest.SeedClassification(t, pool, "custodial-idem-mismatch", "Custodial", "credit", true)
+
+	key := postgrestest.UniqueKey("idem-mismatch")
+	base := core.JournalInput{
+		JournalTypeID:  jtID,
+		IdempotencyKey: key,
+		Entries: []core.EntryInput{
+			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+		},
+		Source: "test",
+	}
+
+	_, err := store.PostJournal(ctx, base)
+	require.NoError(t, err)
+
+	mismatch := base
+	mismatch.Entries = []core.EntryInput{
+		{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(60)},
+		{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(60)},
+	}
+
+	_, err = store.PostJournal(ctx, mismatch)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
 }
 
 func TestLedgerStore_PostJournal_Unbalanced(t *testing.T) {

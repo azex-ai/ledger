@@ -6,7 +6,6 @@ package postgres_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -73,8 +72,8 @@ func TestReversalChainIntegrity(t *testing.T) {
 }
 
 // I-3: 100 concurrent posts of the same idempotency_key result in exactly one
-// journal row. The other 99 must surface ErrDuplicateJournal (or return the
-// existing journal) — never partial entries.
+// journal row and one economic side effect. Every caller should resolve to the
+// same persisted journal.
 func TestIdempotency_ConcurrentSameKey(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
@@ -112,23 +111,24 @@ func TestIdempotency_ConcurrentSameKey(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Count outcomes.
+	// Count outcomes and confirm every replay saw the same journal.
 	successes := 0
-	duplicates := 0
 	other := 0
+	var firstJournalID int64
 	for i, err := range results {
 		switch {
 		case err == nil && journals[i] != nil:
 			successes++
-		case errors.Is(err, core.ErrDuplicateJournal):
-			duplicates++
+			if firstJournalID == 0 {
+				firstJournalID = journals[i].ID
+			}
+			assert.Equal(t, firstJournalID, journals[i].ID, "all concurrent replays must return the same journal")
 		default:
 			other++
 			t.Logf("unexpected error from goroutine %d: %v", i, err)
 		}
 	}
-	assert.Equal(t, 1, successes, "exactly 1 success expected, got %d", successes)
-	assert.Equal(t, goroutines-1, duplicates, "all but one must be ErrDuplicateJournal")
+	assert.Equal(t, goroutines, successes, "all concurrent replays should return success-equivalent results")
 	assert.Equal(t, 0, other, "no other error class permitted")
 
 	// Final balance must reflect a single posting.

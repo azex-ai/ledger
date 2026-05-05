@@ -175,3 +175,98 @@ func TestTxComposition_RunInTx(t *testing.T) {
 	).Scan(&journalCount))
 	assert.Equal(t, 0, journalCount, "aborted RunInTx must not persist journal")
 }
+
+func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-link", "Tether USD (link)")
+	jtID := postgrestest.SeedJournalType(t, pool, "booking-link", "Booking Link")
+
+	lifecycle := &core.Lifecycle{
+		Initial:  "pending",
+		Terminal: []core.Status{"confirmed"},
+		Transitions: map[core.Status][]core.Status{
+			"pending": {"confirmed"},
+		},
+	}
+
+	clsBooking, err := svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
+		Code:       "booking_link_deposit",
+		Name:       "Booking Link Deposit",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  lifecycle,
+	})
+	require.NoError(t, err)
+
+	clsWallet := postgrestest.SeedClassification(t, pool, "booking-link-wallet", "Booking Link Wallet", "debit", false)
+	clsCustodial := postgrestest.SeedClassification(t, pool, "booking-link-custodial", "Booking Link Custodial", "credit", true)
+
+	_, err = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
+		Code:          "booking_link_confirm",
+		Name:          "Booking Link Confirm",
+		JournalTypeID: jtID,
+		Lines: []core.TemplateLineInput{
+			{ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+		},
+	})
+	require.NoError(t, err)
+
+	booking, err := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: clsBooking.Code,
+		AccountHolder:      80,
+		CurrencyID:         curID,
+		Amount:             decimal.NewFromInt(125),
+		IdempotencyKey:     postgrestest.UniqueKey("booking-link-create"),
+		ChannelName:        "manual",
+	})
+	require.NoError(t, err)
+
+	var eventID int64
+	var journalID int64
+	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
+		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
+			BookingID: booking.ID,
+			ToStatus:  "confirmed",
+			Amount:    decimal.NewFromInt(125),
+			ActorID:   80,
+			Source:    "tx-test",
+		})
+		if err != nil {
+			return err
+		}
+		eventID = evt.ID
+
+		j, err := txSvc.JournalWriter().ExecuteTemplate(ctx, "booking_link_confirm", core.TemplateParams{
+			HolderID:       80,
+			CurrencyID:     curID,
+			IdempotencyKey: postgrestest.UniqueKey("booking-link-journal"),
+			EventID:        evt.ID,
+			Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(125)},
+			ActorID:        80,
+			Source:         "tx-test",
+		})
+		if err != nil {
+			return err
+		}
+		journalID = j.ID
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotZero(t, eventID)
+	require.NotZero(t, journalID)
+
+	trace, err := svc.Audit().TraceBooking(ctx, booking.ID)
+	require.NoError(t, err)
+	require.Len(t, trace.Events, 1)
+	require.Len(t, trace.Journals, 1)
+	require.NotNil(t, trace.Booking.JournalID)
+	require.NotNil(t, trace.Events[0].JournalID)
+	assert.Equal(t, journalID, *trace.Booking.JournalID)
+	assert.Equal(t, journalID, *trace.Events[0].JournalID)
+	assert.Equal(t, journalID, trace.Journals[0].ID)
+}

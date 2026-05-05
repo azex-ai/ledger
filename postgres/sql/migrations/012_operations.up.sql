@@ -1,7 +1,7 @@
 CREATE TABLE bookings (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     classification_id BIGINT NOT NULL,
-    account_holder    BIGINT NOT NULL,
+    account_holder    BIGINT NOT NULL CHECK (account_holder <> 0),
     currency_id       BIGINT NOT NULL,
     amount            NUMERIC(30,18) NOT NULL,
     settled_amount    NUMERIC(30,18) NOT NULL DEFAULT 0,

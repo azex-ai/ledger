@@ -19,7 +19,7 @@ CREATE UNIQUE INDEX uq_journals_reversal_of ON journals (reversal_of) WHERE reve
 CREATE TABLE journal_entries (
     id                BIGSERIAL,
     journal_id        BIGINT NOT NULL REFERENCES journals(id),
-    account_holder    BIGINT NOT NULL,
+    account_holder    BIGINT NOT NULL CHECK (account_holder <> 0),
     currency_id       BIGINT NOT NULL REFERENCES currencies(id),
     classification_id BIGINT NOT NULL REFERENCES classifications(id),
     entry_type        TEXT NOT NULL CHECK (entry_type IN ('debit', 'credit')),

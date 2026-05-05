@@ -456,6 +456,42 @@ func TestPostJournal(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
+func TestPostJournal_PassesEventID(t *testing.T) {
+	var captured core.JournalInput
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
+			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
+				captured = input
+				return &core.Journal{
+					ID:             1,
+					JournalTypeID:  input.JournalTypeID,
+					IdempotencyKey: input.IdempotencyKey,
+					EventID:        input.EventID,
+					TotalDebit:     decimal.NewFromInt(100),
+					TotalCredit:    decimal.NewFromInt(100),
+					CreatedAt:      time.Now(),
+				}, nil
+			},
+		}
+	})
+
+	body := map[string]any{
+		"journal_type_id": 1,
+		"idempotency_key": "test-event-link",
+		"event_id":        77,
+		"entries": []map[string]any{
+			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+		},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
+	require.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, int64(77), captured.EventID)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, float64(77), data["event_id"])
+}
+
 func TestPostDepositTolerance(t *testing.T) {
 	var calls []string
 	srv := newTestServerWith(func(o *testServerOpts) {
@@ -498,6 +534,46 @@ func TestPostDepositTolerance(t *testing.T) {
 	require.True(t, ok)
 	assert.Len(t, journals, 2)
 	assert.Equal(t, []string{"deposit_confirm_pending", "deposit_release_pending"}, calls)
+}
+
+func TestPostTemplate_PassesEventID(t *testing.T) {
+	var capturedCode string
+	var captured core.TemplateParams
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
+			templateFn: func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+				capturedCode = code
+				captured = params
+				return &core.Journal{
+					ID:             2,
+					JournalTypeID:  1,
+					IdempotencyKey: params.IdempotencyKey,
+					EventID:        params.EventID,
+					TotalDebit:     decimal.NewFromInt(50),
+					TotalCredit:    decimal.NewFromInt(50),
+					CreatedAt:      time.Now(),
+				}, nil
+			},
+		}
+	})
+
+	body := map[string]any{
+		"template_code":   "deposit_confirm",
+		"holder_id":       100,
+		"currency_id":     1,
+		"idempotency_key": "tmpl-event-link",
+		"event_id":        88,
+		"amounts": map[string]any{
+			"amount": "50",
+		},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", body)
+	require.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, "deposit_confirm", capturedCode)
+	assert.Equal(t, int64(88), captured.EventID)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, float64(88), data["event_id"])
 }
 
 func TestPostJournalUnbalanced(t *testing.T) {
@@ -896,6 +972,26 @@ func TestPostJournal_DuplicateJournal(t *testing.T) {
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+func TestPostJournal_Conflict(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{
+			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
+				return nil, fmt.Errorf("idempotency payload mismatch: %w", core.ErrConflict)
+			},
+		}
+	})
+	body := map[string]any{
+		"journal_type_id": 1,
+		"idempotency_key": "test-conflict",
+		"entries": []map[string]any{
+			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+		},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
+	assert.Equal(t, http.StatusConflict, w.Code)
 }
 
 func TestPostJournal_InternalError(t *testing.T) {

@@ -100,3 +100,9 @@ LIMIT 1;
 -- have (holder ^ (currency_id << 32) collides whenever two pairs differ only
 -- in the high bits of holder).
 SELECT pg_advisory_xact_lock(sqlc.arg(holder)::int4, sqlc.arg(currency_id)::int4);
+
+-- name: AcquireIdempotencyLock :exec
+-- Serialize concurrent requests that present the same idempotency key, even if
+-- they touch different account dimensions. Collisions in the hash only reduce
+-- concurrency; they do not affect correctness.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(key)::text, 0));

@@ -231,6 +231,62 @@ func TestPendingStore_ConfirmPending_Idempotent(t *testing.T) {
 	assert.True(t, walletBal.Equal(amount), "wallet should reflect exactly one confirmation")
 }
 
+// TestPendingStore_CancelPending_Idempotent verifies that calling CancelPending
+// twice with the same idempotency key returns the same journal and does not
+// double-release the pending balance.
+func TestPendingStore_CancelPending_Idempotent(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ls := postgres.NewLedgerStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	curID := postgrestest.SeedCurrency(t, p, "USDT-CANCELIDEM", "Test USDT")
+	ps := postgres.NewPendingStore(p, ls, cs)
+
+	userID := int64(10041)
+	amount := decimal.NewFromInt(300)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyID:     curID,
+		Amount:         amount,
+		IdempotencyKey: postgrestest.UniqueKey("cancelidem-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	key := postgrestest.UniqueKey("cancelidem-cancel")
+	j1, err := ps.CancelPending(ctx, core.CancelPendingInput{
+		AccountHolder:  userID,
+		CurrencyID:     curID,
+		Amount:         amount,
+		Reason:         "timeout",
+		IdempotencyKey: key,
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	j2, err := ps.CancelPending(ctx, core.CancelPendingInput{
+		AccountHolder:  userID,
+		CurrencyID:     curID,
+		Amount:         amount,
+		Reason:         "timeout",
+		IdempotencyKey: key,
+		Source:         "test",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, j1.ID, j2.ID)
+
+	pendingCls, err := cs.GetByCode(ctx, "pending")
+	require.NoError(t, err)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	require.NoError(t, err)
+	assert.True(t, pendingBal.IsZero(), "pending should be released exactly once")
+}
+
 // TestPendingStore_CancelPending verifies that CancelPending posts a compensating
 // journal and the original AddPending journal is not mutated.
 func TestPendingStore_CancelPending(t *testing.T) {

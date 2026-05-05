@@ -98,6 +98,7 @@ func TestEntryTemplate_Render_PassesThroughAuditContext(t *testing.T) {
 		CurrencyID:     1,
 		IdempotencyKey: "deposit-42-tx0xabc",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(1000)},
+		EventID:        77,
 		ActorID:        99,
 		Source:         "channel.evm",
 		Metadata:       meta,
@@ -105,6 +106,7 @@ func TestEntryTemplate_Render_PassesThroughAuditContext(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), input.JournalTypeID)
 	assert.Equal(t, "deposit-42-tx0xabc", input.IdempotencyKey)
+	assert.Equal(t, int64(77), input.EventID)
 	assert.Equal(t, int64(99), input.ActorID)
 	assert.Equal(t, "channel.evm", input.Source)
 	assert.Equal(t, meta, input.Metadata)

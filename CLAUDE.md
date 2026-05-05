@@ -18,7 +18,7 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
 - All amounts: `shopspring/decimal.Decimal` in Go, `NUMERIC(30,18)` in SQL, string in JSON.
 - **No NULL**: All DB columns NOT NULL with meaningful defaults (0, '', 'epoch', '{}'). **Exceptions** (FK target columns where 0 means "absent" must be nullable so PostgreSQL can enforce referential integrity): `journals.reversal_of`, `bookings.journal_id`, `bookings.reservation_id`, `events.journal_id`.
 - **Single-direction data flow**: Ledger never calls external systems. Commands in, events out.
-- **Event-Journal atomicity**: Events and journals are written in the same transaction. Events are the "reason" a journal exists.
+- **Event-Journal atomicity**: When a booking transition causes accounting, compose `Booker().Transition` + `JournalWriter().PostJournal/ExecuteTemplate` inside `Service.RunInTx`, and pass `EventID` so `events.journal_id` and `bookings.journal_id` are linked atomically. `bookings.journal_id` is **set-once** — each booking's lifecycle may have at most one journal-bearing transition (the one that triggers settlement). Subsequent EventID-bearing journals on the same booking will fail with `ErrConflict`. Use multiple events without `EventID` (or rely on `events.journal_id` per event) when modeling lifecycles where every transition records accounting.
 
 ### Core Concepts
 
@@ -81,7 +81,7 @@ docker compose up --build
 - Error wrapping: `fmt.Errorf("module: action: %w", err)`
 - Never discard errors (except in tests)
 - **No NULL**: All DB columns NOT NULL, all Go fields are value types (int64, string, time.Time), never pointers. Use 0/''/epoch/{} as defaults. **Exceptions** (FK target columns where 0 means "absent" must be nullable so PostgreSQL can enforce referential integrity): `journals.reversal_of`, `bookings.journal_id`, `bookings.reservation_id`, `events.journal_id`. The corresponding Go fields on `core.Booking`, `core.Event`, `core.Reservation` are `*int64`.
-- Idempotency: every mutation requires an `idempotency_key` (UNIQUE index)
+- Idempotency: every mutation requires an `idempotency_key` (UNIQUE index); same key + same payload must resolve to the original result, while same key + different payload must raise `ErrConflict`
 - Journal entries: append-only, corrections via reversal journal only
 - Balance: `checkpoint.balance + SUM(entries WHERE id > checkpoint.last_entry_id)`
 - Concurrency: `SELECT FOR UPDATE` on balance writes, advisory locks for reservations

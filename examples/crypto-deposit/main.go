@@ -88,16 +88,41 @@ func run() error {
 		return fmt.Errorf("transition confirming: %w", err)
 	}
 
-	// 3. Enough confirmations -> confirmed (this is where journals post in real flow).
-	evt, err := booker.Transition(ctx, core.TransitionInput{
-		BookingID:  booking.ID,
-		ToStatus:   "confirmed",
-		ChannelRef: "0xabc123",
-		Amount:     decimal.RequireFromString("500.00"),
+	// 3. Enough confirmations -> confirmed. Use RunInTx so the transition event
+	// and the accounting journal commit atomically and cross-link via EventID.
+	var confirmedEvent *core.Event
+	var confirmedJournal *core.Journal
+	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
+		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
+			BookingID:  booking.ID,
+			ToStatus:   "confirmed",
+			ChannelRef: "0xabc123",
+			Amount:     decimal.RequireFromString("500.00"),
+			Source:     "example.crypto_deposit",
+		})
+		if err != nil {
+			return err
+		}
+
+		journal, err := txSvc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+			HolderID:       booking.AccountHolder,
+			CurrencyID:     booking.CurrencyID,
+			IdempotencyKey: fmt.Sprintf("deposit-confirm-journal:%d", booking.ID),
+			EventID:        evt.ID,
+			Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
+			Source:         "example.crypto_deposit",
+		})
+		if err != nil {
+			return err
+		}
+
+		confirmedEvent = evt
+		confirmedJournal = journal
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("transition confirmed: %w", err)
+		return fmt.Errorf("transition confirmed + journal: %w", err)
 	}
-	fmt.Printf("confirmed event id=%d journal_id=%v\n", evt.ID, evt.JournalID)
+	fmt.Printf("confirmed event id=%d journal_id=%v journal=%d\n", confirmedEvent.ID, confirmedEvent.JournalID, confirmedJournal.ID)
 	return nil
 }

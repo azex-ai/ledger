@@ -17,6 +17,7 @@ import (
 type postJournalRequest struct {
 	JournalTypeID  int64             `json:"journal_type_id"`
 	IdempotencyKey string            `json:"idempotency_key"`
+	EventID        int64             `json:"event_id"`
 	Entries        []entryInputJSON  `json:"entries"`
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
@@ -36,6 +37,7 @@ type postTemplateRequest struct {
 	HolderID       int64             `json:"holder_id"`
 	CurrencyID     int64             `json:"currency_id"`
 	IdempotencyKey string            `json:"idempotency_key"`
+	EventID        int64             `json:"event_id"`
 	Amounts        map[string]string `json:"amounts"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
@@ -68,6 +70,7 @@ type journalResponse struct {
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
 	ReversalOf     int64             `json:"reversal_of,omitempty"`
+	EventID        int64             `json:"event_id,omitempty"`
 	CreatedAt      time.Time         `json:"created_at"`
 	Entries        []entryResponse   `json:"entries,omitempty"`
 }
@@ -104,6 +107,7 @@ func toJournalResponse(j *core.Journal) journalResponse {
 		ActorID:        j.ActorID,
 		Source:         j.Source,
 		ReversalOf:     j.ReversalOf,
+		EventID:        j.EventID,
 		CreatedAt:      j.CreatedAt,
 	}
 }
@@ -149,6 +153,7 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 	input := core.JournalInput{
 		JournalTypeID:  req.JournalTypeID,
 		IdempotencyKey: req.IdempotencyKey,
+		EventID:        req.EventID,
 		Entries:        entries,
 		Metadata:       req.Metadata,
 		ActorID:        req.ActorID,
@@ -184,6 +189,7 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 		HolderID:       req.HolderID,
 		CurrencyID:     req.CurrencyID,
 		IdempotencyKey: req.IdempotencyKey,
+		EventID:        req.EventID,
 		Amounts:        amounts,
 		ActorID:        req.ActorID,
 		Source:         req.Source,

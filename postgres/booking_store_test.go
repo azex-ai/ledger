@@ -111,3 +111,51 @@ func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing
 		assert.NotEqual(t, booking.ID, item.ID)
 	}
 }
+
+func TestBookingStore_CreateBooking_IdempotentPayloadMismatch(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	bookingStore := postgres.NewBookingStore(pool)
+
+	lifecycle := &core.Lifecycle{
+		Initial:  "pending",
+		Terminal: []core.Status{"confirmed"},
+		Transitions: map[core.Status][]core.Status{
+			"pending": {"confirmed"},
+		},
+	}
+
+	cls, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "booking_idem_mismatch",
+		Name:       "Booking Idem Mismatch",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  lifecycle,
+	})
+	require.NoError(t, err)
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-BOOK-IDEM", "Tether USD")
+	key := postgrestest.UniqueKey("booking-idem")
+
+	_, err = bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: cls.Code,
+		AccountHolder:      51,
+		CurrencyID:         curID,
+		Amount:             decimal.NewFromInt(100),
+		IdempotencyKey:     key,
+		ChannelName:        "test",
+	})
+	require.NoError(t, err)
+
+	_, err = bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: cls.Code,
+		AccountHolder:      51,
+		CurrencyID:         curID,
+		Amount:             decimal.NewFromInt(200),
+		IdempotencyKey:     key,
+		ChannelName:        "test",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+}

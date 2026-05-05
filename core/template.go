@@ -42,6 +42,7 @@ type TemplateParams struct {
 	HolderID       int64                      `json:"holder_id"`
 	CurrencyID     int64                      `json:"currency_id"`
 	IdempotencyKey string                     `json:"idempotency_key"`
+	EventID        int64                      `json:"event_id"`
 	Amounts        map[string]decimal.Decimal `json:"amounts"`
 	ActorID        int64                      `json:"actor_id"`
 	Source         string                     `json:"source"`
@@ -151,6 +152,7 @@ func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 	input := &JournalInput{
 		JournalTypeID:  t.JournalTypeID,
 		IdempotencyKey: params.IdempotencyKey,
+		EventID:        params.EventID,
 		Entries:        entries,
 		Metadata:       params.Metadata,
 		ActorID:        params.ActorID,

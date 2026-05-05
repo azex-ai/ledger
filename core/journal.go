@@ -98,6 +98,9 @@ func (j *JournalInput) Validate() error {
 		return fmt.Errorf("core: journal: entries must not be empty: %w", ErrInvalidInput)
 	}
 	for i, e := range j.Entries {
+		if e.AccountHolder == 0 {
+			return fmt.Errorf("core: journal: entry[%d]: account_holder must not be zero: %w", i, ErrInvalidInput)
+		}
 		if !e.EntryType.IsValid() {
 			return fmt.Errorf("core: journal: entry[%d]: invalid entry type %q: %w", i, e.EntryType, ErrInvalidInput)
 		}

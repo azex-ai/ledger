@@ -20,7 +20,7 @@ Core engine capabilities:
 - **Double-entry accounting** -- every journal enforces `total_debit = total_credit` at the database level
 - **Classification-driven design** -- account classifications (科目) are the primary entity; deposit/withdrawal are preset configurations, not hardcoded types
 - **Lifecycle state machines** -- attach a generic state machine to any classification; bookings transition through declared states with audit-tracked events
-- **Atomic event-journal model** -- events and journals are written in the same transaction; events are the "reason" a journal exists
+- **Atomic event-journal model** -- booking transitions and journal posts can share one transaction via `RunInTx`; pass `EventID` when posting the journal to backfill `events.journal_id` and `bookings.journal_id`
 - **Entry templates** -- reusable debit/credit recipes; `ExecuteTemplate` for single posts, `ExecuteTemplateBatch` for atomic multi-step plans
 - **Checkpoint + delta balances** -- materialised checkpoints plus incremental rollup; balance reads run inside `REPEATABLE READ` for snapshot consistency
 - **Reserve / Settle / Release** -- per-(holder, currency) advisory-lock serialisation with in-lock balance check (TOCTOU-safe)

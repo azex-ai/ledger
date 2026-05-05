@@ -94,6 +94,36 @@ func TestReserverStore_Reserve_Idempotent(t *testing.T) {
 	assert.Equal(t, r1.ID, r2.ID)
 }
 
+func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-RES-IDEM", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 31, curID, decimal.NewFromInt(100))
+
+	key := postgrestest.UniqueKey("res-idem-mismatch")
+	_, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  31,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(40),
+		IdempotencyKey: key,
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	_, err = store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  31,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: key,
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+}
+
 func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)

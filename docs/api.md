@@ -66,7 +66,7 @@ Common business codes you may see:
 | `10401` | Rate limit exceeded |
 | `10901` | Conflict with current state |
 | `14001` | Insufficient balance |
-| `14002` | Duplicate journal (idempotency replay rejected) |
+| `14002` | Duplicate journal (legacy low-level uniqueness error) |
 | `14003` | Journal entries not balanced |
 | `14004` | Invalid state transition |
 | `14005` | Reservation expired |
@@ -74,7 +74,7 @@ Common business codes you may see:
 
 ### Idempotency
 
-All mutation endpoints accepting an `idempotency_key` enforce it via a database `UNIQUE` index. Replaying the **same key with the same payload** is rejected with HTTP `422` and code `14002` ("duplicate journal"); the original record is **not** re-returned. Callers must treat `14002` as success-equivalent for the operation that already ran. Use a stable, deterministic key (e.g. `deposit:user1001:0xabc...`).
+All mutation endpoints accepting an `idempotency_key` enforce it via a database `UNIQUE` index. Replaying the **same key with the same payload** returns the original success result and does not create a second side effect. Reusing the **same key with a different payload** returns HTTP `409` with code `10901` (`conflict`). Use a stable, deterministic key (e.g. `deposit:user1001:0xabc...`).
 
 ### Pagination
 
