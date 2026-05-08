@@ -32,10 +32,7 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 )
 
-const (
-	userID     int64 = 1001
-	currencyID int64 = 1 // assume USDT with id=1
-)
+const userID int64 = 1001
 
 func main() {
 	if err := run(); err != nil {
@@ -70,6 +67,11 @@ func run() error {
 	// Idempotent — safe to call on every startup.
 	if err := svc.InstallExtendedPresets(ctx); err != nil {
 		return fmt.Errorf("install presets: %w", err)
+	}
+
+	currencyID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	if err != nil {
+		return err
 	}
 
 	// -----------------------------------------------------------------------
@@ -138,4 +140,21 @@ func run() error {
 	// Expected: 100.00 - 15.75 = 84.25 USDT
 	fmt.Printf("final balance: %s USDT (expected 84.25)\n", balance)
 	return nil
+}
+
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+	list, err := svc.Currencies().ListCurrencies(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list currencies: %w", err)
+	}
+	for _, c := range list {
+		if c.Code == code {
+			return c.ID, nil
+		}
+	}
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name})
+	if err != nil {
+		return 0, fmt.Errorf("create currency: %w", err)
+	}
+	return created.ID, nil
 }

@@ -37,10 +37,7 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 )
 
-const (
-	userID     int64 = 9001
-	currencyID int64 = 1 // assume USDT id=1 already exists; if not, see svc.Currencies().CreateCurrency
-)
+const userID int64 = 9001
 
 func main() {
 	if err := run(); err != nil {
@@ -68,6 +65,11 @@ func run() error {
 	svc, err := ledger.New(pool)
 	if err != nil {
 		return fmt.Errorf("ledger.New: %w", err)
+	}
+
+	currencyID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	if err != nil {
+		return err
 	}
 
 	// Make sure a journal type and the two classifications we'll cite exist.
@@ -143,6 +145,23 @@ func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name stri
 		return jt, nil
 	}
 	return svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
+}
+
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+	list, err := svc.Currencies().ListCurrencies(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list currencies: %w", err)
+	}
+	for _, c := range list {
+		if c.Code == code {
+			return c.ID, nil
+		}
+	}
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name})
+	if err != nil {
+		return 0, fmt.Errorf("create currency: %w", err)
+	}
+	return created.ID, nil
 }
 
 func ensureClassification(ctx context.Context, svc *ledger.Service, code, name string, side core.NormalSide, system bool) (*core.Classification, error) {

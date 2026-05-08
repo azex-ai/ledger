@@ -8,13 +8,13 @@
 // Demonstrates:
 //   - svc.RunInTx(ctx, func(tx *ledger.Service) error { ... })
 //   - Combining tx.JournalWriter().ExecuteTemplate with a raw SQL side-effect
-//     on the same pgx.Tx via tx.Pool() (illustrative — real code would use
-//     your own typed store wired to the same DBTX)
+//     on the same pgx.Tx via tx.DBTX() — both writes commit or roll back
+//     together
 //   - Rollback on error: the journal is never committed when the side-effect fails
 //
-// NOTE: This example writes to a hypothetical "orders" table that does not exist
-// in the ledger schema. The second RunInTx call deliberately returns an error to
-// illustrate rollback isolation. Adapt to your own schema before running.
+// NOTE: To stay self-contained, this example creates a tiny `demo_orders`
+// table on startup and uses it as the caller-side write. Adapt to your own
+// schema before integrating into a real application.
 //
 // Run:
 //
@@ -69,6 +69,19 @@ func run() error {
 		return fmt.Errorf("install presets: %w", err)
 	}
 
+	// Demo-only table that the in-tx side-effect will write to. Created via
+	// the facade's DBTX() so the example needs no migration files of its own.
+	if _, err := svc.DBTX().Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS demo_orders (
+			id          BIGSERIAL PRIMARY KEY,
+			holder_id   BIGINT NOT NULL,
+			currency_id BIGINT NOT NULL,
+			amount      NUMERIC(30,18) NOT NULL,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		return fmt.Errorf("create demo_orders: %w", err)
+	}
+
 	// Seed a balance so the lock_funds template has something to work with.
 	_, err = svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       3001,
@@ -99,20 +112,19 @@ func run() error {
 			return fmt.Errorf("lock_funds template: %w", err)
 		}
 
-		// 2. Insert an order row on the same transaction.
-		// In real code you would use a typed repository wired to tx.Pool().
-		// Here we illustrate the pattern with a raw query against a table that
-		// is expected NOT to exist — to keep this compilable without schema changes
-		// we catch the specific "table does not exist" error and treat it as ok.
-		_, execErr := tx.Pool().Exec(ctx,
-			`INSERT INTO orders (holder_id, currency_id, amount) VALUES ($1, $2, $3)`,
+		// 2. Insert an order row on the SAME transaction.
+		// tx.DBTX() returns the active pgx.Tx inside a RunInTx callback, so
+		// this Exec lands on the same connection as the journal write above —
+		// the two writes commit or roll back together.
+		//
+		// (tx.Pool() exists too, but it returns the underlying pool and would
+		// commit independently of the surrounding transaction. Use DBTX inside
+		// RunInTx; reserve Pool for code that runs outside the callback.)
+		if _, err := tx.DBTX().Exec(ctx,
+			`INSERT INTO demo_orders (holder_id, currency_id, amount) VALUES ($1, $2, $3)`,
 			3001, 1, "100.00",
-		)
-		if execErr != nil {
-			// Table doesn't exist in this example environment — that's fine.
-			// In production, return the error so the tx rolls back:
-			//   return fmt.Errorf("insert order: %w", execErr)
-			fmt.Printf("  (orders table not found — skipping side-effect: %v)\n", execErr)
+		); err != nil {
+			return fmt.Errorf("insert demo_orders: %w", err)
 		}
 
 		return nil // commit both operations

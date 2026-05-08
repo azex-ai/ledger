@@ -47,6 +47,12 @@ import (
 type Service struct {
 	pool *pgxpool.Pool
 
+	// tx is non-nil only on the short-lived clone produced by RunInTx; every
+	// store on that clone is rebound to this transaction. Surfaced to callers
+	// via DBTX() so user-side raw SQL can land on the same connection as the
+	// ledger's writes.
+	tx pgx.Tx
+
 	logger  core.Logger
 	metrics core.Metrics
 
@@ -132,6 +138,21 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 // transactional access alongside the ledger (the ledger itself does not hand
 // out transactions).
 func (s *Service) Pool() *pgxpool.Pool { return s.pool }
+
+// DBTX returns the database executor that the ledger's stores are currently
+// bound to. On a top-level Service it is the connection pool. On the clone
+// passed to a RunInTx callback it is the active pgx.Tx, so caller-owned raw
+// SQL run via DBTX().Exec lands on the same transaction as the ledger writes.
+//
+// Use DBTX (not Pool) inside RunInTx when composing your own writes with
+// ledger writes — Pool always returns the underlying pool and would commit
+// outside the surrounding transaction.
+func (s *Service) DBTX() postgres.DBTX {
+	if s.tx != nil {
+		return s.tx
+	}
+	return s.pool
+}
 
 // JournalWriter posts/reverses journals and executes templates.
 func (s *Service) JournalWriter() core.JournalWriter { return s.ledgerStore }
@@ -278,6 +299,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 	cs := s.classStore.WithDB(tx)
 	return &Service{
 		pool:                 s.pool,
+		tx:                   tx,
 		logger:               s.logger,
 		metrics:              s.metrics,
 		ledgerStore:          ls,
@@ -340,13 +362,29 @@ func (s *Service) InstallExtendedPresets(ctx context.Context) error {
 // Channel registry
 // ---------------------------------------------------------------------------
 
-// RegisterChannel registers an inbound-webhook channel adapter under name.
-// Call before starting the HTTP server. Safe to call from a single goroutine
-// during startup; concurrent registrations are serialised by a mutex.
-func (s *Service) RegisterChannel(name string, adapter channel.Adapter) {
+// RegisterChannel registers an inbound-webhook channel adapter. The name is
+// taken from adapter.Name(); registering a nil adapter, an adapter with an
+// empty name, or one whose name is already registered returns an error so
+// silent collisions cannot bury startup-time misconfiguration.
+//
+// Call before starting the HTTP server. Concurrent registrations are
+// serialised by a mutex.
+func (s *Service) RegisterChannel(adapter channel.Adapter) error {
+	if adapter == nil {
+		return fmt.Errorf("ledger: RegisterChannel: adapter is nil")
+	}
+	name := adapter.Name()
+	if name == "" {
+		return fmt.Errorf("ledger: RegisterChannel: adapter Name() is empty")
+	}
+
 	s.channelsMu.Lock()
 	defer s.channelsMu.Unlock()
+	if _, exists := s.channels[name]; exists {
+		return fmt.Errorf("ledger: RegisterChannel: %q already registered", name)
+	}
 	s.channels[name] = adapter
+	return nil
 }
 
 // Channels returns a snapshot of all registered channel adapters. The returned
@@ -371,9 +409,12 @@ func (s *Service) Channels() map[string]channel.Adapter {
 //	worker := svc.Worker(service.DefaultWorkerConfig())
 //	go worker.Run(ctx)
 //
-// The EventStore claim-lease is configured from cfg.EventClaimLease. The
-// RollupAdapter claim-lease is configured from cfg.RollupClaimLease.
+// Any zero-valued field on cfg is filled in from service.DefaultWorkerConfig
+// so callers get a safe-by-default Worker even when they pass a partially
+// populated config or service.WorkerConfig{}. The EventStore and RollupAdapter
+// claim-leases are configured from the merged cfg.
 func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
+	cfg = mergeWorkerConfig(cfg)
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 
 	rollupAdapter := postgres.NewRollupAdapter(s.pool)
@@ -388,6 +429,48 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 
 	return service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, cfg, engine)
+}
+
+// mergeWorkerConfig fills zero-valued fields of cfg with their counterparts
+// from service.DefaultWorkerConfig, so service.WorkerConfig{} (or any partial
+// config) produces a Worker with safe intervals — service/worker.go's
+// time.NewTicker would otherwise panic on a zero Duration.
+func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
+	d := service.DefaultWorkerConfig()
+	if cfg.RollupInterval <= 0 {
+		cfg.RollupInterval = d.RollupInterval
+	}
+	if cfg.RollupBatchSize <= 0 {
+		cfg.RollupBatchSize = d.RollupBatchSize
+	}
+	if cfg.RollupClaimLease <= 0 {
+		cfg.RollupClaimLease = d.RollupClaimLease
+	}
+	if cfg.ExpirationInterval <= 0 {
+		cfg.ExpirationInterval = d.ExpirationInterval
+	}
+	if cfg.ExpirationBatchSize <= 0 {
+		cfg.ExpirationBatchSize = d.ExpirationBatchSize
+	}
+	if cfg.ReconcileInterval <= 0 {
+		cfg.ReconcileInterval = d.ReconcileInterval
+	}
+	if cfg.SnapshotInterval <= 0 {
+		cfg.SnapshotInterval = d.SnapshotInterval
+	}
+	if cfg.SystemRollupInterval <= 0 {
+		cfg.SystemRollupInterval = d.SystemRollupInterval
+	}
+	if cfg.EventDeliveryInterval <= 0 {
+		cfg.EventDeliveryInterval = d.EventDeliveryInterval
+	}
+	if cfg.EventDeliveryBatchSize <= 0 {
+		cfg.EventDeliveryBatchSize = d.EventDeliveryBatchSize
+	}
+	if cfg.EventClaimLease <= 0 {
+		cfg.EventClaimLease = d.EventClaimLease
+	}
+	return cfg
 }
 
 // ---------------------------------------------------------------------------

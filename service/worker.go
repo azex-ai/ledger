@@ -204,7 +204,17 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // runLoop executes fn at the specified interval, exiting when ctx is done.
+//
+// A non-positive interval would crash time.NewTicker; defending here means a
+// caller that bypassed the facade (which fills defaults via mergeWorkerConfig)
+// only loses the loop, not the whole worker.
 func (w *Worker) runLoop(ctx context.Context, name string, interval time.Duration, fn func(context.Context)) error {
+	if interval <= 0 {
+		w.logger.Warn("worker: skipping job: interval is non-positive", "job", name, "interval", interval.String())
+		<-ctx.Done()
+		return nil
+	}
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

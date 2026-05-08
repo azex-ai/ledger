@@ -116,7 +116,9 @@ func run() error {
 	// Register channel adapters via facade.
 	evmSigningKey := os.Getenv("EVM_WEBHOOK_SECRET")
 	if evmSigningKey != "" {
-		svc.RegisterChannel("evm", chanOnchain.New([]byte(evmSigningKey)))
+		if err := svc.RegisterChannel(chanOnchain.New([]byte(evmSigningKey))); err != nil {
+			return fmt.Errorf("register evm channel: %w", err)
+		}
 	}
 
 	// Build reconcile/snapshot/systemRollup services for the HTTP server.
