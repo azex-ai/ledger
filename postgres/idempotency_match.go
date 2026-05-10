@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -43,6 +44,16 @@ func ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing
 }
 
 func ensureReservationMatchesInput(existing sqlcgen.Reservation, input core.ReserveInput) (*core.Reservation, error) {
+	// ExpiresIn is stored as ExpiresAt, computed from CreatedAt at insert time.
+	// Comparing the stored duration against the resolved input duration enforces
+	// the "same key + different payload = ErrConflict" contract for expiry too,
+	// while a 1s tolerance absorbs db timestamp precision (microseconds in PG).
+	storedExpiresIn := existing.ExpiresAt.Sub(existing.CreatedAt)
+	expiresInDrift := storedExpiresIn - resolveReservationExpiresIn(input.ExpiresIn)
+	if expiresInDrift < -time.Second || expiresInDrift > time.Second {
+		return nil, fmt.Errorf("postgres: reserve: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
+	}
+
 	if existing.AccountHolder != input.AccountHolder ||
 		existing.CurrencyID != input.CurrencyID ||
 		!mustNumericToDecimal(existing.ReservedAmount).Equal(input.Amount) {

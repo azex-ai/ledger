@@ -12,21 +12,16 @@ import (
 )
 
 const acquireBalanceLock = `-- name: AcquireBalanceLock :exec
-SELECT pg_advisory_xact_lock($1::int4, $2::int4)
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
 `
 
-type AcquireBalanceLockParams struct {
-	Holder     int32 `json:"holder"`
-	CurrencyID int32 `json:"currency_id"`
-}
-
-// Take a transaction-scoped advisory lock on a (holder, currency_id) pair so
+// Take a transaction-scoped advisory lock keyed on (holder, currency_id) so
 // concurrent reserves and journal posts that touch the same pair serialize.
-// Uses the two-arg form to avoid the XOR collisions a single-key form would
-// have (holder ^ (currency_id << 32) collides whenever two pairs differ only
-// in the high bits of holder).
-func (q *Queries) AcquireBalanceLock(ctx context.Context, arg AcquireBalanceLockParams) error {
-	_, err := q.db.Exec(ctx, acquireBalanceLock, arg.Holder, arg.CurrencyID)
+// The caller passes a stable composite text key (e.g. "balance:<holder>:<currency_id>");
+// hash collisions only reduce concurrency, they do not affect correctness.
+// Single-arg bigint form is used so int64 ids do not need to be narrowed to int32.
+func (q *Queries) AcquireBalanceLock(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, acquireBalanceLock, key)
 	return err
 }
 

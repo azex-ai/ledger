@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
@@ -159,7 +160,7 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 	input := s.buildConfirmPendingJournalInput(in, clsIDs)
 	input.JournalTypeID = jtID
 
-	// Idempotency check first — avoid the balance query if already posted.
+	// Idempotency check first — avoid acquiring a balance lock if already posted.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
 		return ensureJournalMatchesInput(ctx, s.q, existing, input)
@@ -168,19 +169,7 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 		return nil, fmt.Errorf("pending: confirm: idempotency check: %w", err)
 	}
 
-	// Balance check: user must have enough pending.
-	pendingBal, err := s.ledger.GetBalance(ctx, in.AccountHolder, in.CurrencyID, clsIDs.pending)
-	if err != nil {
-		return nil, fmt.Errorf("pending: confirm: get pending balance: %w", err)
-	}
-	if pendingBal.LessThan(in.Amount) {
-		return nil, fmt.Errorf(
-			"pending: confirm: insufficient pending balance: available=%s required=%s: %w",
-			pendingBal, in.Amount, core.ErrInsufficientBalance,
-		)
-	}
-
-	return s.ledger.PostJournal(ctx, input)
+	return s.checkPendingBalanceAndPost(ctx, "pending: confirm", in.AccountHolder, in.CurrencyID, clsIDs.pending, in.Amount, input)
 }
 
 // CancelPending reverses a pending deposit (two-phase step 2 — cancel path).
@@ -209,7 +198,7 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 	input := s.buildCancelPendingJournalInput(in, clsIDs)
 	input.JournalTypeID = jtID
 
-	// Idempotency check.
+	// Idempotency check first — avoid acquiring a balance lock if already posted.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
 		return ensureJournalMatchesInput(ctx, s.q, existing, input)
@@ -218,19 +207,62 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 		return nil, fmt.Errorf("pending: cancel: idempotency check: %w", err)
 	}
 
-	// Balance check.
-	pendingBal, err := s.ledger.GetBalance(ctx, in.AccountHolder, in.CurrencyID, clsIDs.pending)
-	if err != nil {
-		return nil, fmt.Errorf("pending: cancel: get pending balance: %w", err)
-	}
-	if pendingBal.LessThan(in.Amount) {
-		return nil, fmt.Errorf(
-			"pending: cancel: insufficient pending balance: available=%s required=%s: %w",
-			pendingBal, in.Amount, core.ErrInsufficientBalance,
-		)
+	return s.checkPendingBalanceAndPost(ctx, "pending: cancel", in.AccountHolder, in.CurrencyID, clsIDs.pending, in.Amount, input)
+}
+
+// checkPendingBalanceAndPost serializes the (holder, currency_id) balance with
+// an advisory lock, reads the pending balance under the lock, rejects if
+// insufficient, and posts the journal — all in one transaction so two
+// concurrent confirms or cancels cannot both pass the balance check (TOCTOU).
+//
+// In pool mode this method begins and commits its own transaction. In tx mode
+// the caller's transaction is used; the caller owns commit/rollback.
+func (s *PendingStore) checkPendingBalanceAndPost(
+	ctx context.Context,
+	errPrefix string,
+	holder, currencyID, pendingClsID int64,
+	required decimal.Decimal,
+	input core.JournalInput,
+) (*core.Journal, error) {
+	run := func(qtx *sqlcgen.Queries, ledger *LedgerStore) (*core.Journal, error) {
+		if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
+			holder:     holder,
+			currencyID: currencyID,
+		}}); err != nil {
+			return nil, fmt.Errorf("%s: %w", errPrefix, err)
+		}
+		bal, err := ledger.GetBalance(ctx, holder, currencyID, pendingClsID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: get pending balance: %w", errPrefix, err)
+		}
+		if bal.LessThan(required) {
+			return nil, fmt.Errorf(
+				"%s: insufficient pending balance: available=%s required=%s: %w",
+				errPrefix, bal, required, core.ErrInsufficientBalance,
+			)
+		}
+		return ledger.PostJournal(ctx, input)
 	}
 
-	return s.ledger.PostJournal(ctx, input)
+	if s.pool == nil {
+		// Tx mode: caller owns tx; queries and ledger are already bound to it.
+		return run(s.q, s.ledger)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: begin: %w", errPrefix, err)
+	}
+	defer tx.Rollback(ctx)
+
+	j, err := run(s.q.WithTx(tx), s.ledger.WithDB(tx))
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("%s: commit: %w", errPrefix, err)
+	}
+	return j, nil
 }
 
 func (s *PendingStore) buildConfirmPendingJournalInput(in core.ConfirmPendingInput, clsIDs pendingClassIDs) core.JournalInput {

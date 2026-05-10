@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -80,21 +79,13 @@ func balancePairsFromEntries(entries []core.EntryInput) []balancePair {
 	return pairs
 }
 
-// acquireBalanceLocks takes pg_advisory_xact_lock(int4, int4) on every
+// acquireBalanceLocks takes a transaction-scoped advisory lock on every
 // (holder, currency_id) pair in pairs. Pairs must be presorted (see
 // balancePairsFromEntries). The locks are tx-scoped and released at COMMIT/ROLLBACK.
 func acquireBalanceLocks(ctx context.Context, q *sqlcgen.Queries, pairs []balancePair) error {
 	for _, p := range pairs {
-		if p.holder > math.MaxInt32 || p.holder < math.MinInt32 {
-			return fmt.Errorf("postgres: post journal: holder %d does not fit in int32 for advisory lock: %w", p.holder, core.ErrInvalidInput)
-		}
-		if p.currencyID > math.MaxInt32 || p.currencyID < math.MinInt32 {
-			return fmt.Errorf("postgres: post journal: currency_id %d does not fit in int32 for advisory lock: %w", p.currencyID, core.ErrInvalidInput)
-		}
-		if err := q.AcquireBalanceLock(ctx, sqlcgen.AcquireBalanceLockParams{
-			Holder:     int32(p.holder),
-			CurrencyID: int32(p.currencyID),
-		}); err != nil {
+		key := fmt.Sprintf("balance:%d:%d", p.holder, p.currencyID)
+		if err := q.AcquireBalanceLock(ctx, key); err != nil {
 			return fmt.Errorf("postgres: post journal: advisory lock (%d,%d): %w", p.holder, p.currencyID, err)
 		}
 	}
@@ -269,8 +260,14 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 		return nil, fmt.Errorf("postgres: reverse journal: journal %d is already a reversal: %w", journalID, core.ErrConflict)
 	}
 
+	expectedKey := fmt.Sprintf("reversal:%d:%s", journalID, reason)
 	existingReversal, err := s.q.GetReversalByOriginalJournalID(ctx, int64ToInt8(&journalID))
 	if err == nil {
+		// Same (journalID, reason) → idempotent retry, return the original reversal.
+		// Different reason → genuine conflict (a reversal already exists for this journal).
+		if existingReversal.IdempotencyKey == expectedKey {
+			return journalFromRow(existingReversal), nil
+		}
 		return nil, fmt.Errorf("postgres: reverse journal: journal %d already reversed by %d: %w", journalID, existingReversal.ID, core.ErrConflict)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -300,7 +297,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 
 	input := core.JournalInput{
 		JournalTypeID:  original.JournalTypeID,
-		IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason),
+		IdempotencyKey: expectedKey,
 		Entries:        reversedEntries,
 		Source:         "reversal",
 		ReversalOf:     journalID,

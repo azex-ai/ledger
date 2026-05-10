@@ -94,12 +94,12 @@ HAVING SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END) <> 0
 LIMIT 1;
 
 -- name: AcquireBalanceLock :exec
--- Take a transaction-scoped advisory lock on a (holder, currency_id) pair so
+-- Take a transaction-scoped advisory lock keyed on (holder, currency_id) so
 -- concurrent reserves and journal posts that touch the same pair serialize.
--- Uses the two-arg form to avoid the XOR collisions a single-key form would
--- have (holder ^ (currency_id << 32) collides whenever two pairs differ only
--- in the high bits of holder).
-SELECT pg_advisory_xact_lock(sqlc.arg(holder)::int4, sqlc.arg(currency_id)::int4);
+-- The caller passes a stable composite text key (e.g. "balance:<holder>:<currency_id>");
+-- hash collisions only reduce concurrency, they do not affect correctness.
+-- Single-arg bigint form is used so int64 ids do not need to be narrowed to int32.
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(key)::text, 0));
 
 -- name: AcquireIdempotencyLock :exec
 -- Serialize concurrent requests that present the same idempotency key, even if

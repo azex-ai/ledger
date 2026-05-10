@@ -174,10 +174,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: reserve: available %s < requested %s: %w", available.String(), input.Amount.String(), core.ErrInsufficientBalance)
 	}
 
-	expiresAt := time.Now().Add(input.ExpiresIn)
-	if input.ExpiresIn == 0 {
-		expiresAt = time.Now().Add(15 * time.Minute)
-	}
+	expiresAt := time.Now().Add(resolveReservationExpiresIn(input.ExpiresIn))
 
 	row, err := qtx.InsertReservation(ctx, sqlcgen.InsertReservationParams{
 		AccountHolder:  input.AccountHolder,
@@ -198,6 +195,19 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	}
 
 	return reservationFromRow(row), nil
+}
+
+// reservationDefaultExpiresIn is applied when ReserveInput.ExpiresIn is zero.
+const reservationDefaultExpiresIn = 15 * time.Minute
+
+// resolveReservationExpiresIn returns the duration that will be added to
+// time.Now() when storing ExpiresAt. Both the insert path and the idempotency
+// match path use it so retries with the same input compare equal.
+func resolveReservationExpiresIn(d time.Duration) time.Duration {
+	if d == 0 {
+		return reservationDefaultExpiresIn
+	}
+	return d
 }
 
 // Settle marks a reservation as settled with the actual amount.
