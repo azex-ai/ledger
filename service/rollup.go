@@ -16,6 +16,7 @@ type RollupQueuer interface {
 	MarkRollupProcessed(ctx context.Context, id int64) error
 	ReleaseRollupClaim(ctx context.Context, id int64) error
 	CountPendingRollups(ctx context.Context) (int64, error)
+	EnqueueRollup(ctx context.Context, holder, currencyID, classificationID int64) error
 }
 
 // CheckpointReadWriter provides checkpoint read/write operations.
@@ -216,6 +217,51 @@ func (s *RollupService) processItem(
 	// Mark processed
 	if err := s.queue.MarkRollupProcessed(ctx, item.ID); err != nil {
 		return fmt.Errorf("service: rollup: mark processed: %w", err)
+	}
+
+	// Recover a coalesced enqueue. A journal for THIS (holder, currency,
+	// classification) that committed after our snapshot but before
+	// MarkRollupProcessed above had its EnqueueRollup suppressed by the still
+	// -pending queue row (the partial unique index is per dimension). Now that
+	// the row is processed, re-read entries past the checkpoint we just wrote;
+	// if this classification has any, re-enqueue so the next batch materializes
+	// them. Must run AFTER MarkRollupProcessed, else this re-enqueue would be
+	// coalesced away too. Balance reads stay correct meanwhile (the delta covers
+	// id > last_entry_id); this only keeps the checkpoint from lagging.
+	//
+	// This whole stage is best-effort: the checkpoint is already committed and
+	// MarkRollupProcessed has succeeded, so the rollup itself is done. If we
+	// returned an error here, ProcessBatch would call ReleaseRollupClaim, whose
+	// `processed_at IS NULL` guard no longer matches — the item would be logged
+	// as failed while actually being done, orphaned with failed_attempts never
+	// bumped. So a re-check failure is logged and swallowed; the coalesced entry
+	// stays unmaterialized only until the next journal for this dimension, and
+	// balances remain correct via the delta path meanwhile.
+	freshDebit, freshCredit, _, _, err := s.entries.SumEntriesSince(ctx, item.AccountHolder, item.CurrencyID, maxEntryID)
+	if err != nil {
+		s.logger.Warn("service: rollup: recheck entries after processing failed",
+			"holder", item.AccountHolder,
+			"currency_id", item.CurrencyID,
+			"classification_id", item.ClassificationID,
+			"error", err,
+		)
+		return nil
+	}
+	_, hasDebit := freshDebit[item.ClassificationID]
+	_, hasCredit := freshCredit[item.ClassificationID]
+	if hasDebit || hasCredit {
+		if err := s.queue.EnqueueRollup(ctx, item.AccountHolder, item.CurrencyID, item.ClassificationID); err != nil {
+			// Best-effort catch-up: the checkpoint is already correctly written
+			// and balances stay correct via the delta. A failed re-enqueue only
+			// delays re-materialization until the next journal for this
+			// dimension, so log it rather than failing the successful rollup.
+			s.logger.Warn("service: rollup: re-enqueue after coalesced enqueue failed",
+				"holder", item.AccountHolder,
+				"currency_id", item.CurrencyID,
+				"classification_id", item.ClassificationID,
+				"error", err,
+			)
+		}
 	}
 
 	return nil

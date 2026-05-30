@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -15,10 +16,12 @@ import (
 // --- Mock implementations ---
 
 type mockRollupQueuer struct {
-	items     []core.RollupQueueItem
-	processed []int64
-	released  []int64
-	pending   int64
+	items      []core.RollupQueueItem
+	processed  []int64
+	released   []int64
+	enqueued   []core.RollupQueueItem
+	pending    int64
+	enqueueErr error // when set, EnqueueRollup returns it (after recording the call)
 }
 
 func (m *mockRollupQueuer) DequeueRollupBatch(_ context.Context, batchSize int) ([]core.RollupQueueItem, error) {
@@ -42,6 +45,15 @@ func (m *mockRollupQueuer) ReleaseRollupClaim(_ context.Context, id int64) error
 
 func (m *mockRollupQueuer) CountPendingRollups(_ context.Context) (int64, error) {
 	return m.pending, nil
+}
+
+func (m *mockRollupQueuer) EnqueueRollup(_ context.Context, holder, currencyID, classificationID int64) error {
+	m.enqueued = append(m.enqueued, core.RollupQueueItem{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: classificationID,
+	})
+	return m.enqueueErr
 }
 
 type mockCheckpointRW struct {
@@ -78,6 +90,25 @@ type mockEntrySummer struct {
 
 func (m *mockEntrySummer) SumEntriesSince(_ context.Context, _, _, _ int64) (map[int64]decimal.Decimal, map[int64]decimal.Decimal, int64, time.Time, error) {
 	return m.debitByClass, m.creditByClass, m.maxEntryID, m.maxEntryAt, m.err
+}
+
+// sinceAwareEntrySummer returns a different result depending on sinceEntryID, so
+// tests can model entries that arrive AFTER the first rollup snapshot (i.e. the
+// post-processing re-check in processItem reads a different "since" than the
+// initial sum). Used to pin the coalesced-enqueue recovery (Q4).
+type sinceAwareEntrySummer struct {
+	bySince map[int64]struct {
+		debit  map[int64]decimal.Decimal
+		credit map[int64]decimal.Decimal
+		maxID  int64
+	}
+	calls []int64 // records each `since` argument, in call order
+}
+
+func (s *sinceAwareEntrySummer) SumEntriesSince(_ context.Context, _, _, since int64) (map[int64]decimal.Decimal, map[int64]decimal.Decimal, int64, time.Time, error) {
+	s.calls = append(s.calls, since)
+	r := s.bySince[since]
+	return r.debit, r.credit, r.maxID, time.Time{}, nil
 }
 
 type mockClassificationLister struct {
@@ -182,6 +213,125 @@ func TestRollupService_EmptyQueue(t *testing.T) {
 	processed, err := svc.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 0, processed)
+}
+
+// TestRollupService_ReenqueuesCoalescedEntries pins the Q4 fix: when a journal
+// for the dimension lands after the rollup snapshot (so its EnqueueRollup was
+// coalesced away by the still-pending queue row), processItem must re-enqueue
+// the dimension after marking processed, so the checkpoint eventually catches
+// up instead of lagging forever.
+func TestRollupService_ReenqueuesCoalescedEntries(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []core.RollupQueueItem{
+			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
+		},
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &sinceAwareEntrySummer{
+		bySince: map[int64]struct {
+			debit  map[int64]decimal.Decimal
+			credit map[int64]decimal.Decimal
+			maxID  int64
+		}{
+			// Initial sum (no checkpoint yet → since 0): class 10 up to entry 42.
+			0: {debit: map[int64]decimal.Decimal{10: decimal.NewFromInt(500)}, credit: map[int64]decimal.Decimal{10: decimal.NewFromInt(200)}, maxID: 42},
+			// Re-check (since = 42): a new class-10 entry arrived during processing.
+			42: {debit: map[int64]decimal.Decimal{10: decimal.NewFromInt(30)}, credit: map[int64]decimal.Decimal{}, maxID: 50},
+		},
+	}
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+	}
+
+	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	assert.Equal(t, []int64{1}, queue.processed)
+
+	// The coalesced entry must have triggered a re-enqueue of the same dimension.
+	require.Len(t, queue.enqueued, 1)
+	assert.Equal(t, core.RollupQueueItem{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10}, queue.enqueued[0])
+
+	// Non-tautology guard: the re-check MUST read entries past the checkpoint we
+	// just wrote (since = maxEntryID = 42), not re-read from the original since
+	// (0). If processItem regressed to passing sinceEntryID, the re-enqueue
+	// assertion above would still pass (class 10 is present under both snapshots),
+	// so we pin the actual `since` arguments here.
+	assert.Equal(t, []int64{0, 42}, entries.calls)
+}
+
+// TestRollupService_NoReenqueueWhenNothingNew pins the other half: when no new
+// entries for the dimension exist past the checkpoint, processItem must NOT
+// re-enqueue (otherwise a hot sibling classification would churn this one).
+func TestRollupService_NoReenqueueWhenNothingNew(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []core.RollupQueueItem{
+			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
+		},
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &sinceAwareEntrySummer{
+		bySince: map[int64]struct {
+			debit  map[int64]decimal.Decimal
+			credit map[int64]decimal.Decimal
+			maxID  int64
+		}{
+			0:  {debit: map[int64]decimal.Decimal{10: decimal.NewFromInt(500)}, credit: map[int64]decimal.Decimal{10: decimal.NewFromInt(200)}, maxID: 42},
+			42: {debit: map[int64]decimal.Decimal{}, credit: map[int64]decimal.Decimal{}, maxID: 0},
+		},
+	}
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+	}
+
+	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	assert.Empty(t, queue.enqueued)
+}
+
+// TestRollupService_ReenqueueFailureDoesNotFailRollup pins the best-effort
+// contract of the coalesced-enqueue recovery: when the re-enqueue itself fails,
+// the rollup must still report success. The checkpoint was already committed and
+// balances stay correct via the delta path, so a failed re-enqueue only delays
+// re-materialization until the next journal for this dimension — it must never
+// turn a successful rollup into a failure (which would orphan the processed row).
+func TestRollupService_ReenqueueFailureDoesNotFailRollup(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []core.RollupQueueItem{
+			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
+		},
+		enqueueErr: errors.New("db unavailable"),
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &sinceAwareEntrySummer{
+		bySince: map[int64]struct {
+			debit  map[int64]decimal.Decimal
+			credit map[int64]decimal.Decimal
+			maxID  int64
+		}{
+			0:  {debit: map[int64]decimal.Decimal{10: decimal.NewFromInt(500)}, credit: map[int64]decimal.Decimal{10: decimal.NewFromInt(200)}, maxID: 42},
+			42: {debit: map[int64]decimal.Decimal{10: decimal.NewFromInt(30)}, credit: map[int64]decimal.Decimal{}, maxID: 50},
+		},
+	}
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+	}
+
+	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, processed)
+	// Rollup succeeded: the item was marked processed and the checkpoint written,
+	// even though the best-effort re-enqueue attempt errored.
+	assert.Equal(t, []int64{1}, queue.processed)
+	assert.Empty(t, queue.released)
+	require.Len(t, queue.enqueued, 1) // the attempt was made (and failed)
+	cp := cpRW.checkpoints[checkpointKey{holder: 100, currencyID: 1, classificationID: 10}]
+	require.NotNil(t, cp)
+	assert.Equal(t, int64(42), cp.LastEntryID)
 }
 
 func TestRollupService_DriftDetection(t *testing.T) {

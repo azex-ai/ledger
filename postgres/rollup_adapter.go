@@ -101,6 +101,22 @@ func (a *RollupAdapter) CountPendingRollups(ctx context.Context) (int64, error) 
 	return a.q.CountPendingRollups(ctx)
 }
 
+// EnqueueRollup inserts a pending rollup for the dimension, coalescing against
+// any existing unprocessed row (ON CONFLICT DO NOTHING). Used both by the
+// journal-posting path and by the rollup worker's post-processing re-enqueue
+// (see RollupService.processItem) to recover any enqueue that was coalesced
+// away while the dimension's queue row was mid-processing.
+func (a *RollupAdapter) EnqueueRollup(ctx context.Context, holder, currencyID, classificationID int64) error {
+	if err := a.q.EnqueueRollup(ctx, sqlcgen.EnqueueRollupParams{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: classificationID,
+	}); err != nil {
+		return fmt.Errorf("postgres: enqueue rollup: %w", err)
+	}
+	return nil
+}
+
 // --- CheckpointReadWriter ---
 
 func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, classificationID int64) (*core.BalanceCheckpoint, error) {
@@ -140,7 +156,34 @@ func (a *RollupAdapter) UpsertCheckpoint(ctx context.Context, cp core.BalanceChe
 // --- EntrySummer ---
 
 func (a *RollupAdapter) SumEntriesSince(ctx context.Context, holder, currencyID, sinceEntryID int64) (debitByClass, creditByClass map[int64]decimal.Decimal, maxEntryID int64, maxEntryAt time.Time, err error) {
-	rows, err := a.q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
+	if a.pool == nil {
+		// Tx mode (defensive — RollupAdapter is normally pool-backed): the
+		// caller's transaction already provides the snapshot.
+		return a.sumEntriesSinceWithQueries(ctx, a.q, holder, currencyID, sinceEntryID)
+	}
+
+	// Pool mode: the entry-sum read and the max-entry-id read MUST observe the
+	// same snapshot. Without this, a journal committing between the two queries
+	// is seen by the MAX (advancing the checkpoint's last_entry_id) but missed
+	// by the SUM, so the checkpoint advances past an entry whose amount was
+	// never counted — a permanent, silent balance under-count (GetBalance only
+	// sums entries with id > last_entry_id). REPEATABLE READ pins one snapshot
+	// across both reads, closing that window.
+	tx, err := a.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return nil, nil, 0, time.Time{}, fmt.Errorf("postgres: sum entries since: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	return a.sumEntriesSinceWithQueries(ctx, a.q.WithTx(tx), holder, currencyID, sinceEntryID)
+}
+
+// sumEntriesSinceWithQueries runs the two rollup reads (entry sums + max entry
+// id) against the supplied queries handle. Both reads must run on the same
+// handle so that, in pool mode, the caller's REPEATABLE READ transaction makes
+// them observe a single snapshot. See SumEntriesSince for why this matters.
+func (a *RollupAdapter) sumEntriesSinceWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, sinceEntryID int64) (debitByClass, creditByClass map[int64]decimal.Decimal, maxEntryID int64, maxEntryAt time.Time, err error) {
+	rows, err := q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
 		SinceEntryID:  sinceEntryID,
@@ -165,7 +208,7 @@ func (a *RollupAdapter) SumEntriesSince(ctx context.Context, holder, currencyID,
 		}
 	}
 
-	maxRow, err := a.q.GetMaxEntryForAccountCurrencySince(ctx, sqlcgen.GetMaxEntryForAccountCurrencySinceParams{
+	maxRow, err := q.GetMaxEntryForAccountCurrencySince(ctx, sqlcgen.GetMaxEntryForAccountCurrencySinceParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
 		ID:            pgtype.Int8{Int64: sinceEntryID, Valid: true},
