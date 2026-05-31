@@ -1,9 +1,16 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defineConfig } from "tsup";
 
-const DIRECTIVES = ["use client", "use server"];
-const DIRECTIVE_RE = /^\s*["'](use client|use server)["']\s*;?/;
+const DIRECTIVES = ["use client", "use server"] as const;
+// Single source of truth: the regex alternation is derived from DIRECTIVES.
+// NOTE: matches only when the directive is the FIRST statement of the file
+// (optional whitespace allowed, but no comment/banner above it). RSC directives
+// are invalid if anything precedes them, so a future build-banner change that
+// injects a leading comment would silently defeat this hook.
+const DIRECTIVE_RE = new RegExp(
+  `^\\s*["'](${DIRECTIVES.join("|")})["']\\s*;?`,
+);
 
 interface Metafile {
   outputs: Record<string, { inputs: Record<string, unknown> }>;
@@ -12,13 +19,14 @@ interface Metafile {
 /**
  * esbuild strips leading directives (e.g. "use client") when the directive
  * lives in an *imported* module rather than the bundle entry, which silently
- * breaks React Server Components boundaries. tsup runs esbuild plugins' onEnd
- * before writing files, so we patch the written output in `onSuccess` using the
- * build metafile: for each output chunk we inspect every source it bundled, and
- * if any source begins with a directive, re-prepend it to the chunk.
+ * breaks React Server Components boundaries. We run in `onSuccess`, after tsup
+ * has written dist/ and the metafile, and rewrite the chunks in place: for each
+ * output chunk we inspect every source it bundled, and if any source begins
+ * with a directive, re-prepend it to the chunk.
  *
  * A chunk that pulls in any "use client" source keeps the directive; chunks
- * built only from undirected sources stay undirected.
+ * built only from undirected sources stay undirected. The metafile is deleted
+ * afterward so it does not ship in the published tarball.
  */
 async function preserveDirectives(distDir: string): Promise<void> {
   const metaPath = path.resolve(distDir, "metafile-esm.json");
@@ -32,8 +40,7 @@ async function preserveDirectives(distDir: string): Promise<void> {
     let directive: string | null = null;
     try {
       const src = await readFile(path.resolve(cwd, input), "utf8");
-      const match = DIRECTIVE_RE.exec(src)?.[1];
-      if (match && DIRECTIVES.includes(match)) directive = match;
+      directive = DIRECTIVE_RE.exec(src)?.[1] ?? null;
     } catch {
       directive = null;
     }
@@ -56,6 +63,9 @@ async function preserveDirectives(distDir: string): Promise<void> {
       await writeFile(abs, `"${directive}";\n${text}`);
     }),
   );
+
+  // Build-only artifact — keep it out of the published tarball.
+  await rm(metaPath, { force: true });
 }
 
 export default defineConfig({
