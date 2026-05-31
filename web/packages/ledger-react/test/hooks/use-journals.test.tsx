@@ -1,0 +1,105 @@
+import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
+import { http, HttpResponse } from "msw";
+import type { ReactNode } from "react";
+import { describe, expect, test, vi } from "vitest";
+import { LedgerProvider } from "../../src/provider/provider";
+import {
+  useJournals,
+  useJournal,
+  usePostJournal,
+  useEntries,
+} from "../../src/hooks/use-journals";
+import { server } from "../setup";
+
+const BASE = "http://ledger.test";
+
+function wrapperWith(qc?: QueryClient) {
+  return ({ children }: { children: ReactNode }) => (
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+      {children}
+    </LedgerProvider>
+  );
+}
+
+describe("use-journals", () => {
+  test("useJournals loads a page and keys ['ledger','journals',limit]", async () => {
+    const qc = new QueryClient();
+    server.use(
+      http.get(`${BASE}/api/v1/journals`, () =>
+        HttpResponse.json({
+          code: 0,
+          message: "ok",
+          data: { data: [{ id: 1 }], next_cursor: "" },
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useJournals(20), {
+      wrapper: wrapperWith(qc),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.pages[0].data).toHaveLength(1);
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journals", 20] })).toBeDefined();
+  });
+
+  test("useJournal keys ['ledger','journal',id]", async () => {
+    const qc = new QueryClient();
+    server.use(
+      http.get(`${BASE}/api/v1/journals/7`, () =>
+        HttpResponse.json({
+          code: 0,
+          message: "ok",
+          data: { journal: { id: 7 }, entries: [] },
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useJournal(7), {
+      wrapper: wrapperWith(qc),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journal", 7] })).toBeDefined();
+  });
+
+  test("useEntries keys ['ledger','entries',params]", async () => {
+    const qc = new QueryClient();
+    server.use(
+      http.get(`${BASE}/api/v1/entries`, () =>
+        HttpResponse.json({
+          code: 0,
+          message: "ok",
+          data: { data: [], next_cursor: "" },
+        }),
+      ),
+    );
+    const params = { holder: 42 };
+    const { result } = renderHook(() => useEntries(params), {
+      wrapper: wrapperWith(qc),
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(
+      qc.getQueryCache().find({ queryKey: ["ledger", "entries", params] }),
+    ).toBeDefined();
+  });
+
+  test("usePostJournal invalidates ledger keys", async () => {
+    const qc = new QueryClient();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    server.use(
+      http.post(`${BASE}/api/v1/journals`, () =>
+        HttpResponse.json({ code: 0, message: "ok", data: { id: 9 } }),
+      ),
+    );
+    const { result } = renderHook(() => usePostJournal(), {
+      wrapper: wrapperWith(qc),
+    });
+    result.current.mutate({
+      journal_type_id: 1,
+      idempotency_key: "k",
+      entries: [],
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
+    expect(keys).toContainEqual(["ledger", "journals"]);
+    expect(keys).toContainEqual(["ledger", "balances"]);
+  });
+});
