@@ -76,3 +76,29 @@ export type { LedgerNavItem, LinkComponent } from "./components/nav";
 export { HealthCards } from "./components/dashboard/health-cards";
 export { RecentJournals } from "./components/dashboard/recent-journals";
 export type { RecentJournalsProps } from "./components/dashboard/recent-journals";
+
+// Shared presentational components used by pages
+export { StatusBadge } from "./components/status-badge";
+
+// Page components — host extracts route params and wires routing. Each keeps
+// its own "use client" boundary. Pages that link out accept an injectable
+// `linkComponent` (default plain <a>); JournalDetailPage takes the journal `id`.
+export { DashboardPage } from "./components/pages/DashboardPage";
+export type { DashboardPageProps } from "./components/pages/DashboardPage";
+export { JournalsPage } from "./components/pages/JournalsPage";
+export type { JournalsPageProps } from "./components/pages/JournalsPage";
+export { JournalDetailPage } from "./components/pages/JournalDetailPage";
+export type { JournalDetailPageProps } from "./components/pages/JournalDetailPage";
+export { BalancesPage } from "./components/pages/BalancesPage";
+export { ReservationsPage } from "./components/pages/ReservationsPage";
+export { DepositsPage } from "./components/pages/DepositsPage";
+export { WithdrawalsPage } from "./components/pages/WithdrawalsPage";
+export { ClassificationsPage } from "./components/pages/ClassificationsPage";
+export { JournalTypesPage } from "./components/pages/JournalTypesPage";
+export { TemplatesPage } from "./components/pages/TemplatesPage";
+export { CurrenciesPage } from "./components/pages/CurrenciesPage";
+export { ReconciliationPage } from "./components/pages/ReconciliationPage";
+export { SnapshotsPage } from "./components/pages/SnapshotsPage";
+
+// All-in-one admin shell (convenience fallback for hosts that don't wire routes)
+export { LedgerAdmin } from "./components/LedgerAdmin";
