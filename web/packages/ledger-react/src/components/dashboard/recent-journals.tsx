@@ -1,8 +1,8 @@
 "use client";
 
-import { useJournals } from "@/lib/hooks/use-journals";
-import { formatAmount, formatUTC } from "@/lib/utils";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useJournals } from "../../hooks/use-journals";
+import { formatAmount, formatUTC } from "../../lib/utils";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import {
   Table,
   TableBody,
@@ -10,11 +10,21 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-} from "@/components/ui/table";
-import Link from "next/link";
+} from "../ui/table";
 import { AlertCircle, BookOpen } from "lucide-react";
+import { DefaultLink, type LinkComponent } from "../nav";
 
-export function RecentJournals() {
+export interface RecentJournalsProps {
+  /**
+   * Link renderer supplied by the host's router. Defaults to a plain <a> so
+   * the widget works without a host router.
+   */
+  linkComponent?: LinkComponent;
+}
+
+export function RecentJournals({
+  linkComponent: Link = DefaultLink,
+}: RecentJournalsProps = {}) {
   const { data, isLoading, isError } = useJournals(10);
   const journals = data?.pages[0]?.data ?? [];
 

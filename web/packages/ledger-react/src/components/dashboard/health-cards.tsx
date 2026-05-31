@@ -1,9 +1,9 @@
 "use client";
 
-import { useHealth } from "@/lib/hooks/use-system";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useHealth } from "../../hooks/use-system";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import { Activity, Clock, Lock, Scale, AlertCircle } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "../../lib/utils/cn";
 
 export function HealthCards() {
   const { data, isLoading, isError } = useHealth();

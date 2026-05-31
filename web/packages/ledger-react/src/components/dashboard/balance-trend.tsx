@@ -1,7 +1,7 @@
 "use client";
 
-import { useSystemBalances } from "@/lib/hooks/use-system";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useSystemBalances } from "../../hooks/use-system";
+import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import {
   ResponsiveContainer,
   BarChart,
