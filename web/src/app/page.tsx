@@ -7,6 +7,7 @@ import {
   prefetchJournals,
 } from "@azex/ledger-react/server";
 import { NextLink } from "@/components/next-link";
+import { serverLedgerConfig } from "@/lib/ledger-env";
 
 // Admin dashboard is per-request data — never statically prerendered. This also
 // keeps `next build` from trying to reach the backend at build time.
@@ -14,13 +15,9 @@ export const dynamic = "force-dynamic";
 
 export default async function Page() {
   const queryClient = new QueryClient();
-  const client = createServerLedgerClient({
-    baseUrl:
-      process.env.LEDGER_API_URL_INTERNAL ??
-      process.env.NEXT_PUBLIC_API_URL ??
-      "http://localhost:8080",
-    apiKey: process.env.LEDGER_API_KEY,
-  });
+  // Resolve config outside the try/catch — a misconfig must fail loudly, not be
+  // swallowed as a "best-effort prefetch" failure.
+  const client = createServerLedgerClient(serverLedgerConfig());
 
   // Best-effort server prefetch. If the backend is unreachable, fall through
   // to client-side fetching rather than failing the render.
@@ -30,8 +27,11 @@ export default async function Page() {
       prefetchSystemBalances(queryClient, client),
       prefetchJournals(queryClient, client, 10),
     ]);
-  } catch {
-    // Client hooks refetch on mount.
+  } catch (err) {
+    console.warn(
+      "[ledger] server prefetch failed, falling back to client fetch:",
+      err,
+    );
   }
 
   return (
