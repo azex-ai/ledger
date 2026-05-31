@@ -61,3 +61,18 @@ export {
   useReconcileAccount,
   useSnapshots,
 } from "./hooks/use-system";
+
+// Navigation
+export { Sidebar } from "./components/sidebar";
+export type { SidebarProps } from "./components/sidebar";
+export {
+  LEDGER_NAV_ITEMS,
+  DefaultLink,
+} from "./components/nav";
+export type { LedgerNavItem, LinkComponent } from "./components/nav";
+
+// Dashboard widgets
+export { BalanceTrend } from "./components/dashboard/balance-trend";
+export { HealthCards } from "./components/dashboard/health-cards";
+export { RecentJournals } from "./components/dashboard/recent-journals";
+export type { RecentJournalsProps } from "./components/dashboard/recent-journals";

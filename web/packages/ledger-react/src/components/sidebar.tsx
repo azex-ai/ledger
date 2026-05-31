@@ -1,55 +1,35 @@
 "use client";
 
-import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { cn } from "@/lib/utils";
-import { prefetchRoute } from "@/lib/prefetch";
+import { Menu, X } from "lucide-react";
+import { cn } from "../lib/utils/cn";
 import {
-  LayoutDashboard,
-  BookOpen,
-  Wallet,
-  Lock,
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  Tags,
-  FileType2,
-  FileCode2,
-  Coins,
-  Scale,
-  Camera,
-  Menu,
-  X,
-} from "lucide-react";
+  LEDGER_NAV_ITEMS,
+  DefaultLink,
+  type LinkComponent,
+} from "./nav";
 
-const NAV_ITEMS = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/journals", label: "Journals", icon: BookOpen },
-  { href: "/balances", label: "Balances", icon: Wallet },
-  { href: "/reservations", label: "Reservations", icon: Lock },
-  { href: "/deposits", label: "Deposits", icon: ArrowDownToLine },
-  { href: "/withdrawals", label: "Withdrawals", icon: ArrowUpFromLine },
-  { type: "separator" as const, label: "Metadata" },
-  { href: "/classifications", label: "Classifications", icon: Tags },
-  { href: "/journal-types", label: "Journal Types", icon: FileType2 },
-  { href: "/templates", label: "Templates", icon: FileCode2 },
-  { href: "/currencies", label: "Currencies", icon: Coins },
-  { type: "separator" as const, label: "Operations" },
-  { href: "/reconciliation", label: "Reconciliation", icon: Scale },
-  { href: "/snapshots", label: "Snapshots", icon: Camera },
-] as const;
+export interface SidebarProps {
+  /** Current route, supplied by the host's router. */
+  pathname: string;
+  /**
+   * Link renderer supplied by the host's router. Defaults to a plain <a> so
+   * the sidebar works without a host router.
+   */
+  linkComponent?: LinkComponent;
+}
 
-function NavContent({ onNavigate }: { onNavigate?: () => void }) {
-  const pathname = usePathname();
-  const qc = useQueryClient();
-
+function NavContent({
+  pathname,
+  linkComponent: Link = DefaultLink,
+  onNavigate,
+}: SidebarProps & { onNavigate?: () => void }) {
   return (
     <nav className="flex-1 overflow-y-auto p-2 space-y-0.5">
-      {NAV_ITEMS.map((item, i) => {
-        if ("type" in item) {
+      {LEDGER_NAV_ITEMS.map((item, i) => {
+        if (item.type === "separator") {
           return (
-            <div key={i} className="pt-4 pb-1 px-3">
+            <div key={`sep-${i}`} className="pt-4 pb-1 px-3">
               <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
                 {item.label}
               </span>
@@ -57,15 +37,12 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
           );
         }
         const Icon = item.icon;
-        const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+        const active =
+          item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
         return (
           <Link
             key={item.href}
             href={item.href}
-            onClick={onNavigate}
-            onMouseEnter={() => prefetchRoute(qc, item.href)}
-            onFocus={() => prefetchRoute(qc, item.href)}
-            aria-current={active ? "page" : undefined}
             className={cn(
               "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors",
               active
@@ -82,7 +59,7 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ pathname, linkComponent }: SidebarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
@@ -130,7 +107,11 @@ export function Sidebar() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <NavContent onNavigate={() => setMobileOpen(false)} />
+            <NavContent
+              pathname={pathname}
+              linkComponent={linkComponent}
+              onNavigate={() => setMobileOpen(false)}
+            />
             <div className="border-t border-border p-3">
               <p className="text-[10px] text-muted-foreground/50 text-center">
                 Double-Entry Ledger Engine
@@ -153,7 +134,7 @@ export function Sidebar() {
             </div>
           </div>
         </div>
-        <NavContent />
+        <NavContent pathname={pathname} linkComponent={linkComponent} />
         <div className="border-t border-border p-3">
           <p className="text-[10px] text-muted-foreground/50 text-center">
             Double-Entry Ledger Engine
