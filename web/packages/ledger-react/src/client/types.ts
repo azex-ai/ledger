@@ -1,5 +1,5 @@
 // Domain types for the ledger HTTP API. Ported verbatim from the dashboard's
-// web/src/lib/api.ts — framework-agnostic, no React, no process.env.
+// web/src/lib/api.ts — framework-agnostic, no React, no environment reads.
 
 export interface ApiError {
   code: number;

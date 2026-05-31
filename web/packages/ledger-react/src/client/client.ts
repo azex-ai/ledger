@@ -60,9 +60,11 @@ function qs(
 }
 
 export function createLedgerClient(config: LedgerClientConfig) {
-  const fetchImpl = config.fetch ?? globalThis.fetch;
-
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    // Resolve the fetch implementation per call: an explicit override wins,
+    // otherwise the ambient globalThis.fetch (read lazily so test doubles /
+    // MSW installed after client construction are still picked up).
+    const fetchImpl = config.fetch ?? globalThis.fetch;
     const method = (init?.method ?? "GET").toUpperCase();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
