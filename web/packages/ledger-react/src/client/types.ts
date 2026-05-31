@@ -1,0 +1,226 @@
+// Domain types for the ledger HTTP API. Ported verbatim from the dashboard's
+// web/src/lib/api.ts — framework-agnostic, no React, no process.env.
+
+export interface ApiError {
+  code: number;
+  message: string;
+}
+
+export interface Journal {
+  id: number;
+  journal_type_id: number;
+  idempotency_key: string;
+  total_debit: string;
+  total_credit: string;
+  metadata: Record<string, unknown>;
+  actor_id: number;
+  source: string;
+  reversal_of: number | null;
+  created_at: string;
+}
+
+export interface Entry {
+  id: number;
+  journal_id: number;
+  account_holder: number;
+  currency_id: number;
+  classification_id: number;
+  entry_type: "debit" | "credit";
+  amount: string;
+  created_at: string;
+}
+
+export interface JournalWithEntries {
+  journal: Journal;
+  entries: Entry[];
+}
+
+export interface Balance {
+  account_holder: number;
+  currency_id: number;
+  classification_id: number;
+  balance: string;
+}
+
+export interface Reservation {
+  id: number;
+  account_holder: number;
+  currency_id: number;
+  reserved_amount: string;
+  settled_amount: string;
+  status: "active" | "settling" | "settled" | "released";
+  journal_id: number | null;
+  idempotency_key: string;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Lifecycle {
+  initial: string;
+  terminal: string[];
+  transitions: Record<string, string[]>;
+}
+
+// Booking is the unified record replacing v1 Deposit/Withdrawal.
+// Its lifecycle is governed by the classification.
+export interface Booking {
+  id: number;
+  classification_id: number;
+  account_holder: number;
+  currency_id: number;
+  amount: string;
+  settled_amount: string;
+  status: string;
+  channel_name: string;
+  channel_ref: string;
+  // ReservationID and JournalID are nullable on the backend (NULL means
+  // not yet linked). The remaining fields are NOT NULL.
+  reservation_id: number | null;
+  journal_id: number | null;
+  idempotency_key: string;
+  metadata: Record<string, unknown>;
+  expires_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Event {
+  id: number;
+  classification_code: string;
+  booking_id: number;
+  account_holder: number;
+  currency_id: number;
+  from_status: string;
+  to_status: string;
+  amount: string;
+  settled_amount: string;
+  journal_id: number | null;
+  metadata: Record<string, unknown>;
+  occurred_at: string;
+}
+
+export interface Classification {
+  id: number;
+  code: string;
+  name: string;
+  normal_side: "debit" | "credit";
+  is_system: boolean;
+  is_active: boolean;
+  lifecycle: Lifecycle | null;
+  created_at: string;
+}
+
+export interface JournalType {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface TemplateLine {
+  id: number;
+  classification_id: number;
+  entry_type: "debit" | "credit";
+  holder_role: "user" | "system";
+  amount_key: string;
+  sort_order: number;
+}
+
+export interface EntryTemplate {
+  id: number;
+  code: string;
+  name: string;
+  journal_type_id: number;
+  is_active: boolean;
+  lines: TemplateLine[];
+  created_at: string;
+}
+
+export interface Currency {
+  id: number;
+  code: string;
+  name: string;
+  is_active: boolean;
+}
+
+export interface HealthStatus {
+  status: string;
+  rollup_queue_depth: number;
+  checkpoint_max_age_seconds: number;
+  active_reservations: number;
+}
+
+export interface SystemBalance {
+  currency_id: number;
+  classification_id: number;
+  total_balance: string;
+  updated_at: string;
+}
+
+export interface ReconcileResult {
+  balanced: boolean;
+  gap: string;
+  details: Array<{
+    account_holder: number;
+    currency_id: number;
+    classification_id: number;
+    expected: string;
+    actual: string;
+    drift: string;
+  }>;
+  checked_at: string;
+}
+
+export interface Snapshot {
+  account_holder: number;
+  currency_id: number;
+  classification_id: number;
+  snapshot_date: string;
+  balance: string;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  next_cursor: string;
+}
+
+export interface PreviewResult {
+  entries: Array<{
+    account_holder: number;
+    currency_id: number;
+    classification_id: number;
+    entry_type: "debit" | "credit";
+    amount: string;
+  }>;
+  total_debit: string;
+  total_credit: string;
+}
+
+export interface CreateBookingBody {
+  classification_code: string;
+  account_holder: number;
+  currency_id: number;
+  amount: string;
+  idempotency_key: string;
+  channel_name: string;
+  metadata?: Record<string, unknown>;
+  expires_at?: string;
+}
+
+export interface TransitionBookingBody {
+  to_status: string;
+  channel_ref?: string;
+  amount?: string;
+  metadata?: Record<string, unknown>;
+  actor_id?: number;
+}
+
+export interface ListBookingsParams {
+  holder?: number;
+  classification_id?: number;
+  status?: string;
+  cursor?: string;
+  limit?: number;
+}
