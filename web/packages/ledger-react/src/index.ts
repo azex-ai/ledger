@@ -83,13 +83,14 @@ export { StatusBadge } from "./components/status-badge";
 // Page components — host extracts route params and wires routing. Each keeps
 // its own "use client" boundary. Pages that link out accept an injectable
 // `linkComponent` (default plain <a>); JournalDetailPage takes the journal `id`.
-export { DashboardPage } from "./components/pages/DashboardPage";
-export type { DashboardPageProps } from "./components/pages/DashboardPage";
+//
+// NOTE: the chart-bearing pages (DashboardPage, BalancesPage) live on the
+// `./charts` subpath instead — they statically import recharts, so keeping them
+// off this barrel keeps recharts out of dist/index.js.
 export { JournalsPage } from "./components/pages/JournalsPage";
 export type { JournalsPageProps } from "./components/pages/JournalsPage";
 export { JournalDetailPage } from "./components/pages/JournalDetailPage";
 export type { JournalDetailPageProps } from "./components/pages/JournalDetailPage";
-export { BalancesPage } from "./components/pages/BalancesPage";
 export { ReservationsPage } from "./components/pages/ReservationsPage";
 export { DepositsPage } from "./components/pages/DepositsPage";
 export { WithdrawalsPage } from "./components/pages/WithdrawalsPage";
@@ -100,5 +101,11 @@ export { CurrenciesPage } from "./components/pages/CurrenciesPage";
 export { ReconciliationPage } from "./components/pages/ReconciliationPage";
 export { SnapshotsPage } from "./components/pages/SnapshotsPage";
 
-// All-in-one admin shell (convenience fallback for hosts that don't wire routes)
+// All-in-one admin shell (convenience fallback for hosts that don't wire
+// routes). It lazy-loads the chart pages so recharts stays out of index.js.
 export { LedgerAdmin } from "./components/LedgerAdmin";
+
+// Toast surface — hosts wiring individual pages mount <Toaster/> once at their
+// app root; <LedgerAdmin/> mounts its own. Re-exported so consumers don't need
+// a direct sonner dependency.
+export { Toaster } from "sonner";

@@ -18,6 +18,7 @@ import { StatusBadge } from "../status-badge";
 import { DefaultLink, type LinkComponent } from "../nav";
 import { toast } from "sonner";
 import { ErrorState } from "../error-state";
+import { PageHeaderSkeleton, TableSkeleton } from "../loading-skeleton";
 import type { Entry } from "../../client/types";
 
 export interface JournalDetailPageProps {
@@ -120,10 +121,12 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
   const { data, isLoading, isError } = useJournal(id);
 
   if (isLoading) {
-    return <div className="space-y-4">
-      <div className="h-8 w-48 animate-shimmer rounded" />
-      <div className="h-64 animate-shimmer rounded" />
-    </div>;
+    return (
+      <div className="space-y-6">
+        <PageHeaderSkeleton />
+        <TableSkeleton rows={6} />
+      </div>
+    );
   }
 
   if (isError) {

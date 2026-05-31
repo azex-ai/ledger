@@ -18,8 +18,12 @@ describe("LedgerAdmin", () => {
     );
     renderPage(<LedgerAdmin />);
 
-    // Default section is the dashboard.
-    expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+    // Default section is the dashboard. DashboardPage is lazy-loaded behind a
+    // Suspense boundary (to keep recharts off the root barrel), so wait for the
+    // async chunk to resolve before asserting its heading.
+    expect(
+      await screen.findByRole("heading", { name: "Dashboard" }),
+    ).toBeInTheDocument();
 
     // The sidebar drives internal section switching: clicking "Reservations"
     // sets the active section without navigating.
