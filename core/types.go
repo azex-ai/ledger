@@ -118,9 +118,10 @@ func IsSystemAccount(holder int64) bool {
 
 // Currency represents a tradeable currency.
 type Currency struct {
-	ID   int64  `json:"id"`
-	Code string `json:"code"`
-	Name string `json:"name"`
+	ID       int64  `json:"id"`
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	IsActive bool   `json:"is_active"`
 }
 
 // Classification represents a dynamic account classification.

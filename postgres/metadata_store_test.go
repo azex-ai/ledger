@@ -120,14 +120,32 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "USDT", cur.Code)
+	assert.True(t, cur.IsActive)
 
 	got, err := store.GetCurrency(ctx, cur.ID)
 	require.NoError(t, err)
 	assert.Equal(t, cur.ID, got.ID)
+	assert.True(t, got.IsActive)
 
-	list, err := store.ListCurrencies(ctx)
+	// Active-only listing shows the new currency.
+	list, err := store.ListCurrencies(ctx, true)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
+
+	// Deactivate (soft delete).
+	err = store.DeactivateCurrency(ctx, cur.ID)
+	require.NoError(t, err)
+
+	// Active-only listing now hides it.
+	list, err = store.ListCurrencies(ctx, true)
+	require.NoError(t, err)
+	assert.Empty(t, list)
+
+	// Including inactive still returns it, flagged inactive.
+	list, err = store.ListCurrencies(ctx, false)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.False(t, list[0].IsActive)
 }
 
 func TestTemplateStore_CRUD(t *testing.T) {

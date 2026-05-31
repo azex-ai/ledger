@@ -145,7 +145,8 @@ type TemplateLineInput struct {
 // CurrencyStore manages currencies.
 type CurrencyStore interface {
 	CreateCurrency(ctx context.Context, input CurrencyInput) (*Currency, error)
-	ListCurrencies(ctx context.Context) ([]Currency, error)
+	DeactivateCurrency(ctx context.Context, id int64) error
+	ListCurrencies(ctx context.Context, activeOnly bool) ([]Currency, error)
 	GetCurrency(ctx context.Context, id int64) (*Currency, error)
 }
 

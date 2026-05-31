@@ -137,9 +137,10 @@ type createCurrencyRequest struct {
 }
 
 type currencyResponse struct {
-	ID   int64  `json:"id"`
-	Code string `json:"code"`
-	Name string `json:"name"`
+	ID       int64  `json:"id"`
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	IsActive bool   `json:"is_active"`
 }
 
 // --- Template preview types ---
@@ -410,18 +411,32 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name})
+	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive})
+}
+
+func (s *Server) handleDeactivateCurrency(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid currency ID"))
+		return
+	}
+	if err := s.currencies.DeactivateCurrency(r.Context(), id); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.OK(w, map[string]string{"status": "deactivated"})
 }
 
 func (s *Server) handleListCurrencies(w http.ResponseWriter, r *http.Request) {
-	list, err := s.currencies.ListCurrencies(r.Context())
+	activeOnly := r.URL.Query().Get("active_only") == "true"
+	list, err := s.currencies.ListCurrencies(r.Context(), activeOnly)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 	data := make([]currencyResponse, len(list))
 	for i, c := range list {
-		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name}
+		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive}
 	}
 	httpx.OK(w, data)
 }

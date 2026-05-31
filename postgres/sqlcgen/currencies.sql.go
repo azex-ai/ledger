@@ -12,7 +12,7 @@ import (
 const createCurrency = `-- name: CreateCurrency :one
 INSERT INTO currencies (code, name)
 VALUES ($1, $2)
-RETURNING id, code, name
+RETURNING id, code, name, is_active
 `
 
 type CreateCurrencyParams struct {
@@ -23,31 +23,49 @@ type CreateCurrencyParams struct {
 func (q *Queries) CreateCurrency(ctx context.Context, arg CreateCurrencyParams) (Currency, error) {
 	row := q.db.QueryRow(ctx, createCurrency, arg.Code, arg.Name)
 	var i Currency
-	err := row.Scan(&i.ID, &i.Code, &i.Name)
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.IsActive,
+	)
 	return i, err
 }
 
+const deactivateCurrency = `-- name: DeactivateCurrency :exec
+UPDATE currencies SET is_active = false WHERE id = $1
+`
+
+func (q *Queries) DeactivateCurrency(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, deactivateCurrency, id)
+	return err
+}
+
 const getCurrency = `-- name: GetCurrency :one
-SELECT id, code, name
-FROM currencies
+SELECT id, code, name, is_active FROM currencies
 WHERE id = $1
 `
 
 func (q *Queries) GetCurrency(ctx context.Context, id int64) (Currency, error) {
 	row := q.db.QueryRow(ctx, getCurrency, id)
 	var i Currency
-	err := row.Scan(&i.ID, &i.Code, &i.Name)
+	err := row.Scan(
+		&i.ID,
+		&i.Code,
+		&i.Name,
+		&i.IsActive,
+	)
 	return i, err
 }
 
 const listCurrencies = `-- name: ListCurrencies :many
-SELECT id, code, name
-FROM currencies
+SELECT id, code, name, is_active FROM currencies
+WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
 
-func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
-	rows, err := q.db.Query(ctx, listCurrencies)
+func (q *Queries) ListCurrencies(ctx context.Context, activeOnly bool) ([]Currency, error) {
+	rows, err := q.db.Query(ctx, listCurrencies, activeOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +73,12 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 	items := []Currency{}
 	for rows.Next() {
 		var i Currency
-		if err := rows.Scan(&i.ID, &i.Code, &i.Name); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.Name,
+			&i.IsActive,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -53,9 +53,17 @@ func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyI
 	return currencyFromRow(row), nil
 }
 
-// ListCurrencies returns all currencies.
-func (s *CurrencyStore) ListCurrencies(ctx context.Context) ([]core.Currency, error) {
-	rows, err := s.q.ListCurrencies(ctx)
+// DeactivateCurrency soft-deletes a currency by setting is_active = false.
+func (s *CurrencyStore) DeactivateCurrency(ctx context.Context, id int64) error {
+	if err := s.q.DeactivateCurrency(ctx, id); err != nil {
+		return wrapStoreError("postgres: deactivate currency", err)
+	}
+	return nil
+}
+
+// ListCurrencies returns currencies, optionally filtering to active only.
+func (s *CurrencyStore) ListCurrencies(ctx context.Context, activeOnly bool) ([]core.Currency, error) {
+	rows, err := s.q.ListCurrencies(ctx, activeOnly)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list currencies: %w", err)
 	}

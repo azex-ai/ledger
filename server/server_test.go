@@ -259,8 +259,12 @@ func (m *mockCurrencyStore) CreateCurrency(ctx context.Context, input core.Curre
 	return &core.Currency{ID: 1, Code: input.Code, Name: input.Name}, nil
 }
 
-func (m *mockCurrencyStore) ListCurrencies(ctx context.Context) ([]core.Currency, error) {
-	return []core.Currency{{ID: 1, Code: "USDT", Name: "Tether"}}, nil
+func (m *mockCurrencyStore) DeactivateCurrency(ctx context.Context, id int64) error {
+	return nil
+}
+
+func (m *mockCurrencyStore) ListCurrencies(ctx context.Context, activeOnly bool) ([]core.Currency, error) {
+	return []core.Currency{{ID: 1, Code: "USDT", Name: "Tether", IsActive: true}}, nil
 }
 
 func (m *mockCurrencyStore) GetCurrency(ctx context.Context, id int64) (*core.Currency, error) {

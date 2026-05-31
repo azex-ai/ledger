@@ -148,7 +148,7 @@ func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name stri
 }
 
 func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
-	list, err := svc.Currencies().ListCurrencies(ctx)
+	list, err := svc.Currencies().ListCurrencies(ctx, false)
 	if err != nil {
 		return 0, fmt.Errorf("list currencies: %w", err)
 	}

@@ -234,9 +234,10 @@ func journalTypeFromRow(row sqlcgen.JournalType) *core.JournalType {
 
 func currencyFromRow(row sqlcgen.Currency) *core.Currency {
 	return &core.Currency{
-		ID:   row.ID,
-		Code: row.Code,
-		Name: row.Name,
+		ID:       row.ID,
+		Code:     row.Code,
+		Name:     row.Name,
+		IsActive: row.IsActive,
 	}
 }
 

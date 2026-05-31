@@ -526,6 +526,17 @@ paths:
                 name: { type: string }
       responses:
         "201": { description: Created. }
+  /currencies/{id}/deactivate:
+    post:
+      tags: [Metadata]
+      summary: Deactivate a currency.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Deactivated. }
 
   /reconcile:
     post:

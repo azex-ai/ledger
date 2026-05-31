@@ -62,6 +62,7 @@ func (s *Server) setupRoutes() {
 
 		// Metadata — Currencies
 		r.Post("/currencies", s.handleCreateCurrency)
+		r.Post("/currencies/{id}/deactivate", s.handleDeactivateCurrency)
 		r.Get("/currencies", s.handleListCurrencies)
 
 		// Reconciliation + Snapshots
