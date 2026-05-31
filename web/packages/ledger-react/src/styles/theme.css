@@ -12,6 +12,12 @@
  */
 
 .ledger-root {
+  /* Fonts: honor a host-provided Next.js font var, fall back to system stack
+     so the package renders correctly even when the app sets no font var. */
+  --font-sans: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
+  --font-heading: var(--font-sans);
+  --font-mono: var(--font-geist-mono, ui-monospace, monospace);
+
   /* dark (default) */
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

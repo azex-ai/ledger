@@ -25,7 +25,8 @@
   "devDependencies": {
     "tsup": "^8", "vitest": "^2", "msw": "^2",
     "@testing-library/react": "^16", "@testing-library/jest-dom": "^6",
-    "jsdom": "^25", "typescript": "^5"
+    "jsdom": "^25", "typescript": "^5",
+    "@tailwindcss/postcss": "^4", "tailwindcss": "^4", "postcss": "^8"
   },
   "publishConfig": { "registry": "https://npm.pkg.github.com" }
 }

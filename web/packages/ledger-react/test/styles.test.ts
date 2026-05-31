@@ -51,6 +51,19 @@ describe("dist/styles.css", () => {
     expect(css).toContain(".border-border");
   });
 
+  it("uses a class-based dark: variant, not OS media query", () => {
+    // dark: utilities must key off the .ledger-root wrapper class.
+    expect(css).toContain(".ledger-root:not(.light)");
+    // ...and must NOT be gated behind the OS color-scheme media query.
+    expect(css).not.toContain("prefers-color-scheme");
+  });
+
+  it("emits the font-heading utility", () => {
+    // font-heading is used by alert-dialog/card/sheet/dialog; the --font-*
+    // theme mapping must make it generate.
+    expect(css).toContain(".font-heading{");
+  });
+
   it("does NOT contain Tailwind's global preflight reset", () => {
     // Preflight's hallmark global box-sizing reset.
     expect(css).not.toContain("box-sizing:border-box");
