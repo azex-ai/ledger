@@ -1,6 +1,7 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { defineConfig } from "tsup";
+import { buildCss } from "./scripts/build-css";
 
 const DIRECTIVES = ["use client", "use server"] as const;
 // Single source of truth: the regex alternation is derived from DIRECTIVES.
@@ -83,5 +84,7 @@ export default defineConfig({
   ],
   async onSuccess() {
     await preserveDirectives("dist");
+    // Compile the self-contained, preflight-free stylesheet alongside dist/.
+    await buildCss();
   },
 });
