@@ -77,4 +77,24 @@ describe("LedgerProvider", () => {
     const root = container.querySelector(".ledger-root") as HTMLElement;
     expect(root.style.getPropertyValue("--primary")).toBe("red");
   });
+
+  test("(f) keeps a stable client identity across re-renders", () => {
+    const seen: unknown[] = [];
+    function Probe() {
+      seen.push(useLedgerClient());
+      return null;
+    }
+    const { rerender } = render(
+      <LedgerProvider config={{ baseUrl: BASE }}>
+        <Probe />
+      </LedgerProvider>,
+    );
+    rerender(
+      <LedgerProvider config={{ baseUrl: BASE }}>
+        <Probe />
+      </LedgerProvider>,
+    );
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(seen[1]).toBe(seen[0]);
+  });
 });

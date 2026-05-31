@@ -33,7 +33,10 @@ export function LedgerProvider({
   const { baseUrl, apiKey, fetch, queryClient, onError, theme } = config;
 
   // Build the client once per distinct config; memo keyed on the fields that
-  // actually shape requests so it is not rebuilt on every render.
+  // actually shape requests. Stable inputs → stable client identity (Phase 3
+  // hooks depend on this). Caveat: `fetch` must be a stable reference — an
+  // inline arrow changes identity every render and rebuilds the client. See
+  // LedgerClientConfig.fetch.
   const client = useMemo(
     () => createLedgerClient({ baseUrl, apiKey, fetch }),
     [baseUrl, apiKey, fetch],

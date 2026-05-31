@@ -35,7 +35,13 @@ export class ApiRequestError extends Error {
 export interface LedgerClientConfig {
   baseUrl: string;
   apiKey?: string;
-  fetch?: typeof fetch; // optional override (server use / tests)
+  /**
+   * Optional fetch override (server use / tests). MUST be a STABLE reference
+   * (module-level or `useCallback`'d). LedgerProvider keys its client `useMemo`
+   * on this field, so an inline arrow (`fetch: (...) => ...`) changes identity
+   * every render and rebuilds the client — re-rendering all consumers.
+   */
+  fetch?: typeof fetch;
 }
 
 interface Envelope<T> {
