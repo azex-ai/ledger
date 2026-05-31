@@ -141,6 +141,14 @@
   }
 }
 
+/* The package's LedgerProvider wraps the app in a `.ledger-root` div. Make it
+   fill the body so the host shell's full-height flex layout (sidebar + main)
+   resolves. Host-owned shell styling — the package leaves `.ledger-root`
+   layout-neutral on purpose. */
+.ledger-root {
+  height: 100%;
+}
+
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }

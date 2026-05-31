@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Providers } from "@/components/providers";
-import { Sidebar } from "@/components/sidebar";
+import "@azex/ledger-react/styles.css";
+import { LedgerProvider, Toaster } from "@azex/ledger-react";
+import { AppSidebar } from "@/components/app-sidebar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,11 +30,31 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="h-full flex">
-        <Providers>
-          <Sidebar />
-          <main className="flex-1 overflow-y-auto p-6 pt-16 lg:pt-6">{children}</main>
-        </Providers>
+      <body className="h-full">
+        <LedgerProvider
+          config={{
+            baseUrl: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080",
+            apiKey: process.env.NEXT_PUBLIC_API_KEY,
+          }}
+        >
+          <div className="flex h-full">
+            <AppSidebar />
+            <main className="flex-1 overflow-y-auto p-6 pt-16 lg:pt-6">
+              {children}
+            </main>
+          </div>
+          <Toaster
+            theme="dark"
+            position="bottom-right"
+            toastOptions={{
+              style: {
+                background: "var(--card)",
+                border: "1px solid var(--border)",
+                color: "var(--card-foreground)",
+              },
+            }}
+          />
+        </LedgerProvider>
       </body>
     </html>
   );

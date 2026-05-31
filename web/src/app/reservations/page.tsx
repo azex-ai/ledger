@@ -1,5 +1,5 @@
-import { ReservationsClient } from "./_components/reservations-client";
+import { ReservationsPage } from "@azex/ledger-react";
 
-export default function ReservationsPage() {
-  return <ReservationsClient />;
+export default function Page() {
+  return <ReservationsPage />;
 }

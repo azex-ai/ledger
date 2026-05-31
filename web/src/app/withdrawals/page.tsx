@@ -1,5 +1,5 @@
-import { WithdrawalsClient } from "./_components/withdrawals-client";
+import { WithdrawalsPage } from "@azex/ledger-react";
 
-export default function WithdrawalsPage() {
-  return <WithdrawalsClient />;
+export default function Page() {
+  return <WithdrawalsPage />;
 }

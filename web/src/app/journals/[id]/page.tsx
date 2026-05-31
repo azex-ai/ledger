@@ -1,10 +1,11 @@
-import { Suspense } from "react";
-import { JournalDetailClient } from "./_components/journal-detail-client";
+import { JournalDetailPage } from "@azex/ledger-react";
+import { NextLink } from "@/components/next-link";
 
-export default function JournalDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  return (
-    <Suspense fallback={<div className="space-y-4"><div className="h-8 w-48 animate-shimmer rounded" /><div className="h-64 animate-shimmer rounded" /></div>}>
-      <JournalDetailClient params={params} />
-    </Suspense>
-  );
+export default async function Page({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  return <JournalDetailPage id={Number(id)} linkComponent={NextLink} />;
 }

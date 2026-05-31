@@ -1,5 +1,5 @@
-import { CurrenciesClient } from "./_components/currencies-client";
+import { CurrenciesPage } from "@azex/ledger-react";
 
-export default function CurrenciesPage() {
-  return <CurrenciesClient />;
+export default function Page() {
+  return <CurrenciesPage />;
 }

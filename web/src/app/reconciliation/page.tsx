@@ -1,5 +1,5 @@
-import { ReconciliationClient } from "./_components/reconciliation-client";
+import { ReconciliationPage } from "@azex/ledger-react";
 
-export default function ReconciliationPage() {
-  return <ReconciliationClient />;
+export default function Page() {
+  return <ReconciliationPage />;
 }

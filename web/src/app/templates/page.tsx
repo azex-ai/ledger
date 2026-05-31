@@ -1,5 +1,5 @@
-import { TemplatesClient } from "./_components/templates-client";
+import { TemplatesPage } from "@azex/ledger-react";
 
-export default function TemplatesPage() {
-  return <TemplatesClient />;
+export default function Page() {
+  return <TemplatesPage />;
 }

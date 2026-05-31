@@ -1,5 +1,5 @@
-import { DepositsClient } from "./_components/deposits-client";
+import { DepositsPage } from "@azex/ledger-react";
 
-export default function DepositsPage() {
-  return <DepositsClient />;
+export default function Page() {
+  return <DepositsPage />;
 }

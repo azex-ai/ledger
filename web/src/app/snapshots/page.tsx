@@ -1,5 +1,5 @@
-import { SnapshotsClient } from "./_components/snapshots-client";
+import { SnapshotsPage } from "@azex/ledger-react";
 
-export default function SnapshotsPage() {
-  return <SnapshotsClient />;
+export default function Page() {
+  return <SnapshotsPage />;
 }

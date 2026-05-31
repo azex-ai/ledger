@@ -1,5 +1,5 @@
-import { ClassificationsClient } from "./_components/classifications-client";
+import { ClassificationsPage } from "@azex/ledger-react";
 
-export default function ClassificationsPage() {
-  return <ClassificationsClient />;
+export default function Page() {
+  return <ClassificationsPage />;
 }

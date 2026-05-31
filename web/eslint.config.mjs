@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The workspace package is a separate project with its own lint/test
+    // toolchain (and ships built artifacts in dist/). The app must not lint
+    // into it — it consumes it as a dependency.
+    "packages/**",
   ]),
 ]);
 

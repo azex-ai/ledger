@@ -1,5 +1,5 @@
-import { JournalTypesClient } from "./_components/journal-types-client";
+import { JournalTypesPage } from "@azex/ledger-react";
 
-export default function JournalTypesPage() {
-  return <JournalTypesClient />;
+export default function Page() {
+  return <JournalTypesPage />;
 }

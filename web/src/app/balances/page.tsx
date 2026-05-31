@@ -1,5 +1,5 @@
-import { BalancesClient } from "./_components/balances-client";
+import { BalancesPage } from "@azex/ledger-react/charts";
 
-export default function BalancesPage() {
-  return <BalancesClient />;
+export default function Page() {
+  return <BalancesPage />;
 }
