@@ -121,7 +121,8 @@ func (q *Queries) DequeueRollupBatch(ctx context.Context, arg DequeueRollupBatch
 const enqueueRollup = `-- name: EnqueueRollup :exec
 INSERT INTO rollup_queue (account_holder, currency_id, classification_id)
 VALUES ($1, $2, $3)
-ON CONFLICT (account_holder, currency_id, classification_id) WHERE processed_at IS NULL DO NOTHING
+ON CONFLICT (account_holder, currency_id, classification_id) WHERE processed_at IS NULL
+DO UPDATE SET claimed_until = NULL
 `
 
 type EnqueueRollupParams struct {
@@ -130,6 +131,12 @@ type EnqueueRollupParams struct {
 	ClassificationID int64 `json:"classification_id"`
 }
 
+// Re-dirty on conflict: if an unprocessed row already exists for the dimension
+// (idle OR currently claimed by a worker), reset its claim. This signals "new
+// unmaterialized work arrived". Combined with MarkRollupProcessed's claim guard,
+// an enqueue that lands while the worker is mid-processing forces a reprocess
+// instead of being silently coalesced away. (Balances stay correct via the delta
+// regardless; this keeps the checkpoint from lagging indefinitely.)
 func (q *Queries) EnqueueRollup(ctx context.Context, arg EnqueueRollupParams) error {
 	_, err := q.db.Exec(ctx, enqueueRollup, arg.AccountHolder, arg.CurrencyID, arg.ClassificationID)
 	return err
@@ -341,9 +348,14 @@ func (q *Queries) ListBalancesAt(ctx context.Context, createdAt time.Time) ([]Li
 const markRollupProcessed = `-- name: MarkRollupProcessed :exec
 UPDATE rollup_queue
 SET processed_at = now(), claimed_until = NULL
-WHERE id = $1
+WHERE id = $1 AND claimed_until > now()
 `
 
+// Claim guard: only mark processed if our claim is still valid (claimed_until in
+// the future). If a concurrent EnqueueRollup re-dirtied the row (set
+// claimed_until = NULL) while we were processing, OR our claim lease expired,
+// this affects 0 rows and the row stays pending for reprocessing — so an enqueue
+// during processing is never lost.
 func (q *Queries) MarkRollupProcessed(ctx context.Context, id int64) error {
 	_, err := q.db.Exec(ctx, markRollupProcessed, id)
 	return err
@@ -405,6 +417,7 @@ INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id,
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (account_holder, currency_id, classification_id)
 DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now()
+WHERE balance_checkpoints.last_entry_id < EXCLUDED.last_entry_id
 `
 
 type UpsertBalanceCheckpointParams struct {
@@ -416,6 +429,13 @@ type UpsertBalanceCheckpointParams struct {
 	LastEntryAt      time.Time      `json:"last_entry_at"`
 }
 
+// Monotonic: only advance the checkpoint. last_entry_id is non-decreasing
+// (journal_entries.id is append-only), so a writer carrying an OLDER snapshot
+// (lower last_entry_id) must never overwrite a fresher checkpoint. Without this
+// guard, two rollup workers processing the same dimension concurrently (possible
+// once an enqueue re-dirties a claimed row) could let the slower/older writer
+// regress the checkpoint. Balances stay correct either way via the delta, but
+// the guard keeps the checkpoint from going stale.
 func (q *Queries) UpsertBalanceCheckpoint(ctx context.Context, arg UpsertBalanceCheckpointParams) error {
 	_, err := q.db.Exec(ctx, upsertBalanceCheckpoint,
 		arg.AccountHolder,

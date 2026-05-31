@@ -4,10 +4,18 @@ FROM balance_checkpoints
 WHERE account_holder = $1 AND currency_id = $2 AND classification_id = $3;
 
 -- name: UpsertBalanceCheckpoint :exec
+-- Monotonic: only advance the checkpoint. last_entry_id is non-decreasing
+-- (journal_entries.id is append-only), so a writer carrying an OLDER snapshot
+-- (lower last_entry_id) must never overwrite a fresher checkpoint. Without this
+-- guard, two rollup workers processing the same dimension concurrently (possible
+-- once an enqueue re-dirties a claimed row) could let the slower/older writer
+-- regress the checkpoint. Balances stay correct either way via the delta, but
+-- the guard keeps the checkpoint from going stale.
 INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (account_holder, currency_id, classification_id)
-DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now();
+DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now()
+WHERE balance_checkpoints.last_entry_id < EXCLUDED.last_entry_id;
 
 -- name: GetBalanceCheckpoints :many
 SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
@@ -15,9 +23,16 @@ FROM balance_checkpoints
 WHERE account_holder = $1 AND currency_id = $2;
 
 -- name: EnqueueRollup :exec
+-- Re-dirty on conflict: if an unprocessed row already exists for the dimension
+-- (idle OR currently claimed by a worker), reset its claim. This signals "new
+-- unmaterialized work arrived". Combined with MarkRollupProcessed's claim guard,
+-- an enqueue that lands while the worker is mid-processing forces a reprocess
+-- instead of being silently coalesced away. (Balances stay correct via the delta
+-- regardless; this keeps the checkpoint from lagging indefinitely.)
 INSERT INTO rollup_queue (account_holder, currency_id, classification_id)
 VALUES ($1, $2, $3)
-ON CONFLICT (account_holder, currency_id, classification_id) WHERE processed_at IS NULL DO NOTHING;
+ON CONFLICT (account_holder, currency_id, classification_id) WHERE processed_at IS NULL
+DO UPDATE SET claimed_until = NULL;
 
 -- name: DequeueRollupBatch :many
 -- Skip items that have failed too many times (failed_attempts >= 10) — they
@@ -39,9 +54,14 @@ WHERE q.id = claimed.id
 RETURNING q.id, q.account_holder, q.currency_id, q.classification_id, q.created_at;
 
 -- name: MarkRollupProcessed :exec
+-- Claim guard: only mark processed if our claim is still valid (claimed_until in
+-- the future). If a concurrent EnqueueRollup re-dirtied the row (set
+-- claimed_until = NULL) while we were processing, OR our claim lease expired,
+-- this affects 0 rows and the row stays pending for reprocessing — so an enqueue
+-- during processing is never lost.
 UPDATE rollup_queue
 SET processed_at = now(), claimed_until = NULL
-WHERE id = $1;
+WHERE id = $1 AND claimed_until > now();
 
 -- name: ReleaseRollupClaim :exec
 -- Release the claim *and* bump failed_attempts so a permanently-failing item

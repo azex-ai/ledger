@@ -101,11 +101,12 @@ func (a *RollupAdapter) CountPendingRollups(ctx context.Context) (int64, error) 
 	return a.q.CountPendingRollups(ctx)
 }
 
-// EnqueueRollup inserts a pending rollup for the dimension, coalescing against
-// any existing unprocessed row (ON CONFLICT DO NOTHING). Used both by the
-// journal-posting path and by the rollup worker's post-processing re-enqueue
-// (see RollupService.processItem) to recover any enqueue that was coalesced
-// away while the dimension's queue row was mid-processing.
+// EnqueueRollup inserts a pending rollup for the dimension. If an unprocessed
+// row already exists it re-dirties it (ON CONFLICT DO UPDATE SET claimed_until =
+// NULL), so an enqueue landing while a worker is mid-processing forces a
+// reprocess (paired with MarkRollupProcessed's claim guard) rather than being
+// silently coalesced away. Used by the journal-posting path and by the rollup
+// worker's post-processing re-enqueue (see RollupService.processItem).
 func (a *RollupAdapter) EnqueueRollup(ctx context.Context, holder, currencyID, classificationID int64) error {
 	if err := a.q.EnqueueRollup(ctx, sqlcgen.EnqueueRollupParams{
 		AccountHolder:    holder,
