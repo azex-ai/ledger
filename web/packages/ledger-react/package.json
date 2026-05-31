@@ -5,6 +5,7 @@
   "sideEffects": ["*.css"],
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./charts": { "types": "./dist/charts.d.ts", "default": "./dist/charts.js" },
     "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
     "./styles.css": "./dist/styles.css"
   },

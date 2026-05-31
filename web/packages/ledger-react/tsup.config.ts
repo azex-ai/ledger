@@ -69,7 +69,7 @@ async function preserveDirectives(distDir: string): Promise<void> {
 }
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/server.ts"],
+  entry: ["src/index.ts", "src/server.ts", "src/charts.ts"],
   format: ["esm"],
   dts: true,
   clean: true,

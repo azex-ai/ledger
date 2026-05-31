@@ -71,8 +71,8 @@ export {
 } from "./components/nav";
 export type { LedgerNavItem, LinkComponent } from "./components/nav";
 
-// Dashboard widgets
-export { BalanceTrend } from "./components/dashboard/balance-trend";
+// Dashboard widgets (chart widgets live on the ./charts subpath to keep
+// recharts out of the root barrel)
 export { HealthCards } from "./components/dashboard/health-cards";
 export { RecentJournals } from "./components/dashboard/recent-journals";
 export type { RecentJournalsProps } from "./components/dashboard/recent-journals";
