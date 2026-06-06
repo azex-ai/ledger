@@ -160,6 +160,41 @@ docker compose up --build
 - API: <http://localhost:8080/api/v1/system/health>
 - Frontend: <http://localhost:3000>
 
+## Quick Start -- Frontend (React)
+
+The [`@azex/ledger-react`](web/packages/ledger-react/) package ships typed
+TanStack Query hooks, admin page components, and an all-in-one `<LedgerAdmin/>`
+shell for the HTTP API. It is published to GitHub Packages under the `azex-ai`
+org:
+
+```
+# .npmrc
+@azex:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
+```
+
+```bash
+npm install @azex/ledger-react @tanstack/react-query
+```
+
+```tsx
+import { LedgerProvider, LedgerAdmin } from "@azex/ledger-react";
+import "@azex/ledger-react/styles.css";
+
+export default function Admin() {
+  return (
+    <LedgerProvider config={{ baseUrl: "https://ledger.example.com" }}>
+      <LedgerAdmin />
+    </LedgerProvider>
+  );
+}
+```
+
+See [docs/frontend.md](docs/frontend.md) for the full guide: individual page
+components wired to your router, headless hooks, RSC server prefetch, theming,
+and the complete API reference. The [`web/`](web/) app is the working
+reference integration.
+
 ## Core Concepts
 
 The ledger is built on five primitives. Knowing them is enough to model any
@@ -664,6 +699,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
 - [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (32 paths, 34 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
+- [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
 
 ## Examples
 

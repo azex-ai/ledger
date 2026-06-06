@@ -189,6 +189,10 @@ the `/server` RSC prefetch pattern with a Next.js `linkComponent` adapter.
   import from a client component.
 - **`@azex/ledger-react/styles.css`** — bundled Tailwind styles.
 
+The complete API reference (per-hook signatures, endpoints, component props,
+prefetch helpers, query-key factory) lives in the repo at
+[docs/frontend.md](https://github.com/azex-ai/ledger/blob/main/docs/frontend.md).
+
 ## Releasing
 
 Publishing is tag-driven (CI workflow `ledger-react-publish.yml`). The tag

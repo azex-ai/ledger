@@ -130,6 +130,7 @@ docker compose up --build
 | `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
 | `docs/openapi.yaml` | Machine-readable OpenAPI 3.1 spec |
+| `docs/frontend.md` | @azex/ledger-react usage guide + full API reference |
 
 ## HTTP API Quick Reference
 
