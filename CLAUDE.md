@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # azex-ai/ledger
 
 Production-grade double-entry ledger engine for Go. Classification-driven architecture — deposit/withdrawal are preset configurations, not hardcoded types. Dual-mode: importable library or standalone HTTP service.
@@ -12,7 +16,12 @@ Production-grade double-entry ledger engine for Go. Classification-driven archit
 
 Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchestration) -> `server/` (HTTP) -> `cmd/ledgerd/` (entry)
 
+- **Two consumption modes share one composition core:**
+  - **Library mode** — root package `ledger` (`ledger.go`) is the facade. `ledger.New(pool *pgxpool.Pool)` returns a `*ledger.Service`; pull interfaces via `svc.Booker()`, `svc.BalanceReader()`, `svc.JournalWriter()`, etc. Consumers depend only on `core/*` interfaces, never on the `postgres` adapter directly.
+  - **Service mode** — `cmd/ledgerd/main.go` wires the same pieces behind chi HTTP handlers.
+  - `svc.RunInTx(ctx, func(tx *ledger.Service) error {...})` composes ledger writes with the caller's own DB writes in one atomic pgx transaction. The `*Service` passed in is a short-lived clone — do not retain it past the callback.
 - `core/` — zero external dependencies. No net/http, pgx, slog, chi imports allowed.
+- `pkg/` — boundary adapters kept out of `core/`: `bizcode` (error-code taxonomy), `httpx` (HTTP response envelope), `otel` (tracing), `slogadapter` (logging). Error-code mapping happens at the handler boundary, not in the domain.
 - Interfaces defined in `core/interfaces.go`, consumer-side, -er suffix.
 - Account dimensions: `(AccountHolder int64, CurrencyID int64, ClassificationID int64)`. Positive holder = user, negative = system counterpart.
 - All amounts: `shopspring/decimal.Decimal` in Go, `NUMERIC(30,18)` in SQL, string in JSON.
@@ -32,24 +41,23 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
 
 ## Key Commands
 
-```bash
-# Build
-go build ./...
+Prefer the `Makefile` targets — they encode the canonical flags:
 
-# Test (requires PostgreSQL — uses testcontainers, no mocks)
-go test ./... -race -count=1
+```bash
+make build      # go build ./...
+make test       # go test -race -timeout 5m ./...   (needs PostgreSQL — testcontainers, no mocks)
+make test-short # go test -short -race ./...
+make vet        # go vet ./...
+make lint       # golangci-lint run
+make sqlc       # cd postgres && sqlc generate
+make sqlc-diff  # cd postgres && sqlc diff   (CI gate: generated code must match queries)
+make docker     # docker compose up --build
 
 # Unit tests only (no DB needed)
 go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1
 
-# sqlc (run from postgres/ directory)
-cd postgres && sqlc generate
-
-# Lint
-go vet ./...
-
-# Docker (full stack)
-docker compose up --build
+# Run a single test
+go test ./postgres/ -run TestName -race -count=1
 ```
 
 ## Workflow: Adding a New Classification
@@ -98,6 +106,11 @@ docker compose up --build
 
 | Path | Purpose |
 |------|---------|
+| `ledger.go` (root pkg) | Library facade: `ledger.New(pool)` -> `Service` + accessors + `RunInTx` |
+| `idempotency.go` (root pkg) | Idempotency key helpers for library consumers |
+| `pkg/bizcode/` | Error-code taxonomy (mapped to HTTP at handler boundary) |
+| `pkg/httpx/` | HTTP response envelope |
+| `pkg/otel/`, `pkg/slogadapter/` | Tracing + logging adapters |
 | `core/types.go` | Currency, Classification + Lifecycle, JournalType, Balance, Status |
 | `core/booking.go` | Booking, CreateBookingInput, TransitionInput |
 | `core/event.go` | Event, EventFilter |
@@ -155,6 +168,7 @@ GET    /api/v1/events                        — List events
 
 ## Gotchas
 
+- `go.work` spans two modules: root `.` and `internal/postgrestest` (a separate module so testcontainers-only deps stay out of the root `go.mod` consumers import). Test-only deps like testify ride along via `go.work`.
 - `postgres/sqlcgen/` is generated — never edit manually, always `sqlc generate`.
 - sqlc config is at `postgres/sqlc.yaml`, run sqlc from `postgres/` dir.
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.
