@@ -8,13 +8,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.1'
+          go-version: '1.26.x'
           cache: true
           cache-dependency-path: go.sum
       - run: go vet ./...
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.62.0
+          version: v2.12.2
 
   test:
     runs-on: ubuntu-latest
@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.1'
+          go-version: '1.26.x'
           cache: true
           cache-dependency-path: go.sum
       - run: go test -race -timeout 5m -count=1 ./...
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: sqlc-dev/setup-sqlc@v4
         with:
-          sqlc-version: '1.27.0'
+          sqlc-version: '1.31.1'
       - name: sqlc diff
         working-directory: postgres
         run: sqlc diff
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.1'
+          go-version: '1.26.x'
           cache: true
           cache-dependency-path: go.sum
       - run: go build ./...

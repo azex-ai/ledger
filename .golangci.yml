@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  exclusions:
+    # web/ carries a vendored third-party Go file under node_modules that is not
+    # ours to lint (flatted). Never lint the JS workspace.
+    paths:
+      - web
+  settings:
+    errcheck:
+      # Idiomatic, non-actionable error returns. These are written as bare
+      # `defer x.Close()` / `w.Write(...)` (not `_, _ =`), so they respect the
+      # "no silent discard of meaningful errors" rule — close/rollback/response
+      # -write errors have no useful handling at these sites.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*github.com/golang-migrate/migrate/v4.Migrate).Close
+        - (*github.com/jackc/pgx/v5.Conn).Close
+        - (github.com/jackc/pgx/v5.Tx).Rollback
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
