@@ -26,8 +26,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run -w @azex/ledger-react typecheck
-      - run: npm run -w @azex/ledger-react test
+      # build before test: styles.test.ts asserts against dist/styles.css.
       - run: npm run -w @azex/ledger-react build
+      - run: npm run -w @azex/ledger-react test
       - name: Assert build artifacts
         working-directory: web/packages/ledger-react
         run: |

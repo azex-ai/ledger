@@ -37,8 +37,9 @@ jobs:
       # backend spec changed, someone must re-run `npm run codegen` and commit.
       - run: npm run -w @azex/ledger-react codegen:check
       - run: npm run -w @azex/ledger-react typecheck
-      - run: npm run -w @azex/ledger-react test
+      # build before test: styles.test.ts asserts against dist/styles.css.
       - run: npm run -w @azex/ledger-react build
+      - run: npm run -w @azex/ledger-react test
       - name: Assert build artifacts
         working-directory: web/packages/ledger-react
         run: |
