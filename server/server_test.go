@@ -73,9 +73,10 @@ func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []in
 }
 
 type mockReserver struct {
-	reserveFn func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error)
-	settleFn  func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
-	releaseFn func(ctx context.Context, reservationID int64) error
+	reserveFn    func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error)
+	settleFn     func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
+	releaseFn    func(ctx context.Context, reservationID int64) error
+	heldAmountFn func(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
 }
 
 func (m *mockReserver) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
@@ -97,6 +98,13 @@ func (m *mockReserver) Release(ctx context.Context, reservationID int64) error {
 		return m.releaseFn(ctx, reservationID)
 	}
 	return nil
+}
+
+func (m *mockReserver) HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error) {
+	if m.heldAmountFn != nil {
+		return m.heldAmountFn(ctx, holder, currencyID)
+	}
+	return decimal.Zero, nil
 }
 
 type mockBooker struct {

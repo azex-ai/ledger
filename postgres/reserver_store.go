@@ -274,6 +274,25 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 	return nil
 }
 
+// HeldAmount returns the sum of reserved_amount across the holder's active
+// reservations in the given currency. This is the same figure Reserve subtracts
+// from balance when checking availability, exposed so consumers can compute
+// available = balance − held without reaching into the reservations table.
+func (s *ReserverStore) HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error) {
+	total, err := s.q.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+	})
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: held amount: %w", err)
+	}
+	held, err := anyToDecimal(total)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: held amount: convert: %w", err)
+	}
+	return held, nil
+}
+
 // Release cancels an active reservation.
 //
 // In pool mode a new transaction is started and committed here.
