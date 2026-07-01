@@ -10,7 +10,13 @@
     "./styles.css": "./dist/styles.css"
   },
   "files": ["dist"],
-  "scripts": { "build": "tsup", "test": "vitest run", "typecheck": "tsc --noEmit" },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "codegen": "openapi-typescript ../../../docs/openapi.yaml -o src/client/schema.ts",
+    "codegen:check": "npm run codegen && git diff --exit-code src/client/schema.ts"
+  },
   "peerDependencies": { "react": "^19", "react-dom": "^19", "@tanstack/react-query": "^5" },
   "dependencies": {
     "@base-ui/react": "^1.4.0",
@@ -23,7 +29,7 @@
     "viem": "^2.48.4"
   },
   "devDependencies": {
-    "tsup": "^8", "vitest": "^2", "msw": "^2",
+    "tsup": "^8", "vitest": "^2", "msw": "^2", "openapi-typescript": "^7",
     "@testing-library/react": "^16", "@testing-library/jest-dom": "^6",
     "jsdom": "^25", "typescript": "^5",
     "@tailwindcss/postcss": "^4", "tailwindcss": "^4", "postcss": "^8"

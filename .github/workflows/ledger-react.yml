@@ -7,10 +7,12 @@ on:
   push:
     paths:
       - 'web/**'
+      - 'docs/openapi.yaml'
       - '.github/workflows/ledger-react.yml'
   pull_request:
     paths:
       - 'web/**'
+      - 'docs/openapi.yaml'
       - '.github/workflows/ledger-react.yml'
 
 concurrency:
@@ -31,6 +33,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      # Contract gate: src/client/schema.ts must match docs/openapi.yaml. If the
+      # backend spec changed, someone must re-run `npm run codegen` and commit.
+      - run: npm run -w @azex/ledger-react codegen:check
       - run: npm run -w @azex/ledger-react typecheck
       - run: npm run -w @azex/ledger-react test
       - run: npm run -w @azex/ledger-react build
