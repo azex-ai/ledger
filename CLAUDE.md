@@ -144,6 +144,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
 | `docs/openapi.yaml` | Machine-readable OpenAPI 3.1 spec |
 | `docs/frontend.md` | @azex/ledger-react usage guide + full API reference |
+| `docs/COOKBOOK.md` | Business recipes: buy credits (FX rate), discounts, multi-currency, reserve→settle, cash-out, expiry/insufficient edges |
 
 ## HTTP API Quick Reference
 
