@@ -1,9 +1,11 @@
 name: ledger-react-publish
 
-# Publishes @azex/ledger-react to GitHub Packages (azex-ai org) on a release
-# tag matching ledger-react-v* (e.g. ledger-react-v0.1.0). Whatever version is
-# in package.json at tag time is what gets published. Re-runs the full verify
-# gate first so a tag can never publish an artifact that doesn't pass CI.
+# Publishes @azex/ledger-react to the public npm registry on a release tag
+# matching ledger-react-v* (e.g. ledger-react-v0.1.0). Whatever version is in
+# package.json at tag time is what gets published. Re-runs the full verify gate
+# first so a tag can never publish an artifact that doesn't pass CI.
+# Requires the NPM_TOKEN repo secret (an npm automation token with publish
+# rights to the @azex scope).
 on:
   push:
     tags:
@@ -50,7 +52,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     defaults:
       run:
         working-directory: web
@@ -61,7 +62,7 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: web/package-lock.json
-          registry-url: 'https://npm.pkg.github.com'
+          registry-url: 'https://registry.npmjs.org'
           scope: '@azex'
       - run: npm ci
       - run: npm run -w @azex/ledger-react build
@@ -74,4 +75,4 @@ jobs:
           [ "$pkg" = "$tag" ] || { echo "::error::tag $tag != package.json version $pkg — bump version before tagging"; exit 1; }
       - run: npm publish -w @azex/ledger-react
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

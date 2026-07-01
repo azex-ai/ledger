@@ -37,15 +37,8 @@ frontend only displays; the backend does all arithmetic.
 
 ## Install
 
-The package is published to **GitHub Packages** under the `azex-ai` org, not
-the public npm registry. Add an `.npmrc` so the `@azex` scope resolves there
-(you need a GitHub token with `read:packages` set as `NODE_AUTH_TOKEN`):
-
-```
-# .npmrc
-@azex:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
-```
+The package is published to the **public npm registry** — install it directly,
+no registry config or auth token required:
 
 ```bash
 npm install @azex/ledger-react @tanstack/react-query

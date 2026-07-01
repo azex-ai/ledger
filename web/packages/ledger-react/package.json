@@ -1,6 +1,6 @@
 {
   "name": "@azex/ledger-react",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "sideEffects": ["*.css"],
   "exports": {
@@ -28,5 +28,5 @@
     "jsdom": "^25", "typescript": "^5",
     "@tailwindcss/postcss": "^4", "tailwindcss": "^4", "postcss": "^8"
   },
-  "publishConfig": { "registry": "https://npm.pkg.github.com" }
+  "publishConfig": { "registry": "https://registry.npmjs.org", "access": "public" }
 }

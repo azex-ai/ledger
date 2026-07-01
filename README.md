@@ -164,14 +164,8 @@ docker compose up --build
 
 The [`@azex/ledger-react`](web/packages/ledger-react/) package ships typed
 TanStack Query hooks, admin page components, and an all-in-one `<LedgerAdmin/>`
-shell for the HTTP API. It is published to GitHub Packages under the `azex-ai`
-org:
-
-```
-# .npmrc
-@azex:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
-```
+shell for the HTTP API. It is published to the public npm registry — no
+registry config or auth token needed:
 
 ```bash
 npm install @azex/ledger-react @tanstack/react-query
