@@ -31,6 +31,12 @@ type Reserver interface {
 	Reserve(ctx context.Context, input ReserveInput) (*Reservation, error)
 	Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
 	Release(ctx context.Context, reservationID int64) error
+	// HeldAmount returns the sum of reserved_amount across the holder's active
+	// reservations in the given currency — the exact figure Reserve subtracts
+	// from balance to compute available. Consumers should call this instead of
+	// querying the reservations table directly, so available = balance − held
+	// can be derived without depending on the ledger's internal schema.
+	HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
 }
 
 // Booker handles classification-driven booking lifecycle.

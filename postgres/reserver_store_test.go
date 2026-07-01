@@ -194,6 +194,47 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
 
+func TestReserverStore_HeldAmount(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 7, curID, decimal.NewFromInt(100))
+
+	held, err := store.HeldAmount(ctx, 7, curID)
+	require.NoError(t, err)
+	assert.True(t, held.IsZero(), "no reservations yet, held should be 0, got %s", held)
+
+	r1, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder: 7, CurrencyID: curID, Amount: decimal.NewFromInt(30),
+		IdempotencyKey: postgrestest.UniqueKey("held-a"), ExpiresIn: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	_, err = store.Reserve(ctx, core.ReserveInput{
+		AccountHolder: 7, CurrencyID: curID, Amount: decimal.NewFromInt(20),
+		IdempotencyKey: postgrestest.UniqueKey("held-b"), ExpiresIn: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	held, err = store.HeldAmount(ctx, 7, curID)
+	require.NoError(t, err)
+	assert.True(t, held.Equal(decimal.NewFromInt(50)), "two active reservations, want 50, got %s", held)
+
+	// A different holder's total is unaffected (WHERE account_holder isolation).
+	other, err := store.HeldAmount(ctx, 8, curID)
+	require.NoError(t, err)
+	assert.True(t, other.IsZero(), "holder 8 has no reservations, want 0, got %s", other)
+
+	// Releasing one active reservation drops it out of the held total.
+	require.NoError(t, store.Release(ctx, r1.ID))
+	held, err = store.HeldAmount(ctx, 7, curID)
+	require.NoError(t, err)
+	assert.True(t, held.Equal(decimal.NewFromInt(20)), "after release, want 20, got %s", held)
+}
+
 func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.LedgerStore, pool *pgxpool.Pool, holder, currencyID int64, amount decimal.Decimal) {
 	t.Helper()
 
