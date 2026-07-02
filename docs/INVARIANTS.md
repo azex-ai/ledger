@@ -76,6 +76,15 @@ clients double-charge / double-credit users.
   if payload matches, it returns the original record; if payload diverges,
   it returns `ErrConflict`.
 
+`idempotency_key` shares its lifecycle with the record it's attached to —
+there is no separate TTL or expiry on the key itself. A key is only as
+replayable as the row it lives on. Before ever archiving, truncating, or
+otherwise removing main records (journals, reservations, bookings), the
+replay semantics for their idempotency keys must be defined first: does a
+retry after archival re-create the record, return `ErrConflict`, or error
+outright? No such cleanup path exists in this codebase today — this note
+exists so the first one that gets built doesn't skip the question.
+
 **Pinned by**:
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
 - `postgres.TestLedgerStore_PostJournal_Idempotent`
@@ -272,6 +281,12 @@ partition boundaries.
 **Enforced by**:
 - Migration `004_ledger` declares partitioning.
 - Migration `010_default_partition` creates the catch-all.
+
+**Current state**: only the default partition exists today. Named,
+date-bounded partitions and any rolling creation / archival automation are
+not implemented — the `PARTITION BY RANGE` declaration is schema groundwork
+for that future work, not an active rollover process. Every row currently
+lands in `journal_entries_default`.
 
 **Pinned by**:
 - `postgres.TestPartitionBoundary_DefaultCatches`

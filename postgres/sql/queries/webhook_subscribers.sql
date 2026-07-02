@@ -11,3 +11,8 @@ SELECT * FROM webhook_subscribers WHERE is_active = true;
 
 -- name: DeleteWebhookSubscriber :exec
 DELETE FROM webhook_subscribers WHERE id = $1;
+
+-- name: UpdateWebhookSubscriberDeliveryStatus :exec
+UPDATE webhook_subscribers
+SET last_status_code = $2, last_error = $3, last_attempt_at = now()
+WHERE id = $1;

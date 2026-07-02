@@ -34,10 +34,19 @@ type EventPoller interface {
 	MarkDead(ctx context.Context, id int64) error
 }
 
-// SubscriberLister loads active webhook subscribers.
+// SubscriberLister loads active webhook subscribers and records the outcome
+// of delivery attempts against them.
 type SubscriberLister interface {
 	ListActiveSubscribers(ctx context.Context) ([]WebhookSubscriber, error)
+	// RecordDeliveryStatus persists the result of the most recent delivery
+	// attempt to subscriberID. statusCode is 0 when no HTTP response was
+	// received (e.g. connection refused, timeout). errMsg is empty on success.
+	RecordDeliveryStatus(ctx context.Context, subscriberID int64, statusCode int, errMsg string) error
 }
+
+// maxRecordedDeliveryErrorLen bounds how much of a delivery error string is
+// persisted per subscriber, so a verbose upstream error can't bloat the row.
+const maxRecordedDeliveryErrorLen = 500
 
 // WebhookDeliverer delivers events to webhook subscribers via HTTP POST.
 type WebhookDeliverer struct {
@@ -128,13 +137,22 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 
 	allOK := true
 	for _, sub := range matched {
-		if err := d.sendHTTP(ctx, evt, sub); err != nil {
+		statusCode, err := d.sendHTTP(ctx, evt, sub)
+		errMsg := ""
+		if err != nil {
 			d.logger.Warn("delivery: webhook: send failed",
 				"subscriber", sub.Name,
 				"url", sub.URL,
 				"error", err,
 			)
+			errMsg = truncateError(err.Error(), maxRecordedDeliveryErrorLen)
 			allOK = false
+		}
+		if recErr := d.subscribers.RecordDeliveryStatus(ctx, sub.ID, statusCode, errMsg); recErr != nil {
+			d.logger.Error("delivery: webhook: record delivery status",
+				"subscriber", sub.Name,
+				"error", recErr,
+			)
 		}
 	}
 
@@ -161,17 +179,19 @@ func (d *WebhookDeliverer) matchSubscribers(evt core.Event, subs []WebhookSubscr
 	return matched
 }
 
-func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt core.Event, sub WebhookSubscriber) error {
+// sendHTTP delivers evt to sub and returns the HTTP status code received
+// (0 if none, e.g. a connection error) alongside any error.
+func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt core.Event, sub WebhookSubscriber) (int, error) {
 	payload, err := json.Marshal(evt)
 	if err != nil {
-		return fmt.Errorf("delivery: webhook: marshal: %w", err)
+		return 0, fmt.Errorf("delivery: webhook: marshal: %w", err)
 	}
 
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sub.URL, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("delivery: webhook: create request: %w", err)
+		return 0, fmt.Errorf("delivery: webhook: create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -185,14 +205,14 @@ func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt core.Event, sub Web
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("delivery: webhook: http: %w", err)
+		return 0, fmt.Errorf("delivery: webhook: http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
+		return resp.StatusCode, nil
 	}
-	return fmt.Errorf("delivery: webhook: http status %d", resp.StatusCode)
+	return resp.StatusCode, fmt.Errorf("delivery: webhook: http status %d", resp.StatusCode)
 }
 
 func computeSignature(payload []byte, timestamp, secret string) string {
@@ -201,4 +221,13 @@ func computeSignature(payload []byte, timestamp, secret string) string {
 	mac.Write([]byte("."))
 	mac.Write(payload)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// truncateError bounds an error string to at most max bytes so a verbose
+// upstream error can't bloat the recorded delivery status.
+func truncateError(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
 }

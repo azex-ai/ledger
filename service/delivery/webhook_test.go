@@ -2,6 +2,8 @@ package delivery
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -35,12 +37,24 @@ func (m *mockEventPoller) MarkRetry(_ context.Context, id int64, nextAttempt tim
 
 func (m *mockEventPoller) MarkDead(_ context.Context, _ int64) error { return nil }
 
+type recordedDeliveryStatus struct {
+	subscriberID int64
+	statusCode   int
+	errMsg       string
+}
+
 type mockSubscriberLister struct {
-	subs []WebhookSubscriber
+	subs             []WebhookSubscriber
+	recordedStatuses []recordedDeliveryStatus
 }
 
 func (m *mockSubscriberLister) ListActiveSubscribers(_ context.Context) ([]WebhookSubscriber, error) {
 	return m.subs, nil
+}
+
+func (m *mockSubscriberLister) RecordDeliveryStatus(_ context.Context, subscriberID int64, statusCode int, errMsg string) error {
+	m.recordedStatuses = append(m.recordedStatuses, recordedDeliveryStatus{subscriberID: subscriberID, statusCode: statusCode, errMsg: errMsg})
+	return nil
 }
 
 func TestWebhookDeliverer_ProcessBatch_NilSubscriberLister(t *testing.T) {
@@ -62,6 +76,48 @@ func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T)
 	assert.Equal(t, 1, delivered)
 	assert.Equal(t, []int64{42}, poller.delivered)
 	assert.Empty(t, poller.retried)
+}
+
+func TestWebhookDeliverer_ProcessBatch_RecordsSuccessStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	poller := &mockEventPoller{
+		events: []core.Event{{ID: 1, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+	}
+	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 7, Name: "sub", URL: srv.URL}}}
+	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger())
+
+	delivered, err := deliverer.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, delivered)
+	require.Len(t, lister.recordedStatuses, 1)
+	assert.Equal(t, int64(7), lister.recordedStatuses[0].subscriberID)
+	assert.Equal(t, http.StatusOK, lister.recordedStatuses[0].statusCode)
+	assert.Empty(t, lister.recordedStatuses[0].errMsg)
+}
+
+func TestWebhookDeliverer_ProcessBatch_RecordsFailureStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	poller := &mockEventPoller{
+		events: []core.Event{{ID: 2, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+	}
+	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 9, Name: "sub", URL: srv.URL}}}
+	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger())
+
+	_, err := deliverer.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, lister.recordedStatuses, 1)
+	assert.Equal(t, int64(9), lister.recordedStatuses[0].subscriberID)
+	assert.Equal(t, http.StatusInternalServerError, lister.recordedStatuses[0].statusCode)
+	assert.Contains(t, lister.recordedStatuses[0].errMsg, "http status 500")
+	assert.Equal(t, []int64{2}, poller.retried)
 }
 
 func TestRetryDelay(t *testing.T) {

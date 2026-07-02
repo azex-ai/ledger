@@ -19,7 +19,7 @@ func (q *Queries) DeleteWebhookSubscriber(ctx context.Context, id int64) error {
 }
 
 const getWebhookSubscriber = `-- name: GetWebhookSubscriber :one
-SELECT id, name, url, secret, filter_class, filter_to_status, is_active, created_at FROM webhook_subscribers WHERE id = $1
+SELECT id, name, url, secret, filter_class, filter_to_status, is_active, created_at, last_status_code, last_error, last_attempt_at FROM webhook_subscribers WHERE id = $1
 `
 
 func (q *Queries) GetWebhookSubscriber(ctx context.Context, id int64) (WebhookSubscriber, error) {
@@ -34,6 +34,9 @@ func (q *Queries) GetWebhookSubscriber(ctx context.Context, id int64) (WebhookSu
 		&i.FilterToStatus,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.LastStatusCode,
+		&i.LastError,
+		&i.LastAttemptAt,
 	)
 	return i, err
 }
@@ -41,7 +44,7 @@ func (q *Queries) GetWebhookSubscriber(ctx context.Context, id int64) (WebhookSu
 const insertWebhookSubscriber = `-- name: InsertWebhookSubscriber :one
 INSERT INTO webhook_subscribers (name, url, secret, filter_class, filter_to_status)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, name, url, secret, filter_class, filter_to_status, is_active, created_at
+RETURNING id, name, url, secret, filter_class, filter_to_status, is_active, created_at, last_status_code, last_error, last_attempt_at
 `
 
 type InsertWebhookSubscriberParams struct {
@@ -70,12 +73,15 @@ func (q *Queries) InsertWebhookSubscriber(ctx context.Context, arg InsertWebhook
 		&i.FilterToStatus,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.LastStatusCode,
+		&i.LastError,
+		&i.LastAttemptAt,
 	)
 	return i, err
 }
 
 const listActiveWebhookSubscribers = `-- name: ListActiveWebhookSubscribers :many
-SELECT id, name, url, secret, filter_class, filter_to_status, is_active, created_at FROM webhook_subscribers WHERE is_active = true
+SELECT id, name, url, secret, filter_class, filter_to_status, is_active, created_at, last_status_code, last_error, last_attempt_at FROM webhook_subscribers WHERE is_active = true
 `
 
 func (q *Queries) ListActiveWebhookSubscribers(ctx context.Context) ([]WebhookSubscriber, error) {
@@ -96,6 +102,9 @@ func (q *Queries) ListActiveWebhookSubscribers(ctx context.Context) ([]WebhookSu
 			&i.FilterToStatus,
 			&i.IsActive,
 			&i.CreatedAt,
+			&i.LastStatusCode,
+			&i.LastError,
+			&i.LastAttemptAt,
 		); err != nil {
 			return nil, err
 		}
@@ -105,4 +114,21 @@ func (q *Queries) ListActiveWebhookSubscribers(ctx context.Context) ([]WebhookSu
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateWebhookSubscriberDeliveryStatus = `-- name: UpdateWebhookSubscriberDeliveryStatus :exec
+UPDATE webhook_subscribers
+SET last_status_code = $2, last_error = $3, last_attempt_at = now()
+WHERE id = $1
+`
+
+type UpdateWebhookSubscriberDeliveryStatusParams struct {
+	ID             int64  `json:"id"`
+	LastStatusCode int32  `json:"last_status_code"`
+	LastError      string `json:"last_error"`
+}
+
+func (q *Queries) UpdateWebhookSubscriberDeliveryStatus(ctx context.Context, arg UpdateWebhookSubscriberDeliveryStatusParams) error {
+	_, err := q.db.Exec(ctx, updateWebhookSubscriberDeliveryStatus, arg.ID, arg.LastStatusCode, arg.LastError)
+	return err
 }
