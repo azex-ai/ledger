@@ -13,6 +13,60 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+### Go module — Added
+- **Audit / platform reads over HTTP** — the read capabilities previously only
+  reachable via the library facade and `ledger-cli` are now HTTP endpoints:
+  `GET /audit/journals` (by account or time range), `GET /audit/bookings/{id}/trace`,
+  `GET /audit/journals/{id}/reversals`, `GET /platform/balances`,
+  `GET /platform/solvency`, `GET /balances/trends`. All documented in
+  `docs/openapi.yaml`.
+- **Full reconciliation is now runnable in service mode** — the 10-check suite is
+  wired into the background worker (`FULL_RECONCILE_INTERVAL`, default 1h, leader-
+  elected) and exposed as `POST /reconcile/full`. Check #2 (fleet-wide
+  checkpoint-vs-entries scan) is now a real keyset-paginated scan with a scan
+  limit + timeout guard that reports partial coverage instead of false passes.
+- `bizcode.Retryable(code)` + a `retryable` field on the HTTP error envelope —
+  machine-readable retry semantics (retry only with the same idempotency key);
+  contract documented in `docs/api.md`.
+- Per-subscriber webhook delivery health: `webhook_subscribers` gains
+  `last_status_code` / `last_error` / `last_attempt_at` (migration 024), written
+  after every delivery attempt.
+- Delivery / reconcile / rollup observability: new `core.Metrics` methods
+  `EventDelivered`, `EventDeliveryFailed`, `EventDead`, `RollupItemFailed`,
+  `ReconcileCheckResult`, implemented by `observability.PrometheusMetrics`.
+- `journal_entries` primary key `(id, created_at)` (migration 022) and a
+  covering index for `ListReservationsByAccount` (migration 023).
+
+### Go module — Fixed
+- `JournalInput.Validate` now rejects non-positive `currency_id` /
+  `classification_id` at the domain boundary (previously only the DB FK caught it).
+- `Settle` rejects non-positive and over-reserved amounts with
+  `core.ErrInvalidInput` before hitting the DB constraint.
+- `Lifecycle.Validate` rejects states unreachable from `Initial` (island states).
+- Worker cleanup paths (`ReleaseRollupClaim`, advisory-lock release) now run on a
+  detached 5s context so shutdown no longer strands claims until lease expiry.
+- Expiration scans process the earliest-expiring items first
+  (`ORDER BY expires_at`); expected multi-replica transition races log at Info.
+- Added the missing down migration for 020.
+
+### Go module — Breaking (v0.x)
+- `server.New` / `server.NewWithConfig` take five new trailing dependencies
+  (audit, platform balances, solvency, balance trends, full reconciler).
+- `core.Metrics` has five new methods — implementations written from scratch
+  must add them (embedding implementations are unaffected).
+- `delivery.NewWebhookDeliverer` takes a `core.Metrics` argument;
+  `delivery.SubscriberLister` gains `RecordDeliveryStatus`.
+
+### Documentation
+- `docs/RUNBOOK.md`: webhook delivery contract (at-least-once, retries reorder,
+  consumers must dedupe on `X-Ledger-Event-ID`), fixed the subscriber-health
+  troubleshooting SQL, and a new "unauthenticated reads" deployment-boundary
+  section (also in `README.md`).
+- `docs/INVARIANTS.md`: idempotency-key lifecycle note (I-3) and partition
+  rollout status (I-13).
+- `channel.Adapter`: replay-protection responsibility split documented.
+- `docs/openapi.yaml` `info.version` now tracks the Go module version.
+
 ## [0.2.0] - 2026-07-02
 
 ### Go module — Added
