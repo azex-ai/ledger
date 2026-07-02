@@ -12,4 +12,6 @@ var (
 	ErrInvalidTransition   = errors.New("invalid state transition")
 	ErrConflict            = errors.New("conflict")
 	ErrPrecisionExceeded   = errors.New("amount exceeds currency precision")
+	ErrAccountFrozen       = errors.New("account frozen")
+	ErrAccountClosed       = errors.New("account closed")
 )

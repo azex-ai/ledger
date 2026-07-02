@@ -191,3 +191,21 @@ func (i CurrencyInput) Validate() error {
 	}
 	return nil
 }
+
+// AccountPolicyStore manages per-dimension account freeze/close + balance-floor
+// overrides. See core.AccountPolicy for the dimension model and
+// docs/INVARIANTS.md I-17 for the enforcement contract.
+type AccountPolicyStore interface {
+	// SetPolicy creates or updates the policy for the exact
+	// (account_holder, currency_id, classification_id) dimension in input,
+	// appending an audit row (account_policy_changes) in the same transaction.
+	SetPolicy(ctx context.Context, input AccountPolicyInput) (*AccountPolicy, error)
+	// GetPolicy returns the policy row for the exact dimension (no priority
+	// matching — use the write-path's internal resolver for "effective
+	// policy" lookups). Returns ErrNotFound if no row exists at that exact
+	// dimension.
+	GetPolicy(ctx context.Context, holder, currencyID, classificationID int64) (*AccountPolicy, error)
+	// ListPolicies returns every policy row for holder, across all
+	// currencies and classifications.
+	ListPolicies(ctx context.Context, holder int64) ([]AccountPolicy, error)
+}

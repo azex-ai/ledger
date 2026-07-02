@@ -320,6 +320,39 @@ paths:
         "200": { description: Released. }
         "422": { $ref: "#/components/responses/DomainError" }
 
+  /accounts/{holder}/policy:
+    put:
+      tags: [Accounts]
+      summary: Set (create or update) the freeze/close + balance-floor policy for an account dimension.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AccountPolicyInput" }
+      responses:
+        "200":
+          description: Policy set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountPolicyEnvelope" }
+        "422": { $ref: "#/components/responses/DomainError" }
+  /accounts/{holder}/policies:
+    get:
+      tags: [Accounts]
+      summary: List every policy row for an account holder (across currencies/classifications).
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Policies. }
+
   /bookings:
     get:
       tags: [Bookings]
@@ -976,6 +1009,41 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Reservation" }
+
+    AccountPolicyInput:
+      type: object
+      required: [status]
+      properties:
+        currency_id:      { type: integer, format: int64, description: '0 = all currencies for this holder.' }
+        classification_id: { type: integer, format: int64, description: '0 = all classifications for this holder/currency.' }
+        status:
+          type: string
+          enum: [active, frozen, closed]
+        min_balance:      { $ref: "#/components/schemas/Decimal", description: '0 = no overdraft; negative = overdraft limit; positive = dust floor.' }
+        enforce_min_balance: { type: boolean }
+        note:             { type: string }
+        actor_id:         { type: integer, format: int64 }
+    AccountPolicy:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        account_holder: { type: integer, format: int64 }
+        currency_id:    { type: integer, format: int64 }
+        classification_id: { type: integer, format: int64 }
+        status:
+          type: string
+          enum: [active, frozen, closed]
+        min_balance:      { $ref: "#/components/schemas/Decimal" }
+        enforce_min_balance: { type: boolean }
+        note:             { type: string }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    AccountPolicyEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/AccountPolicy" }
 
     CreateBookingInput:
       type: object

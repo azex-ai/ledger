@@ -292,6 +292,63 @@ lands in `journal_entries_default`.
 - `postgres.TestPartitionBoundary_DefaultCatches`
 - `postgres.TestPartitionBoundary_GetBalanceUnionsPartitions`
 
+## I-17: Account policy enforcement
+
+An account dimension `(account_holder, currency_id, classification_id)` may
+carry an optional `account_policies` override row. No row for a dimension
+means today's default behaviour: `active`, unconstrained. When a row exists,
+the most specific match wins — `(holder,currency,classification)` >
+`(holder,currency,0)` > `(holder,0,0)` — and:
+
+- `closed` rejects every entry touching that dimension, in either direction,
+  with `ErrAccountClosed`. Checked per-entry, fail-fast — closed is absolute.
+- `frozen` rejects a **net decrease** under that policy with `ErrAccountFrozen`.
+  Net, not per-entry: a policy can be a currency- or holder-wide wildcard
+  spanning several classifications in one journal (e.g.
+  `PendingBalanceWriter.ConfirmPending` posts a decrease to the "pending"
+  classification and an equal increase to "main_wallet" for the same holder),
+  and deposits must still complete while frozen (design doc §4/§9-1: frozen
+  blocks consumption, not the pending two-phase deposit flow). `Reserve` has
+  no entries to net against — it is unconditionally a consumption entry
+  point, so frozen/closed reject it outright.
+- `enforce_min_balance` rejects a journal that would take the dimension's
+  balance below `min_balance` (0 = no overdraft, negative = overdraft limit,
+  positive = dust floor), evaluated once against the *net* delta across every
+  entry the journal posts to that exact dimension — not per-entry, so an
+  intermediate debit within a net-positive journal is not falsely rejected.
+
+**Why**: without this, any direct `PostJournal` call could push a frozen or
+closed account's balance around, or drive any account arbitrarily negative —
+the only balance floor in the system was `Reserve`'s available-balance check,
+which a direct journal post bypasses entirely.
+
+**Enforced by**:
+- `postgres.LedgerStore.enforceAccountPolicies`, called from
+  `postJournalWithQueries` after the tx-scoped advisory locks for the
+  journal's `(holder, currency)` pairs are held (I-4) and before any row is
+  written — a rejection aborts the whole journal.
+- `postgres.ReserverStore.Reserve`, same advisory lock, same policy
+  resolution (`classification_id` fixed at 0 — a reservation isn't tied to a
+  classification).
+- `postgres.AccountPolicyStore.SetPolicy` acquires the same advisory lock for
+  currency-specific policies (`currency_id != 0`) before writing, so a policy
+  change is serialized against any journal/reserve in flight for that exact
+  pair. A holder-wide policy (`currency_id == 0`) is **not** pinned to a
+  single lock key this way — a policy change at that tier and a concurrent
+  journal in an unrelated currency for the same holder are not linearized
+  against each other. Flagged as a known gap, not silently assumed away.
+
+**Pinned by**:
+- `postgres.TestLedgerStore_AccountPolicy_StatusMatrix` (active/frozen/closed
+  × increase/decrease/Reserve)
+- `postgres.TestLedgerStore_ConfirmPending_SucceedsWhileFrozen` (explicit
+  pin: deposit finalization is not consumption)
+- `postgres.TestLedgerStore_AccountPolicy_MinBalance_*` (zero/negative/positive
+  `min_balance`, and same-journal multi-entry netting)
+- `postgres.TestLedgerStore_AccountPolicy_MatchPriority`
+- `postgres.TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal`
+- `postgres.TestAccountPolicyStore_SetPolicy_AuditTrail`
+
 ---
 
 ## I-16: Amount precision is bounded by currency exponent

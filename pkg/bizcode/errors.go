@@ -80,6 +80,8 @@ var (
 	InvalidTransition   = New(14004, "invalid state transition")
 	ReservationExpired  = New(14005, "reservation expired")
 	PrecisionExceeded   = New(14006, "amount exceeds currency precision")
+	AccountFrozen       = New(14007, "account frozen")
+	AccountClosed       = New(14008, "account closed")
 )
 
 // --- Display messages ---
@@ -99,6 +101,8 @@ var displayMessages = map[int]string{
 	14004: "Invalid state transition",
 	14005: "Reservation has expired",
 	14006: "Amount has more decimal places than this currency allows",
+	14007: "This account is frozen",
+	14008: "This account is closed",
 	19999: "An unexpected error occurred",
 }
 

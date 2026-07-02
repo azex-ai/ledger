@@ -31,6 +31,7 @@ type Server struct {
 	journalTypes    core.JournalTypeStore
 	templates       core.TemplateStore
 	currencies      core.CurrencyStore
+	accountPolicies core.AccountPolicyStore
 	channels        map[string]channel.Adapter // channel name → adapter
 
 	// Read-only audit / platform analytics. These were previously only
@@ -128,6 +129,7 @@ func New(
 	solvency core.SolvencyChecker,
 	balanceTrends core.BalanceTrendReader,
 	fullReconciler core.FullReconciler,
+	accountPolicies core.AccountPolicyStore,
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -140,7 +142,7 @@ func New(
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
 		reconciler, snapshotter, systemRollup, queries,
-		audit, platformBalances, solvency, balanceTrends, fullReconciler)
+		audit, platformBalances, solvency, balanceTrends, fullReconciler, accountPolicies)
 }
 
 // NewWithConfig creates a Server using an explicit config, skipping env-var loading.
@@ -166,6 +168,7 @@ func NewWithConfig(
 	solvency core.SolvencyChecker,
 	balanceTrends core.BalanceTrendReader,
 	fullReconciler core.FullReconciler,
+	accountPolicies core.AccountPolicyStore,
 ) *Server {
 	s := &Server{
 		journals:         journals,
@@ -178,6 +181,7 @@ func NewWithConfig(
 		journalTypes:     journalTypes,
 		templates:        templates,
 		currencies:       currencies,
+		accountPolicies:  accountPolicies,
 		channels:         channels,
 		audit:            audit,
 		platformBalances: platformBalances,

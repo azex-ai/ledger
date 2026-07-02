@@ -328,6 +328,21 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 	}
 }
 
+func accountPolicyFromRow(row sqlcgen.AccountPolicy) *core.AccountPolicy {
+	return &core.AccountPolicy{
+		ID:                row.ID,
+		AccountHolder:     row.AccountHolder,
+		CurrencyID:        row.CurrencyID,
+		ClassificationID:  row.ClassificationID,
+		Status:            core.AccountPolicyStatus(row.Status),
+		MinBalance:        mustNumericToDecimal(row.MinBalance),
+		EnforceMinBalance: row.EnforceMinBalance,
+		Note:              row.Note,
+		UpdatedAt:         row.UpdatedAt,
+		CreatedAt:         row.CreatedAt,
+	}
+}
+
 func jsonToAnyMetadata(b []byte) map[string]any {
 	if len(b) == 0 {
 		return nil

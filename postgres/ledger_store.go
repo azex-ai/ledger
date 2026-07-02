@@ -367,6 +367,15 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		return nil, err
 	}
 
+	// Account policy enforcement (I-17): frozen/closed status + min_balance,
+	// evaluated inside the same advisory lock so it is TOCTOU-safe against
+	// concurrent journals/reserves/policy changes on the same (holder,
+	// currency) pairs. Must run before any row below is written since a
+	// rejection here must abort the whole journal.
+	if err := s.enforceAccountPolicies(ctx, q, input.Entries); err != nil {
+		return nil, err
+	}
+
 	debit, credit := input.Totals()
 
 	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{

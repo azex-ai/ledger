@@ -10,6 +10,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AccountPolicy struct {
+	ID                int64          `json:"id"`
+	AccountHolder     int64          `json:"account_holder"`
+	CurrencyID        int64          `json:"currency_id"`
+	ClassificationID  int64          `json:"classification_id"`
+	Status            string         `json:"status"`
+	MinBalance        pgtype.Numeric `json:"min_balance"`
+	EnforceMinBalance bool           `json:"enforce_min_balance"`
+	Note              string         `json:"note"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	CreatedAt         time.Time      `json:"created_at"`
+}
+
+type AccountPolicyChange struct {
+	ID        int64     `json:"id"`
+	PolicyID  int64     `json:"policy_id"`
+	OldState  []byte    `json:"old_state"`
+	NewState  []byte    `json:"new_state"`
+	ActorID   int64     `json:"actor_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type BalanceCheckpoint struct {
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`
