@@ -55,6 +55,7 @@ func TestResolveError(t *testing.T) {
 		{"ErrDuplicateJournal", core.ErrDuplicateJournal, 14002, http.StatusUnprocessableEntity},
 		{"ErrUnbalancedJournal", core.ErrUnbalancedJournal, 14003, http.StatusUnprocessableEntity},
 		{"ErrInvalidTransition", core.ErrInvalidTransition, 14004, http.StatusUnprocessableEntity},
+		{"ErrPeriodClosed", core.ErrPeriodClosed, 14006, http.StatusUnprocessableEntity},
 		{"ErrConflict", core.ErrConflict, 10901, http.StatusConflict},
 		{"unknown error", fmt.Errorf("something went wrong"), 19999, http.StatusInternalServerError},
 	}
@@ -95,8 +96,8 @@ func TestResolveError_WrappedAppError(t *testing.T) {
 // --- OK / Created response format ---
 
 type successEnvelope struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
+	Code    int                `json:"code"`
+	Message string             `json:"message"`
 	Data    stdjson.RawMessage `json:"data"`
 }
 
