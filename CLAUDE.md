@@ -139,6 +139,8 @@ go test ./postgres/ -run TestName -race -count=1
 | `service/worker.go` | Background job runner |
 | `cmd/ledgerd/` | HTTP service entry point |
 | `cmd/ledger-cli/` | Read-only investigation CLI (balance, journals, trace, reconcile, solvency) |
+| `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx) |
+| `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag) |
 | `deploy/helm/ledger/` | Kubernetes Helm chart |
 | `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
@@ -173,6 +175,8 @@ GET    /api/v1/events                        — List events
 - `postgres/sqlcgen/` is generated — never edit manually, always `sqlc generate`.
 - sqlc config is at `postgres/sqlc.yaml`, run sqlc from `postgres/` dir.
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.
-- `web/` is a separate Next.js project with its own `CLAUDE.md`.
+- `web/` is a separate Next.js project with its own `CLAUDE.md`; `@azex/ledger-react` lives in `web/packages/ledger-react/`.
+- Releases: Go module via `go-release.yml` on version tags; `@azex/ledger-react` published to npm by `ledger-react-publish.yml` on `ledger-react-v*` tags (version taken from `package.json`).
+- To consume the local checkout from a sibling module, use a parent-directory `go.work` (see README "Local Development with go.work") — no `replace` directives.
 - Lifecycle is optional on Classification — nil means label-only (no bookings).
 - `failed` is NOT terminal in withdrawal preset (has retry path to `reserved`).
