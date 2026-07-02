@@ -1,7 +1,7 @@
 # ledger v0.3 — Financial-Core Hardening Design（期末关账 / 舍入策略 / 账户策略 / 部分操作）
 
 **Created**: 2026-07-02
-**Status**: Draft — pending Aaron review
+**Status**: Approved 2026-07-02（§9 五项决策全部拍板，§4 冻结语义按 Aaron 澄清修订）
 **Repo**: `github.com/azex-ai/ledger`
 **前置**: 2026-07-02 深度 review（四区域缺口分析）+ 同日修复批次（migration 001-024、`fix-core/storage/service/http` 已合入 main）
 
@@ -257,12 +257,17 @@ CREATE TABLE account_policy_changes (
 
 **语义**：
 
-| status | 减少余额方向的 entry | 增加余额方向的 entry | Reserve |
-|---|---|---|---|
-| `active` | ✅ | ✅ | ✅ |
-| `frozen` | ❌ `ErrAccountFrozen` | ✅（入金仍可到账） | ❌ |
-| `closed` | ❌ `ErrAccountClosed` | ❌ | ❌ |
+| status | 消耗路径（Reserve / 减少余额的 entry，含出金） | 入金路径（增加余额的 entry，含 ConfirmPending） |
+|---|---|---|
+| `active` | ✅ | ✅ |
+| `frozen` | ❌ `ErrAccountFrozen` | ✅ |
+| `closed` | ❌ `ErrAccountClosed` | ❌ |
 
+- **冻结针对消耗，不针对入金**（Aaron 2026-07-02 澄清）：消耗场景的入口是
+  Reserve（lock）——出金是消耗的一种；入金走 pending 两阶段（AddPending →
+  ConfirmPending），不受冻结影响。因此 frozen 账户上：Reserve 拒绝、减少余额的
+  entry 拒绝，但 **`ConfirmPending` 产生的入账 entry 必须仍然成功**（需要 pin 测试
+  显式钉住这条，防止未来把方向判定改坏）。
 - 「减少/增加余额」按 classification 的 normal side 判定（credit-normal 用户余额：
   debit=减少；debit-normal 资产账户：credit=减少）。
 - 匹配优先级：精确 (holder,currency,classification) > (holder,currency,0) >
@@ -406,15 +411,12 @@ FinalizeSettlement(ctx, reservationID int64) error
 
 ---
 
-## 9. 待拍板的设计决策（Aaron review 点）
+## 9. 设计决策（2026-07-02 Aaron 全部拍板）
 
-1. **冻结方向性**（§4）：`frozen` = 只封「减少余额」方向、入金仍可到账；
-   `closed` = 双向全封。推荐此两档设计（符合风控惯例：冻结不该挡住用户入金）。
-2. **min_balance 三合一**（§4）：负值=透支额度、0=禁透支、正值=防尘底线，
-   一个字段表达三种策略。推荐（避免 credit_limit/overdraft/dust 三个字段的组合爆炸）。
-3. **effective_at 拒绝未来时间**（§1）：未来记账（scheduled posting）视为独立
-   feature 不在本轮。推荐拒绝（容差 5min）。
-4. **period close 允许 reopen**（§2）：latest-row-wins + 审计留痕。自用阶段推荐允许；
-   有外部消费者后再收紧。
-5. **部分冲销只做比例式**（§5a）：不做任意 per-entry 金额组合。推荐（守恒校验
-   简单可靠；任意对冲走普通 PostJournal）。
+1. ✅ **冻结针对消耗路径**（§4）：消耗的入口是 Reserve（lock），出金是消耗的一种，
+   frozen 封 Reserve + 减少余额的 entry；入金走 pending 两阶段不受冻结影响
+   （ConfirmPending 在 frozen 下必须仍可入账）。`closed` 双向全封。
+2. ✅ **min_balance 三合一**（§4）：负值=透支额度、0=禁透支、正值=防尘底线。
+3. ✅ **effective_at 拒绝未来时间**（§1），容差 5min；scheduled posting 另立 feature。
+4. ✅ **period close 允许 reopen**（§2）：latest-row-wins + 审计留痕，自用阶段。
+5. ✅ **部分冲销只做比例式**（§5a）：任意金额对冲走普通 PostJournal。
