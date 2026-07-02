@@ -192,10 +192,17 @@ Every new value type is one `CreateCurrency` call; it reuses all the
 classifications and templates above.
 
 ```go
-points,  _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "POINTS", Name: "Loyalty Points"})
-coupon,  _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "COUPON", Name: "Coupon Balance"})
-eur,     _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "EUR",    Name: "Euro"})
+points,  _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "POINTS", Name: "Loyalty Points", Exponent: 0})
+coupon,  _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "COUPON", Name: "Coupon Balance", Exponent: 2})
+eur,     _ := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: "EUR",    Name: "Euro", Exponent: 2})
 ```
+
+`Exponent` is required and is not "money-shaped" — it's a small integer
+declaring how many decimal places entries in that currency may carry (see
+Recipe 7 below). Points are whole numbers (0), coupon/fiat use the
+conventional 2. Getting this wrong up front means every future entry in that
+currency is bounded by it: the ledger rejects (never rounds) an over-precise
+amount.
 
 - **Loyalty points**: issue with `DR main_wallet(POINTS) / CR equity(POINTS)`
   (points are platform-funded); redeem with the reverse.
@@ -309,6 +316,75 @@ go w.Run(ctx)                            // ledgerd does this for you in service
 > calls `Release` — the funds are **locked forever**. Always drive release
 > through the ledger's `Release` (idempotent, state-machine-guarded), *then*
 > update your mapping.
+
+---
+
+## Recipe 7 — Precision, rounding, and who eats the remainder
+
+### The rule: the ledger rejects, it never rounds
+
+`currencies.exponent` bounds how many decimal places an entry may carry
+(JPY=0, USD=2, USDT=6, wei=18 — see `docs/INVARIANTS.md` I-16). Every write
+path (`PostJournal`, `ExecuteTemplate`, `Reserve`, `AddPending`, ...) checks
+every amount against its currency's exponent and returns
+`core.ErrPrecisionExceeded` if it's over-precise. **It never silently rounds
+or truncates for you.** If your business logic produces a number with more
+decimal places than the target currency allows, that's a bug in the caller —
+round explicitly, before you call the ledger, using `core/money.go`.
+
+### Rounding decision table
+
+| Scenario | Mode | Why |
+|---|---|---|
+| Displaying a price, computing a one-off fee, most user-facing totals | `RoundHalfUp` | Conventional "5 rounds up" behavior users expect. |
+| Aggregating many small roundings over time (e.g. per-transaction fee accrual) | `RoundHalfEven` | Ties resolve toward even digits, so repeated rounding doesn't drift the sum in one direction. |
+| The platform must not round in the user's favor (fee floors, minimum charges) | `RoundDown` | Truncating toward zero guarantees the platform never under-charges from a rounding tie. |
+| Under-crediting the user is the unacceptable direction (gas estimates, minimum payout unit) | `RoundUp` | Rounding away from zero guarantees the user never receives less than earned. |
+
+```go
+fee := core.Round(rawFee, feeCurrency.Exponent, core.RoundHalfEven)
+```
+
+### Who eats the remainder: FX and splits
+
+**FX (currency conversion)** — call `core.ConvertAt` yourself before posting;
+the `fx_sell`/`fx_buy` template pair (`presets/fx.go`) does **not** convert
+for you, it just posts whatever amount you give it on each leg:
+
+```go
+// Converting 100 USDT -> CNY at a quoted rate, rounding to CNY's own exponent.
+cnyAmount := core.ConvertAt(decimal.RequireFromString("100"), rate, cnyCurrency.Exponent, core.RoundHalfUp)
+
+_, _ = svc.Ledger().ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{
+    HolderID: userID, CurrencyID: usdtID,
+    Amounts:  map[string]string{"amount": "100"},
+})
+_, _ = svc.Ledger().ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
+    HolderID: userID, CurrencyID: cnyID,
+    Amounts:  map[string]string{"amount": cnyAmount.String()},
+})
+```
+
+Any residue between the "ideal" rate-implied amount and what the two legs
+actually post is the platform's, by construction: `settlement` absorbs the
+net exposure (see `presets/fx.go`'s "Net effect on system books" comment). The
+caller decides the rounding mode; the ledger never adjusts a leg to make it
+"come out even" on your behalf.
+
+**Splitting one total across several accounts** (e.g. a fee split across
+revenue-share partners) — use `core.Allocate`, not manual division. It
+guarantees the shares sum to exactly the total (no cent lost or manufactured)
+via the largest-remainder method:
+
+```go
+shares, err := core.Allocate(totalFee, []decimal.Decimal{partnerAWeight, partnerBWeight}, feeCurrency.Exponent)
+// sum(shares) == totalFee is guaranteed; the odd cent goes to whichever
+// share had the largest truncated remainder (deterministic, not random).
+```
+
+`Allocate` requires `total` to already be exact at the target exponent —
+round it first with `core.Round` if it might not be (e.g. it came from a
+`ConvertAt` at a different exponent).
 
 ---
 

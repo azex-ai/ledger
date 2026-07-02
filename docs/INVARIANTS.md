@@ -294,6 +294,71 @@ lands in `journal_entries_default`.
 
 ---
 
+## I-16: Amount precision is bounded by currency exponent
+
+Every committed `journal_entries.amount` (and every `reservations.reserved_amount`)
+has at most `currencies.exponent` decimal places. `NUMERIC(30,18)` is storage
+precision; `exponent` is *business* precision — a currency like JPY (exponent=0)
+or USD (exponent=2) legitimately rejects amounts a wei-denominated currency
+(exponent=18) would accept.
+
+**Why**: without a per-currency precision bound, a `0.001 JPY` entry is
+perfectly legal today — every caller has to hand-roll its own precision
+checks, and a missed check is a silent accounting error that only surfaces at
+reconciliation time (or in an external settlement mismatch).
+
+**Enforced by**:
+- `currencies.exponent SMALLINT NOT NULL DEFAULT 18 CHECK (0..18)`
+  (`postgres/sql/migrations/027_currency_exponent.up.sql`). Existing rows
+  default to 18 (the loosest setting) so no historical data is invalidated.
+- `postgres.validateEntriesPrecision` (`postgres/precision.go`), called from
+  `LedgerStore.postJournalWithQueries` — the single choke point behind
+  `PostJournal`, `ExecuteTemplate`, `ExecuteTemplateBatch`, and
+  `ReverseJournal`. `PendingStore.AddPending/ConfirmPending/CancelPending`
+  inherit the check for free because they all post through
+  `LedgerStore.PostJournal` rather than writing entries directly.
+- `postgres.validateSingleAmountPrecision`, called from `ReserverStore.Reserve`
+  — the one write path that does **not** flow through `PostJournal` and so
+  needs its own enforcement point.
+- The check is `amount.Equal(amount.Truncate(exponent))` — over-precise
+  amounts are rejected with `core.ErrPrecisionExceeded` (bizcode 14006),
+  **never** silently rounded or truncated. Rounding is the caller's explicit
+  decision (`core.Round` / `core.ConvertAt` in `core/money.go`), not something
+  the ledger does on the caller's behalf.
+- `core.CurrencyInput.Validate` rejects `Exponent` outside `[0, 18]` before a
+  currency is even created; the DB `CHECK` is defense-in-depth for the same
+  bound.
+
+**Not enforced by**: `core.Allocate` (`core/money.go`) — it requires its
+`total` argument to already be exact at the target exponent (returns
+`core.ErrInvalidInput` otherwise) and guarantees every returned share is
+exact at that exponent too, but it is a pure function with no currency
+lookup; the store-level check above is what actually gates what reaches the
+database.
+
+**Pinned by**:
+- `postgres.TestPrecision_PostJournal_RejectsOverPrecisionAmount`
+- `postgres.TestPrecision_PostJournal_AcceptsWholeYen`
+- `postgres.TestPrecision_PostJournal_DefaultExponentStillAllowsFractionalAmounts`
+- `postgres.TestPrecision_Reserve_RejectsOverPrecisionAmount`
+- `postgres.TestPrecision_Reserve_AcceptsWholeYen`
+- `postgres.TestPrecision_Pending_RejectsOverPrecisionAmount`
+- `postgres.TestCurrencyStore_CreateCurrency_RejectsInvalidExponent`
+- `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
+- `core.TestCurrencyInput_Validate`
+- `core.TestRound_HalfUp` / `TestRound_HalfEven` / `TestRound_Down` / `TestRound_Up`
+- `core.TestAllocate_SumEqualsTotal_KnownCases` and friends
+  (`TestAllocate_RejectsNegativeWeight`, `TestAllocate_RejectsAllZeroWeights`,
+  `TestAllocate_RejectsEmptyWeights`, `TestAllocate_RejectsOverPrecisionTotal`,
+  `TestAllocate_ZeroTotal`, `TestAllocate_SingleWeightGetsEverything`,
+  `TestAllocate_ExponentZero`)
+- `core.TestAllocateInvariant_SumAlwaysEqualsTotal` (500 random trials)
+- `core.FuzzAllocate` (Go fuzz target — sum(shares) == total for any valid
+  total/weights/exponent)
+- `core.TestConvertAt_MatchesHandCalculation`
+
+---
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

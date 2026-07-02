@@ -408,7 +408,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | `useDeactivateTemplate` | `()` — variables `id` | `POST /api/v1/templates/{id}/deactivate` |
 | `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_id, ...amounts}` | `POST /api/v1/templates/{code}/preview` (returns `PreviewResult`, no invalidation — read-only preview) |
 | `useCurrencies` | `(activeOnly?)` | `GET /api/v1/currencies` |
-| `useCreateCurrency` | `()` — body `{code, name}` | `POST /api/v1/currencies` |
+| `useCreateCurrency` | `()` — body `{code, name, exponent}` | `POST /api/v1/currencies` |
 | `useDeactivateCurrency` | `()` — variables `id` | `POST /api/v1/currencies/{id}/deactivate` |
 
 ### Reservations — `src/hooks/use-reservations.ts`
