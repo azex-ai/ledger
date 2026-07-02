@@ -131,7 +131,12 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 			return nil
 		} else {
 			defer func() {
-				if err := s.locker.releaseAdvisoryLock(ctx, lockKey); err != nil {
+				// ctx may already be cancelled (e.g. shutdown mid-snapshot) —
+				// release on a detached, short-lived context so the lock
+				// doesn't leak until the session holding it disconnects.
+				cleanupCtx, cancel := cleanupContext(ctx)
+				defer cancel()
+				if err := s.locker.releaseAdvisoryLock(cleanupCtx, lockKey); err != nil {
 					s.logger.Error("service: snapshot: release advisory lock failed",
 						"date", snapshotDate.Format("2006-01-02"),
 						"error", err,

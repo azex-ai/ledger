@@ -137,7 +137,7 @@ func TestWebhookDeliverer_RecordsDeliveryStatus_EndToEnd(t *testing.T) {
 
 		seedPendingEvent(t, pool, "webhook_e2e_success")
 
-		deliverer := delivery.NewWebhookDeliverer(eventStore, subscriberStore, core.NopLogger())
+		deliverer := delivery.NewWebhookDeliverer(eventStore, subscriberStore, core.NopLogger(), core.NopMetrics())
 		delivered, err := deliverer.ProcessBatch(ctx, 10)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, delivered, 1)
@@ -170,7 +170,7 @@ func TestWebhookDeliverer_RecordsDeliveryStatus_EndToEnd(t *testing.T) {
 
 		seedPendingEvent(t, pool, "webhook_e2e_failure")
 
-		deliverer := delivery.NewWebhookDeliverer(eventStore, subscriberStore, core.NopLogger())
+		deliverer := delivery.NewWebhookDeliverer(eventStore, subscriberStore, core.NopLogger(), core.NopMetrics())
 		_, err := deliverer.ProcessBatch(ctx, 10)
 		require.NoError(t, err)
 

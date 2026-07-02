@@ -24,8 +24,8 @@ type Server struct {
 	journals        core.JournalWriter
 	balances        core.BalanceReader
 	reserver        core.Reserver
-	booker        core.Booker
-	bookingReader core.BookingReader
+	booker          core.Booker
+	bookingReader   core.BookingReader
 	eventReader     core.EventReader
 	classifications core.ClassificationStore
 	journalTypes    core.JournalTypeStore
@@ -42,9 +42,10 @@ type Server struct {
 	balanceTrends    core.BalanceTrendReader
 
 	// Services (injected)
-	reconciler   core.Reconciler
-	snapshotter  core.Snapshotter
-	systemRollup *service.SystemRollupService
+	reconciler     core.Reconciler
+	fullReconciler core.FullReconciler
+	snapshotter    core.Snapshotter
+	systemRollup   *service.SystemRollupService
 
 	// Query helpers (direct sqlcgen access for list queries)
 	queries core.QueryProvider
@@ -126,6 +127,7 @@ func New(
 	platformBalances core.PlatformBalanceReader,
 	solvency core.SolvencyChecker,
 	balanceTrends core.BalanceTrendReader,
+	fullReconciler core.FullReconciler,
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -138,7 +140,7 @@ func New(
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
 		reconciler, snapshotter, systemRollup, queries,
-		audit, platformBalances, solvency, balanceTrends)
+		audit, platformBalances, solvency, balanceTrends, fullReconciler)
 }
 
 // NewWithConfig creates a Server using an explicit config, skipping env-var loading.
@@ -163,6 +165,7 @@ func NewWithConfig(
 	platformBalances core.PlatformBalanceReader,
 	solvency core.SolvencyChecker,
 	balanceTrends core.BalanceTrendReader,
+	fullReconciler core.FullReconciler,
 ) *Server {
 	s := &Server{
 		journals:         journals,
@@ -181,6 +184,7 @@ func NewWithConfig(
 		solvency:         solvency,
 		balanceTrends:    balanceTrends,
 		reconciler:       reconciler,
+		fullReconciler:   fullReconciler,
 		snapshotter:      snapshotter,
 		systemRollup:     systemRollup,
 		queries:          queries,

@@ -68,6 +68,7 @@ func (s *Server) setupRoutes() {
 		// Reconciliation + Snapshots
 		r.Post("/reconcile", s.handleReconcileGlobal)
 		r.Post("/reconcile/account", s.handleReconcileAccount)
+		r.Post("/reconcile/full", s.handleReconcileFull)
 		r.Get("/snapshots", s.handleListSnapshots)
 
 		// Audit (read-only investigation: journals by account/time, booking trace, reversal chain)

@@ -57,8 +57,20 @@ func (m *mockSubscriberLister) RecordDeliveryStatus(_ context.Context, subscribe
 	return nil
 }
 
+// recordingMetrics captures delivery-metric calls for testing.
+type recordingMetrics struct {
+	core.Metrics
+	delivered      int
+	deliveryFailed int
+	dead           int
+}
+
+func (m *recordingMetrics) EventDelivered()      { m.delivered++ }
+func (m *recordingMetrics) EventDeliveryFailed() { m.deliveryFailed++ }
+func (m *recordingMetrics) EventDead()           { m.dead++ }
+
 func TestWebhookDeliverer_ProcessBatch_NilSubscriberLister(t *testing.T) {
-	deliverer := NewWebhookDeliverer(&mockEventPoller{}, nil, core.NopLogger())
+	deliverer := NewWebhookDeliverer(&mockEventPoller{}, nil, core.NopLogger(), core.NopMetrics())
 
 	_, err := deliverer.ProcessBatch(context.Background(), 10)
 	require.Error(t, err)
@@ -69,13 +81,61 @@ func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T)
 	poller := &mockEventPoller{
 		events: []core.Event{{ID: 42, ClassificationCode: "deposit", ToStatus: "confirmed"}},
 	}
-	deliverer := NewWebhookDeliverer(poller, &mockSubscriberLister{}, core.NopLogger())
+	metrics := &recordingMetrics{}
+	deliverer := NewWebhookDeliverer(poller, &mockSubscriberLister{}, core.NopLogger(), metrics)
 
 	delivered, err := deliverer.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 1, delivered)
 	assert.Equal(t, []int64{42}, poller.delivered)
 	assert.Empty(t, poller.retried)
+	assert.Equal(t, 1, metrics.delivered, "EventDelivered must be emitted")
+}
+
+func TestWebhookDeliverer_ProcessBatch_NilMetricsDefaultsToNop(t *testing.T) {
+	poller := &mockEventPoller{
+		events: []core.Event{{ID: 1, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+	}
+	deliverer := NewWebhookDeliverer(poller, &mockSubscriberLister{}, core.NopLogger(), nil)
+
+	assert.NotPanics(t, func() {
+		_, err := deliverer.ProcessBatch(context.Background(), 10)
+		require.NoError(t, err)
+	})
+}
+
+func TestWebhookDeliverer_DeliverEvent_SubscriberFailureEmitsFailedMetric(t *testing.T) {
+	poller := &mockEventPoller{
+		events: []core.Event{{ID: 7, ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 0, MaxAttempts: 10}},
+	}
+	// A subscriber whose URL will fail to dial — sendHTTP returns an error.
+	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
+		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", IsActive: true},
+	}}
+	metrics := &recordingMetrics{}
+	deliverer := NewWebhookDeliverer(poller, subs, core.NopLogger(), metrics)
+
+	_, err := deliverer.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{7}, poller.retried)
+	assert.Equal(t, 1, metrics.deliveryFailed, "EventDeliveryFailed must be emitted on send failure")
+	assert.Equal(t, 0, metrics.dead, "not yet at max attempts, so EventDead must not fire")
+}
+
+func TestWebhookDeliverer_DeliverEvent_LastAttemptEmitsDeadMetric(t *testing.T) {
+	poller := &mockEventPoller{
+		events: []core.Event{{ID: 8, ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 9, MaxAttempts: 10}},
+	}
+	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
+		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", IsActive: true},
+	}}
+	metrics := &recordingMetrics{}
+	deliverer := NewWebhookDeliverer(poller, subs, core.NopLogger(), metrics)
+
+	_, err := deliverer.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, metrics.deliveryFailed)
+	assert.Equal(t, 1, metrics.dead, "attempts+1 >= max_attempts must emit EventDead")
 }
 
 func TestWebhookDeliverer_ProcessBatch_RecordsSuccessStatus(t *testing.T) {
@@ -88,7 +148,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsSuccessStatus(t *testing.T) {
 		events: []core.Event{{ID: 1, ClassificationCode: "deposit", ToStatus: "confirmed"}},
 	}
 	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 7, Name: "sub", URL: srv.URL}}}
-	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger())
+	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
 
 	delivered, err := deliverer.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)
@@ -109,7 +169,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsFailureStatus(t *testing.T) {
 		events: []core.Event{{ID: 2, ClassificationCode: "deposit", ToStatus: "confirmed"}},
 	}
 	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 9, Name: "sub", URL: srv.URL}}}
-	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger())
+	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
 
 	_, err := deliverer.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)

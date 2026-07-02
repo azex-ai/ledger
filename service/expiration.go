@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/azex-ai/ledger/core"
@@ -68,10 +69,21 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 	released := 0
 	for _, r := range reservations {
 		if err := s.reservationRelease.Release(ctx, r.ID); err != nil {
-			s.logger.Error("service: expiration: release reservation failed",
-				"reservation_id", r.ID,
-				"error", err,
-			)
+			if errors.Is(err, core.ErrInvalidTransition) {
+				// Expected under multi-replica scanning: another replica (or a
+				// racing settle/release call) already transitioned this
+				// reservation between our scan and this call. Not a real
+				// failure — just log for visibility.
+				s.logger.Info("service: expiration: reservation already transitioned by a concurrent scan",
+					"reservation_id", r.ID,
+					"error", err,
+				)
+			} else {
+				s.logger.Error("service: expiration: release reservation failed",
+					"reservation_id", r.ID,
+					"error", err,
+				)
+			}
 			continue
 		}
 		released++

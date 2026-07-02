@@ -16,12 +16,13 @@ import (
 // --- Mock implementations ---
 
 type mockRollupQueuer struct {
-	items      []core.RollupQueueItem
-	processed  []int64
-	released   []int64
-	enqueued   []core.RollupQueueItem
-	pending    int64
-	enqueueErr error // when set, EnqueueRollup returns it (after recording the call)
+	items             []core.RollupQueueItem
+	processed         []int64
+	released          []int64
+	enqueued          []core.RollupQueueItem
+	pending           int64
+	enqueueErr        error // when set, EnqueueRollup returns it (after recording the call)
+	lastReleaseCtxErr error // ctx.Err() observed by the most recent ReleaseRollupClaim call
 }
 
 func (m *mockRollupQueuer) DequeueRollupBatch(_ context.Context, batchSize int) ([]core.RollupQueueItem, error) {
@@ -38,8 +39,9 @@ func (m *mockRollupQueuer) MarkRollupProcessed(_ context.Context, id int64, _ ti
 	return true, nil
 }
 
-func (m *mockRollupQueuer) ReleaseRollupClaim(_ context.Context, id int64, _ time.Time) error {
+func (m *mockRollupQueuer) ReleaseRollupClaim(ctx context.Context, id int64, _ time.Time) error {
 	m.released = append(m.released, id)
+	m.lastReleaseCtxErr = ctx.Err()
 	return nil
 }
 
@@ -391,13 +393,50 @@ func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 		},
 	}
 
-	engine := core.NewEngine()
+	metrics := &recordingMetrics{}
+	engine := core.NewEngine(core.WithMetrics(metrics))
 	svc := NewRollupService(queue, cpRW, entries, cls, engine)
 
 	processed, err := svc.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Zero(t, processed)
 	assert.Equal(t, []int64{4}, queue.released)
+	assert.Equal(t, 1, metrics.rollupItemFailed, "RollupItemFailed must be emitted when a claim is released after a failed processing attempt")
+}
+
+// TestRollupService_ReleasesClaimAfterParentCtxCancelled verifies that the
+// claim-release cleanup path still runs (and succeeds) even when the parent
+// ctx passed to ProcessBatch was already cancelled — e.g. worker shutdown
+// racing a batch. Passing the cancelled ctx straight through to the release
+// call would fail immediately (ctx.Err() != nil), leaking the claim until its
+// lease expires; cleanupContext must detach from that cancellation.
+func TestRollupService_ReleasesClaimAfterParentCtxCancelled(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []core.RollupQueueItem{
+			{ID: 5, AccountHolder: 500, CurrencyID: 1, ClassificationID: 50},
+		},
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &mockEntrySummer{
+		err: assert.AnError,
+	}
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 50, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+
+	engine := core.NewEngine()
+	svc := NewRollupService(queue, cpRW, entries, cls, engine)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate shutdown having already fired before this batch runs
+
+	processed, err := svc.ProcessBatch(ctx, 10)
+	require.NoError(t, err)
+	assert.Zero(t, processed)
+	require.Equal(t, []int64{5}, queue.released, "claim must still be released even though the parent ctx was cancelled")
+	assert.NoError(t, queue.lastReleaseCtxErr, "release must run on a detached ctx, not the cancelled parent")
 }
 
 // recordingMetrics captures specific metric calls for testing.
@@ -405,6 +444,7 @@ type recordingMetrics struct {
 	core.Metrics
 	balanceDriftCalled bool
 	rollupProcessed    int
+	rollupItemFailed   int
 }
 
 func (m *recordingMetrics) JournalPosted(string)                  {}
@@ -425,6 +465,7 @@ func (m *recordingMetrics) CheckpointAge(string, time.Duration)   {}
 func (m *recordingMetrics) ReconcileGap(int64, decimal.Decimal)   {}
 func (m *recordingMetrics) ReservedAmount(int64, decimal.Decimal) {}
 func (m *recordingMetrics) RollupProcessed(count int)             { m.rollupProcessed += count }
+func (m *recordingMetrics) RollupItemFailed()                     { m.rollupItemFailed++ }
 func (m *recordingMetrics) RollupLatency(time.Duration)           {}
 func (m *recordingMetrics) BalanceDrift(_ string, _ int64, _ decimal.Decimal) {
 	m.balanceDriftCalled = true

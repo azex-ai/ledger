@@ -470,6 +470,9 @@ func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
 	if cfg.EventClaimLease <= 0 {
 		cfg.EventClaimLease = d.EventClaimLease
 	}
+	if cfg.FullReconcileInterval <= 0 {
+		cfg.FullReconcileInterval = d.FullReconcileInterval
+	}
 	return cfg
 }
 

@@ -84,7 +84,12 @@ func (lj *LockedJob) Run(ctx context.Context) {
 			return
 		} else {
 			defer func() {
-				if err := lj.locker.releaseAdvisoryLock(ctx, lj.lockKey); err != nil {
+				// ctx may already be cancelled (e.g. shutdown mid-job) —
+				// release on a detached, short-lived context so the lock
+				// doesn't leak until the session holding it disconnects.
+				cleanupCtx, cancel := cleanupContext(ctx)
+				defer cancel()
+				if err := lj.locker.releaseAdvisoryLock(cleanupCtx, lj.lockKey); err != nil {
 					lj.logger.Error("service: locked_job: release advisory lock failed",
 						"job", lj.name,
 						"error", err,
