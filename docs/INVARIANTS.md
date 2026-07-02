@@ -288,6 +288,77 @@ not implemented — the `PARTITION BY RANGE` declaration is schema groundwork
 for that future work, not an active rollover process. Every row currently
 lands in `journal_entries_default`.
 
+## I-14: Effective date consistency
+
+`journal_entries.effective_at` is always equal to the `effective_at` of its
+parent journal (denormalized at write time, never independently set per
+entry). `effective_at` is never more than a 5-minute clock-skew tolerance
+ahead of the time it was written — future-dated ("scheduled") posting is not
+supported.
+
+**Why**: `effective_at` separates the business date a journal is attributed
+to from `created_at` (the write date), enabling retroactive posting (late
+invoices, delayed on-chain confirmations). As-of reporting (trial balance,
+balance trends, daily snapshots) reads `effective_at` directly off
+`journal_entries` — if it ever drifted from the parent journal's value, or a
+caller could schedule a journal into the future, those reports would silently
+misattribute or hide postings. See
+`docs/plans/2026-07-02-financial-core-hardening-design.md` §1.
+
+**Enforced by**:
+- `core.JournalInput.Validate` rejects `effective_at` beyond the future
+  tolerance.
+- `postgres.LedgerStore.postJournalWithQueries` defaults a zero `effective_at`
+  to `now()` and writes the same resolved value to the journal row and every
+  entry row in the same transaction.
+- Reversal journals (`ReverseJournal`) never copy the original journal's
+  `effective_at` — they always default to "now" (open period), which is the
+  standard close-then-correct pattern (see I-15).
+
+**Pinned by**:
+- `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
+  `..._Past_OK`, `..._WithinTolerance_OK`, `..._FarFuture_Rejected`
+- `postgres.TestMigration025_EffectiveAtColumnsExist` (schema pin)
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow`
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_Backdated` (also pins
+  entry/journal `effective_at` equality)
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_RejectsFarFuture`
+- `postgres.TestLedgerStore_ReverseJournal_EffectiveAt_DoesNotInheritOriginal`
+- `postgres.TestRollupAdapter_ListBalancesAt_UsesEffectiveAt` (as-of reporting
+  reads the business date, not the write date)
+
+## I-15: The accounting period close line is a hard write barrier
+
+There is no journal whose `effective_at` is earlier than the currently active
+period-close line (`period_closes`, latest-`created_at`-row-wins). Real-time
+balances (`checkpoint + delta`) are unaffected — the close line only gates
+*new writes*, it never rewrites or hides history.
+
+**Why**: without a close line, any historical report can be silently changed
+by a later retroactive posting — "the books for last month are final" has no
+enforcement. Reopening (appending a row with an earlier `close_before`) is a
+deliberate, audited, explicit action (an append-only row), never an implicit
+side effect. Corrections to a closed period are made by reversing at the
+current (open) date, never by rewriting history — consistent with I-2
+(corrections via reversal only).
+
+**Enforced by**: `postgres.LedgerStore.postJournalWithQueries` reads the
+active close line (`GetActivePeriodClose`) inside the same transaction as
+every write path (direct `PostJournal`, `ExecuteTemplate`,
+`ExecuteTemplateBatch`, and `ReverseJournal`, since they all funnel through
+this method) and rejects with `core.ErrPeriodClosed` when
+`effective_at < close_before`.
+
+**Pinned by**:
+- `postgres.TestMigration026_PeriodClosesTableExists` (schema pin)
+- `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed`
+- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` (rejects before
+  the line, accepts at/after it)
+- `postgres.TestPeriodCloseStore_Reopen_LatestRowWins` (reopen restores
+  postability; full close-line history is retained)
+- `postgres.TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod`
+  (correction-via-reversal lands in the open period)
+
 **Pinned by**:
 - `postgres.TestPartitionBoundary_DefaultCatches`
 - `postgres.TestPartitionBoundary_GetBalanceUnionsPartitions`
