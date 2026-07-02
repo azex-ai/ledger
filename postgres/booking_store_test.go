@@ -25,7 +25,7 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 		Initial:  "pending",
 		Terminal: []core.Status{"confirmed", "expired"},
 		Transitions: map[core.Status][]core.Status{
-			"pending": {"failed", "expired"},
+			"pending": {"failed", "expired", "confirmed"},
 			"failed":  {"pending", "expired"},
 		},
 	}

@@ -250,6 +250,10 @@ func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualA
 }
 
 func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, actualAmount decimal.Decimal) error {
+	if !actualAmount.IsPositive() {
+		return fmt.Errorf("postgres: settle: actual amount must be positive, got %s: %w", actualAmount, core.ErrInvalidInput)
+	}
+
 	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -261,6 +265,17 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 	status := core.ReservationStatus(res.Status)
 	if !status.CanTransitionTo(core.ReservationStatusSettled) {
 		return fmt.Errorf("postgres: settle: from %q to settled: %w", res.Status, core.ErrInvalidTransition)
+	}
+
+	// The reservations table enforces settled_amount <= reserved_amount via
+	// chk_settled_lte_reserved, but check here too so callers get a clear
+	// core.ErrInvalidInput without a round trip to the DB constraint.
+	reservedAmount, err := numericToDecimal(res.ReservedAmount)
+	if err != nil {
+		return fmt.Errorf("postgres: settle: convert reserved amount: %w", err)
+	}
+	if actualAmount.GreaterThan(reservedAmount) {
+		return fmt.Errorf("postgres: settle: actual amount %s exceeds reserved amount %s: %w", actualAmount, reservedAmount, core.ErrInvalidInput)
 	}
 
 	if err := qtx.UpdateReservationSettle(ctx, sqlcgen.UpdateReservationSettleParams{

@@ -253,3 +253,109 @@ func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.L
 	})
 	require.NoError(t, err)
 }
+
+func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 20, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  20,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("settle-zero"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = store.Settle(ctx, res.ID, decimal.Zero)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
+func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 21, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  21,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("settle-negative"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = store.Settle(ctx, res.ID, decimal.NewFromInt(-1))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
+// Over-settlement (actualAmount > reserved_amount) is rejected: settling more
+// than was reserved would let a caller debit funds that were never locked,
+// breaking the TOCTOU-safe budget-hold guarantee Reserve provides. No
+// shipped example or test depends on over-settlement being allowed, and the
+// DB already enforces this via chk_settled_lte_reserved — this test pins the
+// Go-level fail-fast check added in front of that constraint.
+func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 22, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  22,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: postgrestest.UniqueKey("settle-oversettle"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50).Add(decimal.NewFromInt(1)))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+	assert.Contains(t, err.Error(), "exceeds reserved amount")
+
+	// The reservation must remain active — a rejected settle must not
+	// partially apply.
+	got, err := store.HeldAmount(ctx, 22, curID)
+	require.NoError(t, err)
+	assert.True(t, got.Equal(decimal.NewFromInt(50)), "reservation should remain active with full hold, got %s", got)
+}
+
+// Settling for exactly the reserved amount (the boundary, not over) must
+// still succeed.
+func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 23, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  23,
+		CurrencyID:     curID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: postgrestest.UniqueKey("settle-exact"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50))
+	require.NoError(t, err)
+}
