@@ -64,14 +64,20 @@ func (i CreateBookingInput) Validate() error {
 
 // TransitionInput is the input to advance a booking's state.
 type TransitionInput struct {
-	BookingID  int64           `json:"booking_id"`
-	ToStatus   Status          `json:"to_status"`
-	ChannelRef string          `json:"channel_ref"`
-	Amount     decimal.Decimal `json:"amount"`
-	Metadata   map[string]any  `json:"metadata"`
-	ActorID    int64           `json:"actor_id"`
+	BookingID  int64  `json:"booking_id"`
+	ToStatus   Status `json:"to_status"`
+	ChannelRef string `json:"channel_ref"`
+	// Amount is intentionally allowed to be zero: not every lifecycle
+	// transition moves money (e.g. a pure status change like
+	// "reviewing" -> "processing"). Amount is only required to be positive
+	// where a transition actually triggers accounting — that is enforced by
+	// JournalInput.Validate at the point a journal is composed for the
+	// transition, not here.
+	Amount   decimal.Decimal `json:"amount"`
+	Metadata map[string]any  `json:"metadata"`
+	ActorID  int64           `json:"actor_id"`
 	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
-	Source     string          `json:"source"`
+	Source string `json:"source"`
 }
 
 func (i TransitionInput) Validate() error {
@@ -81,6 +87,8 @@ func (i TransitionInput) Validate() error {
 	if i.ToStatus == "" {
 		return fmt.Errorf("core: booking: to_status required: %w", ErrInvalidInput)
 	}
+	// Zero is deliberately allowed here (see TransitionInput.Amount doc) —
+	// only negative amounts are a shape error at this layer.
 	if i.Amount.IsNegative() {
 		return fmt.Errorf("core: booking: amount must not be negative: %w", ErrInvalidInput)
 	}

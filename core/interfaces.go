@@ -14,7 +14,11 @@ type JournalWriter interface {
 	ReverseJournal(ctx context.Context, journalID int64, reason string) (*Journal, error)
 }
 
-// TemplateBatchExecutor executes multiple templates atomically when supported.
+// TemplateBatchExecutor executes multiple templates as a single atomic unit:
+// implementations MUST post all requested journals or none at all (e.g. one
+// DB transaction covering the whole batch) — partial application on error is
+// not a conforming implementation. The postgres adapter satisfies this via a
+// single transaction (or the caller's transaction, in tx mode).
 type TemplateBatchExecutor interface {
 	ExecuteTemplateBatch(ctx context.Context, requests []TemplateExecutionRequest) ([]*Journal, error)
 }
@@ -29,7 +33,15 @@ type BalanceReader interface {
 // Reserver handles reserve/settle/lock flow.
 type Reserver interface {
 	Reserve(ctx context.Context, input ReserveInput) (*Reservation, error)
+	// Settle marks an active reservation as settled with the actual amount
+	// consumed. actualAmount must be positive and must not exceed the
+	// reservation's reserved amount — over-settlement is rejected with
+	// ErrInvalidInput, never silently clamped. The unused remainder (reserved
+	// minus actual) is implicitly released by the settle transition.
 	Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
+	// Release cancels an active reservation, freeing its entire reserved
+	// amount without any accounting effect. It is a no-op on the ledger
+	// balance beyond removing the hold — no partial release is supported.
 	Release(ctx context.Context, reservationID int64) error
 	// HeldAmount returns the sum of reserved_amount across the holder's active
 	// reservations in the given currency — the exact figure Reserve subtracts
