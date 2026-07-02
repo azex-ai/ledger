@@ -13,6 +13,39 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+### Go module — Added (financial-core hardening, design: docs/plans/2026-07-02-financial-core-hardening-design.md)
+- **Effective date** (migration 025): `journals.effective_at` / `journal_entries.effective_at`
+  separate business date from posting date. Backdating allowed (future rejected, 5min
+  tolerance); real-time balances stay posting-ordered; as-of reads (`ListBalancesAt`,
+  trends, snapshots) switch to the effective axis.
+- **Accounting period close** (migration 026): append-only `period_closes` line;
+  posting before the line fails with `ErrPeriodClosed` (14009); reopen = append an
+  earlier line (latest-row-wins, audited). `POST /periods/close`, `GET /periods/closes`.
+- **Trial balance**: `GET /reports/trial-balance` + `TrialBalanceReader` +
+  `ledger-cli trial-balance`, on the effective axis.
+- **Currency exponent & money primitives** (migration 027): `currencies.exponent`
+  (JPY=0 … wei=18); every write path rejects over-precise amounts with
+  `ErrPrecisionExceeded` (14006) — never silently rounds. `core.Round` (4 modes),
+  `core.Allocate` (largest-remainder, sum-preserving), `core.ConvertAt`.
+  HTTP currency creation requires an explicit exponent (pointer DTO — 0 is legal).
+- **Account policies** (migration 028): per-(holder[,currency[,classification]])
+  freeze/close + `min_balance` floor (negative = credit limit, 0 = no overdraft,
+  positive = dust floor). Frozen blocks consumption (Reserve + net-negative journals)
+  while pending-deposit confirmation still lands; closed blocks both directions.
+  `ErrAccountFrozen` (14007) / `ErrAccountClosed` (14008). Enforced inside the
+  existing per-dimension advisory locks; policy changes are audit-logged.
+- **Partial reversal** (migration 029): `ReverseJournalFraction(num/den)` — multiple
+  partial reversals per journal, per-currency balanced via `Allocate`, cumulative
+  conservation enforced under the original's row lock; `num==den` reverses the exact
+  remainder. `POST /journals/{id}/reverse-partial`.
+- **Partial settlement**: `SettlePartial` / `FinalizeSettlement` activate the
+  `settling` reservation state; the unsettled remainder stays held against the
+  balance (over-commit window closed); expired settling reservations auto-finalize.
+  `POST /reservations/{id}/settle-partial`, `POST /reservations/{id}/finalize`.
+- Invariants I-14 (effective-date consistency), I-15 (close line is a hard write
+  barrier), I-16 (precision bounded by exponent), I-17 (account policy enforcement);
+  I-2 revised for cumulative partial reversals; I-11 extended to settling holds.
+
 ### Go module — Added
 - **Audit / platform reads over HTTP** — the read capabilities previously only
   reachable via the library facade and `ledger-cli` are now HTTP endpoints:
