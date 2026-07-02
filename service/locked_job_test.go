@@ -20,6 +20,12 @@ import (
 type alwaysAcquireLock struct {
 	acquired int64
 	released int64
+	// lastReleaseCtxErr captures ctx.Err() AT CALL TIME. Storing the ctx
+	// object itself would be misleading: cleanupContext's own `defer cancel()`
+	// fires immediately after this call returns (still before the assertion
+	// runs), which would retroactively cancel a stored reference even though
+	// the call itself ran on a live, uncancelled context.
+	lastReleaseCtxErr error
 }
 
 func (l *alwaysAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
@@ -27,8 +33,9 @@ func (l *alwaysAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (bool, e
 	return true, nil
 }
 
-func (l *alwaysAcquireLock) releaseAdvisoryLock(_ context.Context, _ int64) error {
+func (l *alwaysAcquireLock) releaseAdvisoryLock(ctx context.Context, _ int64) error {
 	atomic.AddInt64(&l.released, 1)
+	l.lastReleaseCtxErr = ctx.Err()
 	return nil
 }
 
@@ -154,6 +161,34 @@ func TestLockedJob_LockErrorFallsThrough(t *testing.T) {
 	lj.Run(context.Background())
 
 	assert.Equal(t, int64(1), called.Load(), "fn should still run when lock acquisition errors")
+}
+
+// TestLockedJob_ReleasesLockAfterCtxCancelledDuringFn verifies that the
+// advisory lock is still released — on a context that is NOT cancelled —
+// even when fn cancels (or observes cancellation of) the ctx it was given.
+// This simulates a worker shutdown racing a running job: the release must not
+// be handed the already-cancelled ctx, or it fails immediately and the lock
+// leaks until the DB session holding it disconnects.
+func TestLockedJob_ReleasesLockAfterCtxCancelledDuringFn(t *testing.T) {
+	locker := &alwaysAcquireLock{}
+	engine := core.NewEngine()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lj := &LockedJob{
+		name:    "test_job",
+		lockKey: advisoryLockKey("job:test_job"),
+		fn: func(_ context.Context) error {
+			cancel() // simulate shutdown firing while the job is running
+			return nil
+		},
+		locker: locker,
+		logger: engine.Logger(),
+	}
+
+	lj.Run(ctx)
+
+	assert.Equal(t, int64(1), atomic.LoadInt64(&locker.released), "lock must still be released")
+	assert.NoError(t, locker.lastReleaseCtxErr, "release must run on a detached ctx, not the cancelled parent")
 }
 
 // TestLockedJob_DoubleConcurrentRun simulates two sequential "pod" calls in

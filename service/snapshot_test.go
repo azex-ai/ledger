@@ -94,3 +94,48 @@ func TestSnapshotService_QueryNonExistentDate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, balances)
 }
+
+// fakeSnapshotLocker is a snapshotLockAcquirer test double that records
+// ctx.Err() AT CALL TIME. Storing the ctx object itself would be misleading:
+// cleanupContext's own `defer cancel()` fires immediately after this call
+// returns (still before the test's assertion runs), which would retroactively
+// cancel a stored reference even though the call itself ran on a live,
+// uncancelled context.
+type fakeSnapshotLocker struct {
+	released          int
+	lastReleaseCtxErr error
+}
+
+func (f *fakeSnapshotLocker) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
+	return true, nil
+}
+
+func (f *fakeSnapshotLocker) releaseAdvisoryLock(ctx context.Context, _ int64) error {
+	f.released++
+	f.lastReleaseCtxErr = ctx.Err()
+	return nil
+}
+
+// TestSnapshotService_ReleasesLockAfterCtxCancelled verifies the advisory
+// lock release runs on a context that is NOT cancelled even when the ctx
+// passed to CreateDailySnapshot was already cancelled — e.g. a shutdown
+// signal racing the daily snapshot tick. Handing the cancelled ctx straight
+// to the release call would fail immediately, leaking the lock until the DB
+// session holding it disconnects.
+func TestSnapshotService_ReleasesLockAfterCtxCancelled(t *testing.T) {
+	balanceLister := &mockHistoricalBalanceLister{}
+	snapWriter := &mockSnapshotWriter{}
+	engine := core.NewEngine()
+	svc := NewSnapshotService(balanceLister, snapWriter, engine)
+	locker := &fakeSnapshotLocker{}
+	svc.locker = locker
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate shutdown having already fired
+
+	err := svc.CreateDailySnapshot(ctx, time.Date(2026, 4, 17, 0, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, locker.released, "lock must still be released")
+	assert.NoError(t, locker.lastReleaseCtxErr, "release must run on a detached ctx, not the cancelled parent")
+}

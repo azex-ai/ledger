@@ -84,12 +84,19 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	clsList, err := s.classifications.ListClassifications(ctx, false)
 	if err != nil {
 		for _, item := range items {
-			if releaseErr := s.queue.ReleaseRollupClaim(ctx, item.ID, item.ClaimedUntil); releaseErr != nil {
+			// ctx may already be cancelled (e.g. shutdown) — release on a
+			// detached, short-lived context so the claim doesn't leak until
+			// its lease expires. See cleanupContext.
+			cleanupCtx, cancel := cleanupContext(ctx)
+			if releaseErr := s.queue.ReleaseRollupClaim(cleanupCtx, item.ID, item.ClaimedUntil); releaseErr != nil {
 				s.logger.Error("service: rollup: release claim failed",
 					"item_id", item.ID,
 					"error", releaseErr,
 				)
+			} else {
+				s.metrics.RollupItemFailed()
 			}
+			cancel()
 		}
 		return 0, fmt.Errorf("service: rollup: list classifications: %w", err)
 	}
@@ -103,12 +110,16 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	processed := 0
 	for _, item := range items {
 		if err := s.processItem(ctx, item, normalSides, classCodeMap); err != nil {
-			if releaseErr := s.queue.ReleaseRollupClaim(ctx, item.ID, item.ClaimedUntil); releaseErr != nil {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			if releaseErr := s.queue.ReleaseRollupClaim(cleanupCtx, item.ID, item.ClaimedUntil); releaseErr != nil {
 				s.logger.Error("service: rollup: release claim failed",
 					"item_id", item.ID,
 					"error", releaseErr,
 				)
+			} else {
+				s.metrics.RollupItemFailed()
 			}
+			cancel()
 			s.logger.Error("service: rollup: process item failed",
 				"item_id", item.ID,
 				"holder", item.AccountHolder,
