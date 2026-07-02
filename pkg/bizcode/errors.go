@@ -108,6 +108,44 @@ func DisplayMessage(code int) string {
 	return "An unexpected error occurred"
 }
 
+// Retryable reports whether a client may safely retry the request that
+// produced this business code, using the SAME idempotency_key (retrying a
+// mutation with a fresh key would create a duplicate side effect, not a
+// no-op — see docs/api.md "Idempotency").
+//
+// The classification follows HTTP retry semantics, not just the numeric
+// range:
+//   - 10400-10499 (rate limited) and 18100-18199 (service unavailable /
+//     starting) describe transient conditions — retrying after backoff is
+//     expected to succeed. Retryable.
+//   - 10000-10399 (input validation, auth, forbidden, not found,
+//     already-exists) and 10900-10999 (state conflict) describe a defect in
+//     the request or an outcome that depends on request content — retrying
+//     the identical payload reproduces the identical result. Not retryable.
+//   - 14000-14999 (ledger domain-invariant violation: insufficient balance,
+//     unbalanced journal, invalid transition, ...) is a business-rule
+//     outcome, not a transient failure. Not retryable.
+//   - Anything else (internal error, or a code outside every known range)
+//     defaults to retryable: unclassified failures most often indicate a
+//     transient dependency hiccup (DB blip, network reset) rather than a
+//     permanent defect in the request.
+func Retryable(code int) bool {
+	switch {
+	case code >= 10400 && code <= 10499:
+		return true // rate limited
+	case code >= 18100 && code <= 18199:
+		return true // service unavailable / starting
+	case code >= 10000 && code <= 10399:
+		return false // input validation / auth / forbidden / not found / already-exists
+	case code >= 10900 && code <= 10999:
+		return false // state conflict
+	case code >= 14000 && code <= 14999:
+		return false // ledger domain invariant violation
+	default:
+		return true // unclassified / internal error — assume transient
+	}
+}
+
 // RegisterDisplayMessage registers a display message for a code.
 func RegisterDisplayMessage(code int, msg string) {
 	displayMessages[code] = msg

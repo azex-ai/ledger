@@ -742,6 +742,7 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 - **Body size**: every request is capped at `MAX_BODY_BYTES`; webhooks have an additional 1 MB cap enforced in the handler.
 - **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected.
 - **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure; `/api/v1/system/ready` returns 503 until migrations + worker have booted.
+- **⚠️ GET endpoints are unauthenticated by design.** `authMiddleware` only enforces the bearer key on `POST`/`PUT`/`PATCH`/`DELETE` (see `server/middleware_auth.go`); every `GET` -- including balances, journals, audit trails, and the platform-wide `/platform/balances` / `/platform/solvency` endpoints -- is open to anyone who can reach the port. Per-key holder scoping for reads is a future item, not implemented today. **You must run standalone-service deployments behind a private network or a gateway that authenticates/authorizes reads** (VPC-only, mTLS, or an API gateway in front) -- do not expose the HTTP port directly to the public internet. This does not apply to library-mode consumption, where your own application owns the auth boundary.
 
 ## Testing
 

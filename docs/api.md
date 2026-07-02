@@ -35,42 +35,53 @@ Error (4xx/5xx):
 ```json
 {
   "code": 14001,
-  "message": "Insufficient balance for this operation"
+  "message": "Insufficient balance for this operation",
+  "retryable": false
 }
 ```
 
-`code` is an integer business code; the HTTP status is derived from it. Standard ranges:
+`code` is an integer business code; the HTTP status is derived from it. `retryable` tells the caller whether reissuing the exact same request (same `idempotency_key` for mutations) is expected to eventually succeed — see "Error handling contract" below.
 
-| Code range | HTTP status | Meaning |
-|------------|-------------|---------|
-| `10000`-`10099` | 400 | Input validation failed |
-| `10100`-`10149` | 401 | Authentication required / invalid key |
-| `10150`-`10199` | 403 | Forbidden (channel mismatch, etc.) |
-| `10200`-`10299` | 404 | Resource not found |
-| `10300`-`10399` | 409 | Already exists |
-| `10400`-`10499` | 429 | Rate limit exceeded |
-| `10900`-`10999` | 409 | State conflict |
-| `14000`-`14999` | 422 | Ledger / domain invariant violation |
-| `18100`-`18199` | 503 | Service unavailable / starting |
-| anything else | 500 | Internal error |
+### Error handling contract
+
+| Code range | HTTP status | Meaning | Retryable |
+|------------|-------------|---------|-----------|
+| `10000`-`10099` | 400 | Input validation failed | No |
+| `10100`-`10149` | 401 | Authentication required / invalid key | No |
+| `10150`-`10199` | 403 | Forbidden (channel mismatch, etc.) | No |
+| `10200`-`10299` | 404 | Resource not found | No |
+| `10300`-`10399` | 409 | Already exists | No |
+| `10400`-`10499` | 429 | Rate limit exceeded | **Yes** |
+| `10900`-`10999` | 409 | State conflict | No |
+| `14000`-`14999` | 422 | Ledger / domain invariant violation | No |
+| `18100`-`18199` | 503 | Service unavailable / starting | **Yes** |
+| anything else | 500 | Internal error | **Yes** (default) |
 
 Common business codes you may see:
 
-| Code | Meaning |
-|------|---------|
-| `10001` | Invalid input |
-| `10101` | Missing or invalid API key |
-| `10150` | Forbidden |
-| `10201` | Not found |
-| `10301` | Already exists |
-| `10401` | Rate limit exceeded |
-| `10901` | Conflict with current state |
-| `14001` | Insufficient balance |
-| `14002` | Duplicate journal (legacy low-level uniqueness error) |
-| `14003` | Journal entries not balanced |
-| `14004` | Invalid state transition |
-| `14005` | Reservation expired |
-| `19999` | Internal error |
+| Code | Meaning | Retryable |
+|------|---------|-----------|
+| `10001` | Invalid input | No |
+| `10101` | Missing or invalid API key | No |
+| `10150` | Forbidden | No |
+| `10201` | Not found | No |
+| `10301` | Already exists | No |
+| `10401` | Rate limit exceeded | Yes |
+| `10901` | Conflict with current state | No |
+| `14001` | Insufficient balance | No |
+| `14002` | Duplicate journal (legacy low-level uniqueness error) | No |
+| `14003` | Journal entries not balanced | No |
+| `14004` | Invalid state transition | No |
+| `14005` | Reservation expired | No |
+| `19999` | Internal error | Yes |
+
+**Retry semantics.** `retryable` is derived purely from the code range (`pkg/bizcode.Retryable`), not from request content:
+
+- `429` (rate limited) and `503` (service unavailable / starting) are transient by nature — back off (honor `Retry-After` when present) and retry.
+- `400`/`401`/`403`/`404`/`409` and `422` describe either a defect in the request or a business-rule outcome — replaying the identical payload reproduces the identical result, so these are **not** retryable without changing the request.
+- `500` and any code outside the known ranges default to retryable: an unclassified failure is assumed to be a transient dependency hiccup (DB blip, network reset) rather than a permanent defect.
+
+**Retrying is only safe with the same `idempotency_key`.** For mutating endpoints, a retry must reuse the exact `idempotency_key` from the original attempt — that is what turns a retry into a no-op replay instead of a duplicate side effect (see "Idempotency" below). Retrying a `429`/`503`/`500` with a *new* idempotency key on a request that actually landed can create a duplicate booking/journal.
 
 ### Idempotency
 
@@ -757,6 +768,132 @@ the refresh time of the `system_rollups` table.
   ]
 }
 ```
+
+---
+
+## 11. Audit
+
+Read-only investigation endpoints for support / audit workflows. These expose the same `core.AuditQuerier` capability that `cmd/ledger-cli`'s `trace` command uses.
+
+### GET /audit/journals
+
+List journals either by account dimension or by a global time range — exactly one mode, selected by which params are present:
+
+- `holder` + `currency_id` (required together; optionally narrowed by `classification_id`, `from`, `to`) — journals touching that account dimension.
+- `from` and/or `to` alone (no `holder`) — a global scan across every account in that time window.
+
+Providing neither, or `holder` without `currency_id`, is a `400`.
+
+Query params: `holder` (int64), `currency_id` (int64), `classification_id` (int64, `0`/omitted = all), `from` (RFC 3339), `to` (RFC 3339), `cursor`, `limit`. Cursor-paginated, same envelope shape as `GET /journals`.
+
+Status codes: `200`, `400`.
+
+### GET /audit/bookings/{id}/trace
+
+Fetch a booking together with every event and every journal generated by those events — the standard "trace this booking end-to-end" shape for support/audit investigation.
+
+Response `200 OK`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "booking": { "id": 42, "status": "confirmed", "...": "..." },
+    "events": [ { "id": 99, "from_status": "pending", "to_status": "confirmed", "...": "..." } ],
+    "journals": [ { "id": 1234, "...": "..." } ]
+  }
+}
+```
+
+Status codes: `200`, `400`, `404`.
+
+### GET /audit/journals/{id}/reversals
+
+List the full reversal chain for a journal — the root journal plus any journals that transitively reverse it, oldest first.
+
+Status codes: `200`, `400`.
+
+---
+
+## 12. Platform
+
+Real-time, system-wide balance and solvency reads. These expose the same `core.PlatformBalanceReader` / `core.SolvencyChecker` capability that `cmd/ledger-cli`'s `solvency` command uses.
+
+### GET /platform/balances
+
+Per-classification breakdown of user-side (holder > 0) vs. system-side (holder < 0) balances for a currency, computed as `checkpoint.balance + delta` (no rollup-worker lag).
+
+**Required** query param: `currency_id`.
+
+Response `200 OK`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "currency_id": 1,
+    "user_side": { "main_wallet": "125000.00" },
+    "system_side": { "custodial": "125000.00" }
+  }
+}
+```
+
+Status codes: `200`, `400`.
+
+### GET /platform/solvency
+
+Compares total user-side liability against the custodial system balance for a currency.
+
+**Required** query param: `currency_id`.
+
+Response `200 OK`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "currency_id": 1,
+    "liability": "125000.00",
+    "custodial": "126500.00",
+    "solvent": true,
+    "margin": "1500.00"
+  }
+}
+```
+
+`margin` is `custodial - liability`; negative means under-collateralised in the ledger's picture. Comparing `custodial` to an off-chain custody position is the caller's responsibility.
+
+Status codes: `200`, `400`.
+
+---
+
+## 13. Balance Trends
+
+### GET /balances/trends
+
+Historical daily balance series for a single account dimension. This exposes the same `core.BalanceTrendReader` capability previously only reachable via `cmd/ledger-cli`.
+
+One point per calendar day in `[from, to]`. Days with no journal activity are forward-filled from the previous known balance; the point for today is always overridden with the live checkpoint+delta balance.
+
+**Required** query params: `holder`, `currency_id`, `from` (RFC 3339), `to` (RFC 3339). Optional: `classification_id` (`0`/omitted = sum across all classifications).
+
+Response `200 OK`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": [
+    {"date": "2026-04-16", "balance": "404.50", "inflow": "50.00", "outflow": "0.00"},
+    {"date": "2026-04-17", "balance": "454.50", "inflow": "50.00", "outflow": "0.00"}
+  ]
+}
+```
+
+Status codes: `200`, `400`.
 
 ---
 

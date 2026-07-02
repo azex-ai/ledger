@@ -20,6 +20,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 7. [Journal posting failures](#7-journal-posting-failures)
 8. [Common investigation queries](#8-common-investigation-queries)
 9. [Emergency: stop the ledger](#9-emergency-stop-the-ledger)
+10. [Deployment security boundary: unauthenticated reads](#10-deployment-security-boundary-unauthenticated-reads)
 
 ---
 
@@ -383,6 +384,48 @@ corruption):
 
 Reads remain available throughout. `GET /balances/*`, `GET /journals*`,
 `GET /events*` are unaffected.
+
+---
+
+## 10. Deployment security boundary: unauthenticated reads
+
+**This is not an incident to fix — it is a known, permanent boundary of the
+current version that every deployment must account for.**
+
+`authMiddleware` (`server/middleware_auth.go`) only checks the bearer API key
+on state-changing methods (`POST`/`PUT`/`PATCH`/`DELETE`). Every `GET`/`HEAD`
+request passes through unauthenticated by design (see the `isMutating`
+check). That includes sensitive read surfaces:
+
+- `GET /balances/*`, `GET /entries`, `GET /journals*` — per-account balances and transaction history
+- `GET /audit/*` — journals by account/time, booking trace, reversal chains
+- `GET /platform/balances`, `GET /platform/solvency` — system-wide liability and custody figures
+
+Per-key holder scoping for reads (so a key can only read its own holder's
+data) is a **future** design item, not implemented today.
+
+### What this means for deployment
+
+Standalone-service mode (`cmd/ledgerd`) **must not** be exposed directly to
+the public internet. Required posture:
+
+- Run it inside a private network (VPC-only ingress) or behind a gateway
+  that performs its own authentication/authorization on reads (mTLS, an API
+  gateway, or a reverse proxy with its own auth layer) before traffic
+  reaches the ledger.
+- Treat `API_KEYS` as protecting **writes only** — it is not a substitute
+  for network-level access control on reads.
+- Library-mode consumption is unaffected: there is no HTTP surface, and your
+  own application owns the auth boundary.
+
+### If you find the port open to the public internet
+
+Treat it the same as any other exposed-data incident:
+
+1. Put it behind a private network / gateway immediately (see above).
+2. Check access logs (`requestLoggerMiddleware` output) for `GET` traffic
+   from unexpected sources during the exposure window.
+3. File a postmortem — this is a P1, not a shrug.
 
 ---
 

@@ -67,8 +67,9 @@ type Result[T any] struct {
 
 // ErrorBody is the unified error response envelope.
 type ErrorBody struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
 }
 
 // OK writes a 200 success response.
@@ -86,8 +87,9 @@ func Error(w http.ResponseWriter, err error) {
 	ae := resolveError(err)
 	slog.Error("api error", "code", ae.Code, "message", ae.Message, "err", err)
 	writeJSON(w, ae.HTTPStatus(), ErrorBody{
-		Code:    ae.Code,
-		Message: bizcode.DisplayMessage(ae.Code),
+		Code:      ae.Code,
+		Message:   bizcode.DisplayMessage(ae.Code),
+		Retryable: bizcode.Retryable(ae.Code),
 	})
 }
 

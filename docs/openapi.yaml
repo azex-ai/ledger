@@ -6,11 +6,14 @@ info:
     architecture: deposit / withdrawal / transfer are preset configurations
     of a generic Booking lifecycle, not hardcoded types.
 
+    `info.version` tracks the Go module's release tag (see CHANGELOG.md) —
+    bump both together, not independently.
+
     Companion docs:
       - `docs/api.md`         — long-form prose
       - `docs/INVARIANTS.md`  — what the ledger guarantees
       - `docs/RUNBOOK.md`     — incident response
-  version: "1.0.0"
+  version: "0.2.0"
   license:
     name: Apache-2.0
 servers:
@@ -41,6 +44,12 @@ tags:
     description: Classifications, journal types, templates, currencies.
   - name: Reconciliation
     description: Accounting-equation checks and snapshots.
+  - name: Audit
+    description: Read-only investigation — journals by account/time, booking trace, reversal chains.
+  - name: Platform
+    description: Real-time platform-wide balance breakdown and solvency check.
+  - name: Trends
+    description: Historical daily balance time-series.
 
 paths:
   /system/health:
@@ -588,6 +597,154 @@ paths:
       responses:
         "200": { description: Snapshots. }
 
+  /audit/journals:
+    get:
+      tags: [Audit]
+      summary: List journals by account dimension or by global time range.
+      description: |
+        Exactly one mode is selected by the params provided: pass `holder` +
+        `currency_id` (optionally narrowed by `classification_id` and/or
+        `from`/`to`) to list journals touching that account dimension; pass
+        `from`/`to` alone to scan a global time range instead. Providing
+        neither, or `holder` without `currency_id`, is a 400.
+      parameters:
+        - in: query
+          name: holder
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: currency_id
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: classification_id
+          schema: { type: integer, format: int64, description: '0 = all classifications.' }
+        - in: query
+          name: from
+          schema: { $ref: "#/components/schemas/Timestamp" }
+        - in: query
+          name: to
+          schema: { $ref: "#/components/schemas/Timestamp" }
+        - in: query
+          name: cursor
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Journals page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalListEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+  /audit/bookings/{id}/trace:
+    get:
+      tags: [Audit]
+      summary: Trace a booking end-to-end (booking + every event + every linked journal).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Booking trace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingTraceEnvelope" }
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /audit/journals/{id}/reversals:
+    get:
+      tags: [Audit]
+      summary: List the reversal chain for a journal (root journal + every journal that transitively reverses it).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Reversal chain, oldest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalListEnvelope" }
+
+  /platform/balances:
+    get:
+      tags: [Platform]
+      summary: Real-time per-classification balance breakdown for a currency.
+      description: |
+        Computed as `checkpoint.balance + delta`, so it reflects every
+        committed journal immediately without waiting for the rollup worker.
+      parameters:
+        - in: query
+          name: currency_id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Platform balance breakdown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlatformBalanceEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+  /platform/solvency:
+    get:
+      tags: [Platform]
+      summary: Compare total user-side liability against custodial system balance for a currency.
+      parameters:
+        - in: query
+          name: currency_id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Solvency report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SolvencyEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+
+  /balances/trends:
+    get:
+      tags: [Trends]
+      summary: Historical daily balance series for an account dimension.
+      description: |
+        One point per calendar day in `[from, to]`. Days without journal
+        activity are forward-filled from the previous known balance;
+        today's point is always the live checkpoint+delta value.
+      parameters:
+        - in: query
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: currency_id
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: classification_id
+          schema: { type: integer, format: int64, description: '0 (default) = sum across all classifications.' }
+        - in: query
+          name: from
+          required: true
+          schema: { $ref: "#/components/schemas/Timestamp" }
+        - in: query
+          name: to
+          required: true
+          schema: { $ref: "#/components/schemas/Timestamp" }
+      responses:
+        "200":
+          description: Balance trend points, ascending by date.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BalanceTrendListEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -631,6 +788,12 @@ components:
           properties:
             code: { type: integer, example: 14001 }
             message: { type: string, example: "Insufficient balance for this operation" }
+            retryable:
+              type: boolean
+              description: |
+                Whether the client may safely retry using the SAME
+                idempotency_key. See docs/api.md "Error handling contract".
+              example: false
 
     EntryType:
       type: string
@@ -963,3 +1126,70 @@ components:
               actual:   { $ref: "#/components/schemas/Decimal" }
               drift:    { $ref: "#/components/schemas/Decimal" }
         checked_at: { $ref: "#/components/schemas/Timestamp" }
+
+    BookingTrace:
+      type: object
+      properties:
+        booking: { $ref: "#/components/schemas/Booking" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+        journals:
+          type: array
+          items: { $ref: "#/components/schemas/Journal" }
+    BookingTraceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/BookingTrace" }
+
+    PlatformBalance:
+      type: object
+      properties:
+        currency_id: { type: integer, format: int64 }
+        user_side:
+          type: object
+          description: classification code → total (holder > 0).
+          additionalProperties: { $ref: "#/components/schemas/Decimal" }
+        system_side:
+          type: object
+          description: classification code → total (holder < 0).
+          additionalProperties: { $ref: "#/components/schemas/Decimal" }
+    PlatformBalanceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/PlatformBalance" }
+
+    SolvencyReport:
+      type: object
+      properties:
+        currency_id: { type: integer, format: int64 }
+        liability: { $ref: "#/components/schemas/Decimal" }
+        custodial: { $ref: "#/components/schemas/Decimal" }
+        solvent: { type: boolean }
+        margin: { $ref: "#/components/schemas/Decimal", description: 'custodial - liability; negative = under-collateralised.' }
+    SolvencyEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/SolvencyReport" }
+
+    BalanceTrendPoint:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        balance: { $ref: "#/components/schemas/Decimal" }
+        inflow: { $ref: "#/components/schemas/Decimal" }
+        outflow: { $ref: "#/components/schemas/Decimal" }
+    BalanceTrendListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { $ref: "#/components/schemas/BalanceTrendPoint" }
