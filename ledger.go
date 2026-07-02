@@ -70,6 +70,7 @@ type Service struct {
 	pendingStore         *postgres.PendingStore
 	platformBalanceStore *postgres.PlatformBalanceStore
 	reconcileAdapter     *postgres.ReconcileAdapter
+	accountPolicyStore   *postgres.AccountPolicyStore
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
@@ -130,6 +131,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 	s.reconcileAdapter = postgres.NewReconcileAdapter(pool)
+	s.accountPolicyStore = postgres.NewAccountPolicyStore(pool)
 
 	return s, nil
 }
@@ -290,6 +292,9 @@ func (s *Service) BalanceTrends() core.BalanceTrendReader { return s.balanceTren
 // Audit returns the read-only audit query interface.
 func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
 
+// AccountPolicies manages per-account freeze/close + balance-floor overrides.
+func (s *Service) AccountPolicies() core.AccountPolicyStore { return s.accountPolicyStore }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -316,6 +321,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
 		reconcileAdapter:     s.reconcileAdapter,     // read-only, pool-backed is fine
+		accountPolicyStore:   s.accountPolicyStore.WithDB(tx),
 		channels:             s.channels,             // shared snapshot; no mutations inside tx
 	}
 }

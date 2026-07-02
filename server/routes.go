@@ -60,6 +60,10 @@ func (s *Server) setupRoutes() {
 		r.Post("/templates/{code}/preview", s.handlePreviewTemplate)
 		r.Get("/templates", s.handleListTemplates)
 
+		// Accounts (policy: freeze/close + balance-floor overrides)
+		r.Put("/accounts/{holder}/policy", s.handleSetAccountPolicy)
+		r.Get("/accounts/{holder}/policies", s.handleListAccountPolicies)
+
 		// Metadata — Currencies
 		r.Post("/currencies", s.handleCreateCurrency)
 		r.Post("/currencies/{id}/deactivate", s.handleDeactivateCurrency)

@@ -79,6 +79,8 @@ var (
 	UnbalancedJournal   = New(14003, "journal debit/credit not balanced")
 	InvalidTransition   = New(14004, "invalid state transition")
 	ReservationExpired  = New(14005, "reservation expired")
+	AccountFrozen       = New(14006, "account frozen")
+	AccountClosed       = New(14007, "account closed")
 )
 
 // --- Display messages ---
@@ -97,6 +99,8 @@ var displayMessages = map[int]string{
 	14003: "Journal entries are not balanced",
 	14004: "Invalid state transition",
 	14005: "Reservation has expired",
+	14006: "This account is frozen",
+	14007: "This account is closed",
 	19999: "An unexpected error occurred",
 }
 

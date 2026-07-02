@@ -279,6 +279,29 @@ func (m *mockCurrencyStore) GetCurrency(ctx context.Context, id int64) (*core.Cu
 	return &core.Currency{ID: id, Code: "USDT", Name: "Tether"}, nil
 }
 
+type mockAccountPolicyStore struct{}
+
+func (m *mockAccountPolicyStore) SetPolicy(ctx context.Context, input core.AccountPolicyInput) (*core.AccountPolicy, error) {
+	return &core.AccountPolicy{
+		ID:                1,
+		AccountHolder:     input.AccountHolder,
+		CurrencyID:        input.CurrencyID,
+		ClassificationID:  input.ClassificationID,
+		Status:            input.Status,
+		MinBalance:        input.MinBalance,
+		EnforceMinBalance: input.EnforceMinBalance,
+		Note:              input.Note,
+	}, nil
+}
+
+func (m *mockAccountPolicyStore) GetPolicy(ctx context.Context, holder, currencyID, classificationID int64) (*core.AccountPolicy, error) {
+	return &core.AccountPolicy{ID: 1, AccountHolder: holder, CurrencyID: currencyID, ClassificationID: classificationID, Status: core.AccountPolicyStatusActive}, nil
+}
+
+func (m *mockAccountPolicyStore) ListPolicies(ctx context.Context, holder int64) ([]core.AccountPolicy, error) {
+	return []core.AccountPolicy{{ID: 1, AccountHolder: holder, Status: core.AccountPolicyStatusActive}}, nil
+}
+
 type mockReconciler struct{}
 
 func (m *mockReconciler) CheckAccountingEquation(ctx context.Context) (*core.ReconcileResult, error) {
@@ -477,6 +500,7 @@ func newTestServer() *server.Server {
 		&mockSolvencyChecker{},
 		&mockBalanceTrendReader{},
 		&mockFullReconciler{},
+		&mockAccountPolicyStore{},
 	)
 }
 
@@ -501,6 +525,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		platformBalances: &mockPlatformBalanceReader{},
 		solvency:         &mockSolvencyChecker{},
 		balanceTrends:    &mockBalanceTrendReader{},
+		accountPolicies:  &mockAccountPolicyStore{},
 	}
 	for _, fn := range opts {
 		fn(o)
@@ -512,7 +537,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		o.channels,
 		o.reconciler, o.snapshotter, nil, o.queries,
 		o.audit, o.platformBalances, o.solvency, o.balanceTrends,
-		o.fullReconciler,
+		o.fullReconciler, o.accountPolicies,
 	)
 }
 
@@ -536,6 +561,7 @@ type testServerOpts struct {
 	platformBalances core.PlatformBalanceReader
 	solvency         core.SolvencyChecker
 	balanceTrends    core.BalanceTrendReader
+	accountPolicies  core.AccountPolicyStore
 }
 
 func doRequest(srv http.Handler, method, path string, body any) *httptest.ResponseRecorder {
