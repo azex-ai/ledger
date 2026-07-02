@@ -11,4 +11,5 @@ var (
 	ErrUnbalancedJournal   = errors.New("unbalanced journal")
 	ErrInvalidTransition   = errors.New("invalid state transition")
 	ErrConflict            = errors.New("conflict")
+	ErrPrecisionExceeded   = errors.New("amount exceeds currency precision")
 )

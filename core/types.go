@@ -144,11 +144,18 @@ func IsSystemAccount(holder int64) bool {
 }
 
 // Currency represents a tradeable currency.
+//
+// Exponent is the maximum number of decimal places an entry amount in this
+// currency may carry (JPY=0, USD=2, USDT=6, wei=18). It bounds business
+// precision; NUMERIC(30,18) in Postgres is only storage precision. Write
+// paths reject (never round) amounts that exceed it — see
+// core.ErrPrecisionExceeded.
 type Currency struct {
 	ID       int64  `json:"id"`
 	Code     string `json:"code"`
 	Name     string `json:"name"`
 	IsActive bool   `json:"is_active"`
+	Exponent int32  `json:"exponent"`
 }
 
 // Classification represents a dynamic account classification.

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -171,4 +172,22 @@ type CurrencyStore interface {
 type CurrencyInput struct {
 	Code string
 	Name string
+	// Exponent is the maximum number of decimal places entries in this
+	// currency may carry. Required — zero is a legitimate value (e.g. JPY),
+	// not a "use the default" sentinel, so callers must state it explicitly.
+	// Must be in [0, 18].
+	Exponent int32
+}
+
+func (i CurrencyInput) Validate() error {
+	if i.Code == "" {
+		return fmt.Errorf("core: currency: code required: %w", ErrInvalidInput)
+	}
+	if i.Name == "" {
+		return fmt.Errorf("core: currency: name required: %w", ErrInvalidInput)
+	}
+	if i.Exponent < 0 || i.Exponent > 18 {
+		return fmt.Errorf("core: currency: exponent must be between 0 and 18, got %d: %w", i.Exponent, ErrInvalidInput)
+	}
+	return nil
 }
