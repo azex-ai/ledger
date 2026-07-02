@@ -241,6 +241,27 @@ SELECT id, url, last_status_code, last_error FROM webhook_subscribers;
 - If a subscriber's HMAC secret rotated and signatures fail, update the
   secret column and reset attempts.
 
+### Delivery semantics (read before building a consumer)
+
+Webhook delivery is **at-least-once**, not exactly-once and not ordered:
+
+- **At-least-once**: a failed attempt is retried with exponential backoff
+  (`retryDelay`: 1m, 5m, 30m, 2h, 24h) until `MaxAttempts` is exhausted, after
+  which the event is parked (`delivery_status = 'dead'`). A subscriber may
+  therefore receive the same event more than once — e.g. the HTTP POST
+  succeeded but the response was lost before the deliverer recorded it.
+- **Retries can arrive out of order**: because failed events are retried on a
+  backoff schedule while newer events for the same booking keep being
+  delivered on the normal cadence, a *retried* older event can reach a
+  subscriber's endpoint *after* a newer event for the same booking has
+  already been delivered. Consumers must not assume "later HTTP request" means
+  "later ledger event."
+- **Consumer requirements**: dedupe on the `X-Ledger-Event-ID` header (each
+  event has a stable, unique ID) and treat delivery as idempotent — reprocessing
+  the same event ID must be a no-op. Do not infer booking state purely from
+  the order requests arrive in; if ordering matters, compare event
+  timestamps/IDs from the payload itself, not arrival order.
+
 ---
 
 ## 6. Idempotency collision spike
