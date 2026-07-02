@@ -2,7 +2,7 @@
 # ---- Builder ----
 # Build on the host arch (faster, no QEMU), cross-compile to the target arch.
 # Works with `docker buildx build --platform linux/amd64,linux/arm64`.
-FROM --platform=$BUILDPLATFORM golang:1.26.1-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -14,8 +14,11 @@ RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /src
 
-# Cache module downloads on dependency-only layer
+# Cache module downloads on dependency-only layer. The main module require+replace
+# a test-only submodule (./internal/postgrestest, used only by *_test.go); its
+# go.mod must be present for `go mod download` to resolve the local replace.
 COPY go.mod go.sum ./
+COPY internal/postgrestest/go.mod ./internal/postgrestest/go.mod
 RUN go mod download
 
 COPY . .

@@ -423,10 +423,6 @@ type pendingClassIDs struct {
 // resolveClassificationIDs loads all four required classification IDs.
 // Results are cached on the store after first resolution.
 func (s *PendingStore) resolveClassificationIDs(ctx context.Context) (pendingClassIDs, error) {
-	if s.pendingClassID != 0 && s.suspenseClassID != 0 {
-		// fast path: already resolved main + pending; resolve all four inline
-	}
-
 	resolve := func(code string) (int64, error) {
 		cls, err := s.classStore.GetByCode(ctx, code)
 		if err != nil {
