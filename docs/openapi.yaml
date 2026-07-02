@@ -565,6 +565,24 @@ paths:
       responses:
         "200":
           description: Reconciliation result.
+  /reconcile/full:
+    post:
+      tags: [Reconciliation]
+      summary: Run the complete 10-check reconciliation suite on-demand.
+      description: |
+        Heavier, fleet-wide counterpart to `/reconcile` — also verifies
+        checkpoint-vs-entries consistency (fleet-scanned, capped by a
+        configurable scan limit/timeout and reported as partial if capped),
+        orphan entries/reservations, the accounting equation, settlement
+        netting, non-negative balances, idempotency-key uniqueness, and stale
+        rollup queue items. Runs on the same schedule in the background
+        worker; this endpoint triggers an out-of-band run.
+      responses:
+        "200":
+          description: Full reconciliation report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconcileReport" }
 
   /snapshots:
     get:
@@ -963,3 +981,24 @@ components:
               actual:   { $ref: "#/components/schemas/Decimal" }
               drift:    { $ref: "#/components/schemas/Decimal" }
         checked_at: { $ref: "#/components/schemas/Timestamp" }
+
+    ReconcileReport:
+      type: object
+      properties:
+        overall_passed: { type: boolean }
+        run_at: { $ref: "#/components/schemas/Timestamp" }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation" }
+              passed: { type: boolean }
+              checked_at: { $ref: "#/components/schemas/Timestamp" }
+              findings:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    description: { type: string }
+                    detail: { type: string }

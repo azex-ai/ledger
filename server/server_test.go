@@ -289,6 +289,21 @@ func (m *mockReconciler) ReconcileAccount(ctx context.Context, holder int64, cur
 	return &core.ReconcileResult{Balanced: true, Gap: decimal.Zero, CheckedAt: time.Now()}, nil
 }
 
+type mockFullReconciler struct {
+	report *core.ReconcileReport
+	err    error
+}
+
+func (m *mockFullReconciler) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.report != nil {
+		return m.report, nil
+	}
+	return &core.ReconcileReport{OverallPassed: true, RunAt: time.Now()}, nil
+}
+
 type mockSnapshotter struct{}
 
 func (m *mockSnapshotter) CreateDailySnapshot(ctx context.Context, date time.Time) error { return nil }
@@ -360,6 +375,7 @@ func newTestServer() *server.Server {
 		&mockSnapshotter{},
 		(*service.SystemRollupService)(nil), // not used directly
 		&mockQueryProvider{},
+		&mockFullReconciler{},
 	)
 }
 
@@ -377,6 +393,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		templates:       &mockTemplateStore{},
 		currencies:      &mockCurrencyStore{},
 		reconciler:      &mockReconciler{},
+		fullReconciler:  &mockFullReconciler{},
 		snapshotter:     &mockSnapshotter{},
 		queries:         &mockQueryProvider{},
 	}
@@ -389,6 +406,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		o.classifications, o.journalTypes, o.templates, o.currencies,
 		o.channels,
 		o.reconciler, o.snapshotter, nil, o.queries,
+		o.fullReconciler,
 	)
 }
 
@@ -405,6 +423,7 @@ type testServerOpts struct {
 	currencies      core.CurrencyStore
 	channels        map[string]channel.Adapter
 	reconciler      core.Reconciler
+	fullReconciler  core.FullReconciler
 	snapshotter     core.Snapshotter
 	queries         core.QueryProvider
 }
@@ -881,6 +900,26 @@ func TestReconcileAccount(t *testing.T) {
 	body := map[string]any{"holder": 100, "currency_id": 1}
 	w := doRequest(srv, http.MethodPost, "/api/v1/reconcile/account", body)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestReconcileFull(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodPost, "/api/v1/reconcile/full", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Data core.ReconcileReport `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.True(t, resp.Data.OverallPassed)
+}
+
+func TestReconcileFull_PropagatesError(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.fullReconciler = &mockFullReconciler{err: assert.AnError}
+	})
+	w := doRequest(srv, http.MethodPost, "/api/v1/reconcile/full", nil)
+	assert.NotEqual(t, http.StatusOK, w.Code)
 }
 
 func TestSystemBalances(t *testing.T) {

@@ -103,14 +103,28 @@ func run() error {
 
 	// Build worker via facade — claim leases are configured from the config.
 	workerCfg := service.DefaultWorkerConfig()
+	if v := os.Getenv("FULL_RECONCILE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid FULL_RECONCILE_INTERVAL %q: %w", v, err)
+		}
+		workerCfg.FullReconcileInterval = d
+	}
 	worker := svc.Worker(workerCfg)
+
+	// Full 10-check reconciliation suite: built once here (service mode) and
+	// wired into both the background worker (periodic) and the HTTP server
+	// (on-demand via POST /reconcile/full). Library-mode consumers build their
+	// own via svc.FullReconciler and are unaffected.
+	fullReconciler := svc.FullReconciler(service.FullReconciliationConfig{})
+	worker.SetFullReconciler(fullReconciler)
 
 	// Set up webhook delivery (service mode).
 	// EventStore and WebhookSubscriberStore are still allocated directly because
 	// the webhook deliverer needs store-level access not exposed through core interfaces.
 	eventStore := postgres.NewEventStore(pool)
 	webhookSubscriberStore := postgres.NewWebhookSubscriberStore(pool)
-	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, webhookSubscriberStore, coreLogger)
+	webhookDeliverer := delivery.NewWebhookDeliverer(eventStore, webhookSubscriberStore, coreLogger, promMetrics)
 	worker.SetEventDeliverer(webhookDeliverer)
 
 	// Register channel adapters via facade.
@@ -146,6 +160,7 @@ func run() error {
 		snapshotSvc,
 		systemRollupSvc,
 		svc.Queries(),
+		fullReconciler,
 	)
 	srv.SetMetricsHandler(promMetrics.Handler())
 

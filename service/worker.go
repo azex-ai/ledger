@@ -24,6 +24,11 @@ type WorkerConfig struct {
 	EventDeliveryInterval  time.Duration // default: 5s
 	EventDeliveryBatchSize int           // default: 100
 	EventClaimLease        time.Duration // default: 2m
+	// FullReconcileInterval controls how often the full 10-check
+	// reconciliation suite runs. Only takes effect when a FullReconciler has
+	// been registered via SetFullReconciler — nil by default (skip job),
+	// mirroring the EventDeliverer pattern. default: 1h
+	FullReconcileInterval time.Duration
 }
 
 // DefaultWorkerConfig returns the default WorkerConfig.
@@ -40,6 +45,7 @@ func DefaultWorkerConfig() WorkerConfig {
 		EventDeliveryInterval:  5 * time.Second,
 		EventDeliveryBatchSize: 100,
 		EventClaimLease:        2 * time.Minute,
+		FullReconcileInterval:  time.Hour,
 	}
 }
 
@@ -51,16 +57,17 @@ type EventBatchProcessor interface {
 
 // Worker runs background jobs on configurable intervals.
 type Worker struct {
-	rollup                 *RollupService
-	expiration             *ExpirationService
-	reconcile              *ReconciliationService
-	snapshot               *SnapshotService
-	systemRollup           *SystemRollupService
-	eventDeliverer         EventBatchProcessor // nil = skip webhook delivery (library mode)
-	localDeliverer         *delivery.LocalDispatcher
-	pool                   *pgxpool.Pool // nil = no advisory locks (single-replica mode)
-	config                 WorkerConfig
-	logger                 core.Logger
+	rollup         *RollupService
+	expiration     *ExpirationService
+	reconcile      *ReconciliationService
+	snapshot       *SnapshotService
+	systemRollup   *SystemRollupService
+	eventDeliverer EventBatchProcessor // nil = skip webhook delivery (library mode)
+	localDeliverer *delivery.LocalDispatcher
+	fullReconcile  core.FullReconciler // nil = skip the full 10-check suite job
+	pool           *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
+	config         WorkerConfig
+	logger         core.Logger
 }
 
 // NewWorker creates a new Worker.
@@ -88,6 +95,16 @@ func NewWorker(
 // If not set, event delivery is skipped (library mode uses sync callbacks instead).
 func (w *Worker) SetEventDeliverer(d EventBatchProcessor) {
 	w.eventDeliverer = d
+}
+
+// SetFullReconciler registers a core.FullReconciler to run the complete
+// 10-check reconciliation suite on FullReconcileInterval. If not set, the job
+// is skipped entirely — the lightweight CheckAccountingEquation job (see
+// ReconcileInterval) still runs regardless. Typically built via
+// (*ledger.Service).FullReconciler and wired in by the service-mode entry
+// point (cmd/ledgerd), mirroring SetEventDeliverer.
+func (w *Worker) SetFullReconciler(fr core.FullReconciler) {
+	w.fullReconcile = fr
 }
 
 // SetPool attaches a *pgxpool.Pool used for pg_try_advisory_lock-based leader
@@ -179,6 +196,19 @@ func (w *Worker) Run(ctx context.Context) error {
 			sysRollupJob.Run(ctx)
 		})
 	})
+
+	if w.fullReconcile != nil {
+		// Advisory-locked so only one replica runs the fleet-wide scan per tick.
+		fullReconcileJob := NewLockedJob("full_reconcile", func(ctx context.Context) error {
+			_, err := w.fullReconcile.RunFullReconciliation(ctx)
+			return err
+		}, w.pool, w.logger)
+		g.Go(func() error {
+			return w.runLoop(ctx, "full_reconcile", w.config.FullReconcileInterval, func(ctx context.Context) {
+				fullReconcileJob.Run(ctx)
+			})
+		})
+	}
 
 	if w.eventDeliverer != nil {
 		g.Go(func() error {

@@ -34,9 +34,10 @@ type Server struct {
 	channels        map[string]channel.Adapter // channel name → adapter
 
 	// Services (injected)
-	reconciler   core.Reconciler
-	snapshotter  core.Snapshotter
-	systemRollup *service.SystemRollupService
+	reconciler     core.Reconciler
+	fullReconciler core.FullReconciler
+	snapshotter    core.Snapshotter
+	systemRollup   *service.SystemRollupService
 
 	// Query helpers (direct sqlcgen access for list queries)
 	queries core.QueryProvider
@@ -114,6 +115,7 @@ func New(
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
+	fullReconciler core.FullReconciler,
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -125,7 +127,7 @@ func New(
 	}
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
-		reconciler, snapshotter, systemRollup, queries)
+		reconciler, snapshotter, systemRollup, queries, fullReconciler)
 }
 
 // NewWithConfig creates a Server using an explicit config, skipping env-var loading.
@@ -146,6 +148,7 @@ func NewWithConfig(
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
+	fullReconciler core.FullReconciler,
 ) *Server {
 	s := &Server{
 		journals:        journals,
@@ -160,6 +163,7 @@ func NewWithConfig(
 		currencies:      currencies,
 		channels:        channels,
 		reconciler:      reconciler,
+		fullReconciler:  fullReconciler,
 		snapshotter:     snapshotter,
 		systemRollup:    systemRollup,
 		queries:         queries,
