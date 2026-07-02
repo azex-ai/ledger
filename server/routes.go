@@ -14,6 +14,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/journals/template", s.handlePostTemplate)
 		r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
 		r.Post("/journals/{id}/reverse", s.handleReverseJournal)
+		r.Post("/journals/{id}/reverse-partial", s.handleReverseJournalFraction)
 		r.Get("/journals/{id}", s.handleGetJournal)
 		r.Get("/journals", s.handleListJournals)
 
@@ -28,6 +29,8 @@ func (s *Server) setupRoutes() {
 		// Reservations
 		r.Post("/reservations", s.handleCreateReservation)
 		r.Post("/reservations/{id}/settle", s.handleSettleReservation)
+		r.Post("/reservations/{id}/settle-partial", s.handleSettlePartialReservation)
+		r.Post("/reservations/{id}/finalize", s.handleFinalizeReservationSettlement)
 		r.Post("/reservations/{id}/release", s.handleReleaseReservation)
 		r.Get("/reservations", s.handleListReservations)
 

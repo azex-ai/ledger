@@ -23,9 +23,10 @@ import (
 // --- Mock implementations ---
 
 type mockJournalWriter struct {
-	postFn     func(ctx context.Context, input core.JournalInput) (*core.Journal, error)
-	templateFn func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error)
-	reverseFn  func(ctx context.Context, journalID int64, reason string) (*core.Journal, error)
+	postFn        func(ctx context.Context, input core.JournalInput) (*core.Journal, error)
+	templateFn    func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error)
+	reverseFn     func(ctx context.Context, journalID int64, reason string) (*core.Journal, error)
+	reverseFracFn func(ctx context.Context, journalID, num, den int64, reason, idempotencyKey string) (*core.Journal, error)
 }
 
 func (m *mockJournalWriter) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
@@ -47,6 +48,13 @@ func (m *mockJournalWriter) ReverseJournal(ctx context.Context, journalID int64,
 		return m.reverseFn(ctx, journalID, reason)
 	}
 	return &core.Journal{ID: 3, JournalTypeID: 1, IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason), ReversalOf: journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+}
+
+func (m *mockJournalWriter) ReverseJournalFraction(ctx context.Context, journalID, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
+	if m.reverseFracFn != nil {
+		return m.reverseFracFn(ctx, journalID, num, den, reason, idempotencyKey)
+	}
+	return &core.Journal{ID: 4, JournalTypeID: 1, IdempotencyKey: idempotencyKey, ReversalOf: journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
 type mockBalanceReader struct{}
@@ -73,10 +81,12 @@ func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []in
 }
 
 type mockReserver struct {
-	reserveFn    func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error)
-	settleFn     func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
-	releaseFn    func(ctx context.Context, reservationID int64) error
-	heldAmountFn func(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
+	reserveFn            func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error)
+	settleFn             func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
+	releaseFn            func(ctx context.Context, reservationID int64) error
+	heldAmountFn         func(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
+	settlePartialFn      func(ctx context.Context, reservationID int64, amount decimal.Decimal) error
+	finalizeSettlementFn func(ctx context.Context, reservationID int64) error
 }
 
 func (m *mockReserver) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
@@ -105,6 +115,20 @@ func (m *mockReserver) HeldAmount(ctx context.Context, holder, currencyID int64)
 		return m.heldAmountFn(ctx, holder, currencyID)
 	}
 	return decimal.Zero, nil
+}
+
+func (m *mockReserver) SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error {
+	if m.settlePartialFn != nil {
+		return m.settlePartialFn(ctx, reservationID, amount)
+	}
+	return nil
+}
+
+func (m *mockReserver) FinalizeSettlement(ctx context.Context, reservationID int64) error {
+	if m.finalizeSettlementFn != nil {
+		return m.finalizeSettlementFn(ctx, reservationID)
+	}
+	return nil
 }
 
 type mockBooker struct {

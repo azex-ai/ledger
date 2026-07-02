@@ -24,6 +24,10 @@ type settleReservationRequest struct {
 	ActualAmount string `json:"actual_amount"`
 }
 
+type settlePartialReservationRequest struct {
+	Amount string `json:"amount"`
+}
+
 type reservationResponse struct {
 	ID             int64     `json:"id"`
 	AccountHolder  int64     `json:"account_holder"`
@@ -109,6 +113,46 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := s.reserver.Settle(r.Context(), id, amount); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.OK(w, map[string]string{"status": "settled"})
+}
+
+func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+		return
+	}
+
+	req, err := httpx.Decode[settlePartialReservationRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+
+	amount, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
+		return
+	}
+
+	if err := s.reserver.SettlePartial(r.Context(), id, amount); err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.OK(w, map[string]string{"status": "settling"})
+}
+
+func (s *Server) handleFinalizeReservationSettlement(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+		return
+	}
+
+	if err := s.reserver.FinalizeSettlement(r.Context(), id); err != nil {
 		httpx.Error(w, err)
 		return
 	}
