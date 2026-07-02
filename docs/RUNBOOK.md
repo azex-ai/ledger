@@ -231,7 +231,7 @@ parked.
 
 ```bash
 # Inspect the subscribers
-SELECT id, url, last_status_code, last_error FROM webhook_subscribers;
+SELECT id, url, last_status_code, last_error, last_attempt_at FROM webhook_subscribers;
 ```
 
 ### Resolution

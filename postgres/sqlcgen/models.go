@@ -210,6 +210,9 @@ type WebhookSubscriber struct {
 	FilterToStatus string    `json:"filter_to_status"`
 	IsActive       bool      `json:"is_active"`
 	CreatedAt      time.Time `json:"created_at"`
+	LastStatusCode int32     `json:"last_status_code"`
+	LastError      string    `json:"last_error"`
+	LastAttemptAt  time.Time `json:"last_attempt_at"`
 }
 
 type Withdrawal struct {

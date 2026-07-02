@@ -44,3 +44,18 @@ func (s *WebhookSubscriberStore) ListActiveSubscribers(ctx context.Context) ([]d
 	}
 	return subs, nil
 }
+
+// RecordDeliveryStatus records the outcome of the most recent delivery
+// attempt to a subscriber. statusCode is 0 when the request never received
+// an HTTP response (e.g. connection refused, timeout). errMsg is empty on
+// success.
+func (s *WebhookSubscriberStore) RecordDeliveryStatus(ctx context.Context, subscriberID int64, statusCode int, errMsg string) error {
+	if err := s.q.UpdateWebhookSubscriberDeliveryStatus(ctx, sqlcgen.UpdateWebhookSubscriberDeliveryStatusParams{
+		ID:             subscriberID,
+		LastStatusCode: int32(statusCode),
+		LastError:      errMsg,
+	}); err != nil {
+		return fmt.Errorf("postgres: record webhook delivery status: %w", err)
+	}
+	return nil
+}
