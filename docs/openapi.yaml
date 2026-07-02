@@ -529,10 +529,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [code, name]
+              required: [code, name, exponent]
               properties:
                 code: { type: string }
                 name: { type: string }
+                exponent:
+                  type: integer
+                  minimum: 0
+                  maximum: 18
+                  description: >
+                    Max decimal places entries in this currency may carry
+                    (JPY=0, USD=2, USDT=6, wei=18). Required — 0 is a legal
+                    value, so it cannot be defaulted.
       responses:
         "201": { description: Created. }
   /currencies/{id}/deactivate:

@@ -991,12 +991,30 @@ func TestTemplatePreview(t *testing.T) {
 func TestCurrencyCRUD(t *testing.T) {
 	srv := newTestServer()
 
-	body := map[string]any{"code": "USDC", "name": "USD Coin"}
+	body := map[string]any{"code": "USDC", "name": "USD Coin", "exponent": 6}
 	w := doRequest(srv, http.MethodPost, "/api/v1/currencies", body)
 	assert.Equal(t, http.StatusCreated, w.Code)
 
 	w = doRequest(srv, http.MethodGet, "/api/v1/currencies", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestCreateCurrency_MissingExponentRejected(t *testing.T) {
+	srv := newTestServer()
+
+	// exponent=0 is legal (JPY), so an omitted field must be a 400 — not
+	// silently decoded to 0 and accepted as a zero-decimal currency.
+	body := map[string]any{"code": "USDC", "name": "USD Coin"}
+	w := doRequest(srv, http.MethodPost, "/api/v1/currencies", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestCreateCurrency_ExplicitZeroExponentAccepted(t *testing.T) {
+	srv := newTestServer()
+
+	body := map[string]any{"code": "JPY", "name": "Japanese Yen", "exponent": 0}
+	w := doRequest(srv, http.MethodPost, "/api/v1/currencies", body)
+	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
 func TestReconcileGlobal(t *testing.T) {

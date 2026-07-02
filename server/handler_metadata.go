@@ -135,8 +135,11 @@ type createCurrencyRequest struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
 	// Exponent is the maximum number of decimal places entries in this
-	// currency may carry (JPY=0, USD=2, USDT=6, wei=18). Required.
-	Exponent int32 `json:"exponent"`
+	// currency may carry (JPY=0, USD=2, USDT=6, wei=18). Required. A pointer
+	// so that an omitted field is distinguishable from an explicit 0 — 0 is a
+	// legal exponent (JPY), so silently defaulting a missing field to it
+	// would create a wrong-precision currency without any error.
+	Exponent *int32 `json:"exponent"`
 }
 
 type currencyResponse struct {
@@ -406,7 +409,11 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.ErrBadRequest("code and name required"))
 		return
 	}
-	if req.Exponent < 0 || req.Exponent > 18 {
+	if req.Exponent == nil {
+		httpx.Error(w, httpx.ErrBadRequest("exponent required (0-18; e.g. JPY=0, USD=2, wei=18)"))
+		return
+	}
+	if *req.Exponent < 0 || *req.Exponent > 18 {
 		httpx.Error(w, httpx.ErrBadRequest("exponent must be between 0 and 18"))
 		return
 	}
@@ -414,7 +421,7 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 	c, err := s.currencies.CreateCurrency(r.Context(), core.CurrencyInput{
 		Code:     req.Code,
 		Name:     req.Name,
-		Exponent: req.Exponent,
+		Exponent: *req.Exponent,
 	})
 	if err != nil {
 		httpx.Error(w, err)
