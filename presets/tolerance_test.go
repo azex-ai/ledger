@@ -165,6 +165,10 @@ func (f *fakeToleranceJournalWriter) ReverseJournal(context.Context, int64, stri
 	return nil, nil
 }
 
+func (f *fakeToleranceJournalWriter) ReverseJournalFraction(context.Context, int64, int64, int64, string, string) (*core.Journal, error) {
+	return nil, nil
+}
+
 type fakeBatchToleranceJournalWriter struct {
 	requests    []core.TemplateExecutionRequest
 	singleCalls []fakeToleranceJournalCall
@@ -196,5 +200,9 @@ func (f *fakeBatchToleranceJournalWriter) PostJournal(context.Context, core.Jour
 }
 
 func (f *fakeBatchToleranceJournalWriter) ReverseJournal(context.Context, int64, string) (*core.Journal, error) {
+	return nil, nil
+}
+
+func (f *fakeBatchToleranceJournalWriter) ReverseJournalFraction(context.Context, int64, int64, int64, string, string) (*core.Journal, error) {
 	return nil, nil
 }

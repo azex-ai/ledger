@@ -402,6 +402,52 @@ paths:
               schema:
                 $ref: '#/components/schemas/StatusEnvelope'
         '422': { $ref: '#/components/responses/Unprocessable' }
+  /reservations/{id}/settle-partial:
+    post:
+      tags: [reservations]
+      summary: Settle part of a reservation (accumulates; active → settling)
+      description: >-
+        The unsettled remainder stays held against the balance until
+        /reservations/{id}/finalize.
+      operationId: settlePartialReservation
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: string, description: Decimal as string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusEnvelope'
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /reservations/{id}/finalize:
+    post:
+      tags: [reservations]
+      summary: Finish a partially-settled reservation (settling → settled)
+      operationId: finalizeReservationSettlement
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusEnvelope'
+        '422': { $ref: '#/components/responses/Unprocessable' }
   /reservations/{id}/release:
     post:
       tags: [reservations]

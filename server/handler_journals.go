@@ -48,6 +48,13 @@ type reverseJournalRequest struct {
 	Reason string `json:"reason"`
 }
 
+type reverseJournalFractionRequest struct {
+	Num            int64  `json:"num"`
+	Den            int64  `json:"den"`
+	Reason         string `json:"reason"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
 type postDepositToleranceRequest struct {
 	HolderID       int64             `json:"holder_id"`
 	CurrencyID     int64             `json:"currency_id"`
@@ -281,6 +288,35 @@ func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	journal, err := s.journals.ReverseJournal(r.Context(), id, req.Reason)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.Created(w, toJournalResponse(journal))
+}
+
+func (s *Server) handleReverseJournalFraction(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDParam(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
+		return
+	}
+
+	req, err := httpx.Decode[reverseJournalFractionRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if req.Reason == "" {
+		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
+		return
+	}
+	if req.IdempotencyKey == "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		return
+	}
+
+	journal, err := s.journals.ReverseJournalFraction(r.Context(), id, req.Num, req.Den, req.Reason, req.IdempotencyKey)
 	if err != nil {
 		httpx.Error(w, err)
 		return

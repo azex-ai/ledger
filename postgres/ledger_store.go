@@ -248,7 +248,10 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 	return journals, nil
 }
 
-// ReverseJournal creates a reversal journal for the given journal ID.
+// ReverseJournal creates a full reversal journal for the given journal ID.
+// It rejects (ErrConflict) if journalID already has any reversal recorded
+// against it, full or partial — see ReverseJournalFraction for posting
+// additional partial reversals against a journal that already has history.
 func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
 	original, err := s.q.GetJournal(ctx, journalID)
 	if err != nil {
@@ -262,17 +265,25 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 	}
 
 	expectedKey := fmt.Sprintf("reversal:%d:%s", journalID, reason)
-	existingReversal, err := s.q.GetReversalByOriginalJournalID(ctx, int64ToInt8(&journalID))
-	if err == nil {
-		// Same (journalID, reason) → idempotent retry, return the original reversal.
-		// Different reason → genuine conflict (a reversal already exists for this journal).
-		if existingReversal.IdempotencyKey == expectedKey {
-			return journalFromRow(existingReversal), nil
-		}
-		return nil, fmt.Errorf("postgres: reverse journal: journal %d already reversed by %d: %w", journalID, existingReversal.ID, core.ErrConflict)
+	existingReversals, err := s.q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reverse journal: lookup reversals: %w", err)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("postgres: reverse journal: lookup reversal: %w", err)
+	if len(existingReversals) > 0 {
+		// Same (journalID, reason) as an existing reversal → idempotent retry,
+		// return it. Any other existing reversal — full or partial, any
+		// reason — means this journal already has reversal history; a second
+		// full reversal on top of that would double-count whatever was
+		// already reversed, so it is rejected regardless of reason text.
+		for _, r := range existingReversals {
+			if r.IdempotencyKey == expectedKey {
+				return journalFromRow(r), nil
+			}
+		}
+		return nil, fmt.Errorf(
+			"postgres: reverse journal: journal %d already has %d reversal(s) recorded; use ReverseJournalFraction for further partial reversals: %w",
+			journalID, len(existingReversals), core.ErrConflict,
+		)
 	}
 
 	entries, err := s.q.ListJournalEntries(ctx, journalID)

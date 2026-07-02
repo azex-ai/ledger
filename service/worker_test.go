@@ -26,7 +26,7 @@ func TestWorker_StartsAndStops(t *testing.T) {
 	expirationSvc := NewExpirationService(
 		&mockExpiredReservationFinder{},
 		&mockReservationReleaser{},
-		nil, nil,
+		nil, nil, nil,
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(
@@ -82,7 +82,7 @@ func TestWorker_RollupRunsAtInterval(t *testing.T) {
 	expirationSvc := NewExpirationService(
 		&mockExpiredReservationFinder{},
 		&mockReservationReleaser{},
-		nil, nil,
+		nil, nil, nil,
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(

@@ -18,6 +18,11 @@ type ReservationReleaser interface {
 	Release(ctx context.Context, reservationID int64) error
 }
 
+// ReservationFinalizer completes a partially-settled (settling) reservation.
+type ReservationFinalizer interface {
+	FinalizeSettlement(ctx context.Context, reservationID int64) error
+}
+
 // ExpiredBookingFinder finds expired active bookings.
 type ExpiredBookingFinder interface {
 	ListExpiredBookings(ctx context.Context, limit int) ([]core.Booking, error)
@@ -30,33 +35,39 @@ type BookingTransitioner interface {
 
 // ExpirationService cleans up stale reservations and bookings.
 type ExpirationService struct {
-	reservationFinder  ExpiredReservationFinder
-	reservationRelease ReservationReleaser
-	bookingFinder      ExpiredBookingFinder
-	bookingTransit     BookingTransitioner
-	logger             core.Logger
-	metrics            core.Metrics
+	reservationFinder   ExpiredReservationFinder
+	reservationRelease  ReservationReleaser
+	reservationFinalize ReservationFinalizer
+	bookingFinder       ExpiredBookingFinder
+	bookingTransit      BookingTransitioner
+	logger              core.Logger
+	metrics             core.Metrics
 }
 
 // NewExpirationService creates a new ExpirationService.
 func NewExpirationService(
 	reservationFinder ExpiredReservationFinder,
 	reservationRelease ReservationReleaser,
+	reservationFinalize ReservationFinalizer,
 	bookingFinder ExpiredBookingFinder,
 	bookingTransit BookingTransitioner,
 	engine *core.Engine,
 ) *ExpirationService {
 	return &ExpirationService{
-		reservationFinder:  reservationFinder,
-		reservationRelease: reservationRelease,
-		bookingFinder:      bookingFinder,
-		bookingTransit:     bookingTransit,
-		logger:             engine.Logger(),
-		metrics:            engine.Metrics(),
+		reservationFinder:   reservationFinder,
+		reservationRelease:  reservationRelease,
+		reservationFinalize: reservationFinalize,
+		bookingFinder:       bookingFinder,
+		bookingTransit:      bookingTransit,
+		logger:              engine.Logger(),
+		metrics:             engine.Metrics(),
 	}
 }
 
-// ExpireStaleReservations finds and releases expired active reservations.
+// ExpireStaleReservations finds and winds down expired reservations: active
+// ones are released in full, while settling ones (partially settled via
+// SettlePartial) are finalized instead — keeping the settled portion and
+// implicitly releasing the rest, rather than losing the partial settlement.
 func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSize int) (int, error) {
 	if s.reservationFinder == nil {
 		return 0, nil
@@ -68,20 +79,30 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 
 	released := 0
 	for _, r := range reservations {
-		if err := s.reservationRelease.Release(ctx, r.ID); err != nil {
-			if errors.Is(err, core.ErrInvalidTransition) {
+		var opErr error
+		var opName string
+		if r.Status == core.ReservationStatusSettling {
+			opErr = s.reservationFinalize.FinalizeSettlement(ctx, r.ID)
+			opName = "finalize settlement"
+		} else {
+			opErr = s.reservationRelease.Release(ctx, r.ID)
+			opName = "release reservation"
+		}
+		if opErr != nil {
+			if errors.Is(opErr, core.ErrInvalidTransition) {
 				// Expected under multi-replica scanning: another replica (or a
 				// racing settle/release call) already transitioned this
 				// reservation between our scan and this call. Not a real
 				// failure — just log for visibility.
 				s.logger.Info("service: expiration: reservation already transitioned by a concurrent scan",
 					"reservation_id", r.ID,
-					"error", err,
+					"op", opName,
+					"error", opErr,
 				)
 			} else {
-				s.logger.Error("service: expiration: release reservation failed",
+				s.logger.Error("service: expiration: "+opName+" failed",
 					"reservation_id", r.ID,
-					"error", err,
+					"error", opErr,
 				)
 			}
 			continue

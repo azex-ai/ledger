@@ -12,7 +12,32 @@ import (
 type JournalWriter interface {
 	PostJournal(ctx context.Context, input JournalInput) (*Journal, error)
 	ExecuteTemplate(ctx context.Context, templateCode string, params TemplateParams) (*Journal, error)
+	// ReverseJournal reverses a journal in full. It rejects (ErrConflict) if
+	// journalID already has any reversal recorded against it — full or
+	// partial — since a full reversal after a partial one would double-count
+	// the portion already reversed. Use ReverseJournalFraction for additional
+	// partial reversals once the journal has any reversal history.
 	ReverseJournal(ctx context.Context, journalID int64, reason string) (*Journal, error)
+	// ReverseJournalFraction reverses num/den of journalID's entries (0 < num
+	// <= den, see ValidateReversalFraction). Each entry's share is computed by
+	// scaling its currency-and-side group's total by num/den and splitting it
+	// back across the group's entries via Allocate, so the resulting reversal
+	// journal is itself per-currency balanced and never reversed-amount
+	// exceeds any original entry's amount. Multiple partial reversals of the
+	// same journal are allowed; their cumulative amount per entry is enforced
+	// (ErrConflict on overshoot) via a row lock on the original journal, so
+	// concurrent partial reversals of the same journal serialize safely.
+	// idempotencyKey follows the library's standard idempotency contract —
+	// the same key replayed returns the original reversal; a reused key with
+	// a different (journalID, num, den, reason) is a conflict.
+	//
+	// num == den (e.g. 1/1) is the "reverse everything remaining" form: each
+	// entry is reversed by exactly its original amount minus what prior
+	// reversals already covered. Use it to complete a reversal whose earlier
+	// fractional steps rounded up (fractions always scale the ORIGINAL
+	// amount, so e.g. two 1/3 steps of 100.01 cover 33.34+33.34 and the exact
+	// remainder 33.33 is not expressible as a fraction of the original).
+	ReverseJournalFraction(ctx context.Context, journalID int64, num, den int64, reason string, idempotencyKey string) (*Journal, error)
 }
 
 // TemplateBatchExecutor executes multiple templates as a single atomic unit:
@@ -44,6 +69,23 @@ type Reserver interface {
 	// amount without any accounting effect. It is a no-op on the ledger
 	// balance beyond removing the hold — no partial release is supported.
 	Release(ctx context.Context, reservationID int64) error
+	// SettlePartial settles part of a reservation. amount must be positive.
+	// The first call transitions the reservation from active to settling;
+	// subsequent calls accumulate settled_amount further, which must never
+	// exceed reserved_amount (ErrInvalidInput on overshoot). Once a
+	// reservation enters settling, its remaining hold is no longer counted by
+	// HeldAmount (mirroring the one-shot Settle's "unused remainder is
+	// implicitly released" behavior) — call FinalizeSettlement when no more
+	// partial settlements will follow. Calling Settle (the one-shot method)
+	// on a settling reservation is rejected; use FinalizeSettlement instead.
+	SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error
+	// FinalizeSettlement completes a reservation that has been partially
+	// settled via SettlePartial, transitioning it from settling to settled.
+	// It is rejected (ErrInvalidTransition) on any other status — in
+	// particular, calling it on an active reservation that never received a
+	// SettlePartial call is not a valid "settle everything" shortcut; use
+	// Settle for that.
+	FinalizeSettlement(ctx context.Context, reservationID int64) error
 	// HeldAmount returns the sum of reserved_amount across the holder's active
 	// reservations in the given currency — the exact figure Reserve subtracts
 	// from balance to compute available. Consumers should call this instead of

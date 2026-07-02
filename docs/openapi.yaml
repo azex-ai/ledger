@@ -164,8 +164,10 @@ paths:
   /journals/{id}/reverse:
     post:
       tags: [Journals]
-      summary: Post the reversal of an existing journal.
-      description: A journal can only be reversed once. Re-attempt returns 409.
+      summary: Post the full reversal of an existing journal.
+      description: >-
+        Rejected (409) once the journal has any reversal history, full or
+        partial — use reverse-partial to continue a partially-reversed journal.
       parameters:
         - in: path
           name: id
@@ -186,6 +188,38 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: Already reversed.
+  /journals/{id}/reverse-partial:
+    post:
+      tags: [Journals]
+      summary: Reverse num/den of a journal (partial reversal).
+      description: >-
+        Reverses num/den of every entry, per-currency balanced via
+        largest-remainder allocation. Cumulative reversals never exceed the
+        original (409 on overshoot). num == den ("1/1") reverses exactly the
+        remaining un-reversed amount — the only way to complete a reversal
+        whose earlier fractional steps rounded up.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [num, den, reason, idempotency_key]
+              properties:
+                num: { type: integer, format: int64, minimum: 1 }
+                den: { type: integer, format: int64, minimum: 1 }
+                reason: { type: string }
+                idempotency_key: { type: string }
+      responses:
+        "201": { description: Partial reversal posted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Cumulative reversal would exceed the original. }
+        "422": { $ref: "#/components/responses/DomainError" }
 
   /entries:
     get:
@@ -306,6 +340,45 @@ paths:
                 actual_amount: { type: string, description: Decimal as string. }
       responses:
         "200": { description: Settled. }
+        "422": { $ref: "#/components/responses/DomainError" }
+  /reservations/{id}/settle-partial:
+    post:
+      tags: [Reservations]
+      summary: Settle part of a reservation; call repeatedly to accumulate.
+      description: >-
+        First call transitions active → settling. Cumulative settled amount
+        may never exceed the reserved amount. The unsettled remainder stays
+        held against the balance until finalize. Finish with
+        /reservations/{id}/finalize.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { type: string, description: Decimal as string. }
+      responses:
+        "200": { description: Partial settlement recorded. }
+        "422": { $ref: "#/components/responses/DomainError" }
+  /reservations/{id}/finalize:
+    post:
+      tags: [Reservations]
+      summary: Finish a partially-settled reservation (settling → settled).
+      description: Releases the unsettled remainder. Rejected on a reservation with no partial settlements.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200": { description: Finalized. }
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{id}/release:
     post:

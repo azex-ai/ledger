@@ -146,7 +146,7 @@ func newMinimalWorker(engine *core.Engine) *Worker {
 	expirationSvc := NewExpirationService(
 		&mockExpiredReservationFinder{},
 		&mockReservationReleaser{},
-		nil, nil,
+		nil, nil, nil,
 		engine,
 	)
 	reconcileSvc := NewReconciliationService(

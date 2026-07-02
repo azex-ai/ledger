@@ -23,13 +23,31 @@ func (q *Queries) CountActiveReservations(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const finalizeReservationSettlement = `-- name: FinalizeReservationSettlement :exec
+UPDATE reservations SET status = 'settled', updated_at = now() WHERE id = $1
+`
+
+// Moves a 'settling' reservation to 'settled' without touching settled_amount
+// — the remaining (reserved_amount - settled_amount) is implicitly released,
+// same as the one-shot Settle's unused-remainder semantics.
+func (q *Queries) FinalizeReservationSettlement(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, finalizeReservationSettlement, id)
+	return err
+}
+
 const getExpiredReservations = `-- name: GetExpiredReservations :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
-FROM reservations WHERE status = 'active' AND expires_at < now()
+FROM reservations WHERE status IN ('active', 'settling') AND expires_at < now()
 ORDER BY expires_at ASC
 LIMIT $1
 `
 
+// Includes 'settling' alongside 'active': a partially-settled reservation
+// that expires must still be wound down (auto-finalized, keeping the settled
+// portion and releasing the rest — see service.ExpirationService), not left
+// dangling forever. NB: idx_reservations_expired is a partial index WHERE
+// status = 'active', so this query no longer hits it for 'settling' rows;
+// acceptable at current scale (see docs/plans/2026-07-02-financial-core-hardening-design.md §5b).
 func (q *Queries) GetExpiredReservations(ctx context.Context, limit int32) ([]Reservation, error) {
 	rows, err := q.db.Query(ctx, getExpiredReservations, limit)
 	if err != nil {
@@ -220,10 +238,32 @@ func (q *Queries) ListReservationsByAccount(ctx context.Context, arg ListReserva
 	return items, nil
 }
 
+const settleReservationPartial = `-- name: SettleReservationPartial :exec
+UPDATE reservations SET status = 'settling', settled_amount = settled_amount + $2, updated_at = now() WHERE id = $1
+`
+
+type SettleReservationPartialParams struct {
+	ID            int64          `json:"id"`
+	SettledAmount pgtype.Numeric `json:"settled_amount"`
+}
+
+// Accumulates settled_amount (unlike UpdateReservationSettle, which overwrites
+// it) and moves status to 'settling' — a no-op status change if it's already
+// there. Caller (ReserverStore.SettlePartial) has already row-locked this
+// reservation via GetReservationForUpdate and verified the cumulative amount
+// stays within reserved_amount; chk_settled_lte_reserved is the DB-level backstop.
+func (q *Queries) SettleReservationPartial(ctx context.Context, arg SettleReservationPartialParams) error {
+	_, err := q.db.Exec(ctx, settleReservationPartial, arg.ID, arg.SettledAmount)
+	return err
+}
+
 const sumActiveReservations = `-- name: SumActiveReservations :one
-SELECT COALESCE(SUM(reserved_amount), 0) as total
+SELECT COALESCE(SUM(
+    CASE WHEN status = 'active' THEN reserved_amount
+         ELSE reserved_amount - settled_amount
+    END), 0) as total
 FROM reservations
-WHERE account_holder = $1 AND currency_id = $2 AND status = 'active'
+WHERE account_holder = $1 AND currency_id = $2 AND status IN ('active', 'settling')
 `
 
 type SumActiveReservationsParams struct {
@@ -231,6 +271,14 @@ type SumActiveReservationsParams struct {
 	CurrencyID    int64 `json:"currency_id"`
 }
 
+// Outstanding hold across the holder's not-yet-terminal reservations. An
+// 'active' reservation holds its full reserved_amount; a 'settling' one
+// (partially settled via SettlePartial) still holds the unsettled remainder
+// (reserved - settled) — counting it as zero would let a concurrent Reserve
+// over-commit the balance the moment the first partial settlement lands
+// (the exact TOCTOU class I-4/I-11 exist to prevent). NB: the partial index
+// idx_reservations_account_status covers only status='active'; the extra
+// 'settling' rows are expected to be few at any moment.
 func (q *Queries) SumActiveReservations(ctx context.Context, arg SumActiveReservationsParams) (interface{}, error) {
 	row := q.db.QueryRow(ctx, sumActiveReservations, arg.AccountHolder, arg.CurrencyID)
 	var total interface{}

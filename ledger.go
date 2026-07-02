@@ -441,7 +441,7 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	s.eventStore.SetClaimLease(cfg.EventClaimLease)
 
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
-	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.bookingStore, s.bookingStore, engine)
+	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.reserverStore, s.bookingStore, s.bookingStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
