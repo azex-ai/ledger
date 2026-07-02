@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -57,6 +58,32 @@ func (l *Lifecycle) Validate() error {
 				return fmt.Errorf("core: lifecycle: transition %q -> %q targets undefined status: %w", from, to, ErrInvalidInput)
 			}
 		}
+	}
+
+	// Every declared status must be reachable from Initial by walking
+	// Transitions — an island state can never be entered (or, if it's the
+	// dangling target of nothing, exited), so it can never be observed.
+	visited := map[Status]bool{l.Initial: true}
+	queue := []Status{l.Initial}
+	for len(queue) > 0 {
+		from := queue[0]
+		queue = queue[1:]
+		for _, to := range l.Transitions[from] {
+			if !visited[to] {
+				visited[to] = true
+				queue = append(queue, to)
+			}
+		}
+	}
+	var unreachable []Status
+	for s := range definedSet {
+		if !visited[s] {
+			unreachable = append(unreachable, s)
+		}
+	}
+	if len(unreachable) > 0 {
+		sort.Slice(unreachable, func(i, k int) bool { return unreachable[i] < unreachable[k] })
+		return fmt.Errorf("core: lifecycle: unreachable status(es) from initial %q: %v: %w", l.Initial, unreachable, ErrInvalidInput)
 	}
 
 	return nil

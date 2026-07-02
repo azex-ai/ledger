@@ -62,6 +62,47 @@ func TestLifecycle_DeadEndStatusRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "targets undefined status")
 }
 
+// A status that is a valid transition target for someone else, but that
+// nothing ever transitions INTO from Initial, is an unreachable island: it
+// can be declared as a source of outgoing edges yet never actually be
+// entered. This is different from the dead-end case above (which catches an
+// edge pointing at an undefined status) — here every status IS defined, but
+// one of them is disconnected from the graph reachable from Initial.
+func TestLifecycle_UnreachableIslandRejected(t *testing.T) {
+	lc := &Lifecycle{
+		Initial:  "pending",
+		Terminal: []Status{"done"},
+		Transitions: map[Status][]Status{
+			"pending": {"done"},
+			// "marooned" is a well-defined source with a valid target, but no
+			// edge in the graph ever points at it.
+			"marooned": {"done"},
+		},
+	}
+	err := lc.Validate()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidInput))
+	assert.Contains(t, err.Error(), "unreachable status")
+	assert.Contains(t, err.Error(), "marooned")
+}
+
+// A multi-hop chain that eventually reconnects to a reachable state must
+// still validate — reachability is transitive, not just one hop from
+// Initial.
+func TestLifecycle_MultiHopReachabilityAccepted(t *testing.T) {
+	lc := &Lifecycle{
+		Initial:  "a",
+		Terminal: []Status{"e"},
+		Transitions: map[Status][]Status{
+			"a": {"b"},
+			"b": {"c"},
+			"c": {"d"},
+			"d": {"e"},
+		},
+	}
+	require.NoError(t, lc.Validate())
+}
+
 // Empty terminal list with non-terminal-only transitions must still validate
 // IF every reachable target has outgoing edges. This is unusual but legal —
 // e.g. a polling loop that never "ends".

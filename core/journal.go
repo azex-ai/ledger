@@ -104,6 +104,12 @@ func (j *JournalInput) Validate() error {
 		if !e.EntryType.IsValid() {
 			return fmt.Errorf("core: journal: entry[%d]: invalid entry type %q: %w", i, e.EntryType, ErrInvalidInput)
 		}
+		if e.CurrencyID <= 0 {
+			return fmt.Errorf("core: journal: entry[%d]: currency_id must be positive: %w", i, ErrInvalidInput)
+		}
+		if e.ClassificationID <= 0 {
+			return fmt.Errorf("core: journal: entry[%d]: classification_id must be positive: %w", i, ErrInvalidInput)
+		}
 		if !e.Amount.IsPositive() {
 			return fmt.Errorf("core: journal: entry[%d]: amount must be positive: %w", i, ErrInvalidInput)
 		}

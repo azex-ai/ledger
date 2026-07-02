@@ -104,6 +104,70 @@ func TestJournalInput_Validate_ZeroHolderRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "account_holder")
 }
 
+func TestJournalInput_Validate_ZeroCurrencyRejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-zero-currency",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 0, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "currency_id")
+}
+
+func TestJournalInput_Validate_NegativeCurrencyRejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-negative-currency",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: -1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "currency_id")
+}
+
+func TestJournalInput_Validate_ZeroClassificationRejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-zero-classification",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 0, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "classification_id")
+}
+
+func TestJournalInput_Validate_NegativeClassificationRejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-negative-classification",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: -1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "classification_id")
+}
+
 func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name  string

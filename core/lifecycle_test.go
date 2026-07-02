@@ -78,6 +78,19 @@ func TestLifecycle_Validate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "targets undefined status",
 		},
+		{
+			name: "island state unreachable from initial",
+			lifecycle: &Lifecycle{
+				Initial:  "pending",
+				Terminal: []Status{"done"},
+				Transitions: map[Status][]Status{
+					"pending":  {"done"},
+					"orphaned": {"done"}, // valid target, but nothing ever transitions into "orphaned"
+				},
+			},
+			wantErr: true,
+			errMsg:  "unreachable status",
+		},
 	}
 
 	for _, tt := range tests {
