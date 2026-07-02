@@ -43,9 +43,13 @@ func (s *CurrencyStore) WithDB(db DBTX) *CurrencyStore {
 
 // CreateCurrency inserts a new currency.
 func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyInput) (*core.Currency, error) {
+	if err := input.Validate(); err != nil {
+		return nil, fmt.Errorf("postgres: create currency: %w", err)
+	}
 	row, err := s.q.CreateCurrency(ctx, sqlcgen.CreateCurrencyParams{
-		Code: input.Code,
-		Name: input.Name,
+		Code:     input.Code,
+		Name:     input.Name,
+		Exponent: int16(input.Exponent),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create currency", err)

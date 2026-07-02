@@ -333,6 +333,9 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
 	}
+	if err := validateEntriesPrecision(ctx, q, input.Entries); err != nil {
+		return nil, err
+	}
 
 	existing, err := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {

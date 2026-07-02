@@ -24,7 +24,7 @@ func TestAudit_ListJournalsByAccount_OrderedByID(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	auditStore := postgres.NewAuditStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-AUDIT", Name: "Audit USDT"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-AUDIT", Name: "Audit USDT", Exponent: 18})
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -99,7 +99,7 @@ func TestAudit_ListEntriesByJournal(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	auditStore := postgres.NewAuditStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-ENT", Name: "Entry USDT"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-ENT", Name: "Entry USDT", Exponent: 18})
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -148,7 +148,7 @@ func TestAudit_ListJournalsByTimeRange(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	auditStore := postgres.NewAuditStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TR", Name: "TimeRange USDT"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TR", Name: "TimeRange USDT", Exponent: 18})
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -215,7 +215,7 @@ func TestAudit_TraceBooking(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	auditStore := postgres.NewAuditStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TRACE", Name: "Trace USDT"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TRACE", Name: "Trace USDT", Exponent: 18})
 	require.NoError(t, err)
 
 	// Install deposit lifecycle so we can create a booking.
@@ -280,7 +280,7 @@ func TestAudit_ListReversals(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	auditStore := postgres.NewAuditStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-REV", Name: "Reversal USDT"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-REV", Name: "Reversal USDT", Exponent: 18})
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{

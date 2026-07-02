@@ -116,16 +116,18 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 
 	cur, err := store.CreateCurrency(ctx, core.CurrencyInput{
 		Code: "USDT",
-		Name: "Tether USD",
+		Name: "Tether USD", Exponent: 18,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "USDT", cur.Code)
 	assert.True(t, cur.IsActive)
+	assert.Equal(t, int32(18), cur.Exponent)
 
 	got, err := store.GetCurrency(ctx, cur.ID)
 	require.NoError(t, err)
 	assert.Equal(t, cur.ID, got.ID)
 	assert.True(t, got.IsActive)
+	assert.Equal(t, int32(18), got.Exponent)
 
 	// Active-only listing shows the new currency.
 	list, err := store.ListCurrencies(ctx, true)
@@ -146,6 +148,36 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.False(t, list[0].IsActive)
+}
+
+// TestCurrencyStore_CreateCurrency_RejectsInvalidExponent pins the exponent
+// bound (I-16): CurrencyInput.Validate rejects anything outside [0, 18]
+// before a query is even issued.
+func TestCurrencyStore_CreateCurrency_RejectsInvalidExponent(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewCurrencyStore(pool)
+	ctx := context.Background()
+
+	_, err := store.CreateCurrency(ctx, core.CurrencyInput{Code: "NEG", Name: "Negative Exponent", Exponent: -1})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+
+	_, err = store.CreateCurrency(ctx, core.CurrencyInput{Code: "TOOBIG", Name: "Too Big Exponent", Exponent: 19})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
+// TestCurrencyStore_CreateCurrency_ExponentZero pins that exponent=0 (JPY) is
+// a legitimate, distinct value from "not specified" — not silently coerced
+// to the loosest default.
+func TestCurrencyStore_CreateCurrency_ExponentZero(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewCurrencyStore(pool)
+	ctx := context.Background()
+
+	cur, err := store.CreateCurrency(ctx, core.CurrencyInput{Code: "JPY-ZERO", Name: "Yen", Exponent: 0})
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), cur.Exponent)
 }
 
 func TestTemplateStore_CRUD(t *testing.T) {

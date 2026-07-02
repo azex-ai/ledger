@@ -24,7 +24,7 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 	trendsStore := postgres.NewBalanceTrendsStore(pool, ledgerStore)
 
 	// Create currency and classification.
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TREND", Name: "Tether USD Trend"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-TREND", Name: "Tether USD Trend", Exponent: 18})
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -127,7 +127,7 @@ func TestBalanceTrends_NoSnapshots(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	trendsStore := postgres.NewBalanceTrendsStore(pool, ledgerStore)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-NOSN", Name: "USDT NoSnapshot"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-NOSN", Name: "USDT NoSnapshot", Exponent: 18})
 	require.NoError(t, err)
 
 	// Query trends for an account that has no entries or snapshots.

@@ -238,6 +238,7 @@ func currencyFromRow(row sqlcgen.Currency) *core.Currency {
 		Code:     row.Code,
 		Name:     row.Name,
 		IsActive: row.IsActive,
+		Exponent: int32(row.Exponent),
 	}
 }
 

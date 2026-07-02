@@ -56,13 +56,29 @@ func SetupDB(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
-// SeedCurrency creates a test currency row and returns its ID.
+// SeedCurrency creates a test currency row and returns its ID. The exponent
+// column takes its schema default (18 — the loosest setting), matching the
+// pre-exponent behavior most callers still rely on.
 func SeedCurrency(t *testing.T, pool *pgxpool.Pool, code, name string) int64 {
 	t.Helper()
 	var id int64
 	err := pool.QueryRow(context.Background(),
 		"INSERT INTO currencies (code, name) VALUES ($1, $2) RETURNING id",
 		code, name,
+	).Scan(&id)
+	require.NoError(t, err)
+	return id
+}
+
+// SeedCurrencyWithExponent creates a test currency row with an explicit
+// exponent and returns its ID. Use this (instead of SeedCurrency) whenever a
+// test exercises precision enforcement (I-16).
+func SeedCurrencyWithExponent(t *testing.T, pool *pgxpool.Pool, code, name string, exponent int32) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(context.Background(),
+		"INSERT INTO currencies (code, name, exponent) VALUES ($1, $2, $3) RETURNING id",
+		code, name, exponent,
 	).Scan(&id)
 	require.NoError(t, err)
 	return id

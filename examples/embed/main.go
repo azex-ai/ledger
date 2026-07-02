@@ -157,7 +157,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 			return c.ID, nil
 		}
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
 	if err != nil {
 		return 0, fmt.Errorf("create currency: %w", err)
 	}

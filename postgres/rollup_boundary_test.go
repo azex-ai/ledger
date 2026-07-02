@@ -42,7 +42,7 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
 
 	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{
-		Code: "USDT-RB", Name: "Tether Rollup Boundary",
+		Code: "USDT-RB", Name: "Tether Rollup Boundary", Exponent: 18,
 	})
 	require.NoError(t, err)
 

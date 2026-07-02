@@ -27,7 +27,7 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
 	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{
-		Code: "USDT-RT", Name: "Tether USD Realtime",
+		Code: "USDT-RT", Name: "Tether USD Realtime", Exponent: 18,
 	})
 	require.NoError(t, err)
 
@@ -116,7 +116,7 @@ func TestPlatformBalance_RealtimeReflectsSecondJournal(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-RT2", Name: "Tether USD RT2"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-RT2", Name: "Tether USD RT2", Exponent: 18})
 	require.NoError(t, err)
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -174,7 +174,7 @@ func TestPlatformBalance_RealtimeSolvencyCheck(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-SOLV", Name: "Tether USD Solv"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-SOLV", Name: "Tether USD Solv", Exponent: 18})
 	require.NoError(t, err)
 
 	// Liability account: credit-normal (what we owe users).

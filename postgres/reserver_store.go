@@ -75,6 +75,10 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
+	if err := validateSingleAmountPrecision(ctx, s.q, input.CurrencyID, input.Amount); err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, err
+	}
 
 	// Check idempotency first (outside tx / on the current db handle).
 	existing, err := s.q.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)

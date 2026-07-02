@@ -141,7 +141,7 @@ func TestPlatformBalanceStore_GetPlatformBalances(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-PB1", Name: "Tether USD PB1"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-PB1", Name: "Tether USD PB1", Exponent: 18})
 	require.NoError(t, err)
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -204,7 +204,7 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-LB1", Name: "Tether USD LB1"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-LB1", Name: "Tether USD LB1", Exponent: 18})
 	require.NoError(t, err)
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
@@ -273,7 +273,7 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	pbStore := postgres.NewPlatformBalanceStore(pool)
 
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-SC1", Name: "Tether USD SC1"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-SC1", Name: "Tether USD SC1", Exponent: 18})
 	require.NoError(t, err)
 
 	// Liability account (credit-normal — what we owe users).

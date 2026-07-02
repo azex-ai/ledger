@@ -314,7 +314,7 @@ func setupInvariantsFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Contex
 
 	cur, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{
 		Code: fmt.Sprintf("USDT_%d", suffix),
-		Name: "Tether USD test",
+		Name: "Tether USD test", Exponent: 18,
 	})
 	require.NoError(t, err)
 

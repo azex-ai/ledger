@@ -26,7 +26,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	tmplStore := postgres.NewTemplateStore(pool)
 
 	// Step 1: Create currency
-	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT", Name: "Tether USD"})
+	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT", Name: "Tether USD", Exponent: 18})
 	require.NoError(t, err)
 
 	// Step 2: Create classifications

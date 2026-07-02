@@ -24,7 +24,7 @@ func TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal(t *testing.
 	queryStore := postgres.NewQueryStore(pool)
 
 	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{
-		Code: "USDT-QS-RT", Name: "Tether QueryStore RT",
+		Code: "USDT-QS-RT", Name: "Tether QueryStore RT", Exponent: 18,
 	})
 	require.NoError(t, err)
 
