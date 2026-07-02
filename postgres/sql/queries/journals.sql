@@ -11,11 +11,32 @@ RETURNING id, journal_id, account_holder, currency_id, classification_id, entry_
 -- name: GetJournal :one
 SELECT * FROM journals WHERE id = $1;
 
+-- name: GetJournalForUpdate :one
+-- Row-locks the original journal for the duration of the caller's
+-- transaction, serializing concurrent ReverseJournalFraction calls against
+-- the same journal so their cumulative-reversed-amount checks cannot race.
+SELECT * FROM journals WHERE id = $1 FOR UPDATE;
+
 -- name: GetJournalByIdempotencyKey :one
 SELECT * FROM journals WHERE idempotency_key = $1;
 
--- name: GetReversalByOriginalJournalID :one
-SELECT * FROM journals WHERE reversal_of = $1;
+-- name: ListReversalsByOriginalJournalID :many
+-- A journal may now have more than one reversal (partial reversals), so this
+-- returns all of them, oldest first. Replaces the old GetReversalByOriginalJournalID
+-- :one query, which silently returned an arbitrary single row once multiple
+-- reversals became possible.
+SELECT * FROM journals WHERE reversal_of = $1 ORDER BY id;
+
+-- name: ListReversalEntriesByOriginal :many
+-- All entries across every reversal journal (full or partial) of the given
+-- original journal. Used to compute the cumulative amount already reversed
+-- per (holder, currency, classification, original entry_type) dimension
+-- before allowing another partial reversal.
+SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classification_id, je.entry_type, je.amount, je.created_at
+FROM journal_entries je
+JOIN journals j ON j.id = je.journal_id
+WHERE j.reversal_of = $1
+ORDER BY je.id;
 
 -- name: ListJournalEntries :many
 SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at

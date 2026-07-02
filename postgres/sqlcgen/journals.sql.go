@@ -115,12 +115,15 @@ func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey
 	return i, err
 }
 
-const getReversalByOriginalJournalID = `-- name: GetReversalByOriginalJournalID :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE reversal_of = $1
+const getJournalForUpdate = `-- name: GetJournalForUpdate :one
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE id = $1 FOR UPDATE
 `
 
-func (q *Queries) GetReversalByOriginalJournalID(ctx context.Context, reversalOf pgtype.Int8) (Journal, error) {
-	row := q.db.QueryRow(ctx, getReversalByOriginalJournalID, reversalOf)
+// Row-locks the original journal for the duration of the caller's
+// transaction, serializing concurrent ReverseJournalFraction calls against
+// the same journal so their cumulative-reversed-amount checks cannot race.
+func (q *Queries) GetJournalForUpdate(ctx context.Context, id int64) (Journal, error) {
+	row := q.db.QueryRow(ctx, getJournalForUpdate, id)
 	var i Journal
 	err := row.Scan(
 		&i.ID,
@@ -323,6 +326,87 @@ type ListJournalsCursorParams struct {
 
 func (q *Queries) ListJournalsCursor(ctx context.Context, arg ListJournalsCursorParams) ([]Journal, error) {
 	rows, err := q.db.Query(ctx, listJournalsCursor, arg.CursorID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Journal{}
+	for rows.Next() {
+		var i Journal
+		if err := rows.Scan(
+			&i.ID,
+			&i.JournalTypeID,
+			&i.IdempotencyKey,
+			&i.TotalDebit,
+			&i.TotalCredit,
+			&i.Metadata,
+			&i.ActorID,
+			&i.Source,
+			&i.ReversalOf,
+			&i.CreatedAt,
+			&i.EventID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReversalEntriesByOriginal = `-- name: ListReversalEntriesByOriginal :many
+SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classification_id, je.entry_type, je.amount, je.created_at
+FROM journal_entries je
+JOIN journals j ON j.id = je.journal_id
+WHERE j.reversal_of = $1
+ORDER BY je.id
+`
+
+// All entries across every reversal journal (full or partial) of the given
+// original journal. Used to compute the cumulative amount already reversed
+// per (holder, currency, classification, original entry_type) dimension
+// before allowing another partial reversal.
+func (q *Queries) ListReversalEntriesByOriginal(ctx context.Context, reversalOf pgtype.Int8) ([]JournalEntry, error) {
+	rows, err := q.db.Query(ctx, listReversalEntriesByOriginal, reversalOf)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []JournalEntry{}
+	for rows.Next() {
+		var i JournalEntry
+		if err := rows.Scan(
+			&i.ID,
+			&i.JournalID,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ClassificationID,
+			&i.EntryType,
+			&i.Amount,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReversalsByOriginalJournalID = `-- name: ListReversalsByOriginalJournalID :many
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE reversal_of = $1 ORDER BY id
+`
+
+// A journal may now have more than one reversal (partial reversals), so this
+// returns all of them, oldest first. Replaces the old GetReversalByOriginalJournalID
+// :one query, which silently returned an arbitrary single row once multiple
+// reversals became possible.
+func (q *Queries) ListReversalsByOriginalJournalID(ctx context.Context, reversalOf pgtype.Int8) ([]Journal, error) {
+	rows, err := q.db.Query(ctx, listReversalsByOriginalJournalID, reversalOf)
 	if err != nil {
 		return nil, err
 	}
