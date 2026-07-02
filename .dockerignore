@@ -22,6 +22,9 @@ examples/*/main
 coverage.out
 *.test
 internal/postgrestest/
+# ...but keep its go.mod: the main module's local `replace` of this test-only
+# submodule must resolve during `go mod download` in the builder. Source stays out.
+!internal/postgrestest/go.mod
 
 # Frontend artefacts
 web/node_modules
