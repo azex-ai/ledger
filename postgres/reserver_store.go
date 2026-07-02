@@ -145,6 +145,27 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// acquireIdempotencyLock above already serializes all same-key transactions,
 	// so nothing could have inserted a matching row between then and now.
 
+	// Account policy enforcement (I-17): Reserve is unconditionally a
+	// consumption entry point (it locks funds toward future spend), so
+	// frozen/closed both reject it outright — no direction/netting question
+	// applies here the way it does for PostJournal entries. classificationID
+	// is 0 because a reservation isn't tied to any classification; only the
+	// (holder,currency,0) and (holder,0,0) policy tiers can ever match.
+	// Evaluated inside the same advisory lock as the balance check below, so
+	// it is TOCTOU-safe against a concurrent SetPolicy on the same pair.
+	policy, err := getEffectiveAccountPolicy(ctx, qtx, input.AccountHolder, input.CurrencyID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reserve: %w", err)
+	}
+	if policy != nil {
+		switch policy.Status {
+		case core.AccountPolicyStatusClosed:
+			return nil, fmt.Errorf("postgres: reserve: account %d currency %d is closed (policy %d): %w", input.AccountHolder, input.CurrencyID, policy.ID, core.ErrAccountClosed)
+		case core.AccountPolicyStatusFrozen:
+			return nil, fmt.Errorf("postgres: reserve: account %d currency %d is frozen (policy %d): %w", input.AccountHolder, input.CurrencyID, policy.ID, core.ErrAccountFrozen)
+		}
+	}
+
 	// Check sufficient balance before reserving.
 	// The advisory lock above serializes concurrent reserves for the same (holder, currency),
 	// so this read is safe against TOCTOU races.
