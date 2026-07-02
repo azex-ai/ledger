@@ -47,14 +47,27 @@ post a **reversal journal** that points at the original via `journals.reversal_o
 **Why**: an immutable audit trail is the basis of every regulator-readable
 ledger. Allowing `UPDATE` would let a bug or bad actor edit history silently.
 
+A journal may be reversed **in fractions** (`ReverseJournalFraction`, since
+migration `029`): several reversal journals may point at the same original.
+The conservation rule is: **cumulative reversed amount per original entry
+never exceeds that entry's amount** — over-reversal is rejected with
+`ErrConflict`. A full `ReverseJournal` is only allowed while the journal has
+no reversal history; a reversal itself can never be reversed.
+
 **Enforced by**:
 - The `journals.reversal_of` FK column (added in migration `014`).
-- A partial unique index `uq_journals_reversal_of` ensures any given journal
-  can be reversed **at most once**: `CREATE UNIQUE INDEX ... WHERE reversal_of IS NOT NULL`.
+- `SELECT ... FOR UPDATE` on the original journal row serialises concurrent
+  reversals; the per-dimension cumulative check runs under that lock
+  (`postgres/reversal_fraction_store.go`). Migration `029` replaced the old
+  "at most once" unique index with this application-level conservation rule.
 
 **Pinned by**:
 - `postgres.TestLedgerStore_ReverseJournal_AlreadyReversed`
 - `postgres.TestReversalChainIntegrity` (full A → ¬A → ¬¬A blocked path)
+- `postgres.TestReverseJournalFraction_ConservationAndRemainderCompletion`
+- `postgres.TestReverseJournalFraction_OverReversalRejected`
+- `postgres.TestReverseJournalFraction_ConcurrentConservation`
+- `postgres.TestReverseJournal_MutualExclusionWithFraction`
 
 ## I-3: Idempotency on every mutation
 
@@ -236,9 +249,14 @@ also holds: an audit trail starting from the journal can always find its
 
 ## I-11: Reservation cannot exceed available balance
 
-`available = total_balance - SUM(active reservations on same dimension)`. A
+`available = total_balance - SUM(outstanding holds on same dimension)`. A
 reservation request for `amount > available` is rejected with
-`ErrInsufficientBalance`.
+`ErrInsufficientBalance`. An `active` reservation holds its full
+`reserved_amount`; a `settling` one (partially settled via `SettlePartial`,
+since migration `029`'s companion changes) holds its unsettled remainder
+(`reserved_amount - settled_amount`) — dropping that remainder from the sum
+would let a concurrent Reserve over-commit the moment the first partial
+settlement lands.
 
 **Why**: the obvious one — overdraft prevention. The non-obvious part: this
 must be checked **inside** the advisory lock (see I-4), not before.
@@ -247,6 +265,7 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent`
+- `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
 
 ## I-12: Money conservation across the system
 
