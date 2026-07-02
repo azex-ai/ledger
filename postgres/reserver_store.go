@@ -267,6 +267,14 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 	}
 
 	status := core.ReservationStatus(res.Status)
+	if status == core.ReservationStatusSettling {
+		// The reservation FSM technically allows settling -> settled (that is
+		// exactly the transition FinalizeSettlement performs), but a one-shot
+		// Settle here would overwrite settled_amount with actualAmount instead
+		// of respecting what SettlePartial already accumulated. Reject
+		// explicitly rather than silently discarding prior partial settlements.
+		return fmt.Errorf("postgres: settle: reservation %d is partially settled (status settling); use FinalizeSettlement, not Settle: %w", reservationID, core.ErrInvalidTransition)
+	}
 	if !status.CanTransitionTo(core.ReservationStatusSettled) {
 		return fmt.Errorf("postgres: settle: from %q to settled: %w", res.Status, core.ErrInvalidTransition)
 	}
@@ -288,6 +296,156 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		JournalID:     0,
 	}); err != nil {
 		return wrapStoreError("postgres: settle: update", err)
+	}
+
+	return nil
+}
+
+// SettlePartial settles part of a reservation, accumulating settled_amount.
+// The first call transitions the reservation from active to settling.
+//
+// In pool mode a new transaction is started and committed here. In tx mode
+// (bound via WithDB) the update is applied to the caller's transaction;
+// commit/rollback is the caller's responsibility.
+func (s *ReserverStore) SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle_partial",
+		attribute.Int64("reservation_id", reservationID),
+		attribute.String("amount", amount.String()),
+	)
+	defer span.End()
+
+	if s.pool == nil {
+		err := s.settlePartialWithQueries(ctx, s.q, reservationID, amount)
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return fmt.Errorf("postgres: settle partial: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), reservationID, amount); err != nil {
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
+		return fmt.Errorf("postgres: settle partial: commit: %w", err)
+	}
+
+	return nil
+}
+
+func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, amount decimal.Decimal) error {
+	if !amount.IsPositive() {
+		return fmt.Errorf("postgres: settle partial: amount must be positive, got %s: %w", amount, core.ErrInvalidInput)
+	}
+
+	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: settle partial: reservation %d: %w", reservationID, core.ErrNotFound)
+		}
+		return fmt.Errorf("postgres: settle partial: get reservation: %w", err)
+	}
+
+	// active -> settling (first call) or settling -> settling (accumulating
+	// further) are both valid; every other status is not — in particular a
+	// reservation that is already settled or released cannot un-terminal
+	// itself via SettlePartial.
+	status := core.ReservationStatus(res.Status)
+	if status != core.ReservationStatusActive && status != core.ReservationStatusSettling {
+		return fmt.Errorf("postgres: settle partial: from %q: %w", res.Status, core.ErrInvalidTransition)
+	}
+
+	reservedAmount, err := numericToDecimal(res.ReservedAmount)
+	if err != nil {
+		return fmt.Errorf("postgres: settle partial: convert reserved amount: %w", err)
+	}
+	settledSoFar, err := numericToDecimal(res.SettledAmount)
+	if err != nil {
+		return fmt.Errorf("postgres: settle partial: convert settled amount: %w", err)
+	}
+
+	// chk_settled_lte_reserved backstops this at the DB level, but check here
+	// too so callers get a clear core.ErrInvalidInput without a round trip to
+	// the DB constraint.
+	newSettled := settledSoFar.Add(amount)
+	if newSettled.GreaterThan(reservedAmount) {
+		return fmt.Errorf("postgres: settle partial: cumulative settled %s exceeds reserved %s: %w", newSettled, reservedAmount, core.ErrInvalidInput)
+	}
+
+	if err := qtx.SettleReservationPartial(ctx, sqlcgen.SettleReservationPartialParams{
+		ID:            reservationID,
+		SettledAmount: decimalToNumeric(amount),
+	}); err != nil {
+		return wrapStoreError("postgres: settle partial: update", err)
+	}
+
+	return nil
+}
+
+// FinalizeSettlement completes a reservation that has been partially settled
+// via SettlePartial, transitioning it from settling to settled. Any status
+// other than settling — including active, which never received a
+// SettlePartial call — is rejected with ErrInvalidTransition; Settle is the
+// one-shot equivalent for a reservation that was never partially settled.
+//
+// In pool mode a new transaction is started and committed here. In tx mode
+// (bound via WithDB) the update is applied to the caller's transaction;
+// commit/rollback is the caller's responsibility.
+func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationID int64) error {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.finalize_settlement",
+		attribute.Int64("reservation_id", reservationID),
+	)
+	defer span.End()
+
+	if s.pool == nil {
+		err := s.finalizeSettlementWithQueries(ctx, s.q, reservationID)
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return fmt.Errorf("postgres: finalize settlement: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), reservationID); err != nil {
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		ledgerotel.RecordError(span, err)
+		return fmt.Errorf("postgres: finalize settlement: commit: %w", err)
+	}
+
+	return nil
+}
+
+func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64) error {
+	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: finalize settlement: reservation %d: %w", reservationID, core.ErrNotFound)
+		}
+		return fmt.Errorf("postgres: finalize settlement: get reservation: %w", err)
+	}
+
+	status := core.ReservationStatus(res.Status)
+	if status != core.ReservationStatusSettling {
+		return fmt.Errorf("postgres: finalize settlement: reservation %d has status %q, not settling (use Settle for a one-shot settlement that never called SettlePartial): %w", reservationID, res.Status, core.ErrInvalidTransition)
+	}
+
+	if err := qtx.FinalizeReservationSettlement(ctx, reservationID); err != nil {
+		return wrapStoreError("postgres: finalize settlement: update", err)
 	}
 
 	return nil
