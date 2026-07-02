@@ -418,6 +418,63 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatusEnvelope'
+  /currencies:
+    post:
+      tags: [metadata]
+      summary: Create a currency
+      operationId: createCurrency
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCurrencyRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrencyResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+    get:
+      tags: [metadata]
+      summary: List currencies
+      operationId: listCurrencies
+      parameters:
+        - { name: active_only, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeOK'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Currency' }
+  /currencies/{id}/deactivate:
+    post:
+      tags: [metadata]
+      summary: Deactivate a currency (soft delete)
+      operationId: deactivateCurrency
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusEnvelope'
+        '404': { $ref: '#/components/responses/NotFound' }
   /system/health:
     get:
       tags: [system]
@@ -732,3 +789,32 @@ components:
         - type: object
           properties:
             data: { $ref: '#/components/schemas/Reservation' }
+    CreateCurrencyRequest:
+      type: object
+      required: [code, name, exponent]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        exponent:
+          type: integer
+          minimum: 0
+          maximum: 18
+          description: >-
+            Maximum decimal places entries in this currency may carry
+            (JPY=0, USD=2, USDT=6, wei=18). Enforced at every write path —
+            over-precise amounts are rejected, never silently rounded.
+    Currency:
+      type: object
+      required: [id, code, name, is_active, exponent]
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        is_active: { type: boolean }
+        exponent: { type: integer, minimum: 0, maximum: 18 }
+    CurrencyResponse:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeOK'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Currency' }

@@ -131,6 +131,8 @@ func resolveError(err error) *bizcode.AppError {
 		return bizcode.Wrap(14003, "unbalanced journal", err)
 	case errors.Is(err, core.ErrInvalidTransition):
 		return bizcode.Wrap(14004, "invalid transition", err)
+	case errors.Is(err, core.ErrPrecisionExceeded):
+		return bizcode.Wrap(14006, "amount exceeds currency precision", err)
 	case errors.Is(err, core.ErrInvalidInput):
 		return bizcode.Wrap(10001, "invalid input", err)
 	case errors.Is(err, core.ErrConflict):

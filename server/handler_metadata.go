@@ -134,6 +134,9 @@ func toTemplateResponse(t *core.EntryTemplate) templateResponse {
 type createCurrencyRequest struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
+	// Exponent is the maximum number of decimal places entries in this
+	// currency may carry (JPY=0, USD=2, USDT=6, wei=18). Required.
+	Exponent int32 `json:"exponent"`
 }
 
 type currencyResponse struct {
@@ -141,6 +144,7 @@ type currencyResponse struct {
 	Code     string `json:"code"`
 	Name     string `json:"name"`
 	IsActive bool   `json:"is_active"`
+	Exponent int32  `json:"exponent"`
 }
 
 // --- Template preview types ---
@@ -402,16 +406,21 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.ErrBadRequest("code and name required"))
 		return
 	}
+	if req.Exponent < 0 || req.Exponent > 18 {
+		httpx.Error(w, httpx.ErrBadRequest("exponent must be between 0 and 18"))
+		return
+	}
 
 	c, err := s.currencies.CreateCurrency(r.Context(), core.CurrencyInput{
-		Code: req.Code,
-		Name: req.Name,
+		Code:     req.Code,
+		Name:     req.Name,
+		Exponent: req.Exponent,
 	})
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive})
+	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent})
 }
 
 func (s *Server) handleDeactivateCurrency(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +445,7 @@ func (s *Server) handleListCurrencies(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]currencyResponse, len(list))
 	for i, c := range list {
-		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive}
+		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent}
 	}
 	httpx.OK(w, data)
 }
