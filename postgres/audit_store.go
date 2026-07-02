@@ -42,10 +42,6 @@ func (s *AuditStore) WithDB(db DBTX) *AuditStore {
 	}
 }
 
-// epoch is the zero-value sentinel used to signal "no time filter" to the
-// SQL queries (they compare against 'epoch'::timestamptz).
-var epoch = time.Time{}
-
 // sinceOrEpoch returns t if it is non-zero, otherwise the zero time.
 // PostgreSQL's 'epoch'::timestamptz = 1970-01-01 00:00:00 UTC, which is
 // what time.Time{} becomes when sent to pgx.

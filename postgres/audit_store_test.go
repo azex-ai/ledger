@@ -15,18 +15,6 @@ import (
 	"github.com/azex-ai/ledger/presets"
 )
 
-// seedAuditFixture creates two journals touching the same account, plus a
-// reversal of the first journal. Returns journalIDs [j1, j2, reversal].
-func seedAuditFixture(t *testing.T, ctx context.Context, pool interface {
-	QueryRow(ctx context.Context, sql string, args ...any) interface {
-		Scan(dest ...any) error
-	}
-	Exec(ctx context.Context, sql string, args ...any) (interface{ RowsAffected() int64 }, error)
-}) (currencyID, classID, j1, j2 int64) {
-	t.Helper()
-	return 0, 0, 0, 0
-}
-
 func TestAudit_ListJournalsByAccount_OrderedByID(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()

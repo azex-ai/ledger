@@ -14,15 +14,6 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 )
 
-// setupTrendFixture creates currency, classification, snapshot, and journal entries
-// for use in balance trend tests. Returns (currencyID, classificationID).
-func setupTrendFixture(t *testing.T, pool interface {
-	Exec(ctx context.Context, sql string, args ...any) (interface{ RowsAffected() int64 }, error)
-}) (int64, int64) {
-	t.Helper()
-	return 0, 0
-}
-
 func TestBalanceTrends_GapFill(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()

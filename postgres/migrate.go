@@ -32,12 +32,8 @@ func Migrate(databaseURL string) error {
 	if err != nil {
 		return fmt.Errorf("postgres: migrate: init migrate: %w", err)
 	}
-	defer func() {
-		sourceErr, databaseErr := m.Close()
-		if sourceErr != nil || databaseErr != nil {
-			// best effort cleanup
-		}
-	}()
+	// Close errors on a completed migration are non-actionable (errcheck excludes Close).
+	defer m.Close()
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("postgres: migrate: up: %w", err)
