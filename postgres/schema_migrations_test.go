@@ -47,9 +47,11 @@ func TestMigration022_JournalEntriesHasPrimaryKey(t *testing.T) {
 }
 
 // Migration 023: reservations gets a non-partial index covering
-// ListReservationsByAccount's filter (account_holder, currency_id) and its
+// ListReservationsByAccount's filter (account_holder) and its
 // ORDER BY created_at DESC, so listing by any status doesn't fall back to a
-// sequential scan.
+// sequential scan. currency_id is deliberately NOT in the index: the query
+// does not filter on it, and placing it between account_holder and created_at
+// would prevent the index from satisfying the ORDER BY.
 func TestMigration023_ReservationsAccountCreatedIndexExists(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
@@ -61,7 +63,7 @@ func TestMigration023_ReservationsAccountCreatedIndexExists(t *testing.T) {
 	`).Scan(&indexdef)
 	require.NoError(t, err, "idx_reservations_account_created must exist on reservations")
 	assert.Contains(t, indexdef, "account_holder")
-	assert.Contains(t, indexdef, "currency_id")
+	assert.NotContains(t, indexdef, "currency_id", "currency_id is not filtered by ListReservationsByAccount and would break the ORDER BY index usage")
 	assert.Contains(t, indexdef, "created_at")
 	assert.NotContains(t, indexdef, "WHERE", "index must not be partial — ListReservationsByAccount queries any status")
 }
