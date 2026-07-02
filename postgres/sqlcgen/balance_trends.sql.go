@@ -33,16 +33,19 @@ snapshots AS (
       AND snapshot_date BETWEEN $1::date AND $2::date
 ),
 daily_flows AS (
+    -- "Day" is keyed on effective_at (business date), not created_at (write
+    -- date). effective_at is denormalized onto journal_entries so this no
+    -- longer needs to join journals — see
+    -- docs/plans/2026-07-02-financial-core-hardening-design.md §1.
     SELECT
-        (j.created_at AT TIME ZONE 'UTC')::date AS flow_date,
+        (je.effective_at AT TIME ZONE 'UTC')::date AS flow_date,
         COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0::numeric END), 0) AS inflow,
         COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE 0::numeric END), 0) AS outflow
     FROM journal_entries je
-    JOIN journals j ON j.id = je.journal_id
     WHERE je.account_holder = $3::bigint
       AND je.currency_id    = $4::bigint
       AND ($5::bigint = 0 OR je.classification_id = $5::bigint)
-      AND (j.created_at AT TIME ZONE 'UTC')::date
+      AND (je.effective_at AT TIME ZONE 'UTC')::date
             BETWEEN $1::date AND $2::date
     GROUP BY flow_date
 ),

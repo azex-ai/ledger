@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -70,7 +71,7 @@ func (q *Queries) DistinctClassificationsForAccount(ctx context.Context, arg Dis
 }
 
 const getJournal = `-- name: GetJournal :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE id = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at FROM journals WHERE id = $1
 `
 
 func (q *Queries) GetJournal(ctx context.Context, id int64) (Journal, error) {
@@ -88,12 +89,13 @@ func (q *Queries) GetJournal(ctx context.Context, id int64) (Journal, error) {
 		&i.ReversalOf,
 		&i.CreatedAt,
 		&i.EventID,
+		&i.EffectiveAt,
 	)
 	return i, err
 }
 
 const getJournalByIdempotencyKey = `-- name: GetJournalByIdempotencyKey :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE idempotency_key = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at FROM journals WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey string) (Journal, error) {
@@ -111,12 +113,13 @@ func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey
 		&i.ReversalOf,
 		&i.CreatedAt,
 		&i.EventID,
+		&i.EffectiveAt,
 	)
 	return i, err
 }
 
 const getReversalByOriginalJournalID = `-- name: GetReversalByOriginalJournalID :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals WHERE reversal_of = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at FROM journals WHERE reversal_of = $1
 `
 
 func (q *Queries) GetReversalByOriginalJournalID(ctx context.Context, reversalOf pgtype.Int8) (Journal, error) {
@@ -134,14 +137,15 @@ func (q *Queries) GetReversalByOriginalJournalID(ctx context.Context, reversalOf
 		&i.ReversalOf,
 		&i.CreatedAt,
 		&i.EventID,
+		&i.EffectiveAt,
 	)
 	return i, err
 }
 
 const insertJournal = `-- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at
 `
 
 type InsertJournalParams struct {
@@ -154,6 +158,7 @@ type InsertJournalParams struct {
 	Source         string         `json:"source"`
 	ReversalOf     pgtype.Int8    `json:"reversal_of"`
 	EventID        int64          `json:"event_id"`
+	EffectiveAt    time.Time      `json:"effective_at"`
 }
 
 func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (Journal, error) {
@@ -167,6 +172,7 @@ func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (J
 		arg.Source,
 		arg.ReversalOf,
 		arg.EventID,
+		arg.EffectiveAt,
 	)
 	var i Journal
 	err := row.Scan(
@@ -181,14 +187,15 @@ func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (J
 		&i.ReversalOf,
 		&i.CreatedAt,
 		&i.EventID,
+		&i.EffectiveAt,
 	)
 	return i, err
 }
 
 const insertJournalEntry = `-- name: InsertJournalEntry :one
-INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, now())
-RETURNING id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+RETURNING id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
 `
 
 type InsertJournalEntryParams struct {
@@ -198,8 +205,13 @@ type InsertJournalEntryParams struct {
 	ClassificationID int64          `json:"classification_id"`
 	EntryType        string         `json:"entry_type"`
 	Amount           pgtype.Numeric `json:"amount"`
+	EffectiveAt      time.Time      `json:"effective_at"`
 }
 
+// Column order in RETURNING matches the table's physical column order
+// (effective_at was appended after created_at in migration 025) so sqlc
+// matches the generated row to the JournalEntry model instead of minting a
+// distinct one-off row type.
 func (q *Queries) InsertJournalEntry(ctx context.Context, arg InsertJournalEntryParams) (JournalEntry, error) {
 	row := q.db.QueryRow(ctx, insertJournalEntry,
 		arg.JournalID,
@@ -208,6 +220,7 @@ func (q *Queries) InsertJournalEntry(ctx context.Context, arg InsertJournalEntry
 		arg.ClassificationID,
 		arg.EntryType,
 		arg.Amount,
+		arg.EffectiveAt,
 	)
 	var i JournalEntry
 	err := row.Scan(
@@ -219,12 +232,13 @@ func (q *Queries) InsertJournalEntry(ctx context.Context, arg InsertJournalEntry
 		&i.EntryType,
 		&i.Amount,
 		&i.CreatedAt,
+		&i.EffectiveAt,
 	)
 	return i, err
 }
 
 const listEntriesByAccount = `-- name: ListEntriesByAccount :many
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
 FROM journal_entries
 WHERE account_holder = $1 AND currency_id = $2
   AND id > $3::bigint
@@ -239,6 +253,7 @@ type ListEntriesByAccountParams struct {
 	PageLimit     int32 `json:"page_limit"`
 }
 
+// Column order matches the table's physical order (see InsertJournalEntry).
 func (q *Queries) ListEntriesByAccount(ctx context.Context, arg ListEntriesByAccountParams) ([]JournalEntry, error) {
 	rows, err := q.db.Query(ctx, listEntriesByAccount,
 		arg.AccountHolder,
@@ -262,6 +277,7 @@ func (q *Queries) ListEntriesByAccount(ctx context.Context, arg ListEntriesByAcc
 			&i.EntryType,
 			&i.Amount,
 			&i.CreatedAt,
+			&i.EffectiveAt,
 		); err != nil {
 			return nil, err
 		}
@@ -274,12 +290,13 @@ func (q *Queries) ListEntriesByAccount(ctx context.Context, arg ListEntriesByAcc
 }
 
 const listJournalEntries = `-- name: ListJournalEntries :many
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
 FROM journal_entries
 WHERE journal_id = $1
 ORDER BY id
 `
 
+// Column order matches the table's physical order (see InsertJournalEntry).
 func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]JournalEntry, error) {
 	rows, err := q.db.Query(ctx, listJournalEntries, journalID)
 	if err != nil {
@@ -298,6 +315,7 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Jo
 			&i.EntryType,
 			&i.Amount,
 			&i.CreatedAt,
+			&i.EffectiveAt,
 		); err != nil {
 			return nil, err
 		}
@@ -310,7 +328,7 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Jo
 }
 
 const listJournalsCursor = `-- name: ListJournalsCursor :many
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id FROM journals
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at FROM journals
 WHERE id > $1::bigint
 ORDER BY id ASC
 LIMIT $2::int
@@ -342,6 +360,7 @@ func (q *Queries) ListJournalsCursor(ctx context.Context, arg ListJournalsCursor
 			&i.ReversalOf,
 			&i.CreatedAt,
 			&i.EventID,
+			&i.EffectiveAt,
 		); err != nil {
 			return nil, err
 		}

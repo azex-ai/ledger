@@ -137,6 +137,8 @@ func resolveError(err error) *bizcode.AppError {
 		return bizcode.Wrap(14007, "account frozen", err)
 	case errors.Is(err, core.ErrAccountClosed):
 		return bizcode.Wrap(14008, "account closed", err)
+	case errors.Is(err, core.ErrPeriodClosed):
+		return bizcode.Wrap(14009, "accounting period is closed", err)
 	case errors.Is(err, core.ErrInvalidInput):
 		return bizcode.Wrap(10001, "invalid input", err)
 	case errors.Is(err, core.ErrConflict):

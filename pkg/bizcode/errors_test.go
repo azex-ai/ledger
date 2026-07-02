@@ -21,6 +21,7 @@ func TestRetryable(t *testing.T) {
 		{"unbalanced journal", 14003, false},
 		{"invalid transition", 14004, false},
 		{"reservation expired", 14005, false},
+		{"period closed", 14006, false},
 		{"service unavailable", 18101, true},
 		{"internal error", 19999, true},
 		{"unclassified code", 99999, true},

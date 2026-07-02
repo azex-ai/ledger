@@ -32,8 +32,10 @@ LIMIT 1;
 SELECT COUNT(*)::bigint FROM balance_snapshots;
 
 -- name: GetEarliestJournalDate :one
--- Returns the earliest journal_entries created_at, or the epoch sentinel when the table is empty.
-SELECT COALESCE(MIN(created_at), 'epoch'::timestamptz) AS earliest_at
+-- Returns the earliest journal_entries effective_at (business date, not
+-- write date — a retroactive posting can predate every created_at), or the
+-- epoch sentinel when the table is empty.
+SELECT COALESCE(MIN(effective_at), 'epoch'::timestamptz) AS earliest_at
 FROM journal_entries;
 
 -- name: UpsertSystemRollup :exec

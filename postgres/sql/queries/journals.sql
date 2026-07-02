@@ -1,12 +1,16 @@
 -- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: InsertJournalEntry :one
-INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, now())
-RETURNING id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at;
+-- Column order in RETURNING matches the table's physical column order
+-- (effective_at was appended after created_at in migration 025) so sqlc
+-- matches the generated row to the JournalEntry model instead of minting a
+-- distinct one-off row type.
+INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+RETURNING id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at;
 
 -- name: GetJournal :one
 SELECT * FROM journals WHERE id = $1;
@@ -18,13 +22,15 @@ SELECT * FROM journals WHERE idempotency_key = $1;
 SELECT * FROM journals WHERE reversal_of = $1;
 
 -- name: ListJournalEntries :many
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+-- Column order matches the table's physical order (see InsertJournalEntry).
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
 FROM journal_entries
 WHERE journal_id = $1
 ORDER BY id;
 
 -- name: ListEntriesByAccount :many
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at
+-- Column order matches the table's physical order (see InsertJournalEntry).
+SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
 FROM journal_entries
 WHERE account_holder = $1 AND currency_id = $2
   AND id > sqlc.arg(cursor_id)::bigint

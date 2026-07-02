@@ -21,11 +21,17 @@ type journalEntryFingerprint struct {
 }
 
 func ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Journal, input core.JournalInput) (*core.Journal, error) {
+	// EffectiveAt is only compared when the caller explicitly set it: a zero
+	// value on input means "defaulted to now() at insert time", which is
+	// necessarily different across retries and would falsely conflict.
+	effectiveAtMismatch := !input.EffectiveAt.IsZero() && !existing.EffectiveAt.Equal(input.EffectiveAt)
+
 	if existing.JournalTypeID != input.JournalTypeID ||
 		existing.ActorID != input.ActorID ||
 		existing.Source != input.Source ||
 		existing.EventID != input.EventID ||
 		journalReversalOf(existing) != input.ReversalOf ||
+		effectiveAtMismatch ||
 		!mustNumericToDecimal(existing.TotalDebit).Equal(totalDebit(input.Entries)) ||
 		!mustNumericToDecimal(existing.TotalCredit).Equal(totalCredit(input.Entries)) ||
 		string(metadataToJSON(journalFromRow(existing).Metadata)) != string(metadataToJSON(input.Metadata)) {

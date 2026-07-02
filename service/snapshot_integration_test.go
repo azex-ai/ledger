@@ -95,23 +95,26 @@ func seedJournal(
 	t.Helper()
 	ctx := context.Background()
 	var jID int64
+	// effective_at is set to `at` alongside created_at: this helper models a
+	// journal whose business date is `at`, which is what the as-of queries
+	// under test (ListBalancesAt et al.) key off since migration 025.
 	err := pgpool.QueryRow(ctx,
-		`INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id, created_at)
-		 VALUES ($1, $2, $3, $3, 0, 'test', 0, $4) RETURNING id`,
+		`INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id, created_at, effective_at)
+		 VALUES ($1, $2, $3, $3, 0, 'test', 0, $4, $4) RETURNING id`,
 		jtID, ikey, amount.String(), at,
 	).Scan(&jID)
 	require.NoError(t, err)
 
 	_, err = pgpool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
-		 VALUES ($1,$2,$3,$4,'debit',$5,$6)`,
+		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
+		 VALUES ($1,$2,$3,$4,'debit',$5,$6,$6)`,
 		jID, holderID, currencyID, classID, amount.String(), at,
 	)
 	require.NoError(t, err)
 
 	_, err = pgpool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
-		 VALUES ($1,$2,$3,$4,'credit',$5,$6)`,
+		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
+		 VALUES ($1,$2,$3,$4,'credit',$5,$6,$6)`,
 		jID, -holderID, currencyID, sysClassID, amount.String(), at,
 	)
 	require.NoError(t, err)

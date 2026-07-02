@@ -388,6 +388,82 @@ round it first with `core.Round` if it might not be (e.g. it came from a
 
 ---
 
+## Recipe 8 — Retroactive posting and period close
+
+### Backdating a journal to its real business date
+
+`JournalInput.EffectiveAt` (and `TemplateParams.EffectiveAt`) lets you attribute
+a journal to a date other than "now" — a delayed on-chain confirmation, an
+invoice for last month's usage. Leave it zero for the common case (attribute
+to now); set it explicitly for retroactive posting:
+
+```go
+_, err := svc.JournalWriter().PostJournal(ctx, core.JournalInput{
+    JournalTypeID:  depositJT,
+    IdempotencyKey: idemKey,
+    EffectiveAt:    lastMonthEnd, // business date — write time (created_at) is still "now"
+    Entries:        entries,
+})
+```
+
+`effective_at` never affects real-time balances (`checkpoint + delta` still
+rolls by insertion order) — it only changes which "as of" bucket a reporting
+query (trial balance, balance trends, daily snapshots) attributes the entry
+to. It's rejected if more than 5 minutes in the future — this is backdating,
+not scheduled posting.
+
+### Closing a period, and correcting a closed period
+
+`svc.PeriodCloser().ClosePeriod` appends a close line: any `PostJournal` (or
+template, or reversal) whose `EffectiveAt` predates the active line is
+rejected with `core.ErrPeriodClosed`.
+
+```go
+_, err := svc.PeriodCloser().ClosePeriod(ctx, core.ClosePeriodInput{
+    CloseBefore: monthEnd,
+    Note:        "March 2026 close",
+    ActorID:     opsUserID,
+})
+```
+
+**You cannot fix a closed period by rewriting history** (I-2 forbids UPDATE/
+DELETE on journals). The correction pattern is: reverse the original journal
+— the reversal's `EffectiveAt` always defaults to *now* (it never inherits
+the original's), so it lands in the currently open period — then, if needed,
+post a fresh corrected journal, also dated in the open period:
+
+```go
+_, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalID, "March closed, correcting in April")
+// then re-post the correct entries with today's date
+```
+
+Reopening a period (e.g. an auditor found something after close) is done by
+closing again with an earlier `CloseBefore` — this is a normal, audited
+append (the full close-line history is kept, nothing is overwritten):
+
+```go
+_, err := svc.PeriodCloser().ClosePeriod(ctx, core.ClosePeriodInput{
+    CloseBefore: earlierDate,
+    Note:        "reopened for audit correction",
+    ActorID:     opsUserID,
+})
+```
+
+### Trial balance as the close-readiness check
+
+Before closing a period, run the trial balance for the cutoff you're about to
+close — `balanced: true` and `total_debit == total_credit` is the signal the
+books are internally consistent as of that date:
+
+```go
+report, err := svc.TrialBalanceReader().TrialBalance(ctx, currencyID, monthEnd)
+if !report.Balanced {
+    return fmt.Errorf("trial balance off by %s, do not close", report.TotalDebit.Sub(report.TotalCredit))
+}
+```
+
+---
+
 ## Running the example
 
 ```bash

@@ -497,6 +497,63 @@ paths:
           description: Ready
         '503':
           description: Starting
+  /periods/close:
+    post:
+      tags: [periods]
+      summary: Append a new accounting period close line (append-only, latest-row-wins; reopening = appending an earlier close_before)
+      operationId: closePeriod
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClosePeriodRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PeriodCloseResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /periods/closes:
+    get:
+      tags: [periods]
+      summary: List the period-close history, most recent first
+      operationId: listPeriodCloses
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/EnvelopeOK'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/PeriodClose' }
+  /reports/trial-balance:
+    get:
+      tags: [reports]
+      summary: Trial balance for one currency as of a point in time
+      operationId: getTrialBalance
+      parameters:
+        - { name: currency_id, in: query, required: true, schema: { type: integer, format: int64 } }
+        - { name: as_of, in: query, schema: { type: string, format: date-time }, description: "Defaults to now" }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialBalanceResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
 components:
   securitySchemes:
     bearerAuth:
@@ -693,9 +750,10 @@ components:
         metadata: { type: object, additionalProperties: { type: string } }
         actor_id: { type: integer, format: int64 }
         source: { type: string }
+        effective_at: { type: string, format: date-time, description: "Business date; defaults to now if omitted. Rejected if more than 5 minutes in the future." }
     Journal:
       type: object
-      required: [id, journal_type_id, idempotency_key, total_debit, total_credit, created_at]
+      required: [id, journal_type_id, idempotency_key, total_debit, total_credit, effective_at, created_at]
       properties:
         id: { type: integer, format: int64 }
         journal_type_id: { type: integer, format: int64 }
@@ -706,6 +764,7 @@ components:
         actor_id: { type: integer, format: int64 }
         source: { type: string }
         reversal_of: { type: integer, format: int64 }
+        effective_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
     JournalResponse:
       allOf:
@@ -818,3 +877,53 @@ components:
         - type: object
           properties:
             data: { $ref: '#/components/schemas/Currency' }
+    ClosePeriodRequest:
+      type: object
+      required: [close_before]
+      properties:
+        close_before: { type: string, format: date-time, description: "Journals with effective_at before this are rejected" }
+        note: { type: string }
+        actor_id: { type: integer, format: int64 }
+    PeriodClose:
+      type: object
+      required: [id, close_before, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        close_before: { type: string, format: date-time }
+        note: { type: string }
+        actor_id: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+    PeriodCloseResponse:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeOK'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/PeriodClose' }
+    TrialBalanceRow:
+      type: object
+      required: [classification_id, classification_code, classification_name, normal_side, total_debit, total_credit, net]
+      properties:
+        classification_id: { type: integer, format: int64 }
+        classification_code: { type: string }
+        classification_name: { type: string }
+        normal_side: { type: string, enum: [debit, credit] }
+        total_debit: { $ref: '#/components/schemas/Decimal' }
+        total_credit: { $ref: '#/components/schemas/Decimal' }
+        net: { $ref: '#/components/schemas/Decimal' }
+    TrialBalanceResponse:
+      allOf:
+        - $ref: '#/components/schemas/EnvelopeOK'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [currency_id, as_of, rows, total_debit, total_credit, balanced]
+              properties:
+                currency_id: { type: integer, format: int64 }
+                as_of: { type: string, format: date-time }
+                rows:
+                  type: array
+                  items: { $ref: '#/components/schemas/TrialBalanceRow' }
+                total_debit: { $ref: '#/components/schemas/Decimal' }
+                total_credit: { $ref: '#/components/schemas/Decimal' }
+                balanced: { type: boolean }

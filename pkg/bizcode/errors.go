@@ -82,6 +82,7 @@ var (
 	PrecisionExceeded   = New(14006, "amount exceeds currency precision")
 	AccountFrozen       = New(14007, "account frozen")
 	AccountClosed       = New(14008, "account closed")
+	PeriodClosed        = New(14009, "accounting period is closed")
 )
 
 // --- Display messages ---
@@ -103,6 +104,7 @@ var displayMessages = map[int]string{
 	14006: "Amount has more decimal places than this currency allows",
 	14007: "This account is frozen",
 	14008: "This account is closed",
+	14009: "This accounting period is closed",
 	19999: "An unexpected error occurred",
 }
 

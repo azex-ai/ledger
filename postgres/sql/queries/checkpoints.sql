@@ -110,6 +110,8 @@ GROUP BY currency_id, entry_type
 ORDER BY currency_id, entry_type;
 
 -- name: ListBalancesAt :many
+-- As-of cutoff is applied on effective_at (business date), not created_at
+-- (write date) — see docs/plans/2026-07-02-financial-core-hardening-design.md §1.
 SELECT
   je.account_holder,
   je.currency_id,
@@ -124,7 +126,7 @@ SELECT
   ), 0)::numeric AS balance
 FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
-WHERE je.created_at < $1
+WHERE je.effective_at < $1
 GROUP BY je.account_holder, je.currency_id, je.classification_id
 ORDER BY je.account_holder, je.currency_id, je.classification_id;
 

@@ -73,6 +73,7 @@ Common business codes you may see:
 | `14003` | Journal entries not balanced | No |
 | `14004` | Invalid state transition | No |
 | `14005` | Reservation expired | No |
+| `14009` | Accounting period is closed | No |
 | `19999` | Internal error | Yes |
 
 **Retry semantics.** `retryable` is derived purely from the code range (`pkg/bizcode.Retryable`), not from request content:
@@ -313,13 +314,19 @@ Request:
   ],
   "source": "api",
   "actor_id": 0,
+  "effective_at": "2026-06-01T00:00:00Z",
   "metadata": {"tx_hash": "0xabc"}
 }
 ```
 
-Response `201 Created`: journal object with `id`, `journal_type_id`, `idempotency_key`, `total_debit`, `total_credit`, `actor_id`, `source`, `metadata`, `created_at`. `entries` is omitted on the create response; use `GET /journals/{id}` to retrieve.
+`effective_at` is optional — omit it to attribute the journal to now. Set it
+to backdate a retroactive posting; rejected with `10001` if more than 5
+minutes in the future, and with `14009` if it falls before the active period
+close line (see [§14 Periods](#14-periods)).
 
-Status codes: `201`, `400`, `401`, `422` (`14002` duplicate, `14003` unbalanced, `14001` insufficient balance), `429`, `503`.
+Response `201 Created`: journal object with `id`, `journal_type_id`, `idempotency_key`, `total_debit`, `total_credit`, `actor_id`, `source`, `metadata`, `effective_at`, `created_at`. `entries` is omitted on the create response; use `GET /journals/{id}` to retrieve.
+
+Status codes: `201`, `400`, `401`, `422` (`14002` duplicate, `14003` unbalanced, `14001` insufficient balance, `14009` period closed), `429`, `503`.
 
 Auth: required. Idempotency: required.
 
@@ -890,6 +897,83 @@ Response `200 OK`:
     {"date": "2026-04-16", "balance": "404.50", "inflow": "50.00", "outflow": "0.00"},
     {"date": "2026-04-17", "balance": "454.50", "inflow": "50.00", "outflow": "0.00"}
   ]
+}
+```
+
+Status codes: `200`, `400`.
+
+---
+
+## 14. Periods
+
+Accounting period close: an append-only barrier that rejects new (or
+reversal) postings whose `effective_at` predates the active close line.
+Real-time balances are never affected — only future writes are gated. See
+[COOKBOOK Recipe 8](COOKBOOK.md#recipe-8--retroactive-posting-and-period-close)
+for the correction pattern.
+
+### POST /periods/close
+
+Append a new close line. `close_before` is the new barrier: journals with
+`effective_at < close_before` are rejected. Reopening a period is done by
+posting an earlier `close_before` than the current one — the previous line is
+never overwritten (append-only; `GET /periods/closes` shows full history).
+
+Request:
+
+```json
+{
+  "close_before": "2026-04-01T00:00:00Z",
+  "note": "March 2026 close",
+  "actor_id": 7
+}
+```
+
+Response `201 Created`: `{ "id", "close_before", "note", "actor_id", "created_at" }`.
+
+Status codes: `201`, `400`.
+
+Auth: required.
+
+### GET /periods/closes
+
+List the close-line history, most recent first.
+
+Query params: `limit` (default 50, max 200).
+
+Response `200 OK`: array of the same object shape as `POST /periods/close`.
+
+Status codes: `200`.
+
+---
+
+## 15. Reports
+
+### GET /reports/trial-balance
+
+Per-classification debit/credit totals for one currency as of a point in
+time, plus the global debit=credit balanced check — the standard
+close-readiness verification.
+
+Query params: `currency_id` (required), `as_of` (RFC 3339, optional — default now).
+
+Response `200 OK`:
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "currency_id": 1,
+    "as_of": "2026-04-01T00:00:00Z",
+    "rows": [
+      {"classification_id": 1, "classification_code": "main_wallet", "classification_name": "Main Wallet", "normal_side": "debit", "total_debit": "500.00", "total_credit": "0.00", "net": "500.00"},
+      {"classification_id": 2, "classification_code": "custodial", "classification_name": "Custodial", "normal_side": "credit", "total_debit": "0.00", "total_credit": "500.00", "net": "500.00"}
+    ],
+    "total_debit": "500.00",
+    "total_credit": "500.00",
+    "balanced": true
+  }
 }
 ```
 

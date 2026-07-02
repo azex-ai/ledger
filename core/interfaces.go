@@ -209,3 +209,18 @@ type AccountPolicyStore interface {
 	// currencies and classifications.
 	ListPolicies(ctx context.Context, holder int64) ([]AccountPolicy, error)
 }
+
+// PeriodCloser manages the accounting period close line (append-only,
+// latest-row-wins). See docs/INVARIANTS.md I-15.
+type PeriodCloser interface {
+	ClosePeriod(ctx context.Context, input ClosePeriodInput) (*PeriodClose, error)
+	// ActiveCloseLine returns the current close_before line, or the zero Time
+	// if the period has never been closed.
+	ActiveCloseLine(ctx context.Context) (time.Time, error)
+	ListPeriodCloses(ctx context.Context, limit int) ([]PeriodClose, error)
+}
+
+// TrialBalanceReader computes a trial balance report.
+type TrialBalanceReader interface {
+	TrialBalance(ctx context.Context, currencyID int64, asOf time.Time) (*TrialBalanceReport, error)
+}

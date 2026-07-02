@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -236,6 +237,60 @@ func TestJournalInput_Validate_WrapsUnbalanced(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnbalancedJournal), "expected ErrUnbalancedJournal, got: %v", err)
 	assert.False(t, errors.Is(err, ErrInvalidInput), "unbalanced journal must NOT wrap ErrInvalidInput")
+}
+
+func TestJournalInput_Validate_EffectiveAt_Zero_OK(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-eff-zero",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+	require.NoError(t, input.Validate())
+}
+
+func TestJournalInput_Validate_EffectiveAt_Past_OK(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-eff-past",
+		EffectiveAt:    time.Now().AddDate(-1, 0, 0),
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+	require.NoError(t, input.Validate())
+}
+
+func TestJournalInput_Validate_EffectiveAt_WithinTolerance_OK(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-eff-tolerance",
+		EffectiveAt:    time.Now().Add(2 * time.Minute),
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+	require.NoError(t, input.Validate())
+}
+
+func TestJournalInput_Validate_EffectiveAt_FarFuture_Rejected(t *testing.T) {
+	input := JournalInput{
+		JournalTypeID:  1,
+		IdempotencyKey: "tx-eff-future",
+		EffectiveAt:    time.Now().Add(time.Hour),
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+	}
+	err := input.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "effective_at")
 }
 
 func TestJournalInput_Totals(t *testing.T) {

@@ -20,7 +20,11 @@ type Journal struct {
 	Source         string            `json:"source"`
 	ReversalOf     int64             `json:"reversal_of"`
 	EventID        int64             `json:"event_id"`
-	CreatedAt      time.Time         `json:"created_at"`
+	// EffectiveAt is the business date this journal is attributed to, distinct
+	// from CreatedAt (the write-time). Used for as-of reporting (trial balance,
+	// balance trends, snapshots) — see docs/INVARIANTS.md I-14.
+	EffectiveAt time.Time `json:"effective_at"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Entry is a single debit or credit line in a journal.
@@ -32,7 +36,10 @@ type Entry struct {
 	ClassificationID int64           `json:"classification_id"`
 	EntryType        EntryType       `json:"entry_type"`
 	Amount           decimal.Decimal `json:"amount"`
-	CreatedAt        time.Time       `json:"created_at"`
+	// EffectiveAt is denormalized from the parent journal so as-of aggregation
+	// does not need to join journals (see docs/INVARIANTS.md I-14).
+	EffectiveAt time.Time `json:"effective_at"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // EntryInput is the input for a single entry line.
@@ -54,7 +61,16 @@ type JournalInput struct {
 	Source         string            `json:"source"`
 	ReversalOf     int64             `json:"reversal_of"`
 	EventID        int64             `json:"event_id"`
+	// EffectiveAt is the business date to attribute this journal to. Zero
+	// value means "now" — the store layer defaults it at insert time. Must
+	// not be more than effectiveAtFutureTolerance ahead of the current time.
+	EffectiveAt time.Time `json:"effective_at"`
 }
+
+// effectiveAtFutureTolerance is the clock-skew allowance for EffectiveAt:
+// timestamps more than this far in the future are rejected. Scheduled
+// (future-dated) posting is a different feature, not implemented here.
+const effectiveAtFutureTolerance = 5 * time.Minute
 
 func (j *JournalInput) Totals() (debit, credit decimal.Decimal) {
 	debit = decimal.Zero
@@ -96,6 +112,9 @@ func (j *JournalInput) Validate() error {
 	}
 	if len(j.Entries) == 0 {
 		return fmt.Errorf("core: journal: entries must not be empty: %w", ErrInvalidInput)
+	}
+	if !j.EffectiveAt.IsZero() && j.EffectiveAt.After(time.Now().Add(effectiveAtFutureTolerance)) {
+		return fmt.Errorf("core: journal: effective_at %s is too far in the future: %w", j.EffectiveAt.Format(time.RFC3339), ErrInvalidInput)
 	}
 	for i, e := range j.Entries {
 		if e.AccountHolder == 0 {

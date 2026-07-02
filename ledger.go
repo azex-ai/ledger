@@ -71,6 +71,8 @@ type Service struct {
 	platformBalanceStore *postgres.PlatformBalanceStore
 	reconcileAdapter     *postgres.ReconcileAdapter
 	accountPolicyStore   *postgres.AccountPolicyStore
+	periodCloseStore     *postgres.PeriodCloseStore
+	trialBalanceStore    *postgres.TrialBalanceStore
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
@@ -132,6 +134,8 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 	s.reconcileAdapter = postgres.NewReconcileAdapter(pool)
 	s.accountPolicyStore = postgres.NewAccountPolicyStore(pool)
+	s.periodCloseStore = postgres.NewPeriodCloseStore(pool)
+	s.trialBalanceStore = postgres.NewTrialBalanceStore(pool)
 
 	return s, nil
 }
@@ -295,6 +299,12 @@ func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
 // AccountPolicies manages per-account freeze/close + balance-floor overrides.
 func (s *Service) AccountPolicies() core.AccountPolicyStore { return s.accountPolicyStore }
 
+// PeriodCloser manages the accounting period close line.
+func (s *Service) PeriodCloser() core.PeriodCloser { return s.periodCloseStore }
+
+// TrialBalanceReader computes a trial balance report.
+func (s *Service) TrialBalanceReader() core.TrialBalanceReader { return s.trialBalanceStore }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -320,9 +330,11 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		auditStore:           s.auditStore.WithDB(tx),
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
-		reconcileAdapter:     s.reconcileAdapter,     // read-only, pool-backed is fine
+		reconcileAdapter:     s.reconcileAdapter, // read-only, pool-backed is fine
 		accountPolicyStore:   s.accountPolicyStore.WithDB(tx),
-		channels:             s.channels,             // shared snapshot; no mutations inside tx
+		periodCloseStore:     s.periodCloseStore.WithDB(tx),
+		trialBalanceStore:    s.trialBalanceStore.WithDB(tx),
+		channels:             s.channels, // shared snapshot; no mutations inside tx
 	}
 }
 

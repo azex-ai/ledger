@@ -288,68 +288,80 @@ not implemented — the `PARTITION BY RANGE` declaration is schema groundwork
 for that future work, not an active rollover process. Every row currently
 lands in `journal_entries_default`.
 
+## I-14: Effective date consistency
+
+`journal_entries.effective_at` is always equal to the `effective_at` of its
+parent journal (denormalized at write time, never independently set per
+entry). `effective_at` is never more than a 5-minute clock-skew tolerance
+ahead of the time it was written — future-dated ("scheduled") posting is not
+supported.
+
+**Why**: `effective_at` separates the business date a journal is attributed
+to from `created_at` (the write date), enabling retroactive posting (late
+invoices, delayed on-chain confirmations). As-of reporting (trial balance,
+balance trends, daily snapshots) reads `effective_at` directly off
+`journal_entries` — if it ever drifted from the parent journal's value, or a
+caller could schedule a journal into the future, those reports would silently
+misattribute or hide postings. See
+`docs/plans/2026-07-02-financial-core-hardening-design.md` §1.
+
+**Enforced by**:
+- `core.JournalInput.Validate` rejects `effective_at` beyond the future
+  tolerance.
+- `postgres.LedgerStore.postJournalWithQueries` defaults a zero `effective_at`
+  to `now()` and writes the same resolved value to the journal row and every
+  entry row in the same transaction.
+- Reversal journals (`ReverseJournal`) never copy the original journal's
+  `effective_at` — they always default to "now" (open period), which is the
+  standard close-then-correct pattern (see I-15).
+
+**Pinned by**:
+- `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
+  `..._Past_OK`, `..._WithinTolerance_OK`, `..._FarFuture_Rejected`
+- `postgres.TestMigration025_EffectiveAtColumnsExist` (schema pin)
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow`
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_Backdated` (also pins
+  entry/journal `effective_at` equality)
+- `postgres.TestLedgerStore_PostJournal_EffectiveAt_RejectsFarFuture`
+- `postgres.TestLedgerStore_ReverseJournal_EffectiveAt_DoesNotInheritOriginal`
+- `postgres.TestRollupAdapter_ListBalancesAt_UsesEffectiveAt` (as-of reporting
+  reads the business date, not the write date)
+
+## I-15: The accounting period close line is a hard write barrier
+
+There is no journal whose `effective_at` is earlier than the currently active
+period-close line (`period_closes`, latest-`created_at`-row-wins). Real-time
+balances (`checkpoint + delta`) are unaffected — the close line only gates
+*new writes*, it never rewrites or hides history.
+
+**Why**: without a close line, any historical report can be silently changed
+by a later retroactive posting — "the books for last month are final" has no
+enforcement. Reopening (appending a row with an earlier `close_before`) is a
+deliberate, audited, explicit action (an append-only row), never an implicit
+side effect. Corrections to a closed period are made by reversing at the
+current (open) date, never by rewriting history — consistent with I-2
+(corrections via reversal only).
+
+**Enforced by**: `postgres.LedgerStore.postJournalWithQueries` reads the
+active close line (`GetActivePeriodClose`) inside the same transaction as
+every write path (direct `PostJournal`, `ExecuteTemplate`,
+`ExecuteTemplateBatch`, and `ReverseJournal`, since they all funnel through
+this method) and rejects with `core.ErrPeriodClosed` when
+`effective_at < close_before`.
+
+**Pinned by**:
+- `postgres.TestMigration026_PeriodClosesTableExists` (schema pin)
+- `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed`
+- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` (rejects before
+  the line, accepts at/after it)
+- `postgres.TestPeriodCloseStore_Reopen_LatestRowWins` (reopen restores
+  postability; full close-line history is retained)
+- `postgres.TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod`
+  (correction-via-reversal lands in the open period)
+
 **Pinned by**:
 - `postgres.TestPartitionBoundary_DefaultCatches`
 - `postgres.TestPartitionBoundary_GetBalanceUnionsPartitions`
-
-## I-17: Account policy enforcement
-
-An account dimension `(account_holder, currency_id, classification_id)` may
-carry an optional `account_policies` override row. No row for a dimension
-means today's default behaviour: `active`, unconstrained. When a row exists,
-the most specific match wins — `(holder,currency,classification)` >
-`(holder,currency,0)` > `(holder,0,0)` — and:
-
-- `closed` rejects every entry touching that dimension, in either direction,
-  with `ErrAccountClosed`. Checked per-entry, fail-fast — closed is absolute.
-- `frozen` rejects a **net decrease** under that policy with `ErrAccountFrozen`.
-  Net, not per-entry: a policy can be a currency- or holder-wide wildcard
-  spanning several classifications in one journal (e.g.
-  `PendingBalanceWriter.ConfirmPending` posts a decrease to the "pending"
-  classification and an equal increase to "main_wallet" for the same holder),
-  and deposits must still complete while frozen (design doc §4/§9-1: frozen
-  blocks consumption, not the pending two-phase deposit flow). `Reserve` has
-  no entries to net against — it is unconditionally a consumption entry
-  point, so frozen/closed reject it outright.
-- `enforce_min_balance` rejects a journal that would take the dimension's
-  balance below `min_balance` (0 = no overdraft, negative = overdraft limit,
-  positive = dust floor), evaluated once against the *net* delta across every
-  entry the journal posts to that exact dimension — not per-entry, so an
-  intermediate debit within a net-positive journal is not falsely rejected.
-
-**Why**: without this, any direct `PostJournal` call could push a frozen or
-closed account's balance around, or drive any account arbitrarily negative —
-the only balance floor in the system was `Reserve`'s available-balance check,
-which a direct journal post bypasses entirely.
-
-**Enforced by**:
-- `postgres.LedgerStore.enforceAccountPolicies`, called from
-  `postJournalWithQueries` after the tx-scoped advisory locks for the
-  journal's `(holder, currency)` pairs are held (I-4) and before any row is
-  written — a rejection aborts the whole journal.
-- `postgres.ReserverStore.Reserve`, same advisory lock, same policy
-  resolution (`classification_id` fixed at 0 — a reservation isn't tied to a
-  classification).
-- `postgres.AccountPolicyStore.SetPolicy` acquires the same advisory lock for
-  currency-specific policies (`currency_id != 0`) before writing, so a policy
-  change is serialized against any journal/reserve in flight for that exact
-  pair. A holder-wide policy (`currency_id == 0`) is **not** pinned to a
-  single lock key this way — a policy change at that tier and a concurrent
-  journal in an unrelated currency for the same holder are not linearized
-  against each other. Flagged as a known gap, not silently assumed away.
-
-**Pinned by**:
-- `postgres.TestLedgerStore_AccountPolicy_StatusMatrix` (active/frozen/closed
-  × increase/decrease/Reserve)
-- `postgres.TestLedgerStore_ConfirmPending_SucceedsWhileFrozen` (explicit
-  pin: deposit finalization is not consumption)
-- `postgres.TestLedgerStore_AccountPolicy_MinBalance_*` (zero/negative/positive
-  `min_balance`, and same-journal multi-entry netting)
-- `postgres.TestLedgerStore_AccountPolicy_MatchPriority`
-- `postgres.TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal`
-- `postgres.TestAccountPolicyStore_SetPolicy_AuditTrail`
-
----
 
 ## I-16: Amount precision is bounded by currency exponent
 
@@ -413,6 +425,65 @@ database.
 - `core.FuzzAllocate` (Go fuzz target — sum(shares) == total for any valid
   total/weights/exponent)
 - `core.TestConvertAt_MatchesHandCalculation`
+
+---
+
+## I-17: Account policy enforcement
+
+An account dimension `(account_holder, currency_id, classification_id)` may
+carry an optional `account_policies` override row. No row for a dimension
+means today's default behaviour: `active`, unconstrained. When a row exists,
+the most specific match wins — `(holder,currency,classification)` >
+`(holder,currency,0)` > `(holder,0,0)` — and:
+
+- `closed` rejects every entry touching that dimension, in either direction,
+  with `ErrAccountClosed`. Checked per-entry, fail-fast — closed is absolute.
+- `frozen` rejects a **net decrease** under that policy with `ErrAccountFrozen`.
+  Net, not per-entry: a policy can be a currency- or holder-wide wildcard
+  spanning several classifications in one journal (e.g.
+  `PendingBalanceWriter.ConfirmPending` posts a decrease to the "pending"
+  classification and an equal increase to "main_wallet" for the same holder),
+  and deposits must still complete while frozen (design doc §4/§9-1: frozen
+  blocks consumption, not the pending two-phase deposit flow). `Reserve` has
+  no entries to net against — it is unconditionally a consumption entry
+  point, so frozen/closed reject it outright.
+- `enforce_min_balance` rejects a journal that would take the dimension's
+  balance below `min_balance` (0 = no overdraft, negative = overdraft limit,
+  positive = dust floor), evaluated once against the *net* delta across every
+  entry the journal posts to that exact dimension — not per-entry, so an
+  intermediate debit within a net-positive journal is not falsely rejected.
+
+**Why**: without this, any direct `PostJournal` call could push a frozen or
+closed account's balance around, or drive any account arbitrarily negative —
+the only balance floor in the system was `Reserve`'s available-balance check,
+which a direct journal post bypasses entirely.
+
+**Enforced by**:
+- `postgres.LedgerStore.enforceAccountPolicies`, called from
+  `postJournalWithQueries` after the tx-scoped advisory locks for the
+  journal's `(holder, currency)` pairs are held (I-4) and before any row is
+  written — a rejection aborts the whole journal.
+- `postgres.ReserverStore.Reserve`, same advisory lock, same policy
+  resolution (`classification_id` fixed at 0 — a reservation isn't tied to a
+  classification).
+- `postgres.AccountPolicyStore.SetPolicy` acquires the same advisory lock for
+  currency-specific policies (`currency_id != 0`) before writing, so a policy
+  change is serialized against any journal/reserve in flight for that exact
+  pair. A holder-wide policy (`currency_id == 0`) is **not** pinned to a
+  single lock key this way — a policy change at that tier and a concurrent
+  journal in an unrelated currency for the same holder are not linearized
+  against each other. Flagged as a known gap, not silently assumed away.
+
+**Pinned by**:
+- `postgres.TestLedgerStore_AccountPolicy_StatusMatrix` (active/frozen/closed
+  × increase/decrease/Reserve)
+- `postgres.TestLedgerStore_ConfirmPending_SucceedsWhileFrozen` (explicit
+  pin: deposit finalization is not consumption)
+- `postgres.TestLedgerStore_AccountPolicy_MinBalance_*` (zero/negative/positive
+  `min_balance`, and same-journal multi-entry netting)
+- `postgres.TestLedgerStore_AccountPolicy_MatchPriority`
+- `postgres.TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal`
+- `postgres.TestAccountPolicyStore_SetPolicy_AuditTrail`
 
 ---
 

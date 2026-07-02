@@ -41,6 +41,8 @@ type Server struct {
 	platformBalances core.PlatformBalanceReader
 	solvency         core.SolvencyChecker
 	balanceTrends    core.BalanceTrendReader
+	periodCloser     core.PeriodCloser
+	trialBalance     core.TrialBalanceReader
 
 	// Services (injected)
 	reconciler     core.Reconciler
@@ -130,6 +132,8 @@ func New(
 	balanceTrends core.BalanceTrendReader,
 	fullReconciler core.FullReconciler,
 	accountPolicies core.AccountPolicyStore,
+	periodCloser core.PeriodCloser,
+	trialBalance core.TrialBalanceReader,
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -142,7 +146,8 @@ func New(
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
 		reconciler, snapshotter, systemRollup, queries,
-		audit, platformBalances, solvency, balanceTrends, fullReconciler, accountPolicies)
+		audit, platformBalances, solvency, balanceTrends, fullReconciler,
+		accountPolicies, periodCloser, trialBalance)
 }
 
 // NewWithConfig creates a Server using an explicit config, skipping env-var loading.
@@ -169,6 +174,8 @@ func NewWithConfig(
 	balanceTrends core.BalanceTrendReader,
 	fullReconciler core.FullReconciler,
 	accountPolicies core.AccountPolicyStore,
+	periodCloser core.PeriodCloser,
+	trialBalance core.TrialBalanceReader,
 ) *Server {
 	s := &Server{
 		journals:         journals,
@@ -187,6 +194,8 @@ func NewWithConfig(
 		platformBalances: platformBalances,
 		solvency:         solvency,
 		balanceTrends:    balanceTrends,
+		periodCloser:     periodCloser,
+		trialBalance:     trialBalance,
 		reconciler:       reconciler,
 		fullReconciler:   fullReconciler,
 		snapshotter:      snapshotter,

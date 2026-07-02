@@ -160,6 +160,7 @@ type Journal struct {
 	ReversalOf     pgtype.Int8    `json:"reversal_of"`
 	CreatedAt      time.Time      `json:"created_at"`
 	EventID        int64          `json:"event_id"`
+	EffectiveAt    time.Time      `json:"effective_at"`
 }
 
 type JournalEntriesDefault struct {
@@ -182,6 +183,7 @@ type JournalEntry struct {
 	EntryType        string         `json:"entry_type"`
 	Amount           pgtype.Numeric `json:"amount"`
 	CreatedAt        time.Time      `json:"created_at"`
+	EffectiveAt      time.Time      `json:"effective_at"`
 }
 
 type JournalType struct {
@@ -190,6 +192,14 @@ type JournalType struct {
 	Name      string    `json:"name"`
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type PeriodClose struct {
+	ID          int64     `json:"id"`
+	CloseBefore time.Time `json:"close_before"`
+	Note        string    `json:"note"`
+	ActorID     int64     `json:"actor_id"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type Reservation struct {

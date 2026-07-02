@@ -14,4 +14,7 @@ var (
 	ErrPrecisionExceeded   = errors.New("amount exceeds currency precision")
 	ErrAccountFrozen       = errors.New("account frozen")
 	ErrAccountClosed       = errors.New("account closed")
+	// ErrPeriodClosed is returned when a journal's effective_at falls before
+	// the active accounting period close line (see docs/INVARIANTS.md I-15).
+	ErrPeriodClosed = errors.New("accounting period is closed")
 )

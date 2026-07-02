@@ -47,6 +47,9 @@ type TemplateParams struct {
 	ActorID        int64                      `json:"actor_id"`
 	Source         string                     `json:"source"`
 	Metadata       map[string]string          `json:"metadata"`
+	// EffectiveAt is passed through to the rendered JournalInput. Zero value
+	// means "now" (see JournalInput.EffectiveAt).
+	EffectiveAt time.Time `json:"effective_at"`
 }
 
 type TemplateExecutionRequest struct {
@@ -157,6 +160,7 @@ func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 		Metadata:       params.Metadata,
 		ActorID:        params.ActorID,
 		Source:         params.Source,
+		EffectiveAt:    params.EffectiveAt,
 	}
 	if err := input.Validate(); err != nil {
 		return nil, err

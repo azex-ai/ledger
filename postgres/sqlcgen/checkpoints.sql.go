@@ -310,7 +310,7 @@ SELECT
   ), 0)::numeric AS balance
 FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
-WHERE je.created_at < $1
+WHERE je.effective_at < $1
 GROUP BY je.account_holder, je.currency_id, je.classification_id
 ORDER BY je.account_holder, je.currency_id, je.classification_id
 `
@@ -322,8 +322,10 @@ type ListBalancesAtRow struct {
 	Balance          pgtype.Numeric `json:"balance"`
 }
 
-func (q *Queries) ListBalancesAt(ctx context.Context, createdAt time.Time) ([]ListBalancesAtRow, error) {
-	rows, err := q.db.Query(ctx, listBalancesAt, createdAt)
+// As-of cutoff is applied on effective_at (business date), not created_at
+// (write date) — see docs/plans/2026-07-02-financial-core-hardening-design.md §1.
+func (q *Queries) ListBalancesAt(ctx context.Context, effectiveAt time.Time) ([]ListBalancesAtRow, error) {
+	rows, err := q.db.Query(ctx, listBalancesAt, effectiveAt)
 	if err != nil {
 		return nil, err
 	}
