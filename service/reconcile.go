@@ -11,6 +11,11 @@ import (
 	"github.com/azex-ai/ledger/core"
 )
 
+// checkpointScanPageSize is the page size used when paginating through
+// distinct (account_holder, currency_id) pairs for check #2's fleet-wide
+// checkpoint-vs-entries scan.
+const checkpointScanPageSize = 200
+
 // ---------------------------------------------------------------------------
 // Shared data-transfer types used by ReconcileQuerier and FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -72,6 +77,14 @@ type DuplicateIdempotencyKey struct {
 	LastID         int64
 }
 
+// CheckpointAccountKey identifies a distinct (account_holder, currency_id)
+// pair that has at least one row in balance_checkpoints. Used to drive
+// check #2's fleet-wide checkpoint-vs-entries scan.
+type CheckpointAccountKey struct {
+	AccountHolder int64
+	CurrencyID    int64
+}
+
 // ---------------------------------------------------------------------------
 // ReconcileQuerier — the port consumed by FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -95,6 +108,10 @@ type ReconcileQuerier interface {
 	DuplicateIdempotencyKeys(ctx context.Context) ([]DuplicateIdempotencyKey, error)
 	// Check #10
 	StaleRollupItems(ctx context.Context, thresholdMinutes int) ([]StaleRollupItem, error)
+	// Check #2 — keyset pagination over distinct (holder, currency) pairs
+	// with at least one checkpoint row. Pass (0, 0) for the first page;
+	// subsequent pages pass the last row's (AccountHolder, CurrencyID).
+	ListCheckpointAccountsPage(ctx context.Context, afterHolder, afterCurrency int64, pageLimit int) ([]CheckpointAccountKey, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +140,18 @@ type FullReconciliationConfig struct {
 	// NegativeBalancePageLimit caps the number of violations fetched per run
 	// (default 200).
 	NegativeBalancePageLimit int
+
+	// Check2ScanLimit caps the number of distinct (holder, currency) account
+	// pairs scanned per run for the checkpoint-vs-entries verification
+	// (default 5000). Fleets larger than this are only partially covered in a
+	// single run — the check reports how far it got instead of silently
+	// claiming full coverage.
+	Check2ScanLimit int
+
+	// Check2Timeout bounds the wall-clock time spent on the check #2 scan
+	// (default 2 minutes). Whichever limit — count or time — is hit first
+	// stops the scan for this run; the check reports the partial coverage.
+	Check2Timeout time.Duration
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -142,6 +171,12 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	if out.NegativeBalancePageLimit == 0 {
 		out.NegativeBalancePageLimit = 200
 	}
+	if out.Check2ScanLimit == 0 {
+		out.Check2ScanLimit = 5000
+	}
+	if out.Check2Timeout == 0 {
+		out.Check2Timeout = 2 * time.Minute
+	}
 	return out
 }
 
@@ -153,7 +188,7 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 // Checks #1-#2 reuse the existing ReconciliationService logic. Checks #3-#10
 // are new and use the ReconcileQuerier port.
 type FullReconciliationService struct {
-	basic  *ReconciliationService
+	basic   *ReconciliationService
 	querier ReconcileQuerier
 	cfg     FullReconciliationConfig
 	logger  core.Logger
@@ -235,6 +270,10 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 		s.logger.Warn("reconcile: full suite has failures")
 	}
 
+	for _, c := range checks {
+		s.metrics.ReconcileCheckResult(c.Name, c.Passed)
+	}
+
 	return &core.ReconcileReport{
 		Checks:        checks,
 		OverallPassed: overallPassed,
@@ -272,20 +311,107 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 	return result
 }
 
-// runCheck2GlobalBalance checks that checkpoint balances are consistent with the
-// global accounting equation at the currency level.
+// runCheck2GlobalBalance verifies that each account's checkpointed balance
+// matches a full recomputation from journal_entries (ReconcileAccount), for
+// every distinct (holder, currency) pair that has a checkpoint. Pairs are
+// discovered via keyset pagination (ListCheckpointAccountsPage) so memory
+// stays bounded regardless of fleet size.
+//
+// A full-fleet scan can be expensive on a large ledger, so the scan is capped
+// by cfg.Check2ScanLimit (account pairs) and cfg.Check2Timeout (wall clock),
+// whichever is hit first. When capped, the check reports an explicit
+// "incomplete" Finding with the resume cursor instead of silently reporting
+// success as if full coverage had been verified.
 func (s *FullReconciliationService) runCheck2GlobalBalance(ctx context.Context) core.CheckResult {
 	result := core.CheckResult{Name: "checkpoint_balance", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
-	// This check mirrors the global DR=CR result but uses a different label so
-	// the report clearly distinguishes check #1 (entry-level balance) from
-	// check #2 (checkpoint materialization). The actual checkpoint-vs-entries
-	// scan is performed by ReconcileAccount per holder, which is too expensive
-	// to run fleet-wide here. We surface a placeholder noting the scope.
-	result.Findings = append(result.Findings, core.Finding{
-		Description: "checkpoint vs entry-sum scan: use ReconcileAccount(holder, currency) for per-account verification",
-		Detail:      "full fleet scan omitted; run targeted reconciliation for suspect accounts",
-	})
-	// Still pass — this is informational.
+
+	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.Check2Timeout)
+	defer cancel()
+
+	var afterHolder, afterCurrency int64
+	scanned := 0
+	partialReason := ""
+
+pageLoop:
+	for scanned < s.cfg.Check2ScanLimit {
+		pageSize := checkpointScanPageSize
+		if remaining := s.cfg.Check2ScanLimit - scanned; remaining < pageSize {
+			pageSize = remaining
+		}
+
+		pairs, err := s.querier.ListCheckpointAccountsPage(scanCtx, afterHolder, afterCurrency, pageSize)
+		if err != nil {
+			if scanCtx.Err() != nil {
+				partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+				break pageLoop
+			}
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint account page query failed",
+				Detail:      err.Error(),
+			})
+			return result
+		}
+		if len(pairs) == 0 {
+			break
+		}
+
+		for _, p := range pairs {
+			if scanCtx.Err() != nil {
+				partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+				break pageLoop
+			}
+
+			acctResult, err := s.basic.ReconcileAccount(scanCtx, p.AccountHolder, p.CurrencyID)
+			if err != nil {
+				if scanCtx.Err() != nil {
+					partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+					break pageLoop
+				}
+				result.Passed = false
+				result.Findings = append(result.Findings, core.Finding{
+					Description: fmt.Sprintf("checkpoint reconcile failed for holder %d currency %d", p.AccountHolder, p.CurrencyID),
+					Detail:      err.Error(),
+				})
+				afterHolder, afterCurrency = p.AccountHolder, p.CurrencyID
+				scanned++
+				continue
+			}
+
+			if !acctResult.Balanced {
+				result.Passed = false
+				for _, d := range acctResult.Details {
+					result.Findings = append(result.Findings, core.Finding{
+						Description: fmt.Sprintf("holder %d currency %d classification %d: checkpoint balance drift", d.AccountHolder, d.CurrencyID, d.ClassificationID),
+						Detail:      fmt.Sprintf("expected=%s actual(checkpoint)=%s drift=%s", d.Expected, d.Actual, d.Drift),
+					})
+				}
+			}
+
+			afterHolder, afterCurrency = p.AccountHolder, p.CurrencyID
+			scanned++
+		}
+
+		if len(pairs) < pageSize {
+			break
+		}
+	}
+
+	if scanned >= s.cfg.Check2ScanLimit && partialReason == "" {
+		partialReason = fmt.Sprintf("scan limit reached (%d account pairs)", s.cfg.Check2ScanLimit)
+	}
+
+	if partialReason != "" {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
+			Detail:      fmt.Sprintf("scanned %d account/currency pairs; resume from holder=%d currency=%d", scanned, afterHolder, afterCurrency),
+		})
+	} else {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified", scanned),
+		})
+	}
+
 	return result
 }
 

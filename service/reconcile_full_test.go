@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -26,15 +29,22 @@ type mockReconcileQuerier struct {
 	staleItems       []StaleRollupItem
 	dupeKeys         []DuplicateIdempotencyKey
 
+	// checkpointAccounts must be pre-sorted ascending by (AccountHolder,
+	// CurrencyID) — ListCheckpointAccountsPage paginates over it using the
+	// same keyset semantics as the real SQL query.
+	checkpointAccounts  []CheckpointAccountKey
+	checkpointPageCalls int
+
 	// force errors
-	errOrphanCount      error
-	errOrphanSample     error
-	errEquation         error
-	errSettlement       error
-	errNegBal           error
-	errOrphanReservs    error
-	errDupeKeys         error
-	errStaleItems       error
+	errOrphanCount    error
+	errOrphanSample   error
+	errEquation       error
+	errSettlement     error
+	errNegBal         error
+	errOrphanReservs  error
+	errDupeKeys       error
+	errStaleItems     error
+	errCheckpointPage error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -60,6 +70,22 @@ func (m *mockReconcileQuerier) DuplicateIdempotencyKeys(_ context.Context) ([]Du
 }
 func (m *mockReconcileQuerier) StaleRollupItems(_ context.Context, _ int) ([]StaleRollupItem, error) {
 	return m.staleItems, m.errStaleItems
+}
+func (m *mockReconcileQuerier) ListCheckpointAccountsPage(_ context.Context, afterHolder, afterCurrency int64, pageLimit int) ([]CheckpointAccountKey, error) {
+	m.checkpointPageCalls++
+	if m.errCheckpointPage != nil {
+		return nil, m.errCheckpointPage
+	}
+	var page []CheckpointAccountKey
+	for _, k := range m.checkpointAccounts {
+		if k.AccountHolder > afterHolder || (k.AccountHolder == afterHolder && k.CurrencyID > afterCurrency) {
+			page = append(page, k)
+			if len(page) >= pageLimit {
+				break
+			}
+		}
+	}
+	return page, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +123,39 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
 	assert.Len(t, report.Checks, 10, "should run exactly 10 checks")
+}
+
+// recordingReconcileMetrics captures ReconcileCheckResult calls for testing.
+type recordingReconcileMetrics struct {
+	core.Metrics
+	results map[string]bool
+}
+
+func (m *recordingReconcileMetrics) ReconcileCheckResult(checkName string, passed bool) {
+	if m.results == nil {
+		m.results = make(map[string]bool)
+	}
+	m.results[checkName] = passed
+}
+
+// TestFullReconciliation_EmitsMetricsPerCheck verifies that
+// FullReconciliationService.metrics — previously injected but never used — is
+// now exercised: one ReconcileCheckResult call per check in the suite.
+func TestFullReconciliation_EmitsMetricsPerCheck(t *testing.T) {
+	metrics := &recordingReconcileMetrics{Metrics: core.NopMetrics()}
+	engine := core.NewEngine(core.WithMetrics(metrics))
+	basic := NewReconciliationService(balancedGlobalSummer(), nil, nil, nil, engine)
+	svc := NewFullReconciliationService(basic, cleanQuerier(), FullReconciliationConfig{}, engine)
+
+	report, err := svc.RunFullReconciliation(context.Background())
+	require.NoError(t, err)
+
+	require.Len(t, metrics.results, len(report.Checks), "one ReconcileCheckResult call per check")
+	for _, c := range report.Checks {
+		passed, ok := metrics.results[c.Name]
+		require.True(t, ok, "check %q must have emitted a metric", c.Name)
+		assert.Equal(t, c.Passed, passed)
+	}
 }
 
 func TestFullReconciliation_OneFailureFlipsOverall(t *testing.T) {
@@ -404,6 +463,8 @@ func TestFullReconciliationConfig_Defaults(t *testing.T) {
 	assert.Equal(t, 30*60, int(out.SettlementWindow.Seconds()))
 	assert.Equal(t, 200, out.NegativeBalancePageLimit)
 	assert.False(t, out.EquationTolerance.IsZero())
+	assert.Equal(t, 5000, out.Check2ScanLimit)
+	assert.Equal(t, 2*time.Minute, out.Check2Timeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -438,4 +499,154 @@ func TestCheck4AccountingEquation_ExceedsTolerance(t *testing.T) {
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
 	result := svc.runCheck4AccountingEquation(context.Background())
 	assert.False(t, result.Passed)
+}
+
+// ---------------------------------------------------------------------------
+// Check #2 — Checkpoint-vs-entries fleet scan
+// ---------------------------------------------------------------------------
+
+// buildFullSvcForCheck2 wires a FullReconciliationService whose `basic`
+// ReconciliationService is fully wired (unlike buildFullSvc, which passes nil
+// account-level dependencies) so runCheck2GlobalBalance can actually call
+// ReconcileAccount per (holder, currency) pair.
+func buildFullSvcForCheck2(t *testing.T, accountEntries AccountEntrySummer, cpReader CheckpointReader, cls ClassificationLister, querier ReconcileQuerier, cfg FullReconciliationConfig) *FullReconciliationService {
+	t.Helper()
+	engine := core.NewEngine()
+	basic := NewReconciliationService(nil, accountEntries, cpReader, cls, engine)
+	return NewFullReconciliationService(basic, querier, cfg, engine)
+}
+
+func TestCheck2GlobalBalance_NoCheckpoints(t *testing.T) {
+	q := cleanQuerier()
+	svc := buildFullSvcForCheck2(t, nil, nil, nil, q, FullReconciliationConfig{})
+
+	result := svc.runCheck2GlobalBalance(context.Background())
+	assert.True(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Description, "checkpoint scan complete: 0 account/currency pairs")
+}
+
+func TestCheck2GlobalBalance_QueryError(t *testing.T) {
+	q := cleanQuerier()
+	q.errCheckpointPage = errors.New("db unavailable")
+	svc := buildFullSvcForCheck2(t, nil, nil, nil, q, FullReconciliationConfig{})
+
+	result := svc.runCheck2GlobalBalance(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Detail, "db unavailable")
+}
+
+func TestCheck2GlobalBalance_DetectsDrift(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(600)},
+		creditByClass: map[int64]decimal.Decimal{10: decimal.NewFromInt(200)},
+	}
+	// entries say 600-200=400, checkpoint says 500 -> drift of 100
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{{AccountHolder: 100, CurrencyID: 1}}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.False(t, result.Passed)
+	var driftFound bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "checkpoint balance drift") {
+			driftFound = true
+			assert.Contains(t, f.Description, "holder 100")
+			assert.Contains(t, f.Detail, "100") // drift amount
+		}
+	}
+	assert.True(t, driftFound, "expected a drift finding, got: %+v", result.Findings)
+}
+
+func TestCheck2GlobalBalance_PaginatesAcrossMultiplePages(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+	// Every pair reconciles clean (same fixed mock result regardless of which
+	// pair is queried) — this test is about pagination mechanics, not drift.
+
+	q := cleanQuerier()
+	const total = checkpointScanPageSize + 50 // forces at least 2 page fetches
+	pairs := make([]CheckpointAccountKey, 0, total)
+	for i := int64(1); i <= total; i++ {
+		pairs = append(pairs, CheckpointAccountKey{AccountHolder: i, CurrencyID: 1})
+	}
+	q.checkpointAccounts = pairs
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed)
+	require.GreaterOrEqual(t, q.checkpointPageCalls, 2, "must paginate across multiple page fetches")
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Description, fmt.Sprintf("checkpoint scan complete: %d account/currency pairs", total))
+}
+
+func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []core.Classification{
+			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 2, CurrencyID: 1},
+		{AccountHolder: 3, CurrencyID: 1},
+		{AccountHolder: 4, CurrencyID: 1},
+		{AccountHolder: 5, CurrencyID: 1},
+	}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{
+		Check2ScanLimit: 2,
+	})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	// No drift was found in the scanned subset, so Passed stays true — but
+	// the scan must explicitly flag itself as incomplete, never silently
+	// claim full coverage it didn't actually perform.
+	assert.True(t, result.Passed)
+	var partialFound bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "checkpoint scan incomplete") {
+			partialFound = true
+			assert.Contains(t, f.Detail, "scanned 2 account/currency pairs")
+		}
+	}
+	assert.True(t, partialFound, "capped scan must report itself as incomplete; got: %+v", result.Findings)
 }

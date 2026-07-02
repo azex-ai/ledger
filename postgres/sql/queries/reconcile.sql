@@ -119,3 +119,16 @@ GROUP BY idempotency_key
 HAVING COUNT(*) > 1
 ORDER BY occurrences DESC
 LIMIT 50;
+
+-- name: ReconcileListCheckpointAccountsPage :many
+-- Check #2: keyset-paginated list of distinct (account_holder, currency_id)
+-- pairs present in balance_checkpoints, used to drive a fleet-wide
+-- checkpoint-vs-entries verification (one ReconcileAccount call per pair).
+-- Ordered by (account_holder, currency_id) so pagination is stable and
+-- resumable from the last-seen pair — pass (0, 0) for the first page.
+SELECT DISTINCT account_holder, currency_id
+FROM balance_checkpoints
+WHERE account_holder > sqlc.arg(after_holder)::bigint
+   OR (account_holder = sqlc.arg(after_holder)::bigint AND currency_id > sqlc.arg(after_currency)::bigint)
+ORDER BY account_holder, currency_id
+LIMIT sqlc.arg(page_limit)::int;

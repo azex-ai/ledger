@@ -108,6 +108,51 @@ func (q *Queries) ReconcileDuplicateIdempotencyKeys(ctx context.Context) ([]Reco
 	return items, nil
 }
 
+const reconcileListCheckpointAccountsPage = `-- name: ReconcileListCheckpointAccountsPage :many
+SELECT DISTINCT account_holder, currency_id
+FROM balance_checkpoints
+WHERE account_holder > $1::bigint
+   OR (account_holder = $1::bigint AND currency_id > $2::bigint)
+ORDER BY account_holder, currency_id
+LIMIT $3::int
+`
+
+type ReconcileListCheckpointAccountsPageParams struct {
+	AfterHolder   int64 `json:"after_holder"`
+	AfterCurrency int64 `json:"after_currency"`
+	PageLimit     int32 `json:"page_limit"`
+}
+
+type ReconcileListCheckpointAccountsPageRow struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+}
+
+// Check #2: keyset-paginated list of distinct (account_holder, currency_id)
+// pairs present in balance_checkpoints, used to drive a fleet-wide
+// checkpoint-vs-entries verification (one ReconcileAccount call per pair).
+// Ordered by (account_holder, currency_id) so pagination is stable and
+// resumable from the last-seen pair — pass (0, 0) for the first page.
+func (q *Queries) ReconcileListCheckpointAccountsPage(ctx context.Context, arg ReconcileListCheckpointAccountsPageParams) ([]ReconcileListCheckpointAccountsPageRow, error) {
+	rows, err := q.db.Query(ctx, reconcileListCheckpointAccountsPage, arg.AfterHolder, arg.AfterCurrency, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReconcileListCheckpointAccountsPageRow{}
+	for rows.Next() {
+		var i ReconcileListCheckpointAccountsPageRow
+		if err := rows.Scan(&i.AccountHolder, &i.CurrencyID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const reconcileNonNegativeBalances = `-- name: ReconcileNonNegativeBalances :many
 SELECT
   je.account_holder,

@@ -177,6 +177,26 @@ func (a *ReconcileAdapter) StaleRollupItems(ctx context.Context, thresholdMinute
 	return result, nil
 }
 
+// ListCheckpointAccountsPage returns a keyset-paginated page of distinct
+// (account_holder, currency_id) pairs that have at least one row in
+// balance_checkpoints, ordered by (account_holder, currency_id). Pass (0, 0)
+// as (afterHolder, afterCurrency) for the first page.
+func (a *ReconcileAdapter) ListCheckpointAccountsPage(ctx context.Context, afterHolder, afterCurrency int64, pageLimit int) ([]service.CheckpointAccountKey, error) {
+	rows, err := a.q.ReconcileListCheckpointAccountsPage(ctx, sqlcgen.ReconcileListCheckpointAccountsPageParams{
+		AfterHolder:   afterHolder,
+		AfterCurrency: afterCurrency,
+		PageLimit:     int32(pageLimit), //nolint:gosec // page sizes are small, bounded internally
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: list checkpoint accounts page: %w", err)
+	}
+	result := make([]service.CheckpointAccountKey, len(rows))
+	for i, r := range rows {
+		result[i] = service.CheckpointAccountKey{AccountHolder: r.AccountHolder, CurrencyID: r.CurrencyID}
+	}
+	return result, nil
+}
+
 // DuplicateIdempotencyKeys returns journals that share an idempotency_key with
 // at least one other journal (should be empty given the UNIQUE index).
 func (a *ReconcileAdapter) DuplicateIdempotencyKeys(ctx context.Context) ([]service.DuplicateIdempotencyKey, error) {
