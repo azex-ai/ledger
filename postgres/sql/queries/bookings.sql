@@ -43,4 +43,5 @@ INNER JOIN classifications c ON c.id = b.classification_id
 WHERE b.expires_at != 'epoch'
   AND b.expires_at < now()
   AND COALESCE(c.lifecycle -> 'transitions' -> b.status, '[]'::jsonb) ? 'expired'
+ORDER BY b.expires_at ASC
 LIMIT $1;

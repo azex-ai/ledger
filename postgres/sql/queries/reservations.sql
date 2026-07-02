@@ -31,7 +31,9 @@ LIMIT sqlc.arg(page_limit)::int;
 
 -- name: GetExpiredReservations :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
-FROM reservations WHERE status = 'active' AND expires_at < now() LIMIT $1;
+FROM reservations WHERE status = 'active' AND expires_at < now()
+ORDER BY expires_at ASC
+LIMIT $1;
 
 -- name: CountActiveReservations :one
 SELECT COUNT(*) FROM reservations WHERE status = 'active';
