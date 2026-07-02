@@ -23,11 +23,13 @@ func (q *Queries) CountSnapshotsTotal(ctx context.Context) (int64, error) {
 }
 
 const getEarliestJournalDate = `-- name: GetEarliestJournalDate :one
-SELECT COALESCE(MIN(created_at), 'epoch'::timestamptz) AS earliest_at
+SELECT COALESCE(MIN(effective_at), 'epoch'::timestamptz) AS earliest_at
 FROM journal_entries
 `
 
-// Returns the earliest journal_entries created_at, or the epoch sentinel when the table is empty.
+// Returns the earliest journal_entries effective_at (business date, not
+// write date — a retroactive posting can predate every created_at), or the
+// epoch sentinel when the table is empty.
 func (q *Queries) GetEarliestJournalDate(ctx context.Context) (interface{}, error) {
 	row := q.db.QueryRow(ctx, getEarliestJournalDate)
 	var earliest_at interface{}

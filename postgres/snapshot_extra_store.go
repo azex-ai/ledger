@@ -83,8 +83,8 @@ func (s *SnapshotExtraStore) CountSnapshots(ctx context.Context) (int64, error) 
 	return n, nil
 }
 
-// EarliestJournalDate returns the created_at of the oldest journal_entry row,
-// or time.Time{} when the table is empty.
+// EarliestJournalDate returns the effective_at of the oldest journal_entry
+// row (business date, not write date), or time.Time{} when the table is empty.
 func (s *SnapshotExtraStore) EarliestJournalDate(ctx context.Context) (time.Time, error) {
 	raw, err := s.q.GetEarliestJournalDate(ctx)
 	if err != nil {

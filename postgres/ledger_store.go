@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -354,6 +355,27 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: post journal: check idempotency after lock: %w", err)
 	}
 
+	// EffectiveAt defaults to now() when the caller didn't set it (core.Validate
+	// already rejected a future value beyond the clock-skew tolerance).
+	effectiveAt := input.EffectiveAt
+	if effectiveAt.IsZero() {
+		effectiveAt = time.Now()
+	}
+
+	// Period close (I-15): reject postings whose effective date falls before
+	// the active close line. GetActivePeriodClose returns pgx.ErrNoRows when
+	// the period has never been closed — nothing to enforce in that case.
+	activeClose, err := q.GetActivePeriodClose(ctx)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: post journal: get active period close: %w", err)
+	}
+	if err == nil && effectiveAt.Before(activeClose.CloseBefore) {
+		return nil, fmt.Errorf(
+			"postgres: post journal: effective_at %s is before the period close line %s: %w",
+			effectiveAt.Format(time.RFC3339), activeClose.CloseBefore.Format(time.RFC3339), core.ErrPeriodClosed,
+		)
+	}
+
 	// Invariant: every balance-mutating tx must take pg_advisory_xact_lock(holder,
 	// currency_id) for every affected (holder, currency_id) pair, in sorted order.
 	// This serializes against ReserverStore.Reserve (which takes the same lock),
@@ -376,6 +398,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		Source:         input.Source,
 		ReversalOf:     int64ToInt8(zeroInt64ToNil(input.ReversalOf)),
 		EventID:        input.EventID,
+		EffectiveAt:    effectiveAt,
 	})
 	if err != nil {
 		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
@@ -403,6 +426,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 			ClassificationID: e.ClassificationID,
 			EntryType:        string(e.EntryType),
 			Amount:           decimalToNumeric(e.Amount),
+			EffectiveAt:      effectiveAt,
 		})
 		if err != nil {
 			return nil, wrapStoreError(fmt.Sprintf("postgres: post journal: insert entry[%d]", i), err)

@@ -181,6 +181,7 @@ func journalFromRow(row sqlcgen.Journal) *core.Journal {
 		Source:         row.Source,
 		ReversalOf:     reversalOf,
 		EventID:        row.EventID,
+		EffectiveAt:    row.EffectiveAt,
 		CreatedAt:      row.CreatedAt,
 	}
 }
@@ -198,6 +199,7 @@ func entryFromRow(row sqlcgen.JournalEntry) *core.Entry {
 		ClassificationID: row.ClassificationID,
 		EntryType:        core.EntryType(row.EntryType),
 		Amount:           mustNumericToDecimal(row.Amount),
+		EffectiveAt:      row.EffectiveAt,
 		CreatedAt:        row.CreatedAt,
 	}
 }
