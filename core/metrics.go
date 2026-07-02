@@ -25,6 +25,23 @@ type Metrics interface {
 	// the destination state (e.g. "confirmed"). Both should come from a bounded
 	// set of values to keep Prometheus cardinality in check.
 	BookingTransitioned(classCode string, toStatus string)
+	// EventDelivered is emitted whenever an outbound event is successfully
+	// delivered to all matched webhook subscribers (or has no subscribers to
+	// deliver to).
+	EventDelivered()
+	// EventDeliveryFailed is emitted whenever at least one webhook subscriber
+	// delivery attempt fails and the event is scheduled for retry.
+	EventDeliveryFailed()
+	// EventDead is emitted when an event exhausts its retry budget and is
+	// permanently parked (delivery_status = 'dead').
+	EventDead()
+	// RollupItemFailed is emitted whenever a rollup queue item's claim is
+	// released after a failed processing attempt (failed_attempts is bumped).
+	RollupItemFailed()
+	// ReconcileCheckResult is emitted once per check in the full 10-check
+	// reconciliation suite. checkName must come from the fixed set of check
+	// names (e.g. "orphan_entries") to keep cardinality bounded.
+	ReconcileCheckResult(checkName string, passed bool)
 
 	// Histograms
 	JournalLatency(d time.Duration)
@@ -45,26 +62,31 @@ type Metrics interface {
 
 type nopMetrics struct{}
 
-func (nopMetrics) JournalPosted(string)                              {}
-func (nopMetrics) JournalFailed(string, string)                      {}
-func (nopMetrics) ReserveCreated()                                   {}
-func (nopMetrics) ReserveSettled()                                   {}
-func (nopMetrics) ReserveReleased()                                  {}
-func (nopMetrics) RollupProcessed(int)                               {}
-func (nopMetrics) ReconcileCompleted(bool)                           {}
-func (nopMetrics) IdempotencyCollision(string)                       {}
-func (nopMetrics) TemplateFailed(string, string)                     {}
-func (nopMetrics) BookingTransitioned(string, string)                {}
-func (nopMetrics) JournalLatency(time.Duration)                      {}
-func (nopMetrics) RollupLatency(time.Duration)                       {}
-func (nopMetrics) SnapshotLatency(time.Duration)                     {}
-func (nopMetrics) JournalEntryCount(string, int)                     {}
-func (nopMetrics) PendingRollups(int64)                              {}
-func (nopMetrics) ActiveReservations(int64)                          {}
-func (nopMetrics) CheckpointAge(string, time.Duration)               {}
-func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal)       {}
-func (nopMetrics) ReconcileGap(int64, decimal.Decimal)               {}
-func (nopMetrics) ReservedAmount(int64, decimal.Decimal)             {}
+func (nopMetrics) JournalPosted(string)                        {}
+func (nopMetrics) JournalFailed(string, string)                {}
+func (nopMetrics) ReserveCreated()                             {}
+func (nopMetrics) ReserveSettled()                             {}
+func (nopMetrics) ReserveReleased()                            {}
+func (nopMetrics) RollupProcessed(int)                         {}
+func (nopMetrics) ReconcileCompleted(bool)                     {}
+func (nopMetrics) IdempotencyCollision(string)                 {}
+func (nopMetrics) TemplateFailed(string, string)               {}
+func (nopMetrics) BookingTransitioned(string, string)          {}
+func (nopMetrics) EventDelivered()                             {}
+func (nopMetrics) EventDeliveryFailed()                        {}
+func (nopMetrics) EventDead()                                  {}
+func (nopMetrics) RollupItemFailed()                           {}
+func (nopMetrics) ReconcileCheckResult(string, bool)           {}
+func (nopMetrics) JournalLatency(time.Duration)                {}
+func (nopMetrics) RollupLatency(time.Duration)                 {}
+func (nopMetrics) SnapshotLatency(time.Duration)               {}
+func (nopMetrics) JournalEntryCount(string, int)               {}
+func (nopMetrics) PendingRollups(int64)                        {}
+func (nopMetrics) ActiveReservations(int64)                    {}
+func (nopMetrics) CheckpointAge(string, time.Duration)         {}
+func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
+func (nopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
+func (nopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 
 // NopMetrics returns a no-op metrics collector.
 func NopMetrics() Metrics { return nopMetrics{} }

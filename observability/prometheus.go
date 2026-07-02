@@ -52,16 +52,21 @@ type PrometheusMetrics struct {
 	registry *prometheus.Registry
 
 	// Counters
-	journalPosted         *prometheus.CounterVec
-	journalFailed         *prometheus.CounterVec
-	reserveCreated        prometheus.Counter
-	reserveSettled        prometheus.Counter
-	reserveReleased       prometheus.Counter
-	rollupProcessed       prometheus.Counter
-	reconcileCompleted    *prometheus.CounterVec
-	idempotencyCollision  *prometheus.CounterVec
-	templateFailed        *prometheus.CounterVec
-	bookingTransitioned   *prometheus.CounterVec
+	journalPosted        *prometheus.CounterVec
+	journalFailed        *prometheus.CounterVec
+	reserveCreated       prometheus.Counter
+	reserveSettled       prometheus.Counter
+	reserveReleased      prometheus.Counter
+	rollupProcessed      prometheus.Counter
+	reconcileCompleted   *prometheus.CounterVec
+	idempotencyCollision *prometheus.CounterVec
+	templateFailed       *prometheus.CounterVec
+	bookingTransitioned  *prometheus.CounterVec
+	eventDelivered       prometheus.Counter
+	eventDeliveryFailed  prometheus.Counter
+	eventDead            prometheus.Counter
+	rollupItemFailed     prometheus.Counter
+	reconcileCheckResult *prometheus.CounterVec
 
 	// Histograms
 	journalLatency    prometheus.Histogram
@@ -138,6 +143,31 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "bookings_transitioned_total",
 			Help:      "Booking state transitions, labelled by classification code and destination status.",
 		}, []string{"class", "to_status"}),
+		eventDelivered: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "events_delivered_total",
+			Help:      "Total outbound events successfully delivered to all matched webhook subscribers.",
+		}),
+		eventDeliveryFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "events_delivery_failed_total",
+			Help:      "Total outbound event delivery attempts where at least one subscriber failed.",
+		}),
+		eventDead: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "events_dead_total",
+			Help:      "Total outbound events that exhausted their retry budget and were parked.",
+		}),
+		rollupItemFailed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "rollup_items_failed_total",
+			Help:      "Total rollup queue items whose claim was released after a failed processing attempt.",
+		}),
+		reconcileCheckResult: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "reconcile_check_results_total",
+			Help:      "Full reconciliation suite check outcomes, labelled by check name and pass/fail.",
+		}, []string{"check", "passed"}),
 
 		journalLatency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: ns,
@@ -201,6 +231,8 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.reserveCreated, m.reserveSettled, m.reserveReleased,
 		m.rollupProcessed, m.reconcileCompleted,
 		m.idempotencyCollision, m.templateFailed, m.bookingTransitioned,
+		m.eventDelivered, m.eventDeliveryFailed, m.eventDead,
+		m.rollupItemFailed, m.reconcileCheckResult,
 		m.journalLatency, m.rollupLatency, m.snapshotLatency, m.journalEntryCount,
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.reconcileGap, m.reservedAmount,
@@ -269,6 +301,28 @@ func (m *PrometheusMetrics) TemplateFailed(templateCode, reason string) {
 // BookingTransitioned records a booking state transition.
 func (m *PrometheusMetrics) BookingTransitioned(classCode, toStatus string) {
 	m.bookingTransitioned.WithLabelValues(safeLabel(classCode), safeLabel(toStatus)).Inc()
+}
+
+// EventDelivered increments the successful outbound event delivery counter.
+func (m *PrometheusMetrics) EventDelivered() { m.eventDelivered.Inc() }
+
+// EventDeliveryFailed increments the failed outbound event delivery counter.
+func (m *PrometheusMetrics) EventDeliveryFailed() { m.eventDeliveryFailed.Inc() }
+
+// EventDead increments the counter of events parked after exhausting retries.
+func (m *PrometheusMetrics) EventDead() { m.eventDead.Inc() }
+
+// RollupItemFailed increments the counter of rollup queue items released
+// after a failed processing attempt.
+func (m *PrometheusMetrics) RollupItemFailed() { m.rollupItemFailed.Inc() }
+
+// ReconcileCheckResult records one outcome of the full reconciliation suite.
+func (m *PrometheusMetrics) ReconcileCheckResult(checkName string, passed bool) {
+	label := "false"
+	if passed {
+		label = "true"
+	}
+	m.reconcileCheckResult.WithLabelValues(safeLabel(checkName), label).Inc()
 }
 
 // Histograms.

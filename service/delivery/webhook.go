@@ -45,15 +45,20 @@ type WebhookDeliverer struct {
 	subscribers SubscriberLister
 	client      *http.Client
 	logger      core.Logger
+	metrics     core.Metrics
 }
 
 // NewWebhookDeliverer creates a new WebhookDeliverer.
-func NewWebhookDeliverer(poller EventPoller, subscribers SubscriberLister, logger core.Logger) *WebhookDeliverer {
+func NewWebhookDeliverer(poller EventPoller, subscribers SubscriberLister, logger core.Logger, metrics core.Metrics) *WebhookDeliverer {
+	if metrics == nil {
+		metrics = core.NopMetrics()
+	}
 	return &WebhookDeliverer{
 		poller:      poller,
 		subscribers: subscribers,
 		client:      &http.Client{Timeout: 30 * time.Second},
 		logger:      logger,
+		metrics:     metrics,
 	}
 }
 
@@ -104,6 +109,8 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 		for _, evt := range events {
 			if err := d.poller.MarkDelivered(ctx, evt.ID); err != nil {
 				d.logger.Error("delivery: webhook: mark delivered (no subscribers)", "event_id", evt.ID, "error", err)
+			} else {
+				d.metrics.EventDelivered()
 			}
 		}
 		return len(events), nil
@@ -123,7 +130,11 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, subs []WebhookSubscriber) error {
 	matched := d.matchSubscribers(evt, subs)
 	if len(matched) == 0 {
-		return d.poller.MarkDelivered(ctx, evt.ID)
+		err := d.poller.MarkDelivered(ctx, evt.ID)
+		if err == nil {
+			d.metrics.EventDelivered()
+		}
+		return err
 	}
 
 	allOK := true
@@ -139,11 +150,20 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 	}
 
 	if allOK {
-		return d.poller.MarkDelivered(ctx, evt.ID)
+		err := d.poller.MarkDelivered(ctx, evt.ID)
+		if err == nil {
+			d.metrics.EventDelivered()
+		}
+		return err
 	}
 
 	// At least one subscriber failed — schedule retry with exponential backoff.
-	// The store increments attempts and transitions the event to dead when max_attempts is exceeded.
+	// The store increments attempts and transitions the event to dead when max_attempts is exceeded;
+	// mirror that same threshold here so EventDead reflects the DB's own decision.
+	d.metrics.EventDeliveryFailed()
+	if evt.MaxAttempts > 0 && evt.Attempts+1 >= evt.MaxAttempts {
+		d.metrics.EventDead()
+	}
 	return d.poller.MarkRetry(ctx, evt.ID, time.Now().Add(retryDelay(evt.Attempts)))
 }
 
