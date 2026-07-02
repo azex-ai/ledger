@@ -155,8 +155,9 @@ func TestCreated(t *testing.T) {
 // --- Error response format ---
 
 type errorEnvelope struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
 }
 
 func TestError_DomainSentinel(t *testing.T) {
@@ -174,6 +175,7 @@ func TestError_DomainSentinel(t *testing.T) {
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 10201, env.Code)
 	assert.NotEmpty(t, env.Message)
+	assert.False(t, env.Retryable, "not-found is a permanent outcome, not retryable")
 }
 
 func TestError_UnknownError(t *testing.T) {
@@ -189,6 +191,7 @@ func TestError_UnknownError(t *testing.T) {
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 19999, env.Code)
+	assert.True(t, env.Retryable, "unclassified internal errors default to retryable")
 }
 
 func TestError_AppError(t *testing.T) {
@@ -204,6 +207,19 @@ func TestError_AppError(t *testing.T) {
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 10901, env.Code)
+	assert.False(t, env.Retryable, "idempotency-key conflict is not retryable with the same key")
+}
+
+func TestError_RateLimited_Retryable(t *testing.T) {
+	w := httptest.NewRecorder()
+	Error(w, bizcode.New(10401, "rate limit exceeded"))
+
+	body, err := io.ReadAll(w.Result().Body)
+	require.NoError(t, err)
+
+	var env errorEnvelope
+	require.NoError(t, stdjson.Unmarshal(body, &env))
+	assert.True(t, env.Retryable, "rate limiting is transient and should be retried after backoff")
 }
 
 // --- Decode ---
