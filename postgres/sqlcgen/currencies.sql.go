@@ -10,24 +10,26 @@ import (
 )
 
 const createCurrency = `-- name: CreateCurrency :one
-INSERT INTO currencies (code, name)
-VALUES ($1, $2)
-RETURNING id, code, name, is_active
+INSERT INTO currencies (code, name, exponent)
+VALUES ($1, $2, $3)
+RETURNING id, code, name, is_active, exponent
 `
 
 type CreateCurrencyParams struct {
-	Code string `json:"code"`
-	Name string `json:"name"`
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	Exponent int16  `json:"exponent"`
 }
 
 func (q *Queries) CreateCurrency(ctx context.Context, arg CreateCurrencyParams) (Currency, error) {
-	row := q.db.QueryRow(ctx, createCurrency, arg.Code, arg.Name)
+	row := q.db.QueryRow(ctx, createCurrency, arg.Code, arg.Name, arg.Exponent)
 	var i Currency
 	err := row.Scan(
 		&i.ID,
 		&i.Code,
 		&i.Name,
 		&i.IsActive,
+		&i.Exponent,
 	)
 	return i, err
 }
@@ -41,8 +43,42 @@ func (q *Queries) DeactivateCurrency(ctx context.Context, id int64) error {
 	return err
 }
 
+const getCurrenciesByIDs = `-- name: GetCurrenciesByIDs :many
+SELECT id, code, name, is_active, exponent FROM currencies
+WHERE id = ANY($1::bigint[])
+`
+
+// Batch-loads currency metadata (code, exponent, ...) for precision
+// validation on write paths — one query per journal/reserve regardless of
+// how many distinct currencies its entries touch.
+func (q *Queries) GetCurrenciesByIDs(ctx context.Context, ids []int64) ([]Currency, error) {
+	rows, err := q.db.Query(ctx, getCurrenciesByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Currency{}
+	for rows.Next() {
+		var i Currency
+		if err := rows.Scan(
+			&i.ID,
+			&i.Code,
+			&i.Name,
+			&i.IsActive,
+			&i.Exponent,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getCurrency = `-- name: GetCurrency :one
-SELECT id, code, name, is_active FROM currencies
+SELECT id, code, name, is_active, exponent FROM currencies
 WHERE id = $1
 `
 
@@ -54,12 +90,13 @@ func (q *Queries) GetCurrency(ctx context.Context, id int64) (Currency, error) {
 		&i.Code,
 		&i.Name,
 		&i.IsActive,
+		&i.Exponent,
 	)
 	return i, err
 }
 
 const listCurrencies = `-- name: ListCurrencies :many
-SELECT id, code, name, is_active FROM currencies
+SELECT id, code, name, is_active, exponent FROM currencies
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -78,6 +115,7 @@ func (q *Queries) ListCurrencies(ctx context.Context, activeOnly bool) ([]Curren
 			&i.Code,
 			&i.Name,
 			&i.IsActive,
+			&i.Exponent,
 		); err != nil {
 			return nil, err
 		}

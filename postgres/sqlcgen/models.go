@@ -64,6 +64,7 @@ type Currency struct {
 	Code     string `json:"code"`
 	Name     string `json:"name"`
 	IsActive bool   `json:"is_active"`
+	Exponent int16  `json:"exponent"`
 }
 
 type Deposit struct {
