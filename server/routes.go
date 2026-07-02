@@ -82,5 +82,12 @@ func (s *Server) setupRoutes() {
 
 		// Balance trends (historical daily balance series)
 		r.Get("/balances/trends", s.handleGetBalanceTrends)
+
+		// Period close (accounting close line)
+		r.Post("/periods/close", s.handleClosePeriod)
+		r.Get("/periods/closes", s.handleListPeriodCloses)
+
+		// Reports
+		r.Get("/reports/trial-balance", s.handleGetTrialBalance)
 	})
 }

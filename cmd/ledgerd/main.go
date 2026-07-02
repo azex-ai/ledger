@@ -165,6 +165,8 @@ func run() error {
 		svc.SolvencyChecker(),
 		svc.BalanceTrends(),
 		fullReconciler,
+		svc.PeriodCloser(),
+		svc.TrialBalanceReader(),
 	)
 	srv.SetMetricsHandler(promMetrics.Handler())
 

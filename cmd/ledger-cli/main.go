@@ -62,6 +62,7 @@ commands:
   trace       trace a booking through events and journals
   reconcile   run reconciliation checks
   solvency    show solvency report for a currency
+  trial-balance  show trial balance report for a currency
   health      show system health metrics
 
 env:
@@ -118,6 +119,8 @@ func run(args []string) error {
 		return cmdReconcile(ctx, svc, rest)
 	case "solvency":
 		return cmdSolvency(ctx, svc, rest)
+	case "trial-balance":
+		return cmdTrialBalance(ctx, svc, rest)
 	case "health":
 		return cmdHealth(ctx, svc)
 	default:
@@ -245,6 +248,33 @@ func cmdSolvency(ctx context.Context, svc *ledger.Service, args []string) error 
 		return fmt.Errorf("--currency is required")
 	}
 	report, err := svc.SolvencyChecker().SolvencyCheck(ctx, *currency)
+	if err != nil {
+		return err
+	}
+	return jsonOut(report)
+}
+
+func cmdTrialBalance(ctx context.Context, svc *ledger.Service, args []string) error {
+	fs := flag.NewFlagSet("trial-balance", flag.ExitOnError)
+	currency := fs.Int64("currency", 0, "currency id")
+	asOf := fs.String("as-of", "", "RFC3339 cutoff (inclusive); default now")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *currency == 0 {
+		return fmt.Errorf("--currency is required")
+	}
+
+	cutoff := time.Now()
+	if *asOf != "" {
+		parsed, err := time.Parse(time.RFC3339, *asOf)
+		if err != nil {
+			return fmt.Errorf("--as-of must be RFC3339: %w", err)
+		}
+		cutoff = parsed
+	}
+
+	report, err := svc.TrialBalanceReader().TrialBalance(ctx, *currency, cutoff)
 	if err != nil {
 		return err
 	}

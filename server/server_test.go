@@ -408,6 +408,35 @@ func (m *mockBalanceTrendReader) GetBalanceTrends(ctx context.Context, filter co
 	}, nil
 }
 
+type mockPeriodCloser struct{}
+
+func (m *mockPeriodCloser) ClosePeriod(ctx context.Context, input core.ClosePeriodInput) (*core.PeriodClose, error) {
+	return &core.PeriodClose{ID: 1, CloseBefore: input.CloseBefore, Note: input.Note, ActorID: input.ActorID, CreatedAt: time.Now()}, nil
+}
+
+func (m *mockPeriodCloser) ActiveCloseLine(ctx context.Context) (time.Time, error) {
+	return time.Time{}, nil
+}
+
+func (m *mockPeriodCloser) ListPeriodCloses(ctx context.Context, limit int) ([]core.PeriodClose, error) {
+	return []core.PeriodClose{{ID: 1, CloseBefore: time.Now(), CreatedAt: time.Now()}}, nil
+}
+
+type mockTrialBalanceReader struct{}
+
+func (m *mockTrialBalanceReader) TrialBalance(ctx context.Context, currencyID int64, asOf time.Time) (*core.TrialBalanceReport, error) {
+	return &core.TrialBalanceReport{
+		CurrencyID:  currencyID,
+		AsOf:        asOf,
+		TotalDebit:  decimal.NewFromInt(100),
+		TotalCredit: decimal.NewFromInt(100),
+		Balanced:    true,
+		Rows: []core.TrialBalanceRow{
+			{ClassificationID: 1, ClassificationCode: "wallet", ClassificationName: "Wallet", NormalSide: core.NormalSideDebit, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.Zero, Net: decimal.NewFromInt(100)},
+		},
+	}, nil
+}
+
 type mockQueryProvider struct{}
 
 func (m *mockQueryProvider) GetJournal(ctx context.Context, id int64) (*core.Journal, []core.Entry, error) {
@@ -477,6 +506,8 @@ func newTestServer() *server.Server {
 		&mockSolvencyChecker{},
 		&mockBalanceTrendReader{},
 		&mockFullReconciler{},
+		&mockPeriodCloser{},
+		&mockTrialBalanceReader{},
 	)
 }
 
@@ -501,6 +532,8 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		platformBalances: &mockPlatformBalanceReader{},
 		solvency:         &mockSolvencyChecker{},
 		balanceTrends:    &mockBalanceTrendReader{},
+		periodCloser:     &mockPeriodCloser{},
+		trialBalance:     &mockTrialBalanceReader{},
 	}
 	for _, fn := range opts {
 		fn(o)
@@ -513,6 +546,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		o.reconciler, o.snapshotter, nil, o.queries,
 		o.audit, o.platformBalances, o.solvency, o.balanceTrends,
 		o.fullReconciler,
+		o.periodCloser, o.trialBalance,
 	)
 }
 
@@ -536,6 +570,8 @@ type testServerOpts struct {
 	platformBalances core.PlatformBalanceReader
 	solvency         core.SolvencyChecker
 	balanceTrends    core.BalanceTrendReader
+	periodCloser     core.PeriodCloser
+	trialBalance     core.TrialBalanceReader
 }
 
 func doRequest(srv http.Handler, method, path string, body any) *httptest.ResponseRecorder {
