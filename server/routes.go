@@ -69,5 +69,17 @@ func (s *Server) setupRoutes() {
 		r.Post("/reconcile", s.handleReconcileGlobal)
 		r.Post("/reconcile/account", s.handleReconcileAccount)
 		r.Get("/snapshots", s.handleListSnapshots)
+
+		// Audit (read-only investigation: journals by account/time, booking trace, reversal chain)
+		r.Get("/audit/journals", s.handleListAuditJournals)
+		r.Get("/audit/bookings/{id}/trace", s.handleTraceBooking)
+		r.Get("/audit/journals/{id}/reversals", s.handleListReversals)
+
+		// Platform (read-only, real-time system-wide balance + solvency)
+		r.Get("/platform/balances", s.handleGetPlatformBalances)
+		r.Get("/platform/solvency", s.handleGetSolvency)
+
+		// Balance trends (historical daily balance series)
+		r.Get("/balances/trends", s.handleGetBalanceTrends)
 	})
 }

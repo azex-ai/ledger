@@ -296,6 +296,103 @@ func (m *mockSnapshotter) GetSnapshotBalance(ctx context.Context, holder int64, 
 	return nil, nil
 }
 
+type mockAuditQuerier struct {
+	listByAccountFn   func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error)
+	listByTimeRangeFn func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error)
+	traceBookingFn    func(ctx context.Context, bookingID int64) (*core.BookingTrace, error)
+	listReversalsFn   func(ctx context.Context, journalID int64) ([]core.Journal, error)
+}
+
+func (m *mockAuditQuerier) ListJournalsByAccount(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error) {
+	if m.listByAccountFn != nil {
+		return m.listByAccountFn(ctx, filter)
+	}
+	return []core.Journal{
+		{ID: 1, JournalTypeID: 1, IdempotencyKey: "audit-account", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, nil
+}
+
+func (m *mockAuditQuerier) ListEntriesByJournal(ctx context.Context, journalID int64) ([]core.Entry, error) {
+	return []core.Entry{
+		{ID: 1, JournalID: journalID, AccountHolder: 100, CurrencyID: 1, ClassificationID: 1, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, nil
+}
+
+func (m *mockAuditQuerier) ListJournalsByTimeRange(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error) {
+	if m.listByTimeRangeFn != nil {
+		return m.listByTimeRangeFn(ctx, filter)
+	}
+	return []core.Journal{
+		{ID: 2, JournalTypeID: 1, IdempotencyKey: "audit-time-range", TotalDebit: decimal.NewFromInt(50), TotalCredit: decimal.NewFromInt(50), CreatedAt: time.Now()},
+	}, nil
+}
+
+func (m *mockAuditQuerier) TraceBooking(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+	if m.traceBookingFn != nil {
+		return m.traceBookingFn(ctx, bookingID)
+	}
+	return &core.BookingTrace{
+		Booking: core.Booking{
+			ID: bookingID, ClassificationID: 1, AccountHolder: 100, CurrencyID: 1,
+			Amount: decimal.NewFromInt(500), Status: "confirmed", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+		Events: []core.Event{
+			{ID: 1, ClassificationCode: "deposit", BookingID: bookingID, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
+		},
+		Journals: []core.Journal{
+			{ID: 10, JournalTypeID: 1, IdempotencyKey: "trace", TotalDebit: decimal.NewFromInt(500), TotalCredit: decimal.NewFromInt(500), CreatedAt: time.Now()},
+		},
+	}, nil
+}
+
+func (m *mockAuditQuerier) ListReversals(ctx context.Context, journalID int64) ([]core.Journal, error) {
+	if m.listReversalsFn != nil {
+		return m.listReversalsFn(ctx, journalID)
+	}
+	return []core.Journal{
+		{ID: journalID, JournalTypeID: 1, IdempotencyKey: "root", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, nil
+}
+
+type mockPlatformBalanceReader struct{}
+
+func (m *mockPlatformBalanceReader) GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error) {
+	return &core.PlatformBalance{
+		CurrencyID: currencyID,
+		UserSide:   map[string]decimal.Decimal{"main_wallet": decimal.NewFromInt(1000)},
+		SystemSide: map[string]decimal.Decimal{"custodial": decimal.NewFromInt(1000)},
+	}, nil
+}
+
+func (m *mockPlatformBalanceReader) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
+	return decimal.NewFromInt(1000), nil
+}
+
+type mockSolvencyChecker struct {
+	checkFn func(ctx context.Context, currencyID int64) (*core.SolvencyReport, error)
+}
+
+func (m *mockSolvencyChecker) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+	if m.checkFn != nil {
+		return m.checkFn(ctx, currencyID)
+	}
+	return &core.SolvencyReport{
+		CurrencyID: currencyID,
+		Liability:  decimal.NewFromInt(1000),
+		Custodial:  decimal.NewFromInt(1200),
+		Solvent:    true,
+		Margin:     decimal.NewFromInt(200),
+	}, nil
+}
+
+type mockBalanceTrendReader struct{}
+
+func (m *mockBalanceTrendReader) GetBalanceTrends(ctx context.Context, filter core.BalanceTrendFilter) ([]core.BalanceTrendPoint, error) {
+	return []core.BalanceTrendPoint{
+		{Date: filter.From, Balance: decimal.NewFromInt(100), Inflow: decimal.NewFromInt(50), Outflow: decimal.Zero},
+	}, nil
+}
+
 type mockQueryProvider struct{}
 
 func (m *mockQueryProvider) GetJournal(ctx context.Context, id int64) (*core.Journal, []core.Entry, error) {
@@ -360,25 +457,33 @@ func newTestServer() *server.Server {
 		&mockSnapshotter{},
 		(*service.SystemRollupService)(nil), // not used directly
 		&mockQueryProvider{},
+		&mockAuditQuerier{},
+		&mockPlatformBalanceReader{},
+		&mockSolvencyChecker{},
+		&mockBalanceTrendReader{},
 	)
 }
 
 // newTestServerWith creates a test server with custom overrides.
 func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 	o := &testServerOpts{
-		journals:        &mockJournalWriter{},
-		balances:        &mockBalanceReader{},
-		reserver:        &mockReserver{},
-		booker:          &mockBooker{},
-		bookingReader:   &mockBookingReader{},
-		eventReader:     &mockEventReader{},
-		classifications: &mockClassificationStore{},
-		journalTypes:    &mockJournalTypeStore{},
-		templates:       &mockTemplateStore{},
-		currencies:      &mockCurrencyStore{},
-		reconciler:      &mockReconciler{},
-		snapshotter:     &mockSnapshotter{},
-		queries:         &mockQueryProvider{},
+		journals:         &mockJournalWriter{},
+		balances:         &mockBalanceReader{},
+		reserver:         &mockReserver{},
+		booker:           &mockBooker{},
+		bookingReader:    &mockBookingReader{},
+		eventReader:      &mockEventReader{},
+		classifications:  &mockClassificationStore{},
+		journalTypes:     &mockJournalTypeStore{},
+		templates:        &mockTemplateStore{},
+		currencies:       &mockCurrencyStore{},
+		reconciler:       &mockReconciler{},
+		snapshotter:      &mockSnapshotter{},
+		queries:          &mockQueryProvider{},
+		audit:            &mockAuditQuerier{},
+		platformBalances: &mockPlatformBalanceReader{},
+		solvency:         &mockSolvencyChecker{},
+		balanceTrends:    &mockBalanceTrendReader{},
 	}
 	for _, fn := range opts {
 		fn(o)
@@ -389,24 +494,29 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		o.classifications, o.journalTypes, o.templates, o.currencies,
 		o.channels,
 		o.reconciler, o.snapshotter, nil, o.queries,
+		o.audit, o.platformBalances, o.solvency, o.balanceTrends,
 	)
 }
 
 type testServerOpts struct {
-	journals        core.JournalWriter
-	balances        core.BalanceReader
-	reserver        core.Reserver
-	booker          core.Booker
-	bookingReader   core.BookingReader
-	eventReader     core.EventReader
-	classifications core.ClassificationStore
-	journalTypes    core.JournalTypeStore
-	templates       core.TemplateStore
-	currencies      core.CurrencyStore
-	channels        map[string]channel.Adapter
-	reconciler      core.Reconciler
-	snapshotter     core.Snapshotter
-	queries         core.QueryProvider
+	journals         core.JournalWriter
+	balances         core.BalanceReader
+	reserver         core.Reserver
+	booker           core.Booker
+	bookingReader    core.BookingReader
+	eventReader      core.EventReader
+	classifications  core.ClassificationStore
+	journalTypes     core.JournalTypeStore
+	templates        core.TemplateStore
+	currencies       core.CurrencyStore
+	channels         map[string]channel.Adapter
+	reconciler       core.Reconciler
+	snapshotter      core.Snapshotter
+	queries          core.QueryProvider
+	audit            core.AuditQuerier
+	platformBalances core.PlatformBalanceReader
+	solvency         core.SolvencyChecker
+	balanceTrends    core.BalanceTrendReader
 }
 
 func doRequest(srv http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -1163,4 +1273,188 @@ func TestCreateBooking_InsufficientBalance(t *testing.T) {
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
+}
+
+// serverErrorEnvelope mirrors httpx.ErrorBody for asserting on the
+// "retryable" field from black-box HTTP responses.
+type serverErrorEnvelope struct {
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+}
+
+// --- Audit ---
+
+func TestAuditListJournals_ByAccount(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?holder=100&currency_id=1", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	page := parseEnvelope(t, w.Body.Bytes())
+	arr, ok := page["data"].([]any)
+	require.True(t, ok)
+	assert.NotEmpty(t, arr)
+}
+
+func TestAuditListJournals_ByTimeRange(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestAuditListJournals_NoFilter(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAuditListJournals_HolderWithoutCurrency(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?holder=100", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAuditListJournals_InvalidFrom(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?from=not-a-date", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAuditTraceBooking(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/42/trace", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Contains(t, data, "booking")
+	assert.Contains(t, data, "events")
+	assert.Contains(t, data, "journals")
+}
+
+func TestAuditTraceBooking_NotFound(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.audit = &mockAuditQuerier{
+			traceBookingFn: func(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+				return nil, fmt.Errorf("postgres: trace booking: %w", core.ErrNotFound)
+			},
+		}
+	})
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/999/trace", nil)
+	require.Equal(t, http.StatusNotFound, w.Code)
+
+	var env serverErrorEnvelope
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+	assert.False(t, env.Retryable, "not-found is a permanent outcome, not retryable")
+}
+
+func TestAuditTraceBooking_InternalError_Retryable(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.audit = &mockAuditQuerier{
+			traceBookingFn: func(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+				return nil, fmt.Errorf("postgres: trace booking: connection reset")
+			},
+		}
+	})
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/999/trace", nil)
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+
+	var env serverErrorEnvelope
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+	assert.True(t, env.Retryable, "unclassified internal errors default to retryable")
+}
+
+func TestAuditTraceBooking_InvalidID(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/not-a-number/trace", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAuditListReversals(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals/10/reversals", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	arr := parseEnvelopeArray(t, w.Body.Bytes())
+	assert.NotEmpty(t, arr)
+}
+
+// --- Platform ---
+
+func TestPlatformBalances(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/balances?currency_id=1", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Contains(t, data, "user_side")
+	assert.Contains(t, data, "system_side")
+}
+
+func TestPlatformBalances_MissingCurrency(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/balances", nil)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+
+	var env serverErrorEnvelope
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+	assert.False(t, env.Retryable, "invalid input is not retryable")
+}
+
+func TestPlatformSolvency(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_id=1", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, true, data["solvent"])
+}
+
+func TestPlatformSolvency_Insolvent(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.solvency = &mockSolvencyChecker{
+			checkFn: func(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+				return &core.SolvencyReport{
+					CurrencyID: currencyID,
+					Liability:  decimal.NewFromInt(1000),
+					Custodial:  decimal.NewFromInt(800),
+					Solvent:    false,
+					Margin:     decimal.NewFromInt(-200),
+				}, nil
+			},
+		}
+	})
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_id=1", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, false, data["solvent"])
+	assert.Equal(t, "-200", data["margin"])
+}
+
+func TestPlatformSolvency_MissingCurrency(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- Balance trends ---
+
+func TestBalanceTrends(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	arr := parseEnvelopeArray(t, w.Body.Bytes())
+	assert.NotEmpty(t, arr)
+}
+
+func TestBalanceTrends_MissingFrom(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&to=2026-01-31T00:00:00Z", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestBalanceTrends_MissingHolder(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?currency_id=1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestBalanceTrends_InvalidTo(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&from=2026-01-01T00:00:00Z&to=not-a-date", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

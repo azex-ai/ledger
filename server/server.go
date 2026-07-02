@@ -33,6 +33,14 @@ type Server struct {
 	currencies      core.CurrencyStore
 	channels        map[string]channel.Adapter // channel name → adapter
 
+	// Read-only audit / platform analytics. These were previously only
+	// reachable through cmd/ledger-cli; wiring them here exposes the same
+	// facade accessors over HTTP.
+	audit            core.AuditQuerier
+	platformBalances core.PlatformBalanceReader
+	solvency         core.SolvencyChecker
+	balanceTrends    core.BalanceTrendReader
+
 	// Services (injected)
 	reconciler   core.Reconciler
 	snapshotter  core.Snapshotter
@@ -114,6 +122,10 @@ func New(
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
+	audit core.AuditQuerier,
+	platformBalances core.PlatformBalanceReader,
+	solvency core.SolvencyChecker,
+	balanceTrends core.BalanceTrendReader,
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -125,7 +137,8 @@ func New(
 	}
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
-		reconciler, snapshotter, systemRollup, queries)
+		reconciler, snapshotter, systemRollup, queries,
+		audit, platformBalances, solvency, balanceTrends)
 }
 
 // NewWithConfig creates a Server using an explicit config, skipping env-var loading.
@@ -146,25 +159,33 @@ func NewWithConfig(
 	snapshotter core.Snapshotter,
 	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
+	audit core.AuditQuerier,
+	platformBalances core.PlatformBalanceReader,
+	solvency core.SolvencyChecker,
+	balanceTrends core.BalanceTrendReader,
 ) *Server {
 	s := &Server{
-		journals:        journals,
-		balances:        balances,
-		reserver:        reserver,
-		booker:        booker,
-		bookingReader: bookingReader,
-		eventReader:     eventReader,
-		classifications: classifications,
-		journalTypes:    journalTypes,
-		templates:       templates,
-		currencies:      currencies,
-		channels:        channels,
-		reconciler:      reconciler,
-		snapshotter:     snapshotter,
-		systemRollup:    systemRollup,
-		queries:         queries,
-		ready:           &atomic.Bool{},
-		rateLimiter:     newRateLimiter(defaultRateLimiterConfig()),
+		journals:         journals,
+		balances:         balances,
+		reserver:         reserver,
+		booker:           booker,
+		bookingReader:    bookingReader,
+		eventReader:      eventReader,
+		classifications:  classifications,
+		journalTypes:     journalTypes,
+		templates:        templates,
+		currencies:       currencies,
+		channels:         channels,
+		audit:            audit,
+		platformBalances: platformBalances,
+		solvency:         solvency,
+		balanceTrends:    balanceTrends,
+		reconciler:       reconciler,
+		snapshotter:      snapshotter,
+		systemRollup:     systemRollup,
+		queries:          queries,
+		ready:            &atomic.Bool{},
+		rateLimiter:      newRateLimiter(defaultRateLimiterConfig()),
 	}
 
 	r := chi.NewRouter()

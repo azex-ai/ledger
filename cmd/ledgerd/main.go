@@ -146,6 +146,10 @@ func run() error {
 		snapshotSvc,
 		systemRollupSvc,
 		svc.Queries(),
+		svc.Audit(),
+		svc.PlatformBalanceReader(),
+		svc.SolvencyChecker(),
+		svc.BalanceTrends(),
 	)
 	srv.SetMetricsHandler(promMetrics.Handler())
 
