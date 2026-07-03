@@ -96,9 +96,9 @@ func (m *mockReserver) Reserve(ctx context.Context, input core.ReserveInput) (*c
 	return &core.Reservation{ID: 1, AccountHolder: input.AccountHolder, CurrencyID: input.CurrencyID, ReservedAmount: input.Amount, Status: core.ReservationStatusActive, IdempotencyKey: input.IdempotencyKey, ExpiresAt: time.Now().Add(15 * time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
 }
 
-func (m *mockReserver) Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
+func (m *mockReserver) Settle(ctx context.Context, input core.SettleInput) error {
 	if m.settleFn != nil {
-		return m.settleFn(ctx, reservationID, actualAmount)
+		return m.settleFn(ctx, input.ReservationID, input.Amount)
 	}
 	return nil
 }
@@ -117,9 +117,9 @@ func (m *mockReserver) HeldAmount(ctx context.Context, holder, currencyID int64)
 	return decimal.Zero, nil
 }
 
-func (m *mockReserver) SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error {
+func (m *mockReserver) SettlePartial(ctx context.Context, input core.SettlePartialInput) error {
 	if m.settlePartialFn != nil {
-		return m.settlePartialFn(ctx, reservationID, amount)
+		return m.settlePartialFn(ctx, input.ReservationID, input.Amount)
 	}
 	return nil
 }

@@ -37,7 +37,7 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 	assert.True(t, res.ReservedAmount.Equal(decimal.NewFromInt(100)))
 
 	// Settle
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(95))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(95)})
 	require.NoError(t, err)
 }
 
@@ -63,7 +63,7 @@ func TestReserverStore_Reserve_Release(t *testing.T) {
 	require.NoError(t, err)
 
 	// Cannot settle after release
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -185,11 +185,11 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	require.NoError(t, err)
 
 	// Settle once
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(100))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(100)})
 	require.NoError(t, err)
 
 	// Settle again should fail
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(100))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(100)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -272,7 +272,7 @@ func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, res.ID, decimal.Zero)
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.Zero})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -295,7 +295,7 @@ func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(-1))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(-1)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -324,7 +324,7 @@ func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50).Add(decimal.NewFromInt(1)))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50).Add(decimal.NewFromInt(1))})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 	assert.Contains(t, err.Error(), "exceeds reserved amount")
@@ -356,6 +356,6 @@ func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, res.ID, decimal.NewFromInt(50))
+	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50)})
 	require.NoError(t, err)
 }

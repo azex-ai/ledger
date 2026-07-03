@@ -240,7 +240,11 @@ func resolveReservationExpiresIn(d time.Duration) time.Duration {
 // In pool mode a new transaction is started and committed here.
 // In tx mode (bound via withDB) the update is applied to the caller's
 // transaction; commit/rollback is the caller's responsibility.
-func (s *ReserverStore) Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
+func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) error {
+	if err := input.Validate(); err != nil {
+		return err
+	}
+	reservationID, actualAmount := input.ReservationID, input.Amount
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle",
 		attribute.Int64("reservation_id", reservationID),
 		attribute.String("actual_amount", actualAmount.String()),
@@ -328,7 +332,11 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 // In pool mode a new transaction is started and committed here. In tx mode
 // (bound via WithDB) the update is applied to the caller's transaction;
 // commit/rollback is the caller's responsibility.
-func (s *ReserverStore) SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error {
+func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePartialInput) error {
+	if err := input.Validate(); err != nil {
+		return err
+	}
+	reservationID, amount := input.ReservationID, input.Amount
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle_partial",
 		attribute.Int64("reservation_id", reservationID),
 		attribute.String("amount", amount.String()),
@@ -472,10 +480,12 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 	return nil
 }
 
-// HeldAmount returns the sum of reserved_amount across the holder's active
-// reservations in the given currency. This is the same figure Reserve subtracts
-// from balance when checking availability, exposed so consumers can compute
-// available = balance − held without reaching into the reservations table.
+// HeldAmount returns the holder's outstanding holds in the given currency:
+// full reserved_amount for active reservations plus the unsettled remainder
+// (reserved − settled) of settling ones. This is the same figure Reserve
+// subtracts from balance when checking availability, exposed so consumers can
+// compute available = balance − held without reaching into the reservations
+// table.
 func (s *ReserverStore) HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error) {
 	total, err := s.q.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 		AccountHolder: holder,

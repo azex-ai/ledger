@@ -60,25 +60,26 @@ type BalanceReader interface {
 type Reserver interface {
 	Reserve(ctx context.Context, input ReserveInput) (*Reservation, error)
 	// Settle marks an active reservation as settled with the actual amount
-	// consumed. actualAmount must be positive and must not exceed the
-	// reservation's reserved amount — over-settlement is rejected with
+	// consumed. input.Amount must be positive and must not exceed the
+	// reservation's reserved amount; over-settlement is rejected with
 	// ErrInvalidInput, never silently clamped. The unused remainder (reserved
 	// minus actual) is implicitly released by the settle transition.
-	Settle(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
+	Settle(ctx context.Context, input SettleInput) error
 	// Release cancels an active reservation, freeing its entire reserved
 	// amount without any accounting effect. It is a no-op on the ledger
 	// balance beyond removing the hold — no partial release is supported.
 	Release(ctx context.Context, reservationID int64) error
-	// SettlePartial settles part of a reservation. amount must be positive.
-	// The first call transitions the reservation from active to settling;
-	// subsequent calls accumulate settled_amount further, which must never
-	// exceed reserved_amount (ErrInvalidInput on overshoot). Once a
-	// reservation enters settling, its remaining hold is no longer counted by
-	// HeldAmount (mirroring the one-shot Settle's "unused remainder is
-	// implicitly released" behavior) — call FinalizeSettlement when no more
-	// partial settlements will follow. Calling Settle (the one-shot method)
-	// on a settling reservation is rejected; use FinalizeSettlement instead.
-	SettlePartial(ctx context.Context, reservationID int64, amount decimal.Decimal) error
+	// SettlePartial settles part of a reservation. input.Amount must be
+	// positive. The first call transitions the reservation from active to
+	// settling; subsequent calls accumulate settled_amount further, which
+	// must never exceed reserved_amount (ErrInvalidInput on overshoot).
+	// A settling reservation's unsettled remainder (reserved minus settled)
+	// STAYS held against the balance until FinalizeSettlement; releasing it
+	// early would let a concurrent Reserve over-commit (see I-11 and
+	// TestReserverStore_SettlePartial_RemainderStillHeld). Calling Settle
+	// (the one-shot method) on a settling reservation is rejected; use
+	// FinalizeSettlement instead.
+	SettlePartial(ctx context.Context, input SettlePartialInput) error
 	// FinalizeSettlement completes a reservation that has been partially
 	// settled via SettlePartial, transitioning it from settling to settled.
 	// It is rejected (ErrInvalidTransition) on any other status — in
@@ -86,8 +87,9 @@ type Reserver interface {
 	// SettlePartial call is not a valid "settle everything" shortcut; use
 	// Settle for that.
 	FinalizeSettlement(ctx context.Context, reservationID int64) error
-	// HeldAmount returns the sum of reserved_amount across the holder's active
-	// reservations in the given currency — the exact figure Reserve subtracts
+	// HeldAmount returns the holder's outstanding holds in the given currency:
+	// full reserved_amount for active reservations plus the unsettled
+	// remainder of settling ones — the exact figure Reserve subtracts
 	// from balance to compute available. Consumers should call this instead of
 	// querying the reservations table directly, so available = balance − held
 	// can be derived without depending on the ledger's internal schema.

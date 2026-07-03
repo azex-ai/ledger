@@ -146,7 +146,7 @@ func BenchmarkReserveSettle(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := reserver.Settle(context.Background(), rsv.ID, decimal.NewFromInt(1)); err != nil {
+		if err := reserver.Settle(context.Background(), core.SettleInput{ReservationID: rsv.ID, Amount: decimal.NewFromInt(1)}); err != nil {
 			b.Fatal(err)
 		}
 	}

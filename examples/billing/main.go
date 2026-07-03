@@ -118,7 +118,7 @@ func run() error {
 	// remainder. Both operations happen atomically inside the adapter.
 	// -----------------------------------------------------------------------
 	actualCost := decimal.RequireFromString("15.75")
-	if err := svc.Reserver().Settle(ctx, rsv.ID, actualCost); err != nil {
+	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationID: rsv.ID, Amount: actualCost}); err != nil {
 		return fmt.Errorf("settle: %w", err)
 	}
 	fmt.Printf("settled: actual_cost=%s (remainder released automatically)\n", actualCost)

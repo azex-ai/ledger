@@ -75,3 +75,35 @@ func (i ReserveInput) Validate() error {
 	}
 	return nil
 }
+
+// SettleInput is the input for a one-shot settlement of an active reservation.
+type SettleInput struct {
+	ReservationID int64           `json:"reservation_id"`
+	Amount        decimal.Decimal `json:"amount"`
+}
+
+func (i SettleInput) Validate() error {
+	if i.ReservationID <= 0 {
+		return fmt.Errorf("core: settle: reservation_id must be positive: %w", ErrInvalidInput)
+	}
+	if !i.Amount.IsPositive() {
+		return fmt.Errorf("core: settle: amount must be positive: %w", ErrInvalidInput)
+	}
+	return nil
+}
+
+// SettlePartialInput is the input for one increment of a partial settlement.
+type SettlePartialInput struct {
+	ReservationID int64           `json:"reservation_id"`
+	Amount        decimal.Decimal `json:"amount"`
+}
+
+func (i SettlePartialInput) Validate() error {
+	if i.ReservationID <= 0 {
+		return fmt.Errorf("core: settle partial: reservation_id must be positive: %w", ErrInvalidInput)
+	}
+	if !i.Amount.IsPositive() {
+		return fmt.Errorf("core: settle partial: amount must be positive: %w", ErrInvalidInput)
+	}
+	return nil
+}

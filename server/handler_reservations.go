@@ -112,7 +112,7 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.reserver.Settle(r.Context(), id, amount); err != nil {
+	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationID: id, Amount: amount}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -138,7 +138,7 @@ func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := s.reserver.SettlePartial(r.Context(), id, amount); err != nil {
+	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationID: id, Amount: amount}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
