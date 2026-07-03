@@ -59,6 +59,9 @@ type Server struct {
 	// Rate limiter — held so its GC loop can be stopped on shutdown.
 	rateLimiter *rateLimiter
 
+	// Optional inbound-webhook replay cache (see SetWebhookNonceRecorder).
+	webhookNonces WebhookNonceRecorder
+
 	// Optional Prometheus /metrics handler. Mounted outside chi's middleware
 	// chain so it bypasses auth + rate limiting (scrapers usually live on
 	// the internal network and authenticate by host/port).

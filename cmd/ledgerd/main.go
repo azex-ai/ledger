@@ -170,6 +170,9 @@ func run() error {
 		svc.TrialBalanceReader(),
 	)
 	srv.SetMetricsHandler(promMetrics.Handler())
+	// Inbound webhook replay cache — rejects identical callbacks resent inside
+	// the signature timestamp window (migration 030).
+	srv.SetWebhookNonceRecorder(webhookSubscriberStore)
 
 	// Rate limiter GC loop — stopped when rateLimiterStop is closed.
 	rateLimiterStop := make(chan struct{})

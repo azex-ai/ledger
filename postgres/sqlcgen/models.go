@@ -234,6 +234,11 @@ type SystemRollup struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 }
 
+type WebhookNonce struct {
+	Nonce  string    `json:"nonce"`
+	SeenAt time.Time `json:"seen_at"`
+}
+
 type WebhookSubscriber struct {
 	ID             int64     `json:"id"`
 	Name           string    `json:"name"`

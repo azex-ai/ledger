@@ -16,3 +16,13 @@ DELETE FROM webhook_subscribers WHERE id = $1;
 UPDATE webhook_subscribers
 SET last_status_code = $2, last_error = $3, last_attempt_at = now()
 WHERE id = $1;
+
+-- name: TryRecordWebhookNonce :execrows
+-- 0 rows affected = nonce already seen inside the retention window = replay.
+INSERT INTO webhook_nonces (nonce) VALUES ($1)
+ON CONFLICT (nonce) DO NOTHING;
+
+-- name: DeleteExpiredWebhookNonces :exec
+-- Retention is 2x the signature timestamp window; anything older can never
+-- verify again, so keeping it only bloats the cache.
+DELETE FROM webhook_nonces WHERE seen_at < now() - interval '15 minutes';

@@ -183,3 +183,27 @@ func TestWebhookDeliverer_RecordsDeliveryStatus_EndToEnd(t *testing.T) {
 		assert.Contains(t, lastError, "http status 500")
 	})
 }
+
+// Pins the webhook replay cache: the first sighting of a nonce is fresh, an
+// identical nonce inside the retention window is a replay and must report
+// stale (the HTTP handler turns that into a 409).
+func TestWebhookSubscriberStore_TryRecordNonce_RejectsReplay(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewWebhookSubscriberStore(pool)
+	ctx := context.Background()
+
+	nonce := postgrestest.UniqueKey("nonce")
+
+	fresh, err := store.TryRecordNonce(ctx, nonce)
+	require.NoError(t, err)
+	assert.True(t, fresh, "first sighting must be fresh")
+
+	fresh, err = store.TryRecordNonce(ctx, nonce)
+	require.NoError(t, err)
+	assert.False(t, fresh, "identical nonce inside the window is a replay")
+
+	// A different nonce is unaffected.
+	fresh, err = store.TryRecordNonce(ctx, postgrestest.UniqueKey("nonce"))
+	require.NoError(t, err)
+	assert.True(t, fresh)
+}

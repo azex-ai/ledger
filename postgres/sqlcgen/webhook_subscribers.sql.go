@@ -9,6 +9,17 @@ import (
 	"context"
 )
 
+const deleteExpiredWebhookNonces = `-- name: DeleteExpiredWebhookNonces :exec
+DELETE FROM webhook_nonces WHERE seen_at < now() - interval '15 minutes'
+`
+
+// Retention is 2x the signature timestamp window; anything older can never
+// verify again, so keeping it only bloats the cache.
+func (q *Queries) DeleteExpiredWebhookNonces(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, deleteExpiredWebhookNonces)
+	return err
+}
+
 const deleteWebhookSubscriber = `-- name: DeleteWebhookSubscriber :exec
 DELETE FROM webhook_subscribers WHERE id = $1
 `
@@ -114,6 +125,20 @@ func (q *Queries) ListActiveWebhookSubscribers(ctx context.Context) ([]WebhookSu
 		return nil, err
 	}
 	return items, nil
+}
+
+const tryRecordWebhookNonce = `-- name: TryRecordWebhookNonce :execrows
+INSERT INTO webhook_nonces (nonce) VALUES ($1)
+ON CONFLICT (nonce) DO NOTHING
+`
+
+// 0 rows affected = nonce already seen inside the retention window = replay.
+func (q *Queries) TryRecordWebhookNonce(ctx context.Context, nonce string) (int64, error) {
+	result, err := q.db.Exec(ctx, tryRecordWebhookNonce, nonce)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateWebhookSubscriberDeliveryStatus = `-- name: UpdateWebhookSubscriberDeliveryStatus :exec

@@ -59,3 +59,20 @@ func (s *WebhookSubscriberStore) RecordDeliveryStatus(ctx context.Context, subsc
 	}
 	return nil
 }
+
+// TryRecordNonce records an inbound webhook nonce (typically the request
+// signature) and reports whether it was fresh. false = the nonce was already
+// seen inside the retention window, i.e. the request is a replay and must be
+// rejected. Expired nonces (older than 2x the signature timestamp window,
+// which can never verify again) are pruned opportunistically on each call —
+// this table is a replay cache, not ledger data.
+func (s *WebhookSubscriberStore) TryRecordNonce(ctx context.Context, nonce string) (bool, error) {
+	if err := s.q.DeleteExpiredWebhookNonces(ctx); err != nil {
+		return false, fmt.Errorf("postgres: prune webhook nonces: %w", err)
+	}
+	rows, err := s.q.TryRecordWebhookNonce(ctx, nonce)
+	if err != nil {
+		return false, fmt.Errorf("postgres: record webhook nonce: %w", err)
+	}
+	return rows > 0, nil
+}
