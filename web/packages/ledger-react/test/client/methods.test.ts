@@ -310,9 +310,9 @@ describe("currencies", () => {
 
   test("createCurrency", async () => {
     const i = intercept("post", "/api/v1/currencies", {});
-    await client.createCurrency({ code: "USD", name: "Dollar" });
+    await client.createCurrency({ code: "USD", name: "Dollar", exponent: 2 });
     expect(i.captured()?.auth).toBe(`Bearer ${API_KEY}`);
-    expect(i.captured()?.body).toEqual({ code: "USD", name: "Dollar" });
+    expect(i.captured()?.body).toEqual({ code: "USD", name: "Dollar", exponent: 2 });
   });
 
   test("deactivateCurrency", async () => {

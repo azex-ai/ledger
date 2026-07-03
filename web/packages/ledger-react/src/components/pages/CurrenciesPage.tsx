@@ -25,7 +25,9 @@ import { TableSkeleton } from "../loading-skeleton";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "" });
+  // exponent kept as string while typing so the field can be empty; "0" is a
+  // legal value (JPY) and must stay distinguishable from "not filled in".
+  const [form, setForm] = useState({ code: "", name: "", exponent: "" });
   const mutation = useCreateCurrency();
 
   return (
@@ -44,14 +46,18 @@ function CreateDialog() {
             <Label htmlFor="cur-name">Name</Label>
             <Input id="cur-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Tether USD" />
           </div>
+          <div className="grid gap-2">
+            <Label htmlFor="cur-exponent">Decimal places (0-18)</Label>
+            <Input id="cur-exponent" type="number" min={0} max={18} step={1} value={form.exponent} onChange={(e) => setForm({ ...form, exponent: e.target.value })} placeholder="e.g. 2 for USD, 0 for JPY, 18 for wei" />
+          </div>
         </div>
         <DialogFooter>
-          <Button onClick={() => mutation.mutate(form, {
+          <Button onClick={() => mutation.mutate({ code: form.code, name: form.name, exponent: Number(form.exponent) }, {
             onSuccess: () => {
               toast.success("Currency created");
               setOpen(false);
             },
-          })} disabled={mutation.isPending || !form.code || !form.name}>
+          })} disabled={mutation.isPending || !form.code || !form.name || form.exponent.trim() === "" || Number.isNaN(Number(form.exponent)) || Number(form.exponent) < 0 || Number(form.exponent) > 18}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
         </DialogFooter>

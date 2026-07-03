@@ -316,7 +316,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
     listCurrencies: (activeOnly?: boolean) =>
       request<Currency[]>(`/api/v1/currencies${qs({ active_only: activeOnly })}`),
 
-    createCurrency: (body: { code: string; name: string }) =>
+    createCurrency: (body: { code: string; name: string; exponent: number }) =>
       request<Currency>("/api/v1/currencies", {
         method: "POST",
         body: JSON.stringify(body),

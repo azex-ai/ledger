@@ -149,6 +149,8 @@ export interface Currency {
   code: string;
   name: string;
   is_active: boolean;
+  /** Max decimal places entries in this currency may carry (JPY=0, USD=2, wei=18). */
+  exponent: number;
 }
 
 export interface HealthStatus {
