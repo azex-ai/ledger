@@ -1,7 +1,7 @@
 # ledger v0.4 — API 契约对齐（api-contract.md 收编）
 
 **Created**: 2026-07-03
-**Status**: Draft — pending Aaron review（§6 三个拍板点）
+**Status**: Approved 2026-07-03（§6 全部拍板；uid 范围按 Aaron 裁定扩大到全部对外契约）
 **权威源**: `~/.claude/rules/api-contract.md`（26-07-03 拍板的跨边界数据契约唯一 SoT）
 **前置**: v0.3.1 已发布。**按全新 lib 对待（Aaron 2026-07-03 裁定）：不存在「存量数据」概念**——
 不设计任何回填/兼容路径，dev 库可随时重建；迁移只需对空库正确。
@@ -37,13 +37,17 @@
 
 ## 2. P2 — uid：对外标识符切换（主工程）
 
-### 原则
+### 原则（Aaron 2026-07-03 裁定：主键 id 不出现在任何对外契约）
 
-- **内部 BIGSERIAL id 保留**（FK、join、advisory lock、checkpoint 序都依赖它），只是**从对外表面消失**
-- **uid = UUIDv7 字符串**，每个对外可见实体一列：`uid UUID NOT NULL UNIQUE`
-- **作用域 = ledger 的对外表面**：HTTP 路径参数、响应体、出站 webhook 事件负载。
-  **Library mode 的 Go 接口保持 int64**（armatrix 这类进程内消费者持有的是内部引用，
-  不是「外部 API」；它们自己的对外 API 用它们自己的 uid）——见 §6 拍板点 2
+- **uid = UUIDv7 字符串，是唯一对外标识**——HTTP 路径/响应体/webhook 负载，
+  **以及 library mode 的 Go 公开 API**（core 类型、接口方法参数/返回、facade）。
+- **内部 BIGSERIAL id 降级为纯存储细节**：只用于 FK、join、advisory lock、
+  checkpoint/cursor 序；**不出现在任何 exported 契约**——core 实体类型删除 `ID int64`
+  字段，接口签名全部收 uid，store 层做一次 uid→内部 id 解析。
+- **机制型字段例外**（不是实体引用，是运行机制）：`BalanceCheckpoint.LastEntryID`、
+  rollup 队列、分页 cursor 的内部序——保留 int64，doc comment 注明 operational
+  internal，不作为查找句柄提供。
+- `journal_entries` 无独立 uid（实体身份跟随 journal）；entry 响应不再输出行 id。
 
 ### 涉及实体（migration 031，单步）
 
@@ -62,16 +66,23 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
 ### Go 侧
 
 - 依赖：`github.com/google/uuid`（v1.6+ 原生 `uuid.NewV7()`）——ledger 首个 ID 生成依赖，进 root go.mod
-- core 类型加 `UID string` 字段（JSON tag `uid`）；insert 路径由 store 生成 V7
-- store 加按 uid 查询：`GetJournalByUID` / `GetBookingByUID` / ...（sqlc）
+- core 实体类型：`ID int64` 删除、`UID string` 加入（JSON tag `uid`）；交叉引用字段
+  全部换 uid（`Booking.JournalUID *string`、`Event.BookingUID`、`Journal.ReversalOfUID`、
+  `JournalInput.EventUID`、`TransitionInput.BookingUID`、`SettleInput.ReservationUID`...）
+- 接口签名收 uid：`GetBooking(ctx, uid string)`、`ReverseJournal(ctx, journalUID, reason)`、
+  `Transition`/`Settle`/`SettlePartial`/`FinalizeSettlement`/`Release` 同理
+- store：insert 生成 V7；读写路径入口做一次 uid→内部 id 解析（unique 索引点查）；
+  sqlc 加 `*ByUID` 查询族
 - **HTTP 层**：路径全部换 uid——`/journals/{uid}`、`/bookings/{uid}/transition`、
-  `/reservations/{uid}/settle-partial`...；handler 内 uid→内部 id 解析一次后走原逻辑
-- **响应体**：`id` 字段删除，输出 `uid`；关联引用同步（`journal_uid`、`reservation_uid`、
-  `booking_uid`、`reversal_of_uid`）；cursor 分页的游标继续基于内部 id（base64 不透明串，
-  不暴露语义，合规）
+  `/reservations/{uid}/settle-partial`...
+- **响应体**：无任何 `id` 键；关联引用 `journal_uid`/`reservation_uid`/`booking_uid`/
+  `reversal_of_uid`；cursor 分页游标继续基于内部序（base64 不透明串，不暴露语义，合规）
 - **出站 webhook 事件负载**：`event.uid` + `booking_uid` + `journal_uid`；
   消费者去重键从 `X-Ledger-Event-ID` 换 `X-Ledger-Event-UID`（header 同步改名）
-- **ledger-cli**：查询参数接受 uid（运维排查仍可用 `--internal-id` 逃生舱直查内部 id）
+- **ledger-cli / examples / COOKBOOK**：全部换 uid 口径（CLI 保留 `--internal-id`
+  运维逃生舱，直查存储层，不经公开 API）
+- **service/ 内部编排**（rollup/reconcile/snapshot/expiration）继续用内部 id——
+  它们是 composition root 内的机制，不是消费者契约
 
 ### 前端
 
@@ -108,18 +119,15 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
 `armatrix-docs/plans/2026-07-03-ledger-v0.3-upgrade.md` 改为「upgrade to v0.4.0」：
 
 - 前置条件：`v0.3.0` → `v0.4.0`
-- 适配清单追加：无（armatrix 走 library mode，Go 接口 int64 不变；HTTP 包络/uid
-  变更不触及它）——**这正是把两批合并成一次升级的收益**
+- 适配清单追加：**ledger_adapter 持有的 ledger 引用列 bigint → uuid**（reservation/
+  journal/event 引用；无存量，直接改列类型 + 调用点换 uid 字符串），以及接口签名跟随
 - armatrix 自己的 API 契约工作（包络统一 + Twitter camelCase 边界归一）保持在该计划内
 
 ## 6. 拍板点
 
-1. **Idempotency-Key：body 字段 vs header（契约 §9）**。ledger 现状是 body 字段
-   `idempotency_key`，且「同 key + 同 payload 幂等返回 / 同 key + 异 payload → ErrConflict」
-   的比对语义天然绑定 body。**推荐：ledger 保持 body 字段为 SoT，HTTP 层额外接受
-   `Idempotency-Key` header 作为别名**（header 存在且 body 缺失时注入 body；两者同时存在
-   且不一致 → 400）——契约 §9 的精神（每次写操作显式幂等）满足，比对语义不丢。
-   若你要严格 header-only，payload 比对改为「key → 请求体哈希」存表，工程量 +1 张表。
-2. **Library mode 接口保持 int64**（uid 只在 HTTP/webhook 表面）。推荐如此——armatrix
-   的 ledger_adapter 零改动；反之全接口切 uid 会让每个进程内调用多一次 uid→id 解析。
+1. ✅ **Idempotency-Key（拍板通过）**：body 字段为 SoT，HTTP 层接受 `Idempotency-Key`
+   header 别名（header 有且 body 缺 → 注入；两者同存且不一致 → 400）。
+2. ✅ **uid 全覆盖（Aaron 裁定，推翻原推荐）**：主键 id 不出现在任何对外契约——
+   包括 library mode 的 Go 公开 API。armatrix adapter 需一次 bigint→uuid 列适配
+   （无存量，代价可控）；每次调用多一次 unique 索引点查，可接受。
 3. ~~存量 uid 回填~~ **已消解**（无存量裁定）：uid 全部 Go 侧 UUIDv7，无回填、无双来源。
