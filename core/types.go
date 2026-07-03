@@ -14,6 +14,11 @@ type Status string
 // Lifecycle defines a finite state machine for a classification.
 // Nil Lifecycle on a Classification means label-only (no state machine).
 type Lifecycle struct {
+	// Version of the lifecycle JSON shape. 0 (absent in pre-v0.3 rows) and 1
+	// are equivalent today; the field exists so a future breaking change to
+	// this structure can distinguish old rows instead of guessing. Bump only
+	// with a documented migration path.
+	Version     int                 `json:"version,omitempty"`
 	Initial     Status              `json:"initial"`
 	Terminal    []Status            `json:"terminal"`
 	Transitions map[Status][]Status `json:"transitions"`
@@ -21,6 +26,9 @@ type Lifecycle struct {
 
 // Validate checks that the lifecycle is well-formed.
 func (l *Lifecycle) Validate() error {
+	if l.Version < 0 || l.Version > 1 {
+		return fmt.Errorf("core: lifecycle: unsupported version %d (this build understands version 1): %w", l.Version, ErrInvalidInput)
+	}
 	if l.Initial == "" {
 		return fmt.Errorf("core: lifecycle: initial status must not be empty: %w", ErrInvalidInput)
 	}
