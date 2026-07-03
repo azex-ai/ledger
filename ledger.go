@@ -268,7 +268,8 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 		}
 	}()
 
-	// Recover panics so we always roll back before re-panicking.
+	// Recover panics so the transaction always rolls back; the panic is
+	// converted into the returned error (not re-raised).
 	var callErr error
 	func() {
 		defer func() {

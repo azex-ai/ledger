@@ -51,11 +51,11 @@ func TestReserverStore_SettlePartial_AccumulatesAndFinalizes(t *testing.T) {
 	reserver, _, ctx, res, curID := seedFundedReservation(t, decimal.NewFromInt(60))
 
 	// Two partial settlements accumulate.
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("12.5")}))
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("20")}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("12.5"), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("20"), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")}))
 
 	// Over-cumulative (32.5 + 30 > 60) is rejected and changes nothing.
-	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30)})
+	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 
@@ -72,7 +72,7 @@ func TestReserverStore_SettlePartial_AccumulatesAndFinalizes(t *testing.T) {
 	assert.True(t, held.IsZero(), "hold must be zero after finalize, got %s", held)
 
 	// Terminal: no further partial settlement or finalize.
-	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(1)})
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(1), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")})
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 	err = reserver.FinalizeSettlement(ctx, res.UID)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
@@ -86,7 +86,7 @@ func TestReserverStore_SettlePartial_RemainderStillHeld(t *testing.T) {
 	reserver, _, ctx, res, curID := seedFundedReservation(t, decimal.NewFromInt(60))
 
 	// Balance 100, reserved 60 → available 40.
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(15)}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(15), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")}))
 
 	// Hold = 60 - 15 = 45 (NOT zero, NOT 60).
 	held, err := reserver.HeldAmount(ctx, 21, curID)
@@ -126,11 +126,47 @@ func TestReserverStore_FinalizeSettlement_OnActiveRejected(t *testing.T) {
 func TestReserverStore_SettlePartial_NonPositiveRejected(t *testing.T) {
 	reserver, _, ctx, res, _ := seedFundedReservation(t, decimal.NewFromInt(30))
 
-	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.Zero})
+	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.Zero, IdempotencyKey: postgrestest.UniqueKey("psettle-leg")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 
-	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-5)})
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-5), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
+// Pins I-3 for SettlePartial: a replayed idempotency key applies its amount
+// exactly once — including after the reservation has been finalized — and a
+// replayed key with a different amount is ErrConflict.
+func TestSettlePartial_IdempotentReplay(t *testing.T) {
+	reserver, _, ctx, res, curID := seedFundedReservation(t, decimal.NewFromInt(50))
+
+	key := postgrestest.UniqueKey("psettle-idem")
+	in := core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(15), IdempotencyKey: key}
+
+	require.NoError(t, reserver.SettlePartial(ctx, in))
+	// Lost-response retry: same key, same payload — must succeed without
+	// accumulating a second time. held = reserved − settled, so a
+	// double-apply would show up as held dropping from 35 to 20.
+	require.NoError(t, reserver.SettlePartial(ctx, in))
+
+	held, err := reserver.HeldAmount(ctx, 21, curID)
+	require.NoError(t, err)
+	assert.True(t, held.Equal(decimal.NewFromInt(35)),
+		"replay must not double-apply: held=%s (want 35 = 50 reserved − 15 settled once)", held)
+
+	// Same key, different amount — conflict.
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(20), IdempotencyKey: key})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+
+	// Replay after finalization still resolves idempotently (not
+	// ErrInvalidTransition) — the retry may arrive after the caller finalized.
+	require.NoError(t, reserver.FinalizeSettlement(ctx, res.UID))
+	require.NoError(t, reserver.SettlePartial(ctx, in))
+
+	// Missing key is rejected outright.
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(1)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }

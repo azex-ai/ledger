@@ -124,6 +124,15 @@ func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 		return nil, err
 	}
 
+	// HolderID must be a positive user-side id: HolderRoleSystem lines derive
+	// the system counterpart by negation, so a negative HolderID would swap
+	// both sides into the wrong namespace (user line lands in system space,
+	// system line lands on a REAL user account) with no other guard —
+	// JournalInput.Validate only rejects holder == 0, not the sign.
+	if params.HolderID <= 0 {
+		return nil, fmt.Errorf("core: template: holder_id must be positive (user-side), got %d: %w", params.HolderID, ErrInvalidInput)
+	}
+
 	entries := make([]EntryInput, 0, len(t.Lines))
 	for i, line := range t.Lines {
 		amount, ok := params.Amounts[line.AmountKey]

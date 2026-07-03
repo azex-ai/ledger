@@ -21,6 +21,7 @@ import (
 type fakeEventPoller struct {
 	events    []delivery.PendingEvent
 	delivered []int64
+	retried   []int64
 }
 
 func (f *fakeEventPoller) GetPendingEvents(_ context.Context, limit int) ([]delivery.PendingEvent, error) {
@@ -36,13 +37,16 @@ func (f *fakeEventPoller) GetPendingEvents(_ context.Context, limit int) ([]deli
 	return batch, nil
 }
 
-func (f *fakeEventPoller) MarkDelivered(_ context.Context, id int64) error {
+func (f *fakeEventPoller) MarkDelivered(_ context.Context, id int64, _ time.Time) error {
 	f.delivered = append(f.delivered, id)
 	return nil
 }
 
-func (f *fakeEventPoller) MarkRetry(_ context.Context, _ int64, _ time.Time) error { return nil }
-func (f *fakeEventPoller) MarkDead(_ context.Context, _ int64) error               { return nil }
+func (f *fakeEventPoller) MarkRetry(_ context.Context, id int64, _ time.Time, _ time.Time) error {
+	f.retried = append(f.retried, id)
+	return nil
+}
+func (f *fakeEventPoller) MarkDead(_ context.Context, _ int64, _ time.Time) error { return nil }
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -83,9 +87,10 @@ func TestWorker_Subscribe_HandlerReceivesEvent(t *testing.T) {
 	assert.Equal(t, []int64{1}, poller.delivered)
 }
 
-// TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue verifies that when a
-// handler returns an error the event is still marked delivered and subsequent
-// events are processed.
+// TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue verifies that a failing
+// handler does not block the queue: the failed event is scheduled for retry
+// (at-least-once, mirroring webhook delivery) while subsequent events are
+// still processed and delivered.
 func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 	engine := core.NewEngine()
 
@@ -115,9 +120,12 @@ func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 	err := worker.Run(ctx)
 	require.NoError(t, err)
 
-	// Both events should have been processed despite the error on event 1.
-	assert.Equal(t, int64(2), processedCount.Load())
-	assert.Equal(t, []int64{1, 2}, poller.delivered)
+	// Both events should have been processed despite the error on event 1;
+	// event 1 goes to retry (not delivered), event 2 is delivered.
+	assert.GreaterOrEqual(t, processedCount.Load(), int64(2))
+	assert.Contains(t, poller.delivered, int64(2))
+	assert.NotContains(t, poller.delivered, int64(1), "a failed handler's event must be retried, not marked delivered")
+	assert.Contains(t, poller.retried, int64(1), "the failed event must be scheduled for retry")
 }
 
 // TestLocalDispatcher_ProcessBatch_NilPollerError verifies that ProcessBatch

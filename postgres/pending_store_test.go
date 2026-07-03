@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -586,4 +587,59 @@ func TestPendingStore_AccountingEquation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, totalDebits, totalCredits,
 		"accounting equation violated: debits=%s credits=%s", totalDebits, totalCredits)
+}
+
+// Pins I-3 for ConfirmPending under concurrency: N racers replaying the SAME
+// idempotency key must all resolve to the one posted journal — never
+// ErrInsufficientBalance. Before the under-lock idempotency recheck, a retry
+// racing its original could pass the pre-check, then find the pending
+// balance already consumed by the original and be told "insufficient
+// balance" for a confirm that in fact succeeded.
+func TestConfirmPending_ConcurrentSameKey_NeverInsufficientBalance(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ls := postgres.NewLedgerStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	curUID := postgrestest.SeedCurrency(t, p, "USDT-RACE", "Test USDT")
+	store := postgres.NewPendingStore(p, ls, cs)
+	holder := int64(4242)
+
+	// Stage exactly the amount that one confirm will fully consume.
+	_, err := store.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  holder,
+		CurrencyUID:    curUID,
+		Amount:         decimal.NewFromInt(70),
+		IdempotencyKey: postgrestest.UniqueKey("race-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	key := postgrestest.UniqueKey("race-confirm")
+	const racers = 6
+	var wg sync.WaitGroup
+	errs := make(chan error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := store.ConfirmPending(ctx, core.ConfirmPendingInput{
+				AccountHolder:  holder,
+				CurrencyUID:    curUID,
+				Amount:         decimal.NewFromInt(70),
+				IdempotencyKey: key,
+				Source:         "test",
+			})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err, "a same-key replay must resolve idempotently, never fail")
+	}
 }

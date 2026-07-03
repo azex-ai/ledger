@@ -217,6 +217,25 @@ func (q *Queries) GetReservationUIDByID(ctx context.Context, id int64) (pgtype.U
 	return uid, err
 }
 
+const getSettlementLegByIdempotencyKey = `-- name: GetSettlementLegByIdempotencyKey :one
+SELECT id, reservation_id, idempotency_key, amount, created_at
+FROM reservation_settlement_legs
+WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetSettlementLegByIdempotencyKey(ctx context.Context, idempotencyKey string) (ReservationSettlementLeg, error) {
+	row := q.db.QueryRow(ctx, getSettlementLegByIdempotencyKey, idempotencyKey)
+	var i ReservationSettlementLeg
+	err := row.Scan(
+		&i.ID,
+		&i.ReservationID,
+		&i.IdempotencyKey,
+		&i.Amount,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertReservation = `-- name: InsertReservation :one
 INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -259,23 +278,61 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 	return i, err
 }
 
+const insertReservationSettlementLeg = `-- name: InsertReservationSettlementLeg :one
+INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount)
+VALUES ($1, $2, $3)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id, reservation_id, idempotency_key, amount, created_at
+`
+
+type InsertReservationSettlementLegParams struct {
+	ReservationID  int64          `json:"reservation_id"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+}
+
+// Durable idempotency record for one SettlePartial application (I-3). On a
+// replayed key this inserts nothing and returns no row; the caller then
+// fetches the existing leg and compares payloads.
+func (q *Queries) InsertReservationSettlementLeg(ctx context.Context, arg InsertReservationSettlementLegParams) (ReservationSettlementLeg, error) {
+	row := q.db.QueryRow(ctx, insertReservationSettlementLeg, arg.ReservationID, arg.IdempotencyKey, arg.Amount)
+	var i ReservationSettlementLeg
+	err := row.Scan(
+		&i.ID,
+		&i.ReservationID,
+		&i.IdempotencyKey,
+		&i.Amount,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listReservationsByAccount = `-- name: ListReservationsByAccount :many
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations
 WHERE ($1::bigint = 0 OR account_holder = $1)
   AND ($2::text = '' OR status = $2)
-ORDER BY created_at DESC
-LIMIT $3::int
+  AND ($3::bigint = 0 OR id < $3)
+ORDER BY id DESC
+LIMIT $4::int
 `
 
 type ListReservationsByAccountParams struct {
 	AccountHolder int64  `json:"account_holder"`
 	FilterStatus  string `json:"filter_status"`
+	BeforeID      int64  `json:"before_id"`
 	PageLimit     int32  `json:"page_limit"`
 }
 
+// Keyset pagination on id DESC (api-contract §6): before_id = 0 means first
+// page; the caller encodes the last row's id as the opaque next_cursor.
 func (q *Queries) ListReservationsByAccount(ctx context.Context, arg ListReservationsByAccountParams) ([]Reservation, error) {
-	rows, err := q.db.Query(ctx, listReservationsByAccount, arg.AccountHolder, arg.FilterStatus, arg.PageLimit)
+	rows, err := q.db.Query(ctx, listReservationsByAccount,
+		arg.AccountHolder,
+		arg.FilterStatus,
+		arg.BeforeID,
+		arg.PageLimit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +419,7 @@ UPDATE reservations SET status = 'settled', settled_amount = $2, journal_id = $3
 type UpdateReservationSettleParams struct {
 	ID            int64          `json:"id"`
 	SettledAmount pgtype.Numeric `json:"settled_amount"`
-	JournalID     int64          `json:"journal_id"`
+	JournalID     pgtype.Int8    `json:"journal_id"`
 }
 
 func (q *Queries) UpdateReservationSettle(ctx context.Context, arg UpdateReservationSettleParams) error {

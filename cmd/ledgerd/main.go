@@ -182,6 +182,12 @@ func run() error {
 		Addr:              ":" + httpPort,
 		Handler:           srv,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound the whole request read and response write: bodyLimitMiddleware
+		// caps body SIZE but not the TIME a slow client may take to send it
+		// (slow-POST exhaustion); idle keep-alives are likewise bounded.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Worker runs under its own derived context so we can drain it

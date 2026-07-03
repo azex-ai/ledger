@@ -78,5 +78,5 @@ func (s *Server) handleGetBalanceTrends(w http.ResponseWriter, r *http.Request) 
 			Outflow: p.Outflow.String(),
 		}
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[balanceTrendPointResponse]{List: data})
 }

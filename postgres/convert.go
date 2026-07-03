@@ -299,11 +299,11 @@ func reservationFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries,
 	if err != nil {
 		return nil, err
 	}
-	// reservations.journal_id is still a NOT NULL DEFAULT 0 column (no FK);
-	// migration 017 forced that. 0 = no journal linked -> empty uid.
+	// reservations.journal_id is a nullable FK since migration 035 (NULL = no
+	// journal linked -> empty uid), same exception shape as bookings.journal_id.
 	journalUID := ""
-	if row.JournalID != 0 {
-		u, err := q.GetJournalUIDByID(ctx, row.JournalID)
+	if row.JournalID.Valid {
+		u, err := q.GetJournalUIDByID(ctx, row.JournalID.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: resolve reservation journal uid: %w", err)
 		}

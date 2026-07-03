@@ -194,3 +194,84 @@ func TestPrecision_Pending_RejectsOverPrecisionAmount(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
 }
+
+// TestPrecision_Booking_RejectsOverPrecisionAmount pins I-16 on the booking
+// write path — booking amounts feed reporting and settlement math.
+func TestPrecision_Booking_RejectsOverPrecisionAmount(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	bookings := postgres.NewBookingStore(pool)
+	classStore := postgres.NewClassificationStore(pool)
+
+	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-BKG", "Japanese Yen Booking", 0)
+	_, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "bkg_prec",
+		Name:       "Booking Precision Test",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle: &core.Lifecycle{
+			Initial:     "pending",
+			Terminal:    []core.Status{"confirmed"},
+			Transitions: map[core.Status][]core.Status{"pending": {"confirmed"}},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = bookings.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: "bkg_prec",
+		AccountHolder:      9006,
+		CurrencyUID:        jpyID,
+		Amount:             decimal.RequireFromString("10.5"),
+		IdempotencyKey:     postgrestest.UniqueKey("jpy-booking"),
+		ExpiresAt:          time.Now().Add(time.Hour),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
+}
+
+// TestPrecision_SettlePartial_RejectsOverPrecisionAmount pins I-16 on the
+// partial-settlement increment.
+func TestPrecision_SettlePartial_RejectsOverPrecisionAmount(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	ledgerStore := postgres.NewLedgerStore(pool)
+	reserver := postgres.NewReserverStore(pool, ledgerStore)
+
+	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-PSET", "Japanese Yen PSettle", 0)
+	mainWallet := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet_jpy_pset", "Main Wallet", "debit", false, "available")
+	custodial := postgrestest.SeedClassification(t, pool, "custodial_jpy_pset", "Custodial", "credit", true)
+	jt := postgrestest.SeedJournalType(t, pool, "test_jpy_pset", "Test JPY PSettle")
+
+	userID := int64(9007)
+	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jt,
+		IdempotencyKey: postgrestest.UniqueKey("jpy-pset-fund"),
+		Source:         "precision-test",
+		Entries: []core.EntryInput{
+			{AccountHolder: userID, CurrencyUID: jpyID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: jpyID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := reserver.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  userID,
+		CurrencyUID:    jpyID,
+		Amount:         decimal.NewFromInt(500),
+		IdempotencyKey: postgrestest.UniqueKey("jpy-pset-rsv"),
+		ExpiresIn:      time.Hour,
+	})
+	require.NoError(t, err)
+
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{
+		ReservationUID: res.UID,
+		Amount:         decimal.RequireFromString("10.5"),
+		IdempotencyKey: postgrestest.UniqueKey("jpy-pset-leg"),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
+
+	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("10.5")})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
+}

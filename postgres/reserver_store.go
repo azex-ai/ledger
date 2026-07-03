@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"go.opentelemetry.io/otel/attribute"
@@ -321,6 +322,16 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		return fmt.Errorf("postgres: settle: from %q to settled: %w", res.Status, core.ErrInvalidTransition)
 	}
 
+	// Business precision (I-16): the settled amount must respect the
+	// reservation currency's exponent, same as Reserve's own amount.
+	cur, err := s.dims.currencyByIDOrErr(ctx, qtx, res.CurrencyID)
+	if err != nil {
+		return fmt.Errorf("postgres: settle: %w", err)
+	}
+	if err := checkAmountPrecision(actualAmount, cur); err != nil {
+		return fmt.Errorf("postgres: settle: %w", err)
+	}
+
 	// The reservations table enforces settled_amount <= reserved_amount via
 	// chk_settled_lte_reserved, but check here too so callers get a clear
 	// core.ErrInvalidInput without a round trip to the DB constraint.
@@ -335,7 +346,7 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 	if err := qtx.UpdateReservationSettle(ctx, sqlcgen.UpdateReservationSettleParams{
 		ID:            reservationID,
 		SettledAmount: decimalToNumeric(actualAmount),
-		JournalID:     0,
+		JournalID:     pgtype.Int8{}, // no journal linked by the one-shot settle
 	}); err != nil {
 		return wrapStoreError("postgres: settle: update", err)
 	}
@@ -361,7 +372,7 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.settlePartialWithQueries(ctx, s.q, reservationUID, amount)
+		err := s.settlePartialWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -373,7 +384,7 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), reservationUID, amount); err != nil {
+	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -386,7 +397,8 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	return nil
 }
 
-func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string, amount decimal.Decimal) error {
+func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettlePartialInput) error {
+	reservationUID, amount := input.ReservationUID, input.Amount
 	if !amount.IsPositive() {
 		return fmt.Errorf("postgres: settle partial: amount must be positive, got %s: %w", amount, core.ErrInvalidInput)
 	}
@@ -403,6 +415,35 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 		return fmt.Errorf("postgres: settle partial: get reservation: %w", err)
 	}
 	reservationID := res.ID
+
+	// Idempotent replay short-circuit (I-3), checked under the row lock and
+	// BEFORE the status gate: a retried leg whose first application already
+	// finalized the reservation must return success, not ErrInvalidTransition.
+	if leg, err := qtx.GetSettlementLegByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		if leg.ReservationID != reservationID {
+			return fmt.Errorf("postgres: settle partial: idempotency key %q already used for a different reservation: %w", input.IdempotencyKey, core.ErrConflict)
+		}
+		legAmount, convErr := numericToDecimal(leg.Amount)
+		if convErr != nil {
+			return fmt.Errorf("postgres: settle partial: convert leg amount: %w", convErr)
+		}
+		if !legAmount.Equal(amount) {
+			return fmt.Errorf("postgres: settle partial: idempotency key %q payload mismatch (recorded %s, got %s): %w", input.IdempotencyKey, legAmount, amount, core.ErrConflict)
+		}
+		return nil // already applied — do not accumulate again
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: settle partial: check idempotency: %w", err)
+	}
+
+	// Business precision (I-16): the increment must respect the reservation
+	// currency's exponent, same as Reserve's own amount.
+	cur, err := s.dims.currencyByIDOrErr(ctx, qtx, res.CurrencyID)
+	if err != nil {
+		return fmt.Errorf("postgres: settle partial: %w", err)
+	}
+	if err := checkAmountPrecision(amount, cur); err != nil {
+		return fmt.Errorf("postgres: settle partial: %w", err)
+	}
 
 	// active -> settling (first call) or settling -> settling (accumulating
 	// further) are both valid; every other status is not — in particular a
@@ -428,6 +469,25 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 	newSettled := settledSoFar.Add(amount)
 	if newSettled.GreaterThan(reservedAmount) {
 		return fmt.Errorf("postgres: settle partial: cumulative settled %s exceeds reserved %s: %w", newSettled, reservedAmount, core.ErrInvalidInput)
+	}
+
+	// Record the leg and apply the increment in the same transaction: the leg
+	// row is the durable proof this key was applied exactly once. The unique
+	// index on idempotency_key backstops the check above (row lock already
+	// serializes same-reservation racers; the index covers cross-reservation
+	// key reuse).
+	if _, err := qtx.InsertReservationSettlementLeg(ctx, sqlcgen.InsertReservationSettlementLegParams{
+		ReservationID:  reservationID,
+		IdempotencyKey: input.IdempotencyKey,
+		Amount:         decimalToNumeric(amount),
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// ON CONFLICT DO NOTHING fired: the key landed concurrently from
+			// another transaction after our check. Treat as conflict — the
+			// caller retries and hits the idempotent path above.
+			return fmt.Errorf("postgres: settle partial: idempotency key %q raced a concurrent application: %w", input.IdempotencyKey, core.ErrConflict)
+		}
+		return wrapStoreError("postgres: settle partial: record leg", err)
 	}
 
 	if err := qtx.SettleReservationPartial(ctx, sqlcgen.SettleReservationPartialParams{

@@ -119,7 +119,7 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	amount, err := decimal.NewFromString(req.Amount)
+	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 		return
@@ -168,7 +168,7 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 
 	var amount decimal.Decimal
 	if req.Amount != "" {
-		amount, err = decimal.NewFromString(req.Amount)
+		amount, err = parseWireAmount(req.Amount, "amount")
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 			return

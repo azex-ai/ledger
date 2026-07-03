@@ -28,15 +28,14 @@ type alwaysAcquireLock struct {
 	lastReleaseCtxErr error
 }
 
-func (l *alwaysAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
+func (l *alwaysAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (func(context.Context) error, bool, error) {
 	atomic.AddInt64(&l.acquired, 1)
-	return true, nil
-}
-
-func (l *alwaysAcquireLock) releaseAdvisoryLock(ctx context.Context, _ int64) error {
-	atomic.AddInt64(&l.released, 1)
-	l.lastReleaseCtxErr = ctx.Err()
-	return nil
+	release := func(ctx context.Context) error {
+		atomic.AddInt64(&l.released, 1)
+		l.lastReleaseCtxErr = ctx.Err()
+		return nil
+	}
+	return release, true, nil
 }
 
 // neverAcquireLock simulates the lock being held by another replica.
@@ -44,24 +43,16 @@ type neverAcquireLock struct {
 	attempts int64
 }
 
-func (l *neverAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
+func (l *neverAcquireLock) tryAdvisoryLock(_ context.Context, _ int64) (func(context.Context) error, bool, error) {
 	atomic.AddInt64(&l.attempts, 1)
-	return false, nil // lock is held
-}
-
-func (l *neverAcquireLock) releaseAdvisoryLock(_ context.Context, _ int64) error {
-	return nil
+	return nil, false, nil // lock is held
 }
 
 // errorLock returns an error from tryAdvisoryLock.
 type errorLock struct{}
 
-func (l *errorLock) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
-	return false, errors.New("pg: connection refused")
-}
-
-func (l *errorLock) releaseAdvisoryLock(_ context.Context, _ int64) error {
-	return nil
+func (l *errorLock) tryAdvisoryLock(_ context.Context, _ int64) (func(context.Context) error, bool, error) {
+	return nil, false, errors.New("pg: connection refused")
 }
 
 // ---------------------------------------------------------------------------
@@ -200,13 +191,16 @@ func TestLockedJob_DoubleConcurrentRun(t *testing.T) {
 	var runCount atomic.Int64
 	var lockHolder atomic.Bool
 
-	tryFn := func(_ context.Context, _ int64) (bool, error) {
+	tryFn := func(_ context.Context, _ int64) (func(context.Context) error, bool, error) {
 		// CAS: first caller wins, second sees lock held.
-		return lockHolder.CompareAndSwap(false, true), nil
-	}
-	releaseFn := func(_ context.Context, _ int64) error {
-		lockHolder.Store(false)
-		return nil
+		if !lockHolder.CompareAndSwap(false, true) {
+			return nil, false, nil
+		}
+		release := func(_ context.Context) error {
+			lockHolder.Store(false)
+			return nil
+		}
+		return release, true, nil
 	}
 
 	engine := core.NewEngine()
@@ -218,7 +212,7 @@ func TestLockedJob_DoubleConcurrentRun(t *testing.T) {
 				runCount.Add(1)
 				return nil
 			},
-			locker: &mockLockAcquirer{tryFn: tryFn, releaseFn: releaseFn},
+			locker: &mockLockAcquirer{tryFn: tryFn},
 			logger: engine.Logger(),
 		}
 	}
@@ -238,16 +232,11 @@ func TestLockedJob_DoubleConcurrentRun(t *testing.T) {
 
 // mockLockAcquirer is a flexible lockAcquirer backed by function fields.
 type mockLockAcquirer struct {
-	tryFn     func(ctx context.Context, key int64) (bool, error)
-	releaseFn func(ctx context.Context, key int64) error
+	tryFn func(ctx context.Context, key int64) (func(context.Context) error, bool, error)
 }
 
-func (m *mockLockAcquirer) tryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
+func (m *mockLockAcquirer) tryAdvisoryLock(ctx context.Context, key int64) (func(context.Context) error, bool, error) {
 	return m.tryFn(ctx, key)
-}
-
-func (m *mockLockAcquirer) releaseAdvisoryLock(ctx context.Context, key int64) error {
-	return m.releaseFn(ctx, key)
 }
 
 // TestAdvisoryLockKey_Deterministic verifies the key derivation is stable.

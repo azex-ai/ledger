@@ -101,6 +101,17 @@ func (rl *rateLimiter) limiterFor(ip, method string) *rate.Limiter {
 	return b.read
 }
 
+// isMutating reports whether the HTTP method is a state-changing one — used
+// to pick the (stricter) mutation bucket vs the read bucket.
+func isMutating(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
 // rateLimitMiddleware enforces per-IP token-bucket limits.
 // 100/min mutations, 1000/min reads. Single-instance only.
 func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {

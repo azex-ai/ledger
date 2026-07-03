@@ -32,7 +32,10 @@ type EntryQuerier interface {
 
 // ReservationQuerier lists reservations.
 type ReservationQuerier interface {
-	ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]Reservation, error)
+	// ListReservations pages newest-first; cursor is the opaque next_cursor
+	// from the previous page ("" = first page). Returns the page plus the
+	// next cursor ("" = exhausted).
+	ListReservations(ctx context.Context, holder int64, status string, cursor string, limit int32) ([]Reservation, string, error)
 }
 
 // SnapshotQuerier queries snapshots by date range.

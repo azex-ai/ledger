@@ -22,36 +22,6 @@ type SnapshotWriter interface {
 	GetSnapshotBalances(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error)
 }
 
-// snapshotLockAcquirer wraps the advisory-lock helpers so they can be
-// overridden in tests without a real Postgres pool.
-type snapshotLockAcquirer interface {
-	tryAdvisoryLock(ctx context.Context, key int64) (bool, error)
-	releaseAdvisoryLock(ctx context.Context, key int64) error
-}
-
-// pgAdvisoryLock implements snapshotLockAcquirer using pg_try_advisory_lock.
-type pgAdvisoryLock struct{ pool *pgxpool.Pool }
-
-func (p *pgAdvisoryLock) tryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
-	var acquired bool
-	err := p.pool.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
-	if err != nil {
-		return false, fmt.Errorf("service: snapshot: pg_try_advisory_lock: %w", err)
-	}
-	return acquired, nil
-}
-
-func (p *pgAdvisoryLock) releaseAdvisoryLock(ctx context.Context, key int64) error {
-	var released bool
-	if err := p.pool.QueryRow(ctx, "SELECT pg_advisory_unlock($1)", key).Scan(&released); err != nil {
-		return fmt.Errorf("service: snapshot: pg_advisory_unlock: %w", err)
-	}
-	if !released {
-		return fmt.Errorf("service: snapshot: pg_advisory_unlock returned false for key %d", key)
-	}
-	return nil
-}
-
 // advisoryLockKey computes a stable int64 key from a name string using FNV-64a.
 func advisoryLockKey(name string) int64 {
 	h := fnv.New64a()
@@ -65,7 +35,7 @@ type SnapshotService struct {
 	balances  HistoricalBalanceLister
 	snapshots SnapshotWriter
 	sparse    core.SparseSnapshotter // nil → non-sparse fallback
-	locker    snapshotLockAcquirer   // nil → skip advisory lock (no pool available)
+	locker    lockAcquirer           // nil → skip advisory lock (no pool available)
 	logger    core.Logger
 	metrics   core.Metrics
 }
@@ -89,7 +59,7 @@ func NewSnapshotService(
 // long-running service; library users that run snapshots inline don't need it.
 func (s *SnapshotService) WithPool(pool *pgxpool.Pool) *SnapshotService {
 	if pool != nil {
-		s.locker = &pgAdvisoryLock{pool: pool}
+		s.locker = &pgPoolLockAcquirer{pool: pool}
 	}
 	return s
 }
@@ -118,7 +88,7 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 	lockKey := advisoryLockKey(lockName)
 
 	if s.locker != nil {
-		acquired, err := s.locker.tryAdvisoryLock(ctx, lockKey)
+		release, acquired, err := s.locker.tryAdvisoryLock(ctx, lockKey)
 		if err != nil {
 			s.logger.Error("service: snapshot: advisory lock failed, proceeding without lock",
 				"date", snapshotDate.Format("2006-01-02"),
@@ -136,7 +106,7 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 				// doesn't leak until the session holding it disconnects.
 				cleanupCtx, cancel := cleanupContext(ctx)
 				defer cancel()
-				if err := s.locker.releaseAdvisoryLock(cleanupCtx, lockKey); err != nil {
+				if err := release(cleanupCtx); err != nil {
 					s.logger.Error("service: snapshot: release advisory lock failed",
 						"date", snapshotDate.Format("2006-01-02"),
 						"error", err,

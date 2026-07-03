@@ -138,24 +138,37 @@ func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder int64, cur
 
 // --- ReservationQuerier ---
 
-func (s *QueryStore) ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]core.Reservation, error) {
+func (s *QueryStore) ListReservations(ctx context.Context, holder int64, status string, cursor string, limit int32) ([]core.Reservation, string, error) {
+	var beforeID int64
+	if cursor != "" {
+		id, err := decodeCursorString(cursor)
+		if err != nil {
+			return nil, "", fmt.Errorf("postgres: list reservations: invalid cursor: %w", core.ErrInvalidInput)
+		}
+		beforeID = id
+	}
 	rows, err := s.q.ListReservationsByAccount(ctx, sqlcgen.ListReservationsByAccountParams{
 		AccountHolder: holder,
 		FilterStatus:  status,
+		BeforeID:      beforeID,
 		PageLimit:     limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list reservations: %w", err)
+		return nil, "", fmt.Errorf("postgres: list reservations: %w", err)
 	}
 	result := make([]core.Reservation, len(rows))
 	for i, r := range rows {
 		res, err := reservationFromRow(ctx, s.dims, s.q, r)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		result[i] = *res
 	}
-	return result, nil
+	nextCursor := ""
+	if limit > 0 && len(rows) == int(limit) {
+		nextCursor = encodeCursorString(rows[len(rows)-1].ID)
+	}
+	return result, nextCursor, nil
 }
 
 // --- SnapshotQuerier ---

@@ -57,9 +57,17 @@ no reversal history; a reversal itself can never be reversed.
 **Enforced by**:
 - The `journals.reversal_of` FK column (added in migration `014`).
 - `SELECT ... FOR UPDATE` on the original journal row serialises concurrent
-  reversals; the per-dimension cumulative check runs under that lock
-  (`postgres/reversal_fraction_store.go`). Migration `029` replaced the old
-  "at most once" unique index with this application-level conservation rule.
+  reversals — BOTH `ReverseJournalFraction` and the full `ReverseJournal`
+  take it inside one transaction with their history check and insert; the
+  per-dimension cumulative check runs under that lock. Migration `029`
+  replaced the old "at most once" unique index with this application-level
+  conservation rule, which makes the row lock load-bearing: without it two
+  concurrent full reversals (different reasons → different idempotency keys)
+  would both see "no history" and together post a 200% reversal.
+- The `journals_no_arbitrary_update` trigger's protected-column list includes
+  every column of `journals` — including `effective_at` and `uid` (migration
+  `033`; 018's original list predated both) — so history cannot be edited
+  around the reversal mechanism.
 
 **Pinned by**:
 - `postgres.TestLedgerStore_ReverseJournal_AlreadyReversed`
@@ -67,7 +75,9 @@ no reversal history; a reversal itself can never be reversed.
 - `postgres.TestReverseJournalFraction_ConservationAndRemainderCompletion`
 - `postgres.TestReverseJournalFraction_OverReversalRejected`
 - `postgres.TestReverseJournalFraction_ConcurrentConservation`
+- `postgres.TestReverseJournal_ConcurrentFullReversals_OnlyOneWins`
 - `postgres.TestReverseJournal_MutualExclusionWithFraction`
+- `postgres.TestJournals_UpdateGuard_CoversEffectiveAtAndUID`
 
 ## I-3: Idempotency on every mutation
 
@@ -98,19 +108,33 @@ retry after archival re-create the record, return `ErrConflict`, or error
 outright? No such cleanup path exists in this codebase today — this note
 exists so the first one that gets built doesn't skip the question.
 
+`SettlePartial` is an accumulator (`settled_amount += x`), so its idempotency
+needs a durable per-application record: each increment writes a
+`reservation_settlement_legs` row keyed by the caller's idempotency key
+(migration `034`). A replayed key with the same amount succeeds without
+re-applying — even after the reservation is finalized — and a replayed key
+with a different amount (or another reservation) is `ErrConflict`.
+
+`ConfirmPending`/`CancelPending` re-check their idempotency key **under the
+balance advisory lock**, before the pending-balance gate: a retry racing its
+original request must resolve to the original journal, never to
+`ErrInsufficientBalance` for a confirm that in fact succeeded.
+
 **Pinned by**:
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
 - `postgres.TestLedgerStore_PostJournal_Idempotent`
 - `postgres.TestPendingStore_AddPending_Idempotent`
 - `postgres.TestReserverStore_Reserve_Idempotent`
 - `postgres.TestIdempotency_ConcurrentSameKey` (100 goroutines, same key)
+- `postgres.TestSettlePartial_IdempotentReplay`
+- `postgres.TestConfirmPending_ConcurrentSameKey_NeverInsufficientBalance`
 
 ## I-4: TOCTOU-safe reserve/settle
 
 Reservation creation atomically (a) takes a per-(holder, currency) advisory
-lock, (b) re-checks `available = total_balance - SUM(active reservations)`, and
-(c) inserts the reservation. Settle and Release transition the same row under
-its own row lock.
+lock, (b) re-checks `available = Σ balance(role=available) - SUM(active
+reservations)` (the I-11 basis), and (c) inserts the reservation. Settle and
+Release transition the same row under its own row lock.
 
 **Why**: classic time-of-check / time-of-use bug. Two concurrent reserve calls
 can each read "balance is enough", then both insert reservations, leaving the
@@ -142,6 +166,15 @@ isolation give us a balance that's consistent and current.
 - `postgres.PlatformBalanceStore.GetPlatformBalances` (LATERAL JOIN with delta).
 - Rollup worker advances checkpoints lazily.
 
+**Load-bearing prerequisite**: every `journal_entries` write goes through the
+single choke point `postJournalWithQueries`, which holds the per
+`(holder, currency)` advisory lock (I-4) from before id allocation until
+commit. That serializes commit order = id order within a pair, which is what
+lets the rollup use `MAX(id)` as a safe checkpoint watermark and lets
+`checkpoint + Σ(id > last_entry_id)` never skip an entry. Any future write
+path that inserts entries without `acquireBalanceLocks` silently reopens
+this visibility race — do not add one.
+
 **Pinned by**:
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
 - `postgres.TestPlatformBalance_RealtimeReflectsUnrolledJournal`
@@ -171,13 +204,16 @@ financial sums is unacceptable. 18 digits accommodates Ethereum wei
 
 Every column is `NOT NULL` with a meaningful default (`0`, `''`, `epoch`, `'{}'`).
 
-**Three exceptions**, all FK-target columns where `0` is not a valid sentinel
+**Exceptions**, all FK-target columns where `0` is not a valid sentinel
 because PostgreSQL needs a real `NULL` to skip referential-integrity enforcement:
 
 - `journals.reversal_of` — null when the journal is original (not a reversal).
 - `bookings.journal_id` — null until accounting is posted.
 - `bookings.reservation_id` — null until / unless a reservation is linked.
 - `events.journal_id` — null until an event has caused a journal posting.
+- `reservations.journal_id` — null until a journal is linked (migration `035`
+  restored the FK that `017` dropped and `018` forgot to restore; the `0`
+  sentinel era left wrong ids silently accepted).
 
 **Why**: NOT NULL eliminates a category of "missing vs zero" ambiguities.
 Where it would conflict with FK enforcement, `NULL` is documented and the Go
@@ -431,9 +467,11 @@ reconciliation time (or in an external settlement mismatch).
   `ReverseJournal`. `PendingStore.AddPending/ConfirmPending/CancelPending`
   inherit the check for free because they all post through
   `LedgerStore.PostJournal` rather than writing entries directly.
-- `postgres.validateSingleAmountPrecision`, called from `ReserverStore.Reserve`
-  — the one write path that does **not** flow through `PostJournal` and so
-  needs its own enforcement point.
+- `postgres.validateSingleAmountPrecision` / `checkAmountPrecision`, called
+  from every amount-bearing write path that does **not** flow through
+  `PostJournal`: `ReserverStore.Reserve`, `ReserverStore.Settle`,
+  `ReserverStore.SettlePartial`, `BookingStore.CreateBooking`, and
+  `BookingStore.Transition` (non-zero settled amounts).
 - The check is `amount.Equal(amount.Truncate(exponent))` — over-precise
   amounts are rejected with `core.ErrPrecisionExceeded` (bizcode 14006),
   **never** silently rounded or truncated. Rounding is the caller's explicit
@@ -457,6 +495,8 @@ database.
 - `postgres.TestPrecision_Reserve_RejectsOverPrecisionAmount`
 - `postgres.TestPrecision_Reserve_AcceptsWholeYen`
 - `postgres.TestPrecision_Pending_RejectsOverPrecisionAmount`
+- `postgres.TestPrecision_Booking_RejectsOverPrecisionAmount`
+- `postgres.TestPrecision_SettlePartial_RejectsOverPrecisionAmount`
 - `postgres.TestCurrencyStore_CreateCurrency_RejectsInvalidExponent`
 - `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
 - `core.TestCurrencyInput_Validate`
@@ -556,6 +596,9 @@ every external reference stable across dump/restore.
 **Pinned by**:
 - `server.TestContract_NoInternalIDKeysInJSON` (mechanical source scan: no
   internal-id JSON key in any handler request/response struct)
+- `service.TestReconcileFindings_NoInternalIDPatternsInSource` (the reconcile
+  report is an API response body; its free-text Description/Detail strings
+  carry uids/codes, never internal ids — per-row forensics go to server logs)
 
 ---
 

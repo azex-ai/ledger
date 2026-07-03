@@ -273,27 +273,31 @@ func (q *Queries) ReconcileOrphanEntriesSample(ctx context.Context) ([]Reconcile
 const reconcileOrphanReservations = `-- name: ReconcileOrphanReservations :many
 SELECT
   r.id,
+  r.uid,
   r.account_holder,
   r.currency_id,
   r.status,
   r.journal_id
 FROM reservations r
-WHERE r.journal_id != 0
+WHERE r.journal_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM journals j WHERE j.id = r.journal_id)
 ORDER BY r.id
 LIMIT 100
 `
 
 type ReconcileOrphanReservationsRow struct {
-	ID            int64  `json:"id"`
-	AccountHolder int64  `json:"account_holder"`
-	CurrencyID    int64  `json:"currency_id"`
-	Status        string `json:"status"`
-	JournalID     int64  `json:"journal_id"`
+	ID            int64       `json:"id"`
+	Uid           pgtype.UUID `json:"uid"`
+	AccountHolder int64       `json:"account_holder"`
+	CurrencyID    int64       `json:"currency_id"`
+	Status        string      `json:"status"`
+	JournalID     pgtype.Int8 `json:"journal_id"`
 }
 
 // Check #7: reservations whose journal_id references a non-existent journal.
-// reservations.journal_id is NOT NULL DEFAULT 0 (sentinel); treat 0 as "no journal".
+// Since migration 035 journal_id is a nullable FK (NULL = no journal), so
+// this can only fire if the FK is ever dropped or disabled — kept as
+// defense-in-depth.
 func (q *Queries) ReconcileOrphanReservations(ctx context.Context) ([]ReconcileOrphanReservationsRow, error) {
 	rows, err := q.db.Query(ctx, reconcileOrphanReservations)
 	if err != nil {
@@ -305,6 +309,7 @@ func (q *Queries) ReconcileOrphanReservations(ctx context.Context) ([]ReconcileO
 		var i ReconcileOrphanReservationsRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.Uid,
 			&i.AccountHolder,
 			&i.CurrencyID,
 			&i.Status,

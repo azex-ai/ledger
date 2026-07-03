@@ -236,6 +236,18 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 		}}); err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
 		}
+		// Idempotency recheck UNDER the balance lock (I-3): the caller's
+		// pre-check ran before the lock, so a retry racing its original
+		// request can pass the pre-check, then arrive here after the original
+		// committed and consumed the pending balance. Without this recheck it
+		// would hit the balance gate below and get ErrInsufficientBalance
+		// instead of the idempotent original journal — a contract violation
+		// that misleads callers into treating a completed confirm as failed.
+		if existing, err := qtx.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+			return ledger.ensureJournalMatchesInput(ctx, qtx, existing, input)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%s: idempotency recheck: %w", errPrefix, err)
+		}
 		bal, err := ledger.GetBalance(ctx, holder, currencyUID, pendingClsUID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: get pending balance: %w", errPrefix, err)

@@ -66,7 +66,7 @@ func (s *Server) handleSetAccountPolicy(w http.ResponseWriter, r *http.Request) 
 
 	minBalance := decimal.Zero
 	if req.MinBalance != "" {
-		minBalance, err = decimal.NewFromString(req.MinBalance)
+		minBalance, err = parseWireAmount(req.MinBalance, "min_balance")
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("min_balance is not a valid decimal"))
 			return
@@ -110,5 +110,5 @@ func (s *Server) handleListAccountPolicies(w http.ResponseWriter, r *http.Reques
 	for i := range policies {
 		data[i] = toAccountPolicyResponse(&policies[i])
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[accountPolicyResponse]{List: data})
 }

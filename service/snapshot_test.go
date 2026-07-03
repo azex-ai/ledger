@@ -95,7 +95,7 @@ func TestSnapshotService_QueryNonExistentDate(t *testing.T) {
 	assert.Empty(t, balances)
 }
 
-// fakeSnapshotLocker is a snapshotLockAcquirer test double that records
+// fakeSnapshotLocker is a lockAcquirer test double that records
 // ctx.Err() AT CALL TIME. Storing the ctx object itself would be misleading:
 // cleanupContext's own `defer cancel()` fires immediately after this call
 // returns (still before the test's assertion runs), which would retroactively
@@ -106,14 +106,13 @@ type fakeSnapshotLocker struct {
 	lastReleaseCtxErr error
 }
 
-func (f *fakeSnapshotLocker) tryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
-	return true, nil
-}
-
-func (f *fakeSnapshotLocker) releaseAdvisoryLock(ctx context.Context, _ int64) error {
-	f.released++
-	f.lastReleaseCtxErr = ctx.Err()
-	return nil
+func (f *fakeSnapshotLocker) tryAdvisoryLock(_ context.Context, _ int64) (func(context.Context) error, bool, error) {
+	release := func(ctx context.Context) error {
+		f.released++
+		f.lastReleaseCtxErr = ctx.Err()
+		return nil
+	}
+	return release, true, nil
 }
 
 // TestSnapshotService_ReleasesLockAfterCtxCancelled verifies the advisory

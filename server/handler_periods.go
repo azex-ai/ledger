@@ -74,5 +74,5 @@ func (s *Server) handleListPeriodCloses(w http.ResponseWriter, r *http.Request) 
 	for i, pc := range closes {
 		resp[i] = toPeriodCloseResponse(&pc)
 	}
-	httpx.OK(w, resp)
+	httpx.OK(w, PagedResponse[periodCloseResponse]{List: resp})
 }

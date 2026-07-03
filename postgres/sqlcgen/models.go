@@ -219,12 +219,20 @@ type Reservation struct {
 	ReservedAmount pgtype.Numeric `json:"reserved_amount"`
 	SettledAmount  pgtype.Numeric `json:"settled_amount"`
 	Status         string         `json:"status"`
-	JournalID      int64          `json:"journal_id"`
+	JournalID      pgtype.Int8    `json:"journal_id"`
 	IdempotencyKey string         `json:"idempotency_key"`
 	ExpiresAt      time.Time      `json:"expires_at"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	Uid            pgtype.UUID    `json:"uid"`
+}
+
+type ReservationSettlementLeg struct {
+	ID             int64          `json:"id"`
+	ReservationID  int64          `json:"reservation_id"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 type RollupQueue struct {

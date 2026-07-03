@@ -103,14 +103,27 @@ FROM journal_entries
 GROUP BY entry_type;
 
 -- name: SumEntriesByAccountClassification :many
+-- Reconcile Check#2 comparison basis: each classification's entries are
+-- bounded by that classification's OWN checkpoint watermark
+-- (je.id <= cp.last_entry_id), so checkpoint.balance vs this sum is an exact
+-- invariant regardless of in-flight rollups. An unbounded sum would flag
+-- every account with unmaterialized entries as "drift" — permanent false
+-- positives on high-frequency system accounts. Classifications with no
+-- checkpoint yet are excluded (their checkpoint balance is implicitly zero
+-- over an empty prefix — nothing to compare).
 SELECT
-  classification_id,
-  entry_type,
-  COALESCE(SUM(amount), 0) as total
-FROM journal_entries
-WHERE account_holder = $1
-  AND currency_id = $2
-GROUP BY classification_id, entry_type;
+  je.classification_id,
+  je.entry_type,
+  COALESCE(SUM(je.amount), 0) as total
+FROM journal_entries je
+JOIN balance_checkpoints cp
+  ON cp.account_holder = je.account_holder
+ AND cp.currency_id = je.currency_id
+ AND cp.classification_id = je.classification_id
+WHERE je.account_holder = $1
+  AND je.currency_id = $2
+  AND je.id <= cp.last_entry_id
+GROUP BY je.classification_id, je.entry_type;
 
 -- name: VerifyJournalBalanced :one
 -- Returns the first currency_id that does not net to zero across the journal's

@@ -93,9 +93,16 @@ func (i SettleInput) Validate() error {
 }
 
 // SettlePartialInput is the input for one increment of a partial settlement.
+//
+// IdempotencyKey is REQUIRED (I-3): SettlePartial is an accumulator
+// (settled_amount += Amount), so without a durable dedup record a client
+// retry of a lost response would double-apply the amount. A replayed key
+// with the same amount succeeds without re-applying; a replayed key with a
+// different amount is ErrConflict.
 type SettlePartialInput struct {
 	ReservationUID string          `json:"reservation_uid"`
 	Amount         decimal.Decimal `json:"amount"`
+	IdempotencyKey string          `json:"idempotency_key"`
 }
 
 func (i SettlePartialInput) Validate() error {
@@ -104,6 +111,9 @@ func (i SettlePartialInput) Validate() error {
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("core: settle partial: amount must be positive: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: settle partial: idempotency key required: %w", ErrInvalidInput)
 	}
 	return nil
 }

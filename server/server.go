@@ -228,7 +228,7 @@ func NewWithConfig(
 		// Production without keys would be silently open — refuse.
 		// Logged as an error; main.go's LoadConfig should already have failed
 		// fast, but defend in depth.
-		slog.Error("server: no API_KEYS configured in non-dev ENV; mutating endpoints WILL be unauthenticated")
+		slog.Error("server: no API_KEYS configured in non-dev ENV; ALL endpoints (reads included) WILL be unauthenticated")
 	}
 
 	s.router = r

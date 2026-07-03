@@ -47,12 +47,18 @@ FROM claimed
 WHERE e.id = claimed.id
 RETURNING e.*;
 
--- name: UpdateEventDelivered :exec
+-- name: UpdateEventDelivered :execrows
+-- Claim-token guard (mirrors rollup_queue's MarkRollupProcessed): only the
+-- worker whose lease (next_attempt_at set at claim time) is still current may
+-- record a delivery outcome. Without this, a worker whose callback outlived
+-- its lease could overwrite the result written by the worker that re-claimed
+-- the event (e.g. a stale 'delivered' clobbering a legitimate retry bump).
 UPDATE events
 SET delivery_status = 'delivered', delivered_at = now()
-WHERE id = $1;
+WHERE id = $1 AND next_attempt_at = $2;
 
--- name: UpdateEventRetry :exec
+-- name: UpdateEventRetry :execrows
+-- Claim-token guard: see UpdateEventDelivered.
 UPDATE events
 SET attempts = attempts + 1,
     delivery_status = CASE
@@ -63,12 +69,13 @@ SET attempts = attempts + 1,
         WHEN attempts + 1 >= max_attempts THEN next_attempt_at
         ELSE $2
     END
-WHERE id = $1;
+WHERE id = $1 AND next_attempt_at = $3;
 
--- name: UpdateEventDead :exec
+-- name: UpdateEventDead :execrows
+-- Claim-token guard: see UpdateEventDelivered.
 UPDATE events
 SET delivery_status = 'dead'
-WHERE id = $1;
+WHERE id = $1 AND next_attempt_at = $2;
 
 -- name: GetEventByUID :one
 SELECT * FROM events WHERE uid = $1;

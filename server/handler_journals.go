@@ -145,7 +145,7 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]core.EntryInput, len(req.Entries))
 	for i, e := range req.Entries {
-		amount, err := decimal.NewFromString(e.Amount)
+		amount, err := parseWireAmount(e.Amount, "entries[].amount")
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("entry "+e.Amount+" is not a valid decimal"))
 			return
@@ -186,7 +186,7 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
 	for k, v := range req.Amounts {
-		d, err := decimal.NewFromString(v)
+		d, err := parseWireAmount(v, "amounts")
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
 			return
@@ -220,17 +220,17 @@ func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	expectedAmount, err := decimal.NewFromString(req.ExpectedAmount)
+	expectedAmount, err := parseWireAmount(req.ExpectedAmount, "expected_amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("expected_amount is not a valid decimal"))
 		return
 	}
-	actualAmount, err := decimal.NewFromString(req.ActualAmount)
+	actualAmount, err := parseWireAmount(req.ActualAmount, "actual_amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
 		return
 	}
-	toleranceAmount, err := decimal.NewFromString(req.Tolerance)
+	toleranceAmount, err := parseWireAmount(req.Tolerance, "tolerance")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("tolerance is not a valid decimal"))
 		return

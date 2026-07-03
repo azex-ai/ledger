@@ -203,3 +203,36 @@ func TestEntryTemplate_Render_RejectsEmptyLines(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrInvalidInput))
 	assert.Contains(t, err.Error(), "lines")
 }
+
+// Pins the HolderID sign guard: a negative HolderID would silently swap the
+// user/system namespaces (system line = -(-x) lands on real user account x).
+func TestTemplateRender_NegativeHolderIDRejected(t *testing.T) {
+	tmpl := EntryTemplate{
+		UID:            "uid-neg",
+		Code:           "neg_holder",
+		Name:           "Negative Holder",
+		JournalTypeUID: "jt-1",
+		IsActive:       true,
+		Lines: []EntryTemplateLine{
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-20", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
+		},
+	}
+	_, err := tmpl.Render(TemplateParams{
+		HolderID:       -42,
+		CurrencyUID:    "cur-1",
+		IdempotencyKey: "k1",
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(10)},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+
+	_, err = tmpl.Render(TemplateParams{
+		HolderID:       0,
+		CurrencyUID:    "cur-1",
+		IdempotencyKey: "k1",
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(10)},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+}

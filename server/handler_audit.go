@@ -157,5 +157,5 @@ func (s *Server) handleListReversals(w http.ResponseWriter, r *http.Request) {
 	for i, j := range journals {
 		data[i] = toJournalResponse(&j)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[journalResponse]{List: data})
 }

@@ -118,6 +118,13 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		ledgerotel.RecordError(span, err)
 		return nil, fmt.Errorf("postgres: create booking: %w", err)
 	}
+	// Business precision (I-16): booking amounts feed reporting and later
+	// settlement math, so they must respect the currency exponent just like
+	// journal entries and reservations do.
+	if err := checkAmountPrecision(input.Amount, cur); err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, fmt.Errorf("postgres: create booking: %w", err)
+	}
 	row, err := s.q.InsertBooking(ctx, sqlcgen.InsertBookingParams{
 		ClassificationID: class.ID,
 		AccountHolder:    input.AccountHolder,
@@ -225,6 +232,18 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 	}
 	if err := lifecycle.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: transition: invalid lifecycle: %w", err)
+	}
+
+	// Business precision (I-16) on the settled amount carried by this
+	// transition (zero = "no amount for this transition", skipped).
+	if !input.Amount.IsZero() {
+		cur, err := s.dims.currencyByIDOrErr(ctx, qtx, op.CurrencyID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: transition: %w", err)
+		}
+		if err := checkAmountPrecision(input.Amount, cur); err != nil {
+			return nil, fmt.Errorf("postgres: transition: %w", err)
+		}
 	}
 
 	fromStatus := core.Status(op.Status)

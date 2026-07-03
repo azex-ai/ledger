@@ -378,29 +378,51 @@ func (q *Queries) ListEventsByFilter(ctx context.Context, arg ListEventsByFilter
 	return items, nil
 }
 
-const updateEventDead = `-- name: UpdateEventDead :exec
+const updateEventDead = `-- name: UpdateEventDead :execrows
 UPDATE events
 SET delivery_status = 'dead'
-WHERE id = $1
+WHERE id = $1 AND next_attempt_at = $2
 `
 
-func (q *Queries) UpdateEventDead(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, updateEventDead, id)
-	return err
+type UpdateEventDeadParams struct {
+	ID            int64     `json:"id"`
+	NextAttemptAt time.Time `json:"next_attempt_at"`
 }
 
-const updateEventDelivered = `-- name: UpdateEventDelivered :exec
+// Claim-token guard: see UpdateEventDelivered.
+func (q *Queries) UpdateEventDead(ctx context.Context, arg UpdateEventDeadParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventDead, arg.ID, arg.NextAttemptAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateEventDelivered = `-- name: UpdateEventDelivered :execrows
 UPDATE events
 SET delivery_status = 'delivered', delivered_at = now()
-WHERE id = $1
+WHERE id = $1 AND next_attempt_at = $2
 `
 
-func (q *Queries) UpdateEventDelivered(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, updateEventDelivered, id)
-	return err
+type UpdateEventDeliveredParams struct {
+	ID            int64     `json:"id"`
+	NextAttemptAt time.Time `json:"next_attempt_at"`
 }
 
-const updateEventRetry = `-- name: UpdateEventRetry :exec
+// Claim-token guard (mirrors rollup_queue's MarkRollupProcessed): only the
+// worker whose lease (next_attempt_at set at claim time) is still current may
+// record a delivery outcome. Without this, a worker whose callback outlived
+// its lease could overwrite the result written by the worker that re-claimed
+// the event (e.g. a stale 'delivered' clobbering a legitimate retry bump).
+func (q *Queries) UpdateEventDelivered(ctx context.Context, arg UpdateEventDeliveredParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventDelivered, arg.ID, arg.NextAttemptAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateEventRetry = `-- name: UpdateEventRetry :execrows
 UPDATE events
 SET attempts = attempts + 1,
     delivery_status = CASE
@@ -411,15 +433,20 @@ SET attempts = attempts + 1,
         WHEN attempts + 1 >= max_attempts THEN next_attempt_at
         ELSE $2
     END
-WHERE id = $1
+WHERE id = $1 AND next_attempt_at = $3
 `
 
 type UpdateEventRetryParams struct {
-	ID            int64     `json:"id"`
-	NextAttemptAt time.Time `json:"next_attempt_at"`
+	ID              int64     `json:"id"`
+	NextAttemptAt   time.Time `json:"next_attempt_at"`
+	NextAttemptAt_2 time.Time `json:"next_attempt_at_2"`
 }
 
-func (q *Queries) UpdateEventRetry(ctx context.Context, arg UpdateEventRetryParams) error {
-	_, err := q.db.Exec(ctx, updateEventRetry, arg.ID, arg.NextAttemptAt)
-	return err
+// Claim-token guard: see UpdateEventDelivered.
+func (q *Queries) UpdateEventRetry(ctx context.Context, arg UpdateEventRetryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateEventRetry, arg.ID, arg.NextAttemptAt, arg.NextAttemptAt_2)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

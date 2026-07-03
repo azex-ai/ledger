@@ -143,10 +143,11 @@ func (a *ReconcileAdapter) OrphanReservations(ctx context.Context) ([]service.Or
 	for i, r := range rows {
 		result[i] = service.OrphanReservation{
 			ID:            r.ID,
+			UID:           pgToUID(r.Uid),
 			AccountHolder: r.AccountHolder,
 			CurrencyID:    r.CurrencyID,
 			Status:        r.Status,
-			JournalID:     r.JournalID,
+			JournalID:     r.JournalID.Int64,
 		}
 	}
 	return result, nil

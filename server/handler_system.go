@@ -70,7 +70,7 @@ func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:         r.UpdatedAt.Format(time.RFC3339),
 		}
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[systemBalanceResp]{List: data})
 }
 
 // --- Reconciliation ---
@@ -225,5 +225,5 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 			Balance:           s.Balance.String(),
 		}
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[snapshotResp]{List: data})
 }

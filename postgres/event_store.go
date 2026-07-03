@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -132,9 +133,10 @@ func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([
 // internal id the delivery bookkeeping (MarkDelivered/MarkRetry/MarkDead)
 // operates on. The internal id never reaches a payload or header.
 func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]delivery.PendingEvent, error) {
+	lease := time.Now().Add(s.claimLease)
 	rows, err := s.q.GetPendingEvents(ctx, sqlcgen.GetPendingEventsParams{
 		Limit:         int32(limit),
-		NextAttemptAt: time.Now().Add(s.claimLease),
+		NextAttemptAt: lease,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get pending events: %w", err)
@@ -146,28 +148,61 @@ func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]deliver
 		if err != nil {
 			return nil, err
 		}
-		events = append(events, delivery.PendingEvent{InternalID: row.ID, Event: *e})
+		// row.NextAttemptAt round-trips through Postgres (µs precision), so
+		// use the stored value — not the Go-side lease — as the claim token
+		// the guard compares against.
+		events = append(events, delivery.PendingEvent{InternalID: row.ID, ClaimToken: row.NextAttemptAt, Event: *e})
 	}
 	return events, nil
 }
 
-// MarkDelivered marks an event as successfully delivered.
-func (s *EventStore) MarkDelivered(ctx context.Context, id int64) error {
-	return s.q.UpdateEventDelivered(ctx, id)
-}
-
-// MarkRetry schedules an event for retry at the given time.
-func (s *EventStore) MarkRetry(ctx context.Context, id int64, nextAttempt time.Time) error {
-	if err := s.q.UpdateEventRetry(ctx, sqlcgen.UpdateEventRetryParams{
+// MarkDelivered marks an event as successfully delivered. Claim-token
+// scoped: if claimToken no longer matches the row's lease (another worker
+// re-claimed it), this no-ops — a stale worker must not overwrite the
+// rightful owner's outcome.
+func (s *EventStore) MarkDelivered(ctx context.Context, id int64, claimToken time.Time) error {
+	n, err := s.q.UpdateEventDelivered(ctx, sqlcgen.UpdateEventDeliveredParams{
 		ID:            id,
-		NextAttemptAt: nextAttempt,
-	}); err != nil {
-		return fmt.Errorf("postgres: mark event retry: %w", err)
+		NextAttemptAt: claimToken,
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: mark event delivered: %w", err)
+	}
+	if n == 0 {
+		slog.Warn("postgres: mark event delivered: claim lost, outcome dropped", "event_id", id)
 	}
 	return nil
 }
 
-// MarkDead marks an event as permanently failed.
-func (s *EventStore) MarkDead(ctx context.Context, id int64) error {
-	return s.q.UpdateEventDead(ctx, id)
+// MarkRetry schedules an event for retry at the given time. Claim-token
+// scoped (see MarkDelivered).
+func (s *EventStore) MarkRetry(ctx context.Context, id int64, claimToken time.Time, nextAttempt time.Time) error {
+	n, err := s.q.UpdateEventRetry(ctx, sqlcgen.UpdateEventRetryParams{
+		ID:              id,
+		NextAttemptAt:   nextAttempt,
+		NextAttemptAt_2: claimToken,
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: mark event retry: %w", err)
+	}
+	if n == 0 {
+		slog.Warn("postgres: mark event retry: claim lost, outcome dropped", "event_id", id)
+	}
+	return nil
+}
+
+// MarkDead marks an event as permanently failed. Claim-token scoped (see
+// MarkDelivered).
+func (s *EventStore) MarkDead(ctx context.Context, id int64, claimToken time.Time) error {
+	n, err := s.q.UpdateEventDead(ctx, sqlcgen.UpdateEventDeadParams{
+		ID:            id,
+		NextAttemptAt: claimToken,
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: mark event dead: %w", err)
+	}
+	if n == 0 {
+		slog.Warn("postgres: mark event dead: claim lost, outcome dropped", "event_id", id)
+	}
+	return nil
 }

@@ -29,17 +29,25 @@ type WebhookSubscriber struct {
 // PendingEvent pairs an event with the internal storage id the delivery
 // bookkeeping (MarkDelivered/MarkRetry/MarkDead) operates on. The internal id
 // never reaches a payload or header — consumers see only Event.UID.
+//
+// ClaimToken is the lease timestamp GetPendingEvents stamped on the row
+// (next_attempt_at). Every Mark* call passes it back; the store only applies
+// the outcome if the lease is still current, so a worker whose callback
+// outlived its lease can never overwrite the re-claiming worker's result.
 type PendingEvent struct {
 	InternalID int64
+	ClaimToken time.Time
 	core.Event
 }
 
 // EventPoller reads pending events from the store.
 type EventPoller interface {
 	GetPendingEvents(ctx context.Context, limit int) ([]PendingEvent, error)
-	MarkDelivered(ctx context.Context, id int64) error
-	MarkRetry(ctx context.Context, id int64, nextAttempt time.Time) error
-	MarkDead(ctx context.Context, id int64) error
+	// MarkDelivered/MarkRetry/MarkDead are claim-token scoped: they no-op
+	// (without error) when claimToken no longer matches the row's lease.
+	MarkDelivered(ctx context.Context, id int64, claimToken time.Time) error
+	MarkRetry(ctx context.Context, id int64, claimToken time.Time, nextAttempt time.Time) error
+	MarkDead(ctx context.Context, id int64, claimToken time.Time) error
 }
 
 // SubscriberLister loads active webhook subscribers and records the outcome
@@ -124,7 +132,7 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 	if len(subs) == 0 {
 		// No subscribers — mark all as delivered (nobody to notify).
 		for _, evt := range events {
-			if err := d.poller.MarkDelivered(ctx, evt.InternalID); err != nil {
+			if err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken); err != nil {
 				d.logger.Error("delivery: webhook: mark delivered (no subscribers)", "event_id", evt.InternalID, "error", err)
 			} else {
 				d.metrics.EventDelivered()
@@ -147,7 +155,7 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, subs []WebhookSubscriber) error {
 	matched := d.matchSubscribers(evt, subs)
 	if len(matched) == 0 {
-		err := d.poller.MarkDelivered(ctx, evt.InternalID)
+		err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken)
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -176,7 +184,7 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, s
 	}
 
 	if allOK {
-		err := d.poller.MarkDelivered(ctx, evt.InternalID)
+		err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken)
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -190,7 +198,7 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, s
 	if evt.MaxAttempts > 0 && evt.Attempts+1 >= evt.MaxAttempts {
 		d.metrics.EventDead()
 	}
-	return d.poller.MarkRetry(ctx, evt.InternalID, time.Now().Add(retryDelay(evt.Attempts)))
+	return d.poller.MarkRetry(ctx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts)))
 }
 
 func (d *WebhookDeliverer) matchSubscribers(evt PendingEvent, subs []WebhookSubscriber) []WebhookSubscriber {

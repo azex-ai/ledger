@@ -1,5 +1,5 @@
 // Package server: middleware_auth.go
-// Bearer-token API key authentication for mutating HTTP methods.
+// Bearer-token API key authentication for every endpoint (reads included).
 package server
 
 import (
@@ -11,15 +11,26 @@ import (
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
-// authMiddleware enforces bearer-token API key auth on mutating requests.
-// Mutating methods (POST/PUT/PATCH/DELETE) require Authorization: Bearer <key>
-// matching one of the configured keys; constant-time compared via crypto/subtle.
-// GET/HEAD/OPTIONS pass through unauthenticated.
-// Future: per-key holder scoping for read endpoints.
+// unauthenticatedPaths are liveness/readiness probes that must answer without
+// credentials (Kubernetes probes cannot present API keys). Everything else —
+// reads included — requires a key: holder is a guessable int64, so an open
+// GET surface hands any network-reachable caller every holder's balances and
+// transaction history.
+var unauthenticatedPaths = map[string]struct{}{
+	"/api/v1/system/health": {},
+	"/api/v1/system/ready":  {},
+}
+
+// authMiddleware enforces bearer-token API key auth on every request except
+// the probe endpoints above. All methods — reads included — require
+// Authorization: Bearer <key> matching one of the configured keys;
+// constant-time compared via crypto/subtle. (OPTIONS is handled by the CORS
+// middleware before auth runs.)
+// Future: per-key holder scoping so one key sees only its own holders.
 func authMiddleware(keys [][]byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !isMutating(r.Method) {
+			if _, open := unauthenticatedPaths[r.URL.Path]; open {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -37,17 +48,6 @@ func authMiddleware(keys [][]byte) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(w, r)
 		})
-	}
-}
-
-// isMutating reports whether the HTTP method is a state-changing one.
-// OPTIONS is handled by the CORS middleware before auth runs.
-func isMutating(method string) bool {
-	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-		return true
-	default:
-		return false
 	}
 }
 

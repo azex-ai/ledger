@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -208,4 +209,39 @@ func TestReverseJournal_MutualExclusionWithFraction(t *testing.T) {
 	_, err = store.ReverseJournalFraction(ctx, rev.UID, 1, 2, "rev of rev", postgrestest.UniqueKey("frac-mx3"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrConflict)
+}
+
+// Pins the concurrency half of I-2 for FULL reversals: migration 029 dropped
+// the at-most-once unique index on reversal_of, so without the row lock two
+// concurrent ReverseJournal calls with different reasons (hence different
+// idempotency keys) would both see "no reversal history" and together post a
+// 200% reversal. Exactly one racer may win; every loser must get ErrConflict
+// (or an idempotent replay of the winner's journal, never a second reversal).
+func TestReverseJournal_ConcurrentFullReversals_OnlyOneWins(t *testing.T) {
+	store, ctx, jID, _, _, _ := seedFractionFixture(t)
+
+	const racers = 4
+	var wg sync.WaitGroup
+	reversalUIDs := make(chan string, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			rev, err := store.ReverseJournal(ctx, jID, fmt.Sprintf("race-reason-%d", n))
+			if err == nil {
+				reversalUIDs <- rev.UID
+			} else {
+				assert.ErrorIs(t, err, core.ErrConflict)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(reversalUIDs)
+
+	distinct := make(map[string]struct{})
+	for uid := range reversalUIDs {
+		distinct[uid] = struct{}{}
+	}
+	assert.LessOrEqual(t, len(distinct), 1, "more than one full reversal journal was posted: %v", distinct)
+	assert.Equal(t, 1, len(distinct), "exactly one racer should have succeeded")
 }

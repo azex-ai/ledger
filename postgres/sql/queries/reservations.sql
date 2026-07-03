@@ -36,11 +36,14 @@ UPDATE reservations SET status = 'settling', settled_amount = settled_amount + $
 UPDATE reservations SET status = 'settled', updated_at = now() WHERE id = $1;
 
 -- name: ListReservationsByAccount :many
+-- Keyset pagination on id DESC (api-contract §6): before_id = 0 means first
+-- page; the caller encodes the last row's id as the opaque next_cursor.
 SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations
 WHERE (sqlc.arg(account_holder)::bigint = 0 OR account_holder = sqlc.arg(account_holder))
   AND (sqlc.arg(filter_status)::text = '' OR status = sqlc.arg(filter_status))
-ORDER BY created_at DESC
+  AND (sqlc.arg(before_id)::bigint = 0 OR id < sqlc.arg(before_id))
+ORDER BY id DESC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: GetExpiredReservations :many
@@ -84,3 +87,17 @@ FROM reservations WHERE uid = $1 FOR UPDATE;
 
 -- name: GetReservationUIDByID :one
 SELECT uid FROM reservations WHERE id = $1;
+
+-- name: InsertReservationSettlementLeg :one
+-- Durable idempotency record for one SettlePartial application (I-3). On a
+-- replayed key this inserts nothing and returns no row; the caller then
+-- fetches the existing leg and compares payloads.
+INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount)
+VALUES ($1, $2, $3)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id, reservation_id, idempotency_key, amount, created_at;
+
+-- name: GetSettlementLegByIdempotencyKey :one
+SELECT id, reservation_id, idempotency_key, amount, created_at
+FROM reservation_settlement_legs
+WHERE idempotency_key = $1;

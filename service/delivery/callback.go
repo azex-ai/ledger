@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/azex-ai/ledger/core"
@@ -23,12 +24,16 @@ func (d *CallbackDeliverer) OnEvent(fn func(context.Context, core.Event) error) 
 	d.handlers = append(d.handlers, fn)
 }
 
-// Deliver calls all registered handlers synchronously.
+// Deliver calls all registered handlers synchronously. Every handler sees
+// the event even when an earlier one fails — a buggy subscriber must not
+// starve its healthy neighbours of the event stream. All handler errors are
+// joined into the returned error.
 func (d *CallbackDeliverer) Deliver(ctx context.Context, event core.Event) error {
-	for _, h := range d.handlers {
+	var errs []error
+	for i, h := range d.handlers {
 		if err := h(ctx, event); err != nil {
-			return fmt.Errorf("delivery: callback: %w", err)
+			errs = append(errs, fmt.Errorf("delivery: callback: handler[%d]: %w", i, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }

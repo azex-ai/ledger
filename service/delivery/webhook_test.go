@@ -24,18 +24,18 @@ func (m *mockEventPoller) GetPendingEvents(_ context.Context, _ int) ([]PendingE
 	return m.events, nil
 }
 
-func (m *mockEventPoller) MarkDelivered(_ context.Context, id int64) error {
+func (m *mockEventPoller) MarkDelivered(_ context.Context, id int64, _ time.Time) error {
 	m.delivered = append(m.delivered, id)
 	return nil
 }
 
-func (m *mockEventPoller) MarkRetry(_ context.Context, id int64, nextAttempt time.Time) error {
+func (m *mockEventPoller) MarkRetry(_ context.Context, id int64, _ time.Time, nextAttempt time.Time) error {
 	m.retried = append(m.retried, id)
 	m.lastRetryAt = nextAttempt
 	return nil
 }
 
-func (m *mockEventPoller) MarkDead(_ context.Context, _ int64) error { return nil }
+func (m *mockEventPoller) MarkDead(_ context.Context, _ int64, _ time.Time) error { return nil }
 
 type recordedDeliveryStatus struct {
 	subscriberID int64

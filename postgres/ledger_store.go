@@ -286,12 +286,48 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 // It rejects (ErrConflict) if journalID already has any reversal recorded
 // against it, full or partial — see ReverseJournalFraction for posting
 // additional partial reversals against a journal that already has history.
+//
+// In pool mode a new transaction is started and committed here: the
+// SELECT ... FOR UPDATE row lock on the original journal and the reversal
+// insert must share one transaction, so the "no reversal history yet" check
+// cannot race a concurrent full or partial reversal. Migration 029 dropped
+// the at-most-once unique index on reversal_of — this row lock is the only
+// thing standing between two concurrent full reversals (with different
+// reasons, hence different idempotency keys) and a 200% reversal. In tx
+// mode (store bound via WithDB) it participates in the caller's transaction.
 func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
+	if s.pool == nil {
+		return s.reverseJournalWithQueries(ctx, s.q, journalUID, reason)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reverse journal: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+	journal, err := s.reverseJournalWithQueries(ctx, qtx, journalUID, reason)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: reverse journal: commit: %w", err)
+	}
+	return journal, nil
+}
+
+func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, reason string) (*core.Journal, error) {
 	pgUID, err := uidToPG(journalUID)
 	if err != nil {
 		return nil, err
 	}
-	original, err := s.q.GetJournalByUID(ctx, pgUID)
+	// Row-lock the original journal for the rest of this transaction, same as
+	// ReverseJournalFraction: full and partial reversals of one journal all
+	// serialize on this lock, so the history check below sees every committed
+	// reversal and no concurrent one can land until we commit.
+	original, err := q.GetJournalForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: reverse journal: journal %q: %w", journalUID, core.ErrNotFound)
@@ -306,7 +342,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 	// The derived idempotency key stays keyed on the journal's uid so it is
 	// stable across replays and never mentions the internal id.
 	expectedKey := fmt.Sprintf("reversal:%s:%s", journalUID, reason)
-	existingReversals, err := s.q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
+	existingReversals, err := q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal: lookup reversals: %w", err)
 	}
@@ -318,7 +354,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 		// already reversed, so it is rejected regardless of reason text.
 		for _, r := range existingReversals {
 			if r.IdempotencyKey == expectedKey {
-				return journalFromRow(ctx, s.dims, s.q, r)
+				return journalFromRow(ctx, s.dims, q, r)
 			}
 		}
 		return nil, fmt.Errorf(
@@ -327,7 +363,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 		)
 	}
 
-	entries, err := s.q.ListJournalEntries(ctx, journalID)
+	entries, err := q.ListJournalEntries(ctx, journalID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal: list entries: %w", err)
 	}
@@ -340,11 +376,11 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 		if core.EntryType(e.EntryType) == core.EntryTypeDebit {
 			entryType = core.EntryTypeCredit
 		}
-		cur, err := s.dims.currencyByIDOrErr(ctx, s.q, e.CurrencyID)
+		cur, err := s.dims.currencyByIDOrErr(ctx, q, e.CurrencyID)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
 		}
-		cls, err := s.dims.classByIDOrErr(ctx, s.q, e.ClassificationID)
+		cls, err := s.dims.classByIDOrErr(ctx, q, e.ClassificationID)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
 		}
@@ -357,7 +393,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 		}
 	}
 
-	jt, err := s.dims.jtByIDOrErr(ctx, s.q, original.JournalTypeID)
+	jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal: %w", err)
 	}
@@ -370,7 +406,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 		Metadata:       map[string]string{"reason": reason},
 	}
 
-	return s.PostJournal(ctx, input)
+	return s.postJournalWithQueries(ctx, q, input)
 }
 
 func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
@@ -855,7 +891,7 @@ func (s *LedgerStore) getBalanceBreakdownWithQueries(ctx context.Context, q *sql
 
 // sumBalancesByRoleWithQueries sums checkpoint+delta balances of every
 // classification the holder has entries in, bucketed by the classification's
-// balance_role. Role-less ('') classifications are skipped. Roles are read
+// balance_role. Role-less (”) classifications are skipped. Roles are read
 // fresh from the config table (not the dims cache) because SetBalanceRole can
 // retag a classification after creation — the dims cache only holds immutable
 // fields.

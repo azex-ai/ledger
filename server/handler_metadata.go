@@ -224,7 +224,7 @@ func (s *Server) handleListClassifications(w http.ResponseWriter, r *http.Reques
 	for i, c := range list {
 		data[i] = toClassificationResponse(&c)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[classificationResponse]{List: data})
 }
 
 // --- Journal Type handlers ---
@@ -275,7 +275,7 @@ func (s *Server) handleListJournalTypes(w http.ResponseWriter, r *http.Request) 
 	for i, jt := range list {
 		data[i] = toJournalTypeResponse(&jt)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[journalTypeResponse]{List: data})
 }
 
 // --- Template handlers ---
@@ -347,7 +347,7 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
 	for k, v := range req.Amounts {
-		d, err := decimal.NewFromString(v)
+		d, err := parseWireAmount(v, "amounts")
 		if err != nil {
 			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
 			return
@@ -392,7 +392,7 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	for i, t := range list {
 		data[i] = toTemplateResponse(&t)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[templateResponse]{List: data})
 }
 
 // --- Currency handlers ---
@@ -452,5 +452,5 @@ func (s *Server) handleListCurrencies(w http.ResponseWriter, r *http.Request) {
 	for i, c := range list {
 		data[i] = currencyResponse{UID: c.UID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent}
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[currencyResponse]{List: data})
 }

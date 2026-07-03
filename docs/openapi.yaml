@@ -386,9 +386,16 @@ paths:
           application/json:
             schema:
               type: object
-              required: [amount]
+              required: [amount, idempotency_key]
               properties:
                 amount: { type: string, description: Decimal as string. }
+                idempotency_key:
+                  type: string
+                  description: >-
+                    Required (I-3). SettlePartial accumulates, so a retried
+                    request replays idempotently instead of double-applying:
+                    same key + same amount succeeds without effect, same key +
+                    different amount is a conflict.
       responses:
         "200": { description: Partial settlement recorded. }
         "422": { $ref: "#/components/responses/DomainError" }
@@ -1029,8 +1036,14 @@ components:
         - type: object
           properties:
             data:
-              type: array
-              items: { $ref: "#/components/schemas/Journal" }
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Journal" }
+                next_cursor:
+                  type: string
+                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
     JournalWithEntriesEnvelope:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -1057,8 +1070,14 @@ components:
         - type: object
           properties:
             data:
-              type: array
-              items: { $ref: "#/components/schemas/Balance" }
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Balance" }
+                next_cursor:
+                  type: string
+                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
 
     BalanceBreakdown:
       type: object
@@ -1089,8 +1108,14 @@ components:
         - type: object
           properties:
             data:
-              type: array
-              items: { $ref: "#/components/schemas/SystemRollup" }
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/SystemRollup" }
+                next_cursor:
+                  type: string
+                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
 
     ReserveInput:
       type: object
@@ -1399,8 +1424,14 @@ components:
         - type: object
           properties:
             data:
-              type: array
-              items: { $ref: "#/components/schemas/BalanceTrendPoint" }
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/BalanceTrendPoint" }
+                next_cursor:
+                  type: string
+                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
 
     ReconcileReport:
       type: object

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/httpx"
@@ -26,6 +25,9 @@ type settleReservationRequest struct {
 
 type settlePartialReservationRequest struct {
 	Amount string `json:"amount"`
+	// IdempotencyKey is required (I-3): SettlePartial accumulates, so a
+	// retried request without a key would double-apply the amount.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type reservationResponse struct {
@@ -69,7 +71,7 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	amount, err := decimal.NewFromString(req.Amount)
+	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 		return
@@ -106,7 +108,7 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	amount, err := decimal.NewFromString(req.ActualAmount)
+	amount, err := parseWireAmount(req.ActualAmount, "actual_amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
 		return
@@ -132,13 +134,17 @@ func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	amount, err := decimal.NewFromString(req.Amount)
+	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
 		return
 	}
 
-	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationUID: uid, Amount: amount}); err != nil {
+	if req.IdempotencyKey == "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		return
+	}
+	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationUID: uid, Amount: amount, IdempotencyKey: req.IdempotencyKey}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -187,8 +193,9 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 	}
 	status := q.Get("status")
 	limit := parsePageLimit(r)
+	cursor := q.Get("cursor")
 
-	reservations, err := s.queries.ListReservations(r.Context(), holder, status, limit)
+	reservations, nextCursor, err := s.queries.ListReservations(r.Context(), holder, status, cursor, limit)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -198,5 +205,5 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 	for i, r := range reservations {
 		data[i] = toReservationResponse(&r)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[reservationResponse]{List: data, NextCursor: nextCursor})
 }

@@ -347,3 +347,36 @@ func setupInvariantsFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Contex
 		Settlement:  settlement.UID,
 	}
 }
+
+// Pins the I-2 anti-tamper guard's column coverage (migration 033): the
+// journals no-arbitrary-update trigger must reject changes to effective_at
+// (else a script could move a posted journal into a closed period, bypassing
+// I-15) and to uid (the external identity, I-18). event_id backfill remains
+// the single permitted update.
+func TestJournals_UpdateGuard_CoversEffectiveAtAndUID(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	clsA := postgrestest.SeedClassification(t, pool, "guard_wallet", "Wallet", "debit", false)
+	clsB := postgrestest.SeedClassification(t, pool, "guard_custodial", "Custodial", "credit", true)
+	jt := postgrestest.SeedJournalType(t, pool, "guard_jt", "Guard JT")
+
+	j, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jt,
+		IdempotencyKey: postgrestest.UniqueKey("guard"),
+		Entries: []core.EntryInput{
+			{AccountHolder: 7, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: -7, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+		},
+		Source: "test",
+	})
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, "UPDATE journals SET effective_at = effective_at - INTERVAL '365 days' WHERE uid = $1", j.UID)
+	require.Error(t, err, "UPDATE journals.effective_at must be blocked by the anti-tamper trigger")
+
+	_, err = pool.Exec(ctx, "UPDATE journals SET uid = gen_random_uuid() WHERE uid = $1", j.UID)
+	require.Error(t, err, "UPDATE journals.uid must be blocked by the anti-tamper trigger")
+}

@@ -53,6 +53,7 @@ type NegativeBalanceAccount struct {
 // OrphanReservation is a reservation whose journal_id does not resolve.
 type OrphanReservation struct {
 	ID            int64
+	UID           string
 	AccountHolder int64
 	CurrencyID    int64
 	Status        string
@@ -197,6 +198,44 @@ type FullReconciliationService struct {
 
 // Compile-time assertion.
 var _ core.FullReconciler = (*FullReconciliationService)(nil)
+
+// externalCurrencyRef resolves an internal currency id to its uid for report
+// strings. Internal BIGSERIAL ids appear in no public contract (I-18) — the
+// reconcile report is returned verbatim by POST /reconcile/full, so every id
+// woven into a Description/Detail is a contract leak. Falls back to a
+// non-identifying placeholder (never the raw id) when resolution fails; the
+// id itself goes to logs only.
+func (s *FullReconciliationService) externalCurrencyRef(ctx context.Context, id int64) string {
+	if s.basic == nil || s.basic.classifications == nil {
+		return "unresolved-currency"
+	}
+	uid, err := s.basic.classifications.CurrencyUIDByID(ctx, id)
+	if err != nil {
+		s.logger.Warn("service: reconcile: currency uid resolution failed", "currency_id", id, "error", err)
+		return "unresolved-currency"
+	}
+	return uid
+}
+
+// externalClassificationRef resolves an internal classification id to its
+// code (the human-facing public identifier) for report strings. Same I-18
+// rationale as externalCurrencyRef.
+func (s *FullReconciliationService) externalClassificationRef(ctx context.Context, id int64) string {
+	if s.basic == nil || s.basic.classifications == nil {
+		return "unresolved-classification"
+	}
+	dims, err := s.basic.classifications.ClassificationDims(ctx)
+	if err != nil {
+		s.logger.Warn("service: reconcile: classification resolution failed", "classification_id", id, "error", err)
+		return "unresolved-classification"
+	}
+	for _, d := range dims {
+		if d.ID == id {
+			return d.Code
+		}
+	}
+	return "unresolved-classification"
+}
 
 // NewFullReconciliationService builds a FullReconciliationService.
 func NewFullReconciliationService(
@@ -374,7 +413,7 @@ pageLoop:
 				}
 				result.Passed = false
 				result.Findings = append(result.Findings, core.Finding{
-					Description: fmt.Sprintf("checkpoint reconcile failed for holder %d currency %d", p.AccountHolder, p.CurrencyID),
+					Description: fmt.Sprintf("checkpoint reconcile failed for holder %d currency %s", p.AccountHolder, s.externalCurrencyRef(scanCtx, p.CurrencyID)),
 					Detail:      err.Error(),
 				})
 				afterHolder, afterCurrency = p.AccountHolder, p.CurrencyID
@@ -408,7 +447,7 @@ pageLoop:
 	if partialReason != "" {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
-			Detail:      fmt.Sprintf("scanned %d account/currency pairs; resume from holder=%d currency=%d", scanned, afterHolder, afterCurrency),
+			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next scheduled run rescans from the top", scanned),
 		})
 	} else {
 		result.Findings = append(result.Findings, core.Finding{
@@ -450,11 +489,17 @@ func (s *FullReconciliationService) runCheck3OrphanEntries(ctx context.Context) 
 		})
 		return result
 	}
+	// Per-sample forensics carry internal row ids — ops-log material, not
+	// report material (I-18: the report is an API response body).
 	for _, o := range samples {
-		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("entry %d references non-existent journal %d", o.EntryID, o.JournalID),
-		})
+		s.logger.Warn("service: reconcile: orphan entry sample",
+			"entry_id", o.EntryID,
+			"journal_id", o.JournalID,
+		)
 	}
+	result.Findings = append(result.Findings, core.Finding{
+		Description: fmt.Sprintf("%d orphan entry sample(s) recorded in server logs", len(samples)),
+	})
 	return result
 }
 
@@ -513,7 +558,7 @@ func (s *FullReconciliationService) runCheck4AccountingEquation(ctx context.Cont
 		if diff.Abs().GreaterThan(s.cfg.EquationTolerance) {
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
-				Description: fmt.Sprintf("currency %d: accounting equation imbalance", cid),
+				Description: fmt.Sprintf("currency %s: accounting equation imbalance", s.externalCurrencyRef(ctx, cid)),
 				Detail: fmt.Sprintf("debit-normal net=%s credit-normal net=%s diff=%s",
 					cn.debitNormalNet, cn.creditNormalNet, diff),
 			})
@@ -541,7 +586,7 @@ func (s *FullReconciliationService) runCheck5SettlementNetting(ctx context.Conte
 	for _, v := range violations {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("currency %d: settlement classification net balance is non-zero", v.CurrencyID),
+			Description: fmt.Sprintf("currency %s: settlement classification net balance is non-zero", s.externalCurrencyRef(ctx, v.CurrencyID)),
 			Detail:      fmt.Sprintf("net=%s (expected 0, excluding last %d min)", v.NetBalance, windowMins),
 		})
 	}
@@ -566,8 +611,8 @@ func (s *FullReconciliationService) runCheck6NonNegativeBalances(ctx context.Con
 	for _, acc := range accounts {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("holder %d currency %d classification %d has negative balance",
-				acc.AccountHolder, acc.CurrencyID, acc.ClassificationID),
+			Description: fmt.Sprintf("holder %d currency %s classification %s has negative balance",
+				acc.AccountHolder, s.externalCurrencyRef(ctx, acc.CurrencyID), s.externalClassificationRef(ctx, acc.ClassificationID)),
 			Detail: fmt.Sprintf("balance=%s (normal_side=%s)", acc.Balance, acc.NormalSide),
 		})
 	}
@@ -591,9 +636,13 @@ func (s *FullReconciliationService) runCheck7OrphanReservations(ctx context.Cont
 
 	for _, o := range orphans {
 		result.Passed = false
+		s.logger.Warn("service: reconcile: orphan reservation",
+			"reservation_id", o.ID,
+			"journal_id", o.JournalID,
+		)
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("reservation %d (holder=%d, status=%s) references non-existent journal %d",
-				o.ID, o.AccountHolder, o.Status, o.JournalID),
+			Description: fmt.Sprintf("reservation %s (holder=%d, status=%s) references a non-existent journal",
+				o.UID, o.AccountHolder, o.Status),
 		})
 	}
 	return result
@@ -634,9 +683,13 @@ func (s *FullReconciliationService) runCheck9IdempotencyAudit(ctx context.Contex
 
 	for _, d := range dupes {
 		result.Passed = false
+		s.logger.Warn("service: reconcile: duplicate idempotency key",
+			"idempotency_key", d.IdempotencyKey,
+			"first_journal_id", d.FirstID,
+			"last_journal_id", d.LastID,
+		)
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("idempotency_key %q appears %d times (journal IDs %d..%d)",
-				d.IdempotencyKey, d.Occurrences, d.FirstID, d.LastID),
+			Description: fmt.Sprintf("idempotency_key %q appears %d times", d.IdempotencyKey, d.Occurrences),
 		})
 	}
 	return result
@@ -660,9 +713,10 @@ func (s *FullReconciliationService) runCheck10StaleRollup(ctx context.Context) c
 
 	for _, item := range items {
 		result.Passed = false
+		s.logger.Warn("service: reconcile: stale rollup queue item", "item_id", item.ID)
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("rollup_queue item %d (holder=%d, currency=%d, class=%d) has stale lease (claimed_until=%s, failed=%d)",
-				item.ID, item.AccountHolder, item.CurrencyID, item.ClassificationID,
+			Description: fmt.Sprintf("rollup dimension (holder=%d, currency=%s, classification=%s) has stale lease (claimed_until=%s, failed=%d)",
+				item.AccountHolder, s.externalCurrencyRef(ctx, item.CurrencyID), s.externalClassificationRef(ctx, item.ClassificationID),
 				item.ClaimedUntil, item.FailedAttempts),
 		})
 	}
@@ -680,7 +734,9 @@ type GlobalSummer interface {
 	SumGlobalDebitCreditByCurrency(ctx context.Context) ([]CurrencyReconcileTotals, error)
 }
 
-// AccountEntrySummer sums all entries for a specific account (no checkpoint filter).
+// AccountEntrySummer sums a specific account's entries, bounded per
+// classification by that classification's checkpoint watermark
+// (id <= last_entry_id) — see ReconcileAccount.
 type AccountEntrySummer interface {
 	SumEntriesByAccountClassification(ctx context.Context, holder, currencyID int64) (debitByClass, creditByClass map[int64]decimal.Decimal, err error)
 }
@@ -763,7 +819,11 @@ func (s *ReconciliationService) CheckAccountingEquation(ctx context.Context) (*c
 	return result, nil
 }
 
-// ReconcileAccount verifies checkpoint balances vs actual entry sums for a specific account.
+// ReconcileAccount verifies checkpoint balances vs actual entry sums for a
+// specific account. The entry sums are bounded per classification by that
+// classification's checkpoint watermark (id <= last_entry_id, enforced in the
+// adapter query), so the comparison is exact and immune to in-flight rollups
+// — entries posted after the checkpoint was materialized are not "drift".
 func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int64, currencyUID string) (*core.ReconcileResult, error) {
 	currencyID, err := s.classifications.CurrencyIDByUID(ctx, currencyUID)
 	if err != nil {

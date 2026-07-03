@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/azex-ai/ledger/core"
 )
@@ -16,11 +17,11 @@ import (
 // duration of the lease by bumping next_attempt_at.  If the process crashes
 // mid-batch the lease expires and the events become visible again.
 //
-// Error handling: if a handler returns an error, the event is logged and
-// marked delivered anyway — we do not block or retry indefinitely.  The
-// rationale is that in-process handlers are trusted code that should handle
-// their own retry logic; stalling the queue on a buggy handler is worse than
-// a missed notification.
+// Error handling: if any handler returns an error the event is scheduled for
+// retry (bounded by max_attempts, after which the store transitions it to
+// 'dead') — the same at-least-once semantics as WebhookDeliverer. Handlers
+// must therefore be idempotent per event UID. A permanently failing handler
+// parks its events in 'dead' rather than stalling the queue forever.
 type LocalDispatcher struct {
 	poller   EventPoller
 	callback *CallbackDeliverer
@@ -49,8 +50,8 @@ func (d *LocalDispatcher) OnEvent(fn func(context.Context, core.Event) error) {
 }
 
 // ProcessBatch polls up to batchSize pending events, invokes registered
-// handlers, and marks each event delivered (regardless of handler errors).
-// Returns the number of events processed.
+// handlers, marks each fully-handled event delivered, and schedules failed
+// ones for retry. Returns the number of events processed.
 func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int, error) {
 	if d.poller == nil {
 		return 0, fmt.Errorf("delivery: local: event poller not configured")
@@ -65,13 +66,20 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 
 	for _, evt := range events {
 		if invokeErr := d.callback.Deliver(ctx, evt.Event); invokeErr != nil {
-			d.logger.Error("delivery: local: handler error (marking delivered anyway)",
+			d.logger.Error("delivery: local: handler error, scheduling retry",
 				"event_id", evt.InternalID,
+				"attempts", evt.Attempts,
 				"error", invokeErr,
 			)
+			if retryErr := d.poller.MarkRetry(ctx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts))); retryErr != nil {
+				d.logger.Error("delivery: local: mark retry failed",
+					"event_id", evt.InternalID,
+					"error", retryErr,
+				)
+			}
+			continue
 		}
-		// Always mark delivered — do not let a bad handler block the queue.
-		if markErr := d.poller.MarkDelivered(ctx, evt.InternalID); markErr != nil {
+		if markErr := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken); markErr != nil {
 			d.logger.Error("delivery: local: mark delivered failed",
 				"event_id", evt.InternalID,
 				"error", markErr,

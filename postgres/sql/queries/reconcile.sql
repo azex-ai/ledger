@@ -76,15 +76,18 @@ LIMIT sqlc.arg(page_limit)::int;
 
 -- name: ReconcileOrphanReservations :many
 -- Check #7: reservations whose journal_id references a non-existent journal.
--- reservations.journal_id is NOT NULL DEFAULT 0 (sentinel); treat 0 as "no journal".
+-- Since migration 035 journal_id is a nullable FK (NULL = no journal), so
+-- this can only fire if the FK is ever dropped or disabled — kept as
+-- defense-in-depth.
 SELECT
   r.id,
+  r.uid,
   r.account_holder,
   r.currency_id,
   r.status,
   r.journal_id
 FROM reservations r
-WHERE r.journal_id != 0
+WHERE r.journal_id IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM journals j WHERE j.id = r.journal_id)
 ORDER BY r.id
 LIMIT 100;

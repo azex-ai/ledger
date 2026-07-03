@@ -525,8 +525,8 @@ func (m *mockQueryProvider) ListEntriesByAccount(ctx context.Context, holder int
 	}, "", nil
 }
 
-func (m *mockQueryProvider) ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]core.Reservation, error) {
-	return []core.Reservation{}, nil
+func (m *mockQueryProvider) ListReservations(ctx context.Context, holder int64, status string, cursor string, limit int32) ([]core.Reservation, string, error) {
+	return []core.Reservation{}, "", nil
 }
 
 func (m *mockQueryProvider) ListSnapshotsByDateRange(ctx context.Context, holder int64, currencyUID string, start, end time.Time) ([]core.BalanceSnapshot, error) {
@@ -666,14 +666,14 @@ func parseEnvelope(t *testing.T, body []byte) map[string]any {
 	return data
 }
 
-// parseEnvelopeArray extracts the "data" field as an array from the envelope.
-func parseEnvelopeArray(t *testing.T, body []byte) []any {
+// parseEnvelopeList unwraps {code, message, data: {list: [...]}} — the
+// uniform list shape (api-contract §6).
+func parseEnvelopeList(t *testing.T, body []byte) []any {
 	t.Helper()
-	var env map[string]any
-	require.NoError(t, json.Unmarshal(body, &env))
-	data, ok := env["data"].([]any)
-	require.True(t, ok, "expected 'data' array in envelope, got: %v", env)
-	return data
+	env := parseEnvelope(t, body)
+	list, ok := env["list"].([]any)
+	require.True(t, ok, "data.list missing or not an array: %v", env)
+	return list
 }
 
 // --- Tests ---
@@ -876,7 +876,7 @@ func TestGetBalances(t *testing.T) {
 	w := doRequest(srv, http.MethodGet, "/api/v1/balances/100?currency_uid=cur-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	data := parseEnvelopeArray(t, w.Body.Bytes())
+	data := parseEnvelopeList(t, w.Body.Bytes())
 	assert.Len(t, data, 2)
 }
 
@@ -1552,7 +1552,7 @@ func TestAuditListReversals(t *testing.T) {
 	srv := newTestServer()
 	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals/10/reversals", nil)
 	require.Equal(t, http.StatusOK, w.Code)
-	arr := parseEnvelopeArray(t, w.Body.Bytes())
+	arr := parseEnvelopeList(t, w.Body.Bytes())
 	assert.NotEmpty(t, arr)
 }
 
@@ -1618,7 +1618,7 @@ func TestBalanceTrends(t *testing.T) {
 	srv := newTestServer()
 	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_uid=cur-1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
 	require.Equal(t, http.StatusOK, w.Code)
-	arr := parseEnvelopeArray(t, w.Body.Bytes())
+	arr := parseEnvelopeList(t, w.Body.Bytes())
 	assert.NotEmpty(t, arr)
 }
 
@@ -1682,4 +1682,54 @@ func jsonBody(t *testing.T, v any) *bytes.Buffer {
 	var buf bytes.Buffer
 	require.NoError(t, json.NewEncoder(&buf).Encode(v))
 	return &buf
+}
+
+// Pins the read-surface auth requirement: with API keys configured, EVERY
+// endpoint — reads included — demands a bearer key (holder is a guessable
+// int64; an open GET surface exposes every holder's balances and history).
+// Only the liveness/readiness probes stay open for Kubernetes.
+func TestAuth_ReadsRequireKeyWhenConfigured(t *testing.T) {
+	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, APIKeys: [][]byte{[]byte("test-key-1")}}
+	srv := server.NewWithConfig(cfg,
+		&mockJournalWriter{},
+		&mockBalanceReader{},
+		&mockReserver{},
+		&mockBooker{},
+		&mockBookingReader{},
+		&mockEventReader{},
+		&mockClassificationStore{},
+		&mockJournalTypeStore{},
+		&mockTemplateStore{},
+		&mockCurrencyStore{},
+		nil,
+		&mockReconciler{},
+		&mockSnapshotter{},
+		(*service.SystemRollupService)(nil),
+		&mockQueryProvider{},
+		&mockAuditQuerier{},
+		&mockPlatformBalanceReader{},
+		&mockSolvencyChecker{},
+		&mockBalanceTrendReader{},
+		&mockFullReconciler{},
+		&mockAccountPolicyStore{},
+		&mockPeriodCloser{},
+		&mockTrialBalanceReader{},
+	)
+
+	// Read without key → rejected.
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/100?currency_uid=cur-1", nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Read with key → accepted.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/balances/100?currency_uid=cur-1", nil)
+	req.Header.Set("Authorization", "Bearer test-key-1")
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Probes stay open without a key.
+	w = doRequest(srv, http.MethodGet, "/api/v1/system/health", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	w = doRequest(srv, http.MethodGet, "/api/v1/system/ready", nil)
+	assert.NotEqual(t, http.StatusUnauthorized, w.Code)
 }

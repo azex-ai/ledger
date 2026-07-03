@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -191,8 +193,12 @@ func TestCheck3OrphanEntries_Violation(t *testing.T) {
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
 	result := svc.runCheck3OrphanEntries(context.Background())
 	assert.False(t, result.Passed)
-	// 1 summary finding + 2 sample findings
-	assert.Len(t, result.Findings, 3)
+	// 1 summary finding + 1 "samples recorded in logs" finding. Per-sample
+	// internal row ids are ops-log material, not report material (I-18).
+	assert.Len(t, result.Findings, 2)
+	for _, f := range result.Findings {
+		assert.NotContains(t, f.Description, "99", "internal journal id must not leak into the report")
+	}
 }
 
 func TestCheck3OrphanEntries_QueryError(t *testing.T) {
@@ -239,7 +245,8 @@ func TestCheck4AccountingEquation_Imbalance(t *testing.T) {
 	result := svc.runCheck4AccountingEquation(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "currency 1")
+	assert.Contains(t, result.Findings[0].Description, "accounting equation imbalance")
+	assert.NotContains(t, result.Findings[0].Description, "currency 1", "internal currency id must not leak (I-18)")
 }
 
 func TestCheck4AccountingEquation_MultipleCurrencies(t *testing.T) {
@@ -256,7 +263,8 @@ func TestCheck4AccountingEquation_MultipleCurrencies(t *testing.T) {
 	result := svc.runCheck4AccountingEquation(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "currency 2")
+	assert.Contains(t, result.Findings[0].Description, "accounting equation imbalance")
+	assert.NotContains(t, result.Findings[0].Description, "currency 2", "internal currency id must not leak (I-18)")
 }
 
 func TestCheck4AccountingEquation_QueryError(t *testing.T) {
@@ -289,7 +297,8 @@ func TestCheck5SettlementNetting_Violation(t *testing.T) {
 	result := svc.runCheck5SettlementNetting(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "currency 1")
+	assert.Contains(t, result.Findings[0].Description, "settlement classification net balance is non-zero")
+	assert.NotContains(t, result.Findings[0].Description, "currency 1", "internal currency id must not leak (I-18)")
 }
 
 func TestCheck5SettlementNetting_QueryError(t *testing.T) {
@@ -349,15 +358,15 @@ func TestCheck7OrphanReservations_Clean(t *testing.T) {
 func TestCheck7OrphanReservations_Violation(t *testing.T) {
 	q := cleanQuerier()
 	q.orphanReservs = []OrphanReservation{
-		{ID: 7, AccountHolder: 99, CurrencyID: 1, Status: "settled", JournalID: 42},
+		{ID: 7, UID: "res-uid-7", AccountHolder: 99, CurrencyID: 1, Status: "settled", JournalID: 42},
 	}
 
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
 	result := svc.runCheck7OrphanReservations(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "reservation 7")
-	assert.Contains(t, result.Findings[0].Description, "journal 42")
+	assert.Contains(t, result.Findings[0].Description, "reservation res-uid-7")
+	assert.NotContains(t, result.Findings[0].Description, "journal 42", "internal journal id must not leak (I-18)")
 }
 
 func TestCheck7OrphanReservations_QueryError(t *testing.T) {
@@ -438,8 +447,9 @@ func TestCheck10StaleRollup_Violation(t *testing.T) {
 	result := svc.runCheck10StaleRollup(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "rollup_queue item 55")
+	assert.Contains(t, result.Findings[0].Description, "stale lease")
 	assert.Contains(t, result.Findings[0].Description, "failed=3")
+	assert.NotContains(t, result.Findings[0].Description, "item 55", "internal queue id must not leak (I-18)")
 }
 
 func TestCheck10StaleRollup_QueryError(t *testing.T) {
@@ -649,4 +659,26 @@ func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
 		}
 	}
 	assert.True(t, partialFound, "capped scan must report itself as incomplete; got: %+v", result.Findings)
+}
+
+// Mechanical I-18 pin for the reconcile report surface: no format string in
+// reconcile.go may weave an internal id into a Finding. The existing
+// server-side pin (TestContract_NoInternalIDKeysInJSON) only scans JSON tags
+// and is structurally blind to ids embedded in free text — this closes that
+// hole at the source.
+func TestReconcileFindings_NoInternalIDPatternsInSource(t *testing.T) {
+	src, err := os.ReadFile("reconcile.go")
+	require.NoError(t, err)
+
+	// Internal-id smells inside Sprintf formats destined for Findings:
+	// "currency %d", "classification %d", "journal %d"/"journal IDs",
+	// "reservation %d", "item %d", "currency=%d", "class=%d".
+	banned := regexp.MustCompile(`(currency %d|classification %d|journal %d|journal IDs|reservation %d|queue item %d|currency=%d|class=%d|classification=%d)`)
+	for i, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, "Finding{") && !strings.Contains(line, "fmt.Sprintf") {
+			continue
+		}
+		require.False(t, banned.MatchString(line),
+			"reconcile.go:%d leaks an internal id pattern into a report string: %s", i+1, strings.TrimSpace(line))
+	}
 }

@@ -49,7 +49,7 @@ func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 			Balance:           b.Balance.String(),
 		}
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[balanceResponse]{List: data})
 }
 
 type balanceByCurrencyResponse struct {
@@ -173,5 +173,5 @@ func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 		}
 		data = append(data, hb)
 	}
-	httpx.OK(w, data)
+	httpx.OK(w, PagedResponse[holderBalances]{List: data})
 }
