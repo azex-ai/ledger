@@ -1733,3 +1733,39 @@ func TestAuth_ReadsRequireKeyWhenConfigured(t *testing.T) {
 	w = doRequest(srv, http.MethodGet, "/api/v1/system/ready", nil)
 	assert.NotEqual(t, http.StatusUnauthorized, w.Code)
 }
+
+// Webhook callbacks are exempt from bearer auth: external channels cannot
+// hold our API keys — the channel adapter's signature verification (HMAC) is
+// that surface's authentication, matching the OpenAPI `security: []`
+// declaration. (An unknown channel still 404s, but must not 401.)
+func TestAuth_WebhookPathExemptFromBearerAuth(t *testing.T) {
+	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, APIKeys: [][]byte{[]byte("test-key-1")}}
+	srv := server.NewWithConfig(cfg,
+		&mockJournalWriter{},
+		&mockBalanceReader{},
+		&mockReserver{},
+		&mockBooker{},
+		&mockBookingReader{},
+		&mockEventReader{},
+		&mockClassificationStore{},
+		&mockJournalTypeStore{},
+		&mockTemplateStore{},
+		&mockCurrencyStore{},
+		nil,
+		&mockReconciler{},
+		&mockSnapshotter{},
+		(*service.SystemRollupService)(nil),
+		&mockQueryProvider{},
+		&mockAuditQuerier{},
+		&mockPlatformBalanceReader{},
+		&mockSolvencyChecker{},
+		&mockBalanceTrendReader{},
+		&mockFullReconciler{},
+		&mockAccountPolicyStore{},
+		&mockPeriodCloser{},
+		&mockTrialBalanceReader{},
+	)
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/webhooks/evm", map[string]any{"payload": "x"})
+	assert.NotEqual(t, http.StatusUnauthorized, w.Code, "webhook surface must not demand a bearer key; got %d", w.Code)
+}

@@ -51,17 +51,24 @@ ORDER BY j.id ASC;
 -- Transitively follows reversal_of links up the chain (up to the root)
 -- and down the chain (journals that reverse the given journal or any of its ancestors).
 WITH RECURSIVE chain AS (
-    -- Anchor: walk UP to find the root of the chain
-    SELECT j.id AS journal_id, j.reversal_of
+    -- Anchor: walk UP to find the root of the chain. The recursion must
+    -- include the root row itself (reversal_of IS NULL) — filtering it out
+    -- here made "query the chain by a reversal's id" return an empty chain
+    -- (root CTE found nothing). Recursion terminates naturally at the root
+    -- because the next join on a NULL reversal_of matches nothing; depth is
+    -- a defense-in-depth bound (reversal-of-reversal is rejected at write
+    -- time, so real chains are depth <= 1, but a cycle written around the
+    -- application would otherwise loop this CTE forever).
+    SELECT j.id AS journal_id, j.reversal_of, 0 AS depth
     FROM journals j
     WHERE j.id = $1
 
     UNION ALL
 
-    SELECT anc.id AS journal_id, anc.reversal_of
+    SELECT anc.id AS journal_id, anc.reversal_of, c.depth + 1
     FROM journals anc
     JOIN chain c ON anc.id = c.reversal_of
-    WHERE anc.reversal_of IS NOT NULL
+    WHERE c.depth < 32
 ),
 root AS (
     SELECT journal_id FROM chain WHERE reversal_of IS NULL
@@ -69,15 +76,16 @@ root AS (
 ),
 full_chain AS (
     -- Walk DOWN from root to find all reversals
-    SELECT j.id AS journal_id, j.reversal_of
+    SELECT j.id AS journal_id, j.reversal_of, 0 AS depth
     FROM journals j
     WHERE j.id = (SELECT journal_id FROM root)
 
     UNION ALL
 
-    SELECT j.id AS journal_id, j.reversal_of
+    SELECT j.id AS journal_id, j.reversal_of, fc.depth + 1
     FROM journals j
     JOIN full_chain fc ON j.reversal_of = fc.journal_id
+    WHERE fc.depth < 32
 )
 SELECT DISTINCT j.*
 FROM journals j

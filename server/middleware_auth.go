@@ -21,6 +21,21 @@ var unauthenticatedPaths = map[string]struct{}{
 	"/api/v1/system/ready":  {},
 }
 
+// webhookPathPrefix carves the inbound channel-callback surface out of
+// bearer auth: callbacks originate from external systems (chain scanners,
+// PSPs) that cannot hold our API keys — their authentication is the
+// channel adapter's own signature verification (e.g. HMAC in
+// channel/onchain). This matches the OpenAPI contract, which declares the
+// webhook path `security: []`.
+const webhookPathPrefix = "/api/v1/webhooks/"
+
+func isUnauthenticatedPath(path string) bool {
+	if _, ok := unauthenticatedPaths[path]; ok {
+		return true
+	}
+	return strings.HasPrefix(path, webhookPathPrefix)
+}
+
 // authMiddleware enforces bearer-token API key auth on every request except
 // the probe endpoints above. All methods — reads included — require
 // Authorization: Bearer <key> matching one of the configured keys;
@@ -30,7 +45,7 @@ var unauthenticatedPaths = map[string]struct{}{
 func authMiddleware(keys [][]byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if _, open := unauthenticatedPaths[r.URL.Path]; open {
+			if isUnauthenticatedPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}

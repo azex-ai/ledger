@@ -334,3 +334,45 @@ func journalUIDs(journals []core.Journal) []string {
 	}
 	return uids
 }
+
+// Pins the reversal-chain walk when queried BY THE REVERSAL's uid: the old
+// UP-walk CTE filtered out the root row (reversal_of IS NULL), so the root
+// lookup found nothing and the chain came back empty for any non-root entry
+// point. Both directions must return the identical full chain.
+func TestAudit_ListReversals_QueryByReversalFindsFullChain(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledgerStore := postgres.NewLedgerStore(pool)
+	auditStore := postgres.NewAuditStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	clsA := postgrestest.SeedClassification(t, pool, "chain_wallet", "Wallet", "debit", false)
+	clsB := postgrestest.SeedClassification(t, pool, "chain_custodial", "Custodial", "credit", true)
+	jt := postgrestest.SeedJournalType(t, pool, "chain_jt", "Chain JT")
+
+	original, err := ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jt,
+		IdempotencyKey: postgrestest.UniqueKey("chain-orig"),
+		Entries: []core.EntryInput{
+			{AccountHolder: 3, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -3, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+		},
+		Source: "test",
+	})
+	require.NoError(t, err)
+
+	reversal, err := ledgerStore.ReverseJournal(ctx, original.UID, "chain test")
+	require.NoError(t, err)
+
+	byOriginal, err := auditStore.ListReversals(ctx, original.UID)
+	require.NoError(t, err)
+	require.Len(t, byOriginal, 2)
+
+	byReversal, err := auditStore.ListReversals(ctx, reversal.UID)
+	require.NoError(t, err)
+	require.Len(t, byReversal, 2, "querying the chain by the reversal's uid must find the same full chain")
+
+	uids := map[string]struct{}{byReversal[0].UID: {}, byReversal[1].UID: {}}
+	assert.Contains(t, uids, original.UID)
+	assert.Contains(t, uids, reversal.UID)
+}
