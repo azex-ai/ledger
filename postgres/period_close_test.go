@@ -40,7 +40,7 @@ func TestLedgerStore_PostJournal_PeriodClosed_Rejected(t *testing.T) {
 	clsA := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 	clsB := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
-	closeBefore := time.Now().AddDate(0, 0, -5)
+	closeBefore := time.Now().Truncate(time.Microsecond).AddDate(0, 0, -5)
 	_, err := periodStore.ClosePeriod(ctx, core.ClosePeriodInput{
 		CloseBefore: closeBefore,
 		Note:        "month-end close",
@@ -87,7 +87,7 @@ func TestPeriodCloseStore_Reopen_LatestRowWins(t *testing.T) {
 	clsA := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 	clsB := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
-	firstClose := time.Now().AddDate(0, 0, -5)
+	firstClose := time.Now().Truncate(time.Microsecond).AddDate(0, 0, -5)
 	_, err := periodStore.ClosePeriod(ctx, core.ClosePeriodInput{CloseBefore: firstClose, ActorID: 1})
 	require.NoError(t, err)
 
@@ -146,7 +146,7 @@ func TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod(t *tes
 	clsA := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 	clsB := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
-	backdated := time.Now().AddDate(0, 0, -10)
+	backdated := time.Now().Truncate(time.Microsecond).AddDate(0, 0, -10)
 	original, err := ledgerStore.PostJournal(ctx, core.JournalInput{
 		JournalTypeID:  jtID,
 		IdempotencyKey: postgrestest.UniqueKey("close-then-reverse-original"),
@@ -160,7 +160,7 @@ func TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod(t *tes
 
 	// Close the period covering the original posting.
 	_, err = periodStore.ClosePeriod(ctx, core.ClosePeriodInput{
-		CloseBefore: time.Now().AddDate(0, 0, -1),
+		CloseBefore: time.Now().Truncate(time.Microsecond).AddDate(0, 0, -1),
 		ActorID:     1,
 	})
 	require.NoError(t, err)

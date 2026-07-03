@@ -13,6 +13,15 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-03
+
+### Fixed
+- CI: period-close reopen test compared a nanosecond Go timestamp against its
+  microsecond Postgres round-trip (passed on Darwin, failed on Linux runners);
+  timestamps are now truncated to microseconds in tests.
+- `@azex/ledger-react`: regenerated `src/client/schema.ts` from the v0.3
+  `docs/openapi.yaml` (the codegen:check CI gate was failing).
+
 ## [0.3.0] - 2026-07-03
 
 ### Go module — Added (financial-core hardening, design: docs/plans/2026-07-02-financial-core-hardening-design.md)

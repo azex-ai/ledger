@@ -306,8 +306,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Post the reversal of an existing journal.
-         * @description A journal can only be reversed once. Re-attempt returns 409.
+         * Post the full reversal of an existing journal.
+         * @description Rejected (409) once the journal has any reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
          */
         post: {
             parameters: {
@@ -342,6 +342,65 @@ export interface paths {
                     };
                     content?: never;
                 };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/journals/{id}/reverse-partial": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reverse num/den of a journal (partial reversal).
+         * @description Reverses num/den of every entry, per-currency balanced via largest-remainder allocation. Cumulative reversals never exceed the original (409 on overshoot). num == den ("1/1") reverses exactly the remaining un-reversed amount — the only way to complete a reversal whose earlier fractional steps rounded up.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        num: number;
+                        /** Format: int64 */
+                        den: number;
+                        reason: string;
+                        idempotency_key: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Partial reversal posted. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Cumulative reversal would exceed the original. */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                422: components["responses"]["DomainError"];
             };
         };
         delete?: never;
@@ -611,6 +670,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/reservations/{id}/settle-partial": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Settle part of a reservation; call repeatedly to accumulate.
+         * @description First call transitions active → settling. Cumulative settled amount may never exceed the reserved amount. The unsettled remainder stays held against the balance until finalize. Finish with /reservations/{id}/finalize.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Decimal as string. */
+                        amount: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Partial settlement recorded. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                422: components["responses"]["DomainError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reservations/{id}/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish a partially-settled reservation (settling → settled).
+         * @description Releases the unsettled remainder. Rejected on a reservation with no partial settlements.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Finalized. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                422: components["responses"]["DomainError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/reservations/{id}/release": {
         parameters: {
             query?: never;
@@ -642,6 +788,85 @@ export interface paths {
                 422: components["responses"]["DomainError"];
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{holder}/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Set (create or update) the freeze/close + balance-floor policy for an account dimension. */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    holder: number;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AccountPolicyInput"];
+                };
+            };
+            responses: {
+                /** @description Policy set. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AccountPolicyEnvelope"];
+                    };
+                };
+                422: components["responses"]["DomainError"];
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{holder}/policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List every policy row for an account holder (across currencies/classifications). */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    holder: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Policies. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1260,6 +1485,8 @@ export interface paths {
                     "application/json": {
                         code: string;
                         name: string;
+                        /** @description Max decimal places entries in this currency may carry (JPY=0, USD=2, USDT=6, wei=18). Required — 0 is a legal value, so it cannot be defaulted. */
+                        exponent: number;
                     };
                 };
             };
@@ -1394,6 +1621,51 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/reconcile/full": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run the complete 10-check reconciliation suite on-demand.
+         * @description Heavier, fleet-wide counterpart to `/reconcile` — also verifies
+         *     checkpoint-vs-entries consistency (fleet-scanned, capped by a
+         *     configurable scan limit/timeout and reported as partial if capped),
+         *     orphan entries/reservations, the accounting equation, settlement
+         *     netting, non-negative balances, idempotency-key uniqueness, and stale
+         *     rollup queue items. Runs on the same schedule in the background
+         *     worker; this endpoint triggers an out-of-band run.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Full reconciliation report. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ReconcileReport"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots": {
         parameters: {
             query?: never;
@@ -1433,6 +1705,265 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/audit/journals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List journals by account dimension or by global time range.
+         * @description Exactly one mode is selected by the params provided: pass `holder` +
+         *     `currency_id` (optionally narrowed by `classification_id` and/or
+         *     `from`/`to`) to list journals touching that account dimension; pass
+         *     `from`/`to` alone to scan a global time range instead. Providing
+         *     neither, or `holder` without `currency_id`, is a 400.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    holder?: number;
+                    currency_id?: number;
+                    classification_id?: number;
+                    from?: components["schemas"]["Timestamp"];
+                    to?: components["schemas"]["Timestamp"];
+                    cursor?: number;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Journals page. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JournalListEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/bookings/{id}/trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trace a booking end-to-end (booking + every event + every linked journal). */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Booking trace. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BookingTraceEnvelope"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/journals/{id}/reversals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the reversal chain for a journal (root journal + every journal that transitively reverses it). */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Reversal chain, oldest first. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JournalListEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/platform/balances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Real-time per-classification balance breakdown for a currency.
+         * @description Computed as `checkpoint.balance + delta`, so it reflects every
+         *     committed journal immediately without waiting for the rollup worker.
+         */
+        get: {
+            parameters: {
+                query: {
+                    currency_id: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Platform balance breakdown. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PlatformBalanceEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/platform/solvency": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Compare total user-side liability against custodial system balance for a currency. */
+        get: {
+            parameters: {
+                query: {
+                    currency_id: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Solvency report. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["SolvencyEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/balances/trends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Historical daily balance series for an account dimension.
+         * @description One point per calendar day in `[from, to]`. Days without journal
+         *     activity are forward-filled from the previous known balance;
+         *     today's point is always the live checkpoint+delta value.
+         */
+        get: {
+            parameters: {
+                query: {
+                    holder: number;
+                    currency_id: number;
+                    classification_id?: number;
+                    from: components["schemas"]["Timestamp"];
+                    to: components["schemas"]["Timestamp"];
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Balance trend points, ascending by date. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BalanceTrendListEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1458,6 +1989,12 @@ export interface components {
             code?: number;
             /** @example Insufficient balance for this operation */
             message?: string;
+            /**
+             * @description Whether the client may safely retry using the SAME
+             *     idempotency_key. See docs/api.md "Error handling contract".
+             * @example false
+             */
+            retryable?: boolean;
         };
         /** @enum {string} */
         EntryType: "debit" | "credit";
@@ -1589,6 +2126,46 @@ export interface components {
         };
         ReservationEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Reservation"];
+        };
+        AccountPolicyInput: {
+            /**
+             * Format: int64
+             * @description 0 = all currencies for this holder.
+             */
+            currency_id?: number;
+            /**
+             * Format: int64
+             * @description 0 = all classifications for this holder/currency.
+             */
+            classification_id?: number;
+            /** @enum {string} */
+            status: "active" | "frozen" | "closed";
+            /** @description 0 = no overdraft; negative = overdraft limit; positive = dust floor. */
+            min_balance?: components["schemas"]["Decimal"];
+            enforce_min_balance?: boolean;
+            note?: string;
+            /** Format: int64 */
+            actor_id?: number;
+        };
+        AccountPolicy: {
+            /** Format: int64 */
+            id?: number;
+            /** Format: int64 */
+            account_holder?: number;
+            /** Format: int64 */
+            currency_id?: number;
+            /** Format: int64 */
+            classification_id?: number;
+            /** @enum {string} */
+            status?: "active" | "frozen" | "closed";
+            min_balance?: components["schemas"]["Decimal"];
+            enforce_min_balance?: boolean;
+            note?: string;
+            updated_at?: components["schemas"]["Timestamp"];
+            created_at?: components["schemas"]["Timestamp"];
+        };
+        AccountPolicyEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["AccountPolicy"];
         };
         CreateBookingInput: {
             classification_code: string;
@@ -1752,6 +2329,65 @@ export interface components {
                 drift?: components["schemas"]["Decimal"];
             }[];
             checked_at?: components["schemas"]["Timestamp"];
+        };
+        BookingTrace: {
+            booking?: components["schemas"]["Booking"];
+            events?: components["schemas"]["Event"][];
+            journals?: components["schemas"]["Journal"][];
+        };
+        BookingTraceEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["BookingTrace"];
+        };
+        PlatformBalance: {
+            /** Format: int64 */
+            currency_id?: number;
+            /** @description classification code → total (holder > 0). */
+            user_side?: {
+                [key: string]: components["schemas"]["Decimal"];
+            };
+            /** @description classification code → total (holder < 0). */
+            system_side?: {
+                [key: string]: components["schemas"]["Decimal"];
+            };
+        };
+        PlatformBalanceEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["PlatformBalance"];
+        };
+        SolvencyReport: {
+            /** Format: int64 */
+            currency_id?: number;
+            liability?: components["schemas"]["Decimal"];
+            custodial?: components["schemas"]["Decimal"];
+            solvent?: boolean;
+            /** @description custodial - liability; negative = under-collateralised. */
+            margin?: components["schemas"]["Decimal"];
+        };
+        SolvencyEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["SolvencyReport"];
+        };
+        BalanceTrendPoint: {
+            /** Format: date */
+            date?: string;
+            balance?: components["schemas"]["Decimal"];
+            inflow?: components["schemas"]["Decimal"];
+            outflow?: components["schemas"]["Decimal"];
+        };
+        BalanceTrendListEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["BalanceTrendPoint"][];
+        };
+        ReconcileReport: {
+            overall_passed?: boolean;
+            run_at?: components["schemas"]["Timestamp"];
+            checks?: {
+                /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation */
+                name?: string;
+                passed?: boolean;
+                checked_at?: components["schemas"]["Timestamp"];
+                findings?: {
+                    description?: string;
+                    detail?: string;
+                }[];
+            }[];
         };
     };
     responses: {
