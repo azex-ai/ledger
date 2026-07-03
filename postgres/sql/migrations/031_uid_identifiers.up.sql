@@ -11,20 +11,50 @@
 -- nicety for new rows. Hence the add-backfill-then-NOT-NULL shape per table
 -- rather than a bare ADD COLUMN ... NOT NULL (which fails on any non-empty
 -- table).
-DO $$
-DECLARE
-    t TEXT;
-BEGIN
-    FOREACH t IN ARRAY ARRAY[
-        'journals', 'bookings', 'events', 'reservations', 'classifications',
-        'journal_types', 'entry_templates', 'currencies', 'account_policies',
-        'period_closes'
-    ] LOOP
-        EXECUTE format('ALTER TABLE %I ADD COLUMN IF NOT EXISTS uid UUID', t);
-        EXECUTE format('UPDATE %I SET uid = gen_random_uuid() WHERE uid IS NULL', t);
-        EXECUTE format('ALTER TABLE %I ALTER COLUMN uid SET NOT NULL', t);
-    END LOOP;
-END $$;
+--
+-- Deliberately plain per-table DDL (not a DO $$ ... EXECUTE loop): sqlc's
+-- static parser derives the schema from these files and cannot see columns
+-- created via dynamic SQL. Keep every statement statically parseable.
+
+ALTER TABLE journals ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE journals SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE journals ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE bookings SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE bookings ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE events ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE events SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE events ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE reservations ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE reservations SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE reservations ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE classifications ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE classifications SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE classifications ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE journal_types ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE journal_types SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE journal_types ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE entry_templates ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE entry_templates SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE entry_templates ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE currencies ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE currencies SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE currencies ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE account_policies ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE account_policies SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE account_policies ALTER COLUMN uid SET NOT NULL;
+
+ALTER TABLE period_closes ADD COLUMN IF NOT EXISTS uid UUID;
+UPDATE period_closes SET uid = gen_random_uuid() WHERE uid IS NULL;
+ALTER TABLE period_closes ALTER COLUMN uid SET NOT NULL;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_journals_uid         ON journals (uid);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_bookings_uid         ON bookings (uid);
