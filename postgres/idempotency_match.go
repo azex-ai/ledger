@@ -80,7 +80,7 @@ func ensureBookingMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing
 		existing.ChannelName != input.ChannelName ||
 		!mustNumericToDecimal(existing.Amount).Equal(input.Amount) ||
 		!existing.ExpiresAt.Equal(input.ExpiresAt) ||
-		string(existing.Metadata) != string(anyMetadataToJSON(input.Metadata)) {
+		string(existing.Metadata) != string(stringMetadataToJSON(input.Metadata)) {
 		return nil, fmt.Errorf("postgres: create booking: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 

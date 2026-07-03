@@ -22,7 +22,7 @@ func TestIdempotentTransitionEvent(t *testing.T) {
 		BookingID: 1,
 		ToStatus:  "confirmed",
 		Amount:    decimal.NewFromInt(100),
-		Metadata:  map[string]any{"tx_hash": "tx-1"},
+		Metadata:  map[string]string{"tx_hash": "tx-1"},
 		JournalID: nil,
 	}
 

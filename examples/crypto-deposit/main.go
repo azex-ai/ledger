@@ -72,7 +72,7 @@ func run() error {
 		Amount:             decimal.RequireFromString("500.00"),
 		IdempotencyKey:     fmt.Sprintf("deposit:1001:%d", time.Now().UnixNano()),
 		ChannelName:        "evm",
-		Metadata:           map[string]any{"chain": "ethereum"},
+		Metadata:           map[string]string{"chain": "ethereum"},
 	})
 	if err != nil {
 		return fmt.Errorf("create booking: %w", err)

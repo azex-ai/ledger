@@ -21,18 +21,18 @@ type Event struct {
 	// JournalID is nullable: NULL means the event has not (yet) caused a journal
 	// posting. Sentinel 0 cannot be used because Postgres enforces an FK on this
 	// column to journals(id).
-	JournalID          *int64          `json:"journal_id,omitempty"`
-	Metadata           map[string]any  `json:"metadata"`
-	OccurredAt         time.Time       `json:"occurred_at"`
+	JournalID  *int64            `json:"journal_id,omitempty"`
+	Metadata   map[string]string `json:"metadata"`
+	OccurredAt time.Time         `json:"occurred_at"`
 	// ActorID is the user or system actor that triggered this transition.
 	// 0 means unknown / system-initiated.
-	ActorID            int64           `json:"actor_id"`
+	ActorID int64 `json:"actor_id"`
 	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
 	// Empty string means unset.
-	Source             string          `json:"source"`
-	Attempts           int32           `json:"-"`
-	MaxAttempts        int32           `json:"-"`
-	NextAttemptAt      time.Time       `json:"-"`
+	Source        string    `json:"source"`
+	Attempts      int32     `json:"-"`
+	MaxAttempts   int32     `json:"-"`
+	NextAttemptAt time.Time `json:"-"`
 }
 
 // EventFilter is the filter for listing events.

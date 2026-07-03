@@ -301,7 +301,7 @@ func bookingFromRow(row sqlcgen.Booking) *core.Booking {
 		ReservationID:    int8ToInt64Ptr(row.ReservationID),
 		JournalID:        int8ToInt64Ptr(row.JournalID),
 		IdempotencyKey:   row.IdempotencyKey,
-		Metadata:         jsonToAnyMetadata(row.Metadata),
+		Metadata:         jsonToStringMetadata(row.Metadata),
 		ExpiresAt:        row.ExpiresAt,
 		CreatedAt:        row.CreatedAt,
 		UpdatedAt:        row.UpdatedAt,
@@ -320,7 +320,7 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 		Amount:             mustNumericToDecimal(row.Amount),
 		SettledAmount:      mustNumericToDecimal(row.SettledAmount),
 		JournalID:          int8ToInt64Ptr(row.JournalID),
-		Metadata:           jsonToAnyMetadata(row.Metadata),
+		Metadata:           jsonToStringMetadata(row.Metadata),
 		OccurredAt:         row.OccurredAt,
 		ActorID:            row.ActorID,
 		Source:             row.Source,
@@ -345,18 +345,33 @@ func accountPolicyFromRow(row sqlcgen.AccountPolicy) *core.AccountPolicy {
 	}
 }
 
-func jsonToAnyMetadata(b []byte) map[string]any {
+// jsonToStringMetadata reads a JSONB metadata blob into the canonical
+// map[string]string form. Rows written before the v0.3 metadata unification
+// may carry non-string values (numbers, bools, nested objects) — those are
+// rendered to their compact JSON text rather than dropped, so old data stays
+// readable without a data migration.
+func jsonToStringMetadata(b []byte) map[string]string {
 	if len(b) == 0 {
 		return nil
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		slog.Warn("postgres: jsonToAnyMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		slog.Warn("postgres: jsonToStringMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
+		return nil
+	}
+	m := make(map[string]string, len(raw))
+	for k, v := range raw {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			m[k] = s
+			continue
+		}
+		m[k] = string(v)
 	}
 	return m
 }
 
-func anyMetadataToJSON(m map[string]any) []byte {
+func stringMetadataToJSON(m map[string]string) []byte {
 	if m == nil {
 		return []byte("{}")
 	}

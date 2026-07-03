@@ -127,7 +127,7 @@ func TestEVMAdapter_ParseCallback(t *testing.T) {
 		assert.Equal(t, "0xabc123", payload.ChannelRef)
 		assert.Equal(t, "confirmed", payload.Status)
 		assert.True(t, decimal.NewFromFloat(1.5).Equal(payload.ActualAmount))
-		assert.Equal(t, 12, payload.Metadata["confirmations"])
+		assert.Equal(t, "12", payload.Metadata["confirmations"])
 		assert.Equal(t, "0xabc123", payload.Metadata["tx_hash"])
 	})
 

@@ -15,56 +15,56 @@ import (
 // --- JSON request/response types ---
 
 type createBookingRequest struct {
-	ClassificationCode string         `json:"classification_code"`
-	AccountHolder      int64          `json:"account_holder"`
-	CurrencyID         int64          `json:"currency_id"`
-	Amount             string         `json:"amount"`
-	IdempotencyKey     string         `json:"idempotency_key"`
-	ChannelName        string         `json:"channel_name"`
-	Metadata           map[string]any `json:"metadata"`
-	ExpiresAt          string         `json:"expires_at"`
+	ClassificationCode string            `json:"classification_code"`
+	AccountHolder      int64             `json:"account_holder"`
+	CurrencyID         int64             `json:"currency_id"`
+	Amount             string            `json:"amount"`
+	IdempotencyKey     string            `json:"idempotency_key"`
+	ChannelName        string            `json:"channel_name"`
+	Metadata           map[string]string `json:"metadata"`
+	ExpiresAt          string            `json:"expires_at"`
 }
 
 type transitionRequest struct {
-	ToStatus   string         `json:"to_status"`
-	ChannelRef string         `json:"channel_ref"`
-	Amount     string         `json:"amount"`
-	Metadata   map[string]any `json:"metadata"`
-	ActorID    int64          `json:"actor_id"`
+	ToStatus   string            `json:"to_status"`
+	ChannelRef string            `json:"channel_ref"`
+	Amount     string            `json:"amount"`
+	Metadata   map[string]string `json:"metadata"`
+	ActorID    int64             `json:"actor_id"`
 }
 
 type bookingResponse struct {
-	ID               int64          `json:"id"`
-	ClassificationID int64          `json:"classification_id"`
-	AccountHolder    int64          `json:"account_holder"`
-	CurrencyID       int64          `json:"currency_id"`
-	Amount           string         `json:"amount"`
-	SettledAmount    string         `json:"settled_amount"`
-	Status           string         `json:"status"`
-	ChannelName      string         `json:"channel_name"`
-	ChannelRef       string         `json:"channel_ref"`
-	ReservationID    *int64         `json:"reservation_id,omitempty"`
-	JournalID        *int64         `json:"journal_id,omitempty"`
-	IdempotencyKey   string         `json:"idempotency_key"`
-	Metadata         map[string]any `json:"metadata"`
-	ExpiresAt        string         `json:"expires_at"`
-	CreatedAt        string         `json:"created_at"`
-	UpdatedAt        string         `json:"updated_at"`
+	ID               int64             `json:"id"`
+	ClassificationID int64             `json:"classification_id"`
+	AccountHolder    int64             `json:"account_holder"`
+	CurrencyID       int64             `json:"currency_id"`
+	Amount           string            `json:"amount"`
+	SettledAmount    string            `json:"settled_amount"`
+	Status           string            `json:"status"`
+	ChannelName      string            `json:"channel_name"`
+	ChannelRef       string            `json:"channel_ref"`
+	ReservationID    *int64            `json:"reservation_id,omitempty"`
+	JournalID        *int64            `json:"journal_id,omitempty"`
+	IdempotencyKey   string            `json:"idempotency_key"`
+	Metadata         map[string]string `json:"metadata"`
+	ExpiresAt        string            `json:"expires_at"`
+	CreatedAt        string            `json:"created_at"`
+	UpdatedAt        string            `json:"updated_at"`
 }
 
 type eventResponse struct {
-	ID                 int64          `json:"id"`
-	ClassificationCode string         `json:"classification_code"`
-	BookingID          int64          `json:"booking_id"`
-	AccountHolder      int64          `json:"account_holder"`
-	CurrencyID         int64          `json:"currency_id"`
-	FromStatus         string         `json:"from_status"`
-	ToStatus           string         `json:"to_status"`
-	Amount             string         `json:"amount"`
-	SettledAmount      string         `json:"settled_amount"`
-	JournalID          *int64         `json:"journal_id,omitempty"`
-	Metadata           map[string]any `json:"metadata"`
-	OccurredAt         string         `json:"occurred_at"`
+	ID                 int64             `json:"id"`
+	ClassificationCode string            `json:"classification_code"`
+	BookingID          int64             `json:"booking_id"`
+	AccountHolder      int64             `json:"account_holder"`
+	CurrencyID         int64             `json:"currency_id"`
+	FromStatus         string            `json:"from_status"`
+	ToStatus           string            `json:"to_status"`
+	Amount             string            `json:"amount"`
+	SettledAmount      string            `json:"settled_amount"`
+	JournalID          *int64            `json:"journal_id,omitempty"`
+	Metadata           map[string]string `json:"metadata"`
+	OccurredAt         string            `json:"occurred_at"`
 }
 
 // --- Conversion helpers ---

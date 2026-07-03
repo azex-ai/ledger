@@ -12,7 +12,7 @@ type CallbackPayload struct {
 	ChannelRef   string
 	Status       string
 	ActualAmount decimal.Decimal
-	Metadata     map[string]any
+	Metadata     map[string]string
 }
 
 // Adapter parses and verifies inbound webhook callbacks from external channels.

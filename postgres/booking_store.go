@@ -119,7 +119,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		Status:           string(lifecycle.Initial),
 		ChannelName:      input.ChannelName,
 		IdempotencyKey:   input.IdempotencyKey,
-		Metadata:         anyMetadataToJSON(input.Metadata),
+		Metadata:         stringMetadataToJSON(input.Metadata),
 		ExpiresAt:        input.ExpiresAt,
 	})
 	if err != nil {
@@ -236,9 +236,9 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 	}
 
 	// Merge metadata
-	metadata := jsonToAnyMetadata(op.Metadata)
+	metadata := jsonToStringMetadata(op.Metadata)
 	if metadata == nil {
-		metadata = make(map[string]any)
+		metadata = make(map[string]string)
 	}
 	maps.Copy(metadata, input.Metadata)
 
@@ -263,7 +263,7 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		ChannelRef:    channelRef,
 		SettledAmount: decimalToNumeric(settledAmount),
 		JournalID:     op.JournalID,
-		Metadata:      anyMetadataToJSON(metadata),
+		Metadata:      stringMetadataToJSON(metadata),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: transition: update", err)
@@ -281,7 +281,7 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		Amount:             op.Amount,
 		SettledAmount:      decimalToNumeric(settledAmount),
 		JournalID:          pgtype.Int8{Valid: false},
-		Metadata:           anyMetadataToJSON(metadata),
+		Metadata:           stringMetadataToJSON(metadata),
 		OccurredAt:         time.Now(),
 		ActorID:            input.ActorID,
 		Source:             input.Source,

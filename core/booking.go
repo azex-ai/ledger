@@ -22,25 +22,25 @@ type Booking struct {
 	// ReservationID and JournalID are nullable: NULL means "no reservation /
 	// journal linked yet". Sentinel 0 cannot be used because Postgres needs a
 	// real NULL to skip FK enforcement.
-	ReservationID    *int64          `json:"reservation_id,omitempty"`
-	JournalID        *int64          `json:"journal_id,omitempty"`
-	IdempotencyKey   string          `json:"idempotency_key"`
-	Metadata         map[string]any  `json:"metadata"`
-	ExpiresAt        time.Time       `json:"expires_at"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	ReservationID  *int64            `json:"reservation_id,omitempty"`
+	JournalID      *int64            `json:"journal_id,omitempty"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	Metadata       map[string]string `json:"metadata"`
+	ExpiresAt      time.Time         `json:"expires_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
 // CreateBookingInput is the input to create a new booking.
 type CreateBookingInput struct {
-	ClassificationCode string          `json:"classification_code"`
-	AccountHolder      int64           `json:"account_holder"`
-	CurrencyID         int64           `json:"currency_id"`
-	Amount             decimal.Decimal `json:"amount"`
-	IdempotencyKey     string          `json:"idempotency_key"`
-	ChannelName        string          `json:"channel_name"`
-	Metadata           map[string]any  `json:"metadata"`
-	ExpiresAt          time.Time       `json:"expires_at"`
+	ClassificationCode string            `json:"classification_code"`
+	AccountHolder      int64             `json:"account_holder"`
+	CurrencyID         int64             `json:"currency_id"`
+	Amount             decimal.Decimal   `json:"amount"`
+	IdempotencyKey     string            `json:"idempotency_key"`
+	ChannelName        string            `json:"channel_name"`
+	Metadata           map[string]string `json:"metadata"`
+	ExpiresAt          time.Time         `json:"expires_at"`
 }
 
 func (i CreateBookingInput) Validate() error {
@@ -73,9 +73,9 @@ type TransitionInput struct {
 	// where a transition actually triggers accounting — that is enforced by
 	// JournalInput.Validate at the point a journal is composed for the
 	// transition, not here.
-	Amount   decimal.Decimal `json:"amount"`
-	Metadata map[string]any  `json:"metadata"`
-	ActorID  int64           `json:"actor_id"`
+	Amount   decimal.Decimal   `json:"amount"`
+	Metadata map[string]string `json:"metadata"`
+	ActorID  int64             `json:"actor_id"`
 	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
 	Source string `json:"source"`
 }

@@ -91,8 +91,8 @@ func (a *EVMAdapter) ParseCallback(header http.Header, body []byte) (*channel.Ca
 		ChannelRef:   raw.TxHash,
 		Status:       raw.Status,
 		ActualAmount: amount,
-		Metadata: map[string]any{
-			"confirmations": raw.Confirmations,
+		Metadata: map[string]string{
+			"confirmations": strconv.Itoa(raw.Confirmations),
 			"tx_hash":       raw.TxHash,
 		},
 	}, nil
