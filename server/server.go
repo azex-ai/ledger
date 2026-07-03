@@ -219,6 +219,7 @@ func NewWithConfig(
 	r.Use(requestLoggerMiddleware)
 	r.Use(corsMiddleware(cfg))
 	r.Use(bodyLimitMiddleware(cfg.MaxBodyBytes))
+	r.Use(idempotencyHeaderAliasMiddleware)
 	r.Use(rateLimitMiddleware(s.rateLimiter))
 
 	if len(cfg.APIKeys) > 0 {

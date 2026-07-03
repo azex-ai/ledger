@@ -190,7 +190,7 @@ export interface Snapshot {
 }
 
 export interface PaginatedResponse<T> {
-  data: T[];
+  list: T[];
   next_cursor: string;
 }
 

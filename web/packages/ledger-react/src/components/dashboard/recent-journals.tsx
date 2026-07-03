@@ -26,7 +26,7 @@ export function RecentJournals({
   linkComponent: Link = DefaultLink,
 }: RecentJournalsProps = {}) {
   const { data, isLoading, isError } = useJournals(10);
-  const journals = data?.pages[0]?.data ?? [];
+  const journals = data?.pages[0]?.list ?? [];
 
   return (
     <Card>

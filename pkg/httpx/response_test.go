@@ -119,7 +119,7 @@ func TestOK(t *testing.T) {
 
 	var env successEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
-	assert.Equal(t, 0, env.Code)
+	assert.Equal(t, 200, env.Code)
 	assert.Equal(t, "ok", env.Message)
 
 	var data payload
@@ -145,7 +145,7 @@ func TestCreated(t *testing.T) {
 
 	var env successEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
-	assert.Equal(t, 0, env.Code)
+	assert.Equal(t, 200, env.Code)
 	assert.Equal(t, "created", env.Message)
 
 	var data payload

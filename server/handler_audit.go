@@ -111,10 +111,10 @@ func (s *Server) handleListAuditJournals(w http.ResponseWriter, r *http.Request)
 	}
 
 	resp := PagedResponse[journalResponse]{
-		Data: make([]journalResponse, len(journals)),
+		List: make([]journalResponse, len(journals)),
 	}
 	for i, j := range journals {
-		resp.Data[i] = toJournalResponse(&j)
+		resp.List[i] = toJournalResponse(&j)
 	}
 	if len(journals) == int(limit) {
 		resp.NextCursor = encodeCursor(journals[len(journals)-1].ID)

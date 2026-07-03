@@ -65,21 +65,25 @@ type Result[T any] struct {
 	Data    T      `json:"data"`
 }
 
-// ErrorBody is the unified error response envelope.
+// ErrorBody is the unified error response envelope. Data is always null on
+// errors — present so the outermost shape is {code, message, data} for every
+// response, success or failure (api-contract §1). Retryable is an additive
+// extension consumers may ignore.
 type ErrorBody struct {
 	Code      int    `json:"code"`
 	Message   string `json:"message"`
+	Data      any    `json:"data"`
 	Retryable bool   `json:"retryable"`
 }
 
 // OK writes a 200 success response.
 func OK[T any](w http.ResponseWriter, data T) {
-	writeJSON(w, http.StatusOK, Result[T]{Code: 0, Message: "ok", Data: data})
+	writeJSON(w, http.StatusOK, Result[T]{Code: 200, Message: "ok", Data: data})
 }
 
 // Created writes a 201 success response.
 func Created[T any](w http.ResponseWriter, data T) {
-	writeJSON(w, http.StatusCreated, Result[T]{Code: 0, Message: "created", Data: data})
+	writeJSON(w, http.StatusCreated, Result[T]{Code: 200, Message: "created", Data: data})
 }
 
 // Error resolves an error to a bizcode and writes the error response.

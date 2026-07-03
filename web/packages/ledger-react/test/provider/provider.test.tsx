@@ -17,7 +17,7 @@ describe("LedgerProvider", () => {
   test("(a) provides a working client that hits MSW", async () => {
     server.use(
       http.get(`${BASE}/api/v1/system/health`, () =>
-        HttpResponse.json({ code: 0, message: "ok", data: { status: "ok" } }),
+        HttpResponse.json({ code: 200, message: "ok", data: { status: "ok" } }),
       ),
     );
     const wrapper = ({ children }: { children: ReactNode }) => (

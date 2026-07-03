@@ -848,7 +848,7 @@ func TestListJournalsWithCursor(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	journals, ok := data["data"].([]any)
+	journals, ok := data["list"].([]any)
 	require.True(t, ok)
 	assert.Len(t, journals, 1)
 }
@@ -943,7 +943,7 @@ func TestListBookings(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	ops, ok := data["data"].([]any)
+	ops, ok := data["list"].([]any)
 	require.True(t, ok)
 	assert.Len(t, ops, 1)
 }
@@ -966,7 +966,7 @@ func TestListEvents(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	events, ok := data["data"].([]any)
+	events, ok := data["list"].([]any)
 	require.True(t, ok)
 	assert.Len(t, events, 1)
 }
@@ -1154,7 +1154,7 @@ func TestListEntriesByAccount(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	entries, ok := data["data"].([]any)
+	entries, ok := data["list"].([]any)
 	require.True(t, ok)
 	assert.Len(t, entries, 1)
 }
@@ -1433,7 +1433,7 @@ func TestAuditListJournals_ByAccount(t *testing.T) {
 	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?holder=100&currency_id=1", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	page := parseEnvelope(t, w.Body.Bytes())
-	arr, ok := page["data"].([]any)
+	arr, ok := page["list"].([]any)
 	require.True(t, ok)
 	assert.NotEmpty(t, arr)
 }
@@ -1600,4 +1600,48 @@ func TestBalanceTrends_InvalidTo(t *testing.T) {
 	srv := newTestServer()
 	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&from=2026-01-01T00:00:00Z&to=not-a-date", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- Idempotency-Key header alias (api-contract §9) ---
+
+func TestIdempotencyHeaderAlias_InjectsIntoBody(t *testing.T) {
+	captured := ""
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.journals = &mockJournalWriter{postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
+			captured = input.IdempotencyKey
+			return &core.Journal{ID: 1, IdempotencyKey: input.IdempotencyKey}, nil
+		}}
+	})
+	body := map[string]any{
+		"journal_type_id": 1,
+		"entries": []map[string]any{
+			{"account_holder": 1, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "5"},
+			{"account_holder": -1, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "5"},
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/journals", jsonBody(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "hdr-key-1")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	assert.Equal(t, "hdr-key-1", captured)
+}
+
+func TestIdempotencyHeaderAlias_MismatchRejected(t *testing.T) {
+	srv := newTestServer()
+	body := map[string]any{"idempotency_key": "body-key", "journal_type_id": 1}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/journals", jsonBody(t, body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "different-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func jsonBody(t *testing.T, v any) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, json.NewEncoder(&buf).Encode(v))
+	return &buf
 }

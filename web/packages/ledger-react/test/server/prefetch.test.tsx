@@ -53,9 +53,9 @@ describe("server prefetch round-trip", () => {
       http.get(`${BASE}/api/v1/journals`, () => {
         calls += 1;
         return HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
-          data: { data: [{ id: 1 }, { id: 2 }], next_cursor: "" },
+          data: { list: [{ id: 1 }, { id: 2 }], next_cursor: "" },
         });
       }),
     );
@@ -68,9 +68,9 @@ describe("server prefetch round-trip", () => {
 
     // Cache is populated under the SHARED key, in useInfiniteQuery shape.
     const cached = qc.getQueryData(ledgerKeys.journals(20)) as
-      | { pages: Array<{ data: Array<{ id: number }> }> }
+      | { pages: Array<{ list: Array<{ id: number }> }> }
       | undefined;
-    expect(cached?.pages[0].data).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(cached?.pages[0].list).toEqual([{ id: 1 }, { id: 2 }]);
     expect(calls).toBe(1);
 
     // Client hook hydrates immediately — success on first render, no refetch.
@@ -78,7 +78,7 @@ describe("server prefetch round-trip", () => {
       wrapper: wrapper(qc, client),
     });
     expect(result.current.isSuccess).toBe(true);
-    expect(result.current.data?.pages[0].data).toEqual([{ id: 1 }, { id: 2 }]);
+    expect(result.current.data?.pages[0].list).toEqual([{ id: 1 }, { id: 2 }]);
 
     // Give any (unwanted) background fetch a chance to fire, then assert none did.
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -91,7 +91,7 @@ describe("server prefetch round-trip", () => {
       http.get(`${BASE}/api/v1/balances/42`, () => {
         calls += 1;
         return HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
           data: [{ currency_id: 1, balance: "100" }],
         });
@@ -124,7 +124,7 @@ describe("server prefetch round-trip", () => {
       http.get(`${BASE}/api/v1/system/health`, () => {
         calls += 1;
         return HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
           data: { status: "healthy" },
         });

@@ -22,7 +22,7 @@ export function useDeposits(params: { holder?: number; status?: string }) {
         status: params.status,
         classification_id: classificationId,
       });
-      return page.data;
+      return page.list;
     },
     enabled: classificationId > 0,
   });

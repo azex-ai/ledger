@@ -910,7 +910,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: integer, example: 0 }
+        code: { type: integer, example: 200, description: "200 on success; business error code otherwise" }
         message: { type: string, example: "ok" }
 
     ErrorResponse:

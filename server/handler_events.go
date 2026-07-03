@@ -65,10 +65,10 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := PagedResponse[eventResponse]{
-		Data: make([]eventResponse, len(events)),
+		List: make([]eventResponse, len(events)),
 	}
 	for i, evt := range events {
-		resp.Data[i] = eventToResponse(&evt)
+		resp.List[i] = eventToResponse(&evt)
 	}
 	if len(events) == int(limit) {
 		resp.NextCursor = encodeCursor(events[len(events)-1].ID)

@@ -268,7 +268,7 @@ function TemplateJournalDialog() {
 
 export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPageProps = {}) {
   const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } = useJournals();
-  const journals = data?.pages.flatMap((p) => p.data) ?? [];
+  const journals = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
     <div className="space-y-6">

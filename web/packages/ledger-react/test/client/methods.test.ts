@@ -34,7 +34,7 @@ function intercept(
         body,
       };
       if (status === 204) return new HttpResponse(null, { status: 204 });
-      return HttpResponse.json({ code: 0, message: "ok", data: respond });
+      return HttpResponse.json({ code: 200, message: "ok", data: respond });
     }),
   );
   return { captured: () => captured };
@@ -55,7 +55,7 @@ describe("system", () => {
 
 describe("journals + entries", () => {
   test("listJournals encodes querystring", async () => {
-    const i = intercept("get", "/api/v1/journals", { data: [], next_cursor: "" });
+    const i = intercept("get", "/api/v1/journals", { list: [], next_cursor: "" });
     await client.listJournals({ cursor: "abc", limit: 10 });
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals?cursor=abc&limit=10`);
   });
@@ -110,7 +110,7 @@ describe("journals + entries", () => {
   });
 
   test("listEntries", async () => {
-    const i = intercept("get", "/api/v1/entries", { data: [], next_cursor: "" });
+    const i = intercept("get", "/api/v1/entries", { list: [], next_cursor: "" });
     await client.listEntries({ holder: 3, currency_id: 1 });
     expect(i.captured()?.url).toBe(
       `${BASE}/api/v1/entries?holder=3&currency_id=1`,
@@ -197,7 +197,7 @@ describe("bookings", () => {
     await client.getBooking(8);
     expect(g.captured()?.url).toBe(`${BASE}/api/v1/bookings/8`);
 
-    const l = intercept("get", "/api/v1/bookings", { data: [], next_cursor: "" });
+    const l = intercept("get", "/api/v1/bookings", { list: [], next_cursor: "" });
     await client.listBookings({ holder: 1, status: "pending" });
     expect(l.captured()?.url).toBe(
       `${BASE}/api/v1/bookings?holder=1&status=pending`,
@@ -211,7 +211,7 @@ describe("events", () => {
     await client.getEvent(2);
     expect(g.captured()?.url).toBe(`${BASE}/api/v1/events/2`);
 
-    const l = intercept("get", "/api/v1/events", { data: [], next_cursor: "" });
+    const l = intercept("get", "/api/v1/events", { list: [], next_cursor: "" });
     await client.listEvents({ classification_code: "deposit", limit: 5 });
     expect(l.captured()?.url).toBe(
       `${BASE}/api/v1/events?classification_code=deposit&limit=5`,

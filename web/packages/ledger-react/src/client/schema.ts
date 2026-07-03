@@ -1979,7 +1979,10 @@ export interface components {
          */
         Timestamp: string;
         Envelope: {
-            /** @example 0 */
+            /**
+             * @description 200 on success; business error code otherwise
+             * @example 200
+             */
             code: number;
             /** @example ok */
             message: string;

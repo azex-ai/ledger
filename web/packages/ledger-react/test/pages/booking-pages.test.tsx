@@ -39,7 +39,7 @@ describe("DepositsPage", () => {
   test("renders heading and a deposit row once the classification resolves", async () => {
     server.use(
       getOk("/api/v1/classifications", classifications()),
-      getOk("/api/v1/bookings", { data: [booking({ id: 7, status: "pending" })], next_cursor: "" }),
+      getOk("/api/v1/bookings", { list: [booking({ id: 7, status: "pending" })], next_cursor: "" }),
     );
     renderPage(<DepositsPage />);
     expect(screen.getByRole("heading", { name: "Deposits" })).toBeInTheDocument();
@@ -52,7 +52,7 @@ describe("WithdrawalsPage", () => {
   test("renders heading and a withdrawal row once the classification resolves", async () => {
     server.use(
       getOk("/api/v1/classifications", classifications()),
-      getOk("/api/v1/bookings", { data: [booking({ id: 9, status: "locked" })], next_cursor: "" }),
+      getOk("/api/v1/bookings", { list: [booking({ id: 9, status: "locked" })], next_cursor: "" }),
     );
     renderPage(<WithdrawalsPage />);
     expect(screen.getByRole("heading", { name: "Withdrawals" })).toBeInTheDocument();

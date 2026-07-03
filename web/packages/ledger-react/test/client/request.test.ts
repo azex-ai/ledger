@@ -10,7 +10,7 @@ describe("request core", () => {
     server.use(
       http.get(`${BASE}/api/v1/system/health`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
           data: {
             status: "healthy",

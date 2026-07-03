@@ -23,7 +23,7 @@ function journal(over: Partial<Record<string, unknown>> = {}) {
 describe("JournalsPage", () => {
   test("renders heading and a journal row linking to detail", async () => {
     server.use(
-      getOk("/api/v1/journals", { data: [journal({ id: 42 })], next_cursor: "" }),
+      getOk("/api/v1/journals", { list: [journal({ id: 42 })], next_cursor: "" }),
     );
     renderPage(<JournalsPage />);
     expect(screen.getByRole("heading", { name: "Journals" })).toBeInTheDocument();

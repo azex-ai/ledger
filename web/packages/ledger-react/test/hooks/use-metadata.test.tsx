@@ -26,7 +26,7 @@ describe("use-metadata", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/classifications`, () =>
-        HttpResponse.json({ code: 0, message: "ok", data: [] }),
+        HttpResponse.json({ code: 200, message: "ok", data: [] }),
       ),
     );
     const { result } = renderHook(() => useClassifications(true), {
@@ -44,7 +44,7 @@ describe("use-metadata", () => {
     server.use(
       http.get(`${BASE}/api/v1/currencies`, ({ request }) => {
         receivedActiveOnly = new URL(request.url).searchParams.get("active_only");
-        return HttpResponse.json({ code: 0, message: "ok", data: [] });
+        return HttpResponse.json({ code: 200, message: "ok", data: [] });
       }),
     );
     const { result } = renderHook(() => useCurrencies(true), {
@@ -62,7 +62,7 @@ describe("use-metadata", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/currencies/3/deactivate`, () =>
-        HttpResponse.json({ code: 0, message: "ok", data: null }),
+        HttpResponse.json({ code: 200, message: "ok", data: null }),
       ),
     );
     const { result } = renderHook(() => useDeactivateCurrency(), {

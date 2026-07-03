@@ -7,9 +7,10 @@ import (
 	"strconv"
 )
 
-// PagedResponse is a cursor-paginated list response.
+// PagedResponse is a cursor-paginated list response (api-contract §6): the
+// list field is named "list" and next_cursor is null/omitted when exhausted.
 type PagedResponse[T any] struct {
-	Data       []T    `json:"data"`
+	List       []T    `json:"list"`
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 

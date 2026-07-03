@@ -9,7 +9,7 @@ export const BASE = "http://ledger.test";
 
 /** Standard success envelope used by the ledger API. */
 export function ok<T>(data: T) {
-  return HttpResponse.json({ code: 0, message: "ok", data });
+  return HttpResponse.json({ code: 200, message: "ok", data });
 }
 
 /** A GET handler returning the success envelope for a fixed body. */

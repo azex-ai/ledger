@@ -660,7 +660,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: integer, enum: [0] }
+        code: { type: integer, enum: [200] }
         message: { type: string }
         data: {}
     StatusEnvelope:

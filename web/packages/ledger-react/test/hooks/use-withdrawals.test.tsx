@@ -26,16 +26,16 @@ describe("use-withdrawals", () => {
     server.use(
       http.get(`${BASE}/api/v1/classifications`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
           data: [{ id: 4, code: "withdraw", name: "Withdraw" }],
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
-          data: { data: [{ id: 2 }], next_cursor: "" },
+          data: { list: [{ id: 2 }], next_cursor: "" },
         }),
       ),
     );
@@ -57,7 +57,7 @@ describe("use-withdrawals", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/bookings/2/transition`, () =>
-        HttpResponse.json({ code: 0, message: "ok", data: { id: 10 } }),
+        HttpResponse.json({ code: 200, message: "ok", data: { id: 10 } }),
       ),
     );
     const { result } = renderHook(() => useReserveWithdraw(), {

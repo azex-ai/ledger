@@ -360,10 +360,10 @@ func (s *Server) handleListJournals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := PagedResponse[journalResponse]{
-		Data: make([]journalResponse, len(journals)),
+		List: make([]journalResponse, len(journals)),
 	}
 	for i, j := range journals {
-		resp.Data[i] = toJournalResponse(&j)
+		resp.List[i] = toJournalResponse(&j)
 	}
 	if len(journals) == int(limit) {
 		resp.NextCursor = encodeCursor(journals[len(journals)-1].ID)
@@ -399,10 +399,10 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := PagedResponse[entryResponse]{
-		Data: make([]entryResponse, len(entries)),
+		List: make([]entryResponse, len(entries)),
 	}
 	for i, e := range entries {
-		resp.Data[i] = toEntryResponse(&e)
+		resp.List[i] = toEntryResponse(&e)
 	}
 	if len(entries) == int(limit) {
 		resp.NextCursor = encodeCursor(entries[len(entries)-1].ID)

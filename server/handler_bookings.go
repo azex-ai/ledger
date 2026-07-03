@@ -255,10 +255,10 @@ func (s *Server) handleListBookings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := PagedResponse[bookingResponse]{
-		Data: make([]bookingResponse, len(bookings)),
+		List: make([]bookingResponse, len(bookings)),
 	}
 	for i, op := range bookings {
-		resp.Data[i] = bookingToResponse(&op)
+		resp.List[i] = bookingToResponse(&op)
 	}
 	if len(bookings) == int(limit) {
 		resp.NextCursor = encodeCursor(bookings[len(bookings)-1].ID)

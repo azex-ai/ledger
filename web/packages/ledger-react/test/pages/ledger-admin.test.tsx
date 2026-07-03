@@ -13,7 +13,7 @@ describe("LedgerAdmin", () => {
         active_reservations: 0,
       }),
       getOk("/api/v1/system/balances", []),
-      getOk("/api/v1/journals", { data: [], next_cursor: "" }),
+      getOk("/api/v1/journals", { list: [], next_cursor: "" }),
       getOk("/api/v1/reservations", []),
     );
     renderPage(<LedgerAdmin />);

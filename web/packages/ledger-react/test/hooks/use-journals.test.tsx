@@ -28,9 +28,9 @@ describe("use-journals", () => {
     server.use(
       http.get(`${BASE}/api/v1/journals`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
-          data: { data: [{ id: 1 }], next_cursor: "" },
+          data: { list: [{ id: 1 }], next_cursor: "" },
         }),
       ),
     );
@@ -38,7 +38,7 @@ describe("use-journals", () => {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.pages[0].data).toHaveLength(1);
+    expect(result.current.data?.pages[0].list).toHaveLength(1);
     expect(qc.getQueryCache().find({ queryKey: ["ledger", "journals", 20] })).toBeDefined();
   });
 
@@ -47,7 +47,7 @@ describe("use-journals", () => {
     server.use(
       http.get(`${BASE}/api/v1/journals/7`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
           data: { journal: { id: 7 }, entries: [] },
         }),
@@ -65,9 +65,9 @@ describe("use-journals", () => {
     server.use(
       http.get(`${BASE}/api/v1/entries`, () =>
         HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
-          data: { data: [], next_cursor: "" },
+          data: { list: [], next_cursor: "" },
         }),
       ),
     );
@@ -86,7 +86,7 @@ describe("use-journals", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/journals`, () =>
-        HttpResponse.json({ code: 0, message: "ok", data: { id: 9 } }),
+        HttpResponse.json({ code: 200, message: "ok", data: { id: 9 } }),
       ),
     );
     const { result } = renderHook(() => usePostJournal(), {
@@ -113,16 +113,16 @@ describe("use-journals", () => {
         if (!cursor) {
           // page 0
           return HttpResponse.json({
-            code: 0,
+            code: 200,
             message: "ok",
-            data: { data: [{ id: 1 }], next_cursor: "c1" },
+            data: { list: [{ id: 1 }], next_cursor: "c1" },
           });
         }
         // page 1 (cursor=c1) — last page, empty next_cursor stops pagination
         return HttpResponse.json({
-          code: 0,
+          code: 200,
           message: "ok",
-          data: { data: [{ id: 2 }], next_cursor: "" },
+          data: { list: [{ id: 2 }], next_cursor: "" },
         });
       }),
     );
@@ -142,7 +142,7 @@ describe("use-journals", () => {
     // cursor param → null); page 1 carries the cursor from page 0's next_cursor.
     expect(seenCursors).toEqual([null, "c1"]);
     // Both pages' data are present (appended, not replaced).
-    expect(result.current.data?.pages.flatMap((p) => p.data)).toEqual([
+    expect(result.current.data?.pages.flatMap((p) => p.list)).toEqual([
       { id: 1 },
       { id: 2 },
     ]);
