@@ -35,9 +35,9 @@ func (m *mockSystemRollupWriter) UpsertSystemRollup(_ context.Context, rollup co
 func TestSystemRollupService_MultipleAccounts(t *testing.T) {
 	agg := &mockCheckpointAggregator{
 		rollups: []core.SystemRollup{
-			{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(1000)},
-			{CurrencyID: 1, ClassificationID: 20, TotalBalance: decimal.NewFromInt(500)},
-			{CurrencyID: 2, ClassificationID: 10, TotalBalance: decimal.NewFromInt(200)},
+			{CurrencyUID: "cur-1", ClassificationUID: "cls-10", TotalBalance: decimal.NewFromInt(1000)},
+			{CurrencyUID: "cur-1", ClassificationUID: "cls-20", TotalBalance: decimal.NewFromInt(500)},
+			{CurrencyUID: "cur-2", ClassificationUID: "cls-10", TotalBalance: decimal.NewFromInt(200)},
 		},
 	}
 	writer := &mockSystemRollupWriter{}
@@ -57,7 +57,7 @@ func TestSystemRollupService_RefreshAfterUpdate(t *testing.T) {
 	// First call
 	agg := &mockCheckpointAggregator{
 		rollups: []core.SystemRollup{
-			{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(100)},
+			{CurrencyUID: "cur-1", ClassificationUID: "cls-10", TotalBalance: decimal.NewFromInt(100)},
 		},
 	}
 	writer := &mockSystemRollupWriter{}
@@ -70,7 +70,7 @@ func TestSystemRollupService_RefreshAfterUpdate(t *testing.T) {
 
 	// Second call with updated data
 	agg.rollups = []core.SystemRollup{
-		{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(300)},
+		{CurrencyUID: "cur-1", ClassificationUID: "cls-10", TotalBalance: decimal.NewFromInt(300)},
 	}
 	err = svc.RefreshSystemRollups(context.Background())
 	require.NoError(t, err)

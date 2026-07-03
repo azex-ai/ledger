@@ -22,15 +22,15 @@ type mockPlatformBalanceQuerier struct {
 	solvency  *core.SolvencyReport
 }
 
-func (m *mockPlatformBalanceQuerier) GetPlatformBalances(_ context.Context, _ int64) (*core.PlatformBalance, error) {
+func (m *mockPlatformBalanceQuerier) GetPlatformBalances(_ context.Context, _ string) (*core.PlatformBalance, error) {
 	return m.pb, nil
 }
 
-func (m *mockPlatformBalanceQuerier) GetTotalLiabilityByAsset(_ context.Context, _ int64) (decimal.Decimal, error) {
+func (m *mockPlatformBalanceQuerier) GetTotalLiabilityByAsset(_ context.Context, _ string) (decimal.Decimal, error) {
 	return m.liability, nil
 }
 
-func (m *mockPlatformBalanceQuerier) SolvencyCheck(_ context.Context, _ int64) (*core.SolvencyReport, error) {
+func (m *mockPlatformBalanceQuerier) SolvencyCheck(_ context.Context, _ string) (*core.SolvencyReport, error) {
 	return m.solvency, nil
 }
 
@@ -55,19 +55,19 @@ func newTestSvc() *service.SystemRollupService {
 // --- Unit tests: service delegation without a querier ---
 
 func TestSystemRollupService_GetPlatformBalances_NoQuerier(t *testing.T) {
-	_, err := newTestSvc().GetPlatformBalances(context.Background(), 1)
+	_, err := newTestSvc().GetPlatformBalances(context.Background(), "cur-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "platform balance querier not configured")
 }
 
 func TestSystemRollupService_GetTotalLiabilityByAsset_NoQuerier(t *testing.T) {
-	_, err := newTestSvc().GetTotalLiabilityByAsset(context.Background(), 1)
+	_, err := newTestSvc().GetTotalLiabilityByAsset(context.Background(), "cur-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "platform balance querier not configured")
 }
 
 func TestSystemRollupService_SolvencyCheck_NoQuerier(t *testing.T) {
-	_, err := newTestSvc().SolvencyCheck(context.Background(), 1)
+	_, err := newTestSvc().SolvencyCheck(context.Background(), "cur-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "platform balance querier not configured")
 }
@@ -76,14 +76,14 @@ func TestSystemRollupService_SolvencyCheck_NoQuerier(t *testing.T) {
 
 func TestSystemRollupService_GetPlatformBalances_WithQuerier(t *testing.T) {
 	expected := &core.PlatformBalance{
-		CurrencyID: 1,
-		UserSide:   map[string]decimal.Decimal{"main_wallet": decimal.NewFromInt(5000)},
-		SystemSide: map[string]decimal.Decimal{"custodial": decimal.NewFromInt(5000)},
+		CurrencyUID: "cur-1",
+		UserSide:    map[string]decimal.Decimal{"main_wallet": decimal.NewFromInt(5000)},
+		SystemSide:  map[string]decimal.Decimal{"custodial": decimal.NewFromInt(5000)},
 	}
 	svc := newTestSvc().WithPlatformBalanceQuerier(&mockPlatformBalanceQuerier{pb: expected})
-	got, err := svc.GetPlatformBalances(context.Background(), 1)
+	got, err := svc.GetPlatformBalances(context.Background(), "cur-1")
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), got.CurrencyID)
+	assert.Equal(t, "cur-1", got.CurrencyUID)
 	assert.True(t, got.UserSide["main_wallet"].Equal(decimal.NewFromInt(5000)))
 	assert.True(t, got.SystemSide["custodial"].Equal(decimal.NewFromInt(5000)))
 }
@@ -92,21 +92,21 @@ func TestSystemRollupService_GetTotalLiabilityByAsset_WithQuerier(t *testing.T) 
 	svc := newTestSvc().WithPlatformBalanceQuerier(&mockPlatformBalanceQuerier{
 		liability: decimal.NewFromInt(12345),
 	})
-	got, err := svc.GetTotalLiabilityByAsset(context.Background(), 1)
+	got, err := svc.GetTotalLiabilityByAsset(context.Background(), "cur-1")
 	require.NoError(t, err)
 	assert.True(t, got.Equal(decimal.NewFromInt(12345)))
 }
 
 func TestSystemRollupService_SolvencyCheck_Solvent(t *testing.T) {
 	report := &core.SolvencyReport{
-		CurrencyID: 1,
-		Liability:  decimal.NewFromInt(1000),
-		Custodial:  decimal.NewFromInt(1200),
-		Solvent:    true,
-		Margin:     decimal.NewFromInt(200),
+		CurrencyUID: "cur-1",
+		Liability:   decimal.NewFromInt(1000),
+		Custodial:   decimal.NewFromInt(1200),
+		Solvent:     true,
+		Margin:      decimal.NewFromInt(200),
 	}
 	svc := newTestSvc().WithPlatformBalanceQuerier(&mockPlatformBalanceQuerier{solvency: report})
-	got, err := svc.SolvencyCheck(context.Background(), 1)
+	got, err := svc.SolvencyCheck(context.Background(), "cur-1")
 	require.NoError(t, err)
 	assert.True(t, got.Solvent)
 	assert.True(t, got.Margin.Equal(decimal.NewFromInt(200)))
@@ -114,14 +114,14 @@ func TestSystemRollupService_SolvencyCheck_Solvent(t *testing.T) {
 
 func TestSystemRollupService_SolvencyCheck_Insolvent(t *testing.T) {
 	report := &core.SolvencyReport{
-		CurrencyID: 1,
-		Liability:  decimal.NewFromInt(2000),
-		Custodial:  decimal.NewFromInt(1500),
-		Solvent:    false,
-		Margin:     decimal.NewFromInt(-500),
+		CurrencyUID: "cur-1",
+		Liability:   decimal.NewFromInt(2000),
+		Custodial:   decimal.NewFromInt(1500),
+		Solvent:     false,
+		Margin:      decimal.NewFromInt(-500),
 	}
 	svc := newTestSvc().WithPlatformBalanceQuerier(&mockPlatformBalanceQuerier{solvency: report})
-	got, err := svc.SolvencyCheck(context.Background(), 1)
+	got, err := svc.SolvencyCheck(context.Background(), "cur-1")
 	require.NoError(t, err)
 	assert.False(t, got.Solvent)
 	assert.True(t, got.Margin.IsNegative())
@@ -164,11 +164,11 @@ func TestPlatformBalanceStore_GetPlatformBalances(t *testing.T) {
 
 	// Post a journal: user DR 500 / system CR 500
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtType.ID,
+		JournalTypeUID: jtType.UID,
 		IdempotencyKey: postgrestest.UniqueKey("pb-j1"),
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: sysID, CurrencyID: usdt.ID, ClassificationID: custodialClass.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sysID, CurrencyUID: usdt.UID, ClassificationUID: custodialClass.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 		Source: "test",
 	})
@@ -176,19 +176,19 @@ func TestPlatformBalanceStore_GetPlatformBalances(t *testing.T) {
 
 	// Seed balance_checkpoints (rollup worker normally materialises these)
 	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 1, now()) ON CONFLICT DO NOTHING",
-		userID, usdt.ID, mainWallet.ID, "500",
+		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, (SELECT id FROM currencies WHERE uid=$2::uuid), (SELECT id FROM classifications WHERE uid=$3::uuid), $4, 1, now()) ON CONFLICT DO NOTHING",
+		userID, usdt.UID, mainWallet.UID, "500",
 	)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx,
-		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, $2, $3, $4, 2, now()) ON CONFLICT DO NOTHING",
-		sysID, usdt.ID, custodialClass.ID, "500",
+		"INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at) VALUES ($1, (SELECT id FROM currencies WHERE uid=$2::uuid), (SELECT id FROM classifications WHERE uid=$3::uuid), $4, 2, now()) ON CONFLICT DO NOTHING",
+		sysID, usdt.UID, custodialClass.UID, "500",
 	)
 	require.NoError(t, err)
 
-	pb, err := pbStore.GetPlatformBalances(ctx, usdt.ID)
+	pb, err := pbStore.GetPlatformBalances(ctx, usdt.UID)
 	require.NoError(t, err)
-	assert.Equal(t, usdt.ID, pb.CurrencyID)
+	assert.Equal(t, usdt.UID, pb.CurrencyUID)
 	assert.True(t, pb.UserSide["main_wallet_pb1"].Equal(decimal.NewFromInt(500)),
 		"user side main_wallet_pb1: got %s", pb.UserSide["main_wallet_pb1"])
 	assert.True(t, pb.SystemSide["custodial_pb1"].Equal(decimal.NewFromInt(500)),
@@ -226,7 +226,7 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Edge case: zero liability when no journals exist
-	total, err := pbStore.GetTotalLiabilityByAsset(ctx, usdt.ID)
+	total, err := pbStore.GetTotalLiabilityByAsset(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, total.IsZero(), "expected zero with no data, got %s", total)
 
@@ -236,28 +236,28 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 	sys := core.SystemAccountHolder(user)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("lb1-deposit-mw"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(300)},
-			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(300)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(300)},
+			{AccountHolder: user, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(300)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("lb1-deposit-locked"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: locked.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: user, CurrencyUID: usdt.UID, ClassificationUID: locked.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
-	total, err = pbStore.GetTotalLiabilityByAsset(ctx, usdt.ID)
+	total, err = pbStore.GetTotalLiabilityByAsset(ctx, usdt.UID)
 	require.NoError(t, err)
 	// Only user-side: 300 + 100 = 400. System custodial (400) is excluded.
 	assert.True(t, total.Equal(decimal.NewFromInt(400)),
@@ -310,28 +310,28 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("sc1-deposit"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(800)},
-			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(800)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(800)},
+			{AccountHolder: user, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(800)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("sc1-house-topup"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: founders.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: founders.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
-	report, err := pbStore.SolvencyCheck(ctx, usdt.ID)
+	report, err := pbStore.SolvencyCheck(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, report.Solvent, "expected solvent when custodial >= liability: %+v", report)
 	assert.True(t, report.Liability.Equal(decimal.NewFromInt(800)), "liability: %s", report.Liability)
@@ -341,17 +341,17 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	// Move 500 of custodial out to hot_wallet (still on books, just not in
 	// "custodial" classification). custodial drops to 500 → insolvent, margin -300.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  xferType.ID,
+		JournalTypeUID: xferType.UID,
 		IdempotencyKey: postgrestest.UniqueKey("sc1-xfer-out"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: hotWallet.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: hotWallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
-	report, err = pbStore.SolvencyCheck(ctx, usdt.ID)
+	report, err = pbStore.SolvencyCheck(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.False(t, report.Solvent, "expected insolvent when custodial < liability: %+v", report)
 	assert.True(t, report.Margin.IsNegative(), "margin should be negative: %s", report.Margin)

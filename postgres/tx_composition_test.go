@@ -38,16 +38,16 @@ func TestTxComposition_Rollback(t *testing.T) {
 
 	// Post a journal inside the caller's transaction.
 	j, err := txStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: idemKey,
 		Entries: []core.EntryInput{
-			{AccountHolder: 10, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -10, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 10, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -10, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 		Source: "txcomp-test",
 	})
 	require.NoError(t, err)
-	assert.True(t, j.ID > 0, "journal should have a positive ID within the open tx")
+	assert.NotEmpty(t, j.UID, "journal should have a positive ID within the open tx")
 
 	// Roll back — the journal must disappear.
 	require.NoError(t, tx.Rollback(ctx))
@@ -88,16 +88,16 @@ func TestTxComposition_Commit(t *testing.T) {
 	txStore := postgres.NewLedgerStore(pool).WithDB(tx)
 
 	j, err := txStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: idemKey,
 		Entries: []core.EntryInput{
-			{AccountHolder: 20, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: amount},
-			{AccountHolder: -20, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: amount},
+			{AccountHolder: 20, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: amount},
+			{AccountHolder: -20, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: amount},
 		},
 		Source: "txcomp-test",
 	})
 	require.NoError(t, err)
-	assert.True(t, j.ID > 0)
+	assert.NotEmpty(t, j.UID)
 	assert.True(t, j.TotalDebit.Equal(amount))
 
 	// Commit — the journal must be durable.
@@ -138,11 +138,11 @@ func TestTxComposition_RunInTx(t *testing.T) {
 
 	buildInput := func(key string) core.JournalInput {
 		return core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: key,
 			Entries: []core.EntryInput{
-				{AccountHolder: 30, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: amount},
-				{AccountHolder: -30, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: 30, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: -30, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: amount},
 			},
 			Source: "runtx-test",
 		}
@@ -206,12 +206,12 @@ func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 	clsCustodial := postgrestest.SeedClassification(t, pool, "booking-link-custodial", "Booking Link Custodial", "credit", true)
 
 	_, err = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
-		Code:          "booking_link_confirm",
-		Name:          "Booking Link Confirm",
-		JournalTypeID: jtID,
+		Code:           "booking_link_confirm",
+		Name:           "Booking Link Confirm",
+		JournalTypeUID: jtID,
 		Lines: []core.TemplateLineInput{
-			{ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
-			{ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+			{ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	})
 	require.NoError(t, err)
@@ -219,33 +219,33 @@ func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 	booking, err := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: clsBooking.Code,
 		AccountHolder:      80,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(125),
 		IdempotencyKey:     postgrestest.UniqueKey("booking-link-create"),
 		ChannelName:        "manual",
 	})
 	require.NoError(t, err)
 
-	var eventID int64
-	var journalID int64
+	var eventUID string
+	var journalUID string
 	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
 		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
-			BookingID: booking.ID,
-			ToStatus:  "confirmed",
-			Amount:    decimal.NewFromInt(125),
-			ActorID:   80,
-			Source:    "tx-test",
+			BookingUID: booking.UID,
+			ToStatus:   "confirmed",
+			Amount:     decimal.NewFromInt(125),
+			ActorID:    80,
+			Source:     "tx-test",
 		})
 		if err != nil {
 			return err
 		}
-		eventID = evt.ID
+		eventUID = evt.UID
 
 		j, err := txSvc.JournalWriter().ExecuteTemplate(ctx, "booking_link_confirm", core.TemplateParams{
 			HolderID:       80,
-			CurrencyID:     curID,
+			CurrencyUID:    curID,
 			IdempotencyKey: postgrestest.UniqueKey("booking-link-journal"),
-			EventID:        evt.ID,
+			EventUID:       evt.UID,
 			Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(125)},
 			ActorID:        80,
 			Source:         "tx-test",
@@ -253,20 +253,20 @@ func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		journalID = j.ID
+		journalUID = j.UID
 		return nil
 	})
 	require.NoError(t, err)
-	require.NotZero(t, eventID)
-	require.NotZero(t, journalID)
+	require.NotEmpty(t, eventUID)
+	require.NotEmpty(t, journalUID)
 
-	trace, err := svc.Audit().TraceBooking(ctx, booking.ID)
+	trace, err := svc.Audit().TraceBooking(ctx, booking.UID)
 	require.NoError(t, err)
 	require.Len(t, trace.Events, 1)
 	require.Len(t, trace.Journals, 1)
-	require.NotNil(t, trace.Booking.JournalID)
-	require.NotNil(t, trace.Events[0].JournalID)
-	assert.Equal(t, journalID, *trace.Booking.JournalID)
-	assert.Equal(t, journalID, *trace.Events[0].JournalID)
-	assert.Equal(t, journalID, trace.Journals[0].ID)
+	require.NotNil(t, trace.Booking.JournalUID)
+	require.NotNil(t, trace.Events[0].JournalUID)
+	assert.Equal(t, journalUID, trace.Booking.JournalUID)
+	assert.Equal(t, journalUID, trace.Events[0].JournalUID)
+	assert.Equal(t, journalUID, trace.Journals[0].UID)
 }

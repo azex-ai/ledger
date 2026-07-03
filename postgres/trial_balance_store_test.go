@@ -28,11 +28,11 @@ func TestTrialBalanceStore_Balanced(t *testing.T) {
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("trial-balance-1"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
 		},
 	})
 	require.NoError(t, err)
@@ -46,7 +46,7 @@ func TestTrialBalanceStore_Balanced(t *testing.T) {
 
 	var walletRow, custodialRow *core.TrialBalanceRow
 	for i := range report.Rows {
-		switch report.Rows[i].ClassificationID {
+		switch report.Rows[i].ClassificationUID {
 		case clsWallet:
 			walletRow = &report.Rows[i]
 		case clsCustodial:
@@ -76,12 +76,12 @@ func TestTrialBalanceStore_AsOf_UsesEffectiveAt(t *testing.T) {
 
 	backdated := time.Now().AddDate(0, 0, -10)
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("trial-balance-asof"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(40)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(40)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(40)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(40)},
 		},
 	})
 	require.NoError(t, err)

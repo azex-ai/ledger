@@ -32,17 +32,17 @@ type RollupQueueItem struct {
 
 // BalanceSnapshot stores a historical daily balance.
 type BalanceSnapshot struct {
-	AccountHolder    int64           `json:"account_holder"`
-	CurrencyID       int64           `json:"currency_id"`
-	ClassificationID int64           `json:"classification_id"`
-	SnapshotDate     time.Time       `json:"snapshot_date"`
-	Balance          decimal.Decimal `json:"balance"`
+	AccountHolder     int64           `json:"account_holder"`
+	CurrencyUID       string          `json:"currency_uid"`
+	ClassificationUID string          `json:"classification_uid"`
+	SnapshotDate      time.Time       `json:"snapshot_date"`
+	Balance           decimal.Decimal `json:"balance"`
 }
 
 // SystemRollup stores aggregated system-wide balances.
 type SystemRollup struct {
-	CurrencyID       int64           `json:"currency_id"`
-	ClassificationID int64           `json:"classification_id"`
-	TotalBalance     decimal.Decimal `json:"total_balance"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+	CurrencyUID       string          `json:"currency_uid"`
+	ClassificationUID string          `json:"classification_uid"`
+	TotalBalance      decimal.Decimal `json:"total_balance"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }

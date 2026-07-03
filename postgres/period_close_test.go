@@ -50,12 +50,12 @@ func TestLedgerStore_PostJournal_PeriodClosed_Rejected(t *testing.T) {
 
 	// Rejected: effective_at is before the close line.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("period-closed-rejected"),
 		EffectiveAt:    closeBefore.AddDate(0, 0, -1),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 	})
 	require.Error(t, err)
@@ -63,11 +63,11 @@ func TestLedgerStore_PostJournal_PeriodClosed_Rejected(t *testing.T) {
 
 	// Accepted: effective_at is in the open period (now).
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("period-closed-accepted"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 	})
 	require.NoError(t, err)
@@ -94,12 +94,12 @@ func TestPeriodCloseStore_Reopen_LatestRowWins(t *testing.T) {
 	backdated := firstClose.AddDate(0, 0, -2)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("reopen-before"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 	})
 	require.Error(t, err)
@@ -116,12 +116,12 @@ func TestPeriodCloseStore_Reopen_LatestRowWins(t *testing.T) {
 
 	// Now the same effective_at succeeds.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("reopen-after"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 	})
 	require.NoError(t, err)
@@ -148,12 +148,12 @@ func TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod(t *tes
 
 	backdated := time.Now().Truncate(time.Microsecond).AddDate(0, 0, -10)
 	original, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("close-then-reverse-original"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(30)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(30)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(30)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(30)},
 		},
 	})
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod(t *tes
 
 	// The reversal's effective_at defaults to now (open period) so it must
 	// succeed even though `original`'s effective_at is now behind the close line.
-	reversal, err := ledgerStore.ReverseJournal(ctx, original.ID, "correction after close")
+	reversal, err := ledgerStore.ReverseJournal(ctx, original.UID, "correction after close")
 	require.NoError(t, err)
 	assert.True(t, reversal.EffectiveAt.After(original.EffectiveAt))
 }

@@ -13,7 +13,7 @@ import (
 )
 
 const getBooking = `-- name: GetBooking :one
-SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings WHERE id = $1
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings WHERE id = $1
 `
 
 func (q *Queries) GetBooking(ctx context.Context, id int64) (Booking, error) {
@@ -36,12 +36,13 @@ func (q *Queries) GetBooking(ctx context.Context, id int64) (Booking, error) {
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getBookingByIdempotencyKey = `-- name: GetBookingByIdempotencyKey :one
-SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings WHERE idempotency_key = $1
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetBookingByIdempotencyKey(ctx context.Context, idempotencyKey string) (Booking, error) {
@@ -64,12 +65,42 @@ func (q *Queries) GetBookingByIdempotencyKey(ctx context.Context, idempotencyKey
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
+	)
+	return i, err
+}
+
+const getBookingByUID = `-- name: GetBookingByUID :one
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings WHERE uid = $1
+`
+
+func (q *Queries) GetBookingByUID(ctx context.Context, uid pgtype.UUID) (Booking, error) {
+	row := q.db.QueryRow(ctx, getBookingByUID, uid)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.Status,
+		&i.ChannelName,
+		&i.ChannelRef,
+		&i.ReservationID,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.Metadata,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getBookingForUpdate = `-- name: GetBookingForUpdate :one
-SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings WHERE id = $1 FOR UPDATE
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) GetBookingForUpdate(ctx context.Context, id int64) (Booking, error) {
@@ -92,16 +123,57 @@ func (q *Queries) GetBookingForUpdate(ctx context.Context, id int64) (Booking, e
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
+}
+
+const getBookingForUpdateByUID = `-- name: GetBookingForUpdateByUID :one
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings WHERE uid = $1 FOR UPDATE
+`
+
+func (q *Queries) GetBookingForUpdateByUID(ctx context.Context, uid pgtype.UUID) (Booking, error) {
+	row := q.db.QueryRow(ctx, getBookingForUpdateByUID, uid)
+	var i Booking
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.Status,
+		&i.ChannelName,
+		&i.ChannelRef,
+		&i.ReservationID,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.Metadata,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Uid,
+	)
+	return i, err
+}
+
+const getBookingUIDByID = `-- name: GetBookingUIDByID :one
+SELECT uid FROM bookings WHERE id = $1
+`
+
+func (q *Queries) GetBookingUIDByID(ctx context.Context, id int64) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getBookingUIDByID, id)
+	var uid pgtype.UUID
+	err := row.Scan(&uid)
+	return uid, err
 }
 
 const insertBooking = `-- name: InsertBooking :one
 INSERT INTO bookings (
     classification_id, account_holder, currency_id, amount, status,
-    channel_name, idempotency_key, metadata, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+    channel_name, idempotency_key, metadata, expires_at, uid
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid
 `
 
 type InsertBookingParams struct {
@@ -114,6 +186,7 @@ type InsertBookingParams struct {
 	IdempotencyKey   string         `json:"idempotency_key"`
 	Metadata         []byte         `json:"metadata"`
 	ExpiresAt        time.Time      `json:"expires_at"`
+	Uid              pgtype.UUID    `json:"uid"`
 }
 
 func (q *Queries) InsertBooking(ctx context.Context, arg InsertBookingParams) (Booking, error) {
@@ -127,6 +200,7 @@ func (q *Queries) InsertBooking(ctx context.Context, arg InsertBookingParams) (B
 		arg.IdempotencyKey,
 		arg.Metadata,
 		arg.ExpiresAt,
+		arg.Uid,
 	)
 	var i Booking
 	err := row.Scan(
@@ -146,6 +220,7 @@ func (q *Queries) InsertBooking(ctx context.Context, arg InsertBookingParams) (B
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -155,7 +230,7 @@ UPDATE bookings
 SET journal_id = $2, updated_at = now()
 WHERE id = $1
   AND journal_id IS NULL
-RETURNING id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at
+RETURNING id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid
 `
 
 type LinkBookingJournalParams struct {
@@ -183,12 +258,13 @@ func (q *Queries) LinkBookingJournal(ctx context.Context, arg LinkBookingJournal
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const listBookingsByFilter = `-- name: ListBookingsByFilter :many
-SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at FROM bookings
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings
 WHERE (account_holder = $1 OR $1 = 0)
   AND (classification_id = $2 OR $2 = 0)
   AND (status = $3 OR $3 = '')
@@ -237,6 +313,7 @@ func (q *Queries) ListBookingsByFilter(ctx context.Context, arg ListBookingsByFi
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -249,7 +326,7 @@ func (q *Queries) ListBookingsByFilter(ctx context.Context, arg ListBookingsByFi
 }
 
 const listExpiredBookings = `-- name: ListExpiredBookings :many
-SELECT b.id, b.classification_id, b.account_holder, b.currency_id, b.amount, b.settled_amount, b.status, b.channel_name, b.channel_ref, b.reservation_id, b.journal_id, b.idempotency_key, b.metadata, b.expires_at, b.created_at, b.updated_at
+SELECT b.id, b.classification_id, b.account_holder, b.currency_id, b.amount, b.settled_amount, b.status, b.channel_name, b.channel_ref, b.reservation_id, b.journal_id, b.idempotency_key, b.metadata, b.expires_at, b.created_at, b.updated_at, b.uid
 FROM bookings b
 INNER JOIN classifications c ON c.id = b.classification_id
 WHERE b.expires_at != 'epoch'
@@ -285,6 +362,7 @@ func (q *Queries) ListExpiredBookings(ctx context.Context, limit int32) ([]Booki
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

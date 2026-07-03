@@ -34,7 +34,7 @@ func (m *mockSnapshotWriter) UpsertSnapshot(_ context.Context, snap core.Balance
 	return nil
 }
 
-func (m *mockSnapshotWriter) GetSnapshotBalances(_ context.Context, _, _ int64, _ time.Time) ([]core.Balance, error) {
+func (m *mockSnapshotWriter) GetSnapshotBalances(_ context.Context, _ int64, _ string, _ time.Time) ([]core.Balance, error) {
 	return m.balances, nil
 }
 
@@ -43,8 +43,8 @@ func (m *mockSnapshotWriter) GetSnapshotBalances(_ context.Context, _, _ int64, 
 func TestSnapshotService_CreateAndQuery(t *testing.T) {
 	balanceLister := &mockHistoricalBalanceLister{
 		balances: []core.Balance{
-			{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
-			{AccountHolder: 100, CurrencyID: 1, ClassificationID: 20, Balance: decimal.NewFromInt(200)},
+			{AccountHolder: 100, CurrencyUID: "cur-1", ClassificationUID: "cls-10", Balance: decimal.NewFromInt(500)},
+			{AccountHolder: 100, CurrencyUID: "cur-1", ClassificationUID: "cls-20", Balance: decimal.NewFromInt(200)},
 		},
 	}
 
@@ -66,7 +66,7 @@ func TestSnapshotService_CreateAndQuery(t *testing.T) {
 func TestSnapshotService_DuplicateIsIdempotent(t *testing.T) {
 	balanceLister := &mockHistoricalBalanceLister{
 		balances: []core.Balance{
-			{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
+			{AccountHolder: 100, CurrencyUID: "cur-1", ClassificationUID: "cls-10", Balance: decimal.NewFromInt(500)},
 		},
 	}
 	snapWriter := &mockSnapshotWriter{}
@@ -90,7 +90,7 @@ func TestSnapshotService_QueryNonExistentDate(t *testing.T) {
 	engine := core.NewEngine()
 	svc := NewSnapshotService(nil, snapWriter, engine)
 
-	balances, err := svc.GetSnapshotBalance(context.Background(), 100, 1, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	balances, err := svc.GetSnapshotBalance(context.Background(), 100, "cur-1", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 	require.NoError(t, err)
 	assert.Empty(t, balances)
 }

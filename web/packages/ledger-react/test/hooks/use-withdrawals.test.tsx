@@ -28,14 +28,14 @@ describe("use-withdrawals", () => {
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ id: 4, code: "withdraw", name: "Withdraw" }],
+          data: [{ uid: "cls-4", code: "withdraw", name: "Withdraw" }],
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: { list: [{ id: 2 }], next_cursor: "" },
+          data: { list: [{ uid: "bk-2" }], next_cursor: "" },
         }),
       ),
     );
@@ -47,7 +47,7 @@ describe("use-withdrawals", () => {
     expect(result.current.data).toHaveLength(1);
     expect(
       qc.getQueryCache().find({
-        queryKey: ["ledger", "bookings", "withdraw", { ...params, classificationId: 4 }],
+        queryKey: ["ledger", "bookings", "withdraw", { ...params, classificationUid: "cls-4" }],
       }),
     ).toBeDefined();
   });
@@ -56,14 +56,14 @@ describe("use-withdrawals", () => {
     const qc = new QueryClient();
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
-      http.post(`${BASE}/api/v1/bookings/2/transition`, () =>
+      http.post(`${BASE}/api/v1/bookings/uid-2/transition`, () =>
         HttpResponse.json({ code: 200, message: "ok", data: { id: 10 } }),
       ),
     );
     const { result } = renderHook(() => useReserveWithdraw(), {
       wrapper: wrapperWith(qc),
     });
-    result.current.mutate(2);
+    result.current.mutate("uid-2");
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
     expect(keys).toContainEqual(["ledger", "bookings"]);

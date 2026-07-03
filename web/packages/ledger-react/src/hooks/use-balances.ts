@@ -14,13 +14,13 @@ export function useBalances(holder: number) {
   });
 }
 
-export function useBalancesByCurrency(holder: number, currency: number) {
+export function useBalancesByCurrency(holder: number, currency: string) {
   const client = useLedgerClient();
   return useQuery({
     queryKey: ledgerKeys.balancesByCurrency(holder, currency),
     queryFn: () => client.getBalancesByCurrency(holder, currency),
     // Negative holders (system accounts) are valid; only 0 means "no account".
-    enabled: holder !== 0 && currency > 0,
+    enabled: holder !== 0 && currency !== "",
     refetchInterval: 15_000,
   });
 }

@@ -1,10 +1,10 @@
 -- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING *;
 
 -- name: DeactivateClassification :exec
-UPDATE classifications SET is_active = false WHERE id = $1;
+UPDATE classifications SET is_active = false WHERE uid = $1;
 
 -- name: GetClassification :one
 SELECT * FROM classifications WHERE id = $1;
@@ -18,20 +18,27 @@ WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;
 
 -- name: CreateJournalType :one
-INSERT INTO journal_types (code, name)
-VALUES ($1, $2)
-RETURNING id, code, name, is_active, created_at;
+INSERT INTO journal_types (code, name, uid)
+VALUES ($1, $2, $3)
+RETURNING id, code, name, is_active, created_at, uid;
 
 -- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at
+SELECT id, code, name, is_active, created_at, uid
 FROM journal_types
 WHERE code = $1;
 
 -- name: DeactivateJournalType :exec
-UPDATE journal_types SET is_active = false WHERE id = $1;
+UPDATE journal_types SET is_active = false WHERE uid = $1;
 
 -- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at
+SELECT id, code, name, is_active, created_at, uid
 FROM journal_types
 WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;
+
+-- name: ListClassificationDims :many
+-- Full config-table scan for the in-process id<->uid dimension cache.
+SELECT id, uid, code, normal_side FROM classifications;
+
+-- name: ListJournalTypeDims :many
+SELECT id, uid, code FROM journal_types;

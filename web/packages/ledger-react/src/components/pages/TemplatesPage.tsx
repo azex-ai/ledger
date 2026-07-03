@@ -25,7 +25,7 @@ import type { PreviewResult } from "../../client/types";
 
 interface LineForm {
   _id: string;
-  classification_id: string;
+  classification_uid: string;
   entry_type: "debit" | "credit";
   holder_role: "user" | "system";
   amount_key: string;
@@ -34,17 +34,17 @@ interface LineForm {
 
 function CreateTemplateDialog() {
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", name: "", journal_type_id: "" });
+  const [form, setForm] = useState({ code: "", name: "", journal_type_uid: "" });
   const [lines, setLines] = useState<LineForm[]>([
-    { _id: crypto.randomUUID(), classification_id: "", entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
-    { _id: crypto.randomUUID(), classification_id: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
+    { _id: crypto.randomUUID(), classification_uid: "", entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
+    { _id: crypto.randomUUID(), classification_uid: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
   ]);
   const mutation = useCreateTemplate();
 
   function addLine() {
     setLines([...lines, {
       _id: crypto.randomUUID(),
-      classification_id: "",
+      classification_uid: "",
       entry_type: "debit",
       holder_role: "user",
       amount_key: "amount",
@@ -61,20 +61,19 @@ function CreateTemplateDialog() {
   }
 
   function handleSubmit() {
-    const journalTypeId = parseInt(form.journal_type_id, 10);
-    if (isNaN(journalTypeId)) {
-      toast.error("Journal Type ID must be a number");
+    const journalTypeUid = form.journal_type_uid.trim();
+    if (journalTypeUid === "") {
+      toast.error("Journal Type UID is required");
       return;
     }
     mutation.mutate(
       {
         code: form.code,
         name: form.name,
-        journal_type_id: journalTypeId,
+        journal_type_uid: journalTypeUid,
         lines: lines.map((l) => {
-          const classId = parseInt(l.classification_id, 10);
           return {
-            classification_id: isNaN(classId) ? 0 : classId,
+            classification_uid: l.classification_uid.trim(),
             entry_type: l.entry_type,
             holder_role: l.holder_role,
             amount_key: l.amount_key,
@@ -110,7 +109,7 @@ function CreateTemplateDialog() {
             </div>
             <div className="grid gap-2">
               <Label htmlFor="tpl-jtype">Journal Type ID</Label>
-              <Input id="tpl-jtype" value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
+              <Input id="tpl-jtype" value={form.journal_type_uid} onChange={(e) => setForm({ ...form, journal_type_uid: e.target.value })} placeholder="1" />
             </div>
           </div>
 
@@ -126,7 +125,7 @@ function CreateTemplateDialog() {
                 {lines.map((l, idx) => l.entry_type !== "debit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-green-500/20 bg-green-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
-                      <Input placeholder="Class ID" value={l.classification_id} onChange={(e) => updateLine(idx, { classification_id: e.target.value })} className="w-24" />
+                      <Input placeholder="Class ID" value={l.classification_uid} onChange={(e) => updateLine(idx, { classification_uid: e.target.value })} className="w-24" />
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
                         <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -145,7 +144,7 @@ function CreateTemplateDialog() {
                 {lines.map((l, idx) => l.entry_type !== "credit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-red-500/20 bg-red-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
-                      <Input placeholder="Class ID" value={l.classification_id} onChange={(e) => updateLine(idx, { classification_id: e.target.value })} className="w-24" />
+                      <Input placeholder="Class ID" value={l.classification_uid} onChange={(e) => updateLine(idx, { classification_uid: e.target.value })} className="w-24" />
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
                         <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -172,7 +171,7 @@ function CreateTemplateDialog() {
   );
 }
 
-function DeactivateDialog({ id, name }: { id: number; name: string }) {
+function DeactivateDialog({ id, name }: { id: string; name: string }) {
   const [open, setOpen] = useState(false);
   const mutation = useDeactivateTemplate();
 
@@ -207,7 +206,7 @@ function DeactivateDialog({ id, name }: { id: number; name: string }) {
 }
 
 function PreviewSection({ code }: { code: string }) {
-  const [params, setParams] = useState({ holder_id: "", currency_id: "", amount: "" });
+  const [params, setParams] = useState({ holder_id: "", currency_uid: "", amount: "" });
   const previewMutation = usePreviewTemplate();
   const preview = previewMutation.data as PreviewResult | undefined;
 
@@ -215,7 +214,7 @@ function PreviewSection({ code }: { code: string }) {
     <div className="space-y-2 mt-2">
       <div className="flex gap-2">
         <Input placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
-        <Input placeholder="Currency ID" value={params.currency_id} onChange={(e) => setParams({ ...params, currency_id: e.target.value })} className="w-28" />
+        <Input placeholder="Currency ID" value={params.currency_uid} onChange={(e) => setParams({ ...params, currency_uid: e.target.value })} className="w-28" />
         <Input placeholder="Amount" value={params.amount} onChange={(e) => setParams({ ...params, amount: e.target.value })} className="w-28" />
         <Button
           size="sm"
@@ -224,7 +223,7 @@ function PreviewSection({ code }: { code: string }) {
             previewMutation.mutate({
               code,
               holder_id: parseInt(params.holder_id, 10),
-              currency_id: parseInt(params.currency_id, 10),
+              currency_uid: params.currency_uid.trim(),
               amount: params.amount,
             })
           }
@@ -238,7 +237,7 @@ function PreviewSection({ code }: { code: string }) {
           <p>Total Debit: {preview.total_debit} | Total Credit: {preview.total_credit}</p>
           {preview.entries.map((e, i) => (
             <p key={i}>
-              {e.entry_type.toUpperCase()} holder={e.account_holder} class={e.classification_id} cur={e.currency_id} amt={e.amount}
+              {e.entry_type.toUpperCase()} holder={e.account_holder} class={e.classification_uid} cur={e.currency_uid} amt={e.amount}
             </p>
           ))}
         </div>
@@ -250,7 +249,7 @@ function PreviewSection({ code }: { code: string }) {
 export function TemplatesPage() {
   const { data, isLoading, isError } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
-  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
     <div className="space-y-6">
@@ -269,7 +268,7 @@ export function TemplatesPage() {
       ) : (
         <div className="space-y-4">
           {templates.map((t) => (
-            <Card key={t.id}>
+            <Card key={t.uid}>
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -278,10 +277,10 @@ export function TemplatesPage() {
                     <StatusBadge status={t.is_active ? "active" : "inactive"} />
                   </div>
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setExpandedId(expandedId === t.id ? null : t.id)}>
-                      {expandedId === t.id ? "Collapse" : "Preview"}
+                    <Button size="sm" variant="outline" onClick={() => setExpandedId(expandedId === t.uid ? null : t.uid)}>
+                      {expandedId === t.uid ? "Collapse" : "Preview"}
                     </Button>
-                    {t.is_active && <DeactivateDialog id={t.id} name={t.name} />}
+                    {t.is_active && <DeactivateDialog id={t.uid} name={t.name} />}
                   </div>
                 </div>
               </CardHeader>
@@ -290,21 +289,21 @@ export function TemplatesPage() {
                   <div>
                     <p className="text-xs font-medium text-green-400 mb-1">DEBIT</p>
                     {t.lines.filter((l) => l.entry_type === "debit").map((l) => (
-                      <div key={l.id} className="text-xs text-muted-foreground">
-                        Class {l.classification_id} / {l.holder_role} / key: {l.amount_key}
+                      <div key={l.sort_order} className="text-xs text-muted-foreground">
+                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
                   <div>
                     <p className="text-xs font-medium text-red-400 mb-1">CREDIT</p>
                     {t.lines.filter((l) => l.entry_type === "credit").map((l) => (
-                      <div key={l.id} className="text-xs text-muted-foreground">
-                        Class {l.classification_id} / {l.holder_role} / key: {l.amount_key}
+                      <div key={l.sort_order} className="text-xs text-muted-foreground">
+                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
                 </div>
-                {expandedId === t.id && <PreviewSection code={t.code} />}
+                {expandedId === t.uid && <PreviewSection code={t.code} />}
               </CardContent>
             </Card>
           ))}

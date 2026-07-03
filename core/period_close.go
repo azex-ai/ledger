@@ -11,7 +11,7 @@ import (
 // §2. Reopening a period is done by appending a new row with an earlier
 // CloseBefore; rows are never updated or deleted.
 type PeriodClose struct {
-	ID          int64     `json:"id"`
+	UID         string    `json:"uid"`
 	CloseBefore time.Time `json:"close_before"`
 	Note        string    `json:"note"`
 	ActorID     int64     `json:"actor_id"`

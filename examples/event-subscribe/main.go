@@ -65,6 +65,11 @@ func run() error {
 		return fmt.Errorf("install presets: %w", err)
 	}
 
+	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	if err != nil {
+		return err
+	}
+
 	// -----------------------------------------------------------------------
 	// Build the background worker with default intervals.
 	// -----------------------------------------------------------------------
@@ -79,8 +84,8 @@ func run() error {
 	// -----------------------------------------------------------------------
 	received := make(chan core.Event, 10)
 	worker.Subscribe(func(_ context.Context, evt core.Event) error {
-		fmt.Printf("[event] id=%d class=%s %s -> %s actor=%d source=%q\n",
-			evt.ID, evt.ClassificationCode, evt.FromStatus, evt.ToStatus,
+		fmt.Printf("[event] id=%s class=%s %s -> %s actor=%d source=%q\n",
+			evt.UID, evt.ClassificationCode, evt.FromStatus, evt.ToStatus,
 			evt.ActorID, evt.Source)
 		received <- evt
 		return nil
@@ -102,7 +107,7 @@ func run() error {
 	booking, err := booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: "deposit",
 		AccountHolder:      2001,
-		CurrencyID:         1,
+		CurrencyUID:        currencyUID,
 		Amount:             decimal.RequireFromString("250.00"),
 		IdempotencyKey:     ledger.NewIdempotencyKey("event-demo"),
 		ChannelName:        "evm",
@@ -112,10 +117,10 @@ func run() error {
 		<-workerDone
 		return fmt.Errorf("create booking: %w", err)
 	}
-	fmt.Printf("created booking id=%d status=%s\n", booking.ID, booking.Status)
+	fmt.Printf("created booking uid=%s status=%s\n", booking.UID, booking.Status)
 
 	if _, err := booker.Transition(ctx, core.TransitionInput{
-		BookingID:  booking.ID,
+		BookingUID: booking.UID,
 		ToStatus:   "confirming",
 		ChannelRef: "0xdemo",
 		Source:     "event-subscribe-example",
@@ -131,7 +136,7 @@ func run() error {
 	// -----------------------------------------------------------------------
 	select {
 	case evt := <-received:
-		fmt.Printf("handler received event id=%d to_status=%s\n", evt.ID, evt.ToStatus)
+		fmt.Printf("handler received event uid=%s to_status=%s\n", evt.UID, evt.ToStatus)
 	case <-time.After(3 * time.Second):
 		fmt.Println("timeout waiting for event — check EventDeliveryInterval config")
 	}
@@ -143,4 +148,21 @@ func run() error {
 	}
 	fmt.Println("worker drained, exiting")
 	return nil
+}
+
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
+	list, err := svc.Currencies().ListCurrencies(ctx, false)
+	if err != nil {
+		return "", fmt.Errorf("list currencies: %w", err)
+	}
+	for _, c := range list {
+		if c.Code == code {
+			return c.UID, nil
+		}
+	}
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	if err != nil {
+		return "", fmt.Errorf("create currency: %w", err)
+	}
+	return created.UID, nil
 }

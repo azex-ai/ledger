@@ -47,7 +47,7 @@ func TestReconciliationService_BalancedSystem(t *testing.T) {
 		},
 	}
 	engine := core.NewEngine()
-	svc := NewReconciliationService(global, nil, nil, nil, engine)
+	svc := NewReconciliationService(global, nil, nil, &mockClassificationLister{}, engine)
 
 	result, err := svc.CheckAccountingEquation(context.Background())
 	require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestReconciliationService_Imbalanced(t *testing.T) {
 		},
 	}
 	engine := core.NewEngine()
-	svc := NewReconciliationService(global, nil, nil, nil, engine)
+	svc := NewReconciliationService(global, nil, nil, &mockClassificationLister{}, engine)
 
 	result, err := svc.CheckAccountingEquation(context.Background())
 	require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestReconciliationService_CrossCurrencyMismatch(t *testing.T) {
 		},
 	}
 	engine := core.NewEngine()
-	svc := NewReconciliationService(global, nil, nil, nil, engine)
+	svc := NewReconciliationService(global, nil, nil, &mockClassificationLister{}, engine)
 
 	result, err := svc.CheckAccountingEquation(context.Background())
 	require.NoError(t, err)
@@ -89,8 +89,8 @@ func TestReconciliationService_CrossCurrencyMismatch(t *testing.T) {
 
 func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 	cpReader := &mockCheckpointReader{
@@ -112,7 +112,7 @@ func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
 	engine := core.NewEngine()
 	svc := NewReconciliationService(nil, accountEntries, cpReader, cls, engine)
 
-	result, err := svc.ReconcileAccount(context.Background(), 100, 1)
+	result, err := svc.ReconcileAccount(context.Background(), 100, "cur-1")
 	require.NoError(t, err)
 	assert.False(t, result.Balanced)
 	assert.Equal(t, 1, len(result.Details))
@@ -121,8 +121,8 @@ func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
 
 func TestReconciliationService_AccountMissingCheckpoint(t *testing.T) {
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 	cpReader := &mockCheckpointReader{}
@@ -134,7 +134,7 @@ func TestReconciliationService_AccountMissingCheckpoint(t *testing.T) {
 	engine := core.NewEngine()
 	svc := NewReconciliationService(nil, accountEntries, cpReader, cls, engine)
 
-	result, err := svc.ReconcileAccount(context.Background(), 100, 1)
+	result, err := svc.ReconcileAccount(context.Background(), 100, "cur-1")
 	require.NoError(t, err)
 	assert.False(t, result.Balanced)
 	assert.Equal(t, 1, len(result.Details))

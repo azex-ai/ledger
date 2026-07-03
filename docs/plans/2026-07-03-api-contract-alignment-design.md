@@ -136,36 +136,25 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
 
 ## 附：P2 执行进度（2026-07-03，供接续会话使用）
 
-已完成（编译通过）：
-- P1 已合入 main（commit 3118bac）。P2 在 main 工作树进行中（未提交；有 stash 备份 "wip-backup"）。
-- migration 031（uid 列+唯一索引，NOT NULL 无 DEFAULT）；全部 INSERT 查询带 uid 参数；
-  Deactivate*/GetCurrency 等查询已改 `WHERE uid=$1`；entry 列表查询 JOIN journals 取 journal_uid；
-  新增 GetJournalUIDByID / GetEventUIDByID / GetEventIDByUID / *ByUID 查询族 / *Dims 缓存查询。
-- `core/` 全包 uid 化并编译通过（实体 UID、交叉引用 *UID、接口签名、AuditFilter.Cursor 改 string）。
-- `service/` 全包编译通过（ClassificationLister 端口改 ClassificationDims/CurrencyIDByUID/CurrencyUIDByID；
-  expiration/reconcile/snapshot/system_rollup 已适配；delivery 用 PendingEvent{InternalID,Event}，
-  header 改 X-Ledger-Event-UID）。
-- `postgres/`：dims.go（per-pool id<->uid 缓存）、convert.go（newUID/uidToPG/pgToUID、
-  journalFromRow(ctx,dims,q)、entryCore、classification/journalType/currency/template/
-  accountPolicy/periodClose mapper 已 uid 化）；classification/currency/template/period/
-  account_policy 五个 store 已完成。
+已完成（P2 全部完成，等待最终全量测试确认后 commit + tag v0.4.0）：
+- 非测试层全部 uid 化（core/postgres/service/server/presets/channel/facade/cmd/examples），
+  见 wip commit 4524f95 的说明。
+- migration 031 修正：011 seed 的两行 classifications 回填 gen_random_uuid()
+  （其余表按无存量前提直接 NOT NULL 无 DEFAULT）。
+- 测试大军完成：postgrestest seed helpers 返回 uid + 新 InternalID(t,pool,table,uid) helper；
+  全部 Go 测试迁移（core/presets/channel/service/delivery/server/postgres），
+  raw SQL 断言处用子查询 `(SELECT id FROM x WHERE uid=$n::uuid)` 解析；
+  service 内部数学类型（RollupQueueItem/BalanceCheckpoint/reconcile 行）保留内部 id。
+- I-18 pin：server.TestContract_NoInternalIDKeysInJSON（源级扫描无内部 id JSON 键）
+  + docs/INVARIANTS.md 新增 I-18 条目。
+- docs/openapi.yaml 全量 uid 化（version 0.4.0）；docs/COOKBOOK.md、docs/frontend.md 同步。
+- ledger-react 0.2.0：schema.ts 重新 codegen；types.ts/client.ts/hooks/pages 全 uid string；
+  typecheck 0 错、vitest 87/87、build 通过；web dogfood app tsc 通过。
+- CHANGELOG [0.4.0] 已写。
+- SystemRollupService.GetPlatformBalances/GetTotalLiabilityByAsset/SolvencyCheck 补 uid 化
+  （P2 初扫漏网）。
 
-待做（按序）：
-1. postgres/ledger_store.go：加 dims 字段；postJournalWithQueries 顶部把 EntryInput 的
-   currency/classification uid 一次性 resolve 成 resolvedEntry（内部 id+exponent+normalSide），
-   下游 precision/policy/locks/insert 全改用 resolved；JournalTypeUID/EventUID/ReversalOfUID
-   resolve；GetBalance(holder, currencyUID, classificationUID)；ReverseJournal(uid)；
-   ExecuteTemplate 路径；journalFromRow 调用点带 (ctx, s.dims, q)。
-2. postgres/precision.go / account_policy_enforce.go：签名改收 resolvedEntry（含 exponent/
-   normalSide/内部 id），删除对 core.EntryInput 内部 id 的引用。
-3. postgres/idempotency_match.go：entries 比对改在 resolved-id 空间或 uid 空间做一致比较。
-4. postgres/booking_store.go / event_store.go（GetPendingEvents 返回 delivery.PendingEvent，
-   转换需要 booking/journal uid join 或查询）/ reserver_store.go（uid 签名）/
-   reversal_fraction_store.go / pending_store.go / audit_store.go / query_provider.go /
-   platform_balance_store.go / rollup_adapter.go（新增 ClassificationDims/CurrencyIDByUID/
-   CurrencyUIDByID 实现 + snapshot/trends/trial/reconcile 查询的 uid 边界）。
-5. server/（handler 路径 {uid}、响应无 id 键）、ledger.go facade、cmd/ledger-cli、examples。
-6. 测试大军：internal/postgrestest seed helpers 改为“插入带 uid 并返回 uid 字符串”，
-   全部测试的 `.ID`→`.UID`、字段名 CurrencyID:→CurrencyUID: 等机械迁移。
-7. I-18 pin（响应体无 "id":" 键的机械扫描测试）+ openapi 全量重写 + ledger-react uid 化 +
-   CHANGELOG [0.4.0] + tag v0.4.0 / ledger-react-v0.2.0；armatrix 计划改“直升 v0.4.0”。
+待做：
+1. 最终 `go test -race ./...` 全绿确认 → commit → push → tag v0.4.0 + ledger-react-v0.2.0。
+2. armatrix 升级计划已另文（armatrix-docs/plans/2026-07-03-ledger-v0.3-upgrade.md），
+   改为直升 v0.4.0，适配清单加 ledger_adapter bigint→uuid 列（armatrix session 处理）。

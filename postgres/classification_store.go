@@ -74,6 +74,7 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 		NormalSide: string(input.NormalSide),
 		IsSystem:   input.IsSystem,
 		Lifecycle:  lifecycle,
+		Uid:        newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create classification", err)
@@ -94,8 +95,12 @@ func (s *ClassificationStore) GetByCode(ctx context.Context, code string) (*core
 }
 
 // DeactivateClassification marks a classification as inactive.
-func (s *ClassificationStore) DeactivateClassification(ctx context.Context, id int64) error {
-	if err := s.q.DeactivateClassification(ctx, id); err != nil {
+func (s *ClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.DeactivateClassification(ctx, pgUID); err != nil {
 		return wrapStoreError("postgres: deactivate classification", err)
 	}
 	return nil
@@ -119,6 +124,7 @@ func (s *ClassificationStore) CreateJournalType(ctx context.Context, input core.
 	row, err := s.q.CreateJournalType(ctx, sqlcgen.CreateJournalTypeParams{
 		Code: input.Code,
 		Name: input.Name,
+		Uid:  newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create journal type", err)
@@ -139,8 +145,12 @@ func (s *ClassificationStore) GetJournalTypeByCode(ctx context.Context, code str
 }
 
 // DeactivateJournalType marks a journal type as inactive.
-func (s *ClassificationStore) DeactivateJournalType(ctx context.Context, id int64) error {
-	if err := s.q.DeactivateJournalType(ctx, id); err != nil {
+func (s *ClassificationStore) DeactivateJournalType(ctx context.Context, uid string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.DeactivateJournalType(ctx, pgUID); err != nil {
 		return wrapStoreError("postgres: deactivate journal type", err)
 	}
 	return nil

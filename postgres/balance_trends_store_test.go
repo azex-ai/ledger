@@ -50,11 +50,11 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 
 	// Post a journal to generate entries.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("trend-j1"),
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: wallet.ID, EntryType: core.EntryTypeDebit, Amount: amount},
-			{AccountHolder: -userID, CurrencyID: usdt.ID, ClassificationID: system.ID, EntryType: core.EntryTypeCredit, Amount: amount},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: wallet.UID, EntryType: core.EntryTypeDebit, Amount: amount},
+			{AccountHolder: -userID, CurrencyUID: usdt.UID, ClassificationUID: system.UID, EntryType: core.EntryTypeCredit, Amount: amount},
 		},
 		Source: "trend_test",
 	})
@@ -66,9 +66,9 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 
 	_, err = pool.Exec(ctx,
 		`INSERT INTO balance_snapshots (account_holder, currency_id, classification_id, snapshot_date, balance)
-		 VALUES ($1, $2, $3, $4, $5)
+		 VALUES ($1, (SELECT id FROM currencies WHERE uid=$2::uuid), (SELECT id FROM classifications WHERE uid=$3::uuid), $4, $5)
 		 ON CONFLICT DO NOTHING`,
-		userID, usdt.ID, wallet.ID, threeDaysAgoDate, "250.000000000000000000",
+		userID, usdt.UID, wallet.UID, threeDaysAgoDate, "250.000000000000000000",
 	)
 	require.NoError(t, err)
 
@@ -77,11 +77,11 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 	until := time.Now().UTC()
 
 	points, err := trendsStore.GetBalanceTrends(ctx, core.BalanceTrendFilter{
-		AccountHolder:    userID,
-		CurrencyID:       usdt.ID,
-		ClassificationID: wallet.ID,
-		From:             from,
-		Until:            until,
+		AccountHolder:     userID,
+		CurrencyUID:       usdt.UID,
+		ClassificationUID: wallet.UID,
+		From:              from,
+		Until:             until,
 	})
 	require.NoError(t, err)
 
@@ -135,11 +135,11 @@ func TestBalanceTrends_NoSnapshots(t *testing.T) {
 	until := time.Now().UTC()
 
 	points, err := trendsStore.GetBalanceTrends(ctx, core.BalanceTrendFilter{
-		AccountHolder:    int64(99999),
-		CurrencyID:       usdt.ID,
-		ClassificationID: 0, // all
-		From:             from,
-		Until:            until,
+		AccountHolder:     int64(99999),
+		CurrencyUID:       usdt.UID,
+		ClassificationUID: "", // all
+		From:              from,
+		Until:             until,
 	})
 	require.NoError(t, err)
 	// Should have 3 points (day -2, -1, today), all zero.
@@ -160,7 +160,7 @@ func TestBalanceTrends_UntilBeforeFrom(t *testing.T) {
 
 	_, err := trendsStore.GetBalanceTrends(ctx, core.BalanceTrendFilter{
 		AccountHolder: 1,
-		CurrencyID:    1,
+		CurrencyUID:   "cur-1",
 		From:          time.Now(),
 		Until:         time.Now().AddDate(0, 0, -1), // until before from
 	})

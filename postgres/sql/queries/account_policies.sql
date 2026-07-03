@@ -5,9 +5,9 @@
 -- account_policy_changes, appended by the caller in the same transaction).
 INSERT INTO account_policies (
     account_holder, currency_id, classification_id,
-    status, min_balance, enforce_min_balance, note
+    status, min_balance, enforce_min_balance, note, uid
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8
 )
 ON CONFLICT (account_holder, currency_id, classification_id) DO UPDATE SET
     status              = EXCLUDED.status,

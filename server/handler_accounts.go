@@ -12,8 +12,8 @@ import (
 )
 
 type setAccountPolicyRequest struct {
-	CurrencyID        int64  `json:"currency_id"`
-	ClassificationID  int64  `json:"classification_id"`
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
 	Status            string `json:"status"`
 	MinBalance        string `json:"min_balance"`
 	EnforceMinBalance bool   `json:"enforce_min_balance"`
@@ -22,10 +22,10 @@ type setAccountPolicyRequest struct {
 }
 
 type accountPolicyResponse struct {
-	ID                int64     `json:"id"`
+	UID               string    `json:"uid"`
 	AccountHolder     int64     `json:"account_holder"`
-	CurrencyID        int64     `json:"currency_id"`
-	ClassificationID  int64     `json:"classification_id"`
+	CurrencyUID       string    `json:"currency_uid,omitempty"`
+	ClassificationUID string    `json:"classification_uid,omitempty"`
 	Status            string    `json:"status"`
 	MinBalance        string    `json:"min_balance"`
 	EnforceMinBalance bool      `json:"enforce_min_balance"`
@@ -36,10 +36,10 @@ type accountPolicyResponse struct {
 
 func toAccountPolicyResponse(p *core.AccountPolicy) accountPolicyResponse {
 	return accountPolicyResponse{
-		ID:                p.ID,
+		UID:               p.UID,
 		AccountHolder:     p.AccountHolder,
-		CurrencyID:        p.CurrencyID,
-		ClassificationID:  p.ClassificationID,
+		CurrencyUID:       p.CurrencyUID,
+		ClassificationUID: p.ClassificationUID,
 		Status:            string(p.Status),
 		MinBalance:        p.MinBalance.String(),
 		EnforceMinBalance: p.EnforceMinBalance,
@@ -50,7 +50,7 @@ func toAccountPolicyResponse(p *core.AccountPolicy) accountPolicyResponse {
 }
 
 // handleSetAccountPolicy handles PUT /api/v1/accounts/{holder}/policy.
-// currency_id / classification_id default to 0 (wildcard tiers) when omitted.
+// currency_uid / classification_uid default to "" (wildcard tiers) when omitted.
 func (s *Server) handleSetAccountPolicy(w http.ResponseWriter, r *http.Request) {
 	holder, err := parseIDParam(chi.URLParam(r, "holder"))
 	if err != nil {
@@ -75,8 +75,8 @@ func (s *Server) handleSetAccountPolicy(w http.ResponseWriter, r *http.Request) 
 
 	input := core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        req.CurrencyID,
-		ClassificationID:  req.ClassificationID,
+		CurrencyUID:       req.CurrencyUID,
+		ClassificationUID: req.ClassificationUID,
 		Status:            core.AccountPolicyStatus(req.Status),
 		MinBalance:        minBalance,
 		EnforceMinBalance: req.EnforceMinBalance,

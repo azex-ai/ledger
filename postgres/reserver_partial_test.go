@@ -15,7 +15,7 @@ import (
 
 // seedFundedReservation funds holder 21 with 100 USDT and reserves reserveAmt
 // of it, returning the stores and reservation.
-func seedFundedReservation(t *testing.T, reserveAmt decimal.Decimal) (*postgres.ReserverStore, *postgres.LedgerStore, context.Context, *core.Reservation, int64) {
+func seedFundedReservation(t *testing.T, reserveAmt decimal.Decimal) (*postgres.ReserverStore, *postgres.LedgerStore, context.Context, *core.Reservation, string) {
 	t.Helper()
 	pool := postgrestest.SetupDB(t)
 	ledgerStore := postgres.NewLedgerStore(pool)
@@ -28,18 +28,18 @@ func seedFundedReservation(t *testing.T, reserveAmt decimal.Decimal) (*postgres.
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "debit", true)
 
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("psettle-fund"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 21, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -21, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 21, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -21, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
 
 	res, err := reserver.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  21,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         reserveAmt,
 		IdempotencyKey: postgrestest.UniqueKey("psettle-res"),
 	})
@@ -51,30 +51,30 @@ func TestReserverStore_SettlePartial_AccumulatesAndFinalizes(t *testing.T) {
 	reserver, _, ctx, res, curID := seedFundedReservation(t, decimal.NewFromInt(60))
 
 	// Two partial settlements accumulate.
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.RequireFromString("12.5")}))
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.RequireFromString("20")}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("12.5")}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("20")}))
 
 	// Over-cumulative (32.5 + 30 > 60) is rejected and changes nothing.
-	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.NewFromInt(30)})
+	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 
 	// One-shot Settle on a settling reservation is rejected — it would
 	// overwrite the accumulated settled_amount.
-	err = reserver.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(40)})
+	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(40)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 
 	// Finalize: settling → settled; the hold is fully released.
-	require.NoError(t, reserver.FinalizeSettlement(ctx, res.ID))
+	require.NoError(t, reserver.FinalizeSettlement(ctx, res.UID))
 	held, err := reserver.HeldAmount(ctx, 21, curID)
 	require.NoError(t, err)
 	assert.True(t, held.IsZero(), "hold must be zero after finalize, got %s", held)
 
 	// Terminal: no further partial settlement or finalize.
-	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.NewFromInt(1)})
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(1)})
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
-	err = reserver.FinalizeSettlement(ctx, res.ID)
+	err = reserver.FinalizeSettlement(ctx, res.UID)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
 
@@ -86,7 +86,7 @@ func TestReserverStore_SettlePartial_RemainderStillHeld(t *testing.T) {
 	reserver, _, ctx, res, curID := seedFundedReservation(t, decimal.NewFromInt(60))
 
 	// Balance 100, reserved 60 → available 40.
-	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.NewFromInt(15)}))
+	require.NoError(t, reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(15)}))
 
 	// Hold = 60 - 15 = 45 (NOT zero, NOT 60).
 	held, err := reserver.HeldAmount(ctx, 21, curID)
@@ -95,7 +95,7 @@ func TestReserverStore_SettlePartial_RemainderStillHeld(t *testing.T) {
 
 	// available = 100 - 45 = 55 → reserving 56 must fail, 55 must succeed.
 	_, err = reserver.Reserve(ctx, core.ReserveInput{
-		AccountHolder: 21, CurrencyID: curID,
+		AccountHolder: 21, CurrencyUID: curID,
 		Amount:         decimal.NewFromInt(56),
 		IdempotencyKey: postgrestest.UniqueKey("psettle-over"),
 	})
@@ -103,7 +103,7 @@ func TestReserverStore_SettlePartial_RemainderStillHeld(t *testing.T) {
 	assert.ErrorIs(t, err, core.ErrInsufficientBalance)
 
 	_, err = reserver.Reserve(ctx, core.ReserveInput{
-		AccountHolder: 21, CurrencyID: curID,
+		AccountHolder: 21, CurrencyUID: curID,
 		Amount:         decimal.NewFromInt(55),
 		IdempotencyKey: postgrestest.UniqueKey("psettle-fit"),
 	})
@@ -115,22 +115,22 @@ func TestReserverStore_FinalizeSettlement_OnActiveRejected(t *testing.T) {
 
 	// Finalizing a reservation that never had a partial settlement is a
 	// contract misuse (nothing was settled — Release is the right call).
-	err := reserver.FinalizeSettlement(ctx, res.ID)
+	err := reserver.FinalizeSettlement(ctx, res.UID)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 
 	// The reservation is untouched: a one-shot Settle still works.
-	require.NoError(t, reserver.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(30)}))
+	require.NoError(t, reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30)}))
 }
 
 func TestReserverStore_SettlePartial_NonPositiveRejected(t *testing.T) {
 	reserver, _, ctx, res, _ := seedFundedReservation(t, decimal.NewFromInt(30))
 
-	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.Zero})
+	err := reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.Zero})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 
-	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationID: res.ID, Amount: decimal.NewFromInt(-5)})
+	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-5)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }

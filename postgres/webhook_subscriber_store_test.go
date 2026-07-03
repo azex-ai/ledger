@@ -52,7 +52,7 @@ func seedPendingEvent(t *testing.T, pool *pgxpool.Pool, classCode string) {
 	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      42,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(100),
 		IdempotencyKey:     postgrestest.UniqueKey("webhook-e2e-" + classCode),
 		ChannelName:        "test",
@@ -61,8 +61,8 @@ func seedPendingEvent(t *testing.T, pool *pgxpool.Pool, classCode string) {
 	require.NoError(t, err)
 
 	_, err = bookingStore.Transition(ctx, core.TransitionInput{
-		BookingID: booking.ID,
-		ToStatus:  "confirmed",
+		BookingUID: booking.UID,
+		ToStatus:   "confirmed",
 	})
 	require.NoError(t, err)
 }

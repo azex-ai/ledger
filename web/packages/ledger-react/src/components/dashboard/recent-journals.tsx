@@ -69,13 +69,13 @@ export function RecentJournals({
             </TableHeader>
             <TableBody>
               {journals.map((j) => (
-                <TableRow key={j.id}>
+                <TableRow key={j.uid}>
                   <TableCell>
                     <Link
-                      href={`/journals/${j.id}`}
+                      href={`/journals/${j.uid}`}
                       className="text-primary underline-offset-4 hover:underline"
                     >
-                      #{j.id}
+                      #{j.uid}
                     </Link>
                   </TableCell>
                   <TableCell className="font-mono text-xs max-w-[200px] truncate">

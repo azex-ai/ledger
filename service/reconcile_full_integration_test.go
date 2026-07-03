@@ -43,28 +43,27 @@ func TestFullReconciliation_Check2DetectsCheckpointDrift(t *testing.T) {
 	ctx := context.Background()
 
 	rollup := postgres.NewRollupAdapter(pgpool)
-	classStore := postgres.NewClassificationStore(pgpool)
 	reconcileAdapter := postgres.NewReconcileAdapter(pgpool)
 
-	currencyID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether USD")
-	classID := postgrestest.SeedClassification(t, pgpool, "wallet_c2", "Wallet Check2", "debit", false)
-	sysClassID := postgrestest.SeedClassification(t, pgpool, "custodial_c2", "Custodial Check2", "credit", true)
-	jtID := postgrestest.SeedJournalType(t, pgpool, "c2_deposit", "Check2 Deposit")
+	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether USD")
+	classUID := postgrestest.SeedClassification(t, pgpool, "wallet_c2", "Wallet Check2", "debit", false)
+	sysClassUID := postgrestest.SeedClassification(t, pgpool, "custodial_c2", "Custodial Check2", "credit", true)
+	jtUID := postgrestest.SeedJournalType(t, pgpool, "c2_deposit", "Check2 Deposit")
 	holderID := int64(9001)
 
 	// Post a journal and materialize its checkpoint via the real rollup path
 	// so we start from a genuinely correct checkpoint, not a hand-crafted one.
-	seedJournal(t, pgpool, jtID, holderID, currencyID, classID, sysClassID,
+	seedJournal(t, pgpool, jtUID, holderID, currencyUID, classUID, sysClassUID,
 		decimal.NewFromInt(500), time.Now(), postgrestest.UniqueKey("c2-dep"))
-	require.NoError(t, rollup.EnqueueRollup(ctx, holderID, currencyID, classID))
+	require.NoError(t, rollup.EnqueueRollup(ctx, holderID, postgrestest.InternalID(t, pgpool, "currencies", currencyUID), postgrestest.InternalID(t, pgpool, "classifications", classUID)))
 
 	engine := core.NewEngine()
-	rollupSvc := service.NewRollupService(rollup, rollup, rollup, classStore, engine)
+	rollupSvc := service.NewRollupService(rollup, rollup, rollup, rollup, engine)
 	processed, err := rollupSvc.ProcessBatch(ctx, 10)
 	require.NoError(t, err)
 	require.Equal(t, 1, processed, "rollup must materialize exactly one checkpoint")
 
-	basic := service.NewReconciliationService(rollup, rollup, rollup, classStore, engine)
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
 	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, engine)
 
 	// Sanity: check #2 passes before we corrupt anything.
@@ -78,7 +77,7 @@ func TestFullReconciliation_Check2DetectsCheckpointDrift(t *testing.T) {
 	// matches a full recomputation from entries).
 	_, err = pgpool.Exec(ctx,
 		"UPDATE balance_checkpoints SET balance = balance + 999 WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
-		holderID, currencyID, classID,
+		holderID, postgrestest.InternalID(t, pgpool, "currencies", currencyUID), postgrestest.InternalID(t, pgpool, "classifications", classUID),
 	)
 	require.NoError(t, err)
 
@@ -106,29 +105,28 @@ func TestFullReconciliation_Check2ReportsPartialScanOnScanLimit(t *testing.T) {
 	ctx := context.Background()
 
 	rollup := postgres.NewRollupAdapter(pgpool)
-	classStore := postgres.NewClassificationStore(pgpool)
 	reconcileAdapter := postgres.NewReconcileAdapter(pgpool)
 
-	currencyID := postgrestest.SeedCurrency(t, pgpool, "USDC", "USD Coin")
-	classID := postgrestest.SeedClassification(t, pgpool, "wallet_c2b", "Wallet Check2b", "debit", false)
-	sysClassID := postgrestest.SeedClassification(t, pgpool, "custodial_c2b", "Custodial Check2b", "credit", true)
-	jtID := postgrestest.SeedJournalType(t, pgpool, "c2b_deposit", "Check2b Deposit")
+	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDC", "USD Coin")
+	classUID := postgrestest.SeedClassification(t, pgpool, "wallet_c2b", "Wallet Check2b", "debit", false)
+	sysClassUID := postgrestest.SeedClassification(t, pgpool, "custodial_c2b", "Custodial Check2b", "credit", true)
+	jtUID := postgrestest.SeedJournalType(t, pgpool, "c2b_deposit", "Check2b Deposit")
 
 	engine := core.NewEngine()
-	rollupSvc := service.NewRollupService(rollup, rollup, rollup, classStore, engine)
+	rollupSvc := service.NewRollupService(rollup, rollup, rollup, rollup, engine)
 
 	// Materialize checkpoints for 3 distinct holders.
 	for i := int64(1); i <= 3; i++ {
 		holderID := 9100 + i
-		seedJournal(t, pgpool, jtID, holderID, currencyID, classID, sysClassID,
+		seedJournal(t, pgpool, jtUID, holderID, currencyUID, classUID, sysClassUID,
 			decimal.NewFromInt(100), time.Now(), postgrestest.UniqueKey("c2b-dep"))
-		require.NoError(t, rollup.EnqueueRollup(ctx, holderID, currencyID, classID))
+		require.NoError(t, rollup.EnqueueRollup(ctx, holderID, postgrestest.InternalID(t, pgpool, "currencies", currencyUID), postgrestest.InternalID(t, pgpool, "classifications", classUID)))
 	}
 	processed, err := rollupSvc.ProcessBatch(ctx, 10)
 	require.NoError(t, err)
 	require.Equal(t, 3, processed)
 
-	basic := service.NewReconciliationService(rollup, rollup, rollup, classStore, engine)
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
 	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{
 		Check2ScanLimit: 2, // fewer than the 3 pairs that exist
 	}, engine)

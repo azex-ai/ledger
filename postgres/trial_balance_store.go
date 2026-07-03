@@ -24,6 +24,7 @@ var _ core.TrialBalanceReader = (*TrialBalanceStore)(nil)
 type TrialBalanceStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewTrialBalanceStore creates a new TrialBalanceStore.
@@ -31,6 +32,7 @@ func NewTrialBalanceStore(pool *pgxpool.Pool) *TrialBalanceStore {
 	return &TrialBalanceStore{
 		pool: pool,
 		q:    sqlcgen.New(pool),
+		dims: dimCacheFor(pool),
 	}
 }
 
@@ -39,18 +41,23 @@ func (s *TrialBalanceStore) WithDB(db DBTX) *TrialBalanceStore {
 	return &TrialBalanceStore{
 		pool: nil, // tx mode
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
 // TrialBalance aggregates per-classification debit/credit totals for
 // currencyID as of asOf (inclusive), and reports whether the ledger balances
 // globally for that currency and cutoff.
-func (s *TrialBalanceStore) TrialBalance(ctx context.Context, currencyID int64, asOf time.Time) (*core.TrialBalanceReport, error) {
+func (s *TrialBalanceStore) TrialBalance(ctx context.Context, currencyUID string, asOf time.Time) (*core.TrialBalanceReport, error) {
 	ctx, cancel := context.WithTimeout(ctx, trialBalanceQueryTimeout)
 	defer cancel()
 
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.q.TrialBalanceRows(ctx, sqlcgen.TrialBalanceRowsParams{
-		CurrencyID:  currencyID,
+		CurrencyID:  cur.ID,
 		EffectiveAt: asOf,
 	})
 	if err != nil {
@@ -58,9 +65,9 @@ func (s *TrialBalanceStore) TrialBalance(ctx context.Context, currencyID int64, 
 	}
 
 	report := &core.TrialBalanceReport{
-		CurrencyID: currencyID,
-		AsOf:       asOf,
-		Rows:       make([]core.TrialBalanceRow, 0, len(rows)),
+		CurrencyUID: currencyUID,
+		AsOf:        asOf,
+		Rows:        make([]core.TrialBalanceRow, 0, len(rows)),
 	}
 
 	for _, row := range rows {
@@ -73,8 +80,12 @@ func (s *TrialBalanceStore) TrialBalance(ctx context.Context, currencyID int64, 
 			net = credit.Sub(debit)
 		}
 
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, row.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		report.Rows = append(report.Rows, core.TrialBalanceRow{
-			ClassificationID:   row.ClassificationID,
+			ClassificationUID:  cls.UID,
 			ClassificationCode: row.ClassificationCode,
 			ClassificationName: row.ClassificationName,
 			NormalSide:         normalSide,

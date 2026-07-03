@@ -27,7 +27,7 @@ import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
 
-function SettleDialog({ id }: { id: number }) {
+function SettleDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const mutation = useSettleReservation();
@@ -70,7 +70,7 @@ function SettleDialog({ id }: { id: number }) {
   );
 }
 
-function ReleaseConfirmDialog({ id }: { id: number }) {
+function ReleaseConfirmDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const mutation = useReleaseReservation();
 
@@ -164,10 +164,10 @@ export function ReservationsPage() {
             </TableHeader>
             <TableBody>
               {reservations.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell>#{r.id}</TableCell>
+                <TableRow key={r.uid}>
+                  <TableCell>#{r.uid}</TableCell>
                   <TableCell>{r.account_holder}</TableCell>
-                  <TableCell>{r.currency_id}</TableCell>
+                  <TableCell>{r.currency_uid}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(r.reserved_amount)}</TableCell>
                   <TableCell className="text-right font-mono">{r.settled_amount ? formatAmount(r.settled_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
@@ -177,8 +177,8 @@ export function ReservationsPage() {
                   <TableCell>
                     {r.status === "active" && (
                       <div className="flex gap-1">
-                        <SettleDialog id={r.id} />
-                        <ReleaseConfirmDialog id={r.id} />
+                        <SettleDialog id={r.uid} />
+                        <ReleaseConfirmDialog id={r.uid} />
                       </div>
                     )}
                   </TableCell>

@@ -92,16 +92,16 @@ func (s *SnapshotBackfillService) backfillSingleDay(ctx context.Context, date ti
 	inserted := 0
 	for _, b := range balances {
 		snap := core.BalanceSnapshot{
-			AccountHolder:    b.AccountHolder,
-			CurrencyID:       b.CurrencyID,
-			ClassificationID: b.ClassificationID,
-			SnapshotDate:     date,
-			Balance:          b.Balance,
+			AccountHolder:     b.AccountHolder,
+			CurrencyUID:       b.CurrencyUID,
+			ClassificationUID: b.ClassificationUID,
+			SnapshotDate:      date,
+			Balance:           b.Balance,
 		}
 		ok, err := s.sparse.UpsertSnapshotSparse(ctx, snap)
 		if err != nil {
-			return inserted, fmt.Errorf("service: backfill: upsert: holder=%d currency=%d class=%d: %w",
-				b.AccountHolder, b.CurrencyID, b.ClassificationID, err)
+			return inserted, fmt.Errorf("service: backfill: upsert: holder=%d currency=%s class=%s: %w",
+				b.AccountHolder, b.CurrencyUID, b.ClassificationUID, err)
 		}
 		if ok {
 			inserted++

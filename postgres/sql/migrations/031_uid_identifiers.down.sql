@@ -1,0 +1,10 @@
+ALTER TABLE journals         DROP COLUMN IF EXISTS uid;
+ALTER TABLE bookings         DROP COLUMN IF EXISTS uid;
+ALTER TABLE events           DROP COLUMN IF EXISTS uid;
+ALTER TABLE reservations     DROP COLUMN IF EXISTS uid;
+ALTER TABLE classifications  DROP COLUMN IF EXISTS uid;
+ALTER TABLE journal_types    DROP COLUMN IF EXISTS uid;
+ALTER TABLE entry_templates  DROP COLUMN IF EXISTS uid;
+ALTER TABLE currencies       DROP COLUMN IF EXISTS uid;
+ALTER TABLE account_policies DROP COLUMN IF EXISTS uid;
+ALTER TABLE period_closes    DROP COLUMN IF EXISTS uid;

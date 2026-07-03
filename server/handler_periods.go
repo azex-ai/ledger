@@ -17,7 +17,7 @@ type closePeriodRequest struct {
 }
 
 type periodCloseResponse struct {
-	ID          int64     `json:"id"`
+	UID         string    `json:"uid"`
 	CloseBefore time.Time `json:"close_before"`
 	Note        string    `json:"note"`
 	ActorID     int64     `json:"actor_id"`
@@ -26,7 +26,7 @@ type periodCloseResponse struct {
 
 func toPeriodCloseResponse(p *core.PeriodClose) periodCloseResponse {
 	return periodCloseResponse{
-		ID:          p.ID,
+		UID:         p.UID,
 		CloseBefore: p.CloseBefore,
 		Note:        p.Note,
 		ActorID:     p.ActorID,

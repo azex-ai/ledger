@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 	"github.com/azex-ai/ledger/core"
 	ledgerotel "github.com/azex-ai/ledger/pkg/otel"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
+	"github.com/azex-ai/ledger/service/delivery"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,13 +29,14 @@ type EventStore struct {
 	pool       *pgxpool.Pool
 	q          *sqlcgen.Queries
 	claimLease time.Duration
+	dims       *dimCache
 }
 
 // NewEventStore creates a new EventStore. The internal sqlc Queries instance
 // is built from pool so library consumers don't need to import the generated
 // sqlcgen package.
 func NewEventStore(pool *pgxpool.Pool) *EventStore {
-	return &EventStore{pool: pool, q: sqlcgen.New(pool), claimLease: eventClaimLease}
+	return &EventStore{pool: pool, q: sqlcgen.New(pool), claimLease: eventClaimLease, dims: dimCacheFor(pool)}
 }
 
 // WithDB returns a clone of the EventStore bound to an existing transaction.
@@ -41,6 +45,7 @@ func (s *EventStore) WithDB(db DBTX) *EventStore {
 		pool:       nil, // tx mode
 		q:          sqlcgen.New(db),
 		claimLease: s.claimLease,
+		dims:       s.dims,
 	}
 }
 
@@ -52,45 +57,81 @@ func (s *EventStore) SetClaimLease(d time.Duration) {
 }
 
 // GetEvent returns an event by ID.
-func (s *EventStore) GetEvent(ctx context.Context, id int64) (*core.Event, error) {
-	row, err := s.q.GetEvent(ctx, id)
+func (s *EventStore) GetEvent(ctx context.Context, uid string) (*core.Event, error) {
+	pgUID, err := uidToPG(uid)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: get event %d: %w", id, err)
+		return nil, err
 	}
-	return eventFromRow(row), nil
+	row, err := s.q.GetEventByUID(ctx, pgUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: get event %q: %w", uid, core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: get event %q: %w", uid, err)
+	}
+	return eventFromRow(ctx, s.dims, s.q, row)
 }
 
-// ListEvents returns events matching the filter.
-func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, error) {
+// ListEvents returns events matching the filter plus the opaque cursor for
+// the next page ("" when exhausted).
+func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, string, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.event.list_events",
 		attribute.String("classification_code", filter.ClassificationCode),
-		attribute.Int64("booking_id", filter.BookingID),
+		attribute.String("booking_uid", filter.BookingUID),
 		attribute.String("to_status", filter.ToStatus),
-		attribute.Int64("cursor", filter.Cursor),
 		attribute.Int("limit", filter.Limit),
 	)
 	defer span.End()
 
+	bookingID := int64(0)
+	if filter.BookingUID != "" {
+		pgUID, err := uidToPG(filter.BookingUID)
+		if err != nil {
+			return nil, "", err
+		}
+		row, err := s.q.GetBookingByUID(ctx, pgUID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, "", fmt.Errorf("postgres: list events: booking %q: %w", filter.BookingUID, core.ErrNotFound)
+			}
+			return nil, "", fmt.Errorf("postgres: list events: resolve booking: %w", err)
+		}
+		bookingID = row.ID
+	}
+	cursorID, err := decodeCursorString(filter.Cursor)
+	if err != nil {
+		cursorID = 0
+	}
 	rows, err := s.q.ListEventsByFilter(ctx, sqlcgen.ListEventsByFilterParams{
 		ClassificationCode: filter.ClassificationCode,
-		BookingID:          filter.BookingID,
+		BookingID:          bookingID,
 		ToStatus:           filter.ToStatus,
-		ID:                 filter.Cursor,
+		ID:                 cursorID,
 		Limit:              int32(filter.Limit),
 	})
 	if err != nil {
 		ledgerotel.RecordError(span, err)
-		return nil, fmt.Errorf("postgres: list events: %w", err)
+		return nil, "", fmt.Errorf("postgres: list events: %w", err)
 	}
 	events := make([]core.Event, len(rows))
 	for i, row := range rows {
-		events[i] = *eventFromRow(row)
+		e, err := eventFromRow(ctx, s.dims, s.q, row)
+		if err != nil {
+			return nil, "", err
+		}
+		events[i] = *e
 	}
-	return events, nil
+	nextCursor := ""
+	if filter.Limit > 0 && len(rows) == filter.Limit {
+		nextCursor = encodeCursorString(rows[len(rows)-1].ID)
+	}
+	return events, nextCursor, nil
 }
 
-// GetPendingEvents returns events that are pending delivery.
-func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]core.Event, error) {
+// GetPendingEvents returns events that are pending delivery, paired with the
+// internal id the delivery bookkeeping (MarkDelivered/MarkRetry/MarkDead)
+// operates on. The internal id never reaches a payload or header.
+func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]delivery.PendingEvent, error) {
 	rows, err := s.q.GetPendingEvents(ctx, sqlcgen.GetPendingEventsParams{
 		Limit:         int32(limit),
 		NextAttemptAt: time.Now().Add(s.claimLease),
@@ -99,9 +140,13 @@ func (s *EventStore) GetPendingEvents(ctx context.Context, limit int) ([]core.Ev
 		return nil, fmt.Errorf("postgres: get pending events: %w", err)
 	}
 
-	events := make([]core.Event, 0, limit)
+	events := make([]delivery.PendingEvent, 0, limit)
 	for _, row := range rows {
-		events = append(events, *eventFromRow(row))
+		e, err := eventFromRow(ctx, s.dims, s.q, row)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, delivery.PendingEvent{InternalID: row.ID, Event: *e})
 	}
 	return events, nil
 }

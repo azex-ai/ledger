@@ -56,7 +56,7 @@ function DepositStepper({ status }: { status: string }) {
   );
 }
 
-function ConfirmingDialog({ id }: { id: number }) {
+function ConfirmingDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
   const mutation = useConfirmingDeposit();
@@ -92,7 +92,7 @@ function ConfirmingDialog({ id }: { id: number }) {
   );
 }
 
-function ConfirmDialog({ id }: { id: number }) {
+function ConfirmDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [channelRef, setChannelRef] = useState("");
@@ -149,7 +149,7 @@ function ConfirmDialog({ id }: { id: number }) {
   );
 }
 
-function FailDialog({ id }: { id: number }) {
+function FailDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const mutation = useFailDeposit();
@@ -247,8 +247,8 @@ export function DepositsPage() {
             </TableHeader>
             <TableBody>
               {deposits.map((d) => (
-                <TableRow key={d.id}>
-                  <TableCell>#{d.id}</TableCell>
+                <TableRow key={d.uid}>
+                  <TableCell>#{d.uid}</TableCell>
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(d.amount)}</TableCell>
@@ -259,10 +259,10 @@ export function DepositsPage() {
                   <TableCell><DepositStepper status={d.status} /></TableCell>
                   <TableCell>
                     <div className="flex gap-1">
-                      {d.status === "pending" && <ConfirmingDialog id={d.id} />}
-                      {d.status === "confirming" && <ConfirmDialog id={d.id} />}
+                      {d.status === "pending" && <ConfirmingDialog id={d.uid} />}
+                      {d.status === "confirming" && <ConfirmDialog id={d.uid} />}
                       {(d.status === "pending" || d.status === "confirming") && (
-                        <FailDialog id={d.id} />
+                        <FailDialog id={d.uid} />
                       )}
                     </div>
                   </TableCell>

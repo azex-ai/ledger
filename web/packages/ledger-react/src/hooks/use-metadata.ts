@@ -28,7 +28,7 @@ export function useDeactivateClassification() {
   const client = useLedgerClient();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => client.deactivateClassification(id),
+    mutationFn: (id: string) => client.deactivateClassification(id),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications }),
   });
@@ -59,7 +59,7 @@ export function useDeactivateJournalType() {
   const client = useLedgerClient();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => client.deactivateJournalType(id),
+    mutationFn: (id: string) => client.deactivateJournalType(id),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes }),
   });
@@ -90,7 +90,7 @@ export function useDeactivateTemplate() {
   const client = useLedgerClient();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => client.deactivateTemplate(id),
+    mutationFn: (id: string) => client.deactivateTemplate(id),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates }),
   });
@@ -102,7 +102,7 @@ export function usePreviewTemplate() {
     mutationFn: ({
       code,
       ...params
-    }: { code: string; holder_id: number; currency_id: number } & Record<
+    }: { code: string; holder_id: number; currency_uid: string } & Record<
       string,
       string | number
     >) =>
@@ -138,7 +138,7 @@ export function useDeactivateCurrency() {
   const client = useLedgerClient();
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: number) => client.deactivateCurrency(id),
+    mutationFn: (id: string) => client.deactivateCurrency(id),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies }),
   });

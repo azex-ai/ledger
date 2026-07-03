@@ -18,7 +18,7 @@ import (
 // everything a partial-reversal test needs. 100.01 does not divide evenly by
 // 3, which is exactly the case the largest-remainder allocation must survive
 // without losing a cent.
-func seedFractionFixture(t *testing.T) (store *postgres.LedgerStore, ctx context.Context, journalID, curID, clsWallet, clsCustodial int64) {
+func seedFractionFixture(t *testing.T) (store *postgres.LedgerStore, ctx context.Context, journalUID, curID, clsWallet, clsCustodial string) {
 	t.Helper()
 	pool := postgrestest.SetupDB(t)
 	store = postgres.NewLedgerStore(pool)
@@ -31,15 +31,15 @@ func seedFractionFixture(t *testing.T) (store *postgres.LedgerStore, ctx context
 
 	amount := decimal.RequireFromString("100.01")
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("frac-base"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 7, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeCredit, Amount: amount},
-			{AccountHolder: -7, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeDebit, Amount: amount},
+			{AccountHolder: 7, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeCredit, Amount: amount},
+			{AccountHolder: -7, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeDebit, Amount: amount},
 		},
 	})
 	require.NoError(t, err)
-	return store, ctx, j.ID, curID, clsWallet, clsCustodial
+	return store, ctx, j.UID, curID, clsWallet, clsCustodial
 }
 
 // Pins I-2 (revised): fractional reversals conserve — cumulative reversed
@@ -58,7 +58,7 @@ func TestReverseJournalFraction_ConservationAndRemainderCompletion(t *testing.T)
 	for i := 0; i < 2; i++ {
 		rev, err := store.ReverseJournalFraction(ctx, jID, 1, 3, "partial refund", postgrestest.UniqueKey("frac-third"))
 		require.NoError(t, err, "reversal %d/2", i+1)
-		assert.Equal(t, jID, rev.ReversalOf)
+		assert.Equal(t, jID, rev.ReversalOfUID)
 		// Every partial reversal must itself balance per currency.
 		assert.True(t, rev.TotalDebit.Equal(rev.TotalCredit), "reversal %d unbalanced: DR=%s CR=%s", i+1, rev.TotalDebit, rev.TotalCredit)
 		assert.True(t, rev.TotalDebit.Equal(decimal.RequireFromString("33.34")), "each 1/3 of 100.01 rounds to 33.34, got %s", rev.TotalDebit)
@@ -116,7 +116,7 @@ func TestReverseJournalFraction_IdempotentReplay(t *testing.T) {
 	// Same key + same payload → the original reversal, no second posting.
 	second, err := store.ReverseJournalFraction(ctx, jID, 1, 4, "refund", key)
 	require.NoError(t, err)
-	assert.Equal(t, first.ID, second.ID)
+	assert.Equal(t, first.UID, second.UID)
 
 	// Same key + different fraction → conflict.
 	_, err = store.ReverseJournalFraction(ctx, jID, 1, 2, "refund", key)
@@ -171,18 +171,18 @@ func TestReverseJournalFraction_MultiCurrencyBalancesPerCurrency(t *testing.T) {
 	clsSettle := postgrestest.SeedClassification(t, pool, "settlement", "Settlement", "debit", true)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("frac-fx"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 9, CurrencyID: curA, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("10.01")},
-			{AccountHolder: -9, CurrencyID: curA, ClassificationID: clsSettle, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("10.01")},
-			{AccountHolder: 9, CurrencyID: curB, ClassificationID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1501)},
-			{AccountHolder: -9, CurrencyID: curB, ClassificationID: clsSettle, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1501)},
+			{AccountHolder: 9, CurrencyUID: curA, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("10.01")},
+			{AccountHolder: -9, CurrencyUID: curA, ClassificationUID: clsSettle, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("10.01")},
+			{AccountHolder: 9, CurrencyUID: curB, ClassificationUID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1501)},
+			{AccountHolder: -9, CurrencyUID: curB, ClassificationUID: clsSettle, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1501)},
 		},
 	})
 	require.NoError(t, err)
 
-	rev, err := store.ReverseJournalFraction(ctx, j.ID, 1, 3, "fx partial", postgrestest.UniqueKey("frac-fx-rev"))
+	rev, err := store.ReverseJournalFraction(ctx, j.UID, 1, 3, "fx partial", postgrestest.UniqueKey("frac-fx-rev"))
 	require.NoError(t, err)
 
 	// The DB's deferred per-currency balance trigger would have aborted the
@@ -205,7 +205,7 @@ func TestReverseJournal_MutualExclusionWithFraction(t *testing.T) {
 	// Reversing a reversal (full or fractional) stays blocked.
 	rev, err := store.ReverseJournalFraction(ctx, jID, 1, 4, "partial2", postgrestest.UniqueKey("frac-mx2"))
 	require.NoError(t, err)
-	_, err = store.ReverseJournalFraction(ctx, rev.ID, 1, 2, "rev of rev", postgrestest.UniqueKey("frac-mx3"))
+	_, err = store.ReverseJournalFraction(ctx, rev.UID, 1, 2, "rev of rev", postgrestest.UniqueKey("frac-mx3"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrConflict)
 }

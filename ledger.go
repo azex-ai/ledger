@@ -232,7 +232,7 @@ func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBala
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 	rollupAdapter := postgres.NewRollupAdapter(s.pool)
-	basic := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	basic := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	return service.NewFullReconciliationService(basic, s.reconcileAdapter, cfg, engine)
 }
 
@@ -440,9 +440,9 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 
 	s.eventStore.SetClaimLease(cfg.EventClaimLease)
 
-	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.reserverStore, s.bookingStore, s.bookingStore, engine)
-	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, s.classStore, engine)
+	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 

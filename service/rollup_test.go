@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -114,11 +115,24 @@ func (s *sinceAwareEntrySummer) SumEntriesSince(_ context.Context, _, _, since i
 }
 
 type mockClassificationLister struct {
-	classifications []core.Classification
+	classifications []ClassificationDim
 }
 
-func (m *mockClassificationLister) ListClassifications(_ context.Context, _ bool) ([]core.Classification, error) {
+func (m *mockClassificationLister) ClassificationDims(_ context.Context) ([]ClassificationDim, error) {
 	return m.classifications, nil
+}
+
+// CurrencyIDByUID parses the test convention "cur-<id>" back to the id.
+func (m *mockClassificationLister) CurrencyIDByUID(_ context.Context, uid string) (int64, error) {
+	var id int64
+	if _, err := fmt.Sscanf(uid, "cur-%d", &id); err != nil {
+		return 0, core.ErrNotFound
+	}
+	return id, nil
+}
+
+func (m *mockClassificationLister) CurrencyUIDByID(_ context.Context, id int64) (string, error) {
+	return fmt.Sprintf("cur-%d", id), nil
 }
 
 // --- Tests ---
@@ -138,8 +152,8 @@ func TestRollupService_ProcessSingleItem(t *testing.T) {
 		maxEntryAt:    now,
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 
@@ -185,8 +199,8 @@ func TestRollupService_CreditNormalBalance(t *testing.T) {
 		maxEntryAt:    now,
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 20, Code: "liability", NormalSide: core.NormalSideCredit},
+		classifications: []ClassificationDim{
+			{ID: 20, UID: "cls-20", Code: "liability", NormalSide: core.NormalSideCredit},
 		},
 	}
 
@@ -242,7 +256,7 @@ func TestRollupService_ReenqueuesCoalescedEntries(t *testing.T) {
 		},
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+		classifications: []ClassificationDim{{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit}},
 	}
 
 	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
@@ -284,7 +298,7 @@ func TestRollupService_NoReenqueueWhenNothingNew(t *testing.T) {
 		},
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+		classifications: []ClassificationDim{{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit}},
 	}
 
 	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
@@ -319,7 +333,7 @@ func TestRollupService_ReenqueueFailureDoesNotFailRollup(t *testing.T) {
 		},
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit}},
+		classifications: []ClassificationDim{{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit}},
 	}
 
 	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine())
@@ -359,8 +373,8 @@ func TestRollupService_DriftDetection(t *testing.T) {
 		maxEntryAt:    time.Now(),
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 30, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 30, UID: "cls-30", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 
@@ -388,8 +402,8 @@ func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 		err: assert.AnError,
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 40, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 40, UID: "cls-40", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 
@@ -421,8 +435,8 @@ func TestRollupService_ReleasesClaimAfterParentCtxCancelled(t *testing.T) {
 		err: assert.AnError,
 	}
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 50, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 50, UID: "cls-50", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 

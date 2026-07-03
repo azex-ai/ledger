@@ -7,22 +7,30 @@ package sqlcgen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createTemplate = `-- name: CreateTemplate :one
-INSERT INTO entry_templates (code, name, journal_type_id)
-VALUES ($1, $2, $3)
-RETURNING id, code, name, journal_type_id, is_active, created_at
+INSERT INTO entry_templates (code, name, journal_type_id, uid)
+VALUES ($1, $2, $3, $4)
+RETURNING id, code, name, journal_type_id, is_active, created_at, uid
 `
 
 type CreateTemplateParams struct {
-	Code          string `json:"code"`
-	Name          string `json:"name"`
-	JournalTypeID int64  `json:"journal_type_id"`
+	Code          string      `json:"code"`
+	Name          string      `json:"name"`
+	JournalTypeID int64       `json:"journal_type_id"`
+	Uid           pgtype.UUID `json:"uid"`
 }
 
 func (q *Queries) CreateTemplate(ctx context.Context, arg CreateTemplateParams) (EntryTemplate, error) {
-	row := q.db.QueryRow(ctx, createTemplate, arg.Code, arg.Name, arg.JournalTypeID)
+	row := q.db.QueryRow(ctx, createTemplate,
+		arg.Code,
+		arg.Name,
+		arg.JournalTypeID,
+		arg.Uid,
+	)
 	var i EntryTemplate
 	err := row.Scan(
 		&i.ID,
@@ -31,6 +39,7 @@ func (q *Queries) CreateTemplate(ctx context.Context, arg CreateTemplateParams) 
 		&i.JournalTypeID,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -73,16 +82,16 @@ func (q *Queries) CreateTemplateLine(ctx context.Context, arg CreateTemplateLine
 }
 
 const deactivateTemplate = `-- name: DeactivateTemplate :exec
-UPDATE entry_templates SET is_active = false WHERE id = $1
+UPDATE entry_templates SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateTemplate(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deactivateTemplate, id)
+func (q *Queries) DeactivateTemplate(ctx context.Context, uid pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deactivateTemplate, uid)
 	return err
 }
 
 const getTemplateByCode = `-- name: GetTemplateByCode :one
-SELECT id, code, name, journal_type_id, is_active, created_at
+SELECT id, code, name, journal_type_id, is_active, created_at, uid
 FROM entry_templates
 WHERE code = $1
 `
@@ -97,6 +106,7 @@ func (q *Queries) GetTemplateByCode(ctx context.Context, code string) (EntryTemp
 		&i.JournalTypeID,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -137,7 +147,7 @@ func (q *Queries) GetTemplateLines(ctx context.Context, templateID int64) ([]Ent
 }
 
 const listTemplates = `-- name: ListTemplates :many
-SELECT id, code, name, journal_type_id, is_active, created_at
+SELECT id, code, name, journal_type_id, is_active, created_at, uid
 FROM entry_templates
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY code
@@ -159,6 +169,7 @@ func (q *Queries) ListTemplates(ctx context.Context, activeOnly bool) ([]EntryTe
 			&i.JournalTypeID,
 			&i.IsActive,
 			&i.CreatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

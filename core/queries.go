@@ -17,13 +17,17 @@ type QueryProvider interface {
 
 // JournalQuerier lists journals with cursor pagination.
 type JournalQuerier interface {
-	GetJournal(ctx context.Context, id int64) (*Journal, []Entry, error)
-	ListJournals(ctx context.Context, cursorID int64, limit int32) ([]Journal, error)
+	GetJournal(ctx context.Context, uid string) (*Journal, []Entry, error)
+	// ListJournals returns one page plus the opaque cursor for the next
+	// page ("" when exhausted).
+	ListJournals(ctx context.Context, cursor string, limit int32) ([]Journal, string, error)
 }
 
 // EntryQuerier lists entries with cursor pagination.
 type EntryQuerier interface {
-	ListEntriesByAccount(ctx context.Context, holder, currencyID, cursorID int64, limit int32) ([]Entry, error)
+	// ListEntriesByAccount returns one page plus the opaque cursor for the
+	// next page ("" when exhausted).
+	ListEntriesByAccount(ctx context.Context, holder int64, currencyUID string, cursor string, limit int32) ([]Entry, string, error)
 }
 
 // ReservationQuerier lists reservations.
@@ -33,7 +37,7 @@ type ReservationQuerier interface {
 
 // SnapshotQuerier queries snapshots by date range.
 type SnapshotQuerier interface {
-	ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]BalanceSnapshot, error)
+	ListSnapshotsByDateRange(ctx context.Context, holder int64, currencyUID string, start, end time.Time) ([]BalanceSnapshot, error)
 }
 
 // SystemRollupQuerier reads aggregated system-wide balances in the response

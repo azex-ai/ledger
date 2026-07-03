@@ -13,7 +13,7 @@ import (
 )
 
 const getEvent = `-- name: GetEvent :one
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events WHERE id = $1
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid FROM events WHERE id = $1
 `
 
 func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
@@ -40,12 +40,68 @@ func (q *Queries) GetEvent(ctx context.Context, id int64) (Event, error) {
 		&i.CreatedAt,
 		&i.ActorID,
 		&i.Source,
+		&i.Uid,
 	)
 	return i, err
 }
 
+const getEventByUID = `-- name: GetEventByUID :one
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid FROM events WHERE uid = $1
+`
+
+func (q *Queries) GetEventByUID(ctx context.Context, uid pgtype.UUID) (Event, error) {
+	row := q.db.QueryRow(ctx, getEventByUID, uid)
+	var i Event
+	err := row.Scan(
+		&i.ID,
+		&i.ClassificationCode,
+		&i.BookingID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.FromStatus,
+		&i.ToStatus,
+		&i.Amount,
+		&i.SettledAmount,
+		&i.JournalID,
+		&i.Metadata,
+		&i.OccurredAt,
+		&i.DeliveryStatus,
+		&i.Attempts,
+		&i.MaxAttempts,
+		&i.NextAttemptAt,
+		&i.DeliveredAt,
+		&i.CreatedAt,
+		&i.ActorID,
+		&i.Source,
+		&i.Uid,
+	)
+	return i, err
+}
+
+const getEventIDByUID = `-- name: GetEventIDByUID :one
+SELECT id FROM events WHERE uid = $1
+`
+
+func (q *Queries) GetEventIDByUID(ctx context.Context, uid pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getEventIDByUID, uid)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const getEventUIDByID = `-- name: GetEventUIDByID :one
+SELECT uid FROM events WHERE id = $1
+`
+
+func (q *Queries) GetEventUIDByID(ctx context.Context, id int64) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getEventUIDByID, id)
+	var uid pgtype.UUID
+	err := row.Scan(&uid)
+	return uid, err
+}
+
 const getLatestEventForBooking = `-- name: GetLatestEventForBooking :one
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid FROM events
 WHERE booking_id = $1
 ORDER BY id DESC
 LIMIT 1
@@ -75,6 +131,7 @@ func (q *Queries) GetLatestEventForBooking(ctx context.Context, bookingID int64)
 		&i.CreatedAt,
 		&i.ActorID,
 		&i.Source,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -93,7 +150,7 @@ UPDATE events AS e
 SET next_attempt_at = $2
 FROM claimed
 WHERE e.id = claimed.id
-RETURNING e.id, e.classification_code, e.booking_id, e.account_holder, e.currency_id, e.from_status, e.to_status, e.amount, e.settled_amount, e.journal_id, e.metadata, e.occurred_at, e.delivery_status, e.attempts, e.max_attempts, e.next_attempt_at, e.delivered_at, e.created_at, e.actor_id, e.source
+RETURNING e.id, e.classification_code, e.booking_id, e.account_holder, e.currency_id, e.from_status, e.to_status, e.amount, e.settled_amount, e.journal_id, e.metadata, e.occurred_at, e.delivery_status, e.attempts, e.max_attempts, e.next_attempt_at, e.delivered_at, e.created_at, e.actor_id, e.source, e.uid
 `
 
 type GetPendingEventsParams struct {
@@ -131,6 +188,7 @@ func (q *Queries) GetPendingEvents(ctx context.Context, arg GetPendingEventsPara
 			&i.CreatedAt,
 			&i.ActorID,
 			&i.Source,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -146,9 +204,9 @@ const insertEvent = `-- name: InsertEvent :one
 INSERT INTO events (
     classification_code, booking_id, account_holder, currency_id,
     from_status, to_status, amount, settled_amount, journal_id,
-    metadata, occurred_at, actor_id, source
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
+    metadata, occurred_at, actor_id, source, uid
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid
 `
 
 type InsertEventParams struct {
@@ -165,6 +223,7 @@ type InsertEventParams struct {
 	OccurredAt         time.Time      `json:"occurred_at"`
 	ActorID            int64          `json:"actor_id"`
 	Source             string         `json:"source"`
+	Uid                pgtype.UUID    `json:"uid"`
 }
 
 func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event, error) {
@@ -182,6 +241,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 		arg.OccurredAt,
 		arg.ActorID,
 		arg.Source,
+		arg.Uid,
 	)
 	var i Event
 	err := row.Scan(
@@ -205,6 +265,7 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Event
 		&i.CreatedAt,
 		&i.ActorID,
 		&i.Source,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -214,7 +275,7 @@ UPDATE events
 SET journal_id = $2
 WHERE id = $1
   AND journal_id IS NULL
-RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
+RETURNING id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid
 `
 
 type LinkEventJournalParams struct {
@@ -246,12 +307,13 @@ func (q *Queries) LinkEventJournal(ctx context.Context, arg LinkEventJournalPara
 		&i.CreatedAt,
 		&i.ActorID,
 		&i.Source,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const listEventsByFilter = `-- name: ListEventsByFilter :many
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source FROM events
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid FROM events
 WHERE (classification_code = $1 OR $1 = '')
   AND (booking_id = $2 OR $2 = 0)
   AND (to_status = $3 OR $3 = '')
@@ -304,6 +366,7 @@ func (q *Queries) ListEventsByFilter(ctx context.Context, arg ListEventsByFilter
 			&i.CreatedAt,
 			&i.ActorID,
 			&i.Source,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

@@ -93,7 +93,7 @@ describe("server prefetch round-trip", () => {
         return HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ currency_id: 1, balance: "100" }],
+          data: [{ currency_uid: 1, balance: "100" }],
         });
       }),
     );
@@ -104,7 +104,7 @@ describe("server prefetch round-trip", () => {
     await prefetchBalances(qc, client, 42);
 
     expect(qc.getQueryData(ledgerKeys.balances(42))).toEqual([
-      { currency_id: 1, balance: "100" },
+      { currency_uid: 1, balance: "100" },
     ]);
     expect(calls).toBe(1);
 
@@ -112,7 +112,7 @@ describe("server prefetch round-trip", () => {
       wrapper: wrapper(qc, client),
     });
     expect(result.current.isSuccess).toBe(true);
-    expect(result.current.data).toEqual([{ currency_id: 1, balance: "100" }]);
+    expect(result.current.data).toEqual([{ currency_uid: 1, balance: "100" }]);
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(calls).toBe(1);

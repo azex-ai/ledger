@@ -53,7 +53,7 @@ func TestFeeBundle_Template_Balance(t *testing.T) {
 	amount := decimal.NewFromFloat(2.50)
 	params := core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "fee-42",
 		Amounts:        map[string]decimal.Decimal{"amount": amount},
 	}

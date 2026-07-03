@@ -44,11 +44,11 @@ func TestReconcileAdapter_AccountingEquation(t *testing.T) {
 	clsCredit := postgrestest.SeedClassification(t, pool, "aeq-custodial", "AEQ Custodial", "credit", true)
 
 	_, err := ledger.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("aeq-test"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsDebit, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCredit, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsDebit, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCredit, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 	})
 	require.NoError(t, err)
@@ -57,13 +57,17 @@ func TestReconcileAdapter_AccountingEquation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, rows)
 
-	// Find the rows for our currency/classifications.
+	// Find the rows for our currency/classifications. The reconcile math is
+	// keyed on internal ids, so resolve the seeded uids back once.
+	curInternal := postgrestest.InternalID(t, pool, "currencies", curID)
+	clsDebitInternal := postgrestest.InternalID(t, pool, "classifications", clsDebit)
+	clsCreditInternal := postgrestest.InternalID(t, pool, "classifications", clsCredit)
 	for _, r := range rows {
-		if r.CurrencyID == curID && r.ClassificationID == clsDebit {
+		if r.CurrencyID == curInternal && r.ClassificationID == clsDebitInternal {
 			assert.Equal(t, "debit", r.NormalSide)
 			assert.True(t, r.TotalDebit.Equal(decimal.NewFromInt(500)), "debit total mismatch")
 		}
-		if r.CurrencyID == curID && r.ClassificationID == clsCredit {
+		if r.CurrencyID == curInternal && r.ClassificationID == clsCreditInternal {
 			assert.Equal(t, "credit", r.NormalSide)
 			assert.True(t, r.TotalCredit.Equal(decimal.NewFromInt(500)), "credit total mismatch")
 		}
@@ -87,13 +91,13 @@ func TestReconcileAdapter_SettlementNetting(t *testing.T) {
 
 	// Post a BALANCED journal that nets to zero in settlement.
 	_, err := ledger.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("sn-balanced"),
 		Entries: []core.EntryInput{
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsSettlement, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsSettlement, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCounterpart, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCounterpart, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsSettlement, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsSettlement, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCounterpart, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCounterpart, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
@@ -120,11 +124,11 @@ func TestReconcileAdapter_NonNegativeBalances_Clean(t *testing.T) {
 
 	// User 50 gets a deposit of 200.
 	_, err := ledger.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("nnb-deposit"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 50, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: -50, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: 50, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: -50, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
 		},
 	})
 	require.NoError(t, err)
@@ -132,8 +136,9 @@ func TestReconcileAdapter_NonNegativeBalances_Clean(t *testing.T) {
 	accounts, err := adapter.NegativeBalanceAccounts(ctx, 100)
 	require.NoError(t, err)
 	// The debit-normal wallet has balance 200 (positive), so no violations.
+	clsWalletInternal := postgrestest.InternalID(t, pool, "classifications", clsWallet)
 	for _, acc := range accounts {
-		assert.False(t, acc.AccountHolder == 50 && acc.ClassificationID == clsWallet,
+		assert.False(t, acc.AccountHolder == 50 && acc.ClassificationID == clsWalletInternal,
 			"positive wallet balance should not appear as violation")
 	}
 }

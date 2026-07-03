@@ -12,7 +12,7 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 	valid := CreateBookingInput{
 		ClassificationCode: "deposit",
 		AccountHolder:      1001,
-		CurrencyID:         1,
+		CurrencyUID:        "cur-1",
 		Amount:             decimal.NewFromInt(100),
 		IdempotencyKey:     "booking-1",
 	}
@@ -31,7 +31,7 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 			name: "zero holder",
 			input: CreateBookingInput{
 				ClassificationCode: "deposit",
-				CurrencyID:         1,
+				CurrencyUID:        "cur-1",
 				Amount:             decimal.NewFromInt(100),
 				IdempotencyKey:     "booking-1",
 			},
@@ -50,7 +50,7 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 			input: CreateBookingInput{
 				ClassificationCode: "deposit",
 				AccountHolder:      1001,
-				CurrencyID:         1,
+				CurrencyUID:        "cur-1",
 				Amount:             decimal.Zero,
 				IdempotencyKey:     "booking-1",
 			},
@@ -60,7 +60,7 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 			input: CreateBookingInput{
 				ClassificationCode: "deposit",
 				AccountHolder:      1001,
-				CurrencyID:         1,
+				CurrencyUID:        "cur-1",
 				Amount:             decimal.NewFromInt(100),
 			},
 		},
@@ -80,9 +80,9 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 
 func TestTransitionInput_Validate(t *testing.T) {
 	valid := TransitionInput{
-		BookingID: 1,
-		ToStatus:  "confirmed",
-		Amount:    decimal.NewFromInt(100),
+		BookingUID: "bk-1",
+		ToStatus:   "confirmed",
+		Amount:     decimal.NewFromInt(100),
 	}
 	require.NoError(t, valid.Validate())
 
@@ -99,15 +99,15 @@ func TestTransitionInput_Validate(t *testing.T) {
 		{
 			name: "missing status",
 			input: TransitionInput{
-				BookingID: 1,
+				BookingUID: "bk-1",
 			},
 		},
 		{
 			name: "negative amount",
 			input: TransitionInput{
-				BookingID: 1,
-				ToStatus:  "confirmed",
-				Amount:    decimal.NewFromInt(-1),
+				BookingUID: "bk-1",
+				ToStatus:   "confirmed",
+				Amount:     decimal.NewFromInt(-1),
 			},
 		},
 	}

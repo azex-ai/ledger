@@ -1,8 +1,8 @@
 -- name: InsertPeriodClose :one
 -- Append-only: latest-row-wins semantics come from ordering by created_at in
 -- GetActivePeriodClose, not from any uniqueness constraint here.
-INSERT INTO period_closes (close_before, note, actor_id)
-VALUES ($1, $2, $3)
+INSERT INTO period_closes (close_before, note, actor_id, uid)
+VALUES ($1, $2, $3, $4)
 RETURNING *;
 
 -- name: GetActivePeriodClose :one

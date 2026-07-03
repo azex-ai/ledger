@@ -35,7 +35,7 @@ type entryDimKey struct {
 	entryType        core.EntryType
 }
 
-// ReverseJournalFraction posts a reversal covering num/den of journalID's
+// ReverseJournalFraction posts a reversal covering num/den of the journal's
 // entries. See core.JournalWriter's doc comment for the full contract.
 //
 // In pool mode a new transaction is started and committed here (the
@@ -43,7 +43,7 @@ type entryDimKey struct {
 // transaction so the lock covers both the cumulative-amount check and the
 // write). In tx mode (store bound via WithDB) it participates in the
 // caller's transaction; commit/rollback is the caller's responsibility.
-func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalID int64, num, den int64, reason string, idempotencyKey string) (*core.Journal, error) {
+func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (*core.Journal, error) {
 	if err := core.ValidateReversalFraction(num, den); err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalID int6
 	}
 
 	if s.pool == nil {
-		return s.reverseJournalFractionWithQueries(ctx, s.q, journalID, num, den, reason, idempotencyKey)
+		return s.reverseJournalFractionWithQueries(ctx, s.q, journalUID, num, den, reason, idempotencyKey)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -62,7 +62,7 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalID int6
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	journal, err := s.reverseJournalFractionWithQueries(ctx, qtx, journalID, num, den, reason, idempotencyKey)
+	journal, err := s.reverseJournalFractionWithQueries(ctx, qtx, journalUID, num, den, reason, idempotencyKey)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +73,32 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalID int6
 	return journal, nil
 }
 
-func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *sqlcgen.Queries, journalID, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
+func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
 	expectedFraction := fmt.Sprintf("%d/%d", num, den)
+
+	pgUID, err := uidToPG(journalUID)
+	if err != nil {
+		return nil, err
+	}
 
 	// Idempotent replay short-circuit. This must happen before the row lock
 	// below (and before any cumulative-amount computation): a retried call
 	// with the same key would otherwise see its own, already-committed
 	// entries as "reversed by someone else" via ListReversalEntriesByOriginal
 	// and reject itself.
+	// Row-lock the original journal for the rest of this transaction so
+	// concurrent partial reversals of it serialize. Without this, two
+	// concurrent calls could each read "0 reversed so far" and both post,
+	// together over-reversing the journal beyond its original amount.
+	original, err := q.GetJournalForUpdateByUID(ctx, pgUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: reverse journal fraction: journal %q: %w", journalUID, core.ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: reverse journal fraction: get journal: %w", err)
+	}
+	journalID := original.ID
+
 	if existing, err := q.GetJournalByIdempotencyKey(ctx, idempotencyKey); err == nil {
 		if !existing.ReversalOf.Valid || existing.ReversalOf.Int64 != journalID {
 			return nil, fmt.Errorf("postgres: reverse journal fraction: idempotency key %q already used for a different journal: %w", idempotencyKey, core.ErrConflict)
@@ -89,24 +107,13 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		if existingMeta["reason"] != reason || existingMeta["reversal_fraction"] != expectedFraction {
 			return nil, fmt.Errorf("postgres: reverse journal fraction: idempotency key %q payload mismatch: %w", idempotencyKey, core.ErrConflict)
 		}
-		return journalFromRow(existing), nil
+		return journalFromRow(ctx, s.dims, q, existing)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: reverse journal fraction: check idempotency: %w", err)
 	}
 
-	// Row-lock the original journal for the rest of this transaction so
-	// concurrent partial reversals of it serialize. Without this, two
-	// concurrent calls could each read "0 reversed so far" and both post,
-	// together over-reversing the journal beyond its original amount.
-	original, err := q.GetJournalForUpdate(ctx, journalID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: reverse journal fraction: journal %d: %w", journalID, core.ErrNotFound)
-		}
-		return nil, fmt.Errorf("postgres: reverse journal fraction: get journal: %w", err)
-	}
 	if original.ReversalOf.Valid {
-		return nil, fmt.Errorf("postgres: reverse journal fraction: journal %d is already a reversal: %w", journalID, core.ErrConflict)
+		return nil, fmt.Errorf("postgres: reverse journal fraction: journal %q is already a reversal: %w", journalUID, core.ErrConflict)
 	}
 
 	entries, err := q.ListJournalEntries(ctx, journalID)
@@ -145,39 +152,38 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 			if originalType == core.EntryTypeCredit {
 				flipped = core.EntryTypeDebit
 			}
+			cur, err := s.dims.currencyByIDOrErr(ctx, q, e.CurrencyID)
+			if err != nil {
+				return nil, err
+			}
+			cls, err := s.dims.classByIDOrErr(ctx, q, e.ClassificationID)
+			if err != nil {
+				return nil, err
+			}
 			reversedEntries = append(reversedEntries, core.EntryInput{
-				AccountHolder:    e.AccountHolder,
-				CurrencyID:       e.CurrencyID,
-				ClassificationID: e.ClassificationID,
-				EntryType:        flipped,
-				Amount:           remaining,
+				AccountHolder:     e.AccountHolder,
+				CurrencyUID:       cur.UID,
+				ClassificationUID: cls.UID,
+				EntryType:         flipped,
+				Amount:            remaining,
 			})
 		}
 		if len(reversedEntries) == 0 {
 			return nil, fmt.Errorf("postgres: reverse journal fraction: journal %d is already fully reversed: %w", journalID, core.ErrConflict)
 		}
+		jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
+		if err != nil {
+			return nil, err
+		}
 		input := core.JournalInput{
-			JournalTypeID:  original.JournalTypeID,
+			JournalTypeUID: jt.UID,
 			IdempotencyKey: idempotencyKey,
 			Entries:        reversedEntries,
 			Source:         "reversal",
-			ReversalOf:     journalID,
+			ReversalOfUID:  journalUID,
 			Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 		}
 		return s.postJournalWithQueries(ctx, q, input)
-	}
-
-	currencyIDs := make([]int64, 0, len(entries))
-	seenCurrency := make(map[int64]struct{}, len(entries))
-	for _, e := range entries {
-		if _, ok := seenCurrency[e.CurrencyID]; !ok {
-			seenCurrency[e.CurrencyID] = struct{}{}
-			currencyIDs = append(currencyIDs, e.CurrencyID)
-		}
-	}
-	currencies, err := fetchCurrencyExponents(ctx, q, currencyIDs)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reverse journal fraction: %w", err)
 	}
 
 	// Group original entries by (currency, entry_type) so each group's total
@@ -199,11 +205,11 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 
 	reversedAmounts := make([]decimal.Decimal, len(entries))
 	for gk, idxs := range groups {
-		currency, ok := currencies[gk.currencyID]
-		if !ok {
-			return nil, fmt.Errorf("postgres: reverse journal fraction: currency %d not found: %w", gk.currencyID, core.ErrInvalidInput)
+		currency, err := s.dims.currencyByIDOrErr(ctx, q, gk.currencyID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal fraction: %w", err)
 		}
-		exponent := int32(currency.Exponent)
+		exponent := currency.Exponent
 
 		groupTotal := decimal.Zero
 		weights := make([]decimal.Decimal, len(idxs))
@@ -254,24 +260,36 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		if originalType == core.EntryTypeCredit {
 			flipped = core.EntryTypeDebit
 		}
+		cur, err := s.dims.currencyByIDOrErr(ctx, q, e.CurrencyID)
+		if err != nil {
+			return nil, err
+		}
+		cls, err := s.dims.classByIDOrErr(ctx, q, e.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		reversedEntries = append(reversedEntries, core.EntryInput{
-			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
-			EntryType:        flipped,
-			Amount:           newAmount,
+			AccountHolder:     e.AccountHolder,
+			CurrencyUID:       cur.UID,
+			ClassificationUID: cls.UID,
+			EntryType:         flipped,
+			Amount:            newAmount,
 		})
 	}
 	if len(reversedEntries) == 0 {
-		return nil, fmt.Errorf("postgres: reverse journal fraction: fraction %d/%d of journal %d rounds to zero on every entry: %w", num, den, journalID, core.ErrInvalidInput)
+		return nil, fmt.Errorf("postgres: reverse journal fraction: fraction %d/%d of journal %s rounds to zero on every entry: %w", num, den, journalUID, core.ErrInvalidInput)
 	}
 
+	jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
+	if err != nil {
+		return nil, err
+	}
 	input := core.JournalInput{
-		JournalTypeID:  original.JournalTypeID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: idempotencyKey,
 		Entries:        reversedEntries,
 		Source:         "reversal",
-		ReversalOf:     journalID,
+		ReversalOfUID:  journalUID,
 		Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 	}
 

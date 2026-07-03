@@ -126,7 +126,7 @@ export interface paths {
         get: {
             parameters: {
                 query?: {
-                    cursor?: number;
+                    cursor?: string;
                     limit?: number;
                 };
                 header?: never;
@@ -257,7 +257,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/journals/{id}": {
+    "/journals/{uid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -270,7 +270,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -296,7 +296,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/journals/{id}/reverse": {
+    "/journals/{uid}/reverse": {
         parameters: {
             query?: never;
             header?: never;
@@ -314,7 +314,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -350,7 +350,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/journals/{id}/reverse-partial": {
+    "/journals/{uid}/reverse-partial": {
         parameters: {
             query?: never;
             header?: never;
@@ -368,7 +368,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -421,8 +421,8 @@ export interface paths {
             parameters: {
                 query: {
                     holder: number;
-                    currency: number;
-                    cursor?: number;
+                    currency: string;
+                    cursor?: string;
                     limit?: number;
                 };
                 header?: never;
@@ -500,7 +500,7 @@ export interface paths {
                 header?: never;
                 path: {
                     holder: number;
-                    currency: number;
+                    currency: string;
                 };
                 cookie?: never;
             };
@@ -546,8 +546,8 @@ export interface paths {
                 content: {
                     "application/json": {
                         holders: number[];
-                        /** Format: int64 */
-                        currency_id: number;
+                        /** Format: uuid */
+                        currency_uid: string;
                     };
                 };
             };
@@ -626,7 +626,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/reservations/{id}/settle": {
+    "/reservations/{uid}/settle": {
         parameters: {
             query?: never;
             header?: never;
@@ -641,7 +641,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -670,7 +670,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/reservations/{id}/settle-partial": {
+    "/reservations/{uid}/settle-partial": {
         parameters: {
             query?: never;
             header?: never;
@@ -681,14 +681,14 @@ export interface paths {
         put?: never;
         /**
          * Settle part of a reservation; call repeatedly to accumulate.
-         * @description First call transitions active → settling. Cumulative settled amount may never exceed the reserved amount. The unsettled remainder stays held against the balance until finalize. Finish with /reservations/{id}/finalize.
+         * @description First call transitions active → settling. Cumulative settled amount may never exceed the reserved amount. The unsettled remainder stays held against the balance until finalize. Finish with /reservations/{uid}/finalize.
          */
         post: {
             parameters: {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -717,7 +717,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/reservations/{id}/finalize": {
+    "/reservations/{uid}/finalize": {
         parameters: {
             query?: never;
             header?: never;
@@ -735,7 +735,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -757,7 +757,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/reservations/{id}/release": {
+    "/reservations/{uid}/release": {
         parameters: {
             query?: never;
             header?: never;
@@ -772,7 +772,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -932,7 +932,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/bookings/{id}": {
+    "/bookings/{uid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -945,7 +945,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -971,7 +971,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/bookings/{id}/transition": {
+    "/bookings/{uid}/transition": {
         parameters: {
             query?: never;
             header?: never;
@@ -986,7 +986,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1047,7 +1047,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/events/{id}": {
+    "/events/{uid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1060,7 +1060,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1186,7 +1186,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/classifications/{id}/deactivate": {
+    "/classifications/{uid}/deactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1201,7 +1201,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1281,7 +1281,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/journal-types/{id}/deactivate": {
+    "/journal-types/{uid}/deactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1295,7 +1295,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1412,7 +1412,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/templates/{id}/deactivate": {
+    "/templates/{uid}/deactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1426,7 +1426,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1506,7 +1506,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/currencies/{id}/deactivate": {
+    "/currencies/{uid}/deactivate": {
         parameters: {
             query?: never;
             header?: never;
@@ -1521,7 +1521,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1600,8 +1600,8 @@ export interface paths {
                     "application/json": {
                         /** Format: int64 */
                         holder: number;
-                        /** Format: int64 */
-                        currency_id: number;
+                        /** Format: uuid */
+                        currency_uid: string;
                     };
                 };
             };
@@ -1678,7 +1678,7 @@ export interface paths {
             parameters: {
                 query: {
                     holder: number;
-                    currency: number;
+                    currency: string;
                     from?: string;
                     to?: string;
                 };
@@ -1715,20 +1715,20 @@ export interface paths {
         /**
          * List journals by account dimension or by global time range.
          * @description Exactly one mode is selected by the params provided: pass `holder` +
-         *     `currency_id` (optionally narrowed by `classification_id` and/or
+         *     `currency_uid` (optionally narrowed by `classification_uid` and/or
          *     `from`/`to`) to list journals touching that account dimension; pass
          *     `from`/`to` alone to scan a global time range instead. Providing
-         *     neither, or `holder` without `currency_id`, is a 400.
+         *     neither, or `holder` without `currency_uid`, is a 400.
          */
         get: {
             parameters: {
                 query?: {
                     holder?: number;
-                    currency_id?: number;
-                    classification_id?: number;
+                    currency_uid?: string;
+                    classification_uid?: string;
                     from?: components["schemas"]["Timestamp"];
                     to?: components["schemas"]["Timestamp"];
-                    cursor?: number;
+                    cursor?: string;
                     limit?: number;
                 };
                 header?: never;
@@ -1757,7 +1757,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/audit/bookings/{id}/trace": {
+    "/audit/bookings/{uid}/trace": {
         parameters: {
             query?: never;
             header?: never;
@@ -1770,7 +1770,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1796,7 +1796,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/audit/journals/{id}/reversals": {
+    "/audit/journals/{uid}/reversals": {
         parameters: {
             query?: never;
             header?: never;
@@ -1809,7 +1809,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
-                    id: number;
+                    uid: string;
                 };
                 cookie?: never;
             };
@@ -1849,7 +1849,7 @@ export interface paths {
         get: {
             parameters: {
                 query: {
-                    currency_id: number;
+                    currency_uid: string;
                 };
                 header?: never;
                 path?: never;
@@ -1888,7 +1888,7 @@ export interface paths {
         get: {
             parameters: {
                 query: {
-                    currency_id: number;
+                    currency_uid: string;
                 };
                 header?: never;
                 path?: never;
@@ -1933,8 +1933,8 @@ export interface paths {
             parameters: {
                 query: {
                     holder: number;
-                    currency_id: number;
-                    classification_id?: number;
+                    currency_uid: string;
+                    classification_uid?: string;
                     from: components["schemas"]["Timestamp"];
                     to: components["schemas"]["Timestamp"];
                 };
@@ -2008,19 +2008,19 @@ export interface components {
         EntryInput: {
             /** Format: int64 */
             account_holder: number;
-            /** Format: int64 */
-            currency_id: number;
-            /** Format: int64 */
-            classification_id: number;
+            /** Format: uuid */
+            currency_uid: string;
+            /** Format: uuid */
+            classification_uid: string;
             entry_type: components["schemas"]["EntryType"];
             amount: components["schemas"]["Decimal"];
         };
         JournalInput: {
-            /** Format: int64 */
-            journal_type_id: number;
+            /** Format: uuid */
+            journal_type_uid: string;
             idempotency_key: string;
-            /** Format: int64 */
-            event_id?: number;
+            /** Format: uuid */
+            event_uid?: string;
             entries: components["schemas"]["EntryInput"][];
             metadata?: {
                 [key: string]: string;
@@ -2030,10 +2030,10 @@ export interface components {
             source?: string;
         };
         Journal: {
-            /** Format: int64 */
-            id?: number;
-            /** Format: int64 */
-            journal_type_id?: number;
+            /** Format: uuid */
+            uid?: string;
+            /** Format: uuid */
+            journal_type_uid?: string;
             idempotency_key?: string;
             total_debit?: components["schemas"]["Decimal"];
             total_credit?: components["schemas"]["Decimal"];
@@ -2043,23 +2043,29 @@ export interface components {
             /** Format: int64 */
             actor_id?: number;
             source?: string;
-            /** Format: int64 */
-            reversal_of?: number | null;
-            /** Format: int64 */
-            event_id?: number | null;
+            /**
+             * Format: uuid
+             * @description Empty when this journal is not a reversal.
+             */
+            reversal_of_uid?: string;
+            /**
+             * Format: uuid
+             * @description Empty when not event-driven.
+             */
+            event_uid?: string;
             created_at?: components["schemas"]["Timestamp"];
         };
         Entry: {
-            /** Format: int64 */
-            id?: number;
-            /** Format: int64 */
-            journal_id?: number;
+            /** Format: uuid */
+            uid?: string;
+            /** Format: uuid */
+            journal_uid?: string;
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
-            /** Format: int64 */
-            classification_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
+            /** Format: uuid */
+            classification_uid?: string;
             entry_type?: components["schemas"]["EntryType"];
             amount?: components["schemas"]["Decimal"];
             created_at?: components["schemas"]["Timestamp"];
@@ -2079,20 +2085,20 @@ export interface components {
         Balance: {
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
-            /** Format: int64 */
-            classification_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
+            /** Format: uuid */
+            classification_uid?: string;
             balance?: components["schemas"]["Decimal"];
         };
         BalancesEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Balance"][];
         };
         SystemRollup: {
-            /** Format: int64 */
-            currency_id?: number;
-            /** Format: int64 */
-            classification_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
+            /** Format: uuid */
+            classification_uid?: string;
             total_balance?: components["schemas"]["Decimal"];
             updated_at?: components["schemas"]["Timestamp"];
         };
@@ -2102,26 +2108,29 @@ export interface components {
         ReserveInput: {
             /** Format: int64 */
             account_holder: number;
-            /** Format: int64 */
-            currency_id: number;
+            /** Format: uuid */
+            currency_uid: string;
             amount: components["schemas"]["Decimal"];
             idempotency_key: string;
             /** @description Go duration string (e.g. 1h, 30m). */
             expires_in?: string;
         };
         Reservation: {
-            /** Format: int64 */
-            id?: number;
+            /** Format: uuid */
+            uid?: string;
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
             reserved_amount?: components["schemas"]["Decimal"];
             settled_amount?: components["schemas"]["Decimal"];
             /** @enum {string} */
             status?: "active" | "settling" | "settled" | "released";
-            /** Format: int64 */
-            journal_id?: number | null;
+            /**
+             * Format: uuid
+             * @description Empty when no journal linked.
+             */
+            journal_uid?: string;
             idempotency_key?: string;
             expires_at?: components["schemas"]["Timestamp"];
             created_at?: components["schemas"]["Timestamp"];
@@ -2132,15 +2141,15 @@ export interface components {
         };
         AccountPolicyInput: {
             /**
-             * Format: int64
-             * @description 0 = all currencies for this holder.
+             * Format: uuid
+             * @description Empty = all currencies for this holder.
              */
-            currency_id?: number;
+            currency_uid?: string;
             /**
-             * Format: int64
-             * @description 0 = all classifications for this holder/currency.
+             * Format: uuid
+             * @description Empty = all classifications for this holder/currency.
              */
-            classification_id?: number;
+            classification_uid?: string;
             /** @enum {string} */
             status: "active" | "frozen" | "closed";
             /** @description 0 = no overdraft; negative = overdraft limit; positive = dust floor. */
@@ -2151,14 +2160,14 @@ export interface components {
             actor_id?: number;
         };
         AccountPolicy: {
-            /** Format: int64 */
-            id?: number;
+            /** Format: uuid */
+            uid?: string;
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
-            /** Format: int64 */
-            classification_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
+            /** Format: uuid */
+            classification_uid?: string;
             /** @enum {string} */
             status?: "active" | "frozen" | "closed";
             min_balance?: components["schemas"]["Decimal"];
@@ -2174,8 +2183,8 @@ export interface components {
             classification_code: string;
             /** Format: int64 */
             account_holder: number;
-            /** Format: int64 */
-            currency_id: number;
+            /** Format: uuid */
+            currency_uid: string;
             amount: components["schemas"]["Decimal"];
             idempotency_key: string;
             channel_name?: string;
@@ -2196,23 +2205,29 @@ export interface components {
             source?: string;
         };
         Booking: {
-            /** Format: int64 */
-            id?: number;
-            /** Format: int64 */
-            classification_id?: number;
+            /** Format: uuid */
+            uid?: string;
+            /** Format: uuid */
+            classification_uid?: string;
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
             amount?: components["schemas"]["Decimal"];
             settled_amount?: components["schemas"]["Decimal"];
             status?: string;
             channel_name?: string;
             channel_ref?: string;
-            /** Format: int64 */
-            reservation_id?: number | null;
-            /** Format: int64 */
-            journal_id?: number | null;
+            /**
+             * Format: uuid
+             * @description Empty when no reservation linked.
+             */
+            reservation_uid?: string;
+            /**
+             * Format: uuid
+             * @description Empty when no journal linked.
+             */
+            journal_uid?: string;
             idempotency_key?: string;
             metadata?: {
                 [key: string]: unknown;
@@ -2225,21 +2240,24 @@ export interface components {
             data?: components["schemas"]["Booking"];
         };
         Event: {
-            /** Format: int64 */
-            id?: number;
+            /** Format: uuid */
+            uid?: string;
             classification_code?: string;
-            /** Format: int64 */
-            booking_id?: number;
+            /** Format: uuid */
+            booking_uid?: string;
             /** Format: int64 */
             account_holder?: number;
-            /** Format: int64 */
-            currency_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
             from_status?: string;
             to_status?: string;
             amount?: components["schemas"]["Decimal"];
             settled_amount?: components["schemas"]["Decimal"];
-            /** Format: int64 */
-            journal_id?: number | null;
+            /**
+             * Format: uuid
+             * @description Empty when no journal linked.
+             */
+            journal_uid?: string;
             metadata?: {
                 [key: string]: unknown;
             };
@@ -2266,8 +2284,8 @@ export interface components {
             lifecycle?: components["schemas"]["Lifecycle"];
         };
         TemplateLineInput: {
-            /** Format: int64 */
-            classification_id: number;
+            /** Format: uuid */
+            classification_uid: string;
             entry_type: components["schemas"]["EntryType"];
             holder_role: components["schemas"]["HolderRole"];
             amount_key: string;
@@ -2276,18 +2294,18 @@ export interface components {
         TemplateInput: {
             code: string;
             name: string;
-            /** Format: int64 */
-            journal_type_id: number;
+            /** Format: uuid */
+            journal_type_uid: string;
             lines: components["schemas"]["TemplateLineInput"][];
         };
         TemplateParams: {
             /** Format: int64 */
             holder_id: number;
-            /** Format: int64 */
-            currency_id: number;
+            /** Format: uuid */
+            currency_uid: string;
             idempotency_key: string;
-            /** Format: int64 */
-            event_id?: number;
+            /** Format: uuid */
+            event_uid?: string;
             amounts: {
                 [key: string]: components["schemas"]["Decimal"];
             };
@@ -2302,11 +2320,11 @@ export interface components {
             template_code: string;
             /** Format: int64 */
             holder_id: number;
-            /** Format: int64 */
-            currency_id: number;
+            /** Format: uuid */
+            currency_uid: string;
             idempotency_key: string;
-            /** Format: int64 */
-            event_id?: number;
+            /** Format: uuid */
+            event_uid?: string;
             amounts: {
                 [key: string]: components["schemas"]["Decimal"];
             };
@@ -2323,10 +2341,10 @@ export interface components {
             details?: {
                 /** Format: int64 */
                 account_holder?: number;
-                /** Format: int64 */
-                currency_id?: number;
-                /** Format: int64 */
-                classification_id?: number;
+                /** Format: uuid */
+                currency_uid?: string;
+                /** Format: uuid */
+                classification_uid?: string;
                 expected?: components["schemas"]["Decimal"];
                 actual?: components["schemas"]["Decimal"];
                 drift?: components["schemas"]["Decimal"];
@@ -2342,8 +2360,8 @@ export interface components {
             data?: components["schemas"]["BookingTrace"];
         };
         PlatformBalance: {
-            /** Format: int64 */
-            currency_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
             /** @description classification code → total (holder > 0). */
             user_side?: {
                 [key: string]: components["schemas"]["Decimal"];
@@ -2357,8 +2375,8 @@ export interface components {
             data?: components["schemas"]["PlatformBalance"];
         };
         SolvencyReport: {
-            /** Format: int64 */
-            currency_id?: number;
+            /** Format: uuid */
+            currency_uid?: string;
             liability?: components["schemas"]["Decimal"];
             custodial?: components["schemas"]["Decimal"];
             solvent?: boolean;

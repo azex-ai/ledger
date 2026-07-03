@@ -69,7 +69,7 @@ func run() error {
 		return fmt.Errorf("install presets: %w", err)
 	}
 
-	currencyID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func run() error {
 
 	_, err = jw.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     currencyID,
+		CurrencyUID:    currencyUID,
 		IdempotencyKey: topupKey,
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString("100.00")},
 		Source:         "billing-example",
@@ -102,7 +102,7 @@ func run() error {
 	reserveKey := ledger.NewIdempotencyKey("reserve")
 	rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
 		AccountHolder:  userID,
-		CurrencyID:     currencyID,
+		CurrencyUID:    currencyUID,
 		Amount:         decimal.RequireFromString("20.00"),
 		IdempotencyKey: reserveKey,
 		ExpiresIn:      time.Hour, // 1-hour budget window
@@ -110,7 +110,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("reserve: %w", err)
 	}
-	fmt.Printf("reserved: id=%d amount=%s status=%s\n", rsv.ID, rsv.ReservedAmount, rsv.Status)
+	fmt.Printf("reserved: uid=%s amount=%s status=%s\n", rsv.UID, rsv.ReservedAmount, rsv.Status)
 
 	// -----------------------------------------------------------------------
 	// Step 3: compute run finishes — actual cost was $15.75.
@@ -118,7 +118,7 @@ func run() error {
 	// remainder. Both operations happen atomically inside the adapter.
 	// -----------------------------------------------------------------------
 	actualCost := decimal.RequireFromString("15.75")
-	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationID: rsv.ID, Amount: actualCost}); err != nil {
+	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actualCost}); err != nil {
 		return fmt.Errorf("settle: %w", err)
 	}
 	fmt.Printf("settled: actual_cost=%s (remainder released automatically)\n", actualCost)
@@ -132,7 +132,7 @@ func run() error {
 		return fmt.Errorf("get classification: %w", err)
 	}
 
-	balance, err := svc.BalanceReader().GetBalance(ctx, userID, currencyID, cls.ID)
+	balance, err := svc.BalanceReader().GetBalance(ctx, userID, currencyUID, cls.UID)
 	if err != nil {
 		return fmt.Errorf("get balance: %w", err)
 	}
@@ -142,19 +142,19 @@ func run() error {
 	return nil
 }
 
-func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
 	list, err := svc.Currencies().ListCurrencies(ctx, false)
 	if err != nil {
-		return 0, fmt.Errorf("list currencies: %w", err)
+		return "", fmt.Errorf("list currencies: %w", err)
 	}
 	for _, c := range list {
 		if c.Code == code {
-			return c.ID, nil
+			return c.UID, nil
 		}
 	}
 	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
 	if err != nil {
-		return 0, fmt.Errorf("create currency: %w", err)
+		return "", fmt.Errorf("create currency: %w", err)
 	}
-	return created.ID, nil
+	return created.UID, nil
 }

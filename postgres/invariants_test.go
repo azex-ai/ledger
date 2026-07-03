@@ -35,18 +35,18 @@ func TestReversalChainIntegrity(t *testing.T) {
 
 	// 1. Post original A.
 	a, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  deps.JournalType,
+		JournalTypeUID: deps.JournalType,
 		IdempotencyKey: postgrestest.UniqueKey("rev-orig"),
 		Source:         "rev-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
 
 	// 2. Reverse A → ¬A. Must succeed.
-	revA, err := store.ReverseJournal(ctx, a.ID, "test reversal")
+	revA, err := store.ReverseJournal(ctx, a.UID, "test reversal")
 	require.NoError(t, err)
 	require.NotNil(t, revA)
 
@@ -58,7 +58,7 @@ func TestReversalChainIntegrity(t *testing.T) {
 	//
 	//    The invariant is: "any given journal can be reversed at most once."
 	//    We enforce by attempting to reverse A a second time.
-	_, err = store.ReverseJournal(ctx, a.ID, "double reversal")
+	_, err = store.ReverseJournal(ctx, a.UID, "double reversal")
 	require.Error(t, err, "second reversal of the same journal must be rejected")
 
 	// 4. Net effect on the user main_wallet dimension must be zero.
@@ -88,12 +88,12 @@ func TestIdempotency_ConcurrentSameKey(t *testing.T) {
 	journals := make([]*core.Journal, goroutines)
 
 	input := core.JournalInput{
-		JournalTypeID:  deps.JournalType,
+		JournalTypeUID: deps.JournalType,
 		IdempotencyKey: idemKey,
 		Source:         "idem-race",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -114,15 +114,15 @@ func TestIdempotency_ConcurrentSameKey(t *testing.T) {
 	// Count outcomes and confirm every replay saw the same journal.
 	successes := 0
 	other := 0
-	var firstJournalID int64
+	var firstJournalUID string
 	for i, err := range results {
 		switch {
 		case err == nil && journals[i] != nil:
 			successes++
-			if firstJournalID == 0 {
-				firstJournalID = journals[i].ID
+			if firstJournalUID == "" {
+				firstJournalUID = journals[i].UID
 			}
-			assert.Equal(t, firstJournalID, journals[i].ID, "all concurrent replays must return the same journal")
+			assert.Equal(t, firstJournalUID, journals[i].UID, "all concurrent replays must return the same journal")
 		default:
 			other++
 			t.Logf("unexpected error from goroutine %d: %v", i, err)
@@ -163,12 +163,12 @@ func TestPartitionBoundary_DefaultCatchesOutsideRanges(t *testing.T) {
 
 	// Post a journal — entries land in whichever partition matches now().
 	_, err = store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  deps.JournalType,
+		JournalTypeUID: deps.JournalType,
 		IdempotencyKey: postgrestest.UniqueKey("partition-now"),
 		Source:         "partition-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 	})
 	require.NoError(t, err)
@@ -204,12 +204,12 @@ func TestMoneyConservation_Network(t *testing.T) {
 	for i := 1; i <= userCount; i++ {
 		amt := decimal.NewFromInt(int64(1_000_000 + rng.Intn(1_000_000)))
 		_, err := store.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  deps.JournalType,
+			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey("seed"),
 			Source:         "seed",
 			Entries: []core.EntryInput{
-				{AccountHolder: int64(i), CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: amt},
-				{AccountHolder: core.SystemAccountHolder(int64(i)), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: amt},
+				{AccountHolder: int64(i), CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: amt},
+				{AccountHolder: core.SystemAccountHolder(int64(i)), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: amt},
 			},
 		})
 		require.NoError(t, err)
@@ -226,14 +226,14 @@ func TestMoneyConservation_Network(t *testing.T) {
 		amt := decimal.NewFromInt(int64(1 + rng.Intn(100)))
 		// Two-leg transfer with settlement intermediary, all in one journal.
 		_, err := store.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  deps.JournalType,
+			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("xfer-%d", k)),
 			Source:         "xfer",
 			Entries: []core.EntryInput{
-				{AccountHolder: from, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeCredit, Amount: amt},
-				{AccountHolder: core.SystemAccountHolder(from), CurrencyID: deps.Currency, ClassificationID: deps.Settlement, EntryType: core.EntryTypeDebit, Amount: amt},
-				{AccountHolder: core.SystemAccountHolder(to), CurrencyID: deps.Currency, ClassificationID: deps.Settlement, EntryType: core.EntryTypeCredit, Amount: amt},
-				{AccountHolder: to, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: amt},
+				{AccountHolder: from, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeCredit, Amount: amt},
+				{AccountHolder: core.SystemAccountHolder(from), CurrencyUID: deps.Currency, ClassificationUID: deps.Settlement, EntryType: core.EntryTypeDebit, Amount: amt},
+				{AccountHolder: core.SystemAccountHolder(to), CurrencyUID: deps.Currency, ClassificationUID: deps.Settlement, EntryType: core.EntryTypeCredit, Amount: amt},
+				{AccountHolder: to, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: amt},
 			},
 		})
 		require.NoError(t, err, "transfer %d", k)
@@ -246,7 +246,7 @@ func TestMoneyConservation_Network(t *testing.T) {
 		  COALESCE(SUM(CASE WHEN entry_type='debit' THEN amount END), 0),
 		  COALESCE(SUM(CASE WHEN entry_type='credit' THEN amount END), 0)
 		FROM journal_entries
-		WHERE currency_id = $1
+		WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid)
 	`, deps.Currency).Scan(&debit, &credit)
 	require.NoError(t, err)
 	assert.True(t, debit.Equal(credit), "money conservation broken: debit=%s credit=%s", debit, credit)
@@ -260,7 +260,7 @@ func TestMoneyConservation_Network(t *testing.T) {
 		  CASE WHEN entry_type='debit' THEN amount ELSE -amount END
 		), 0)
 		FROM journal_entries
-		WHERE currency_id = $1
+		WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid)
 	`, deps.Currency).Scan(&net)
 	require.NoError(t, err)
 	assert.True(t, net.IsZero(), "Σ(debit) - Σ(credit) per currency must be zero, got %s", net)
@@ -272,7 +272,7 @@ func TestMoneyConservation_Network(t *testing.T) {
 		  CASE WHEN entry_type='debit' THEN amount ELSE -amount END
 		), 0)
 		FROM journal_entries
-		WHERE currency_id = $1 AND account_holder > 0 AND classification_id = $2
+		WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid) AND account_holder > 0 AND classification_id = (SELECT id FROM classifications WHERE uid=$2::uuid)
 	`, deps.Currency, deps.MainWallet).Scan(&liability)
 	require.NoError(t, err)
 
@@ -281,7 +281,7 @@ func TestMoneyConservation_Network(t *testing.T) {
 		  CASE WHEN entry_type='credit' THEN amount ELSE -amount END
 		), 0)
 		FROM journal_entries
-		WHERE currency_id = $1 AND account_holder < 0 AND classification_id = $2
+		WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid) AND account_holder < 0 AND classification_id = (SELECT id FROM classifications WHERE uid=$2::uuid)
 	`, deps.Currency, deps.Custodial).Scan(&custody)
 	require.NoError(t, err)
 
@@ -294,11 +294,11 @@ func TestMoneyConservation_Network(t *testing.T) {
 type invariantsFixture struct {
 	BalanceReader core.BalanceReader
 
-	Currency    int64
-	JournalType int64
-	MainWallet  int64
-	Custodial   int64
-	Settlement  int64
+	Currency    string
+	JournalType string
+	MainWallet  string
+	Custodial   string
+	Settlement  string
 }
 
 func setupInvariantsFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Context) (*postgres.LedgerStore, invariantsFixture) {
@@ -340,10 +340,10 @@ func setupInvariantsFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Contex
 	return store, invariantsFixture{
 		BalanceReader: store,
 
-		Currency:    cur.ID,
-		JournalType: jt.ID,
-		MainWallet:  mainWallet.ID,
-		Custodial:   custodial.ID,
-		Settlement:  settlement.ID,
+		Currency:    cur.UID,
+		JournalType: jt.UID,
+		MainWallet:  mainWallet.UID,
+		Custodial:   custodial.UID,
+		Settlement:  settlement.UID,
 	}
 }

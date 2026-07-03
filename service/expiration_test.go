@@ -27,36 +27,36 @@ func (m *mockExpiredReservationFinder) GetExpiredReservations(_ context.Context,
 }
 
 type mockReservationReleaser struct {
-	released           []int64
-	failIDs            map[int64]bool
-	invalidTransitions map[int64]bool
+	released           []string
+	failUIDs           map[string]bool
+	invalidTransitions map[string]bool
 }
 
-func (m *mockReservationReleaser) Release(_ context.Context, id int64) error {
-	if m.invalidTransitions != nil && m.invalidTransitions[id] {
+func (m *mockReservationReleaser) Release(_ context.Context, uid string) error {
+	if m.invalidTransitions != nil && m.invalidTransitions[uid] {
 		return fmt.Errorf("postgres: release: from %q to released: %w", "settled", core.ErrInvalidTransition)
 	}
-	if m.failIDs != nil && m.failIDs[id] {
-		return fmt.Errorf("release failed for %d", id)
+	if m.failUIDs != nil && m.failUIDs[uid] {
+		return fmt.Errorf("release failed for %s", uid)
 	}
-	m.released = append(m.released, id)
+	m.released = append(m.released, uid)
 	return nil
 }
 
 type mockReservationFinalizer struct {
-	finalized          []int64
-	failIDs            map[int64]bool
-	invalidTransitions map[int64]bool
+	finalized          []string
+	failUIDs           map[string]bool
+	invalidTransitions map[string]bool
 }
 
-func (m *mockReservationFinalizer) FinalizeSettlement(_ context.Context, id int64) error {
-	if m.invalidTransitions != nil && m.invalidTransitions[id] {
-		return fmt.Errorf("postgres: finalize settlement: reservation %d has status %q, not settling: %w", id, "active", core.ErrInvalidTransition)
+func (m *mockReservationFinalizer) FinalizeSettlement(_ context.Context, uid string) error {
+	if m.invalidTransitions != nil && m.invalidTransitions[uid] {
+		return fmt.Errorf("postgres: finalize settlement: reservation %s has status %q, not settling: %w", uid, "active", core.ErrInvalidTransition)
 	}
-	if m.failIDs != nil && m.failIDs[id] {
-		return fmt.Errorf("finalize failed for %d", id)
+	if m.failUIDs != nil && m.failUIDs[uid] {
+		return fmt.Errorf("finalize failed for %s", uid)
 	}
-	m.finalized = append(m.finalized, id)
+	m.finalized = append(m.finalized, uid)
 	return nil
 }
 
@@ -76,8 +76,8 @@ func TestExpirationService_ExpiredReservations(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	finder := &mockExpiredReservationFinder{
 		reservations: []core.Reservation{
-			{ID: 1, AccountHolder: 100, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
-			{ID: 2, AccountHolder: 200, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusActive, ExpiresAt: past},
+			{UID: "rsv-1", AccountHolder: 100, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
+			{UID: "rsv-2", AccountHolder: 200, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusActive, ExpiresAt: past},
 		},
 	}
 	releaser := &mockReservationReleaser{}
@@ -88,7 +88,7 @@ func TestExpirationService_ExpiredReservations(t *testing.T) {
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
-	assert.Equal(t, []int64{1, 2}, releaser.released)
+	assert.Equal(t, []string{"rsv-1", "rsv-2"}, releaser.released)
 }
 
 // TestExpirationService_ConcurrentReleaseRaceLoggedAsInfo verifies that a
@@ -100,13 +100,13 @@ func TestExpirationService_ConcurrentReleaseRaceLoggedAsInfo(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	finder := &mockExpiredReservationFinder{
 		reservations: []core.Reservation{
-			{ID: 1, AccountHolder: 100, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
-			{ID: 2, AccountHolder: 200, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusActive, ExpiresAt: past},
+			{UID: "rsv-1", AccountHolder: 100, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
+			{UID: "rsv-2", AccountHolder: 200, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusActive, ExpiresAt: past},
 		},
 	}
 	releaser := &mockReservationReleaser{
-		invalidTransitions: map[int64]bool{1: true},
-		failIDs:            map[int64]bool{2: true},
+		invalidTransitions: map[string]bool{"rsv-1": true},
+		failUIDs:           map[string]bool{"rsv-2": true},
 	}
 	logger := &recordingLogger{}
 	engine := core.NewEngine(core.WithLogger(logger))
@@ -130,8 +130,8 @@ func TestExpirationService_SettlingReservationsAreFinalized(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	finder := &mockExpiredReservationFinder{
 		reservations: []core.Reservation{
-			{ID: 1, AccountHolder: 100, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
-			{ID: 2, AccountHolder: 200, CurrencyID: 1, ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusSettling, ExpiresAt: past},
+			{UID: "rsv-1", AccountHolder: 100, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(50), Status: core.ReservationStatusActive, ExpiresAt: past},
+			{UID: "rsv-2", AccountHolder: 200, CurrencyUID: "cur-1", ReservedAmount: decimal.NewFromInt(75), Status: core.ReservationStatusSettling, ExpiresAt: past},
 		},
 	}
 	releaser := &mockReservationReleaser{}
@@ -143,8 +143,8 @@ func TestExpirationService_SettlingReservationsAreFinalized(t *testing.T) {
 	count, err := svc.ExpireStaleReservations(context.Background(), 10)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
-	assert.Equal(t, []int64{1}, releaser.released, "only the active reservation should be released")
-	assert.Equal(t, []int64{2}, finalizer.finalized, "only the settling reservation should be finalized")
+	assert.Equal(t, []string{"rsv-1"}, releaser.released, "only the active reservation should be released")
+	assert.Equal(t, []string{"rsv-2"}, finalizer.finalized, "only the settling reservation should be finalized")
 }
 
 func TestExpirationService_NonExpiredUntouched(t *testing.T) {

@@ -12,35 +12,35 @@ import (
 
 func TestIdempotentTransitionEvent(t *testing.T) {
 	current := &core.Booking{
-		ID:            1,
+		UID:           "uid-1",
 		Status:        "confirmed",
 		ChannelRef:    "tx-1",
 		SettledAmount: decimal.NewFromInt(100),
 	}
 	latest := &core.Event{
-		ID:        10,
-		BookingID: 1,
-		ToStatus:  "confirmed",
-		Amount:    decimal.NewFromInt(100),
-		Metadata:  map[string]string{"tx_hash": "tx-1"},
-		JournalID: nil,
+		UID:        "uid-10",
+		BookingUID: "bk-1",
+		ToStatus:   "confirmed",
+		Amount:     decimal.NewFromInt(100),
+		Metadata:   map[string]string{"tx_hash": "tx-1"},
+		JournalUID: "",
 	}
 
 	t.Run("reuse matching transition", func(t *testing.T) {
 		reused, err := idempotentTransitionEvent(current, latest, core.TransitionInput{
-			BookingID:  1,
+			BookingUID: "bk-1",
 			ToStatus:   "confirmed",
 			ChannelRef: "tx-1",
 			Amount:     decimal.NewFromInt(100),
 		})
 		require.NoError(t, err)
 		require.NotNil(t, reused)
-		assert.Equal(t, latest.ID, reused.ID)
+		assert.Equal(t, latest.UID, reused.UID)
 	})
 
 	t.Run("channel mismatch conflicts", func(t *testing.T) {
 		reused, err := idempotentTransitionEvent(current, latest, core.TransitionInput{
-			BookingID:  1,
+			BookingUID: "bk-1",
 			ToStatus:   "confirmed",
 			ChannelRef: "tx-2",
 			Amount:     decimal.NewFromInt(100),
@@ -52,7 +52,7 @@ func TestIdempotentTransitionEvent(t *testing.T) {
 
 	t.Run("amount mismatch conflicts", func(t *testing.T) {
 		reused, err := idempotentTransitionEvent(current, latest, core.TransitionInput{
-			BookingID:  1,
+			BookingUID: "bk-1",
 			ToStatus:   "confirmed",
 			ChannelRef: "tx-1",
 			Amount:     decimal.NewFromInt(90),
@@ -64,8 +64,8 @@ func TestIdempotentTransitionEvent(t *testing.T) {
 
 	t.Run("different status is not idempotent", func(t *testing.T) {
 		reused, err := idempotentTransitionEvent(current, latest, core.TransitionInput{
-			BookingID: 1,
-			ToStatus:  "failed",
+			BookingUID: "bk-1",
+			ToStatus:   "failed",
 		})
 		require.NoError(t, err)
 		assert.Nil(t, reused)

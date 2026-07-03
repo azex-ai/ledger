@@ -19,30 +19,28 @@ func (r HolderRole) IsValid() bool {
 }
 
 type EntryTemplate struct {
-	ID            int64               `json:"id"`
-	Code          string              `json:"code"`
-	Name          string              `json:"name"`
-	JournalTypeID int64               `json:"journal_type_id"`
-	IsActive      bool                `json:"is_active"`
-	Lines         []EntryTemplateLine `json:"lines"`
-	CreatedAt     time.Time           `json:"created_at"`
+	UID            string              `json:"uid"`
+	Code           string              `json:"code"`
+	Name           string              `json:"name"`
+	JournalTypeUID string              `json:"journal_type_uid"`
+	IsActive       bool                `json:"is_active"`
+	Lines          []EntryTemplateLine `json:"lines"`
+	CreatedAt      time.Time           `json:"created_at"`
 }
 
 type EntryTemplateLine struct {
-	ID               int64      `json:"id"`
-	TemplateID       int64      `json:"template_id"`
-	ClassificationID int64      `json:"classification_id"`
-	EntryType        EntryType  `json:"entry_type"`
-	HolderRole       HolderRole `json:"holder_role"`
-	AmountKey        string     `json:"amount_key"`
-	SortOrder        int        `json:"sort_order"`
+	ClassificationUID string     `json:"classification_uid"`
+	EntryType         EntryType  `json:"entry_type"`
+	HolderRole        HolderRole `json:"holder_role"`
+	AmountKey         string     `json:"amount_key"`
+	SortOrder         int        `json:"sort_order"`
 }
 
 type TemplateParams struct {
 	HolderID       int64                      `json:"holder_id"`
-	CurrencyID     int64                      `json:"currency_id"`
+	CurrencyUID    string                     `json:"currency_uid"`
 	IdempotencyKey string                     `json:"idempotency_key"`
-	EventID        int64                      `json:"event_id"`
+	EventUID       string                     `json:"event_uid,omitempty"`
 	Amounts        map[string]decimal.Decimal `json:"amounts"`
 	ActorID        int64                      `json:"actor_id"`
 	Source         string                     `json:"source"`
@@ -64,14 +62,14 @@ func (t TemplateInput) Validate() error {
 	if t.Name == "" {
 		return fmt.Errorf("core: template: name required: %w", ErrInvalidInput)
 	}
-	if t.JournalTypeID <= 0 {
-		return fmt.Errorf("core: template: journal_type_id must be positive: %w", ErrInvalidInput)
+	if t.JournalTypeUID == "" {
+		return fmt.Errorf("core: template: journal_type_uid required: %w", ErrInvalidInput)
 	}
 	if len(t.Lines) == 0 {
 		return fmt.Errorf("core: template: lines must not be empty: %w", ErrInvalidInput)
 	}
 	for i, line := range t.Lines {
-		if err := validateTemplateLine(i, line.ClassificationID, line.EntryType, line.HolderRole, line.AmountKey); err != nil {
+		if err := validateTemplateLine(i, line.ClassificationUID, line.EntryType, line.HolderRole, line.AmountKey); err != nil {
 			return err
 		}
 	}
@@ -88,23 +86,23 @@ func (t *EntryTemplate) validateDefinition() error {
 	if t.Name == "" {
 		return fmt.Errorf("core: template: name required: %w", ErrInvalidInput)
 	}
-	if t.JournalTypeID <= 0 {
-		return fmt.Errorf("core: template: journal_type_id must be positive: %w", ErrInvalidInput)
+	if t.JournalTypeUID == "" {
+		return fmt.Errorf("core: template: journal_type_uid required: %w", ErrInvalidInput)
 	}
 	if len(t.Lines) == 0 {
 		return fmt.Errorf("core: template: lines must not be empty: %w", ErrInvalidInput)
 	}
 	for i, line := range t.Lines {
-		if err := validateTemplateLine(i, line.ClassificationID, line.EntryType, line.HolderRole, line.AmountKey); err != nil {
+		if err := validateTemplateLine(i, line.ClassificationUID, line.EntryType, line.HolderRole, line.AmountKey); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateTemplateLine(i int, classificationID int64, entryType EntryType, holderRole HolderRole, amountKey string) error {
-	if classificationID <= 0 {
-		return fmt.Errorf("core: template: line[%d]: classification_id must be positive: %w", i, ErrInvalidInput)
+func validateTemplateLine(i int, classificationUID string, entryType EntryType, holderRole HolderRole, amountKey string) error {
+	if classificationUID == "" {
+		return fmt.Errorf("core: template: line[%d]: classification_uid required: %w", i, ErrInvalidInput)
 	}
 	if !entryType.IsValid() {
 		return fmt.Errorf("core: template: line[%d]: invalid entry type %q: %w", i, entryType, ErrInvalidInput)
@@ -144,18 +142,18 @@ func (t *EntryTemplate) Render(params TemplateParams) (*JournalInput, error) {
 		}
 
 		entries = append(entries, EntryInput{
-			AccountHolder:    holder,
-			CurrencyID:       params.CurrencyID,
-			ClassificationID: line.ClassificationID,
-			EntryType:        line.EntryType,
-			Amount:           amount,
+			AccountHolder:     holder,
+			CurrencyUID:       params.CurrencyUID,
+			ClassificationUID: line.ClassificationUID,
+			EntryType:         line.EntryType,
+			Amount:            amount,
 		})
 	}
 
 	input := &JournalInput{
-		JournalTypeID:  t.JournalTypeID,
+		JournalTypeUID: t.JournalTypeUID,
 		IdempotencyKey: params.IdempotencyKey,
-		EventID:        params.EventID,
+		EventUID:       params.EventUID,
 		Entries:        entries,
 		Metadata:       params.Metadata,
 		ActorID:        params.ActorID,

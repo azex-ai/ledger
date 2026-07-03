@@ -35,12 +35,12 @@ func BenchmarkPostJournal_SingleAccount(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; b.Loop(); i++ {
 		_, err := store.PostJournal(context.Background(), core.JournalInput{
-			JournalTypeID:  deps.JournalType,
+			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey("bench-single"),
 			Source:         "bench",
 			Entries: []core.EntryInput{
-				{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
-				{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
 			},
 		})
 		if err != nil {
@@ -61,12 +61,12 @@ func BenchmarkPostJournal_FanoutAccounts(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		userID := int64(10_000 + i)
 		_, err := store.PostJournal(context.Background(), core.JournalInput{
-			JournalTypeID:  deps.JournalType,
+			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("bench-fanout-%d", i)),
 			Source:         "bench",
 			Entries: []core.EntryInput{
-				{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
-				{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
 			},
 		})
 		if err != nil {
@@ -88,12 +88,12 @@ func BenchmarkGetBalance_ColdCheckpoint(b *testing.B) {
 	// Seed: post `deltaJournals` journals on the same account dimension.
 	for i := range deltaJournals {
 		_, err := store.PostJournal(context.Background(), core.JournalInput{
-			JournalTypeID:  deps.JournalType,
+			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("seed-%d", i)),
 			Source:         "bench-seed",
 			Entries: []core.EntryInput{
-				{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
-				{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
 			},
 		})
 		if err != nil {
@@ -122,12 +122,12 @@ func BenchmarkReserveSettle(b *testing.B) {
 	const userID int64 = 9200
 	// Top up enough that thousands of reservations don't drain it.
 	_, err := store.PostJournal(context.Background(), core.JournalInput{
-		JournalTypeID:  deps.JournalType,
+		JournalTypeUID: deps.JournalType,
 		IdempotencyKey: postgrestest.UniqueKey("bench-rsv-seed"),
 		Source:         "bench-seed",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: deps.Currency, ClassificationID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1_000_000)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: deps.Currency, ClassificationID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1_000_000)},
+			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1_000_000)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1_000_000)},
 		},
 	})
 	if err != nil {
@@ -139,14 +139,14 @@ func BenchmarkReserveSettle(b *testing.B) {
 	for b.Loop() {
 		rsv, err := reserver.Reserve(context.Background(), core.ReserveInput{
 			AccountHolder:  userID,
-			CurrencyID:     deps.Currency,
+			CurrencyUID:    deps.Currency,
 			Amount:         decimal.NewFromInt(1),
 			IdempotencyKey: postgrestest.UniqueKey("bench-rsv"),
 		})
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := reserver.Settle(context.Background(), core.SettleInput{ReservationID: rsv.ID, Amount: decimal.NewFromInt(1)}); err != nil {
+		if err := reserver.Settle(context.Background(), core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.NewFromInt(1)}); err != nil {
 			b.Fatal(err)
 		}
 	}

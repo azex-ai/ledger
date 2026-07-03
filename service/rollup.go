@@ -33,9 +33,22 @@ type EntrySummer interface {
 	SumEntriesSince(ctx context.Context, holder, currencyID, sinceEntryID int64) (debitByClass, creditByClass map[int64]decimal.Decimal, maxEntryID int64, maxEntryAt time.Time, err error)
 }
 
-// ClassificationLister lists classifications for normal_side lookup.
+// ClassificationDim is one classification's internal dimension row: the
+// internal id the entry math is keyed on, plus the uid/code used whenever a
+// result crosses into a public shape. Internal ids never leave the service.
+type ClassificationDim struct {
+	ID         int64
+	UID        string
+	Code       string
+	NormalSide core.NormalSide
+}
+
+// ClassificationLister provides classification dimensions and currency
+// id<->uid resolution for rollup/reconcile math.
 type ClassificationLister interface {
-	ListClassifications(ctx context.Context, activeOnly bool) ([]core.Classification, error)
+	ClassificationDims(ctx context.Context) ([]ClassificationDim, error)
+	CurrencyIDByUID(ctx context.Context, uid string) (int64, error)
+	CurrencyUIDByID(ctx context.Context, id int64) (string, error)
 }
 
 // RollupService processes the rollup queue to materialize balance checkpoints.
@@ -81,7 +94,7 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	}
 
 	// Load classifications for normal_side lookup
-	clsList, err := s.classifications.ListClassifications(ctx, false)
+	clsList, err := s.classifications.ClassificationDims(ctx)
 	if err != nil {
 		for _, item := range items {
 			// ctx may already be cancelled (e.g. shutdown) — release on a

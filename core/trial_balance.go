@@ -9,7 +9,7 @@ import (
 // TrialBalanceRow is one classification's aggregated debit/credit totals as
 // of a given point in time.
 type TrialBalanceRow struct {
-	ClassificationID   int64           `json:"classification_id"`
+	ClassificationUID  string          `json:"classification_uid"`
 	ClassificationCode string          `json:"classification_code"`
 	ClassificationName string          `json:"classification_name"`
 	NormalSide         NormalSide      `json:"normal_side"`
@@ -23,7 +23,7 @@ type TrialBalanceRow struct {
 // TrialBalanceReport is a full trial balance for one currency as of one
 // point in time, with the global debit=credit check.
 type TrialBalanceReport struct {
-	CurrencyID  int64             `json:"currency_id"`
+	CurrencyUID string            `json:"currency_uid"`
 	AsOf        time.Time         `json:"as_of"`
 	Rows        []TrialBalanceRow `json:"rows"`
 	TotalDebit  decimal.Decimal   `json:"total_debit"`

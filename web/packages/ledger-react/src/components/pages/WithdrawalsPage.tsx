@@ -38,7 +38,7 @@ import { TableSkeleton } from "../loading-skeleton";
 
 const WITHDRAW_STATES = ["locked", "reserved", "reviewing", "processing", "confirmed", "failed", "expired"];
 
-function ProcessDialog({ id }: { id: number }) {
+function ProcessDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
   const mutation = useProcessWithdraw();
@@ -81,7 +81,7 @@ function ProcessDialog({ id }: { id: number }) {
   );
 }
 
-function FailDialog({ id }: { id: number }) {
+function FailDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const mutation = useFailWithdraw();
@@ -122,7 +122,7 @@ function FailDialog({ id }: { id: number }) {
   );
 }
 
-function ReserveButton({ id }: { id: number }) {
+function ReserveButton({ id }: { id: string }) {
   const mutation = useReserveWithdraw();
   return (
     <AlertDialog>
@@ -147,7 +147,7 @@ function ReserveButton({ id }: { id: number }) {
   );
 }
 
-function ReviewButtons({ id }: { id: number }) {
+function ReviewButtons({ id }: { id: string }) {
   const mutation = useReviewWithdraw();
   return (
     <>
@@ -193,7 +193,7 @@ function ReviewButtons({ id }: { id: number }) {
   );
 }
 
-function ConfirmButton({ id }: { id: number }) {
+function ConfirmButton({ id }: { id: string }) {
   const mutation = useConfirmWithdraw();
   return (
     <AlertDialog>
@@ -218,7 +218,7 @@ function ConfirmButton({ id }: { id: number }) {
   );
 }
 
-function RetryButton({ id }: { id: number }) {
+function RetryButton({ id }: { id: string }) {
   const mutation = useRetryWithdraw();
   return (
     <AlertDialog>
@@ -302,8 +302,8 @@ export function WithdrawalsPage() {
             </TableHeader>
             <TableBody>
               {withdrawals.map((w) => (
-                <TableRow key={w.id}>
-                  <TableCell>#{w.id}</TableCell>
+                <TableRow key={w.uid}>
+                  <TableCell>#{w.uid}</TableCell>
                   <TableCell>{w.account_holder}</TableCell>
                   <TableCell>{w.channel_name}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(w.amount)}</TableCell>
@@ -316,16 +316,16 @@ export function WithdrawalsPage() {
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1 flex-wrap">
-                      {w.status === "locked" && <ReserveButton id={w.id} />}
-                      {w.status === "reviewing" && <ReviewButtons id={w.id} />}
-                      {w.status === "reserved" && <ProcessDialog id={w.id} />}
+                      {w.status === "locked" && <ReserveButton id={w.uid} />}
+                      {w.status === "reviewing" && <ReviewButtons id={w.uid} />}
+                      {w.status === "reserved" && <ProcessDialog id={w.uid} />}
                       {w.status === "processing" && (
                         <>
-                          <ConfirmButton id={w.id} />
-                          <FailDialog id={w.id} />
+                          <ConfirmButton id={w.uid} />
+                          <FailDialog id={w.uid} />
                         </>
                       )}
-                      {w.status === "failed" && <RetryButton id={w.id} />}
+                      {w.status === "failed" && <RetryButton id={w.uid} />}
                     </div>
                   </TableCell>
                 </TableRow>

@@ -12,7 +12,7 @@ import (
 func TestAddPendingInput_Validate(t *testing.T) {
 	valid := AddPendingInput{
 		AccountHolder:  42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: "pending-add-1",
 	}
@@ -25,8 +25,7 @@ func TestAddPendingInput_Validate(t *testing.T) {
 	}{
 		{"zero holder", func(i *AddPendingInput) { i.AccountHolder = 0 }, "account_holder"},
 		{"negative holder accepted (system side)", func(i *AddPendingInput) { i.AccountHolder = -42 }, ""},
-		{"zero currency", func(i *AddPendingInput) { i.CurrencyID = 0 }, "currency_id"},
-		{"negative currency", func(i *AddPendingInput) { i.CurrencyID = -1 }, "currency_id"},
+		{"empty currency", func(i *AddPendingInput) { i.CurrencyUID = "" }, "currency_uid"},
 		{"zero amount", func(i *AddPendingInput) { i.Amount = decimal.Zero }, "amount"},
 		{"negative amount", func(i *AddPendingInput) { i.Amount = decimal.NewFromInt(-1) }, "amount"},
 		{"empty idempotency", func(i *AddPendingInput) { i.IdempotencyKey = "" }, "idempotency_key"},
@@ -51,7 +50,7 @@ func TestAddPendingInput_Validate(t *testing.T) {
 func TestConfirmPendingInput_Validate(t *testing.T) {
 	valid := ConfirmPendingInput{
 		AccountHolder:  42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: "pending-confirm-1",
 	}
@@ -63,7 +62,7 @@ func TestConfirmPendingInput_Validate(t *testing.T) {
 		errSnip string
 	}{
 		{"zero holder", func(i *ConfirmPendingInput) { i.AccountHolder = 0 }, "account_holder"},
-		{"zero currency", func(i *ConfirmPendingInput) { i.CurrencyID = 0 }, "currency_id"},
+		{"empty currency", func(i *ConfirmPendingInput) { i.CurrencyUID = "" }, "currency_uid"},
 		{"zero amount", func(i *ConfirmPendingInput) { i.Amount = decimal.Zero }, "amount"},
 		{"negative amount", func(i *ConfirmPendingInput) { i.Amount = decimal.NewFromInt(-5) }, "amount"},
 		{"empty idempotency", func(i *ConfirmPendingInput) { i.IdempotencyKey = "" }, "idempotency_key"},
@@ -84,7 +83,7 @@ func TestConfirmPendingInput_Validate(t *testing.T) {
 func TestCancelPendingInput_Validate(t *testing.T) {
 	valid := CancelPendingInput{
 		AccountHolder:  42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: "pending-cancel-1",
 		Reason:         "tx reverted on-chain",
@@ -102,7 +101,7 @@ func TestCancelPendingInput_Validate(t *testing.T) {
 		errSnip string
 	}{
 		{"zero holder", func(i *CancelPendingInput) { i.AccountHolder = 0 }, "account_holder"},
-		{"zero currency", func(i *CancelPendingInput) { i.CurrencyID = 0 }, "currency_id"},
+		{"empty currency", func(i *CancelPendingInput) { i.CurrencyUID = "" }, "currency_uid"},
 		{"zero amount", func(i *CancelPendingInput) { i.Amount = decimal.Zero }, "amount"},
 		{"negative amount", func(i *CancelPendingInput) { i.Amount = decimal.NewFromInt(-1) }, "amount"},
 		{"empty idempotency", func(i *CancelPendingInput) { i.IdempotencyKey = "" }, "idempotency_key"},

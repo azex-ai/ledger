@@ -25,14 +25,14 @@ describe("use-deposits", () => {
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ id: 3, code: "deposit", name: "Deposit" }],
+          data: [{ uid: "cls-3", code: "deposit", name: "Deposit" }],
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: { list: [{ id: 1 }], next_cursor: "" },
+          data: { list: [{ uid: "bk-1" }], next_cursor: "" },
         }),
       ),
     );
@@ -47,7 +47,7 @@ describe("use-deposits", () => {
     ).toBeDefined();
     expect(
       qc.getQueryCache().find({
-        queryKey: ["ledger", "bookings", "deposit", { ...params, classificationId: 3 }],
+        queryKey: ["ledger", "bookings", "deposit", { ...params, classificationUid: "cls-3" }],
       }),
     ).toBeDefined();
   });
@@ -56,14 +56,14 @@ describe("use-deposits", () => {
     const qc = new QueryClient();
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
-      http.post(`${BASE}/api/v1/bookings/1/transition`, () =>
+      http.post(`${BASE}/api/v1/bookings/uid-1/transition`, () =>
         HttpResponse.json({ code: 200, message: "ok", data: { id: 99 } }),
       ),
     );
     const { result } = renderHook(() => useConfirmDeposit(), {
       wrapper: wrapperWith(qc),
     });
-    result.current.mutate({ id: 1, actual_amount: "10", channel_ref: "tx" });
+    result.current.mutate({ id: "uid-1", actual_amount: "10", channel_ref: "tx" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
     expect(keys).toContainEqual(["ledger", "bookings"]);

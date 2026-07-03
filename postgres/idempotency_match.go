@@ -20,21 +20,28 @@ type journalEntryFingerprint struct {
 	amount           string
 }
 
-func ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Journal, input core.JournalInput) (*core.Journal, error) {
+func (s *LedgerStore) ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Journal, input core.JournalInput) (*core.Journal, error) {
 	// EffectiveAt is only compared when the caller explicitly set it: a zero
 	// value on input means "defaulted to now() at insert time", which is
 	// necessarily different across retries and would falsely conflict.
 	effectiveAtMismatch := !input.EffectiveAt.IsZero() && !existing.EffectiveAt.Equal(input.EffectiveAt)
 
-	if existing.JournalTypeID != input.JournalTypeID ||
+	// The comparison happens in uid space: map the stored row's internal
+	// references back to uids so a retried uid-space payload compares 1:1.
+	existingCore, err := journalFromRow(ctx, s.dims, q, existing)
+	if err != nil {
+		return nil, err
+	}
+
+	if existingCore.JournalTypeUID != input.JournalTypeUID ||
 		existing.ActorID != input.ActorID ||
 		existing.Source != input.Source ||
-		existing.EventID != input.EventID ||
-		journalReversalOf(existing) != input.ReversalOf ||
+		existingCore.EventUID != input.EventUID ||
+		existingCore.ReversalOfUID != input.ReversalOfUID ||
 		effectiveAtMismatch ||
 		!mustNumericToDecimal(existing.TotalDebit).Equal(totalDebit(input.Entries)) ||
 		!mustNumericToDecimal(existing.TotalCredit).Equal(totalCredit(input.Entries)) ||
-		string(metadataToJSON(journalFromRow(existing).Metadata)) != string(metadataToJSON(input.Metadata)) {
+		string(metadataToJSON(existingCore.Metadata)) != string(metadataToJSON(input.Metadata)) {
 		return nil, fmt.Errorf("postgres: post journal: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
@@ -42,14 +49,18 @@ func ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing
 	if err != nil {
 		return nil, fmt.Errorf("postgres: post journal: load existing entries: %w", err)
 	}
-	if !sameJournalEntries(rows, input.Entries) {
+	same, err := s.sameJournalEntries(ctx, q, rows, input.Entries)
+	if err != nil {
+		return nil, err
+	}
+	if !same {
 		return nil, fmt.Errorf("postgres: post journal: idempotency key %q entries mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
-	return journalFromRow(existing), nil
+	return existingCore, nil
 }
 
-func ensureReservationMatchesInput(existing sqlcgen.Reservation, input core.ReserveInput) (*core.Reservation, error) {
+func (s *ReserverStore) ensureReservationMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Reservation, input core.ReserveInput, currencyID int64) (*core.Reservation, error) {
 	// ExpiresIn is stored as ExpiresAt, computed from CreatedAt at insert time.
 	// Comparing the stored duration against the resolved input duration enforces
 	// the "same key + different payload = ErrConflict" contract for expiry too,
@@ -61,22 +72,26 @@ func ensureReservationMatchesInput(existing sqlcgen.Reservation, input core.Rese
 	}
 
 	if existing.AccountHolder != input.AccountHolder ||
-		existing.CurrencyID != input.CurrencyID ||
+		existing.CurrencyID != currencyID ||
 		!mustNumericToDecimal(existing.ReservedAmount).Equal(input.Amount) {
 		return nil, fmt.Errorf("postgres: reserve: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
-	return reservationFromRow(existing), nil
+	return reservationFromRow(ctx, s.dims, q, existing)
 }
 
-func ensureBookingMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Booking, input core.CreateBookingInput) (*core.Booking, error) {
+func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Booking, input core.CreateBookingInput) (*core.Booking, error) {
 	class, err := q.GetClassification(ctx, existing.ClassificationID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: create booking: load existing classification: %w", err)
 	}
+	cur, err := s.dims.currencyByUIDOrErr(ctx, q, input.CurrencyUID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: create booking: %w", err)
+	}
 
 	if class.Code != input.ClassificationCode ||
 		existing.AccountHolder != input.AccountHolder ||
-		existing.CurrencyID != input.CurrencyID ||
+		existing.CurrencyID != cur.ID ||
 		existing.ChannelName != input.ChannelName ||
 		!mustNumericToDecimal(existing.Amount).Equal(input.Amount) ||
 		!existing.ExpiresAt.Equal(input.ExpiresAt) ||
@@ -84,14 +99,7 @@ func ensureBookingMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing
 		return nil, fmt.Errorf("postgres: create booking: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
-	return bookingFromRow(existing), nil
-}
-
-func journalReversalOf(row sqlcgen.Journal) int64 {
-	if row.ReversalOf.Valid {
-		return row.ReversalOf.Int64
-	}
-	return 0
+	return bookingFromRow(ctx, s.dims, q, existing)
 }
 
 func totalDebit(entries []core.EntryInput) decimal.Decimal {
@@ -114,9 +122,9 @@ func totalCredit(entries []core.EntryInput) decimal.Decimal {
 	return total
 }
 
-func sameJournalEntries(rows []sqlcgen.JournalEntry, input []core.EntryInput) bool {
+func (s *LedgerStore) sameJournalEntries(ctx context.Context, q *sqlcgen.Queries, rows []sqlcgen.ListJournalEntriesRow, input []core.EntryInput) (bool, error) {
 	if len(rows) != len(input) {
-		return false
+		return false, nil
 	}
 
 	left := make([]journalEntryFingerprint, len(rows))
@@ -132,10 +140,18 @@ func sameJournalEntries(rows []sqlcgen.JournalEntry, input []core.EntryInput) bo
 
 	right := make([]journalEntryFingerprint, len(input))
 	for i, entry := range input {
+		cur, err := s.dims.currencyByUIDOrErr(ctx, q, entry.CurrencyUID)
+		if err != nil {
+			return false, err
+		}
+		cls, err := s.dims.classByUIDOrErr(ctx, q, entry.ClassificationUID)
+		if err != nil {
+			return false, err
+		}
 		right[i] = journalEntryFingerprint{
 			holder:           entry.AccountHolder,
-			currencyID:       entry.CurrencyID,
-			classificationID: entry.ClassificationID,
+			currencyID:       cur.ID,
+			classificationID: cls.ID,
 			entryType:        string(entry.EntryType),
 			amount:           entry.Amount.String(),
 		}
@@ -146,10 +162,10 @@ func sameJournalEntries(rows []sqlcgen.JournalEntry, input []core.EntryInput) bo
 
 	for i := range left {
 		if left[i] != right[i] {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func (f journalEntryFingerprint) less(other journalEntryFingerprint) bool {

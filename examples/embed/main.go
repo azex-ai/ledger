@@ -67,7 +67,7 @@ func run() error {
 		return fmt.Errorf("ledger.New: %w", err)
 	}
 
-	currencyID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
 	if err != nil {
 		return err
 	}
@@ -98,23 +98,23 @@ func run() error {
 	// -----------------------------------------------------------------------
 	amount := decimal.RequireFromString("50.00")
 	input := core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: ledger.NewIdempotencyKey("embed-demo"),
 		Source:         "embed-example",
 		Entries: []core.EntryInput{
 			{
-				AccountHolder:    userID,
-				CurrencyID:       currencyID,
-				ClassificationID: main.ID,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           amount,
+				AccountHolder:     userID,
+				CurrencyUID:       currencyUID,
+				ClassificationUID: main.UID,
+				EntryType:         core.EntryTypeDebit,
+				Amount:            amount,
 			},
 			{
-				AccountHolder:    core.SystemAccountHolder(userID),
-				CurrencyID:       currencyID,
-				ClassificationID: custody.ID,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           amount,
+				AccountHolder:     core.SystemAccountHolder(userID),
+				CurrencyUID:       currencyUID,
+				ClassificationUID: custody.UID,
+				EntryType:         core.EntryTypeCredit,
+				Amount:            amount,
 			},
 		},
 	}
@@ -123,18 +123,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("post journal: %w", err)
 	}
-	fmt.Printf("posted journal id=%d (debit=%s credit=%s)\n", journal.ID, journal.TotalDebit, journal.TotalCredit)
+	fmt.Printf("posted journal uid=%s (debit=%s credit=%s)\n", journal.UID, journal.TotalDebit, journal.TotalCredit)
 
 	// -----------------------------------------------------------------------
 	// Read the balance back. Uses the checkpoint+delta path internally so the
 	// new journal is reflected immediately, even though the rollup worker
 	// hasn't advanced the checkpoint yet.
 	// -----------------------------------------------------------------------
-	balance, err := svc.BalanceReader().GetBalance(ctx, userID, currencyID, main.ID)
+	balance, err := svc.BalanceReader().GetBalance(ctx, userID, currencyUID, main.UID)
 	if err != nil {
 		return fmt.Errorf("get balance: %w", err)
 	}
-	fmt.Printf("user %d main_wallet (currency %d): %s\n", userID, currencyID, balance)
+	fmt.Printf("user %d main_wallet (currency %s): %s\n", userID, currencyUID, balance)
 
 	return nil
 }
@@ -147,21 +147,21 @@ func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name stri
 	return svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
 }
 
-func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
 	list, err := svc.Currencies().ListCurrencies(ctx, false)
 	if err != nil {
-		return 0, fmt.Errorf("list currencies: %w", err)
+		return "", fmt.Errorf("list currencies: %w", err)
 	}
 	for _, c := range list {
 		if c.Code == code {
-			return c.ID, nil
+			return c.UID, nil
 		}
 	}
 	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
 	if err != nil {
-		return 0, fmt.Errorf("create currency: %w", err)
+		return "", fmt.Errorf("create currency: %w", err)
 	}
-	return created.ID, nil
+	return created.UID, nil
 }
 
 func ensureClassification(ctx context.Context, svc *ledger.Service, code, name string, side core.NormalSide, system bool) (*core.Classification, error) {

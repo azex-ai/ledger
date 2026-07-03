@@ -54,6 +54,11 @@ func run() error {
 		return fmt.Errorf("ledger facade: %w", err)
 	}
 
+	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	if err != nil {
+		return err
+	}
+
 	// Presets need the concrete store handles. ClassificationStore satisfies
 	// both ClassificationStore and JournalTypeStore.
 	classStore := postgres.NewClassificationStore(pool)
@@ -68,7 +73,7 @@ func run() error {
 	booking, err := booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: "deposit",
 		AccountHolder:      1001,
-		CurrencyID:         1,
+		CurrencyUID:        currencyUID,
 		Amount:             decimal.RequireFromString("500.00"),
 		IdempotencyKey:     fmt.Sprintf("deposit:1001:%d", time.Now().UnixNano()),
 		ChannelName:        "evm",
@@ -77,11 +82,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create booking: %w", err)
 	}
-	fmt.Printf("created booking id=%d status=%s\n", booking.ID, booking.Status)
+	fmt.Printf("created booking uid=%s status=%s\n", booking.UID, booking.Status)
 
 	// 2. Mempool sighting -> confirming.
 	if _, err := booker.Transition(ctx, core.TransitionInput{
-		BookingID:  booking.ID,
+		BookingUID: booking.UID,
 		ToStatus:   "confirming",
 		ChannelRef: "0xabc123",
 	}); err != nil {
@@ -94,7 +99,7 @@ func run() error {
 	var confirmedJournal *core.Journal
 	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
 		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
-			BookingID:  booking.ID,
+			BookingUID: booking.UID,
 			ToStatus:   "confirmed",
 			ChannelRef: "0xabc123",
 			Amount:     decimal.RequireFromString("500.00"),
@@ -106,9 +111,9 @@ func run() error {
 
 		journal, err := txSvc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 			HolderID:       booking.AccountHolder,
-			CurrencyID:     booking.CurrencyID,
-			IdempotencyKey: fmt.Sprintf("deposit-confirm-journal:%d", booking.ID),
-			EventID:        evt.ID,
+			CurrencyUID:    booking.CurrencyUID,
+			IdempotencyKey: fmt.Sprintf("deposit-confirm-journal:%s", booking.UID),
+			EventUID:       evt.UID,
 			Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
 			Source:         "example.crypto_deposit",
 		})
@@ -123,6 +128,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("transition confirmed + journal: %w", err)
 	}
-	fmt.Printf("confirmed event id=%d journal_id=%v journal=%d\n", confirmedEvent.ID, confirmedEvent.JournalID, confirmedJournal.ID)
+	fmt.Printf("confirmed event uid=%s journal_uid=%s journal=%s\n", confirmedEvent.UID, confirmedEvent.JournalUID, confirmedJournal.UID)
 	return nil
+}
+
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
+	list, err := svc.Currencies().ListCurrencies(ctx, false)
+	if err != nil {
+		return "", fmt.Errorf("list currencies: %w", err)
+	}
+	for _, c := range list {
+		if c.Code == code {
+			return c.UID, nil
+		}
+	}
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	if err != nil {
+		return "", fmt.Errorf("create currency: %w", err)
+	}
+	return created.UID, nil
 }

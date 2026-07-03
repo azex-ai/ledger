@@ -4,10 +4,10 @@
 // the same query interfaces the HTTP server uses. Useful for:
 //
 //   - Reconciliation triage (`ledger-cli reconcile --full`).
-//   - Solvency check (`ledger-cli solvency --currency 1`).
-//   - Trace a single booking end-to-end (`ledger-cli trace --booking-id 42`).
-//   - List recent journals or events (`ledger-cli journals --since 1h`).
-//   - Pull a balance snapshot for one account (`ledger-cli balance --holder 42 --currency 1`).
+//   - Solvency check (`ledger-cli solvency --currency <uid>`).
+//   - Trace a single booking end-to-end (`ledger-cli trace --booking-uid <uid>`).
+//   - List recent journals or events (`ledger-cli journals --limit 20`).
+//   - Pull a balance snapshot for one account (`ledger-cli balance --holder 42 --currency <uid>`).
 //
 // Read-only by design: the CLI never posts journals or mutates state.
 // For one-off corrections, use the HTTP API or write a migration.
@@ -19,11 +19,11 @@
 // Examples:
 //
 //	export DATABASE_URL="postgres://user:pass@host:5432/ledger?sslmode=disable"
-//	ledger-cli balance --holder 42 --currency 1 --class main_wallet
+//	ledger-cli balance --holder 42 --currency <uid> --class main_wallet
 //	ledger-cli journals --limit 20
-//	ledger-cli trace --booking-id 17
+//	ledger-cli trace --booking-uid <uid>
 //	ledger-cli reconcile --full
-//	ledger-cli solvency --currency 1
+//	ledger-cli solvency --currency <uid>
 package main
 
 import (
@@ -131,12 +131,12 @@ func run(args []string) error {
 func cmdBalance(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("balance", flag.ExitOnError)
 	holder := fs.Int64("holder", 0, "account holder (positive = user, negative = system)")
-	currency := fs.Int64("currency", 0, "currency id")
+	currency := fs.String("currency", "", "currency uid")
 	class := fs.String("class", "", "classification code (e.g. main_wallet)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *holder == 0 || *currency == 0 || *class == "" {
+	if *holder == 0 || *currency == "" || *class == "" {
 		return fmt.Errorf("--holder, --currency, --class are all required")
 	}
 
@@ -144,13 +144,13 @@ func cmdBalance(ctx context.Context, svc *ledger.Service, args []string) error {
 	if err != nil {
 		return fmt.Errorf("classification %q: %w", *class, err)
 	}
-	bal, err := svc.BalanceReader().GetBalance(ctx, *holder, *currency, c.ID)
+	bal, err := svc.BalanceReader().GetBalance(ctx, *holder, *currency, c.UID)
 	if err != nil {
 		return err
 	}
 	return jsonOut(map[string]any{
 		"holder":         *holder,
-		"currency_id":    *currency,
+		"currency_uid":   *currency,
 		"classification": *class,
 		"balance":        bal.String(),
 	})
@@ -159,11 +159,11 @@ func cmdBalance(ctx context.Context, svc *ledger.Service, args []string) error {
 func cmdBalances(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("balances", flag.ExitOnError)
 	holder := fs.Int64("holder", 0, "account holder")
-	currency := fs.Int64("currency", 0, "currency id")
+	currency := fs.String("currency", "", "currency uid")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *holder == 0 || *currency == 0 {
+	if *holder == 0 || *currency == "" {
 		return fmt.Errorf("--holder and --currency are required")
 	}
 	bs, err := svc.BalanceReader().GetBalances(ctx, *holder, *currency)
@@ -175,28 +175,28 @@ func cmdBalances(ctx context.Context, svc *ledger.Service, args []string) error 
 
 func cmdJournals(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("journals", flag.ExitOnError)
-	cursor := fs.Int64("cursor", 0, "starting journal id (descending); 0 = latest")
+	cursor := fs.String("cursor", "", "opaque page cursor from a previous run; empty = latest")
 	limit := fs.Int("limit", 20, "max journals to return")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	js, err := svc.Queries().ListJournals(ctx, *cursor, int32(*limit))
+	js, nextCursor, err := svc.Queries().ListJournals(ctx, *cursor, int32(*limit))
 	if err != nil {
 		return err
 	}
-	return jsonOut(js)
+	return jsonOut(map[string]any{"list": js, "next_cursor": nextCursor})
 }
 
 func cmdJournal(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("journal", flag.ExitOnError)
-	id := fs.Int64("id", 0, "journal id")
+	uid := fs.String("uid", "", "journal uid")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *id == 0 {
-		return fmt.Errorf("--id is required")
+	if *uid == "" {
+		return fmt.Errorf("--uid is required")
 	}
-	j, entries, err := svc.Queries().GetJournal(ctx, *id)
+	j, entries, err := svc.Queries().GetJournal(ctx, *uid)
 	if err != nil {
 		return err
 	}
@@ -205,14 +205,14 @@ func cmdJournal(ctx context.Context, svc *ledger.Service, args []string) error {
 
 func cmdTrace(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("trace", flag.ExitOnError)
-	bookingID := fs.Int64("booking-id", 0, "booking id")
+	bookingUID := fs.String("booking-uid", "", "booking uid")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *bookingID == 0 {
-		return fmt.Errorf("--booking-id is required")
+	if *bookingUID == "" {
+		return fmt.Errorf("--booking-uid is required")
 	}
-	tr, err := svc.Audit().TraceBooking(ctx, *bookingID)
+	tr, err := svc.Audit().TraceBooking(ctx, *bookingUID)
 	if err != nil {
 		return err
 	}
@@ -240,11 +240,11 @@ func cmdReconcile(ctx context.Context, svc *ledger.Service, args []string) error
 
 func cmdSolvency(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("solvency", flag.ExitOnError)
-	currency := fs.Int64("currency", 0, "currency id")
+	currency := fs.String("currency", "", "currency uid")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *currency == 0 {
+	if *currency == "" {
 		return fmt.Errorf("--currency is required")
 	}
 	report, err := svc.SolvencyChecker().SolvencyCheck(ctx, *currency)
@@ -256,12 +256,12 @@ func cmdSolvency(ctx context.Context, svc *ledger.Service, args []string) error 
 
 func cmdTrialBalance(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("trial-balance", flag.ExitOnError)
-	currency := fs.Int64("currency", 0, "currency id")
+	currency := fs.String("currency", "", "currency uid")
 	asOf := fs.String("as-of", "", "RFC3339 cutoff (inclusive); default now")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *currency == 0 {
+	if *currency == "" {
 		return fmt.Errorf("--currency is required")
 	}
 

@@ -17,7 +17,7 @@ import (
 type createBookingRequest struct {
 	ClassificationCode string            `json:"classification_code"`
 	AccountHolder      int64             `json:"account_holder"`
-	CurrencyID         int64             `json:"currency_id"`
+	CurrencyUID        string            `json:"currency_uid"`
 	Amount             string            `json:"amount"`
 	IdempotencyKey     string            `json:"idempotency_key"`
 	ChannelName        string            `json:"channel_name"`
@@ -34,35 +34,35 @@ type transitionRequest struct {
 }
 
 type bookingResponse struct {
-	ID               int64             `json:"id"`
-	ClassificationID int64             `json:"classification_id"`
-	AccountHolder    int64             `json:"account_holder"`
-	CurrencyID       int64             `json:"currency_id"`
-	Amount           string            `json:"amount"`
-	SettledAmount    string            `json:"settled_amount"`
-	Status           string            `json:"status"`
-	ChannelName      string            `json:"channel_name"`
-	ChannelRef       string            `json:"channel_ref"`
-	ReservationID    *int64            `json:"reservation_id,omitempty"`
-	JournalID        *int64            `json:"journal_id,omitempty"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	Metadata         map[string]string `json:"metadata"`
-	ExpiresAt        string            `json:"expires_at"`
-	CreatedAt        string            `json:"created_at"`
-	UpdatedAt        string            `json:"updated_at"`
+	UID               string            `json:"uid"`
+	ClassificationUID string            `json:"classification_uid"`
+	AccountHolder     int64             `json:"account_holder"`
+	CurrencyUID       string            `json:"currency_uid"`
+	Amount            string            `json:"amount"`
+	SettledAmount     string            `json:"settled_amount"`
+	Status            string            `json:"status"`
+	ChannelName       string            `json:"channel_name"`
+	ChannelRef        string            `json:"channel_ref"`
+	ReservationUID    string            `json:"reservation_uid,omitempty"`
+	JournalUID        string            `json:"journal_uid,omitempty"`
+	IdempotencyKey    string            `json:"idempotency_key"`
+	Metadata          map[string]string `json:"metadata"`
+	ExpiresAt         string            `json:"expires_at"`
+	CreatedAt         string            `json:"created_at"`
+	UpdatedAt         string            `json:"updated_at"`
 }
 
 type eventResponse struct {
-	ID                 int64             `json:"id"`
+	UID                string            `json:"uid"`
 	ClassificationCode string            `json:"classification_code"`
-	BookingID          int64             `json:"booking_id"`
+	BookingUID         string            `json:"booking_uid"`
 	AccountHolder      int64             `json:"account_holder"`
-	CurrencyID         int64             `json:"currency_id"`
+	CurrencyUID        string            `json:"currency_uid"`
 	FromStatus         string            `json:"from_status"`
 	ToStatus           string            `json:"to_status"`
 	Amount             string            `json:"amount"`
 	SettledAmount      string            `json:"settled_amount"`
-	JournalID          *int64            `json:"journal_id,omitempty"`
+	JournalUID         string            `json:"journal_uid,omitempty"`
 	Metadata           map[string]string `json:"metadata"`
 	OccurredAt         string            `json:"occurred_at"`
 }
@@ -71,19 +71,19 @@ type eventResponse struct {
 
 func bookingToResponse(op *core.Booking) bookingResponse {
 	resp := bookingResponse{
-		ID:               op.ID,
-		ClassificationID: op.ClassificationID,
-		AccountHolder:    op.AccountHolder,
-		CurrencyID:       op.CurrencyID,
-		Amount:           op.Amount.String(),
-		SettledAmount:    op.SettledAmount.String(),
-		Status:           string(op.Status),
-		ChannelName:      op.ChannelName,
-		ChannelRef:       op.ChannelRef,
-		ReservationID:    op.ReservationID,
-		JournalID:        op.JournalID,
-		IdempotencyKey:   op.IdempotencyKey,
-		Metadata:         op.Metadata,
+		UID:               op.UID,
+		ClassificationUID: op.ClassificationUID,
+		AccountHolder:     op.AccountHolder,
+		CurrencyUID:       op.CurrencyUID,
+		Amount:            op.Amount.String(),
+		SettledAmount:     op.SettledAmount.String(),
+		Status:            string(op.Status),
+		ChannelName:       op.ChannelName,
+		ChannelRef:        op.ChannelRef,
+		ReservationUID:    op.ReservationUID,
+		JournalUID:        op.JournalUID,
+		IdempotencyKey:    op.IdempotencyKey,
+		Metadata:          op.Metadata,
 	}
 	if !op.ExpiresAt.IsZero() {
 		resp.ExpiresAt = op.ExpiresAt.Format(time.RFC3339)
@@ -95,16 +95,16 @@ func bookingToResponse(op *core.Booking) bookingResponse {
 
 func eventToResponse(evt *core.Event) eventResponse {
 	return eventResponse{
-		ID:                 evt.ID,
+		UID:                evt.UID,
 		ClassificationCode: evt.ClassificationCode,
-		BookingID:          evt.BookingID,
+		BookingUID:         evt.BookingUID,
 		AccountHolder:      evt.AccountHolder,
-		CurrencyID:         evt.CurrencyID,
+		CurrencyUID:        evt.CurrencyUID,
 		FromStatus:         string(evt.FromStatus),
 		ToStatus:           string(evt.ToStatus),
 		Amount:             evt.Amount.String(),
 		SettledAmount:      evt.SettledAmount.String(),
-		JournalID:          evt.JournalID,
+		JournalUID:         evt.JournalUID,
 		Metadata:           evt.Metadata,
 		OccurredAt:         evt.OccurredAt.Format(time.RFC3339),
 	}
@@ -137,7 +137,7 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 	input := core.CreateBookingInput{
 		ClassificationCode: req.ClassificationCode,
 		AccountHolder:      req.AccountHolder,
-		CurrencyID:         req.CurrencyID,
+		CurrencyUID:        req.CurrencyUID,
 		Amount:             amount,
 		IdempotencyKey:     req.IdempotencyKey,
 		ChannelName:        req.ChannelName,
@@ -154,9 +154,9 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid booking ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid booking uid"))
 		return
 	}
 
@@ -176,7 +176,7 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := core.TransitionInput{
-		BookingID:  id,
+		BookingUID: uid,
 		ToStatus:   core.Status(req.ToStatus),
 		ChannelRef: req.ChannelRef,
 		Amount:     amount,
@@ -193,13 +193,13 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetBooking(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid booking ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid booking uid"))
 		return
 	}
 
-	op, err := s.bookingReader.GetBooking(r.Context(), id)
+	op, err := s.bookingReader.GetBooking(r.Context(), uid)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -220,48 +220,29 @@ func (s *Server) handleListBookings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var classificationID int64
-	if c := q.Get("classification_id"); c != "" {
-		var err error
-		classificationID, err = strconv.ParseInt(c, 10, 64)
-		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("classification_id must be a number"))
-			return
-		}
-	}
-
 	status := q.Get("status")
-
-	cursor, err := decodeCursor(q.Get("cursor"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
-		return
-	}
-
 	limit := parsePageLimit(r)
 
 	filter := core.BookingFilter{
-		AccountHolder:    holder,
-		ClassificationID: classificationID,
-		Status:           status,
-		Cursor:           cursor,
-		Limit:            int(limit),
+		AccountHolder:     holder,
+		ClassificationUID: q.Get("classification_uid"),
+		Status:            status,
+		Cursor:            q.Get("cursor"),
+		Limit:             int(limit),
 	}
 
-	bookings, err := s.bookingReader.ListBookings(r.Context(), filter)
+	bookings, nextCursor, err := s.bookingReader.ListBookings(r.Context(), filter)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	resp := PagedResponse[bookingResponse]{
-		List: make([]bookingResponse, len(bookings)),
+		List:       make([]bookingResponse, len(bookings)),
+		NextCursor: nextCursor,
 	}
 	for i, op := range bookings {
 		resp.List[i] = bookingToResponse(&op)
-	}
-	if len(bookings) == int(limit) {
-		resp.NextCursor = encodeCursor(bookings[len(bookings)-1].ID)
 	}
 	httpx.OK(w, resp)
 }

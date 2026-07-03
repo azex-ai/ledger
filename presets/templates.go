@@ -466,19 +466,19 @@ func buildTemplateInput(
 		}
 
 		lines[i] = core.TemplateLineInput{
-			ClassificationID: classification.ID,
-			EntryType:        line.EntryType,
-			HolderRole:       line.HolderRole,
-			AmountKey:        line.AmountKey,
-			SortOrder:        line.SortOrder,
+			ClassificationUID: classification.UID,
+			EntryType:         line.EntryType,
+			HolderRole:        line.HolderRole,
+			AmountKey:         line.AmountKey,
+			SortOrder:         line.SortOrder,
 		}
 	}
 
 	return core.TemplateInput{
-		Code:          preset.Code,
-		Name:          preset.Name,
-		JournalTypeID: journalType.ID,
-		Lines:         lines,
+		Code:           preset.Code,
+		Name:           preset.Name,
+		JournalTypeUID: journalType.UID,
+		Lines:          lines,
 	}, nil
 }
 
@@ -486,10 +486,10 @@ func validateExistingTemplatePreset(existing *core.EntryTemplate, preset Templat
 	if !existing.IsActive {
 		return fmt.Errorf("presets: existing template %q is inactive: %w", preset.Code, core.ErrInvalidInput)
 	}
-	if existing.JournalTypeID != expected.JournalTypeID {
+	if existing.JournalTypeUID != expected.JournalTypeUID {
 		return fmt.Errorf(
-			"presets: existing template %q has journal_type_id=%d, want %d: %w",
-			preset.Code, existing.JournalTypeID, expected.JournalTypeID, core.ErrInvalidInput,
+			"presets: existing template %q has journal_type_uid=%s, want %s: %w",
+			preset.Code, existing.JournalTypeUID, expected.JournalTypeUID, core.ErrInvalidInput,
 		)
 	}
 	if len(existing.Lines) != len(expected.Lines) {
@@ -500,7 +500,7 @@ func validateExistingTemplatePreset(existing *core.EntryTemplate, preset Templat
 	}
 	for i, line := range expected.Lines {
 		existingLine := existing.Lines[i]
-		if existingLine.ClassificationID != line.ClassificationID ||
+		if existingLine.ClassificationUID != line.ClassificationUID ||
 			existingLine.EntryType != line.EntryType ||
 			existingLine.HolderRole != line.HolderRole ||
 			existingLine.AmountKey != line.AmountKey ||

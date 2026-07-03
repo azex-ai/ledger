@@ -56,6 +56,7 @@ func (s *PeriodCloseStore) ClosePeriod(ctx context.Context, input core.ClosePeri
 		CloseBefore: input.CloseBefore,
 		Note:        input.Note,
 		ActorID:     input.ActorID,
+		Uid:         newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: close period: insert", err)
@@ -91,7 +92,7 @@ func (s *PeriodCloseStore) ListPeriodCloses(ctx context.Context, limit int) ([]c
 
 func periodCloseFromRow(row sqlcgen.PeriodClose) *core.PeriodClose {
 	return &core.PeriodClose{
-		ID:          row.ID,
+		UID:         pgToUID(row.Uid),
 		CloseBefore: row.CloseBefore,
 		Note:        row.Note,
 		ActorID:     row.ActorID,

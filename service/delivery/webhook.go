@@ -26,9 +26,17 @@ type WebhookSubscriber struct {
 	IsActive       bool   `json:"is_active"`
 }
 
+// PendingEvent pairs an event with the internal storage id the delivery
+// bookkeeping (MarkDelivered/MarkRetry/MarkDead) operates on. The internal id
+// never reaches a payload or header — consumers see only Event.UID.
+type PendingEvent struct {
+	InternalID int64
+	core.Event
+}
+
 // EventPoller reads pending events from the store.
 type EventPoller interface {
-	GetPendingEvents(ctx context.Context, limit int) ([]core.Event, error)
+	GetPendingEvents(ctx context.Context, limit int) ([]PendingEvent, error)
 	MarkDelivered(ctx context.Context, id int64) error
 	MarkRetry(ctx context.Context, id int64, nextAttempt time.Time) error
 	MarkDead(ctx context.Context, id int64) error
@@ -116,8 +124,8 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 	if len(subs) == 0 {
 		// No subscribers — mark all as delivered (nobody to notify).
 		for _, evt := range events {
-			if err := d.poller.MarkDelivered(ctx, evt.ID); err != nil {
-				d.logger.Error("delivery: webhook: mark delivered (no subscribers)", "event_id", evt.ID, "error", err)
+			if err := d.poller.MarkDelivered(ctx, evt.InternalID); err != nil {
+				d.logger.Error("delivery: webhook: mark delivered (no subscribers)", "event_id", evt.InternalID, "error", err)
 			} else {
 				d.metrics.EventDelivered()
 			}
@@ -128,7 +136,7 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 	delivered := 0
 	for _, evt := range events {
 		if err := d.deliverEvent(ctx, evt, subs); err != nil {
-			d.logger.Error("delivery: webhook: deliver event", "event_id", evt.ID, "error", err)
+			d.logger.Error("delivery: webhook: deliver event", "event_id", evt.InternalID, "error", err)
 		} else {
 			delivered++
 		}
@@ -136,10 +144,10 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 	return delivered, nil
 }
 
-func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, subs []WebhookSubscriber) error {
+func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, subs []WebhookSubscriber) error {
 	matched := d.matchSubscribers(evt, subs)
 	if len(matched) == 0 {
-		err := d.poller.MarkDelivered(ctx, evt.ID)
+		err := d.poller.MarkDelivered(ctx, evt.InternalID)
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -168,7 +176,7 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 	}
 
 	if allOK {
-		err := d.poller.MarkDelivered(ctx, evt.ID)
+		err := d.poller.MarkDelivered(ctx, evt.InternalID)
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -182,10 +190,10 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt core.Event, sub
 	if evt.MaxAttempts > 0 && evt.Attempts+1 >= evt.MaxAttempts {
 		d.metrics.EventDead()
 	}
-	return d.poller.MarkRetry(ctx, evt.ID, time.Now().Add(retryDelay(evt.Attempts)))
+	return d.poller.MarkRetry(ctx, evt.InternalID, time.Now().Add(retryDelay(evt.Attempts)))
 }
 
-func (d *WebhookDeliverer) matchSubscribers(evt core.Event, subs []WebhookSubscriber) []WebhookSubscriber {
+func (d *WebhookDeliverer) matchSubscribers(evt PendingEvent, subs []WebhookSubscriber) []WebhookSubscriber {
 	var matched []WebhookSubscriber
 	for _, sub := range subs {
 		if sub.FilterClass != "" && sub.FilterClass != evt.ClassificationCode {
@@ -201,8 +209,8 @@ func (d *WebhookDeliverer) matchSubscribers(evt core.Event, subs []WebhookSubscr
 
 // sendHTTP delivers evt to sub and returns the HTTP status code received
 // (0 if none, e.g. a connection error) alongside any error.
-func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt core.Event, sub WebhookSubscriber) (int, error) {
-	payload, err := json.Marshal(evt)
+func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt PendingEvent, sub WebhookSubscriber) (int, error) {
+	payload, err := json.Marshal(evt.Event)
 	if err != nil {
 		return 0, fmt.Errorf("delivery: webhook: marshal: %w", err)
 	}
@@ -215,7 +223,7 @@ func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt core.Event, sub Web
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Ledger-Event-ID", strconv.FormatInt(evt.ID, 10))
+	req.Header.Set("X-Ledger-Event-UID", evt.UID)
 	req.Header.Set("X-Ledger-Timestamp", timestamp)
 
 	if sub.Secret != "" {

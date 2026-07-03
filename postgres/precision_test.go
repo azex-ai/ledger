@@ -35,12 +35,12 @@ func TestPrecision_PostJournal_RejectsOverPrecisionAmount(t *testing.T) {
 	userID := int64(9001)
 
 	_, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt,
+		JournalTypeUID: jt,
 		IdempotencyKey: postgrestest.UniqueKey("jpy-half"),
 		Source:         "precision-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: jpyID, ClassificationID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("0.5")},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: jpyID, ClassificationID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("0.5")},
+			{AccountHolder: userID, CurrencyUID: jpyID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("0.5")},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: jpyID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("0.5")},
 		},
 	})
 	require.Error(t, err)
@@ -64,12 +64,12 @@ func TestPrecision_PostJournal_AcceptsWholeYen(t *testing.T) {
 	userID := int64(9002)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt,
+		JournalTypeUID: jt,
 		IdempotencyKey: postgrestest.UniqueKey("jpy-whole"),
 		Source:         "precision-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: jpyID, ClassificationID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: jpyID, ClassificationID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: userID, CurrencyUID: jpyID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: jpyID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 	})
 	require.NoError(t, err)
@@ -95,12 +95,12 @@ func TestPrecision_PostJournal_DefaultExponentStillAllowsFractionalAmounts(t *te
 	userID := int64(9003)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt,
+		JournalTypeUID: jt,
 		IdempotencyKey: postgrestest.UniqueKey("usdt-fractional"),
 		Source:         "precision-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: usdtID, ClassificationID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("100.123456789012345678")},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: usdtID, ClassificationID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("100.123456789012345678")},
+			{AccountHolder: userID, CurrencyUID: usdtID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("100.123456789012345678")},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: usdtID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("100.123456789012345678")},
 		},
 	})
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestPrecision_Reserve_RejectsOverPrecisionAmount(t *testing.T) {
 
 	_, err := reserver.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  int64(9004),
-		CurrencyID:     jpyID,
+		CurrencyUID:    jpyID,
 		Amount:         decimal.RequireFromString("12.5"),
 		IdempotencyKey: postgrestest.UniqueKey("jpy-reserve"),
 		ExpiresIn:      time.Hour,
@@ -148,19 +148,19 @@ func TestPrecision_Reserve_AcceptsWholeYen(t *testing.T) {
 
 	// Fund the account first so Reserve's availability check passes.
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt,
+		JournalTypeUID: jt,
 		IdempotencyKey: postgrestest.UniqueKey("jpy-fund"),
 		Source:         "precision-test",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: jpyID, ClassificationID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: jpyID, ClassificationID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: userID, CurrencyUID: jpyID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: jpyID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
 		},
 	})
 	require.NoError(t, err)
 
 	_, err = reserver.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  userID,
-		CurrencyID:     jpyID,
+		CurrencyUID:    jpyID,
 		Amount:         decimal.NewFromInt(500),
 		IdempotencyKey: postgrestest.UniqueKey("jpy-reserve-ok"),
 		ExpiresIn:      time.Hour,
@@ -186,7 +186,7 @@ func TestPrecision_Pending_RejectsOverPrecisionAmount(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  int64(9006),
-		CurrencyID:     jpyID,
+		CurrencyUID:    jpyID,
 		Amount:         decimal.RequireFromString("0.5"),
 		IdempotencyKey: postgrestest.UniqueKey("jpy-pending"),
 		Source:         "precision-test",

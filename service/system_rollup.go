@@ -23,9 +23,9 @@ type SystemRollupWriter interface {
 // PlatformBalanceQuerier reads raw platform balance rows from the store.
 // Implemented by postgres.PlatformBalanceStore.
 type PlatformBalanceQuerier interface {
-	GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error)
-	GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error)
-	SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error)
+	GetPlatformBalances(ctx context.Context, currencyUID string) (*core.PlatformBalance, error)
+	GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error)
+	SolvencyCheck(ctx context.Context, currencyUID string) (*core.SolvencyReport, error)
 }
 
 // SystemRollupService aggregates balance_checkpoints into system_rollups for O(1) queries.
@@ -72,8 +72,8 @@ func (s *SystemRollupService) RefreshSystemRollups(ctx context.Context) error {
 	for _, r := range rollups {
 		r.UpdatedAt = time.Now()
 		if err := s.writer.UpsertSystemRollup(ctx, r); err != nil {
-			return fmt.Errorf("service: system rollup: upsert currency=%d class=%d: %w",
-				r.CurrencyID, r.ClassificationID, err)
+			return fmt.Errorf("service: system rollup: upsert currency=%s class=%s: %w",
+				r.CurrencyUID, r.ClassificationUID, err)
 		}
 	}
 
@@ -88,13 +88,13 @@ func (s *SystemRollupService) RefreshSystemRollups(ctx context.Context) error {
 // GetPlatformBalances returns a structured per-classification breakdown for the
 // given currency. See core.PlatformBalance for field semantics.
 // Returns an error if WithPlatformBalanceQuerier has not been called.
-func (s *SystemRollupService) GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error) {
+func (s *SystemRollupService) GetPlatformBalances(ctx context.Context, currencyUID string) (*core.PlatformBalance, error) {
 	if s.pbQuerier == nil {
 		return nil, fmt.Errorf("service: system rollup: platform balance querier not configured")
 	}
-	pb, err := s.pbQuerier.GetPlatformBalances(ctx, currencyID)
+	pb, err := s.pbQuerier.GetPlatformBalances(ctx, currencyUID)
 	if err != nil {
-		return nil, fmt.Errorf("service: system rollup: get platform balances currency=%d: %w", currencyID, err)
+		return nil, fmt.Errorf("service: system rollup: get platform balances currency=%s: %w", currencyUID, err)
 	}
 	return pb, nil
 }
@@ -102,13 +102,13 @@ func (s *SystemRollupService) GetPlatformBalances(ctx context.Context, currencyI
 // GetTotalLiabilityByAsset returns the sum of all user-side (holder > 0) balances
 // across all classifications for the given currency.
 // Returns an error if WithPlatformBalanceQuerier has not been called.
-func (s *SystemRollupService) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
+func (s *SystemRollupService) GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error) {
 	if s.pbQuerier == nil {
 		return decimal.Zero, fmt.Errorf("service: system rollup: platform balance querier not configured")
 	}
-	total, err := s.pbQuerier.GetTotalLiabilityByAsset(ctx, currencyID)
+	total, err := s.pbQuerier.GetTotalLiabilityByAsset(ctx, currencyUID)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("service: system rollup: total liability currency=%d: %w", currencyID, err)
+		return decimal.Zero, fmt.Errorf("service: system rollup: total liability currency=%s: %w", currencyUID, err)
 	}
 	return total, nil
 }
@@ -116,13 +116,13 @@ func (s *SystemRollupService) GetTotalLiabilityByAsset(ctx context.Context, curr
 // SolvencyCheck computes a solvency report for the given currency.
 // See core.SolvencyReport for field semantics.
 // Returns an error if WithPlatformBalanceQuerier has not been called.
-func (s *SystemRollupService) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+func (s *SystemRollupService) SolvencyCheck(ctx context.Context, currencyUID string) (*core.SolvencyReport, error) {
 	if s.pbQuerier == nil {
 		return nil, fmt.Errorf("service: system rollup: platform balance querier not configured")
 	}
-	report, err := s.pbQuerier.SolvencyCheck(ctx, currencyID)
+	report, err := s.pbQuerier.SolvencyCheck(ctx, currencyUID)
 	if err != nil {
-		return nil, fmt.Errorf("service: system rollup: solvency check currency=%d: %w", currencyID, err)
+		return nil, fmt.Errorf("service: system rollup: solvency check currency=%s: %w", currencyUID, err)
 	}
 	return report, nil
 }

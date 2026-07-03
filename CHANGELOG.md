@@ -13,6 +13,48 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-03
+
+API-contract alignment (design: docs/plans/2026-07-03-api-contract-alignment-design.md).
+No-legacy premise (Aaron's 2026-07-03 ruling): the ledger is treated as a brand-new
+library — single-step breaking migration, no compatibility shims, no backfill.
+
+### Go module — Changed (BREAKING: uid-only identity)
+- **uid (UUIDv7) is the only externally visible identifier** (migration 031). Every
+  entity table gains `uid UUID NOT NULL` + unique index; uids are generated Go-side
+  (UUIDv7) on insert — no DB default, so a write path that forgets one fails loudly.
+  Internal BIGSERIAL ids survive only inside storage (PKs/FKs/locks/keyset cursors)
+  and appear in **no public contract**, including the library-mode Go API.
+- `core` entity structs expose `UID string`; all cross-references are `*UID string`
+  (`Journal.EventUID`, `Booking.JournalUID`, `Entry.ClassificationUID`, …; "" = not
+  linked). All interface signatures take/return uids (`GetJournal(uid string)`,
+  `ReverseJournal(uid string, …)`, `GetBalance(holder, currencyUID, classificationUID)`, …).
+- **Pagination**: every list interface returns `(items, nextCursor string, error)`;
+  cursors are opaque base64 strings produced by the store (`AuditFilter.Cursor`,
+  `BookingFilter.Cursor`, `EventFilter.Cursor` are now strings). HTTP responses carry
+  `next_cursor` populated by the store, not recomputed by handlers.
+- **HTTP API**: all path params are `{uid}`; query params renamed
+  (`currency_id`→`currency_uid`, `classification_id`→`classification_uid`,
+  `booking_id`→`booking_uid`); no request or response body carries an internal id.
+  Pinned by a mechanical source scan (server contract test, invariant I-18).
+- `channel.CallbackPayload.BookingID int64` → `BookingUID string`; EVM adapter
+  parses `booking_uid` from webhook JSON.
+- `service.ClassificationLister` is now a dimension port
+  (`ClassificationDims` / `CurrencyIDByUID` / `CurrencyUIDByID`), implemented by
+  `postgres.RollupAdapter`; rollup/reconcile math stays on internal ids and converts
+  at the boundary.
+- `ledger-cli` flags take uids (`--currency <uid>`, `--uid`, `--booking-uid`); the
+  internal-id escape hatch was not kept — use psql for storage-level investigation.
+- `postgrestest` seed helpers return uid strings; new `InternalID` helper resolves a
+  uid back to the bigint id for raw-SQL test assertions.
+- `docs/openapi.yaml` rewritten for the uid contract (info.version 0.4.0).
+
+### @azex/ledger-react — Changed (BREAKING, 0.2.0)
+- Regenerated `schema.ts`; all hand-written types use `uid: string` / `*_uid: string`
+  ("" = not linked, no more `number | null`); `Entry` and `TemplateLine` no longer
+  carry row ids. Client methods, hooks, and admin pages take uid strings; journal
+  detail routing matches opaque uids (`/journals/{uid}`).
+
 ## [0.3.1] - 2026-07-03
 
 ### Fixed

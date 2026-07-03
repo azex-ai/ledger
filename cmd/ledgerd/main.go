@@ -138,7 +138,7 @@ func run() error {
 	// Build reconcile/snapshot/systemRollup services for the HTTP server.
 	// These are lightweight (no state) and share the same rollup adapter.
 	rollupAdapter := postgres.NewRollupAdapter(pool)
-	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, postgres.NewClassificationStore(pool), engine)
+	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 

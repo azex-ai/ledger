@@ -33,7 +33,7 @@ func TestEVMAdapter_Name(t *testing.T) {
 
 func TestEVMAdapter_VerifySignature(t *testing.T) {
 	a := New(testKey)
-	body := []byte(`{"tx_hash":"0xabc","booking_id":1,"amount":"100.5","confirmations":12,"status":"confirmed"}`)
+	body := []byte(`{"tx_hash":"0xabc","booking_uid":"bk-1","amount":"100.5","confirmations":12,"status":"confirmed"}`)
 	now := time.Unix(1_700_000_000, 0)
 	a.now = func() time.Time { return now }
 	tsStr := strconv.FormatInt(now.Unix(), 10)
@@ -118,12 +118,12 @@ func TestEVMAdapter_ParseCallback(t *testing.T) {
 	a := New(testKey)
 
 	t.Run("valid JSON", func(t *testing.T) {
-		body := []byte(`{"tx_hash":"0xabc123","booking_id":42,"amount":"1.5","confirmations":12,"status":"confirmed"}`)
+		body := []byte(`{"tx_hash":"0xabc123","booking_uid":"bk-42","amount":"1.5","confirmations":12,"status":"confirmed"}`)
 		header := http.Header{}
 
 		payload, err := a.ParseCallback(header, body)
 		require.NoError(t, err)
-		assert.Equal(t, int64(42), payload.BookingID)
+		assert.Equal(t, "bk-42", payload.BookingUID)
 		assert.Equal(t, "0xabc123", payload.ChannelRef)
 		assert.Equal(t, "confirmed", payload.Status)
 		assert.True(t, decimal.NewFromFloat(1.5).Equal(payload.ActualAmount))
@@ -141,7 +141,7 @@ func TestEVMAdapter_ParseCallback(t *testing.T) {
 	})
 
 	t.Run("invalid amount", func(t *testing.T) {
-		body := []byte(`{"tx_hash":"0x1","booking_id":1,"amount":"not-a-number","confirmations":1,"status":"pending"}`)
+		body := []byte(`{"tx_hash":"0x1","booking_uid":"bk-1","amount":"not-a-number","confirmations":1,"status":"pending"}`)
 		header := http.Header{}
 
 		_, err := a.ParseCallback(header, body)

@@ -7,24 +7,24 @@ import type { Booking } from "../client/types";
 
 const DEPOSIT_CODE = "deposit";
 
-export function useDepositClassificationId(): number {
+export function useDepositClassificationId(): string {
   return useClassificationIdByCode(DEPOSIT_CODE);
 }
 
 export function useDeposits(params: { holder?: number; status?: string }) {
   const client = useLedgerClient();
-  const classificationId = useDepositClassificationId();
+  const classificationUid = useDepositClassificationId();
   return useQuery<Booking[]>({
-    queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationId }),
+    queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationUid }),
     queryFn: async () => {
       const page = await client.listBookings({
         holder: params.holder,
         status: params.status,
-        classification_id: classificationId,
+        classification_uid: classificationUid,
       });
       return page.list;
     },
-    enabled: classificationId > 0,
+    enabled: classificationUid !== "",
   });
 }
 
@@ -35,7 +35,7 @@ export function useDeposits(params: { holder?: number; status?: string }) {
 export function useConfirmingDeposit() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, channelRef }: { id: number; channelRef: string }) =>
+    ({ id, channelRef }: { id: string; channelRef: string }) =>
       client.transitionBooking(id, {
         to_status: "confirming",
         channel_ref: channelRef,
@@ -56,7 +56,7 @@ export function useConfirmDeposit() {
       actual_amount,
       channel_ref,
     }: {
-      id: number;
+      id: string;
       actual_amount: string;
       channel_ref: string;
     }) =>
@@ -72,7 +72,7 @@ export function useConfirmDeposit() {
 export function useFailDeposit() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, reason }: { id: number; reason: string }) =>
+    ({ id, reason }: { id: string; reason: string }) =>
       client.transitionBooking(id, {
         to_status: "failed",
         metadata: { reason },

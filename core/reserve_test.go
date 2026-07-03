@@ -29,7 +29,7 @@ func TestReservationStatus_CanTransition(t *testing.T) {
 func TestReserveInput_Validate(t *testing.T) {
 	valid := ReserveInput{
 		AccountHolder:  7,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: "reserve-1",
 	}
@@ -42,7 +42,7 @@ func TestReserveInput_Validate(t *testing.T) {
 		{
 			name: "zero holder",
 			input: ReserveInput{
-				CurrencyID:     1,
+				CurrencyUID:    "cur-1",
 				Amount:         decimal.NewFromInt(100),
 				IdempotencyKey: "reserve-1",
 			},
@@ -59,7 +59,7 @@ func TestReserveInput_Validate(t *testing.T) {
 			name: "non-positive amount",
 			input: ReserveInput{
 				AccountHolder:  7,
-				CurrencyID:     1,
+				CurrencyUID:    "cur-1",
 				Amount:         decimal.Zero,
 				IdempotencyKey: "reserve-1",
 			},
@@ -68,7 +68,7 @@ func TestReserveInput_Validate(t *testing.T) {
 			name: "missing idempotency key",
 			input: ReserveInput{
 				AccountHolder: 7,
-				CurrencyID:    1,
+				CurrencyUID:   "cur-1",
 				Amount:        decimal.NewFromInt(100),
 			},
 		},

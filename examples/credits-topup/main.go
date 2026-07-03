@@ -73,11 +73,11 @@ func run() error {
 	}
 
 	// Two currencies — credits is just another row in `currencies`.
-	usdtID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	usdtUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
 	if err != nil {
 		return err
 	}
-	creditsID, err := ensureCurrency(ctx, svc, "CREDITS", "Platform Credits")
+	creditsUID, err := ensureCurrency(ctx, svc, "CREDITS", "Platform Credits")
 	if err != nil {
 		return err
 	}
@@ -87,17 +87,17 @@ func run() error {
 		return fmt.Errorf("get main_wallet: %w", err)
 	}
 	creditsBal := func() (decimal.Decimal, error) {
-		return svc.BalanceReader().GetBalance(ctx, userID, creditsID, mainWallet.ID)
+		return svc.BalanceReader().GetBalance(ctx, userID, creditsUID, mainWallet.UID)
 	}
 	usdtBal := func() (decimal.Decimal, error) {
-		return svc.BalanceReader().GetBalance(ctx, userID, usdtID, mainWallet.ID)
+		return svc.BalanceReader().GetBalance(ctx, userID, usdtUID, mainWallet.UID)
 	}
 
 	// -----------------------------------------------------------------------
 	// Seed: give the user 10 USDT to spend (a confirmed deposit).
 	// -----------------------------------------------------------------------
 	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
-		HolderID: userID, CurrencyID: usdtID, IdempotencyKey: ledger.NewIdempotencyKey("seed-usdt"),
+		HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: ledger.NewIdempotencyKey("seed-usdt"),
 		Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("10")},
 		Source:  "credits-topup-example",
 	}); err != nil {
@@ -112,11 +112,11 @@ func run() error {
 	buyMeta := map[string]string{"quote_id": "q-1", "fx_rate": "100"}
 	if _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
 		{TemplateCode: "fx_sell", Params: core.TemplateParams{
-			HolderID: userID, CurrencyID: usdtID, IdempotencyKey: buyKey + "-sell",
+			HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: buyKey + "-sell",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("1")}, Metadata: buyMeta,
 		}},
 		{TemplateCode: "fx_buy", Params: core.TemplateParams{
-			HolderID: userID, CurrencyID: creditsID, IdempotencyKey: buyKey + "-buy",
+			HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: buyKey + "-buy",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")}, Metadata: buyMeta,
 		}},
 	}); err != nil {
@@ -135,11 +135,11 @@ func run() error {
 	bonusKey := ledger.NewIdempotencyKey("bonus-topup")
 	if _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
 		{TemplateCode: "fx_sell", Params: core.TemplateParams{ // the paid leg: 1 USDT
-			HolderID: userID, CurrencyID: usdtID, IdempotencyKey: bonusKey + "-pay",
+			HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: bonusKey + "-pay",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("1")},
 		}},
 		{TemplateCode: "credits_topup", Params: core.TemplateParams{ // 100 purchased + 20 bonus
-			HolderID: userID, CurrencyID: creditsID, IdempotencyKey: bonusKey + "-issue",
+			HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: bonusKey + "-issue",
 			Amounts: map[string]decimal.Decimal{
 				"purchased": decimal.RequireFromString("100"),
 				"bonus":     decimal.RequireFromString("20"),
@@ -156,7 +156,7 @@ func run() error {
 	// the balance — the actual debit is a separate journal we post on settle.
 	// -----------------------------------------------------------------------
 	rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
-		AccountHolder: userID, CurrencyID: creditsID,
+		AccountHolder: userID, CurrencyUID: creditsUID,
 		Amount:         decimal.RequireFromString("50"),
 		IdempotencyKey: ledger.NewIdempotencyKey("run-budget"),
 		ExpiresIn:      time.Hour,
@@ -164,10 +164,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("recipe 4 reserve: %w", err)
 	}
-	fmt.Printf("  reserved 50 credits (id=%d, status=%s) — balance unchanged, available reduced\n", rsv.ID, rsv.Status)
+	fmt.Printf("  reserved 50 credits (uid=%s, status=%s) — balance unchanged, available reduced\n", rsv.UID, rsv.Status)
 
 	// Run finished, actual cost 32 → capture it and release the 18 remainder.
-	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationID: rsv.ID, Amount: decimal.RequireFromString("32")}); err != nil {
+	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32")}); err != nil {
 		return fmt.Errorf("recipe 4 settle: %w", err)
 	}
 	// Post the actual spend so it hits the books (credits flow back to settlement).
@@ -175,7 +175,7 @@ func run() error {
 		return err
 	}
 	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
-		HolderID: userID, CurrencyID: creditsID, IdempotencyKey: ledger.NewIdempotencyKey("run-spend"),
+		HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: ledger.NewIdempotencyKey("run-spend"),
 		Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
 	}); err != nil {
 		return fmt.Errorf("recipe 4 spend journal: %w", err)
@@ -189,11 +189,11 @@ func run() error {
 	cashMeta := map[string]string{"quote_id": "q-2", "fx_rate": "100"}
 	if _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
 		{TemplateCode: "fx_sell", Params: core.TemplateParams{
-			HolderID: userID, CurrencyID: creditsID, IdempotencyKey: cashKey + "-sell",
+			HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: cashKey + "-sell",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("88")}, Metadata: cashMeta,
 		}},
 		{TemplateCode: "fx_buy", Params: core.TemplateParams{
-			HolderID: userID, CurrencyID: usdtID, IdempotencyKey: cashKey + "-buy",
+			HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: cashKey + "-buy",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("0.88")}, Metadata: cashMeta,
 		}},
 	}); err != nil {
@@ -205,21 +205,21 @@ func run() error {
 }
 
 // ensureCurrency creates a currency if it doesn't already exist (idempotent).
-func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
 	list, err := svc.Currencies().ListCurrencies(ctx, false)
 	if err != nil {
-		return 0, fmt.Errorf("list currencies: %w", err)
+		return "", fmt.Errorf("list currencies: %w", err)
 	}
 	for _, c := range list {
 		if c.Code == code {
-			return c.ID, nil
+			return c.UID, nil
 		}
 	}
 	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
 	if err != nil {
-		return 0, fmt.Errorf("create currency %s: %w", code, err)
+		return "", fmt.Errorf("create currency %s: %w", code, err)
 	}
-	return created.ID, nil
+	return created.UID, nil
 }
 
 // ensureBonusTemplate registers the credits_topup template (purchased + bonus)
@@ -237,12 +237,12 @@ func ensureBonusTemplate(ctx context.Context, svc *ledger.Service) error {
 		return err
 	}
 	_, err = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
-		Code: "credits_topup", Name: "Credits Top-up with Bonus", JournalTypeID: jt,
+		Code: "credits_topup", Name: "Credits Top-up with Bonus", JournalTypeUID: jt,
 		Lines: []core.TemplateLineInput{
-			{ClassificationID: mw, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "purchased", SortOrder: 1},
-			{ClassificationID: st, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "purchased", SortOrder: 2},
-			{ClassificationID: mw, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "bonus", SortOrder: 3},
-			{ClassificationID: eq, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "bonus", SortOrder: 4},
+			{ClassificationUID: mw, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "purchased", SortOrder: 1},
+			{ClassificationUID: st, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "purchased", SortOrder: 2},
+			{ClassificationUID: mw, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "bonus", SortOrder: 3},
+			{ClassificationUID: eq, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "bonus", SortOrder: 4},
 		},
 	})
 	if err != nil {
@@ -266,10 +266,10 @@ func ensureSpendTemplate(ctx context.Context, svc *ledger.Service) error {
 		return err
 	}
 	_, err = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
-		Code: "credits_spend", Name: "Credits Spend", JournalTypeID: jt,
+		Code: "credits_spend", Name: "Credits Spend", JournalTypeUID: jt,
 		Lines: []core.TemplateLineInput{
-			{ClassificationID: st, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
-			{ClassificationID: mw, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 2},
+			{ClassificationUID: st, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
+			{ClassificationUID: mw, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 2},
 		},
 	})
 	if err != nil {
@@ -278,31 +278,31 @@ func ensureSpendTemplate(ctx context.Context, svc *ledger.Service) error {
 	return nil
 }
 
-func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name string) (int64, error) {
+func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
 	if jt, err := svc.JournalTypes().GetJournalTypeByCode(ctx, code); err == nil {
-		return jt.ID, nil
+		return jt.UID, nil
 	}
 	jt, err := svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
 	if err != nil {
-		return 0, fmt.Errorf("create journal type %s: %w", code, err)
+		return "", fmt.Errorf("create journal type %s: %w", code, err)
 	}
-	return jt.ID, nil
+	return jt.UID, nil
 }
 
-func classIDs(ctx context.Context, svc *ledger.Service, a, b, c string) (int64, int64, int64, error) {
+func classIDs(ctx context.Context, svc *ledger.Service, a, b, c string) (string, string, string, error) {
 	ca, err := svc.Classifications().GetByCode(ctx, a)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("get %s: %w", a, err)
+		return "", "", "", fmt.Errorf("get %s: %w", a, err)
 	}
 	cb, err := svc.Classifications().GetByCode(ctx, b)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("get %s: %w", b, err)
+		return "", "", "", fmt.Errorf("get %s: %w", b, err)
 	}
 	cc, err := svc.Classifications().GetByCode(ctx, c)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("get %s: %w", c, err)
+		return "", "", "", fmt.Errorf("get %s: %w", c, err)
 	}
-	return ca.ID, cb.ID, cc.ID, nil
+	return ca.UID, cb.UID, cc.UID, nil
 }
 
 func printBalances(usdtBal, creditsBal func() (decimal.Decimal, error), label string) {

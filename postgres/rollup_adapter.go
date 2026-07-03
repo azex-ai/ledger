@@ -37,6 +37,7 @@ type RollupAdapter struct {
 	pool       *pgxpool.Pool
 	q          *sqlcgen.Queries
 	claimLease time.Duration
+	dims       *dimCache
 }
 
 const rollupClaimLease = 2 * time.Minute
@@ -47,6 +48,7 @@ func NewRollupAdapter(pool *pgxpool.Pool) *RollupAdapter {
 		pool:       pool,
 		q:          sqlcgen.New(pool),
 		claimLease: rollupClaimLease,
+		dims:       dimCacheFor(pool),
 	}
 }
 
@@ -363,32 +365,51 @@ func (a *RollupAdapter) ListBalancesAt(ctx context.Context, cutoff time.Time) ([
 
 	balances := make([]core.Balance, 0, len(rows))
 	for _, row := range rows {
-		balance := core.Balance{
-			AccountHolder:    row.AccountHolder,
-			CurrencyID:       row.CurrencyID,
-			ClassificationID: row.ClassificationID,
-			Balance:          mustNumericToDecimal(row.Balance),
+		cur, err := a.dims.currencyByIDOrErr(ctx, a.q, row.CurrencyID)
+		if err != nil {
+			return nil, err
 		}
-		balances = append(balances, balance)
+		cls, err := a.dims.classByIDOrErr(ctx, a.q, row.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
+		balances = append(balances, core.Balance{
+			AccountHolder:     row.AccountHolder,
+			CurrencyUID:       cur.UID,
+			ClassificationUID: cls.UID,
+			Balance:           mustNumericToDecimal(row.Balance),
+		})
 	}
 
 	return balances, nil
 }
 
 func (a *RollupAdapter) UpsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error {
+	cur, err := a.dims.currencyByUIDOrErr(ctx, a.q, snap.CurrencyUID)
+	if err != nil {
+		return err
+	}
+	cls, err := a.dims.classByUIDOrErr(ctx, a.q, snap.ClassificationUID)
+	if err != nil {
+		return err
+	}
 	return a.q.InsertSnapshot(ctx, sqlcgen.InsertSnapshotParams{
 		AccountHolder:    snap.AccountHolder,
-		CurrencyID:       snap.CurrencyID,
-		ClassificationID: snap.ClassificationID,
+		CurrencyID:       cur.ID,
+		ClassificationID: cls.ID,
 		SnapshotDate:     pgtype.Date{Time: snap.SnapshotDate, Valid: true},
 		Balance:          decimalToNumeric(snap.Balance),
 	})
 }
 
-func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder, currencyID int64, date time.Time) ([]core.Balance, error) {
+func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error) {
+	cur, err := a.dims.currencyByUIDOrErr(ctx, a.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := a.q.GetSnapshotBalances(ctx, sqlcgen.GetSnapshotBalancesParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
+		CurrencyID:    cur.ID,
 		SnapshotDate:  pgtype.Date{Time: date, Valid: true},
 	})
 	if err != nil {
@@ -396,11 +417,15 @@ func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder, currenc
 	}
 	result := make([]core.Balance, len(rows))
 	for i, r := range rows {
+		cls, err := a.dims.classByIDOrErr(ctx, a.q, r.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		result[i] = core.Balance{
-			AccountHolder:    r.AccountHolder,
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			Balance:          mustNumericToDecimal(r.Balance),
+			AccountHolder:     r.AccountHolder,
+			CurrencyUID:       currencyUID,
+			ClassificationUID: cls.UID,
+			Balance:           mustNumericToDecimal(r.Balance),
 		}
 	}
 	return result, nil
@@ -419,10 +444,18 @@ func (a *RollupAdapter) AggregateCheckpointsByClassification(ctx context.Context
 		if err != nil {
 			return nil, fmt.Errorf("postgres: aggregate checkpoints: convert: %w", err)
 		}
+		cur, err := a.dims.currencyByIDOrErr(ctx, a.q, r.CurrencyID)
+		if err != nil {
+			return nil, err
+		}
+		cls, err := a.dims.classByIDOrErr(ctx, a.q, r.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		result[i] = core.SystemRollup{
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			TotalBalance:     bal,
+			CurrencyUID:       cur.UID,
+			ClassificationUID: cls.UID,
+			TotalBalance:      bal,
 		}
 	}
 	return result, nil
@@ -431,9 +464,17 @@ func (a *RollupAdapter) AggregateCheckpointsByClassification(ctx context.Context
 // --- SystemRollupWriter ---
 
 func (a *RollupAdapter) UpsertSystemRollup(ctx context.Context, rollup core.SystemRollup) error {
+	cur, err := a.dims.currencyByUIDOrErr(ctx, a.q, rollup.CurrencyUID)
+	if err != nil {
+		return err
+	}
+	cls, err := a.dims.classByUIDOrErr(ctx, a.q, rollup.ClassificationUID)
+	if err != nil {
+		return err
+	}
 	return a.q.UpsertSystemRollup(ctx, sqlcgen.UpsertSystemRollupParams{
-		CurrencyID:       rollup.CurrencyID,
-		ClassificationID: rollup.ClassificationID,
+		CurrencyID:       cur.ID,
+		ClassificationID: cls.ID,
 		TotalBalance:     decimalToNumeric(rollup.TotalBalance),
 	})
 }
@@ -447,7 +488,50 @@ func (a *RollupAdapter) GetExpiredReservations(ctx context.Context, limit int) (
 	}
 	result := make([]core.Reservation, len(rows))
 	for i, r := range rows {
-		result[i] = *reservationFromRow(r)
+		res, err := reservationFromRow(ctx, a.dims, a.q, r)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *res
 	}
 	return result, nil
+}
+
+// --- service.ClassificationLister (dimension port) ---
+
+// ClassificationDims exposes the classification dimension rows (internal id +
+// uid + normal side) the rollup/reconcile math is keyed on.
+func (a *RollupAdapter) ClassificationDims(ctx context.Context) ([]service.ClassificationDim, error) {
+	rows, err := a.q.ListClassificationDims(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: classification dims: %w", err)
+	}
+	out := make([]service.ClassificationDim, len(rows))
+	for i, r := range rows {
+		out[i] = service.ClassificationDim{
+			ID:         r.ID,
+			UID:        pgToUID(r.Uid),
+			Code:       r.Code,
+			NormalSide: core.NormalSide(r.NormalSide),
+		}
+	}
+	return out, nil
+}
+
+// CurrencyIDByUID resolves a currency uid to its internal id.
+func (a *RollupAdapter) CurrencyIDByUID(ctx context.Context, uid string) (int64, error) {
+	d, err := a.dims.currencyByUIDOrErr(ctx, a.q, uid)
+	if err != nil {
+		return 0, err
+	}
+	return d.ID, nil
+}
+
+// CurrencyUIDByID resolves an internal currency id to its uid.
+func (a *RollupAdapter) CurrencyUIDByID(ctx context.Context, id int64) (string, error) {
+	d, err := a.dims.currencyByIDOrErr(ctx, a.q, id)
+	if err != nil {
+		return "", err
+	}
+	return d.UID, nil
 }

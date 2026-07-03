@@ -12,7 +12,7 @@ import (
 )
 
 const getAccountPolicy = `-- name: GetAccountPolicy :one
-SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at FROM account_policies
+SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at, uid FROM account_policies
 WHERE account_holder = $1 AND currency_id = $2 AND classification_id = $3
 `
 
@@ -37,12 +37,13 @@ func (q *Queries) GetAccountPolicy(ctx context.Context, arg GetAccountPolicyPara
 		&i.Note,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getAccountPolicyForUpdate = `-- name: GetAccountPolicyForUpdate :one
-SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at FROM account_policies
+SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at, uid FROM account_policies
 WHERE account_holder = $1 AND currency_id = $2 AND classification_id = $3
 FOR UPDATE
 `
@@ -71,12 +72,13 @@ func (q *Queries) GetAccountPolicyForUpdate(ctx context.Context, arg GetAccountP
 		&i.Note,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getEffectiveAccountPolicy = `-- name: GetEffectiveAccountPolicy :one
-SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at FROM account_policies
+SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at, uid FROM account_policies
 WHERE account_holder = $1
   AND currency_id IN ($2, 0)
   AND classification_id IN ($3, 0)
@@ -115,6 +117,7 @@ func (q *Queries) GetEffectiveAccountPolicy(ctx context.Context, arg GetEffectiv
 		&i.Note,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
@@ -152,7 +155,7 @@ func (q *Queries) InsertAccountPolicyChange(ctx context.Context, arg InsertAccou
 }
 
 const listAccountPoliciesByHolder = `-- name: ListAccountPoliciesByHolder :many
-SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at FROM account_policies
+SELECT id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at, uid FROM account_policies
 WHERE account_holder = $1
 ORDER BY currency_id, classification_id
 `
@@ -177,6 +180,7 @@ func (q *Queries) ListAccountPoliciesByHolder(ctx context.Context, accountHolder
 			&i.Note,
 			&i.UpdatedAt,
 			&i.CreatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -225,9 +229,9 @@ func (q *Queries) ListAccountPolicyChanges(ctx context.Context, policyID int64) 
 const upsertAccountPolicy = `-- name: UpsertAccountPolicy :one
 INSERT INTO account_policies (
     account_holder, currency_id, classification_id,
-    status, min_balance, enforce_min_balance, note
+    status, min_balance, enforce_min_balance, note, uid
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8
 )
 ON CONFLICT (account_holder, currency_id, classification_id) DO UPDATE SET
     status              = EXCLUDED.status,
@@ -235,7 +239,7 @@ ON CONFLICT (account_holder, currency_id, classification_id) DO UPDATE SET
     enforce_min_balance = EXCLUDED.enforce_min_balance,
     note                = EXCLUDED.note,
     updated_at          = now()
-RETURNING id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at
+RETURNING id, account_holder, currency_id, classification_id, status, min_balance, enforce_min_balance, note, updated_at, created_at, uid
 `
 
 type UpsertAccountPolicyParams struct {
@@ -246,6 +250,7 @@ type UpsertAccountPolicyParams struct {
 	MinBalance        pgtype.Numeric `json:"min_balance"`
 	EnforceMinBalance bool           `json:"enforce_min_balance"`
 	Note              string         `json:"note"`
+	Uid               pgtype.UUID    `json:"uid"`
 }
 
 // Plain UPSERT keyed on the UNIQUE (account_holder, currency_id,
@@ -261,6 +266,7 @@ func (q *Queries) UpsertAccountPolicy(ctx context.Context, arg UpsertAccountPoli
 		arg.MinBalance,
 		arg.EnforceMinBalance,
 		arg.Note,
+		arg.Uid,
 	)
 	var i AccountPolicy
 	err := row.Scan(
@@ -274,6 +280,7 @@ func (q *Queries) UpsertAccountPolicy(ctx context.Context, arg UpsertAccountPoli
 		&i.Note,
 		&i.UpdatedAt,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }

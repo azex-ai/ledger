@@ -58,12 +58,12 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = tmplStore.CreateTemplate(ctx, core.TemplateInput{
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: jtDeposit.ID,
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: jtDeposit.UID,
 		Lines: []core.TemplateLineInput{
-			{ClassificationID: mainWallet.ID, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
-			{ClassificationID: custodial.ID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+			{ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationUID: custodial.UID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	})
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	// Step 4: Execute deposit via template
 	j, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     usdt.ID,
+		CurrencyUID:    usdt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("integ-dep-journal"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(1000)},
 		Source:         "deposit",
@@ -82,22 +82,22 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	assert.True(t, j.TotalDebit.Equal(decimal.NewFromInt(1000)))
 
 	// Step 5: Verify balances
-	walletBal, err := ledgerStore.GetBalance(ctx, userID, usdt.ID, mainWallet.ID)
+	walletBal, err := ledgerStore.GetBalance(ctx, userID, usdt.UID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(decimal.NewFromInt(1000)), "wallet: expected 1000, got %s", walletBal)
 
-	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, usdt.ID, custodial.ID)
+	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, usdt.UID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, custodialBal.Equal(decimal.NewFromInt(1000)), "custodial: expected 1000, got %s", custodialBal)
 
 	// Step 6: Reserve → Settle flow (lock 200 from wallet)
 	// First, create a lock journal: wallet credit 200, locked debit 200
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtTransfer.ID,
+		JournalTypeUID: jtTransfer.UID,
 		IdempotencyKey: postgrestest.UniqueKey("integ-lock"),
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: locked.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: locked.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
 		},
 		Source: "reserve",
 	})
@@ -105,7 +105,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 
 	reservation, err := reserverStore.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  userID,
-		CurrencyID:     usdt.ID,
+		CurrencyUID:    usdt.UID,
 		Amount:         decimal.NewFromInt(200),
 		IdempotencyKey: postgrestest.UniqueKey("integ-reserve"),
 		ExpiresIn:      10 * time.Minute,
@@ -113,15 +113,15 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, core.ReservationStatusActive, reservation.Status)
 
-	err = reserverStore.Settle(ctx, core.SettleInput{ReservationID: reservation.ID, Amount: decimal.NewFromInt(200)})
+	err = reserverStore.Settle(ctx, core.SettleInput{ReservationUID: reservation.UID, Amount: decimal.NewFromInt(200)})
 	require.NoError(t, err)
 
 	// Verify after lock: wallet 800, locked 200
-	walletBal, err = ledgerStore.GetBalance(ctx, userID, usdt.ID, mainWallet.ID)
+	walletBal, err = ledgerStore.GetBalance(ctx, userID, usdt.UID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(decimal.NewFromInt(800)), "wallet after lock: expected 800, got %s", walletBal)
 
-	lockedBal, err := ledgerStore.GetBalance(ctx, userID, usdt.ID, locked.ID)
+	lockedBal, err := ledgerStore.GetBalance(ctx, userID, usdt.UID, locked.UID)
 	require.NoError(t, err)
 	assert.True(t, lockedBal.Equal(decimal.NewFromInt(200)), "locked: expected 200, got %s", lockedBal)
 
@@ -143,7 +143,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	assert.Equal(t, totalDebits, totalCredits, "accounting equation: debits (%s) must equal credits (%s)", totalDebits, totalCredits)
 
 	// Step 9: Verify fee classification exists but has no entries
-	feeBal, err := ledgerStore.GetBalance(ctx, -userID, usdt.ID, fees.ID)
+	feeBal, err := ledgerStore.GetBalance(ctx, -userID, usdt.UID, fees.UID)
 	require.NoError(t, err)
 	assert.True(t, feeBal.IsZero(), "fees should be zero")
 }

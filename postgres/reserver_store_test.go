@@ -27,7 +27,7 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  1,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: postgrestest.UniqueKey("res-settle"),
 		ExpiresIn:      10 * time.Minute,
@@ -37,7 +37,7 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 	assert.True(t, res.ReservedAmount.Equal(decimal.NewFromInt(100)))
 
 	// Settle
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(95)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(95)})
 	require.NoError(t, err)
 }
 
@@ -52,18 +52,18 @@ func TestReserverStore_Reserve_Release(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  2,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(50),
 		IdempotencyKey: postgrestest.UniqueKey("res-release"),
 		ExpiresIn:      5 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	err = store.Release(ctx, res.ID)
+	err = store.Release(ctx, res.UID)
 	require.NoError(t, err)
 
 	// Cannot settle after release
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -80,7 +80,7 @@ func TestReserverStore_Reserve_Idempotent(t *testing.T) {
 	key := postgrestest.UniqueKey("res-idem")
 	input := core.ReserveInput{
 		AccountHolder:  3,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: key,
 		ExpiresIn:      10 * time.Minute,
@@ -91,7 +91,7 @@ func TestReserverStore_Reserve_Idempotent(t *testing.T) {
 
 	r2, err := store.Reserve(ctx, input)
 	require.NoError(t, err)
-	assert.Equal(t, r1.ID, r2.ID)
+	assert.Equal(t, r1.UID, r2.UID)
 }
 
 func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
@@ -106,7 +106,7 @@ func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
 	key := postgrestest.UniqueKey("res-idem-mismatch")
 	_, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  31,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(40),
 		IdempotencyKey: key,
 		ExpiresIn:      10 * time.Minute,
@@ -115,7 +115,7 @@ func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
 
 	_, err = store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  31,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(50),
 		IdempotencyKey: key,
 		ExpiresIn:      10 * time.Minute,
@@ -143,7 +143,7 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 		defer wg.Done()
 		res1, err1 = store.Reserve(ctx, core.ReserveInput{
 			AccountHolder:  10,
-			CurrencyID:     curID,
+			CurrencyUID:    curID,
 			Amount:         decimal.NewFromInt(50),
 			IdempotencyKey: postgrestest.UniqueKey("conc-a"),
 			ExpiresIn:      10 * time.Minute,
@@ -153,7 +153,7 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 		defer wg.Done()
 		res2, err2 = store.Reserve(ctx, core.ReserveInput{
 			AccountHolder:  10,
-			CurrencyID:     curID,
+			CurrencyUID:    curID,
 			Amount:         decimal.NewFromInt(30),
 			IdempotencyKey: postgrestest.UniqueKey("conc-b"),
 			ExpiresIn:      10 * time.Minute,
@@ -163,7 +163,7 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 
 	require.NoError(t, err1)
 	require.NoError(t, err2)
-	assert.NotEqual(t, res1.ID, res2.ID)
+	assert.NotEqual(t, res1.UID, res2.UID)
 }
 
 func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
@@ -177,7 +177,7 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  5,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: postgrestest.UniqueKey("double-settle"),
 		ExpiresIn:      10 * time.Minute,
@@ -185,11 +185,11 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	require.NoError(t, err)
 
 	// Settle once
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(100)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100)})
 	require.NoError(t, err)
 
 	// Settle again should fail
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(100)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -208,13 +208,13 @@ func TestReserverStore_HeldAmount(t *testing.T) {
 	assert.True(t, held.IsZero(), "no reservations yet, held should be 0, got %s", held)
 
 	r1, err := store.Reserve(ctx, core.ReserveInput{
-		AccountHolder: 7, CurrencyID: curID, Amount: decimal.NewFromInt(30),
+		AccountHolder: 7, CurrencyUID: curID, Amount: decimal.NewFromInt(30),
 		IdempotencyKey: postgrestest.UniqueKey("held-a"), ExpiresIn: 10 * time.Minute,
 	})
 	require.NoError(t, err)
 
 	_, err = store.Reserve(ctx, core.ReserveInput{
-		AccountHolder: 7, CurrencyID: curID, Amount: decimal.NewFromInt(20),
+		AccountHolder: 7, CurrencyUID: curID, Amount: decimal.NewFromInt(20),
 		IdempotencyKey: postgrestest.UniqueKey("held-b"), ExpiresIn: 10 * time.Minute,
 	})
 	require.NoError(t, err)
@@ -229,13 +229,13 @@ func TestReserverStore_HeldAmount(t *testing.T) {
 	assert.True(t, other.IsZero(), "holder 8 has no reservations, want 0, got %s", other)
 
 	// Releasing one active reservation drops it out of the held total.
-	require.NoError(t, store.Release(ctx, r1.ID))
+	require.NoError(t, store.Release(ctx, r1.UID))
 	held, err = store.HeldAmount(ctx, 7, curID)
 	require.NoError(t, err)
 	assert.True(t, held.Equal(decimal.NewFromInt(20)), "after release, want 20, got %s", held)
 }
 
-func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.LedgerStore, pool *pgxpool.Pool, holder, currencyID int64, amount decimal.Decimal) {
+func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.LedgerStore, pool *pgxpool.Pool, holder int64, currencyUID string, amount decimal.Decimal) {
 	t.Helper()
 
 	journalTypeID := postgrestest.SeedJournalType(t, pool, "fund_account", "Fund Account")
@@ -243,11 +243,11 @@ func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.L
 	custodialID := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	_, err := ledger.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  journalTypeID,
+		JournalTypeUID: journalTypeID,
 		IdempotencyKey: postgrestest.UniqueKey("seed-reserve-balance"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: currencyID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: amount},
-			{AccountHolder: -holder, CurrencyID: currencyID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
+			{AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: amount},
+			{AccountHolder: -holder, CurrencyUID: currencyUID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
 		},
 		Source: "test",
 	})
@@ -265,14 +265,14 @@ func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  20,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: postgrestest.UniqueKey("settle-zero"),
 		ExpiresIn:      10 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.Zero})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.Zero})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -288,14 +288,14 @@ func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  21,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100),
 		IdempotencyKey: postgrestest.UniqueKey("settle-negative"),
 		ExpiresIn:      10 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(-1)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-1)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -317,14 +317,14 @@ func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  22,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(50),
 		IdempotencyKey: postgrestest.UniqueKey("settle-oversettle"),
 		ExpiresIn:      10 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50).Add(decimal.NewFromInt(1))})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50).Add(decimal.NewFromInt(1))})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 	assert.Contains(t, err.Error(), "exceeds reserved amount")
@@ -349,13 +349,13 @@ func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
 
 	res, err := store.Reserve(ctx, core.ReserveInput{
 		AccountHolder:  23,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(50),
 		IdempotencyKey: postgrestest.UniqueKey("settle-exact"),
 		ExpiresIn:      10 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationID: res.ID, Amount: decimal.NewFromInt(50)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50)})
 	require.NoError(t, err)
 }

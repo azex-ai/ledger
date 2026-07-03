@@ -7,22 +7,30 @@ package sqlcgen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createCurrency = `-- name: CreateCurrency :one
-INSERT INTO currencies (code, name, exponent)
-VALUES ($1, $2, $3)
-RETURNING id, code, name, is_active, exponent
+INSERT INTO currencies (code, name, exponent, uid)
+VALUES ($1, $2, $3, $4)
+RETURNING id, code, name, is_active, exponent, uid
 `
 
 type CreateCurrencyParams struct {
-	Code     string `json:"code"`
-	Name     string `json:"name"`
-	Exponent int16  `json:"exponent"`
+	Code     string      `json:"code"`
+	Name     string      `json:"name"`
+	Exponent int16       `json:"exponent"`
+	Uid      pgtype.UUID `json:"uid"`
 }
 
 func (q *Queries) CreateCurrency(ctx context.Context, arg CreateCurrencyParams) (Currency, error) {
-	row := q.db.QueryRow(ctx, createCurrency, arg.Code, arg.Name, arg.Exponent)
+	row := q.db.QueryRow(ctx, createCurrency,
+		arg.Code,
+		arg.Name,
+		arg.Exponent,
+		arg.Uid,
+	)
 	var i Currency
 	err := row.Scan(
 		&i.ID,
@@ -30,21 +38,22 @@ func (q *Queries) CreateCurrency(ctx context.Context, arg CreateCurrencyParams) 
 		&i.Name,
 		&i.IsActive,
 		&i.Exponent,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const deactivateCurrency = `-- name: DeactivateCurrency :exec
-UPDATE currencies SET is_active = false WHERE id = $1
+UPDATE currencies SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateCurrency(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deactivateCurrency, id)
+func (q *Queries) DeactivateCurrency(ctx context.Context, uid pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deactivateCurrency, uid)
 	return err
 }
 
 const getCurrenciesByIDs = `-- name: GetCurrenciesByIDs :many
-SELECT id, code, name, is_active, exponent FROM currencies
+SELECT id, code, name, is_active, exponent, uid FROM currencies
 WHERE id = ANY($1::bigint[])
 `
 
@@ -66,6 +75,7 @@ func (q *Queries) GetCurrenciesByIDs(ctx context.Context, ids []int64) ([]Curren
 			&i.Name,
 			&i.IsActive,
 			&i.Exponent,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -78,12 +88,12 @@ func (q *Queries) GetCurrenciesByIDs(ctx context.Context, ids []int64) ([]Curren
 }
 
 const getCurrency = `-- name: GetCurrency :one
-SELECT id, code, name, is_active, exponent FROM currencies
-WHERE id = $1
+SELECT id, code, name, is_active, exponent, uid FROM currencies
+WHERE uid = $1
 `
 
-func (q *Queries) GetCurrency(ctx context.Context, id int64) (Currency, error) {
-	row := q.db.QueryRow(ctx, getCurrency, id)
+func (q *Queries) GetCurrency(ctx context.Context, uid pgtype.UUID) (Currency, error) {
+	row := q.db.QueryRow(ctx, getCurrency, uid)
 	var i Currency
 	err := row.Scan(
 		&i.ID,
@@ -91,12 +101,13 @@ func (q *Queries) GetCurrency(ctx context.Context, id int64) (Currency, error) {
 		&i.Name,
 		&i.IsActive,
 		&i.Exponent,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const listCurrencies = `-- name: ListCurrencies :many
-SELECT id, code, name, is_active, exponent FROM currencies
+SELECT id, code, name, is_active, exponent, uid FROM currencies
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -115,6 +126,44 @@ func (q *Queries) ListCurrencies(ctx context.Context, activeOnly bool) ([]Curren
 			&i.Code,
 			&i.Name,
 			&i.IsActive,
+			&i.Exponent,
+			&i.Uid,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCurrencyDims = `-- name: ListCurrencyDims :many
+SELECT id, uid, code, exponent FROM currencies
+`
+
+type ListCurrencyDimsRow struct {
+	ID       int64       `json:"id"`
+	Uid      pgtype.UUID `json:"uid"`
+	Code     string      `json:"code"`
+	Exponent int16       `json:"exponent"`
+}
+
+// Full config-table scan for the in-process id<->uid dimension cache.
+func (q *Queries) ListCurrencyDims(ctx context.Context) ([]ListCurrencyDimsRow, error) {
+	rows, err := q.db.Query(ctx, listCurrencyDims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCurrencyDimsRow{}
+	for rows.Next() {
+		var i ListCurrencyDimsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Uid,
+			&i.Code,
 			&i.Exponent,
 		); err != nil {
 			return nil, err

@@ -69,6 +69,11 @@ func run() error {
 		return fmt.Errorf("install presets: %w", err)
 	}
 
+	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	if err != nil {
+		return err
+	}
+
 	// Demo-only table that the in-tx side-effect will write to. Created via
 	// the facade's DBTX() so the example needs no migration files of its own.
 	if _, err := svc.DBTX().Exec(ctx, `
@@ -85,7 +90,7 @@ func run() error {
 	// Seed a balance so the lock_funds template has something to work with.
 	_, err = svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       3001,
-		CurrencyID:     1,
+		CurrencyUID:    currencyUID,
 		IdempotencyKey: ledger.NewIdempotencyKey("txdemo-seed"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString("500.00")},
 		Source:         "tx-compose-seed",
@@ -103,7 +108,7 @@ func run() error {
 		// 1. Lock funds in the ledger (DR locked / CR main_wallet).
 		_, err := tx.JournalWriter().ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 			HolderID:       3001,
-			CurrencyID:     1,
+			CurrencyUID:    currencyUID,
 			IdempotencyKey: ikey,
 			Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString("100.00")},
 			Source:         "tx-compose-example",
@@ -142,7 +147,7 @@ func run() error {
 	rollbackErr := svc.RunInTx(ctx, func(tx *ledger.Service) error {
 		_, err := tx.JournalWriter().ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 			HolderID:       3001,
-			CurrencyID:     1,
+			CurrencyUID:    currencyUID,
 			IdempotencyKey: rollbackKey,
 			Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString("50.00")},
 			Source:         "tx-compose-rollback",
@@ -162,4 +167,21 @@ func run() error {
 	}
 
 	return nil
+}
+
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
+	list, err := svc.Currencies().ListCurrencies(ctx, false)
+	if err != nil {
+		return "", fmt.Errorf("list currencies: %w", err)
+	}
+	for _, c := range list {
+		if c.Code == code {
+			return c.UID, nil
+		}
+	}
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	if err != nil {
+		return "", fmt.Errorf("create currency: %w", err)
+	}
+	return created.UID, nil
 }

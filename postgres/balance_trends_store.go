@@ -21,6 +21,7 @@ type BalanceTrendsStore struct {
 	db          DBTX
 	q           *sqlcgen.Queries
 	ledgerStore *LedgerStore // used for live balance override
+	dims        *dimCache
 }
 
 // Compile-time check.
@@ -33,6 +34,7 @@ func NewBalanceTrendsStore(pool *pgxpool.Pool, ledgerStore *LedgerStore) *Balanc
 		db:          pool,
 		q:           sqlcgen.New(pool),
 		ledgerStore: ledgerStore,
+		dims:        dimCacheFor(pool),
 	}
 }
 
@@ -43,6 +45,7 @@ func (s *BalanceTrendsStore) WithDB(db DBTX, ls *LedgerStore) *BalanceTrendsStor
 		db:          db,
 		q:           sqlcgen.New(db),
 		ledgerStore: ls,
+		dims:        s.dims,
 	}
 }
 
@@ -66,12 +69,24 @@ func (s *BalanceTrendsStore) GetBalanceTrends(ctx context.Context, filter core.B
 		return nil, fmt.Errorf("postgres: balance trends: until must not be before from")
 	}
 
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, filter.CurrencyUID)
+	if err != nil {
+		return nil, err
+	}
+	classificationID := int64(0)
+	if filter.ClassificationUID != "" {
+		d, err := s.dims.classByUIDOrErr(ctx, s.q, filter.ClassificationUID)
+		if err != nil {
+			return nil, err
+		}
+		classificationID = d.ID
+	}
 	rows, err := s.q.GetBalanceTrendGapFill(ctx, sqlcgen.GetBalanceTrendGapFillParams{
 		FromDate:         pgtype.Date{Time: from, Valid: true},
 		UntilDate:        pgtype.Date{Time: until, Valid: true},
 		Holder:           filter.AccountHolder,
-		CurrencyID:       filter.CurrencyID,
-		ClassificationID: filter.ClassificationID,
+		CurrencyID:       cur.ID,
+		ClassificationID: classificationID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: balance trends: gap fill query: %w", err)
@@ -84,7 +99,7 @@ func (s *BalanceTrendsStore) GetBalanceTrends(ctx context.Context, filter core.B
 
 	var liveBalance decimal.Decimal
 	if needsLiveOverride {
-		liveBalance, err = s.ledgerStore.GetBalance(ctx, filter.AccountHolder, filter.CurrencyID, filter.ClassificationID)
+		liveBalance, err = s.ledgerStore.GetBalance(ctx, filter.AccountHolder, filter.CurrencyUID, filter.ClassificationUID)
 		if err != nil {
 			// Non-fatal: fall back to snapshot value rather than failing the whole series.
 			// This can happen when the account has no entries yet.

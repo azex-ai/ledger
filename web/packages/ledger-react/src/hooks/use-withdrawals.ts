@@ -7,31 +7,31 @@ import type { Booking } from "../client/types";
 
 const WITHDRAW_CODE = "withdraw";
 
-export function useWithdrawClassificationId(): number {
+export function useWithdrawClassificationId(): string {
   return useClassificationIdByCode(WITHDRAW_CODE);
 }
 
 export function useWithdrawals(params: { holder?: number; status?: string }) {
   const client = useLedgerClient();
-  const classificationId = useWithdrawClassificationId();
+  const classificationUid = useWithdrawClassificationId();
   return useQuery<Booking[]>({
-    queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationId }),
+    queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationUid }),
     queryFn: async () => {
       const page = await client.listBookings({
         holder: params.holder,
         status: params.status,
-        classification_id: classificationId,
+        classification_uid: classificationUid,
       });
       return page.list;
     },
-    enabled: classificationId > 0,
+    enabled: classificationUid !== "",
   });
 }
 
 export function useReserveWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: number) => client.transitionBooking(id, { to_status: "reserved" }),
+    (id: string) => client.transitionBooking(id, { to_status: "reserved" }),
     ["bookings"],
   );
 }
@@ -43,7 +43,7 @@ export function useReserveWithdraw() {
 export function useReviewWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, approved }: { id: number; approved: boolean }) =>
+    ({ id, approved }: { id: string; approved: boolean }) =>
       client.transitionBooking(id, {
         to_status: approved ? "processing" : "failed",
       }),
@@ -54,7 +54,7 @@ export function useReviewWithdraw() {
 export function useProcessWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, channelRef }: { id: number; channelRef: string }) =>
+    ({ id, channelRef }: { id: string; channelRef: string }) =>
       client.transitionBooking(id, {
         to_status: "processing",
         channel_ref: channelRef,
@@ -66,7 +66,7 @@ export function useProcessWithdraw() {
 export function useConfirmWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: number) => client.transitionBooking(id, { to_status: "confirmed" }),
+    (id: string) => client.transitionBooking(id, { to_status: "confirmed" }),
     ["bookings"],
   );
 }
@@ -74,7 +74,7 @@ export function useConfirmWithdraw() {
 export function useFailWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, reason }: { id: number; reason: string }) =>
+    ({ id, reason }: { id: string; reason: string }) =>
       client.transitionBooking(id, {
         to_status: "failed",
         metadata: { reason },
@@ -90,7 +90,7 @@ export function useFailWithdraw() {
 export function useRetryWithdraw() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: number) => client.transitionBooking(id, { to_status: "reserved" }),
+    (id: string) => client.transitionBooking(id, { to_status: "reserved" }),
     ["bookings"],
   );
 }

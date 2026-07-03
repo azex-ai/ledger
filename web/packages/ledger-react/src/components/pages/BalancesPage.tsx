@@ -44,13 +44,13 @@ export function BalancesPage() {
 
   const chartData = snapshots.reduce<Record<string, Record<string, string | number>>>((acc, s) => {
     if (!acc[s.snapshot_date]) acc[s.snapshot_date] = { date: s.snapshot_date };
-    acc[s.snapshot_date][`c${s.classification_id}`] = parseFloat(s.balance); // chart display only — intentional lossy conversion
+    acc[s.snapshot_date][`c${s.classification_uid}`] = parseFloat(s.balance); // chart display only — intentional lossy conversion
     return acc;
   }, {});
   const chartArray = Object.values(chartData).sort((a, b) =>
     String(a.date).localeCompare(String(b.date)),
   );
-  const classIds = [...new Set(snapshots.map((s) => s.classification_id))];
+  const classIds = [...new Set(snapshots.map((s) => s.classification_uid))];
 
   const COLORS = [
     "var(--chart-1)", "var(--chart-2)", "var(--chart-3)",
@@ -98,9 +98,9 @@ export function BalancesPage() {
                   </TableHeader>
                   <TableBody>
                     {balances.map((b) => (
-                      <TableRow key={`${b.currency_id}-${b.classification_id}`}>
-                        <TableCell>{b.currency_id}</TableCell>
-                        <TableCell>{b.classification_id}</TableCell>
+                      <TableRow key={`${b.currency_uid}-${b.classification_uid}`}>
+                        <TableCell>{b.currency_uid}</TableCell>
+                        <TableCell>{b.classification_uid}</TableCell>
                         <TableCell className="text-right font-mono">{formatAmount(b.balance)}</TableCell>
                       </TableRow>
                     ))}

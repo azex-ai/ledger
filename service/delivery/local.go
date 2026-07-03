@@ -64,16 +64,16 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 	}
 
 	for _, evt := range events {
-		if invokeErr := d.callback.Deliver(ctx, evt); invokeErr != nil {
+		if invokeErr := d.callback.Deliver(ctx, evt.Event); invokeErr != nil {
 			d.logger.Error("delivery: local: handler error (marking delivered anyway)",
-				"event_id", evt.ID,
+				"event_id", evt.InternalID,
 				"error", invokeErr,
 			)
 		}
 		// Always mark delivered — do not let a bad handler block the queue.
-		if markErr := d.poller.MarkDelivered(ctx, evt.ID); markErr != nil {
+		if markErr := d.poller.MarkDelivered(ctx, evt.InternalID); markErr != nil {
 			d.logger.Error("delivery: local: mark delivered failed",
-				"event_id", evt.ID,
+				"event_id", evt.InternalID,
 				"error", markErr,
 			)
 		}

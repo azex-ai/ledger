@@ -61,14 +61,14 @@ describe("use-metadata", () => {
     const qc = new QueryClient();
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
-      http.post(`${BASE}/api/v1/currencies/3/deactivate`, () =>
+      http.post(`${BASE}/api/v1/currencies/uid-3/deactivate`, () =>
         HttpResponse.json({ code: 200, message: "ok", data: null }),
       ),
     );
     const { result } = renderHook(() => useDeactivateCurrency(), {
       wrapper: wrapperWith(qc),
     });
-    result.current.mutate(3);
+    result.current.mutate("uid-3");
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
     expect(keys).toContainEqual(["ledger", "currencies"]);

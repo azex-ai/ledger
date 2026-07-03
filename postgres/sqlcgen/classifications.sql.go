@@ -7,20 +7,23 @@ package sqlcgen
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createClassification = `-- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid
 `
 
 type CreateClassificationParams struct {
-	Code       string `json:"code"`
-	Name       string `json:"name"`
-	NormalSide string `json:"normal_side"`
-	IsSystem   bool   `json:"is_system"`
-	Lifecycle  []byte `json:"lifecycle"`
+	Code       string      `json:"code"`
+	Name       string      `json:"name"`
+	NormalSide string      `json:"normal_side"`
+	IsSystem   bool        `json:"is_system"`
+	Lifecycle  []byte      `json:"lifecycle"`
+	Uid        pgtype.UUID `json:"uid"`
 }
 
 func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassificationParams) (Classification, error) {
@@ -30,6 +33,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		arg.NormalSide,
 		arg.IsSystem,
 		arg.Lifecycle,
+		arg.Uid,
 	)
 	var i Classification
 	err := row.Scan(
@@ -41,23 +45,25 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.Lifecycle,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const createJournalType = `-- name: CreateJournalType :one
-INSERT INTO journal_types (code, name)
-VALUES ($1, $2)
-RETURNING id, code, name, is_active, created_at
+INSERT INTO journal_types (code, name, uid)
+VALUES ($1, $2, $3)
+RETURNING id, code, name, is_active, created_at, uid
 `
 
 type CreateJournalTypeParams struct {
-	Code string `json:"code"`
-	Name string `json:"name"`
+	Code string      `json:"code"`
+	Name string      `json:"name"`
+	Uid  pgtype.UUID `json:"uid"`
 }
 
 func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypeParams) (JournalType, error) {
-	row := q.db.QueryRow(ctx, createJournalType, arg.Code, arg.Name)
+	row := q.db.QueryRow(ctx, createJournalType, arg.Code, arg.Name, arg.Uid)
 	var i JournalType
 	err := row.Scan(
 		&i.ID,
@@ -65,30 +71,31 @@ func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypePa
 		&i.Name,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const deactivateClassification = `-- name: DeactivateClassification :exec
-UPDATE classifications SET is_active = false WHERE id = $1
+UPDATE classifications SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateClassification(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deactivateClassification, id)
+func (q *Queries) DeactivateClassification(ctx context.Context, uid pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deactivateClassification, uid)
 	return err
 }
 
 const deactivateJournalType = `-- name: DeactivateJournalType :exec
-UPDATE journal_types SET is_active = false WHERE id = $1
+UPDATE journal_types SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateJournalType(ctx context.Context, id int64) error {
-	_, err := q.db.Exec(ctx, deactivateJournalType, id)
+func (q *Queries) DeactivateJournalType(ctx context.Context, uid pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deactivateJournalType, uid)
 	return err
 }
 
 const getClassification = `-- name: GetClassification :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications WHERE id = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications WHERE id = $1
 `
 
 func (q *Queries) GetClassification(ctx context.Context, id int64) (Classification, error) {
@@ -103,12 +110,13 @@ func (q *Queries) GetClassification(ctx context.Context, id int64) (Classificati
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.Lifecycle,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getClassificationByCode = `-- name: GetClassificationByCode :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications WHERE code = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications WHERE code = $1
 `
 
 func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Classification, error) {
@@ -123,12 +131,13 @@ func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Cla
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.Lifecycle,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getJournalTypeByCode = `-- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at
+SELECT id, code, name, is_active, created_at, uid
 FROM journal_types
 WHERE code = $1
 `
@@ -142,12 +151,50 @@ func (q *Queries) GetJournalTypeByCode(ctx context.Context, code string) (Journa
 		&i.Name,
 		&i.IsActive,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
+const listClassificationDims = `-- name: ListClassificationDims :many
+SELECT id, uid, code, normal_side FROM classifications
+`
+
+type ListClassificationDimsRow struct {
+	ID         int64       `json:"id"`
+	Uid        pgtype.UUID `json:"uid"`
+	Code       string      `json:"code"`
+	NormalSide string      `json:"normal_side"`
+}
+
+// Full config-table scan for the in-process id<->uid dimension cache.
+func (q *Queries) ListClassificationDims(ctx context.Context) ([]ListClassificationDimsRow, error) {
+	rows, err := q.db.Query(ctx, listClassificationDims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListClassificationDimsRow{}
+	for rows.Next() {
+		var i ListClassificationDimsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Uid,
+			&i.Code,
+			&i.NormalSide,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listClassifications = `-- name: ListClassifications :many
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle FROM classifications
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -170,6 +217,7 @@ func (q *Queries) ListClassifications(ctx context.Context, activeOnly bool) ([]C
 			&i.IsActive,
 			&i.CreatedAt,
 			&i.Lifecycle,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -181,8 +229,38 @@ func (q *Queries) ListClassifications(ctx context.Context, activeOnly bool) ([]C
 	return items, nil
 }
 
+const listJournalTypeDims = `-- name: ListJournalTypeDims :many
+SELECT id, uid, code FROM journal_types
+`
+
+type ListJournalTypeDimsRow struct {
+	ID   int64       `json:"id"`
+	Uid  pgtype.UUID `json:"uid"`
+	Code string      `json:"code"`
+}
+
+func (q *Queries) ListJournalTypeDims(ctx context.Context) ([]ListJournalTypeDimsRow, error) {
+	rows, err := q.db.Query(ctx, listJournalTypeDims)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJournalTypeDimsRow{}
+	for rows.Next() {
+		var i ListJournalTypeDimsRow
+		if err := rows.Scan(&i.ID, &i.Uid, &i.Code); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJournalTypes = `-- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at
+SELECT id, code, name, is_active, created_at, uid
 FROM journal_types
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
@@ -203,6 +281,7 @@ func (q *Queries) ListJournalTypes(ctx context.Context, activeOnly bool) ([]Jour
 			&i.Name,
 			&i.IsActive,
 			&i.CreatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

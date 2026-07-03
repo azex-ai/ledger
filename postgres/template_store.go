@@ -23,6 +23,7 @@ type TemplateStore struct {
 	// pool is non-nil only in pool mode. Nil signals tx mode.
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewTemplateStore creates a new TemplateStore.
@@ -30,6 +31,7 @@ func NewTemplateStore(pool *pgxpool.Pool) *TemplateStore {
 	return &TemplateStore{
 		pool: pool,
 		q:    sqlcgen.New(pool),
+		dims: dimCacheFor(pool),
 	}
 }
 
@@ -38,6 +40,7 @@ func (s *TemplateStore) WithDB(db DBTX) *TemplateStore {
 	return &TemplateStore{
 		pool: nil, // tx mode
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
@@ -76,10 +79,15 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, input core.TemplateI
 }
 
 func (s *TemplateStore) createTemplateWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TemplateInput) (*core.EntryTemplate, error) {
+	jt, err := s.dims.jtByUIDOrErr(ctx, qtx, input.JournalTypeUID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: create template: %w", err)
+	}
 	tmpl, err := qtx.CreateTemplate(ctx, sqlcgen.CreateTemplateParams{
 		Code:          input.Code,
 		Name:          input.Name,
-		JournalTypeID: input.JournalTypeID,
+		JournalTypeID: jt.ID,
+		Uid:           newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create template: insert", err)
@@ -87,9 +95,13 @@ func (s *TemplateStore) createTemplateWithQueries(ctx context.Context, qtx *sqlc
 
 	sqlcLines := make([]sqlcgen.EntryTemplateLine, len(input.Lines))
 	for i, l := range input.Lines {
+		classDim, err := s.dims.classByUIDOrErr(ctx, qtx, l.ClassificationUID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: create template: line[%d]: %w", i, err)
+		}
 		line, err := qtx.CreateTemplateLine(ctx, sqlcgen.CreateTemplateLineParams{
 			TemplateID:       tmpl.ID,
-			ClassificationID: l.ClassificationID,
+			ClassificationID: classDim.ID,
 			EntryType:        string(l.EntryType),
 			HolderRole:       string(l.HolderRole),
 			AmountKey:        l.AmountKey,
@@ -101,12 +113,16 @@ func (s *TemplateStore) createTemplateWithQueries(ctx context.Context, qtx *sqlc
 		sqlcLines[i] = line
 	}
 
-	return templateFromRow(tmpl, sqlcLines), nil
+	return templateFromRow(ctx, s.dims, qtx, tmpl, sqlcLines)
 }
 
 // DeactivateTemplate marks a template as inactive.
-func (s *TemplateStore) DeactivateTemplate(ctx context.Context, id int64) error {
-	if err := s.q.DeactivateTemplate(ctx, id); err != nil {
+func (s *TemplateStore) DeactivateTemplate(ctx context.Context, uid string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.DeactivateTemplate(ctx, pgUID); err != nil {
 		return wrapStoreError("postgres: deactivate template", err)
 	}
 	return nil
@@ -127,7 +143,7 @@ func (s *TemplateStore) GetTemplate(ctx context.Context, code string) (*core.Ent
 		return nil, fmt.Errorf("postgres: get template: lines: %w", err)
 	}
 
-	return templateFromRow(tmpl, lines), nil
+	return templateFromRow(ctx, s.dims, s.q, tmpl, lines)
 }
 
 // ListTemplates returns templates, optionally filtering to active only.
@@ -143,7 +159,11 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, activeOnly bool) ([]c
 		if err != nil {
 			return nil, fmt.Errorf("postgres: list templates: lines for %d: %w", row.ID, err)
 		}
-		result[i] = *templateFromRow(row, lines)
+		t, err := templateFromRow(ctx, s.dims, s.q, row, lines)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *t
 	}
 	return result, nil
 }

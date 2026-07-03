@@ -36,7 +36,7 @@ func (q *Queries) FinalizeReservationSettlement(ctx context.Context, id int64) e
 }
 
 const getExpiredReservations = `-- name: GetExpiredReservations :many
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE status IN ('active', 'settling') AND expires_at < now()
 ORDER BY expires_at ASC
 LIMIT $1
@@ -69,6 +69,7 @@ func (q *Queries) GetExpiredReservations(ctx context.Context, limit int32) ([]Re
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -81,7 +82,7 @@ func (q *Queries) GetExpiredReservations(ctx context.Context, limit int32) ([]Re
 }
 
 const getReservation = `-- name: GetReservation :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE id = $1
 `
 
@@ -100,12 +101,13 @@ func (q *Queries) GetReservation(ctx context.Context, id int64) (Reservation, er
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getReservationByIdempotencyKey = `-- name: GetReservationByIdempotencyKey :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE idempotency_key = $1
 `
 
@@ -124,12 +126,38 @@ func (q *Queries) GetReservationByIdempotencyKey(ctx context.Context, idempotenc
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
+	)
+	return i, err
+}
+
+const getReservationByUID = `-- name: GetReservationByUID :one
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
+FROM reservations WHERE uid = $1
+`
+
+func (q *Queries) GetReservationByUID(ctx context.Context, uid pgtype.UUID) (Reservation, error) {
+	row := q.db.QueryRow(ctx, getReservationByUID, uid)
+	var i Reservation
+	err := row.Scan(
+		&i.ID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.ReservedAmount,
+		&i.SettledAmount,
+		&i.Status,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const getReservationForUpdate = `-- name: GetReservationForUpdate :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE id = $1 FOR UPDATE
 `
 
@@ -148,14 +176,51 @@ func (q *Queries) GetReservationForUpdate(ctx context.Context, id int64) (Reserv
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
+const getReservationForUpdateByUID = `-- name: GetReservationForUpdateByUID :one
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
+FROM reservations WHERE uid = $1 FOR UPDATE
+`
+
+func (q *Queries) GetReservationForUpdateByUID(ctx context.Context, uid pgtype.UUID) (Reservation, error) {
+	row := q.db.QueryRow(ctx, getReservationForUpdateByUID, uid)
+	var i Reservation
+	err := row.Scan(
+		&i.ID,
+		&i.AccountHolder,
+		&i.CurrencyID,
+		&i.ReservedAmount,
+		&i.SettledAmount,
+		&i.Status,
+		&i.JournalID,
+		&i.IdempotencyKey,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Uid,
+	)
+	return i, err
+}
+
+const getReservationUIDByID = `-- name: GetReservationUIDByID :one
+SELECT uid FROM reservations WHERE id = $1
+`
+
+func (q *Queries) GetReservationUIDByID(ctx context.Context, id int64) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getReservationUIDByID, id)
+	var uid pgtype.UUID
+	err := row.Scan(&uid)
+	return uid, err
+}
+
 const insertReservation = `-- name: InsertReservation :one
-INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 `
 
 type InsertReservationParams struct {
@@ -164,6 +229,7 @@ type InsertReservationParams struct {
 	ReservedAmount pgtype.Numeric `json:"reserved_amount"`
 	IdempotencyKey string         `json:"idempotency_key"`
 	ExpiresAt      time.Time      `json:"expires_at"`
+	Uid            pgtype.UUID    `json:"uid"`
 }
 
 func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationParams) (Reservation, error) {
@@ -173,6 +239,7 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 		arg.ReservedAmount,
 		arg.IdempotencyKey,
 		arg.ExpiresAt,
+		arg.Uid,
 	)
 	var i Reservation
 	err := row.Scan(
@@ -187,12 +254,13 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const listReservationsByAccount = `-- name: ListReservationsByAccount :many
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations
 WHERE ($1::bigint = 0 OR account_holder = $1)
   AND ($2::text = '' OR status = $2)
@@ -227,6 +295,7 @@ func (q *Queries) ListReservationsByAccount(ctx context.Context, arg ListReserva
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

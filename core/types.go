@@ -159,7 +159,7 @@ func IsSystemAccount(holder int64) bool {
 // paths reject (never round) amounts that exceed it — see
 // core.ErrPrecisionExceeded.
 type Currency struct {
-	ID       int64  `json:"id"`
+	UID      string `json:"uid"`
 	Code     string `json:"code"`
 	Name     string `json:"name"`
 	IsActive bool   `json:"is_active"`
@@ -169,7 +169,7 @@ type Currency struct {
 // Classification represents a dynamic account classification.
 // Lifecycle is nil for label-only classifications (no state machine).
 type Classification struct {
-	ID         int64      `json:"id"`
+	UID        string     `json:"uid"`
 	Code       string     `json:"code"`
 	Name       string     `json:"name"`
 	NormalSide NormalSide `json:"normal_side"`
@@ -181,7 +181,7 @@ type Classification struct {
 
 // JournalType represents a dynamic journal category.
 type JournalType struct {
-	ID        int64     `json:"id"`
+	UID       string    `json:"uid"`
 	Code      string    `json:"code"`
 	Name      string    `json:"name"`
 	IsActive  bool      `json:"is_active"`
@@ -190,8 +190,8 @@ type JournalType struct {
 
 // Balance represents a computed balance for an account dimension.
 type Balance struct {
-	AccountHolder    int64           `json:"account_holder"`
-	CurrencyID       int64           `json:"currency_id"`
-	ClassificationID int64           `json:"classification_id"`
-	Balance          decimal.Decimal `json:"balance"`
+	AccountHolder     int64           `json:"account_holder"`
+	CurrencyUID       string          `json:"currency_uid"`
+	ClassificationUID string          `json:"classification_uid"`
+	Balance           decimal.Decimal `json:"balance"`
 }

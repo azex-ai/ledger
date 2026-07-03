@@ -1,8 +1,6 @@
 package server
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"net/http"
 	"strconv"
 )
@@ -12,28 +10,6 @@ import (
 type PagedResponse[T any] struct {
 	List       []T    `json:"list"`
 	NextCursor string `json:"next_cursor,omitempty"`
-}
-
-// encodeCursor encodes an int64 ID as a base64 cursor string.
-func encodeCursor(id int64) string {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(id))
-	return base64.URLEncoding.EncodeToString(b)
-}
-
-// decodeCursor decodes a base64 cursor string to an int64 ID. Returns 0 for empty cursor.
-func decodeCursor(cursor string) (int64, error) {
-	if cursor == "" {
-		return 0, nil
-	}
-	b, err := base64.URLEncoding.DecodeString(cursor)
-	if err != nil {
-		return 0, err
-	}
-	if len(b) != 8 {
-		return 0, nil
-	}
-	return int64(binary.BigEndian.Uint64(b)), nil
 }
 
 // parsePageLimit reads the "limit" query param, defaulting to 50, capped at 200.

@@ -22,7 +22,7 @@ type createClassificationRequest struct {
 }
 
 type classificationResponse struct {
-	ID         int64           `json:"id"`
+	UID        string          `json:"uid"`
 	Code       string          `json:"code"`
 	Name       string          `json:"name"`
 	NormalSide string          `json:"normal_side"`
@@ -34,7 +34,7 @@ type classificationResponse struct {
 
 func toClassificationResponse(c *core.Classification) classificationResponse {
 	return classificationResponse{
-		ID:         c.ID,
+		UID:        c.UID,
 		Code:       c.Code,
 		Name:       c.Name,
 		NormalSide: string(c.NormalSide),
@@ -53,7 +53,7 @@ type createJournalTypeRequest struct {
 }
 
 type journalTypeResponse struct {
-	ID        int64     `json:"id"`
+	UID       string    `json:"uid"`
 	Code      string    `json:"code"`
 	Name      string    `json:"name"`
 	IsActive  bool      `json:"is_active"`
@@ -62,7 +62,7 @@ type journalTypeResponse struct {
 
 func toJournalTypeResponse(jt *core.JournalType) journalTypeResponse {
 	return journalTypeResponse{
-		ID:        jt.ID,
+		UID:       jt.UID,
 		Code:      jt.Code,
 		Name:      jt.Name,
 		IsActive:  jt.IsActive,
@@ -73,59 +73,57 @@ func toJournalTypeResponse(jt *core.JournalType) journalTypeResponse {
 // --- Template types ---
 
 type createTemplateRequest struct {
-	Code          string                   `json:"code"`
-	Name          string                   `json:"name"`
-	JournalTypeID int64                    `json:"journal_type_id"`
-	Lines         []createTemplateLineJSON `json:"lines"`
+	Code           string                   `json:"code"`
+	Name           string                   `json:"name"`
+	JournalTypeUID string                   `json:"journal_type_uid"`
+	Lines          []createTemplateLineJSON `json:"lines"`
 }
 
 type createTemplateLineJSON struct {
-	ClassificationID int64  `json:"classification_id"`
-	EntryType        string `json:"entry_type"`
-	HolderRole       string `json:"holder_role"`
-	AmountKey        string `json:"amount_key"`
-	SortOrder        int    `json:"sort_order"`
+	ClassificationUID string `json:"classification_uid"`
+	EntryType         string `json:"entry_type"`
+	HolderRole        string `json:"holder_role"`
+	AmountKey         string `json:"amount_key"`
+	SortOrder         int    `json:"sort_order"`
 }
 
 type templateResponse struct {
-	ID            int64                  `json:"id"`
-	Code          string                 `json:"code"`
-	Name          string                 `json:"name"`
-	JournalTypeID int64                  `json:"journal_type_id"`
-	IsActive      bool                   `json:"is_active"`
-	Lines         []templateLineResponse `json:"lines"`
-	CreatedAt     time.Time              `json:"created_at"`
+	UID            string                 `json:"uid"`
+	Code           string                 `json:"code"`
+	Name           string                 `json:"name"`
+	JournalTypeUID string                 `json:"journal_type_uid"`
+	IsActive       bool                   `json:"is_active"`
+	Lines          []templateLineResponse `json:"lines"`
+	CreatedAt      time.Time              `json:"created_at"`
 }
 
 type templateLineResponse struct {
-	ID               int64  `json:"id"`
-	ClassificationID int64  `json:"classification_id"`
-	EntryType        string `json:"entry_type"`
-	HolderRole       string `json:"holder_role"`
-	AmountKey        string `json:"amount_key"`
-	SortOrder        int    `json:"sort_order"`
+	ClassificationUID string `json:"classification_uid"`
+	EntryType         string `json:"entry_type"`
+	HolderRole        string `json:"holder_role"`
+	AmountKey         string `json:"amount_key"`
+	SortOrder         int    `json:"sort_order"`
 }
 
 func toTemplateResponse(t *core.EntryTemplate) templateResponse {
 	lines := make([]templateLineResponse, len(t.Lines))
 	for i, l := range t.Lines {
 		lines[i] = templateLineResponse{
-			ID:               l.ID,
-			ClassificationID: l.ClassificationID,
-			EntryType:        string(l.EntryType),
-			HolderRole:       string(l.HolderRole),
-			AmountKey:        l.AmountKey,
-			SortOrder:        l.SortOrder,
+			ClassificationUID: l.ClassificationUID,
+			EntryType:         string(l.EntryType),
+			HolderRole:        string(l.HolderRole),
+			AmountKey:         l.AmountKey,
+			SortOrder:         l.SortOrder,
 		}
 	}
 	return templateResponse{
-		ID:            t.ID,
-		Code:          t.Code,
-		Name:          t.Name,
-		JournalTypeID: t.JournalTypeID,
-		IsActive:      t.IsActive,
-		Lines:         lines,
-		CreatedAt:     t.CreatedAt,
+		UID:            t.UID,
+		Code:           t.Code,
+		Name:           t.Name,
+		JournalTypeUID: t.JournalTypeUID,
+		IsActive:       t.IsActive,
+		Lines:          lines,
+		CreatedAt:      t.CreatedAt,
 	}
 }
 
@@ -143,7 +141,7 @@ type createCurrencyRequest struct {
 }
 
 type currencyResponse struct {
-	ID       int64  `json:"id"`
+	UID      string `json:"uid"`
 	Code     string `json:"code"`
 	Name     string `json:"name"`
 	IsActive bool   `json:"is_active"`
@@ -153,17 +151,17 @@ type currencyResponse struct {
 // --- Template preview types ---
 
 type previewTemplateRequest struct {
-	HolderID   int64             `json:"holder_id"`
-	CurrencyID int64             `json:"currency_id"`
-	Amounts    map[string]string `json:"amounts"`
+	HolderID    int64             `json:"holder_id"`
+	CurrencyUID string            `json:"currency_uid"`
+	Amounts     map[string]string `json:"amounts"`
 }
 
 type previewEntryResponse struct {
-	AccountHolder    int64  `json:"account_holder"`
-	CurrencyID       int64  `json:"currency_id"`
-	ClassificationID int64  `json:"classification_id"`
-	EntryType        string `json:"entry_type"`
-	Amount           string `json:"amount"`
+	AccountHolder     int64  `json:"account_holder"`
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
+	EntryType         string `json:"entry_type"`
+	Amount            string `json:"amount"`
 }
 
 type previewTemplateResponse struct {
@@ -203,12 +201,12 @@ func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleDeactivateClassification(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid classification ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid classification uid"))
 		return
 	}
-	if err := s.classifications.DeactivateClassification(r.Context(), id); err != nil {
+	if err := s.classifications.DeactivateClassification(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -254,12 +252,12 @@ func (s *Server) handleCreateJournalType(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDeactivateJournalType(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid journal type ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal type uid"))
 		return
 	}
-	if err := s.journalTypes.DeactivateJournalType(r.Context(), id); err != nil {
+	if err := s.journalTypes.DeactivateJournalType(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -288,27 +286,27 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, err)
 		return
 	}
-	if req.Code == "" || req.Name == "" || req.JournalTypeID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("code, name, and journal_type_id required"))
+	if req.Code == "" || req.Name == "" || req.JournalTypeUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("code, name, and journal_type_uid required"))
 		return
 	}
 
 	lines := make([]core.TemplateLineInput, len(req.Lines))
 	for i, l := range req.Lines {
 		lines[i] = core.TemplateLineInput{
-			ClassificationID: l.ClassificationID,
-			EntryType:        core.EntryType(l.EntryType),
-			HolderRole:       core.HolderRole(l.HolderRole),
-			AmountKey:        l.AmountKey,
-			SortOrder:        l.SortOrder,
+			ClassificationUID: l.ClassificationUID,
+			EntryType:         core.EntryType(l.EntryType),
+			HolderRole:        core.HolderRole(l.HolderRole),
+			AmountKey:         l.AmountKey,
+			SortOrder:         l.SortOrder,
 		}
 	}
 
 	input := core.TemplateInput{
-		Code:          req.Code,
-		Name:          req.Name,
-		JournalTypeID: req.JournalTypeID,
-		Lines:         lines,
+		Code:           req.Code,
+		Name:           req.Name,
+		JournalTypeUID: req.JournalTypeUID,
+		Lines:          lines,
 	}
 
 	tmpl, err := s.templates.CreateTemplate(r.Context(), input)
@@ -320,12 +318,12 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeactivateTemplate(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid template ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid template uid"))
 		return
 	}
-	if err := s.templates.DeactivateTemplate(r.Context(), id); err != nil {
+	if err := s.templates.DeactivateTemplate(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -359,7 +357,7 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 
 	params := core.TemplateParams{
 		HolderID:       req.HolderID,
-		CurrencyID:     req.CurrencyID,
+		CurrencyUID:    req.CurrencyUID,
 		IdempotencyKey: "preview",
 		Amounts:        amounts,
 	}
@@ -373,11 +371,11 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 	entries := make([]previewEntryResponse, len(input.Entries))
 	for i, e := range input.Entries {
 		entries[i] = previewEntryResponse{
-			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
-			EntryType:        string(e.EntryType),
-			Amount:           e.Amount.String(),
+			AccountHolder:     e.AccountHolder,
+			CurrencyUID:       e.CurrencyUID,
+			ClassificationUID: e.ClassificationUID,
+			EntryType:         string(e.EntryType),
+			Amount:            e.Amount.String(),
 		}
 	}
 	httpx.OK(w, previewTemplateResponse{Entries: entries})
@@ -427,16 +425,16 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.Created(w, currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent})
+	httpx.Created(w, currencyResponse{UID: c.UID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent})
 }
 
 func (s *Server) handleDeactivateCurrency(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid currency ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid currency uid"))
 		return
 	}
-	if err := s.currencies.DeactivateCurrency(r.Context(), id); err != nil {
+	if err := s.currencies.DeactivateCurrency(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -452,7 +450,7 @@ func (s *Server) handleListCurrencies(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]currencyResponse, len(list))
 	for i, c := range list {
-		data[i] = currencyResponse{ID: c.ID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent}
+		data[i] = currencyResponse{UID: c.UID, Code: c.Code, Name: c.Name, IsActive: c.IsActive, Exponent: c.Exponent}
 	}
 	httpx.OK(w, data)
 }

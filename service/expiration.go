@@ -13,14 +13,14 @@ type ExpiredReservationFinder interface {
 	GetExpiredReservations(ctx context.Context, limit int) ([]core.Reservation, error)
 }
 
-// ReservationReleaser releases a reservation by ID.
+// ReservationReleaser releases a reservation by uid.
 type ReservationReleaser interface {
-	Release(ctx context.Context, reservationID int64) error
+	Release(ctx context.Context, reservationUID string) error
 }
 
 // ReservationFinalizer completes a partially-settled (settling) reservation.
 type ReservationFinalizer interface {
-	FinalizeSettlement(ctx context.Context, reservationID int64) error
+	FinalizeSettlement(ctx context.Context, reservationUID string) error
 }
 
 // ExpiredBookingFinder finds expired active bookings.
@@ -82,10 +82,10 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 		var opErr error
 		var opName string
 		if r.Status == core.ReservationStatusSettling {
-			opErr = s.reservationFinalize.FinalizeSettlement(ctx, r.ID)
+			opErr = s.reservationFinalize.FinalizeSettlement(ctx, r.UID)
 			opName = "finalize settlement"
 		} else {
-			opErr = s.reservationRelease.Release(ctx, r.ID)
+			opErr = s.reservationRelease.Release(ctx, r.UID)
 			opName = "release reservation"
 		}
 		if opErr != nil {
@@ -95,13 +95,13 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 				// reservation between our scan and this call. Not a real
 				// failure — just log for visibility.
 				s.logger.Info("service: expiration: reservation already transitioned by a concurrent scan",
-					"reservation_id", r.ID,
+					"reservation_id", r.UID,
 					"op", opName,
 					"error", opErr,
 				)
 			} else {
 				s.logger.Error("service: expiration: "+opName+" failed",
-					"reservation_id", r.ID,
+					"reservation_id", r.UID,
 					"error", opErr,
 				)
 			}
@@ -127,12 +127,12 @@ func (s *ExpirationService) ExpireStaleBookings(ctx context.Context, batchSize i
 	expired := 0
 	for _, b := range bookings {
 		_, err := s.bookingTransit.Transition(ctx, core.TransitionInput{
-			BookingID: b.ID,
-			ToStatus:  "expired",
+			BookingUID: b.UID,
+			ToStatus:   "expired",
 		})
 		if err != nil {
 			s.logger.Error("service: expiration: expire booking failed",
-				"booking_id", b.ID,
+				"booking_id", b.UID,
 				"error", err,
 			)
 			continue

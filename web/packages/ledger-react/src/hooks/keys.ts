@@ -15,13 +15,13 @@ export const ledgerKeys = {
 
   // Journals + entries
   journals: (limit: number) => ["ledger", "journals", limit] as const,
-  journal: (id: number) => ["ledger", "journal", id] as const,
-  entries: (params: { holder?: number; currency_id?: number }) =>
+  journal: (id: string) => ["ledger", "journal", id] as const,
+  entries: (params: { holder?: number; currency_uid?: string }) =>
     ["ledger", "entries", params] as const,
 
   // Balances
   balances: (holder: number) => ["ledger", "balances", holder] as const,
-  balancesByCurrency: (holder: number, currency: number) =>
+  balancesByCurrency: (holder: number, currency: string) =>
     ["ledger", "balances", holder, currency] as const,
 
   // Reservations
@@ -31,7 +31,7 @@ export const ledgerKeys = {
   // Snapshots
   snapshots: (params: {
     holder?: number;
-    currency_id?: number;
+    currency_uid?: string;
     start?: string;
     end?: string;
   }) => ["ledger", "snapshots", params] as const,
@@ -51,7 +51,7 @@ export const ledgerKeys = {
   // `classificationId` the hook computes at runtime.
   bookings: (
     code: string,
-    params: { holder?: number; status?: string; classificationId: number },
+    params: { holder?: number; status?: string; classificationUid: string },
   ) => ["ledger", "bookings", code, params] as const,
 } as const;
 

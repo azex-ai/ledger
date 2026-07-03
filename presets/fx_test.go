@@ -63,7 +63,7 @@ func TestFXBundle_Templates_Balance(t *testing.T) {
 	// User sells 100 USD (currency 1)
 	sellInput, err := sell.Render(core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "fx-quote-7-sell",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Metadata:       map[string]string{"fx_rate": "0.92", "quote_id": "q-7", "side": "sell"},
@@ -75,7 +75,7 @@ func TestFXBundle_Templates_Balance(t *testing.T) {
 	// User buys 92 EUR (currency 2)
 	buyInput, err := buy.Render(core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     2,
+		CurrencyUID:    "cur-2",
 		IdempotencyKey: "fx-quote-7-buy",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString("92")},
 		Metadata:       map[string]string{"fx_rate": "0.92", "quote_id": "q-7", "side": "buy"},
@@ -100,7 +100,7 @@ func TestFXBundle_FXSell_RoutesUserOutToSettlement(t *testing.T) {
 
 	got, err := sell.Render(core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "fx-sell-direction",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 	})
@@ -130,7 +130,7 @@ func TestFXBundle_FXBuy_RoutesSettlementToUser(t *testing.T) {
 
 	got, err := buy.Render(core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     2,
+		CurrencyUID:    "cur-2",
 		IdempotencyKey: "fx-buy-direction",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(92)},
 	})

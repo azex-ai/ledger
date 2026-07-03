@@ -1,8 +1,8 @@
 -- name: InsertBooking :one
 INSERT INTO bookings (
     classification_id, account_holder, currency_id, amount, status,
-    channel_name, idempotency_key, metadata, expires_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    channel_name, idempotency_key, metadata, expires_at, uid
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: GetBooking :one
@@ -45,3 +45,12 @@ WHERE b.expires_at != 'epoch'
   AND COALESCE(c.lifecycle -> 'transitions' -> b.status, '[]'::jsonb) ? 'expired'
 ORDER BY b.expires_at ASC
 LIMIT $1;
+
+-- name: GetBookingByUID :one
+SELECT * FROM bookings WHERE uid = $1;
+
+-- name: GetBookingForUpdateByUID :one
+SELECT * FROM bookings WHERE uid = $1 FOR UPDATE;
+
+-- name: GetBookingUIDByID :one
+SELECT uid FROM bookings WHERE id = $1;

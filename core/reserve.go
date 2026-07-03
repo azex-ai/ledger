@@ -39,13 +39,13 @@ func (s ReservationStatus) CanTransitionTo(target ReservationStatus) bool {
 }
 
 type Reservation struct {
-	ID             int64             `json:"id"`
+	UID            string            `json:"uid"`
 	AccountHolder  int64             `json:"account_holder"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	ReservedAmount decimal.Decimal   `json:"reserved_amount"`
 	SettledAmount  *decimal.Decimal  `json:"settled_amount,omitempty"`
 	Status         ReservationStatus `json:"status"`
-	JournalID      *int64            `json:"journal_id,omitempty"`
+	JournalUID     string            `json:"journal_uid,omitempty"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	ExpiresAt      time.Time         `json:"expires_at"`
 	CreatedAt      time.Time         `json:"created_at"`
@@ -54,7 +54,7 @@ type Reservation struct {
 
 type ReserveInput struct {
 	AccountHolder  int64           `json:"account_holder"`
-	CurrencyID     int64           `json:"currency_id"`
+	CurrencyUID    string          `json:"currency_uid"`
 	Amount         decimal.Decimal `json:"amount"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	ExpiresIn      time.Duration   `json:"expires_in"`
@@ -64,7 +64,7 @@ func (i ReserveInput) Validate() error {
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("core: reserve: account_holder required: %w", ErrInvalidInput)
 	}
-	if i.CurrencyID <= 0 {
+	if i.CurrencyUID == "" {
 		return fmt.Errorf("core: reserve: currency_id must be positive: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
@@ -78,12 +78,12 @@ func (i ReserveInput) Validate() error {
 
 // SettleInput is the input for a one-shot settlement of an active reservation.
 type SettleInput struct {
-	ReservationID int64           `json:"reservation_id"`
-	Amount        decimal.Decimal `json:"amount"`
+	ReservationUID string          `json:"reservation_uid"`
+	Amount         decimal.Decimal `json:"amount"`
 }
 
 func (i SettleInput) Validate() error {
-	if i.ReservationID <= 0 {
+	if i.ReservationUID == "" {
 		return fmt.Errorf("core: settle: reservation_id must be positive: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
@@ -94,12 +94,12 @@ func (i SettleInput) Validate() error {
 
 // SettlePartialInput is the input for one increment of a partial settlement.
 type SettlePartialInput struct {
-	ReservationID int64           `json:"reservation_id"`
-	Amount        decimal.Decimal `json:"amount"`
+	ReservationUID string          `json:"reservation_uid"`
+	Amount         decimal.Decimal `json:"amount"`
 }
 
 func (i SettlePartialInput) Validate() error {
-	if i.ReservationID <= 0 {
+	if i.ReservationUID == "" {
 		return fmt.Errorf("core: settle partial: reservation_id must be positive: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {

@@ -30,16 +30,16 @@ func (s AccountPolicyStatus) IsValid() bool {
 const accountPolicyNoteMaxLen = 2000
 
 // AccountPolicy is an optional override on the otherwise implicit
-// (account_holder, currency_id, classification_id) account dimension. A
+// (account_holder, currency, classification) account dimension. A
 // dimension with no AccountPolicy row behaves exactly as it does today:
-// active, unconstrained. CurrencyID == 0 means "all currencies for this
-// holder"; ClassificationID == 0 means "all classifications for this
+// active, unconstrained. CurrencyUID == "" means "all currencies for this
+// holder"; ClassificationUID == "" means "all classifications for this
 // holder/currency". See docs/INVARIANTS.md I-17 for the enforcement contract.
 type AccountPolicy struct {
-	ID                int64               `json:"id"`
+	UID               string              `json:"uid"`
 	AccountHolder     int64               `json:"account_holder"`
-	CurrencyID        int64               `json:"currency_id"`
-	ClassificationID  int64               `json:"classification_id"`
+	CurrencyUID       string              `json:"currency_uid,omitempty"`
+	ClassificationUID string              `json:"classification_uid,omitempty"`
 	Status            AccountPolicyStatus `json:"status"`
 	MinBalance        decimal.Decimal     `json:"min_balance"`
 	EnforceMinBalance bool                `json:"enforce_min_balance"`
@@ -51,11 +51,11 @@ type AccountPolicy struct {
 // AccountPolicyInput is the input to AccountPolicyStore.SetPolicy. Setting a
 // policy is an operational/config write (not a funds movement), so unlike
 // journal/reservation writes it carries no idempotency key — SetPolicy is a
-// plain UPSERT keyed on (account_holder, currency_id, classification_id).
+// plain UPSERT keyed on (account_holder, currency_uid, classification_uid).
 type AccountPolicyInput struct {
 	AccountHolder     int64               `json:"account_holder"`
-	CurrencyID        int64               `json:"currency_id"`
-	ClassificationID  int64               `json:"classification_id"`
+	CurrencyUID       string              `json:"currency_uid,omitempty"`
+	ClassificationUID string              `json:"classification_uid,omitempty"`
 	Status            AccountPolicyStatus `json:"status"`
 	MinBalance        decimal.Decimal     `json:"min_balance"`
 	EnforceMinBalance bool                `json:"enforce_min_balance"`
@@ -67,11 +67,11 @@ func (i AccountPolicyInput) Validate() error {
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("core: account policy: account_holder must not be zero: %w", ErrInvalidInput)
 	}
-	if i.CurrencyID < 0 {
-		return fmt.Errorf("core: account policy: currency_id must not be negative: %w", ErrInvalidInput)
-	}
-	if i.ClassificationID < 0 {
-		return fmt.Errorf("core: account policy: classification_id must not be negative: %w", ErrInvalidInput)
+	if i.ClassificationUID != "" && i.CurrencyUID == "" {
+		// A classification-specific policy without a currency has no defined
+		// dimension to match (specificity ladder is holder -> +currency ->
+		// +classification).
+		return fmt.Errorf("core: account policy: classification_uid requires currency_uid: %w", ErrInvalidInput)
 	}
 	if !i.Status.IsValid() {
 		return fmt.Errorf("core: account policy: invalid status %q: %w", i.Status, ErrInvalidInput)

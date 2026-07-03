@@ -32,6 +32,7 @@ type PlatformBalanceStore struct {
 	pool *pgxpool.Pool
 	db   DBTX
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewPlatformBalanceStore creates a new PlatformBalanceStore bound to a pool.
@@ -40,6 +41,7 @@ func NewPlatformBalanceStore(pool *pgxpool.Pool) *PlatformBalanceStore {
 		pool: pool,
 		db:   pool,
 		q:    sqlcgen.New(pool),
+		dims: dimCacheFor(pool),
 	}
 }
 
@@ -51,6 +53,7 @@ func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
 		pool: nil, // tx mode — disables inner BeginTx
 		db:   db,
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
@@ -58,16 +61,20 @@ func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
 // for the given currency. UserSide and SystemSide maps are keyed by
 // classification code. Classifications with no checkpoints are absent from the
 // maps (not present with a zero value).
-func (s *PlatformBalanceStore) GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error) {
-	rows, err := s.q.GetPlatformBalancesByHolder(ctx, currencyID)
+func (s *PlatformBalanceStore) GetPlatformBalances(ctx context.Context, currencyUID string) (*core.PlatformBalance, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.q.GetPlatformBalancesByHolder(ctx, cur.ID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: platform balance: get by holder: %w", err)
 	}
 
 	pb := &core.PlatformBalance{
-		CurrencyID: currencyID,
-		UserSide:   make(map[string]decimal.Decimal),
-		SystemSide: make(map[string]decimal.Decimal),
+		CurrencyUID: currencyUID,
+		UserSide:    make(map[string]decimal.Decimal),
+		SystemSide:  make(map[string]decimal.Decimal),
 	}
 
 	for _, row := range rows {
@@ -90,10 +97,14 @@ func (s *PlatformBalanceStore) GetPlatformBalances(ctx context.Context, currency
 // GetTotalLiabilityByAsset returns the realtime sum of all user-side
 // (holder > 0) balances for the given currency, across all classifications.
 // This is the aggregate liability — what the platform owes users in total.
-func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
-	raw, err := s.q.GetTotalUserSideBalance(ctx, currencyID)
+func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("postgres: platform balance: total liability currency=%d: %w", currencyID, err)
+		return decimal.Zero, err
+	}
+	raw, err := s.q.GetTotalUserSideBalance(ctx, cur.ID)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: platform balance: total liability currency=%s: %w", currencyUID, err)
 	}
 	total, err := numericToDecimal(raw)
 	if err != nil {
@@ -112,10 +123,14 @@ func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, cur
 // Both figures come from one REPEATABLE READ transaction so they describe a
 // single point in time. Comparing the custodial figure to an off-chain custody
 // position is the consumer's responsibility.
-func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyUID string) (*core.SolvencyReport, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
 	if s.pool == nil {
 		// Tx mode: caller's transaction provides isolation; query directly.
-		return s.solvencyCheckWithQueries(ctx, s.q, currencyID)
+		return s.solvencyCheckWithQueries(ctx, s.q, currencyUID, cur.ID)
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
@@ -128,17 +143,17 @@ func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyID int
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	q := sqlcgen.New(tx)
-	report, err := s.solvencyCheckWithQueries(ctx, q, currencyID)
+	report, err := s.solvencyCheckWithQueries(ctx, q, currencyUID, cur.ID)
 	if err != nil {
 		return nil, err
 	}
 	return report, nil
 }
 
-func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *sqlcgen.Queries, currencyID int64) (*core.SolvencyReport, error) {
+func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *sqlcgen.Queries, currencyUID string, currencyID int64) (*core.SolvencyReport, error) {
 	liabilityRaw, err := q.GetTotalUserSideBalance(ctx, currencyID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: platform balance: solvency liability currency=%d: %w", currencyID, err)
+		return nil, fmt.Errorf("postgres: platform balance: solvency liability currency=%s: %w", currencyUID, err)
 	}
 	liability, err := numericToDecimal(liabilityRaw)
 	if err != nil {
@@ -156,10 +171,10 @@ func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *
 
 	margin := custodial.Sub(liability)
 	return &core.SolvencyReport{
-		CurrencyID: currencyID,
-		Liability:  liability,
-		Custodial:  custodial,
-		Solvent:    custodial.GreaterThanOrEqual(liability),
-		Margin:     margin,
+		CurrencyUID: currencyUID,
+		Liability:   liability,
+		Custodial:   custodial,
+		Solvent:     custodial.GreaterThanOrEqual(liability),
+		Margin:      margin,
 	}, nil
 }

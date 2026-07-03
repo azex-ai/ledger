@@ -25,11 +25,11 @@ func TestLedgerStore_PostJournal_Balanced(t *testing.T) {
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("post-balanced"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 		Source: "test",
 	}
@@ -39,7 +39,7 @@ func TestLedgerStore_PostJournal_Balanced(t *testing.T) {
 	assert.True(t, journal.TotalDebit.Equal(decimal.NewFromInt(100)))
 	assert.True(t, journal.TotalCredit.Equal(decimal.NewFromInt(100)))
 	assert.Equal(t, input.IdempotencyKey, journal.IdempotencyKey)
-	assert.True(t, journal.ID > 0)
+	assert.NotEmpty(t, journal.UID)
 }
 
 func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
@@ -54,11 +54,11 @@ func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
 
 	key := postgrestest.UniqueKey("idem")
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: key,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -67,7 +67,7 @@ func TestLedgerStore_PostJournal_Idempotent(t *testing.T) {
 
 	j2, err := store.PostJournal(ctx, input)
 	require.NoError(t, err)
-	assert.Equal(t, j1.ID, j2.ID)
+	assert.Equal(t, j1.UID, j2.UID)
 }
 
 func TestLedgerStore_PostJournal_ConcurrentSameKey(t *testing.T) {
@@ -82,11 +82,11 @@ func TestLedgerStore_PostJournal_ConcurrentSameKey(t *testing.T) {
 
 	key := postgrestest.UniqueKey("idem-concurrent")
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: key,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(75)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(75)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(75)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(75)},
 		},
 		Source: "test",
 	}
@@ -106,14 +106,14 @@ func TestLedgerStore_PostJournal_ConcurrentSameKey(t *testing.T) {
 	}
 	wg.Wait()
 
-	var firstID int64
+	var firstUID string
 	for i, j := range results {
 		require.NoError(t, errs[i], "goroutine %d", i)
 		require.NotNil(t, j, "goroutine %d", i)
-		if firstID == 0 {
-			firstID = j.ID
+		if firstUID == "" {
+			firstUID = j.UID
 		}
-		assert.Equal(t, firstID, j.ID, "goroutine %d returned a different journal ID", i)
+		assert.Equal(t, firstUID, j.UID, "goroutine %d returned a different journal uid", i)
 	}
 }
 
@@ -129,11 +129,11 @@ func TestLedgerStore_PostJournal_IdempotentPayloadMismatch(t *testing.T) {
 
 	key := postgrestest.UniqueKey("idem-mismatch")
 	base := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: key,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 		Source: "test",
 	}
@@ -143,8 +143,8 @@ func TestLedgerStore_PostJournal_IdempotentPayloadMismatch(t *testing.T) {
 
 	mismatch := base
 	mismatch.Entries = []core.EntryInput{
-		{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(60)},
-		{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(60)},
+		{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(60)},
+		{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(60)},
 	}
 
 	_, err = store.PostJournal(ctx, mismatch)
@@ -162,11 +162,11 @@ func TestLedgerStore_PostJournal_Unbalanced(t *testing.T) {
 	cls := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("unbalanced"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: cls, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: cls, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: cls, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: cls, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -187,11 +187,11 @@ func TestLedgerStore_GetBalance(t *testing.T) {
 
 	// Post a deposit journal: debit wallet, credit custodial
 	_, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("bal-deposit"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
@@ -220,11 +220,11 @@ func TestLedgerStore_GetBalance_MultipleJournals(t *testing.T) {
 	// Post two journals
 	for i := range 3 {
 		_, err := store.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("multi"),
 			Entries: []core.EntryInput{
-				{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-				{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+				{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+				{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 			},
 		})
 		require.NoError(t, err, "journal %d", i)
@@ -248,22 +248,22 @@ func TestLedgerStore_GetBalances(t *testing.T) {
 
 	// Deposit 200 to wallet
 	_, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("bals-1"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
 		},
 	})
 	require.NoError(t, err)
 
 	// Lock 50 from wallet
 	_, err = store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("bals-2"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsLocked, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsLocked, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
 		},
 	})
 	require.NoError(t, err)
@@ -272,9 +272,9 @@ func TestLedgerStore_GetBalances(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, bals, 2)
 
-	balMap := make(map[int64]decimal.Decimal)
+	balMap := make(map[string]decimal.Decimal)
 	for _, b := range bals {
-		balMap[b.ClassificationID] = b.Balance
+		balMap[b.ClassificationUID] = b.Balance
 	}
 	assert.True(t, balMap[clsWallet].Equal(decimal.NewFromInt(150)), "wallet: expected 150, got %s", balMap[clsWallet])
 	assert.True(t, balMap[clsLocked].Equal(decimal.NewFromInt(50)), "locked: expected 50, got %s", balMap[clsLocked])
@@ -291,19 +291,19 @@ func TestLedgerStore_ReverseJournal(t *testing.T) {
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("rev-orig"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
 
-	rev, err := store.ReverseJournal(ctx, j.ID, "test-reversal")
+	rev, err := store.ReverseJournal(ctx, j.UID, "test-reversal")
 	require.NoError(t, err)
-	assert.NotZero(t, rev.ReversalOf)
-	assert.Equal(t, j.ID, rev.ReversalOf)
+	assert.NotZero(t, rev.ReversalOfUID)
+	assert.Equal(t, j.UID, rev.ReversalOfUID)
 
 	// After reversal, balance should be zero
 	bal, err := store.GetBalance(ctx, 1, curID, clsWallet)
@@ -322,19 +322,19 @@ func TestLedgerStore_ReverseJournal_AlreadyReversed(t *testing.T) {
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	j, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("rev-once"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	})
 	require.NoError(t, err)
 
-	_, err = store.ReverseJournal(ctx, j.ID, "first")
+	_, err = store.ReverseJournal(ctx, j.UID, "first")
 	require.NoError(t, err)
 
-	_, err = store.ReverseJournal(ctx, j.ID, "second")
+	_, err = store.ReverseJournal(ctx, j.UID, "second")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrConflict)
 }
@@ -352,12 +352,12 @@ func TestLedgerStore_ExecuteTemplate(t *testing.T) {
 
 	// Create template
 	_, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: jtID,
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: jtID,
 		Lines: []core.TemplateLineInput{
-			{ClassificationID: clsWallet, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
-			{ClassificationID: clsCustodial, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+			{ClassificationUID: clsWallet, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationUID: clsCustodial, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	})
 	require.NoError(t, err)
@@ -365,7 +365,7 @@ func TestLedgerStore_ExecuteTemplate(t *testing.T) {
 	// Execute template
 	j, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tmpl-exec"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(250)},
 		Source:         "test",

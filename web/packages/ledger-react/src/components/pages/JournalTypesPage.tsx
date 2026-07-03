@@ -60,7 +60,7 @@ function CreateDialog() {
   );
 }
 
-function DeactivateDialog({ id, name }: { id: number; name: string }) {
+function DeactivateDialog({ id, name }: { id: string; name: string }) {
   const [open, setOpen] = useState(false);
   const mutation = useDeactivateJournalType();
 
@@ -126,14 +126,14 @@ export function JournalTypesPage() {
           </TableHeader>
           <TableBody>
             {types.map((t) => (
-              <TableRow key={t.id}>
-                <TableCell>{t.id}</TableCell>
+              <TableRow key={t.uid}>
+                <TableCell>{t.uid}</TableCell>
                 <TableCell className="font-mono text-xs">{t.code}</TableCell>
                 <TableCell>{t.name}</TableCell>
                 <TableCell><StatusBadge status={t.is_active ? "active" : "inactive"} /></TableCell>
                 <TableCell className="text-xs text-muted-foreground">{new Date(t.created_at).toLocaleDateString()}</TableCell>
                 <TableCell>
-                  {t.is_active && <DeactivateDialog id={t.id} name={t.name} />}
+                  {t.is_active && <DeactivateDialog id={t.uid} name={t.name} />}
                 </TableCell>
               </TableRow>
             ))}

@@ -17,7 +17,7 @@ export function BalanceTrend() {
   const { data, isLoading, isError } = useSystemBalances();
 
   const chartData = (data ?? []).map((b) => ({
-    label: `C${b.classification_id} / Cur${b.currency_id}`,
+    label: `C${b.classification_uid} / Cur${b.currency_uid}`,
     balance: parseFloat(b.total_balance), // chart display only — intentional lossy conversion
   }));
 

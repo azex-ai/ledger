@@ -22,32 +22,32 @@ func TestEntryTemplate_validateDefinition(t *testing.T) {
 		{"nil receiver", nil, "template is nil"},
 		{
 			name:    "empty code",
-			tmpl:    &EntryTemplate{Code: "", Name: "X", JournalTypeID: 1, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
+			tmpl:    &EntryTemplate{Code: "", Name: "X", JournalTypeUID: "jt-1", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
 			errSnip: "code required",
 		},
 		{
 			name:    "empty name",
-			tmpl:    &EntryTemplate{Code: "x", Name: "", JournalTypeID: 1, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
+			tmpl:    &EntryTemplate{Code: "x", Name: "", JournalTypeUID: "jt-1", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
 			errSnip: "name required",
 		},
 		{
-			name:    "zero journal type id",
-			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeID: 0, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
-			errSnip: "journal_type_id must be positive",
+			name:    "empty journal type uid",
+			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeUID: "", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
+			errSnip: "journal_type_uid required",
 		},
 		{
-			name:    "negative classification id",
-			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeID: 1, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: -1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
-			errSnip: "classification_id must be positive",
+			name:    "empty classification uid",
+			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeUID: "jt-1", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "x"}}},
+			errSnip: "classification_uid required",
 		},
 		{
 			name:    "invalid entry type",
-			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeID: 1, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: 1, EntryType: EntryType("upside-down"), HolderRole: HolderRoleUser, AmountKey: "x"}}},
+			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeUID: "jt-1", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "cls-1", EntryType: EntryType("upside-down"), HolderRole: HolderRoleUser, AmountKey: "x"}}},
 			errSnip: "invalid entry type",
 		},
 		{
 			name:    "missing amount key",
-			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeID: 1, IsActive: true, Lines: []EntryTemplateLine{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: ""}}},
+			tmpl:    &EntryTemplate{Code: "x", Name: "X", JournalTypeUID: "jt-1", IsActive: true, Lines: []EntryTemplateLine{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: ""}}},
 			errSnip: "amount_key required",
 		},
 	}
@@ -68,7 +68,7 @@ func TestEntryTemplate_validateDefinition(t *testing.T) {
 
 			_, err := tc.tmpl.Render(TemplateParams{
 				HolderID:       1,
-				CurrencyID:     1,
+				CurrencyUID:    "cur-1",
 				IdempotencyKey: "edge",
 				Amounts:        map[string]decimal.Decimal{"x": decimal.NewFromInt(1)},
 			})
@@ -84,29 +84,29 @@ func TestEntryTemplate_validateDefinition(t *testing.T) {
 // the rendering step.
 func TestEntryTemplate_Render_PassesThroughAuditContext(t *testing.T) {
 	tmpl := &EntryTemplate{
-		ID: 1, Code: "deposit_confirm", Name: "Deposit Confirm",
-		JournalTypeID: 7, IsActive: true,
+		UID: "uid-1", Code: "deposit_confirm", Name: "Deposit Confirm",
+		JournalTypeUID: "jt-7", IsActive: true,
 		Lines: []EntryTemplateLine{
-			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
-			{ClassificationID: 20, EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-20", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
 		},
 	}
 
 	meta := map[string]string{"chain": "ethereum", "tx": "0xabc"}
 	input, err := tmpl.Render(TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "deposit-42-tx0xabc",
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(1000)},
-		EventID:        77,
+		EventUID:       "evt-77",
 		ActorID:        99,
 		Source:         "channel.evm",
 		Metadata:       meta,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, int64(7), input.JournalTypeID)
+	assert.Equal(t, "jt-7", input.JournalTypeUID)
 	assert.Equal(t, "deposit-42-tx0xabc", input.IdempotencyKey)
-	assert.Equal(t, int64(77), input.EventID)
+	assert.Equal(t, "evt-77", input.EventUID)
 	assert.Equal(t, int64(99), input.ActorID)
 	assert.Equal(t, "channel.evm", input.Source)
 	assert.Equal(t, meta, input.Metadata)
@@ -118,14 +118,14 @@ func TestEntryTemplate_Render_PassesThroughAuditContext(t *testing.T) {
 // in a future refactor.
 func TestEntryTemplate_Render_ZeroAmount_RejectedByValidate(t *testing.T) {
 	tmpl := &EntryTemplate{
-		ID: 1, Code: "x", Name: "X", JournalTypeID: 1, IsActive: true,
+		UID: "uid-1", Code: "x", Name: "X", JournalTypeUID: "jt-1", IsActive: true,
 		Lines: []EntryTemplateLine{
-			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
-			{ClassificationID: 20, EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-20", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
 		},
 	}
 	_, err := tmpl.Render(TemplateParams{
-		HolderID: 42, CurrencyID: 1, IdempotencyKey: "tx-zero",
+		HolderID: 42, CurrencyUID: "cur-1", IdempotencyKey: "tx-zero",
 		Amounts: map[string]decimal.Decimal{"amount": decimal.Zero},
 	})
 	require.Error(t, err)
@@ -139,11 +139,11 @@ func TestEntryTemplate_Render_ZeroAmount_RejectedByValidate(t *testing.T) {
 // these checks is caught.
 func TestTemplateInput_Validate_AllBranches(t *testing.T) {
 	valid := TemplateInput{
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: 1,
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: "jt-1",
 		Lines: []TemplateLineInput{
-			{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
 		},
 	}
 	require.NoError(t, valid.Validate())
@@ -155,16 +155,15 @@ func TestTemplateInput_Validate_AllBranches(t *testing.T) {
 	}{
 		{"empty code", func(in *TemplateInput) { in.Code = "" }, "code required"},
 		{"empty name", func(in *TemplateInput) { in.Name = "" }, "name required"},
-		{"zero journal type", func(in *TemplateInput) { in.JournalTypeID = 0 }, "journal_type_id"},
-		{"negative journal type", func(in *TemplateInput) { in.JournalTypeID = -5 }, "journal_type_id"},
+		{"empty journal type", func(in *TemplateInput) { in.JournalTypeUID = "" }, "journal_type_uid"},
 		{"invalid entry type", func(in *TemplateInput) {
-			in.Lines = []TemplateLineInput{{ClassificationID: 1, EntryType: EntryType("???"), HolderRole: HolderRoleUser, AmountKey: "x"}}
+			in.Lines = []TemplateLineInput{{ClassificationUID: "cls-1", EntryType: EntryType("???"), HolderRole: HolderRoleUser, AmountKey: "x"}}
 		}, "invalid entry type"},
 		{"invalid holder role", func(in *TemplateInput) {
-			in.Lines = []TemplateLineInput{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRole("ghost"), AmountKey: "x"}}
+			in.Lines = []TemplateLineInput{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRole("ghost"), AmountKey: "x"}}
 		}, "invalid holder role"},
 		{"empty amount key", func(in *TemplateInput) {
-			in.Lines = []TemplateLineInput{{ClassificationID: 1, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: ""}}
+			in.Lines = []TemplateLineInput{{ClassificationUID: "cls-1", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: ""}}
 		}, "amount_key required"},
 	}
 
@@ -186,14 +185,14 @@ func TestTemplateInput_Validate_AllBranches(t *testing.T) {
 // refactor that swaps the assignment direction is caught immediately.
 func TestEntryTemplate_Render_HolderRoleRouting(t *testing.T) {
 	tmpl := &EntryTemplate{
-		ID: 1, Code: "x", Name: "X", JournalTypeID: 1, IsActive: true,
+		UID: "uid-1", Code: "x", Name: "X", JournalTypeUID: "jt-1", IsActive: true,
 		Lines: []EntryTemplateLine{
-			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "a"},
-			{ClassificationID: 20, EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "a"},
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "a"},
+			{ClassificationUID: "cls-20", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "a"},
 		},
 	}
 	in, err := tmpl.Render(TemplateParams{
-		HolderID: 42, CurrencyID: 1, IdempotencyKey: "tx-routing",
+		HolderID: 42, CurrencyUID: "cur-1", IdempotencyKey: "tx-routing",
 		Amounts: map[string]decimal.Decimal{"a": decimal.NewFromInt(1)},
 	})
 	require.NoError(t, err)

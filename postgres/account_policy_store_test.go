@@ -28,7 +28,7 @@ func TestAccountPolicyStore_SetPolicy_CreateAndGet(t *testing.T) {
 
 	created, err := policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        curID,
+		CurrencyUID:       curID,
 		Status:            core.AccountPolicyStatusFrozen,
 		MinBalance:        decimal.NewFromInt(-10),
 		EnforceMinBalance: true,
@@ -41,9 +41,9 @@ func TestAccountPolicyStore_SetPolicy_CreateAndGet(t *testing.T) {
 	assert.True(t, created.EnforceMinBalance)
 	assert.Equal(t, "AML hold", created.Note)
 
-	got, err := policies.GetPolicy(ctx, holder, curID, 0)
+	got, err := policies.GetPolicy(ctx, holder, curID, "")
 	require.NoError(t, err)
-	assert.Equal(t, created.ID, got.ID)
+	assert.Equal(t, created.UID, got.UID)
 	assert.Equal(t, core.AccountPolicyStatusFrozen, got.Status)
 }
 
@@ -52,7 +52,7 @@ func TestAccountPolicyStore_GetPolicy_NotFound(t *testing.T) {
 	ctx := context.Background()
 	policies := postgres.NewAccountPolicyStore(p)
 
-	_, err := policies.GetPolicy(ctx, 999999, 1, 0)
+	_, err := policies.GetPolicy(ctx, 999999, "00000000-0000-7000-8000-000000000001", "")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrNotFound)
 }
@@ -66,9 +66,9 @@ func TestAccountPolicyStore_ListPolicies(t *testing.T) {
 	curA := postgrestest.SeedCurrency(t, p, "USDT-LIST-A", "Test USDT A")
 	curB := postgrestest.SeedCurrency(t, p, "USDT-LIST-B", "Test USDT B")
 
-	_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyID: curA, Status: core.AccountPolicyStatusFrozen})
+	_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyUID: curA, Status: core.AccountPolicyStatusFrozen})
 	require.NoError(t, err)
-	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyID: curB, Status: core.AccountPolicyStatusClosed})
+	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyUID: curB, Status: core.AccountPolicyStatusClosed})
 	require.NoError(t, err)
 
 	list, err := policies.ListPolicies(ctx, holder)
@@ -86,7 +86,7 @@ func TestAccountPolicyStore_SetPolicy_AuditTrail(t *testing.T) {
 
 	created, err := policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder: holder,
-		CurrencyID:    curID,
+		CurrencyUID:   curID,
 		Status:        core.AccountPolicyStatusActive,
 		ActorID:       7,
 	})
@@ -94,15 +94,15 @@ func TestAccountPolicyStore_SetPolicy_AuditTrail(t *testing.T) {
 
 	updated, err := policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder: holder,
-		CurrencyID:    curID,
+		CurrencyUID:   curID,
 		Status:        core.AccountPolicyStatusFrozen,
 		Note:          "manual freeze",
 		ActorID:       8,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, created.ID, updated.ID, "SetPolicy on the same dimension must UPSERT the same row")
+	assert.Equal(t, created.UID, updated.UID, "SetPolicy on the same dimension must UPSERT the same row")
 
-	rows, err := p.Query(ctx, `SELECT policy_id, old_state, new_state, actor_id FROM account_policy_changes WHERE policy_id = $1 ORDER BY created_at`, created.ID)
+	rows, err := p.Query(ctx, `SELECT policy_id, old_state, new_state, actor_id FROM account_policy_changes WHERE policy_id = (SELECT id FROM account_policies WHERE uid=$1::uuid) ORDER BY created_at`, created.UID)
 	require.NoError(t, err)
 	defer rows.Close()
 
@@ -154,11 +154,11 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 	seedBalance := func(t *testing.T, holder int64, amount decimal.Decimal) {
 		t.Helper()
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("matrix-seed"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: amount},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
 			},
 			Source: "test",
 		})
@@ -167,11 +167,11 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 
 	increase := func(holder int64) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("matrix-increase"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 			},
 			Source: "test",
 		})
@@ -180,11 +180,11 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 
 	decrease := func(holder int64) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("matrix-decrease"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
 			},
 			Source: "test",
 		})
@@ -194,7 +194,7 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 	reserve := func(holder int64) error {
 		_, err := reserver.Reserve(ctx, core.ReserveInput{
 			AccountHolder:  holder,
-			CurrencyID:     curID,
+			CurrencyUID:    curID,
 			Amount:         decimal.NewFromInt(5),
 			IdempotencyKey: postgrestest.UniqueKey("matrix-reserve"),
 		})
@@ -223,7 +223,7 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 			// and Reserve (which is never tied to a classification).
 			_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{
 				AccountHolder: holder,
-				CurrencyID:    curID,
+				CurrencyUID:   curID,
 				Status:        tc.status,
 			})
 			require.NoError(t, err)
@@ -267,13 +267,13 @@ func TestLedgerStore_AccountPolicy_MatchPriority(t *testing.T) {
 	jtID := postgrestest.SeedJournalType(t, p, "jt_priority", "Test JT")
 	holder := int64(4200)
 
-	seed := func(classificationID int64, amount decimal.Decimal) {
+	seed := func(classificationUID string, amount decimal.Decimal) {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("priority-seed"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: classificationID, EntryType: core.EntryTypeDebit, Amount: amount},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: classificationUID, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: amount},
 			},
 			Source: "test",
 		})
@@ -282,13 +282,13 @@ func TestLedgerStore_AccountPolicy_MatchPriority(t *testing.T) {
 	seed(walletAID, decimal.NewFromInt(100))
 	seed(walletBID, decimal.NewFromInt(100))
 
-	decrease := func(classificationID int64) error {
+	decrease := func(classificationUID string) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("priority-decrease"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: classificationID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: classificationUID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
 			},
 			Source: "test",
 		})
@@ -296,11 +296,11 @@ func TestLedgerStore_AccountPolicy_MatchPriority(t *testing.T) {
 	}
 
 	// Tier 2: freeze the whole holder+currency.
-	_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyID: curID, Status: core.AccountPolicyStatusFrozen})
+	_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyUID: curID, Status: core.AccountPolicyStatusFrozen})
 	require.NoError(t, err)
 
 	// Tier 1: explicitly re-activate wallet_a only — more specific, must win.
-	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletAID, Status: core.AccountPolicyStatusActive})
+	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletAID, Status: core.AccountPolicyStatusActive})
 	require.NoError(t, err)
 
 	assert.NoError(t, decrease(walletAID), "tier-1 active override must win over tier-2 frozen")
@@ -333,7 +333,7 @@ func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
 
 	_, err := pendingStore.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-add"),
 		Source:         "test",
@@ -342,14 +342,14 @@ func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
 
 	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder: userID,
-		CurrencyID:    curID,
+		CurrencyUID:   curID,
 		Status:        core.AccountPolicyStatusFrozen,
 	})
 	require.NoError(t, err)
 
 	j, err := pendingStore.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-confirm"),
 		Source:         "test",
@@ -359,7 +359,7 @@ func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
 
 	mainWalletCls, err := cs.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
-	bal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.ID)
+	bal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
 	require.NoError(t, err)
 	assert.True(t, bal.Equal(amount), "main_wallet balance should equal confirmed amount, got %s", bal)
 
@@ -368,11 +368,11 @@ func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
 
 	// A genuine net decrease under the same freeze must still be rejected.
 	_, err = ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-withdraw"),
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: curID, ClassificationID: mainWalletCls.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyID: curID, ClassificationID: custodialCls.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: userID, CurrencyUID: curID, ClassificationUID: mainWalletCls.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: curID, ClassificationUID: custodialCls.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
 		},
 		Source: "test",
 	})
@@ -395,11 +395,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_ZeroForbidsOverdraft(t *testing.T)
 	holder := int64(4400)
 
 	_, err := ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("minbal-zero-seed"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 		Source: "test",
 	})
@@ -407,8 +407,8 @@ func TestLedgerStore_AccountPolicy_MinBalance_ZeroForbidsOverdraft(t *testing.T)
 
 	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        curID,
-		ClassificationID:  walletID,
+		CurrencyUID:       curID,
+		ClassificationUID: walletID,
 		Status:            core.AccountPolicyStatusActive,
 		MinBalance:        decimal.Zero,
 		EnforceMinBalance: true,
@@ -417,11 +417,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_ZeroForbidsOverdraft(t *testing.T)
 
 	decreaseBy := func(amount decimal.Decimal) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("minbal-zero-decrease"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
 			},
 			Source: "test",
 		})
@@ -455,8 +455,8 @@ func TestLedgerStore_AccountPolicy_MinBalance_NegativeAllowsOverdraftLimit(t *te
 
 	_, err := policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        curID,
-		ClassificationID:  walletID,
+		CurrencyUID:       curID,
+		ClassificationUID: walletID,
 		Status:            core.AccountPolicyStatusActive,
 		MinBalance:        decimal.NewFromInt(-50), // overdraft limit of 50
 		EnforceMinBalance: true,
@@ -465,11 +465,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_NegativeAllowsOverdraftLimit(t *te
 
 	decreaseBy := func(amount decimal.Decimal, key string) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: key,
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
 			},
 			Source: "test",
 		})
@@ -502,11 +502,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_PositiveDustFloor(t *testing.T) {
 	holder := int64(4600)
 
 	_, err := ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("minbal-pos-seed"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 		Source: "test",
 	})
@@ -514,8 +514,8 @@ func TestLedgerStore_AccountPolicy_MinBalance_PositiveDustFloor(t *testing.T) {
 
 	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        curID,
-		ClassificationID:  walletID,
+		CurrencyUID:       curID,
+		ClassificationUID: walletID,
 		Status:            core.AccountPolicyStatusActive,
 		MinBalance:        decimal.NewFromInt(10), // dust floor
 		EnforceMinBalance: true,
@@ -524,11 +524,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_PositiveDustFloor(t *testing.T) {
 
 	decreaseBy := func(amount decimal.Decimal, key string) error {
 		_, err := ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: key,
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: amount},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: amount},
 			},
 			Source: "test",
 		})
@@ -568,11 +568,11 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 	// the credit-30 leg below would read as "10 - 30 = -20 < 10" and
 	// incorrectly reject.
 	_, err := ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("minbal-net-seed"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
 		},
 		Source: "test",
 	})
@@ -580,8 +580,8 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 
 	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
 		AccountHolder:     holder,
-		CurrencyID:        curID,
-		ClassificationID:  walletID,
+		CurrencyUID:       curID,
+		ClassificationUID: walletID,
 		Status:            core.AccountPolicyStatusActive,
 		MinBalance:        decimal.NewFromInt(10),
 		EnforceMinBalance: true,
@@ -592,12 +592,12 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 	// one journal: debit 100 (increase), credit 30 (decrease). Net +70.
 	// Balanced against a single custodial leg of 70.
 	_, err = ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("minbal-net-journal"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(30)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(70)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(30)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(70)},
 		},
 		Source: "test",
 	})
@@ -623,11 +623,11 @@ func TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal(t *testing.T) {
 	holder := int64(4800)
 
 	_, err := ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("concurrent-freeze-seed"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
 		},
 		Source: "test",
 	})
@@ -638,16 +638,16 @@ func TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, freezeErr = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyID: curID, Status: core.AccountPolicyStatusFrozen})
+		_, freezeErr = policies.SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: holder, CurrencyUID: curID, Status: core.AccountPolicyStatusFrozen})
 	}()
 	go func() {
 		defer wg.Done()
 		_, journalErr = ls.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jtID,
+			JournalTypeUID: jtID,
 			IdempotencyKey: postgrestest.UniqueKey("concurrent-freeze-decrease"),
 			Entries: []core.EntryInput{
-				{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
-				{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(10)},
+				{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(10)},
 			},
 			Source: "test",
 		})
@@ -675,11 +675,11 @@ func TestAccountPolicyStore_SetPolicy_ConcurrentWithPostJournal(t *testing.T) {
 	// rejected deterministically — proves the freeze is actually effective
 	// going forward, not just a race artifact.
 	_, err = ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("concurrent-freeze-followup"),
 		Entries: []core.EntryInput{
-			{AccountHolder: holder, CurrencyID: curID, ClassificationID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
-			{AccountHolder: core.SystemAccountHolder(holder), CurrencyID: curID, ClassificationID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: walletID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+			{AccountHolder: core.SystemAccountHolder(holder), CurrencyUID: curID, ClassificationUID: custodialID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
 		},
 		Source: "test",
 	})

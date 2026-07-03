@@ -19,12 +19,12 @@ func TestAccountPolicyStatus_IsValid(t *testing.T) {
 func TestAccountPolicyInput_Validate(t *testing.T) {
 	valid := AccountPolicyInput{
 		AccountHolder: 7,
-		CurrencyID:    1,
+		CurrencyUID:   "cur-1",
 		Status:        AccountPolicyStatusFrozen,
 	}
 	require.NoError(t, valid.Validate())
 
-	// Wildcard tiers (currency_id == 0, classification_id == 0) are valid.
+	// Wildcard tiers (currency_uid == "", classification_uid == "") are valid.
 	require.NoError(t, AccountPolicyInput{AccountHolder: 7, Status: AccountPolicyStatusActive}.Validate())
 
 	cases := []struct {
@@ -36,12 +36,8 @@ func TestAccountPolicyInput_Validate(t *testing.T) {
 			input: AccountPolicyInput{Status: AccountPolicyStatusActive},
 		},
 		{
-			name:  "negative currency",
-			input: AccountPolicyInput{AccountHolder: 7, CurrencyID: -1, Status: AccountPolicyStatusActive},
-		},
-		{
-			name:  "negative classification",
-			input: AccountPolicyInput{AccountHolder: 7, ClassificationID: -1, Status: AccountPolicyStatusActive},
+			name:  "classification without currency",
+			input: AccountPolicyInput{AccountHolder: 7, ClassificationUID: "cls-1", Status: AccountPolicyStatusActive},
 		},
 		{
 			name:  "invalid status",

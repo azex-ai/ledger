@@ -280,7 +280,7 @@ dedicated hook (call these via `useLedgerClient()`):
 |-------|---------|
 | System | `getHealth()`, `getSystemBalances()` |
 | Journals | `listJournals({cursor?, limit?})`, `getJournal(id)`, `postJournal(body)`, `postTemplateJournal(body)`, `reverseJournal(id, reason)` |
-| Entries | `listEntries({holder?, currency_id?, cursor?, limit?})` |
+| Entries | `listEntries({holder?, currency_uid?, cursor?, limit?})` |
 | Balances | `getBalances(holder)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyId)` |
 | Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount)`, `releaseReservation(id)` |
 | Bookings | `createBooking(CreateBookingBody)`, `transitionBooking(id, TransitionBookingBody)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
@@ -290,7 +290,7 @@ dedicated hook (call these via `useLedgerClient()`):
 | Templates | `listTemplates(activeOnly?)`, `createTemplate(body)`, `deactivateTemplate(id)`, `previewTemplate(code, params)` |
 | Currencies | `listCurrencies(activeOnly?)`, `createCurrency(body)`, `deactivateCurrency(id)` |
 | Reconciliation | `reconcileGlobal()`, `reconcileAccount(holder, currencyId)` |
-| Snapshots | `listSnapshots({holder?, currency_id?, start?, end?})` |
+| Snapshots | `listSnapshots({holder?, currency_uid?, start?, end?})` |
 
 ## Provider
 
@@ -343,11 +343,11 @@ const mutation = useLedgerMutation((body) => client.postJournal(body), ["journal
 | Hook | Signature | Returns / Endpoint | Notes |
 |------|-----------|--------------------|-------|
 | `useJournals` | `(limit = 20)` | Infinite query → `GET /api/v1/journals` | Cursor pagination via `next_cursor` |
-| `useJournal` | `(id: number)` | Query → `GET /api/v1/journals/{id}` (`JournalWithEntries`) | `enabled: id > 0`. Keyed `["ledger","journal",id]` (singular) so list-namespace invalidation doesn't refetch every detail page |
+| `useJournal` | `(id: string)` | Query → `GET /api/v1/journals/{uid}` (`JournalWithEntries`) | `enabled: id !== ""`. Keyed `["ledger","journal",id]` (singular) so list-namespace invalidation doesn't refetch every detail page |
 | `usePostJournal` | `()` | Mutation → `POST /api/v1/journals` | Body: `{journal_type_id, idempotency_key, entries[], source?, metadata?}`. Invalidates `journals` |
-| `usePostTemplateJournal` | `()` | Mutation → `POST /api/v1/journals/template` | Body: `{template_code, holder_id, currency_id, idempotency_key, amounts, source?}`. Invalidates `journals` |
-| `useReverseJournal` | `()` | Mutation → `POST /api/v1/journals/{id}/reverse` | Variables: `{id, reason}`. Invalidates `journals` |
-| `useEntries` | `(params: {holder?, currency_id?}, limit = 50)` | Infinite query → `GET /api/v1/entries` | `enabled: params.holder !== undefined && params.holder !== 0` |
+| `usePostTemplateJournal` | `()` | Mutation → `POST /api/v1/journals/template` | Body: `{template_code, holder_id, currency_uid, idempotency_key, amounts, source?}`. Invalidates `journals` |
+| `useReverseJournal` | `()` | Mutation → `POST /api/v1/journals/{uid}/reverse` | Variables: `{id, reason}`. Invalidates `journals` |
+| `useEntries` | `(params: {holder?, currency_uid?}, limit = 50)` | Infinite query → `GET /api/v1/entries` | `enabled: params.holder !== undefined && params.holder !== 0` |
 
 ### Balances — `src/hooks/use-balances.ts`
 
@@ -365,12 +365,12 @@ classification id is resolved at runtime from a shared, long-cached
 | Hook | Signature | Returns / Endpoint | Notes |
 |------|-----------|--------------------|-------|
 | `useDepositClassificationId` | `()` | `number` | Returns `0` (falsy) until classifications load |
-| `useDeposits` | `(params: {holder?, status?})` | Query → `GET /api/v1/bookings?classification_id=…` (`Booking[]`) | `enabled: classificationId > 0` |
+| `useDeposits` | `(params: {holder?, status?})` | Query → `GET /api/v1/bookings?classification_uid=…` (`Booking[]`) | `enabled: classificationId > 0` |
 | `useConfirmingDeposit` | `()` | Mutation → transition `pending → confirming` | Variables: `{id, channelRef}` (external tx ref) |
 | `useConfirmDeposit` | `()` | Mutation → transition `confirming → confirmed` | Variables: `{id, actual_amount, channel_ref}` — actual amount may differ from expected within tolerance |
 | `useFailDeposit` | `()` | Mutation → transition `→ failed` | Variables: `{id, reason}` (stored in metadata) |
 
-All transitions hit `POST /api/v1/bookings/{id}/transition` and invalidate
+All transitions hit `POST /api/v1/bookings/{uid}/transition` and invalidate
 the `bookings` namespace.
 
 ### Withdrawals — `src/hooks/use-withdrawals.ts`
@@ -399,25 +399,25 @@ invalidates its own namespace only (metadata changes don't move balances).
 |------|-----------|----------|
 | `useClassifications` | `(activeOnly?: boolean)` | `GET /api/v1/classifications` |
 | `useCreateClassification` | `()` — body `{code, name, normal_side, is_system}` | `POST /api/v1/classifications` |
-| `useDeactivateClassification` | `()` — variables `id: number` | `POST /api/v1/classifications/{id}/deactivate` |
+| `useDeactivateClassification` | `()` — variables `id: string` | `POST /api/v1/classifications/{uid}/deactivate` |
 | `useJournalTypes` | `(activeOnly?)` | `GET /api/v1/journal-types` |
 | `useCreateJournalType` | `()` — body `{code, name}` | `POST /api/v1/journal-types` |
-| `useDeactivateJournalType` | `()` — variables `id` | `POST /api/v1/journal-types/{id}/deactivate` |
+| `useDeactivateJournalType` | `()` — variables `id` | `POST /api/v1/journal-types/{uid}/deactivate` |
 | `useTemplates` | `(activeOnly?)` | `GET /api/v1/templates` |
 | `useCreateTemplate` | `()` — body `{code, name, journal_type_id, lines[]}` | `POST /api/v1/templates` |
-| `useDeactivateTemplate` | `()` — variables `id` | `POST /api/v1/templates/{id}/deactivate` |
-| `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_id, ...amounts}` | `POST /api/v1/templates/{code}/preview` (returns `PreviewResult`, no invalidation — read-only preview) |
+| `useDeactivateTemplate` | `()` — variables `id` | `POST /api/v1/templates/{uid}/deactivate` |
+| `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_uid, ...amounts}` | `POST /api/v1/templates/{code}/preview` (returns `PreviewResult`, no invalidation — read-only preview) |
 | `useCurrencies` | `(activeOnly?)` | `GET /api/v1/currencies` |
 | `useCreateCurrency` | `()` — body `{code, name, exponent}` | `POST /api/v1/currencies` |
-| `useDeactivateCurrency` | `()` — variables `id` | `POST /api/v1/currencies/{id}/deactivate` |
+| `useDeactivateCurrency` | `()` — variables `id` | `POST /api/v1/currencies/{uid}/deactivate` |
 
 ### Reservations — `src/hooks/use-reservations.ts`
 
 | Hook | Signature | Endpoint | Notes |
 |------|-----------|----------|-------|
 | `useReservations` | `(params: {holder?, status?})` | `GET /api/v1/reservations` | |
-| `useSettleReservation` | `()` — variables `{id, actualAmount: string}` | `POST /api/v1/reservations/{id}/settle` | Invalidates `reservations` (+ balances) |
-| `useReleaseReservation` | `()` — variables `id: number` | `POST /api/v1/reservations/{id}/release` | Invalidates `reservations` (+ balances) |
+| `useSettleReservation` | `()` — variables `{id, actualAmount: string}` | `POST /api/v1/reservations/{uid}/settle` | Invalidates `reservations` (+ balances) |
+| `useReleaseReservation` | `()` — variables `id: string` | `POST /api/v1/reservations/{uid}/release` | Invalidates `reservations` (+ balances) |
 
 ### System — `src/hooks/use-system.ts`
 
@@ -427,7 +427,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | `useSystemBalances` | `()` | `GET /api/v1/system/balances` (`SystemBalance[]`) | |
 | `useReconcileGlobal` | `()` | Mutation → `POST /api/v1/reconcile` (`ReconcileResult`) | Plain mutation, no invalidation |
 | `useReconcileAccount` | `()` — variables `{holder, currencyId}` | Mutation → `POST /api/v1/reconcile/account` | Plain mutation, no invalidation |
-| `useSnapshots` | `(params: {holder?, currency_id?, start?, end?})` | `GET /api/v1/snapshots` (`Snapshot[]`) | `enabled: params.holder !== undefined && params.holder !== 0` |
+| `useSnapshots` | `(params: {holder?, currency_uid?, start?, end?})` | `GET /api/v1/snapshots` (`Snapshot[]`) | `enabled: params.holder !== undefined && params.holder !== 0` |
 
 ## Components
 
@@ -476,7 +476,7 @@ mount inside `<LedgerProvider>` and they work.
 
 | Export | Props | Details |
 |--------|-------|---------|
-| `LedgerAdmin` | none | All-in-one shell: Sidebar + content area, section switching via internal state (no URL; an internal `linkComponent` intercepts nav clicks, `/journals/{id}` links open `JournalDetailPage`). Self-mounts `<Toaster/>`. Lazy-loads `DashboardPage`/`BalancesPage` so recharts ships as an async chunk |
+| `LedgerAdmin` | none | All-in-one shell: Sidebar + content area, section switching via internal state (no URL; an internal `linkComponent` intercepts nav clicks, `/journals/{uid}` links open `JournalDetailPage`). Self-mounts `<Toaster/>`. Lazy-loads `DashboardPage`/`BalancesPage` so recharts ships as an async chunk |
 
 ### `Toaster`
 
@@ -500,7 +500,7 @@ method):
 | Helper | Params after `(qc, client, …)` | Mirrors |
 |--------|-------------------------------|---------|
 | `prefetchJournals` | `limit = 20` | `useJournals(limit)` (infinite shape) |
-| `prefetchEntries` | `params: {holder?, currency_id?}, limit = 50` | `useEntries(params, limit)` (infinite shape) |
+| `prefetchEntries` | `params: {holder?, currency_uid?}, limit = 50` | `useEntries(params, limit)` (infinite shape) |
 | `prefetchBalances` | `holder: number` | `useBalances(holder)` |
 | `prefetchSystemHealth` | — | `useHealth()` |
 | `prefetchSystemBalances` | — | `useSystemBalances()` |
@@ -509,7 +509,7 @@ method):
 | `prefetchCurrencies` | `activeOnly?` | `useCurrencies(activeOnly)` |
 | `prefetchJournalTypes` | `activeOnly?` | `useJournalTypes(activeOnly)` |
 | `prefetchTemplates` | `activeOnly?` | `useTemplates(activeOnly)` |
-| `prefetchSnapshots` | `params: {holder?, currency_id?, start?, end?}` | `useSnapshots(params)` |
+| `prefetchSnapshots` | `params: {holder?, currency_uid?, start?, end?}` | `useSnapshots(params)` |
 
 (No bookings prefetch — see [Server Prefetch](#server-prefetch-rsc) for why.)
 
@@ -545,7 +545,7 @@ this is the orientation map:
 | Group | Types | Key fields |
 |-------|-------|-----------|
 | Journals | `Journal`, `Entry`, `JournalWithEntries` | `total_debit`/`total_credit`/`amount` are strings; `Journal.reversal_of: number \| null` |
-| Balances | `Balance`, `SystemBalance` | `(account_holder, currency_id, classification_id)` dimensions; `balance: string` |
+| Balances | `Balance`, `SystemBalance` | `(account_holder, currency_uid, classification_uid)` dimensions; `balance: string` |
 | Bookings | `Booking`, `Event`, `CreateBookingBody`, `TransitionBookingBody`, `ListBookingsParams` | `Booking.reservation_id`/`journal_id` are `number \| null` (not yet linked); lifecycle governed by the classification |
 | Reservations | `Reservation` | `status: "active" \| "settling" \| "settled" \| "released"` |
 | Metadata | `Classification`, `Lifecycle`, `JournalType`, `EntryTemplate`, `TemplateLine`, `Currency` | `Classification.lifecycle: Lifecycle \| null` (null = label-only) |

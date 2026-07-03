@@ -539,8 +539,8 @@ func TestCheck2GlobalBalance_QueryError(t *testing.T) {
 
 func TestCheck2GlobalBalance_DetectsDrift(t *testing.T) {
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 	cpReader := &mockCheckpointReader{
@@ -574,8 +574,8 @@ func TestCheck2GlobalBalance_DetectsDrift(t *testing.T) {
 
 func TestCheck2GlobalBalance_PaginatesAcrossMultiplePages(t *testing.T) {
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 	cpReader := &mockCheckpointReader{
@@ -609,8 +609,8 @@ func TestCheck2GlobalBalance_PaginatesAcrossMultiplePages(t *testing.T) {
 
 func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
 	cls := &mockClassificationLister{
-		classifications: []core.Classification{
-			{ID: 10, Code: "asset", NormalSide: core.NormalSideDebit},
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
 		},
 	}
 	cpReader := &mockCheckpointReader{

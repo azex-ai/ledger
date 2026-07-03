@@ -15,7 +15,7 @@ export function useJournals(limit = 20) {
   });
 }
 
-export function useJournal(id: number) {
+export function useJournal(id: string) {
   const client = useLedgerClient();
   return useQuery({
     // Detail uses singular ["journal", id] so invalidation of the list
@@ -23,7 +23,7 @@ export function useJournal(id: number) {
     // detail page to refetch.
     queryKey: ledgerKeys.journal(id),
     queryFn: () => client.getJournal(id),
-    enabled: id > 0,
+    enabled: id !== "",
   });
 }
 
@@ -48,14 +48,14 @@ export function usePostTemplateJournal() {
 export function useReverseJournal() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, reason }: { id: number; reason: string }) =>
+    ({ id, reason }: { id: string; reason: string }) =>
       client.reverseJournal(id, reason),
     ["journals"],
   );
 }
 
 export function useEntries(
-  params: { holder?: number; currency_id?: number },
+  params: { holder?: number; currency_uid?: string },
   limit = 50,
 ) {
   const client = useLedgerClient();

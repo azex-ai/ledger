@@ -1,6 +1,6 @@
 -- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING *;
 
 -- name: InsertJournalEntry :one
@@ -44,18 +44,21 @@ ORDER BY je.id;
 
 -- name: ListJournalEntries :many
 -- Column order matches the table's physical order (see InsertJournalEntry).
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
-FROM journal_entries
-WHERE journal_id = $1
-ORDER BY id;
+-- j.uid rides along so the mapper can emit journal_uid without a per-row lookup.
+SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classification_id, je.entry_type, je.amount, je.created_at, je.effective_at, j.uid AS journal_uid
+FROM journal_entries je
+JOIN journals j ON j.id = je.journal_id
+WHERE je.journal_id = $1
+ORDER BY je.id;
 
 -- name: ListEntriesByAccount :many
 -- Column order matches the table's physical order (see InsertJournalEntry).
-SELECT id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at
-FROM journal_entries
-WHERE account_holder = $1 AND currency_id = $2
-  AND id > sqlc.arg(cursor_id)::bigint
-ORDER BY id ASC
+SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classification_id, je.entry_type, je.amount, je.created_at, je.effective_at, j.uid AS journal_uid
+FROM journal_entries je
+JOIN journals j ON j.id = je.journal_id
+WHERE je.account_holder = $1 AND je.currency_id = $2
+  AND je.id > sqlc.arg(cursor_id)::bigint
+ORDER BY je.id ASC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: SumEntriesSinceCheckpoint :many
@@ -133,3 +136,12 @@ SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(key)::text, 0));
 -- they touch different account dimensions. Collisions in the hash only reduce
 -- concurrency; they do not affect correctness.
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(key)::text, 0));
+
+-- name: GetJournalByUID :one
+SELECT * FROM journals WHERE uid = $1;
+
+-- name: GetJournalForUpdateByUID :one
+SELECT * FROM journals WHERE uid = $1 FOR UPDATE;
+
+-- name: GetJournalUIDByID :one
+SELECT uid FROM journals WHERE id = $1;

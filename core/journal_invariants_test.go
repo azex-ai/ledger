@@ -30,8 +30,8 @@ func TestJournalInvariant_BalancedRandomEntries(t *testing.T) {
 			amt := decimal.New(int64(rng.Intn(1_000_000_000)+1), -int32(rng.Intn(19)))
 			want = want.Add(amt)
 			entries = append(entries,
-				EntryInput{AccountHolder: int64(i + 1), CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: amt},
-				EntryInput{AccountHolder: -int64(i + 1), CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: amt},
+				EntryInput{AccountHolder: int64(i + 1), CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: amt},
+				EntryInput{AccountHolder: -int64(i + 1), CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: amt},
 			)
 		}
 
@@ -39,7 +39,7 @@ func TestJournalInvariant_BalancedRandomEntries(t *testing.T) {
 		rng.Shuffle(len(entries), func(i, j int) { entries[i], entries[j] = entries[j], entries[i] })
 
 		input := JournalInput{
-			JournalTypeID:  1,
+			JournalTypeUID: "jt-1",
 			IdempotencyKey: fmt.Sprintf("trial-%d", trial),
 			Entries:        entries,
 		}
@@ -67,11 +67,11 @@ func TestJournalInvariant_UnbalancedAlwaysRejected(t *testing.T) {
 		drift := decimal.New(1, -int32(rng.Intn(18)))
 		credit := amt.Sub(drift)
 		input := JournalInput{
-			JournalTypeID:  1,
+			JournalTypeUID: "jt-1",
 			IdempotencyKey: fmt.Sprintf("drift-%d", trial),
 			Entries: []EntryInput{
-				{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: amt},
-				{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: credit},
+				{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: amt},
+				{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: credit},
 			},
 		}
 
@@ -89,13 +89,13 @@ func TestJournalInvariant_MultiCurrencyEachMustBalance(t *testing.T) {
 	// Currency 1 unbalanced (100 debit / 50 credit), currency 2 reverses
 	// the asymmetry (50 debit / 100 credit) so global totals match.
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "multi-currency-skew",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: 2, CurrencyID: 2, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -2, CurrencyID: 2, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 2, CurrencyUID: "cur-2", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -2, CurrencyUID: "cur-2", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 
@@ -104,7 +104,7 @@ func TestJournalInvariant_MultiCurrencyEachMustBalance(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrUnbalancedJournal))
 	// Validate iterates currencies in ascending ID order, so currency 1
 	// is the first one to fail.
-	assert.Contains(t, err.Error(), "currency 1 unbalanced")
+	assert.Contains(t, err.Error(), "currency cur-1 unbalanced")
 }
 
 // 18-digit precision must round-trip without rounding noise. NUMERIC(30,18)
@@ -112,11 +112,11 @@ func TestJournalInvariant_MultiCurrencyEachMustBalance(t *testing.T) {
 func TestJournalInvariant_HighPrecisionAmounts(t *testing.T) {
 	amt := decimal.RequireFromString("0.000000000000000001") // 1e-18
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-precision",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: amt},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: amt},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: amt},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: amt},
 		},
 	}
 	require.NoError(t, input.Validate())
@@ -133,16 +133,16 @@ func TestJournalInvariant_RepeatedEntriesAggregate(t *testing.T) {
 	entries := make([]EntryInput, 0, repeat+1)
 	for range repeat {
 		entries = append(entries, EntryInput{
-			AccountHolder: 1, CurrencyID: 1, ClassificationID: 1,
+			AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1",
 			EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(2),
 		})
 	}
 	entries = append(entries, EntryInput{
-		AccountHolder: -1, CurrencyID: 1, ClassificationID: 2,
+		AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2",
 		EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(repeat * 2),
 	})
 
-	input := JournalInput{JournalTypeID: 1, IdempotencyKey: "tx-repeated", Entries: entries}
+	input := JournalInput{JournalTypeUID: "jt-1", IdempotencyKey: "tx-repeated", Entries: entries}
 	require.NoError(t, input.Validate())
 
 	debit, credit := input.Totals()
@@ -157,12 +157,12 @@ func TestJournalInvariant_RepeatedEntriesAggregate(t *testing.T) {
 // Run with: go test ./core -run=^$ -fuzz=FuzzJournalValidate -fuzztime=10s
 func FuzzJournalValidate(f *testing.F) {
 	// Seeds: known-good and known-bad shapes.
-	f.Add(int64(1), int64(1), int64(1), "tx", "100", "100")
-	f.Add(int64(0), int64(1), int64(1), "", "0", "100")
-	f.Add(int64(1), int64(1), int64(1), "tx", "100", "50")
-	f.Add(int64(1), int64(1), int64(1), "tx", "1.000000000000000001", "1.000000000000000001")
+	f.Add(int64(1), "cur-1", "cls-1", "tx", "100", "100")
+	f.Add(int64(0), "cur-1", "cls-1", "", "0", "100")
+	f.Add(int64(1), "cur-1", "cls-1", "tx", "100", "50")
+	f.Add(int64(1), "cur-1", "cls-1", "tx", "1.000000000000000001", "1.000000000000000001")
 
-	f.Fuzz(func(t *testing.T, holder, currencyID, classificationID int64, idemKey, debitAmt, creditAmt string) {
+	f.Fuzz(func(t *testing.T, holder int64, currencyUID, classificationUID string, idemKey, debitAmt, creditAmt string) {
 		dr, drErr := decimal.NewFromString(debitAmt)
 		cr, crErr := decimal.NewFromString(creditAmt)
 		if drErr != nil || crErr != nil {
@@ -170,11 +170,11 @@ func FuzzJournalValidate(f *testing.F) {
 		}
 
 		input := JournalInput{
-			JournalTypeID:  1,
+			JournalTypeUID: "jt-1",
 			IdempotencyKey: idemKey,
 			Entries: []EntryInput{
-				{AccountHolder: holder, CurrencyID: currencyID, ClassificationID: classificationID, EntryType: EntryTypeDebit, Amount: dr},
-				{AccountHolder: -holder, CurrencyID: currencyID, ClassificationID: classificationID, EntryType: EntryTypeCredit, Amount: cr},
+				{AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: classificationUID, EntryType: EntryTypeDebit, Amount: dr},
+				{AccountHolder: -holder, CurrencyUID: currencyUID, ClassificationUID: classificationUID, EntryType: EntryTypeCredit, Amount: cr},
 			},
 		}
 

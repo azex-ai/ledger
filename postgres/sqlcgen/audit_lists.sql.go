@@ -40,7 +40,7 @@ full_chain AS (
     FROM journals j
     JOIN full_chain fc ON j.reversal_of = fc.journal_id
 )
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
 FROM journals j
 JOIN full_chain fc ON fc.journal_id = j.id
 ORDER BY j.id ASC
@@ -72,6 +72,7 @@ func (q *Queries) GetReversalChain(ctx context.Context, id int64) ([]Journal, er
 			&i.CreatedAt,
 			&i.EventID,
 			&i.EffectiveAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -85,7 +86,7 @@ func (q *Queries) GetReversalChain(ctx context.Context, id int64) ([]Journal, er
 
 const listJournalsByAccount = `-- name: ListJournalsByAccount :many
 
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
 FROM journals j
 JOIN journal_entries je ON je.journal_id = j.id
 WHERE je.account_holder = $1::bigint
@@ -145,6 +146,7 @@ func (q *Queries) ListJournalsByAccount(ctx context.Context, arg ListJournalsByA
 			&i.CreatedAt,
 			&i.EventID,
 			&i.EffectiveAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -157,7 +159,7 @@ func (q *Queries) ListJournalsByAccount(ctx context.Context, arg ListJournalsByA
 }
 
 const listJournalsByTimeRange = `-- name: ListJournalsByTimeRange :many
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid
 FROM journals
 WHERE ($1::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at >= $1::timestamptz)
   AND ($2::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at <= $2::timestamptz)
@@ -202,6 +204,7 @@ func (q *Queries) ListJournalsByTimeRange(ctx context.Context, arg ListJournalsB
 			&i.CreatedAt,
 			&i.EventID,
 			&i.EffectiveAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -214,7 +217,7 @@ func (q *Queries) ListJournalsByTimeRange(ctx context.Context, arg ListJournalsB
 }
 
 const traceBookingEvents = `-- name: TraceBookingEvents :many
-SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source
+SELECT id, classification_code, booking_id, account_holder, currency_id, from_status, to_status, amount, settled_amount, journal_id, metadata, occurred_at, delivery_status, attempts, max_attempts, next_attempt_at, delivered_at, created_at, actor_id, source, uid
 FROM events
 WHERE booking_id = $1
 ORDER BY id ASC
@@ -251,6 +254,7 @@ func (q *Queries) TraceBookingEvents(ctx context.Context, bookingID int64) ([]Ev
 			&i.CreatedAt,
 			&i.ActorID,
 			&i.Source,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}
@@ -263,7 +267,7 @@ func (q *Queries) TraceBookingEvents(ctx context.Context, bookingID int64) ([]Ev
 }
 
 const traceBookingJournals = `-- name: TraceBookingJournals :many
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
 FROM journals j
 JOIN events e ON e.journal_id = j.id
 WHERE e.booking_id = $1
@@ -293,6 +297,7 @@ func (q *Queries) TraceBookingJournals(ctx context.Context, bookingID int64) ([]
 			&i.CreatedAt,
 			&i.EventID,
 			&i.EffectiveAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

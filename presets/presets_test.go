@@ -76,13 +76,13 @@ func TestWithdrawalLifecycle_Transitions(t *testing.T) {
 }
 
 type fakeClassificationStore struct {
-	nextID          int64
+	nextUID         int64
 	classifications map[string]*core.Classification
 }
 
 func newFakeClassificationStore() *fakeClassificationStore {
 	return &fakeClassificationStore{
-		nextID:          1,
+		nextUID:         1,
 		classifications: make(map[string]*core.Classification),
 	}
 }
@@ -92,7 +92,7 @@ func (s *fakeClassificationStore) CreateClassification(_ context.Context, input 
 		return existing, nil
 	}
 	classification := &core.Classification{
-		ID:         s.nextID,
+		UID:        fmt.Sprintf("cls-%d", s.nextUID),
 		Code:       input.Code,
 		Name:       input.Name,
 		NormalSide: input.NormalSide,
@@ -101,7 +101,7 @@ func (s *fakeClassificationStore) CreateClassification(_ context.Context, input 
 		Lifecycle:  input.Lifecycle,
 		CreatedAt:  time.Now(),
 	}
-	s.nextID++
+	s.nextUID++
 	s.classifications[input.Code] = classification
 	return classification, nil
 }
@@ -114,9 +114,9 @@ func (s *fakeClassificationStore) GetByCode(_ context.Context, code string) (*co
 	return classification, nil
 }
 
-func (s *fakeClassificationStore) DeactivateClassification(_ context.Context, id int64) error {
+func (s *fakeClassificationStore) DeactivateClassification(_ context.Context, uid string) error {
 	for _, classification := range s.classifications {
-		if classification.ID == id {
+		if classification.UID == uid {
 			classification.IsActive = false
 			return nil
 		}
@@ -136,13 +136,13 @@ func (s *fakeClassificationStore) ListClassifications(_ context.Context, activeO
 }
 
 type fakeJournalTypeStore struct {
-	nextID       int64
+	nextUID      int64
 	journalTypes map[string]*core.JournalType
 }
 
 func newFakeJournalTypeStore() *fakeJournalTypeStore {
 	return &fakeJournalTypeStore{
-		nextID:       1,
+		nextUID:      1,
 		journalTypes: make(map[string]*core.JournalType),
 	}
 }
@@ -152,13 +152,13 @@ func (s *fakeJournalTypeStore) CreateJournalType(_ context.Context, input core.J
 		return existing, nil
 	}
 	journalType := &core.JournalType{
-		ID:        s.nextID,
+		UID:       fmt.Sprintf("jt-%d", s.nextUID),
 		Code:      input.Code,
 		Name:      input.Name,
 		IsActive:  true,
 		CreatedAt: time.Now(),
 	}
-	s.nextID++
+	s.nextUID++
 	s.journalTypes[input.Code] = journalType
 	return journalType, nil
 }
@@ -171,9 +171,9 @@ func (s *fakeJournalTypeStore) GetJournalTypeByCode(_ context.Context, code stri
 	return journalType, nil
 }
 
-func (s *fakeJournalTypeStore) DeactivateJournalType(_ context.Context, id int64) error {
+func (s *fakeJournalTypeStore) DeactivateJournalType(_ context.Context, uid string) error {
 	for _, journalType := range s.journalTypes {
-		if journalType.ID == id {
+		if journalType.UID == uid {
 			journalType.IsActive = false
 			return nil
 		}
@@ -193,13 +193,13 @@ func (s *fakeJournalTypeStore) ListJournalTypes(_ context.Context, activeOnly bo
 }
 
 type fakeTemplateStore struct {
-	nextID    int64
+	nextUID   int64
 	templates map[string]*core.EntryTemplate
 }
 
 func newFakeTemplateStore() *fakeTemplateStore {
 	return &fakeTemplateStore{
-		nextID:    1,
+		nextUID:   1,
 		templates: make(map[string]*core.EntryTemplate),
 	}
 }
@@ -213,33 +213,25 @@ func (s *fakeTemplateStore) CreateTemplate(_ context.Context, input core.Templat
 	}
 	lines := make([]core.EntryTemplateLine, len(input.Lines))
 	for i, line := range input.Lines {
-		lines[i] = core.EntryTemplateLine{
-			ID:               int64(i + 1),
-			TemplateID:       s.nextID,
-			ClassificationID: line.ClassificationID,
-			EntryType:        line.EntryType,
-			HolderRole:       line.HolderRole,
-			AmountKey:        line.AmountKey,
-			SortOrder:        line.SortOrder,
-		}
+		lines[i] = core.EntryTemplateLine(line)
 	}
 	template := &core.EntryTemplate{
-		ID:            s.nextID,
-		Code:          input.Code,
-		Name:          input.Name,
-		JournalTypeID: input.JournalTypeID,
-		IsActive:      true,
-		Lines:         lines,
-		CreatedAt:     time.Now(),
+		UID:            fmt.Sprintf("tmpl-%d", s.nextUID),
+		Code:           input.Code,
+		Name:           input.Name,
+		JournalTypeUID: input.JournalTypeUID,
+		IsActive:       true,
+		Lines:          lines,
+		CreatedAt:      time.Now(),
 	}
-	s.nextID++
+	s.nextUID++
 	s.templates[input.Code] = template
 	return template, nil
 }
 
-func (s *fakeTemplateStore) DeactivateTemplate(_ context.Context, id int64) error {
+func (s *fakeTemplateStore) DeactivateTemplate(_ context.Context, uid string) error {
 	for _, template := range s.templates {
-		if template.ID == id {
+		if template.UID == uid {
 			template.IsActive = false
 			return nil
 		}
@@ -338,7 +330,7 @@ func TestInstallTemplatePresets_RejectsConflictingClassification(t *testing.T) {
 	templates := newFakeTemplateStore()
 
 	classifications.classifications["main_wallet"] = &core.Classification{
-		ID:         1,
+		UID:        "cls-1",
 		Code:       "main_wallet",
 		Name:       "Main Wallet",
 		NormalSide: core.NormalSideCredit,
@@ -367,29 +359,25 @@ func TestInstallTemplatePresets_RejectsConflictingTemplate(t *testing.T) {
 	require.NoError(t, err)
 
 	templates.templates["withdraw_confirm"] = &core.EntryTemplate{
-		ID:            999,
-		Code:          "withdraw_confirm",
-		Name:          "Withdraw Confirm",
-		JournalTypeID: withdrawJournalType.ID,
-		IsActive:      true,
+		UID:            "tmpl-999",
+		Code:           "withdraw_confirm",
+		Name:           "Withdraw Confirm",
+		JournalTypeUID: withdrawJournalType.UID,
+		IsActive:       true,
 		Lines: []core.EntryTemplateLine{
 			{
-				ID:               1,
-				TemplateID:       999,
-				ClassificationID: mainWallet.ID,
-				EntryType:        core.EntryTypeDebit,
-				HolderRole:       core.HolderRoleUser,
-				AmountKey:        "amount",
-				SortOrder:        1,
+				ClassificationUID: mainWallet.UID,
+				EntryType:         core.EntryTypeDebit,
+				HolderRole:        core.HolderRoleUser,
+				AmountKey:         "amount",
+				SortOrder:         1,
 			},
 			{
-				ID:               2,
-				TemplateID:       999,
-				ClassificationID: custodial.ID,
-				EntryType:        core.EntryTypeCredit,
-				HolderRole:       core.HolderRoleSystem,
-				AmountKey:        "amount",
-				SortOrder:        2,
+				ClassificationUID: custodial.UID,
+				EntryType:         core.EntryTypeCredit,
+				HolderRole:        core.HolderRoleSystem,
+				AmountKey:         "amount",
+				SortOrder:         2,
 			},
 		},
 	}

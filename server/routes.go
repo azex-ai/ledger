@@ -13,9 +13,9 @@ func (s *Server) setupRoutes() {
 		r.Post("/journals", s.handlePostJournal)
 		r.Post("/journals/template", s.handlePostTemplate)
 		r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
-		r.Post("/journals/{id}/reverse", s.handleReverseJournal)
-		r.Post("/journals/{id}/reverse-partial", s.handleReverseJournalFraction)
-		r.Get("/journals/{id}", s.handleGetJournal)
+		r.Post("/journals/{uid}/reverse", s.handleReverseJournal)
+		r.Post("/journals/{uid}/reverse-partial", s.handleReverseJournalFraction)
+		r.Get("/journals/{uid}", s.handleGetJournal)
 		r.Get("/journals", s.handleListJournals)
 
 		// Entries
@@ -28,16 +28,16 @@ func (s *Server) setupRoutes() {
 
 		// Reservations
 		r.Post("/reservations", s.handleCreateReservation)
-		r.Post("/reservations/{id}/settle", s.handleSettleReservation)
-		r.Post("/reservations/{id}/settle-partial", s.handleSettlePartialReservation)
-		r.Post("/reservations/{id}/finalize", s.handleFinalizeReservationSettlement)
-		r.Post("/reservations/{id}/release", s.handleReleaseReservation)
+		r.Post("/reservations/{uid}/settle", s.handleSettleReservation)
+		r.Post("/reservations/{uid}/settle-partial", s.handleSettlePartialReservation)
+		r.Post("/reservations/{uid}/finalize", s.handleFinalizeReservationSettlement)
+		r.Post("/reservations/{uid}/release", s.handleReleaseReservation)
 		r.Get("/reservations", s.handleListReservations)
 
 		// Bookings (unified — replaces deposits + withdrawals)
 		r.Post("/bookings", s.handleCreateBooking)
-		r.Post("/bookings/{id}/transition", s.handleTransition)
-		r.Get("/bookings/{id}", s.handleGetBooking)
+		r.Post("/bookings/{uid}/transition", s.handleTransition)
+		r.Get("/bookings/{uid}", s.handleGetBooking)
 		r.Get("/bookings", s.handleListBookings)
 
 		// Webhooks (inbound channel callbacks)
@@ -45,21 +45,21 @@ func (s *Server) setupRoutes() {
 
 		// Events (outbound)
 		r.Get("/events", s.handleListEvents)
-		r.Get("/events/{id}", s.handleGetEvent)
+		r.Get("/events/{uid}", s.handleGetEvent)
 
 		// Metadata — Classifications
 		r.Post("/classifications", s.handleCreateClassification)
-		r.Post("/classifications/{id}/deactivate", s.handleDeactivateClassification)
+		r.Post("/classifications/{uid}/deactivate", s.handleDeactivateClassification)
 		r.Get("/classifications", s.handleListClassifications)
 
 		// Metadata — Journal Types
 		r.Post("/journal-types", s.handleCreateJournalType)
-		r.Post("/journal-types/{id}/deactivate", s.handleDeactivateJournalType)
+		r.Post("/journal-types/{uid}/deactivate", s.handleDeactivateJournalType)
 		r.Get("/journal-types", s.handleListJournalTypes)
 
 		// Metadata — Templates
 		r.Post("/templates", s.handleCreateTemplate)
-		r.Post("/templates/{id}/deactivate", s.handleDeactivateTemplate)
+		r.Post("/templates/{uid}/deactivate", s.handleDeactivateTemplate)
 		r.Post("/templates/{code}/preview", s.handlePreviewTemplate)
 		r.Get("/templates", s.handleListTemplates)
 
@@ -69,7 +69,7 @@ func (s *Server) setupRoutes() {
 
 		// Metadata — Currencies
 		r.Post("/currencies", s.handleCreateCurrency)
-		r.Post("/currencies/{id}/deactivate", s.handleDeactivateCurrency)
+		r.Post("/currencies/{uid}/deactivate", s.handleDeactivateCurrency)
 		r.Get("/currencies", s.handleListCurrencies)
 
 		// Reconciliation + Snapshots
@@ -80,8 +80,8 @@ func (s *Server) setupRoutes() {
 
 		// Audit (read-only investigation: journals by account/time, booking trace, reversal chain)
 		r.Get("/audit/journals", s.handleListAuditJournals)
-		r.Get("/audit/bookings/{id}/trace", s.handleTraceBooking)
-		r.Get("/audit/journals/{id}/reversals", s.handleListReversals)
+		r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
+		r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
 
 		// Platform (read-only, real-time system-wide balance + solvency)
 		r.Get("/platform/balances", s.handleGetPlatformBalances)

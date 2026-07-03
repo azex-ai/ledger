@@ -24,6 +24,7 @@ type QueryStore struct {
 	pool *pgxpool.Pool
 	db   DBTX
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewQueryStore creates a new QueryStore.
@@ -32,6 +33,7 @@ func NewQueryStore(pool *pgxpool.Pool) *QueryStore {
 		pool: pool,
 		db:   pool,
 		q:    sqlcgen.New(pool),
+		dims: dimCacheFor(pool),
 	}
 }
 
@@ -41,6 +43,7 @@ func (s *QueryStore) WithDB(db DBTX) *QueryStore {
 		pool: nil, // tx mode
 		db:   db,
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
@@ -49,59 +52,88 @@ var _ core.QueryProvider = (*QueryStore)(nil)
 
 // --- JournalQuerier ---
 
-func (s *QueryStore) GetJournal(ctx context.Context, id int64) (*core.Journal, []core.Entry, error) {
-	row, err := s.q.GetJournal(ctx, id)
+func (s *QueryStore) GetJournal(ctx context.Context, uid string) (*core.Journal, []core.Entry, error) {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	row, err := s.q.GetJournalByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil, fmt.Errorf("postgres: get journal: id %d: %w", id, core.ErrNotFound)
+			return nil, nil, fmt.Errorf("postgres: get journal %q: %w", uid, core.ErrNotFound)
 		}
 		return nil, nil, fmt.Errorf("postgres: get journal: %w", err)
 	}
 
-	entryRows, err := s.q.ListJournalEntries(ctx, id)
+	entryRows, err := s.q.ListJournalEntries(ctx, row.ID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres: get journal entries: %w", err)
 	}
 
 	entries := make([]core.Entry, len(entryRows))
 	for i, e := range entryRows {
-		entries[i] = *entryFromRow(e)
+		entry, err := entryCore(ctx, s.dims, s.q, e.JournalUid, e.AccountHolder, e.CurrencyID, e.ClassificationID, e.EntryType, e.Amount, e.EffectiveAt, e.CreatedAt)
+		if err != nil {
+			return nil, nil, err
+		}
+		entries[i] = *entry
 	}
-	return journalFromRow(row), entries, nil
+	journal, err := journalFromRow(ctx, s.dims, s.q, row)
+	if err != nil {
+		return nil, nil, err
+	}
+	return journal, entries, nil
 }
 
-func (s *QueryStore) ListJournals(ctx context.Context, cursorID int64, limit int32) ([]core.Journal, error) {
+func (s *QueryStore) ListJournals(ctx context.Context, cursor string, limit int32) ([]core.Journal, string, error) {
+	cursorID := decodeAuditCursor(cursor)
 	rows, err := s.q.ListJournalsCursor(ctx, sqlcgen.ListJournalsCursorParams{
 		CursorID:  cursorID,
 		PageLimit: limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list journals: %w", err)
+		return nil, "", fmt.Errorf("postgres: list journals: %w", err)
 	}
 	result := make([]core.Journal, len(rows))
 	for i, j := range rows {
-		result[i] = *journalFromRow(j)
+		journal, err := journalFromRow(ctx, s.dims, s.q, j)
+		if err != nil {
+			return nil, "", err
+		}
+		result[i] = *journal
 	}
-	return result, nil
+	return result, nextAuditCursor(rows, limit), nil
 }
 
 // --- EntryQuerier ---
 
-func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder, currencyID, cursorID int64, limit int32) ([]core.Entry, error) {
+func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder int64, currencyUID string, cursor string, limit int32) ([]core.Entry, string, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.q.ListEntriesByAccount(ctx, sqlcgen.ListEntriesByAccountParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
-		CursorID:      cursorID,
+		CurrencyID:    cur.ID,
+		CursorID:      decodeAuditCursor(cursor),
 		PageLimit:     limit,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list entries: %w", err)
+		return nil, "", fmt.Errorf("postgres: list entries: %w", err)
 	}
 	result := make([]core.Entry, len(rows))
 	for i, e := range rows {
-		result[i] = *entryFromRow(e)
+		entry, err := entryCore(ctx, s.dims, s.q, e.JournalUid, e.AccountHolder, e.CurrencyID, e.ClassificationID, e.EntryType, e.Amount, e.EffectiveAt, e.CreatedAt)
+		if err != nil {
+			return nil, "", err
+		}
+		result[i] = *entry
 	}
-	return result, nil
+	nextCursor := ""
+	if limit > 0 && int32(len(rows)) == limit {
+		nextCursor = encodeCursorString(rows[len(rows)-1].ID.Int64)
+	}
+	return result, nextCursor, nil
 }
 
 // --- ReservationQuerier ---
@@ -117,17 +149,25 @@ func (s *QueryStore) ListReservations(ctx context.Context, holder int64, status 
 	}
 	result := make([]core.Reservation, len(rows))
 	for i, r := range rows {
-		result[i] = *reservationFromRow(r)
+		res, err := reservationFromRow(ctx, s.dims, s.q, r)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *res
 	}
 	return result, nil
 }
 
 // --- SnapshotQuerier ---
 
-func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]core.BalanceSnapshot, error) {
+func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder int64, currencyUID string, start, end time.Time) ([]core.BalanceSnapshot, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.q.ListSnapshotsByDateRange(ctx, sqlcgen.ListSnapshotsByDateRangeParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
+		CurrencyID:    cur.ID,
 		StartDate:     pgtype.Date{Time: start, Valid: true},
 		EndDate:       pgtype.Date{Time: end, Valid: true},
 	})
@@ -136,12 +176,16 @@ func (s *QueryStore) ListSnapshotsByDateRange(ctx context.Context, holder, curre
 	}
 	result := make([]core.BalanceSnapshot, len(rows))
 	for i, r := range rows {
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, r.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		result[i] = core.BalanceSnapshot{
-			AccountHolder:    r.AccountHolder,
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			SnapshotDate:     r.SnapshotDate.Time,
-			Balance:          mustNumericToDecimal(r.Balance),
+			AccountHolder:     r.AccountHolder,
+			CurrencyUID:       currencyUID,
+			ClassificationUID: cls.UID,
+			SnapshotDate:      r.SnapshotDate.Time,
+			Balance:           mustNumericToDecimal(r.Balance),
 		}
 	}
 	return result, nil
@@ -208,11 +252,19 @@ ORDER BY currency_id, classification_id`
 		if err != nil {
 			return nil, fmt.Errorf("postgres: get system rollups: convert balance: %w", err)
 		}
+		cur, err := s.dims.currencyByIDOrErr(ctx, s.q, currencyID)
+		if err != nil {
+			return nil, err
+		}
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, classificationID)
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, core.SystemRollup{
-			CurrencyID:       currencyID,
-			ClassificationID: classificationID,
-			TotalBalance:     balance,
-			UpdatedAt:        updatedAt,
+			CurrencyUID:       cur.UID,
+			ClassificationUID: cls.UID,
+			TotalBalance:      balance,
+			UpdatedAt:         updatedAt,
 		})
 	}
 	if err := rows.Err(); err != nil {

@@ -54,7 +54,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	journal, err := ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-deposit"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(500)},
 		Source:         "test",
@@ -64,7 +64,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-lock-release"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(40)},
 		Source:         "test",
@@ -73,7 +73,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "unlock_funds", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-unlock"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(40)},
 		Source:         "test",
@@ -82,7 +82,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "lock_funds", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-lock-withdraw"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(105)},
 		Source:         "test",
@@ -91,7 +91,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "withdraw_fee", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-withdraw-fee"),
 		Amounts:        map[string]decimal.Decimal{"fee": decimal.NewFromInt(5)},
 		Source:         "test",
@@ -100,7 +100,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "withdraw_confirm", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-withdraw-confirm"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
@@ -122,23 +122,23 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 	suspense, err := classStore.GetByCode(ctx, "suspense")
 	require.NoError(t, err)
 
-	walletBal, err := ledgerStore.GetBalance(ctx, userID, curID, mainWallet.ID)
+	walletBal, err := ledgerStore.GetBalance(ctx, userID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(decimal.NewFromInt(395)))
 
-	lockedBal, err := ledgerStore.GetBalance(ctx, userID, curID, locked.ID)
+	lockedBal, err := ledgerStore.GetBalance(ctx, userID, curID, locked.UID)
 	require.NoError(t, err)
 	assert.True(t, lockedBal.IsZero())
 
-	feeExpenseBal, err := ledgerStore.GetBalance(ctx, userID, curID, feeExpense.ID)
+	feeExpenseBal, err := ledgerStore.GetBalance(ctx, userID, curID, feeExpense.UID)
 	require.NoError(t, err)
 	assert.True(t, feeExpenseBal.Equal(decimal.NewFromInt(5)))
 
-	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, curID, custodial.ID)
+	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, curID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, custodialBal.Equal(decimal.NewFromInt(395)))
 
-	feeRevenueBal, err := ledgerStore.GetBalance(ctx, -userID, curID, feeRevenue.ID)
+	feeRevenueBal, err := ledgerStore.GetBalance(ctx, -userID, curID, feeRevenue.UID)
 	require.NoError(t, err)
 	assert.True(t, feeRevenueBal.Equal(decimal.NewFromInt(5)))
 
@@ -146,7 +146,7 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
@@ -155,43 +155,43 @@ func TestInstallDefaultTemplatePresets(t *testing.T) {
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_confirm_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-confirm"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(95)},
 		Source:         "test",
 	})
 	require.NoError(t, err)
 
-	stagedWalletBal, err := ledgerStore.GetBalance(ctx, stagedUserID, curID, mainWallet.ID)
+	stagedWalletBal, err := ledgerStore.GetBalance(ctx, stagedUserID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedWalletBal.Equal(decimal.NewFromInt(95)))
 
-	stagedPendingBal, err := ledgerStore.GetBalance(ctx, stagedUserID, curID, pending.ID)
+	stagedPendingBal, err := ledgerStore.GetBalance(ctx, stagedUserID, curID, pending.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedPendingBal.Equal(decimal.NewFromInt(5)))
 
-	stagedSuspenseBal, err := ledgerStore.GetBalance(ctx, -stagedUserID, curID, suspense.ID)
+	stagedSuspenseBal, err := ledgerStore.GetBalance(ctx, -stagedUserID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedSuspenseBal.Equal(decimal.NewFromInt(5)))
 
-	stagedCustodialBal, err := ledgerStore.GetBalance(ctx, -stagedUserID, curID, custodial.ID)
+	stagedCustodialBal, err := ledgerStore.GetBalance(ctx, -stagedUserID, curID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedCustodialBal.Equal(decimal.NewFromInt(95)))
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_release_pending", core.TemplateParams{
 		HolderID:       stagedUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("preset-staged-deposit-release"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(5)},
 		Source:         "test",
 	})
 	require.NoError(t, err)
 
-	stagedPendingBal, err = ledgerStore.GetBalance(ctx, stagedUserID, curID, pending.ID)
+	stagedPendingBal, err = ledgerStore.GetBalance(ctx, stagedUserID, curID, pending.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedPendingBal.IsZero())
 
-	stagedSuspenseBal, err = ledgerStore.GetBalance(ctx, -stagedUserID, curID, suspense.ID)
+	stagedSuspenseBal, err = ledgerStore.GetBalance(ctx, -stagedUserID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, stagedSuspenseBal.IsZero())
 }
@@ -219,7 +219,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	shortUserID := int64(501)
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       shortUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-short-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
@@ -234,32 +234,32 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 	require.NoError(t, err)
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       shortUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-short"),
 		Source:         "test",
 	}, shortPlan)
 	require.NoError(t, err)
 
-	shortWalletBal, err := ledgerStore.GetBalance(ctx, shortUserID, curID, mainWallet.ID)
+	shortWalletBal, err := ledgerStore.GetBalance(ctx, shortUserID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, shortWalletBal.Equal(decimal.NewFromInt(98)))
 
-	shortPendingBal, err := ledgerStore.GetBalance(ctx, shortUserID, curID, pending.ID)
+	shortPendingBal, err := ledgerStore.GetBalance(ctx, shortUserID, curID, pending.UID)
 	require.NoError(t, err)
 	assert.True(t, shortPendingBal.IsZero())
 
-	shortSuspenseBal, err := ledgerStore.GetBalance(ctx, -shortUserID, curID, suspense.ID)
+	shortSuspenseBal, err := ledgerStore.GetBalance(ctx, -shortUserID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, shortSuspenseBal.IsZero())
 
-	shortCustodialBal, err := ledgerStore.GetBalance(ctx, -shortUserID, curID, custodial.ID)
+	shortCustodialBal, err := ledgerStore.GetBalance(ctx, -shortUserID, curID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, shortCustodialBal.Equal(decimal.NewFromInt(98)))
 
 	overUserID := int64(502)
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       overUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-over-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
@@ -276,42 +276,42 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       overUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-over"),
 		Source:         "test",
 	}, overPlan)
 	require.NoError(t, err)
 
-	overWalletBal, err := ledgerStore.GetBalance(ctx, overUserID, curID, mainWallet.ID)
+	overWalletBal, err := ledgerStore.GetBalance(ctx, overUserID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, overWalletBal.Equal(decimal.NewFromInt(100)))
 
-	overPendingBal, err := ledgerStore.GetBalance(ctx, overUserID, curID, pending.ID)
+	overPendingBal, err := ledgerStore.GetBalance(ctx, overUserID, curID, pending.UID)
 	require.NoError(t, err)
 	assert.True(t, overPendingBal.IsZero())
 
-	overSuspenseBal, err := ledgerStore.GetBalance(ctx, -overUserID, curID, suspense.ID)
+	overSuspenseBal, err := ledgerStore.GetBalance(ctx, -overUserID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, overSuspenseBal.Equal(decimal.NewFromInt(10)))
 
-	overCustodialBal, err := ledgerStore.GetBalance(ctx, -overUserID, curID, custodial.ID)
+	overCustodialBal, err := ledgerStore.GetBalance(ctx, -overUserID, curID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, overCustodialBal.Equal(decimal.NewFromInt(110)))
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_resolve_overage", core.TemplateParams{
 		HolderID:       overUserID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-over-resolve"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(10)},
 		Source:         "test",
 	})
 	require.NoError(t, err)
 
-	overWalletBal, err = ledgerStore.GetBalance(ctx, overUserID, curID, mainWallet.ID)
+	overWalletBal, err = ledgerStore.GetBalance(ctx, overUserID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, overWalletBal.Equal(decimal.NewFromInt(110)))
 
-	overSuspenseBal, err = ledgerStore.GetBalance(ctx, -overUserID, curID, suspense.ID)
+	overSuspenseBal, err = ledgerStore.GetBalance(ctx, -overUserID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, overSuspenseBal.IsZero())
 }
@@ -339,7 +339,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 	userID := int64(777)
 	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_pending", core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-batch-pending"),
 		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
 		Source:         "test",
@@ -348,7 +348,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 
 	_, err = presets.ExecuteDepositTolerancePlan(ctx, ledgerStore, core.TemplateParams{
 		HolderID:       userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		IdempotencyKey: postgrestest.UniqueKey("tolerance-batch-fail"),
 		Source:         "test",
 	}, &presets.DepositTolerancePlan{
@@ -371,19 +371,19 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	walletBal, err := ledgerStore.GetBalance(ctx, userID, curID, mainWallet.ID)
+	walletBal, err := ledgerStore.GetBalance(ctx, userID, curID, mainWallet.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.IsZero())
 
-	pendingBal, err := ledgerStore.GetBalance(ctx, userID, curID, pending.ID)
+	pendingBal, err := ledgerStore.GetBalance(ctx, userID, curID, pending.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.Equal(decimal.NewFromInt(100)))
 
-	suspenseBal, err := ledgerStore.GetBalance(ctx, -userID, curID, suspense.ID)
+	suspenseBal, err := ledgerStore.GetBalance(ctx, -userID, curID, suspense.UID)
 	require.NoError(t, err)
 	assert.True(t, suspenseBal.Equal(decimal.NewFromInt(100)))
 
-	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, curID, custodial.ID)
+	custodialBal, err := ledgerStore.GetBalance(ctx, -userID, curID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, custodialBal.IsZero())
 }

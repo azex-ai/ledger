@@ -54,31 +54,20 @@ type accountPolicyDim struct {
 // table) so it is checked per-entry, fail-fast, with no netting.
 //
 // See docs/INVARIANTS.md I-17.
-func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Queries, entries []core.EntryInput) error {
-	normalSides := make(map[int64]core.NormalSide)
-	policies := make(map[accountPolicyDim]*core.AccountPolicy)
+func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Queries, entries []resolvedEntry) error {
+	policies := make(map[accountPolicyDim]*sqlcgen.AccountPolicy)
 	dimensionDelta := make(map[accountPolicyDim]decimal.Decimal)
 	policyDelta := make(map[int64]decimal.Decimal)
-	policyByID := make(map[int64]*core.AccountPolicy)
+	policyByID := make(map[int64]*sqlcgen.AccountPolicy)
 
 	for _, e := range entries {
-		normalSide, ok := normalSides[e.ClassificationID]
-		if !ok {
-			cls, err := q.GetClassification(ctx, e.ClassificationID)
-			if err != nil {
-				return fmt.Errorf("postgres: post journal: account policy: get classification %d: %w", e.ClassificationID, err)
-			}
-			normalSide = core.NormalSide(cls.NormalSide)
-			normalSides[e.ClassificationID] = normalSide
-		}
-
-		direction := core.EntryDirection(e.EntryType, normalSide)
+		direction := core.EntryDirection(e.EntryType, e.normalSide)
 		delta := e.Amount
 		if direction == core.BalanceDirectionDecrease {
 			delta = delta.Neg()
 		}
 
-		dim := accountPolicyDim{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID}
+		dim := accountPolicyDim{holder: e.AccountHolder, currencyID: e.currencyID, classificationID: e.classificationID}
 		dimensionDelta[dim] = dimensionDelta[dim].Add(delta)
 
 		policy, ok := policies[dim]
@@ -94,14 +83,14 @@ func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Que
 			continue
 		}
 
-		if policy.Status == core.AccountPolicyStatusClosed {
+		if core.AccountPolicyStatus(policy.Status) == core.AccountPolicyStatusClosed {
 			return fmt.Errorf(
 				"postgres: post journal: account %d currency %d classification %d is closed (policy %d): %w",
 				dim.holder, dim.currencyID, dim.classificationID, policy.ID, core.ErrAccountClosed,
 			)
 		}
 
-		if policy.Status == core.AccountPolicyStatusFrozen {
+		if core.AccountPolicyStatus(policy.Status) == core.AccountPolicyStatusFrozen {
 			policyDelta[policy.ID] = policyDelta[policy.ID].Add(delta)
 			policyByID[policy.ID] = policy
 		}
@@ -122,15 +111,16 @@ func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Que
 		if policy == nil || !policy.EnforceMinBalance {
 			continue
 		}
+		minBalance := mustNumericToDecimal(policy.MinBalance)
 		before, err := s.getBalanceWithQueries(ctx, q, dim.holder, dim.currencyID, dim.classificationID)
 		if err != nil {
 			return fmt.Errorf("postgres: post journal: account policy: get balance: %w", err)
 		}
 		after := before.Add(delta)
-		if after.LessThan(policy.MinBalance) {
+		if after.LessThan(minBalance) {
 			return fmt.Errorf(
 				"postgres: post journal: account %d currency %d classification %d balance %s would fall below min_balance %s (policy %d): %w",
-				dim.holder, dim.currencyID, dim.classificationID, after, policy.MinBalance, policy.ID, core.ErrInsufficientBalance,
+				dim.holder, dim.currencyID, dim.classificationID, after, minBalance, policy.ID, core.ErrInsufficientBalance,
 			)
 		}
 	}

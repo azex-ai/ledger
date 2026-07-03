@@ -19,7 +19,7 @@ type HistoricalBalanceLister interface {
 // SnapshotWriter writes and reads balance snapshots.
 type SnapshotWriter interface {
 	UpsertSnapshot(ctx context.Context, snap core.BalanceSnapshot) error
-	GetSnapshotBalances(ctx context.Context, holder, currencyID int64, date time.Time) ([]core.Balance, error)
+	GetSnapshotBalances(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error)
 }
 
 // snapshotLockAcquirer wraps the advisory-lock helpers so they can be
@@ -156,26 +156,26 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 	written := 0
 	for _, balance := range balances {
 		snap := core.BalanceSnapshot{
-			AccountHolder:    balance.AccountHolder,
-			CurrencyID:       balance.CurrencyID,
-			ClassificationID: balance.ClassificationID,
-			SnapshotDate:     snapshotDate,
-			Balance:          balance.Balance,
+			AccountHolder:     balance.AccountHolder,
+			CurrencyUID:       balance.CurrencyUID,
+			ClassificationUID: balance.ClassificationUID,
+			SnapshotDate:      snapshotDate,
+			Balance:           balance.Balance,
 		}
 
 		if s.sparse != nil {
 			ok, err := s.sparse.UpsertSnapshotSparse(ctx, snap)
 			if err != nil {
-				return fmt.Errorf("service: snapshot: sparse insert: holder=%d currency=%d class=%d: %w",
-					balance.AccountHolder, balance.CurrencyID, balance.ClassificationID, err)
+				return fmt.Errorf("service: snapshot: sparse insert: holder=%d currency=%s class=%s: %w",
+					balance.AccountHolder, balance.CurrencyUID, balance.ClassificationUID, err)
 			}
 			if ok {
 				written++
 			}
 		} else {
 			if err := s.snapshots.UpsertSnapshot(ctx, snap); err != nil {
-				return fmt.Errorf("service: snapshot: insert: holder=%d currency=%d class=%d: %w",
-					balance.AccountHolder, balance.CurrencyID, balance.ClassificationID, err)
+				return fmt.Errorf("service: snapshot: insert: holder=%d currency=%s class=%s: %w",
+					balance.AccountHolder, balance.CurrencyUID, balance.ClassificationUID, err)
 			}
 			written++
 		}
@@ -192,10 +192,10 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 }
 
 // GetSnapshotBalance reads balance snapshots for a specific holder, currency, and date.
-func (s *SnapshotService) GetSnapshotBalance(ctx context.Context, holder int64, currencyID int64, date time.Time) ([]core.Balance, error) {
+func (s *SnapshotService) GetSnapshotBalance(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error) {
 	snapshotDate := normalizeDay(date)
 
-	balances, err := s.snapshots.GetSnapshotBalances(ctx, holder, currencyID, snapshotDate)
+	balances, err := s.snapshots.GetSnapshotBalances(ctx, holder, currencyUID, snapshotDate)
 	if err != nil {
 		return nil, fmt.Errorf("service: snapshot: get balances: %w", err)
 	}

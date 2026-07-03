@@ -61,28 +61,28 @@ describe("journals + entries", () => {
   });
 
   test("getJournal", async () => {
-    const i = intercept("get", "/api/v1/journals/7", {});
-    await client.getJournal(7);
-    expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/7`);
+    const i = intercept("get", "/api/v1/journals/uid-7", {});
+    await client.getJournal("uid-7");
+    expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/uid-7`);
   });
 
   test("postJournal attaches Bearer and serializes body", async () => {
     const i = intercept("post", "/api/v1/journals", {});
     await client.postJournal({
-      journal_type_id: 1,
+      journal_type_uid: "uid-1",
       idempotency_key: "k1",
       entries: [],
     });
     const c = i.captured();
     expect(c?.method).toBe("POST");
     expect(c?.auth).toBe(`Bearer ${API_KEY}`);
-    expect(c?.body).toMatchObject({ journal_type_id: 1, idempotency_key: "k1" });
+    expect(c?.body).toMatchObject({ journal_type_uid: "uid-1", idempotency_key: "k1" });
   });
 
   test("postJournal omits Bearer when no apiKey", async () => {
     const i = intercept("post", "/api/v1/journals", {});
     await noKey.postJournal({
-      journal_type_id: 1,
+      journal_type_uid: "uid-1",
       idempotency_key: "k1",
       entries: [],
     });
@@ -94,7 +94,7 @@ describe("journals + entries", () => {
     await client.postTemplateJournal({
       template_code: "dep",
       holder_id: 1,
-      currency_id: 1,
+      currency_uid: "uid-1",
       idempotency_key: "k",
       amounts: { gross: "10" },
     });
@@ -103,17 +103,17 @@ describe("journals + entries", () => {
   });
 
   test("reverseJournal", async () => {
-    const i = intercept("post", "/api/v1/journals/5/reverse", {});
-    await client.reverseJournal(5, "oops");
-    expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/5/reverse`);
+    const i = intercept("post", "/api/v1/journals/uid-5/reverse", {});
+    await client.reverseJournal("uid-5", "oops");
+    expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/uid-5/reverse`);
     expect(i.captured()?.body).toEqual({ reason: "oops" });
   });
 
   test("listEntries", async () => {
     const i = intercept("get", "/api/v1/entries", { list: [], next_cursor: "" });
-    await client.listEntries({ holder: 3, currency_id: 1 });
+    await client.listEntries({ holder: 3, currency_uid: "cur-1" });
     expect(i.captured()?.url).toBe(
-      `${BASE}/api/v1/entries?holder=3&currency_id=1`,
+      `${BASE}/api/v1/entries?holder=3&currency_uid=cur-1`,
     );
   });
 });
@@ -124,17 +124,17 @@ describe("balances", () => {
     await client.getBalances(9);
     expect(a.captured()?.url).toBe(`${BASE}/api/v1/balances/9`);
 
-    const b = intercept("get", "/api/v1/balances/9/2", []);
-    await client.getBalancesByCurrency(9, 2);
-    expect(b.captured()?.url).toBe(`${BASE}/api/v1/balances/9/2`);
+    const b = intercept("get", "/api/v1/balances/9/cur-2", []);
+    await client.getBalancesByCurrency(9, "cur-2");
+    expect(b.captured()?.url).toBe(`${BASE}/api/v1/balances/9/cur-2`);
   });
 
   test("batchBalances POST body", async () => {
     const i = intercept("post", "/api/v1/balances/batch", {});
-    await client.batchBalances([1, 2], 3);
+    await client.batchBalances([1, 2], "uid-3");
     expect(i.captured()?.method).toBe("POST");
     expect(i.captured()?.auth).toBe(`Bearer ${API_KEY}`);
-    expect(i.captured()?.body).toEqual({ holder_ids: [1, 2], currency_id: 3 });
+    expect(i.captured()?.body).toEqual({ holder_ids: [1, 2], currency_uid: "uid-3" });
   });
 });
 
@@ -151,7 +151,7 @@ describe("reservations", () => {
     const i = intercept("post", "/api/v1/reservations", {});
     await client.createReservation({
       account_holder: 1,
-      currency_id: 1,
+      currency_uid: "uid-1",
       amount: "5",
       idempotency_key: "k",
     });
@@ -160,12 +160,12 @@ describe("reservations", () => {
   });
 
   test("settleReservation + releaseReservation (204)", async () => {
-    const s = intercept("post", "/api/v1/reservations/4/settle", null, 204);
-    await client.settleReservation(4, "3");
+    const s = intercept("post", "/api/v1/reservations/uid-4/settle", null, 204);
+    await client.settleReservation("uid-4", "3");
     expect(s.captured()?.body).toEqual({ actual_amount: "3" });
 
-    const r = intercept("post", "/api/v1/reservations/4/release", null, 204);
-    await client.releaseReservation(4);
+    const r = intercept("post", "/api/v1/reservations/uid-4/release", null, 204);
+    await client.releaseReservation("uid-4");
     expect(r.captured()?.method).toBe("POST");
   });
 });
@@ -176,7 +176,7 @@ describe("bookings", () => {
     await client.createBooking({
       classification_code: "deposit",
       account_holder: 1,
-      currency_id: 1,
+      currency_uid: "uid-1",
       amount: "10",
       idempotency_key: "k",
       channel_name: "evm",
@@ -186,16 +186,16 @@ describe("bookings", () => {
   });
 
   test("transitionBooking", async () => {
-    const i = intercept("post", "/api/v1/bookings/8/transition", {});
-    await client.transitionBooking(8, { to_status: "confirmed" });
-    expect(i.captured()?.url).toBe(`${BASE}/api/v1/bookings/8/transition`);
+    const i = intercept("post", "/api/v1/bookings/uid-8/transition", {});
+    await client.transitionBooking("uid-8", { to_status: "confirmed" });
+    expect(i.captured()?.url).toBe(`${BASE}/api/v1/bookings/uid-8/transition`);
     expect(i.captured()?.body).toEqual({ to_status: "confirmed" });
   });
 
   test("getBooking + listBookings", async () => {
-    const g = intercept("get", "/api/v1/bookings/8", {});
-    await client.getBooking(8);
-    expect(g.captured()?.url).toBe(`${BASE}/api/v1/bookings/8`);
+    const g = intercept("get", "/api/v1/bookings/uid-8", {});
+    await client.getBooking("uid-8");
+    expect(g.captured()?.url).toBe(`${BASE}/api/v1/bookings/uid-8`);
 
     const l = intercept("get", "/api/v1/bookings", { list: [], next_cursor: "" });
     await client.listBookings({ holder: 1, status: "pending" });
@@ -207,9 +207,9 @@ describe("bookings", () => {
 
 describe("events", () => {
   test("getEvent + listEvents", async () => {
-    const g = intercept("get", "/api/v1/events/2", {});
-    await client.getEvent(2);
-    expect(g.captured()?.url).toBe(`${BASE}/api/v1/events/2`);
+    const g = intercept("get", "/api/v1/events/uid-2", {});
+    await client.getEvent("uid-2");
+    expect(g.captured()?.url).toBe(`${BASE}/api/v1/events/uid-2`);
 
     const l = intercept("get", "/api/v1/events", { list: [], next_cursor: "" });
     await client.listEvents({ classification_code: "deposit", limit: 5 });
@@ -238,11 +238,11 @@ describe("classifications", () => {
 
     const d = intercept(
       "post",
-      "/api/v1/classifications/3/deactivate",
+      "/api/v1/classifications/uid-3/deactivate",
       null,
       204,
     );
-    await client.deactivateClassification(3);
+    await client.deactivateClassification("uid-3");
     expect(d.captured()?.method).toBe("POST");
   });
 });
@@ -259,8 +259,8 @@ describe("journal-types", () => {
     await client.createJournalType({ code: "jt", name: "JT" });
     expect(c.captured()?.body).toEqual({ code: "jt", name: "JT" });
 
-    const d = intercept("post", "/api/v1/journal-types/2/deactivate", null, 204);
-    await client.deactivateJournalType(2);
+    const d = intercept("post", "/api/v1/journal-types/uid-2/deactivate", null, 204);
+    await client.deactivateJournalType("uid-2");
     expect(d.captured()?.method).toBe("POST");
   });
 });
@@ -275,13 +275,13 @@ describe("templates", () => {
     await client.createTemplate({
       code: "t",
       name: "T",
-      journal_type_id: 1,
+      journal_type_uid: "uid-1",
       lines: [],
     });
     expect(c.captured()?.auth).toBe(`Bearer ${API_KEY}`);
 
-    const d = intercept("post", "/api/v1/templates/9/deactivate", null, 204);
-    await client.deactivateTemplate(9);
+    const d = intercept("post", "/api/v1/templates/uid-9/deactivate", null, 204);
+    await client.deactivateTemplate("uid-9");
     expect(d.captured()?.method).toBe("POST");
 
     const p = intercept("post", "/api/v1/templates/dep/preview", {
@@ -289,7 +289,7 @@ describe("templates", () => {
       total_debit: "0",
       total_credit: "0",
     });
-    await client.previewTemplate("dep", { holder_id: 1, currency_id: 1 });
+    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1" });
     expect(p.captured()?.url).toBe(`${BASE}/api/v1/templates/dep/preview`);
     expect(p.captured()?.body).toMatchObject({ holder_id: 1 });
   });
@@ -316,9 +316,9 @@ describe("currencies", () => {
   });
 
   test("deactivateCurrency", async () => {
-    const i = intercept("post", "/api/v1/currencies/4/deactivate", null, 204);
-    await client.deactivateCurrency(4);
-    expect(i.captured()?.url).toBe(`${BASE}/api/v1/currencies/4/deactivate`);
+    const i = intercept("post", "/api/v1/currencies/uid-4/deactivate", null, 204);
+    await client.deactivateCurrency("uid-4");
+    expect(i.captured()?.url).toBe(`${BASE}/api/v1/currencies/uid-4/deactivate`);
     expect(i.captured()?.method).toBe("POST");
   });
 });
@@ -331,8 +331,8 @@ describe("reconciliation", () => {
     expect(g.captured()?.auth).toBe(`Bearer ${API_KEY}`);
 
     const a = intercept("post", "/api/v1/reconcile/account", {});
-    await client.reconcileAccount(1, 2);
-    expect(a.captured()?.body).toEqual({ holder: 1, currency_id: 2 });
+    await client.reconcileAccount(1, "cur-2");
+    expect(a.captured()?.body).toEqual({ holder: 1, currency_uid: "cur-2" });
   });
 });
 

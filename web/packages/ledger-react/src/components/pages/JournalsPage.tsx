@@ -33,16 +33,16 @@ export interface JournalsPageProps {
 
 interface RawEntry {
   account_holder?: unknown;
-  currency_id?: unknown;
-  classification_id?: unknown;
+  currency_uid?: unknown;
+  classification_uid?: unknown;
   entry_type?: unknown;
   amount?: unknown;
 }
 
 type ValidEntry = {
   account_holder: number;
-  currency_id: number;
-  classification_id: number;
+  currency_uid: string;
+  classification_uid: string;
   entry_type: "debit" | "credit";
   amount: string;
 };
@@ -59,8 +59,8 @@ function validateEntries(input: unknown): ValidEntry[] | string {
     const e = input[i] as RawEntry;
     if (!e || typeof e !== "object") return `Entry ${i}: must be an object`;
     if (typeof e.account_holder !== "number") return `Entry ${i}: account_holder must be a number`;
-    if (typeof e.currency_id !== "number") return `Entry ${i}: currency_id must be a number`;
-    if (typeof e.classification_id !== "number") return `Entry ${i}: classification_id must be a number`;
+    if (typeof e.currency_uid !== "string" || e.currency_uid === "") return `Entry ${i}: currency_uid must be a non-empty string`;
+    if (typeof e.classification_uid !== "string" || e.classification_uid === "") return `Entry ${i}: classification_uid must be a non-empty string`;
     if (e.entry_type !== "debit" && e.entry_type !== "credit") {
       return `Entry ${i}: entry_type must be "debit" or "credit"`;
     }
@@ -69,8 +69,8 @@ function validateEntries(input: unknown): ValidEntry[] | string {
     }
     out.push({
       account_holder: e.account_holder,
-      currency_id: e.currency_id,
-      classification_id: e.classification_id,
+      currency_uid: e.currency_uid,
+      classification_uid: e.classification_uid,
       entry_type: e.entry_type,
       amount: e.amount,
     });
@@ -81,7 +81,7 @@ function validateEntries(input: unknown): ValidEntry[] | string {
 function PostJournalDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
-    journal_type_id: "",
+    journal_type_uid: "",
     idempotency_key: "",
     source: "api",
     entries: "",
@@ -89,8 +89,8 @@ function PostJournalDialog() {
   const mutation = usePostJournal();
 
   function handleSubmit() {
-    const journalTypeId = parseInt(form.journal_type_id, 10);
-    if (isNaN(journalTypeId)) {
+    const journalTypeUid = form.journal_type_uid.trim();
+    if (journalTypeUid === "") {
       toast.error("Journal Type ID must be a number");
       return;
     }
@@ -108,7 +108,7 @@ function PostJournalDialog() {
     }
     mutation.mutate(
       {
-        journal_type_id: journalTypeId,
+        journal_type_uid: journalTypeUid,
         idempotency_key: form.idempotency_key,
         source: form.source,
         entries,
@@ -132,7 +132,7 @@ function PostJournalDialog() {
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
             <Label htmlFor="pj-type-id">Journal Type ID</Label>
-            <Input id="pj-type-id" value={form.journal_type_id} onChange={(e) => setForm({ ...form, journal_type_id: e.target.value })} placeholder="1" />
+            <Input id="pj-type-id" value={form.journal_type_uid} onChange={(e) => setForm({ ...form, journal_type_uid: e.target.value })} placeholder="1" />
           </div>
           <div className="grid gap-2">
             <Label htmlFor="pj-idem-key">Idempotency Key</Label>
@@ -150,7 +150,7 @@ function PostJournalDialog() {
               onChange={(e) => setForm({ ...form, entries: e.target.value })}
               rows={6}
               className="font-mono text-xs"
-              placeholder={`[{"account_holder":1001,"currency_id":1,"classification_id":1,"entry_type":"debit","amount":"100.00"},{"account_holder":-1001,"currency_id":1,"classification_id":2,"entry_type":"credit","amount":"100.00"}]`}
+              placeholder={`[{"account_holder":1001,"currency_uid":1,"classification_uid":1,"entry_type":"debit","amount":"100.00"},{"account_holder":-1001,"currency_uid":1,"classification_uid":2,"entry_type":"credit","amount":"100.00"}]`}
             />
           </div>
         </div>
@@ -169,7 +169,7 @@ function TemplateJournalDialog() {
   const [form, setForm] = useState({
     template_code: "",
     holder_id: "",
-    currency_id: "",
+    currency_uid: "",
     idempotency_key: "",
     amounts: "",
     source: "",
@@ -178,8 +178,8 @@ function TemplateJournalDialog() {
 
   function handleSubmit() {
     const holderId = parseInt(form.holder_id, 10);
-    const currencyId = parseInt(form.currency_id, 10);
-    if (isNaN(holderId) || isNaN(currencyId)) {
+    const currencyUid = form.currency_uid.trim();
+    if (isNaN(holderId) || currencyUid === "") {
       toast.error("Holder ID and Currency ID must be numbers");
       return;
     }
@@ -204,7 +204,7 @@ function TemplateJournalDialog() {
       {
         template_code: form.template_code,
         holder_id: holderId,
-        currency_id: currencyId,
+        currency_uid: currencyUid,
         idempotency_key: form.idempotency_key,
         amounts: amountsRecord,
         source: form.source || undefined,
@@ -237,7 +237,7 @@ function TemplateJournalDialog() {
             </div>
             <div className="grid gap-2">
               <Label htmlFor="tj-currency">Currency ID</Label>
-              <Input id="tj-currency" value={form.currency_id} onChange={(e) => setForm({ ...form, currency_id: e.target.value })} placeholder="1" />
+              <Input id="tj-currency" value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" />
             </div>
           </div>
           <div className="grid gap-2">
@@ -309,19 +309,19 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
             </TableHeader>
             <TableBody>
               {journals.map((j) => (
-                <TableRow key={j.id}>
+                <TableRow key={j.uid}>
                   <TableCell>
-                    <Link href={`/journals/${j.id}`} className="text-primary underline-offset-4 hover:underline">
-                      #{j.id}
+                    <Link href={`/journals/${j.uid}`} className="text-primary underline-offset-4 hover:underline">
+                      #{j.uid}
                     </Link>
                   </TableCell>
                   <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.idempotency_key}</TableCell>
-                  <TableCell>{j.journal_type_id}</TableCell>
+                  <TableCell>{j.journal_type_uid}</TableCell>
                   <TableCell>{j.source}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(j.total_debit)}</TableCell>
                   <TableCell className="text-right font-mono">{formatAmount(j.total_credit)}</TableCell>
                   <TableCell>
-                    {j.reversal_of ? (
+                    {j.reversal_of_uid ? (
                       <StatusBadge status="reversed" />
                     ) : null}
                   </TableCell>

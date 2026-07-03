@@ -50,7 +50,7 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 	sysID := core.SystemAccountHolder(userID)
 
 	// Sanity: with no journals the platform balance is empty.
-	pb0, err := pbStore.GetPlatformBalances(ctx, usdt.ID)
+	pb0, err := pbStore.GetPlatformBalances(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.Empty(t, pb0.UserSide)
 	assert.Empty(t, pb0.SystemSide)
@@ -59,11 +59,11 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 	// NOT touch balance_checkpoints — that's the rollup worker's job, which we
 	// deliberately do not run here.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("rt-deposit"),
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: sysID, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sysID, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 		Source: "test",
 	})
@@ -75,14 +75,14 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 	var cpCount int
 	require.NoError(t,
 		pool.QueryRow(ctx,
-			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = $1 AND account_holder IN ($2, $3)",
-			usdt.ID, userID, sysID,
+			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid) AND account_holder IN ($2, $3)",
+			usdt.UID, userID, sysID,
 		).Scan(&cpCount),
 	)
 	require.Zero(t, cpCount, "test invalid: checkpoints should not exist before rollup runs")
 
 	// Realtime read: must reflect the journal even with no checkpoints.
-	pb, err := pbStore.GetPlatformBalances(ctx, usdt.ID)
+	pb, err := pbStore.GetPlatformBalances(ctx, usdt.UID)
 	require.NoError(t, err)
 
 	assert.True(t,
@@ -98,7 +98,7 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 	)
 
 	// Liability: 500 (the only user-side entry).
-	liability, err := pbStore.GetTotalLiabilityByAsset(ctx, usdt.ID)
+	liability, err := pbStore.GetTotalLiabilityByAsset(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, liability.Equal(decimal.NewFromInt(500)),
 		"liability: expected 500, got %s", liability)
@@ -137,11 +137,11 @@ func TestPlatformBalance_RealtimeReflectsSecondJournal(t *testing.T) {
 
 	post := func(amount int64, idem string) {
 		_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jt.ID,
+			JournalTypeUID: jt.UID,
 			IdempotencyKey: idem,
 			Entries: []core.EntryInput{
-				{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(amount)},
-				{AccountHolder: sysID, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(amount)},
+				{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(amount)},
+				{AccountHolder: sysID, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(amount)},
 			},
 			Source: "test",
 		})
@@ -150,13 +150,13 @@ func TestPlatformBalance_RealtimeReflectsSecondJournal(t *testing.T) {
 
 	post(100, postgrestest.UniqueKey("rt2-1"))
 
-	pb1, err := pbStore.GetPlatformBalances(ctx, usdt.ID)
+	pb1, err := pbStore.GetPlatformBalances(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, pb1.UserSide["mw_rt2"].Equal(decimal.NewFromInt(100)))
 
 	post(250, postgrestest.UniqueKey("rt2-2"))
 
-	pb2, err := pbStore.GetPlatformBalances(ctx, usdt.ID)
+	pb2, err := pbStore.GetPlatformBalances(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, pb2.UserSide["mw_rt2"].Equal(decimal.NewFromInt(350)),
 		"second read should see both journals: expected 350, got %s", pb2.UserSide["mw_rt2"])
@@ -202,17 +202,17 @@ func TestPlatformBalance_RealtimeSolvencyCheck(t *testing.T) {
 	// Real deposit: DR custodial 1000, CR main_wallet 1000.
 	// → custodial = +1000 (debit normal + debit), main_wallet = +1000 (credit normal + credit).
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("solv-deposit"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
-			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: user, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
-	report, err := pbStore.SolvencyCheck(ctx, usdt.ID)
+	report, err := pbStore.SolvencyCheck(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.True(t, report.Solvent, "after balanced deposit should be solvent: %+v", report)
 	assert.True(t, report.Liability.Equal(decimal.NewFromInt(1000)), "liability=1000, got %s", report.Liability)
@@ -222,17 +222,17 @@ func TestPlatformBalance_RealtimeSolvencyCheck(t *testing.T) {
 	// Promo grant: DR promo_expense 500, CR main_wallet 500.
 	// → main_wallet → +1500 (liability), custodial unchanged.
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("solv-grant"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sys, CurrencyID: usdt.ID, ClassificationID: promo.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: user, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sys, CurrencyUID: usdt.UID, ClassificationUID: promo.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: user, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 		Source: "test",
 	})
 	require.NoError(t, err)
 
-	report2, err := pbStore.SolvencyCheck(ctx, usdt.ID)
+	report2, err := pbStore.SolvencyCheck(ctx, usdt.UID)
 	require.NoError(t, err)
 	assert.False(t, report2.Solvent, "after liability bump should be insolvent: %+v", report2)
 	assert.True(t, report2.Liability.Equal(decimal.NewFromInt(1500)), "liability=1500, got %s", report2.Liability)

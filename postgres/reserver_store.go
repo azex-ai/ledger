@@ -30,6 +30,7 @@ type ReserverStore struct {
 	db     DBTX
 	q      *sqlcgen.Queries
 	ledger *LedgerStore
+	dims   *dimCache
 }
 
 // NewReserverStore creates a new ReserverStore backed by a connection pool.
@@ -39,6 +40,7 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore) *ReserverStore {
 		db:     pool,
 		q:      sqlcgen.New(pool),
 		ledger: ledger,
+		dims:   dimCacheFor(pool),
 	}
 }
 
@@ -47,6 +49,7 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore) *ReserverStore {
 // balance checks and advisory locks share the same connection.
 func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 	return &ReserverStore{
+		dims:   s.dims,
 		pool:   nil, // tx mode
 		db:     db,
 		q:      sqlcgen.New(db),
@@ -64,7 +67,7 @@ func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.reserve",
 		attribute.Int64("account_holder", input.AccountHolder),
-		attribute.Int64("currency_id", input.CurrencyID),
+		attribute.String("currency_uid", input.CurrencyUID),
 		attribute.String("idempotency_key", input.IdempotencyKey),
 		attribute.String("amount", input.Amount.String()),
 	)
@@ -75,7 +78,12 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
-	if err := validateSingleAmountPrecision(ctx, s.q, input.CurrencyID, input.Amount); err != nil {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, input.CurrencyUID)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, err
+	}
+	if err := checkAmountPrecision(input.Amount, cur); err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
@@ -83,7 +91,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// Check idempotency first (outside tx / on the current db handle).
 	existing, err := s.q.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return ensureReservationMatchesInput(existing, input)
+		return s.ensureReservationMatchesInput(ctx, s.q, existing, input, cur.ID)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		ledgerotel.RecordError(span, err)
@@ -92,7 +100,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		res, err := s.reserveWithQueries(ctx, s.q, input)
+		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID)
 		ledgerotel.RecordError(span, err)
 		return res, err
 	}
@@ -106,7 +114,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	res, err := s.reserveWithQueries(ctx, qtx, input)
+	res, err := s.reserveWithQueries(ctx, qtx, input, cur.ID)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
@@ -120,14 +128,14 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	return res, nil
 }
 
-func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput) (*core.Reservation, error) {
+func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64) (*core.Reservation, error) {
 	if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
 
 	existing, err := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return ensureReservationMatchesInput(existing, input)
+		return s.ensureReservationMatchesInput(ctx, qtx, existing, input, currencyID)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: reserve: check idempotency in tx: %w", err)
@@ -140,7 +148,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// consistent across reserve and post-journal.
 	if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
 		holder:     input.AccountHolder,
-		currencyID: input.CurrencyID,
+		currencyID: currencyID,
 	}}); err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
@@ -157,23 +165,23 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// (holder,currency,0) and (holder,0,0) policy tiers can ever match.
 	// Evaluated inside the same advisory lock as the balance check below, so
 	// it is TOCTOU-safe against a concurrent SetPolicy on the same pair.
-	policy, err := getEffectiveAccountPolicy(ctx, qtx, input.AccountHolder, input.CurrencyID, 0)
+	policy, err := getEffectiveAccountPolicy(ctx, qtx, input.AccountHolder, currencyID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
 	if policy != nil {
-		switch policy.Status {
+		switch core.AccountPolicyStatus(policy.Status) {
 		case core.AccountPolicyStatusClosed:
-			return nil, fmt.Errorf("postgres: reserve: account %d currency %d is closed (policy %d): %w", input.AccountHolder, input.CurrencyID, policy.ID, core.ErrAccountClosed)
+			return nil, fmt.Errorf("postgres: reserve: account %d currency %s is closed (policy %d): %w", input.AccountHolder, input.CurrencyUID, policy.ID, core.ErrAccountClosed)
 		case core.AccountPolicyStatusFrozen:
-			return nil, fmt.Errorf("postgres: reserve: account %d currency %d is frozen (policy %d): %w", input.AccountHolder, input.CurrencyID, policy.ID, core.ErrAccountFrozen)
+			return nil, fmt.Errorf("postgres: reserve: account %d currency %s is frozen (policy %d): %w", input.AccountHolder, input.CurrencyUID, policy.ID, core.ErrAccountFrozen)
 		}
 	}
 
 	// Check sufficient balance before reserving.
 	// The advisory lock above serializes concurrent reserves for the same (holder, currency),
 	// so this read is safe against TOCTOU races.
-	balances, err := s.ledger.GetBalances(ctx, input.AccountHolder, input.CurrencyID)
+	balances, err := s.ledger.GetBalances(ctx, input.AccountHolder, input.CurrencyUID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reserve: get balances: %w", err)
 	}
@@ -184,7 +192,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 
 	activeReserved, err := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 		AccountHolder: input.AccountHolder,
-		CurrencyID:    input.CurrencyID,
+		CurrencyID:    currencyID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reserve: sum active reservations: %w", err)
@@ -203,15 +211,16 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 
 	row, err := qtx.InsertReservation(ctx, sqlcgen.InsertReservationParams{
 		AccountHolder:  input.AccountHolder,
-		CurrencyID:     input.CurrencyID,
+		CurrencyID:     currencyID,
 		ReservedAmount: decimalToNumeric(input.Amount),
 		IdempotencyKey: input.IdempotencyKey,
 		ExpiresAt:      expiresAt,
+		Uid:            newUID(),
 	})
 	if err != nil {
 		existing, lookupErr := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)
 		if lookupErr == nil {
-			return ensureReservationMatchesInput(existing, input)
+			return s.ensureReservationMatchesInput(ctx, qtx, existing, input, currencyID)
 		}
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: reserve: insert: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
@@ -219,7 +228,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return nil, wrapStoreError("postgres: reserve: insert", err)
 	}
 
-	return reservationFromRow(row), nil
+	return reservationFromRow(ctx, s.dims, qtx, row)
 }
 
 // reservationDefaultExpiresIn is applied when ReserveInput.ExpiresIn is zero.
@@ -244,16 +253,16 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	if err := input.Validate(); err != nil {
 		return err
 	}
-	reservationID, actualAmount := input.ReservationID, input.Amount
+	reservationUID, actualAmount := input.ReservationUID, input.Amount
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle",
-		attribute.Int64("reservation_id", reservationID),
+		attribute.String("reservation_uid", reservationUID),
 		attribute.String("actual_amount", actualAmount.String()),
 	)
 	defer span.End()
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		err := s.settleWithQueries(ctx, s.q, reservationID, actualAmount)
+		err := s.settleWithQueries(ctx, s.q, reservationUID, actualAmount)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -265,7 +274,7 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), reservationID, actualAmount); err != nil {
+	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), reservationUID, actualAmount); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -278,18 +287,23 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	return nil
 }
 
-func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, actualAmount decimal.Decimal) error {
+func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string, actualAmount decimal.Decimal) error {
 	if !actualAmount.IsPositive() {
 		return fmt.Errorf("postgres: settle: actual amount must be positive, got %s: %w", actualAmount, core.ErrInvalidInput)
 	}
 
-	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+	pgUID, err := uidToPG(reservationUID)
+	if err != nil {
+		return err
+	}
+	res, err := qtx.GetReservationForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: settle: reservation %d: %w", reservationID, core.ErrNotFound)
+			return fmt.Errorf("postgres: settle: reservation %q: %w", reservationUID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: settle: get reservation: %w", err)
 	}
+	reservationID := res.ID
 
 	status := core.ReservationStatus(res.Status)
 	if status == core.ReservationStatusSettling {
@@ -298,7 +312,7 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		// Settle here would overwrite settled_amount with actualAmount instead
 		// of respecting what SettlePartial already accumulated. Reject
 		// explicitly rather than silently discarding prior partial settlements.
-		return fmt.Errorf("postgres: settle: reservation %d is partially settled (status settling); use FinalizeSettlement, not Settle: %w", reservationID, core.ErrInvalidTransition)
+		return fmt.Errorf("postgres: settle: reservation %q is partially settled (status settling); use FinalizeSettlement, not Settle: %w", reservationUID, core.ErrInvalidTransition)
 	}
 	if !status.CanTransitionTo(core.ReservationStatusSettled) {
 		return fmt.Errorf("postgres: settle: from %q to settled: %w", res.Status, core.ErrInvalidTransition)
@@ -336,15 +350,15 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	if err := input.Validate(); err != nil {
 		return err
 	}
-	reservationID, amount := input.ReservationID, input.Amount
+	reservationUID, amount := input.ReservationUID, input.Amount
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle_partial",
-		attribute.Int64("reservation_id", reservationID),
+		attribute.String("reservation_uid", reservationUID),
 		attribute.String("amount", amount.String()),
 	)
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.settlePartialWithQueries(ctx, s.q, reservationID, amount)
+		err := s.settlePartialWithQueries(ctx, s.q, reservationUID, amount)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -356,7 +370,7 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), reservationID, amount); err != nil {
+	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), reservationUID, amount); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -369,18 +383,23 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	return nil
 }
 
-func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, amount decimal.Decimal) error {
+func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string, amount decimal.Decimal) error {
 	if !amount.IsPositive() {
 		return fmt.Errorf("postgres: settle partial: amount must be positive, got %s: %w", amount, core.ErrInvalidInput)
 	}
 
-	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+	pgUID, err := uidToPG(reservationUID)
+	if err != nil {
+		return err
+	}
+	res, err := qtx.GetReservationForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: settle partial: reservation %d: %w", reservationID, core.ErrNotFound)
+			return fmt.Errorf("postgres: settle partial: reservation %q: %w", reservationUID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: settle partial: get reservation: %w", err)
 	}
+	reservationID := res.ID
 
 	// active -> settling (first call) or settling -> settling (accumulating
 	// further) are both valid; every other status is not — in particular a
@@ -427,14 +446,14 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 // In pool mode a new transaction is started and committed here. In tx mode
 // (bound via WithDB) the update is applied to the caller's transaction;
 // commit/rollback is the caller's responsibility.
-func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationID int64) error {
+func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationUID string) error {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.finalize_settlement",
-		attribute.Int64("reservation_id", reservationID),
+		attribute.String("reservation_uid", reservationUID),
 	)
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.finalizeSettlementWithQueries(ctx, s.q, reservationID)
+		err := s.finalizeSettlementWithQueries(ctx, s.q, reservationUID)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -446,7 +465,7 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationID in
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), reservationID); err != nil {
+	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), reservationUID); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -459,21 +478,25 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationID in
 	return nil
 }
 
-func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64) error {
-	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string) error {
+	pgUID, err := uidToPG(reservationUID)
+	if err != nil {
+		return err
+	}
+	res, err := qtx.GetReservationForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: finalize settlement: reservation %d: %w", reservationID, core.ErrNotFound)
+			return fmt.Errorf("postgres: finalize settlement: reservation %q: %w", reservationUID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: finalize settlement: get reservation: %w", err)
 	}
 
 	status := core.ReservationStatus(res.Status)
 	if status != core.ReservationStatusSettling {
-		return fmt.Errorf("postgres: finalize settlement: reservation %d has status %q, not settling (use Settle for a one-shot settlement that never called SettlePartial): %w", reservationID, res.Status, core.ErrInvalidTransition)
+		return fmt.Errorf("postgres: finalize settlement: reservation %q has status %q, not settling (use Settle for a one-shot settlement that never called SettlePartial): %w", reservationUID, res.Status, core.ErrInvalidTransition)
 	}
 
-	if err := qtx.FinalizeReservationSettlement(ctx, reservationID); err != nil {
+	if err := qtx.FinalizeReservationSettlement(ctx, res.ID); err != nil {
 		return wrapStoreError("postgres: finalize settlement: update", err)
 	}
 
@@ -486,10 +509,14 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 // subtracts from balance when checking availability, exposed so consumers can
 // compute available = balance − held without reaching into the reservations
 // table.
-func (s *ReserverStore) HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error) {
+func (s *ReserverStore) HeldAmount(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return decimal.Zero, err
+	}
 	total, err := s.q.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
+		CurrencyID:    cur.ID,
 	})
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("postgres: held amount: %w", err)
@@ -506,15 +533,15 @@ func (s *ReserverStore) HeldAmount(ctx context.Context, holder, currencyID int64
 // In pool mode a new transaction is started and committed here.
 // In tx mode (bound via withDB) the update is applied to the caller's
 // transaction; commit/rollback is the caller's responsibility.
-func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error {
+func (s *ReserverStore) Release(ctx context.Context, reservationUID string) error {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.release",
-		attribute.Int64("reservation_id", reservationID),
+		attribute.String("reservation_uid", reservationUID),
 	)
 	defer span.End()
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		err := s.releaseWithQueries(ctx, s.q, reservationID)
+		err := s.releaseWithQueries(ctx, s.q, reservationUID)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -526,7 +553,7 @@ func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error 
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), reservationID); err != nil {
+	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), reservationUID); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -539,11 +566,15 @@ func (s *ReserverStore) Release(ctx context.Context, reservationID int64) error 
 	return nil
 }
 
-func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64) error {
-	res, err := qtx.GetReservationForUpdate(ctx, reservationID)
+func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string) error {
+	pgUID, err := uidToPG(reservationUID)
+	if err != nil {
+		return err
+	}
+	res, err := qtx.GetReservationForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: release: reservation %d: %w", reservationID, core.ErrNotFound)
+			return fmt.Errorf("postgres: release: reservation %q: %w", reservationUID, core.ErrNotFound)
 		}
 		return fmt.Errorf("postgres: release: get reservation: %w", err)
 	}
@@ -554,7 +585,7 @@ func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	}
 
 	if err := qtx.UpdateReservationStatus(ctx, sqlcgen.UpdateReservationStatusParams{
-		ID:     reservationID,
+		ID:     res.ID,
 		Status: string(core.ReservationStatusReleased),
 	}); err != nil {
 		return wrapStoreError("postgres: release: update", err)

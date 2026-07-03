@@ -25,56 +25,56 @@ import (
 type mockJournalWriter struct {
 	postFn        func(ctx context.Context, input core.JournalInput) (*core.Journal, error)
 	templateFn    func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error)
-	reverseFn     func(ctx context.Context, journalID int64, reason string) (*core.Journal, error)
-	reverseFracFn func(ctx context.Context, journalID, num, den int64, reason, idempotencyKey string) (*core.Journal, error)
+	reverseFn     func(ctx context.Context, journalUID string, reason string) (*core.Journal, error)
+	reverseFracFn func(ctx context.Context, journalUID string, num, den int64, reason, idempotencyKey string) (*core.Journal, error)
 }
 
 func (m *mockJournalWriter) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 	if m.postFn != nil {
 		return m.postFn(ctx, input)
 	}
-	return &core.Journal{ID: 1, JournalTypeID: input.JournalTypeID, IdempotencyKey: input.IdempotencyKey, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+	return &core.Journal{UID: "uid-1", JournalTypeUID: input.JournalTypeUID, IdempotencyKey: input.IdempotencyKey, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
 func (m *mockJournalWriter) ExecuteTemplate(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 	if m.templateFn != nil {
 		return m.templateFn(ctx, code, params)
 	}
-	return &core.Journal{ID: 2, JournalTypeID: 1, IdempotencyKey: params.IdempotencyKey, TotalDebit: decimal.NewFromInt(50), TotalCredit: decimal.NewFromInt(50), CreatedAt: time.Now()}, nil
+	return &core.Journal{UID: "uid-2", JournalTypeUID: "jt-1", IdempotencyKey: params.IdempotencyKey, TotalDebit: decimal.NewFromInt(50), TotalCredit: decimal.NewFromInt(50), CreatedAt: time.Now()}, nil
 }
 
-func (m *mockJournalWriter) ReverseJournal(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
+func (m *mockJournalWriter) ReverseJournal(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
 	if m.reverseFn != nil {
-		return m.reverseFn(ctx, journalID, reason)
+		return m.reverseFn(ctx, journalUID, reason)
 	}
-	return &core.Journal{ID: 3, JournalTypeID: 1, IdempotencyKey: fmt.Sprintf("reversal:%d:%s", journalID, reason), ReversalOf: journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+	return &core.Journal{UID: "uid-3", JournalTypeUID: "jt-1", IdempotencyKey: fmt.Sprintf("reversal:%s:%s", journalUID, reason), ReversalOfUID: journalUID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
-func (m *mockJournalWriter) ReverseJournalFraction(ctx context.Context, journalID, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
+func (m *mockJournalWriter) ReverseJournalFraction(ctx context.Context, journalUID string, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
 	if m.reverseFracFn != nil {
-		return m.reverseFracFn(ctx, journalID, num, den, reason, idempotencyKey)
+		return m.reverseFracFn(ctx, journalUID, num, den, reason, idempotencyKey)
 	}
-	return &core.Journal{ID: 4, JournalTypeID: 1, IdempotencyKey: idempotencyKey, ReversalOf: journalID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+	return &core.Journal{UID: "uid-4", JournalTypeUID: "jt-1", IdempotencyKey: idempotencyKey, ReversalOfUID: journalUID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
 type mockBalanceReader struct{}
 
-func (m *mockBalanceReader) GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error) {
+func (m *mockBalanceReader) GetBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error) {
 	return decimal.NewFromInt(1000), nil
 }
 
-func (m *mockBalanceReader) GetBalances(ctx context.Context, holder int64, currencyID int64) ([]core.Balance, error) {
+func (m *mockBalanceReader) GetBalances(ctx context.Context, holder int64, currencyUID string) ([]core.Balance, error) {
 	return []core.Balance{
-		{AccountHolder: holder, CurrencyID: currencyID, ClassificationID: 1, Balance: decimal.NewFromInt(500)},
-		{AccountHolder: holder, CurrencyID: currencyID, ClassificationID: 2, Balance: decimal.NewFromInt(300)},
+		{AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: "cls-1", Balance: decimal.NewFromInt(500)},
+		{AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: "cls-2", Balance: decimal.NewFromInt(300)},
 	}, nil
 }
 
-func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyID int64) (map[int64][]core.Balance, error) {
+func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]core.Balance, error) {
 	result := make(map[int64][]core.Balance)
 	for _, id := range holderIDs {
 		result[id] = []core.Balance{
-			{AccountHolder: id, CurrencyID: currencyID, ClassificationID: 1, Balance: decimal.NewFromInt(100)},
+			{AccountHolder: id, CurrencyUID: currencyUID, ClassificationUID: "cls-1", Balance: decimal.NewFromInt(100)},
 		}
 	}
 	return result, nil
@@ -82,51 +82,51 @@ func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []in
 
 type mockReserver struct {
 	reserveFn            func(ctx context.Context, input core.ReserveInput) (*core.Reservation, error)
-	settleFn             func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error
-	releaseFn            func(ctx context.Context, reservationID int64) error
-	heldAmountFn         func(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
-	settlePartialFn      func(ctx context.Context, reservationID int64, amount decimal.Decimal) error
-	finalizeSettlementFn func(ctx context.Context, reservationID int64) error
+	settleFn             func(ctx context.Context, reservationUID string, actualAmount decimal.Decimal) error
+	releaseFn            func(ctx context.Context, reservationUID string) error
+	heldAmountFn         func(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error)
+	settlePartialFn      func(ctx context.Context, reservationUID string, amount decimal.Decimal) error
+	finalizeSettlementFn func(ctx context.Context, reservationUID string) error
 }
 
 func (m *mockReserver) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
 	if m.reserveFn != nil {
 		return m.reserveFn(ctx, input)
 	}
-	return &core.Reservation{ID: 1, AccountHolder: input.AccountHolder, CurrencyID: input.CurrencyID, ReservedAmount: input.Amount, Status: core.ReservationStatusActive, IdempotencyKey: input.IdempotencyKey, ExpiresAt: time.Now().Add(15 * time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
+	return &core.Reservation{UID: "rsv-1", AccountHolder: input.AccountHolder, CurrencyUID: input.CurrencyUID, ReservedAmount: input.Amount, Status: core.ReservationStatusActive, IdempotencyKey: input.IdempotencyKey, ExpiresAt: time.Now().Add(15 * time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil
 }
 
 func (m *mockReserver) Settle(ctx context.Context, input core.SettleInput) error {
 	if m.settleFn != nil {
-		return m.settleFn(ctx, input.ReservationID, input.Amount)
+		return m.settleFn(ctx, input.ReservationUID, input.Amount)
 	}
 	return nil
 }
 
-func (m *mockReserver) Release(ctx context.Context, reservationID int64) error {
+func (m *mockReserver) Release(ctx context.Context, reservationUID string) error {
 	if m.releaseFn != nil {
-		return m.releaseFn(ctx, reservationID)
+		return m.releaseFn(ctx, reservationUID)
 	}
 	return nil
 }
 
-func (m *mockReserver) HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error) {
+func (m *mockReserver) HeldAmount(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error) {
 	if m.heldAmountFn != nil {
-		return m.heldAmountFn(ctx, holder, currencyID)
+		return m.heldAmountFn(ctx, holder, currencyUID)
 	}
 	return decimal.Zero, nil
 }
 
 func (m *mockReserver) SettlePartial(ctx context.Context, input core.SettlePartialInput) error {
 	if m.settlePartialFn != nil {
-		return m.settlePartialFn(ctx, input.ReservationID, input.Amount)
+		return m.settlePartialFn(ctx, input.ReservationUID, input.Amount)
 	}
 	return nil
 }
 
-func (m *mockReserver) FinalizeSettlement(ctx context.Context, reservationID int64) error {
+func (m *mockReserver) FinalizeSettlement(ctx context.Context, reservationUID string) error {
 	if m.finalizeSettlementFn != nil {
-		return m.finalizeSettlementFn(ctx, reservationID)
+		return m.finalizeSettlementFn(ctx, reservationUID)
 	}
 	return nil
 }
@@ -141,8 +141,8 @@ func (m *mockBooker) CreateBooking(ctx context.Context, input core.CreateBooking
 		return m.createFn(ctx, input)
 	}
 	return &core.Booking{
-		ID: 1, ClassificationID: 1, AccountHolder: input.AccountHolder,
-		CurrencyID: input.CurrencyID, Amount: input.Amount, Status: "pending",
+		UID: "bk-1", ClassificationUID: "cls-1", AccountHolder: input.AccountHolder,
+		CurrencyUID: input.CurrencyUID, Amount: input.Amount, Status: "pending",
 		ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey,
 		Metadata: input.Metadata, CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}, nil
@@ -153,70 +153,70 @@ func (m *mockBooker) Transition(ctx context.Context, input core.TransitionInput)
 		return m.transitionFn(ctx, input)
 	}
 	return &core.Event{
-		ID: 1, ClassificationCode: "deposit", BookingID: input.BookingID,
-		AccountHolder: 100, CurrencyID: 1,
+		UID: "evt-1", ClassificationCode: "deposit", BookingUID: input.BookingUID,
+		AccountHolder: 100, CurrencyUID: "cur-1",
 		FromStatus: "pending", ToStatus: input.ToStatus,
 		Amount: input.Amount, OccurredAt: time.Now(),
 	}, nil
 }
 
 type mockBookingReader struct {
-	getFn  func(ctx context.Context, id int64) (*core.Booking, error)
-	listFn func(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error)
+	getFn  func(ctx context.Context, uid string) (*core.Booking, error)
+	listFn func(ctx context.Context, filter core.BookingFilter) ([]core.Booking, string, error)
 }
 
-func (m *mockBookingReader) GetBooking(ctx context.Context, id int64) (*core.Booking, error) {
+func (m *mockBookingReader) GetBooking(ctx context.Context, uid string) (*core.Booking, error) {
 	if m.getFn != nil {
-		return m.getFn(ctx, id)
+		return m.getFn(ctx, uid)
 	}
 	return &core.Booking{
-		ID: id, ClassificationID: 1, AccountHolder: 100,
-		CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending",
+		UID: uid, ClassificationUID: "cls-1", AccountHolder: 100,
+		CurrencyUID: "cur-1", Amount: decimal.NewFromInt(500), Status: "pending",
 		ChannelName: "crypto", IdempotencyKey: "op-1",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}, nil
 }
 
-func (m *mockBookingReader) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error) {
+func (m *mockBookingReader) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, string, error) {
 	if m.listFn != nil {
 		return m.listFn(ctx, filter)
 	}
 	return []core.Booking{
-		{ID: 1, ClassificationID: 1, AccountHolder: 100, CurrencyID: 1, Amount: decimal.NewFromInt(500), Status: "pending", CreatedAt: time.Now(), UpdatedAt: time.Now()},
-	}, nil
+		{UID: "bk-1", ClassificationUID: "cls-1", AccountHolder: 100, CurrencyUID: "cur-1", Amount: decimal.NewFromInt(500), Status: "pending", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	}, "", nil
 }
 
 type mockEventReader struct {
-	getFn  func(ctx context.Context, id int64) (*core.Event, error)
-	listFn func(ctx context.Context, filter core.EventFilter) ([]core.Event, error)
+	getFn  func(ctx context.Context, uid string) (*core.Event, error)
+	listFn func(ctx context.Context, filter core.EventFilter) ([]core.Event, string, error)
 }
 
-func (m *mockEventReader) GetEvent(ctx context.Context, id int64) (*core.Event, error) {
+func (m *mockEventReader) GetEvent(ctx context.Context, uid string) (*core.Event, error) {
 	if m.getFn != nil {
-		return m.getFn(ctx, id)
+		return m.getFn(ctx, uid)
 	}
 	return &core.Event{
-		ID: id, ClassificationCode: "deposit", BookingID: 1,
-		AccountHolder: 100, CurrencyID: 1,
+		UID: uid, ClassificationCode: "deposit", BookingUID: "bk-1",
+		AccountHolder: 100, CurrencyUID: "cur-1",
 		FromStatus: "pending", ToStatus: "confirmed",
 		Amount: decimal.NewFromInt(500), OccurredAt: time.Now(),
 	}, nil
 }
 
-func (m *mockEventReader) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, error) {
+func (m *mockEventReader) ListEvents(ctx context.Context, filter core.EventFilter) ([]core.Event, string, error) {
 	if m.listFn != nil {
 		return m.listFn(ctx, filter)
 	}
 	return []core.Event{
-		{ID: 1, ClassificationCode: "deposit", BookingID: 1, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
-	}, nil
+		{UID: "evt-1", ClassificationCode: "deposit", BookingUID: "bk-1", AccountHolder: 100, CurrencyUID: "cur-1", FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
+	}, "", nil
 }
 
 type mockClassificationStore struct{}
 
 func (m *mockClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
 	return &core.Classification{
-		ID:         1,
+		UID:        "cls-1",
 		Code:       input.Code,
 		Name:       input.Name,
 		NormalSide: input.NormalSide,
@@ -228,36 +228,36 @@ func (m *mockClassificationStore) CreateClassification(ctx context.Context, inpu
 }
 
 func (m *mockClassificationStore) GetByCode(ctx context.Context, code string) (*core.Classification, error) {
-	return &core.Classification{ID: 1, Code: code, Name: code, NormalSide: core.NormalSideDebit, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.Classification{UID: "cls-1", Code: code, Name: code, NormalSide: core.NormalSideDebit, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
-func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, id int64) error {
+func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
 	return nil
 }
 
 func (m *mockClassificationStore) ListClassifications(ctx context.Context, activeOnly bool) ([]core.Classification, error) {
 	return []core.Classification{
-		{ID: 1, Code: "ASSET", Name: "Asset", NormalSide: core.NormalSideDebit, IsActive: true},
-		{ID: 2, Code: "LIABILITY", Name: "Liability", NormalSide: core.NormalSideCredit, IsActive: true},
+		{UID: "cls-1", Code: "ASSET", Name: "Asset", NormalSide: core.NormalSideDebit, IsActive: true},
+		{UID: "cls-2", Code: "LIABILITY", Name: "Liability", NormalSide: core.NormalSideCredit, IsActive: true},
 	}, nil
 }
 
 type mockJournalTypeStore struct{}
 
 func (m *mockJournalTypeStore) CreateJournalType(ctx context.Context, input core.JournalTypeInput) (*core.JournalType, error) {
-	return &core.JournalType{ID: 1, Code: input.Code, Name: input.Name, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.JournalType{UID: "jt-1", Code: input.Code, Name: input.Name, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
 func (m *mockJournalTypeStore) GetJournalTypeByCode(ctx context.Context, code string) (*core.JournalType, error) {
-	return &core.JournalType{ID: 1, Code: code, Name: code, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.JournalType{UID: "jt-1", Code: code, Name: code, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
-func (m *mockJournalTypeStore) DeactivateJournalType(ctx context.Context, id int64) error {
+func (m *mockJournalTypeStore) DeactivateJournalType(ctx context.Context, uid string) error {
 	return nil
 }
 
 func (m *mockJournalTypeStore) ListJournalTypes(ctx context.Context, activeOnly bool) ([]core.JournalType, error) {
-	return []core.JournalType{{ID: 1, Code: "DEPOSIT", Name: "Deposit", IsActive: true}}, nil
+	return []core.JournalType{{UID: "jt-1", Code: "DEPOSIT", Name: "Deposit", IsActive: true}}, nil
 }
 
 type mockTemplateStore struct{}
@@ -266,51 +266,51 @@ func (m *mockTemplateStore) CreateTemplate(ctx context.Context, input core.Templ
 	if err := input.Validate(); err != nil {
 		return nil, err
 	}
-	return &core.EntryTemplate{ID: 1, Code: input.Code, Name: input.Name, JournalTypeID: input.JournalTypeID, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.EntryTemplate{UID: "tmpl-1", Code: input.Code, Name: input.Name, JournalTypeUID: input.JournalTypeUID, IsActive: true, CreatedAt: time.Now()}, nil
 }
 
-func (m *mockTemplateStore) DeactivateTemplate(ctx context.Context, id int64) error { return nil }
+func (m *mockTemplateStore) DeactivateTemplate(ctx context.Context, uid string) error { return nil }
 
 func (m *mockTemplateStore) GetTemplate(ctx context.Context, code string) (*core.EntryTemplate, error) {
 	return &core.EntryTemplate{
-		ID: 1, Code: code, Name: "Test", JournalTypeID: 1, IsActive: true,
+		UID: "tmpl-1", Code: code, Name: "Test", JournalTypeUID: "jt-1", IsActive: true,
 		Lines: []core.EntryTemplateLine{
-			{ID: 1, ClassificationID: 1, EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount"},
-			{ID: 2, ClassificationID: 1, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount"},
+			{ClassificationUID: "cls-1", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-1", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount"},
 		},
 	}, nil
 }
 
 func (m *mockTemplateStore) ListTemplates(ctx context.Context, activeOnly bool) ([]core.EntryTemplate, error) {
-	return []core.EntryTemplate{{ID: 1, Code: "deposit", Name: "Deposit", JournalTypeID: 1, IsActive: true}}, nil
+	return []core.EntryTemplate{{UID: "tmpl-1", Code: "deposit", Name: "Deposit", JournalTypeUID: "jt-1", IsActive: true}}, nil
 }
 
 type mockCurrencyStore struct{}
 
 func (m *mockCurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyInput) (*core.Currency, error) {
-	return &core.Currency{ID: 1, Code: input.Code, Name: input.Name}, nil
+	return &core.Currency{UID: "cur-1", Code: input.Code, Name: input.Name}, nil
 }
 
-func (m *mockCurrencyStore) DeactivateCurrency(ctx context.Context, id int64) error {
+func (m *mockCurrencyStore) DeactivateCurrency(ctx context.Context, uid string) error {
 	return nil
 }
 
 func (m *mockCurrencyStore) ListCurrencies(ctx context.Context, activeOnly bool) ([]core.Currency, error) {
-	return []core.Currency{{ID: 1, Code: "USDT", Name: "Tether", IsActive: true}}, nil
+	return []core.Currency{{UID: "cur-1", Code: "USDT", Name: "Tether", IsActive: true}}, nil
 }
 
-func (m *mockCurrencyStore) GetCurrency(ctx context.Context, id int64) (*core.Currency, error) {
-	return &core.Currency{ID: id, Code: "USDT", Name: "Tether"}, nil
+func (m *mockCurrencyStore) GetCurrency(ctx context.Context, uid string) (*core.Currency, error) {
+	return &core.Currency{UID: uid, Code: "USDT", Name: "Tether"}, nil
 }
 
 type mockAccountPolicyStore struct{}
 
 func (m *mockAccountPolicyStore) SetPolicy(ctx context.Context, input core.AccountPolicyInput) (*core.AccountPolicy, error) {
 	return &core.AccountPolicy{
-		ID:                1,
+		UID:               "pol-1",
 		AccountHolder:     input.AccountHolder,
-		CurrencyID:        input.CurrencyID,
-		ClassificationID:  input.ClassificationID,
+		CurrencyUID:       input.CurrencyUID,
+		ClassificationUID: input.ClassificationUID,
 		Status:            input.Status,
 		MinBalance:        input.MinBalance,
 		EnforceMinBalance: input.EnforceMinBalance,
@@ -318,12 +318,12 @@ func (m *mockAccountPolicyStore) SetPolicy(ctx context.Context, input core.Accou
 	}, nil
 }
 
-func (m *mockAccountPolicyStore) GetPolicy(ctx context.Context, holder, currencyID, classificationID int64) (*core.AccountPolicy, error) {
-	return &core.AccountPolicy{ID: 1, AccountHolder: holder, CurrencyID: currencyID, ClassificationID: classificationID, Status: core.AccountPolicyStatusActive}, nil
+func (m *mockAccountPolicyStore) GetPolicy(ctx context.Context, holder int64, currencyUID, classificationUID string) (*core.AccountPolicy, error) {
+	return &core.AccountPolicy{UID: "pol-1", AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: classificationUID, Status: core.AccountPolicyStatusActive}, nil
 }
 
 func (m *mockAccountPolicyStore) ListPolicies(ctx context.Context, holder int64) ([]core.AccountPolicy, error) {
-	return []core.AccountPolicy{{ID: 1, AccountHolder: holder, Status: core.AccountPolicyStatusActive}}, nil
+	return []core.AccountPolicy{{UID: "pol-1", AccountHolder: holder, Status: core.AccountPolicyStatusActive}}, nil
 }
 
 type mockReconciler struct{}
@@ -332,7 +332,7 @@ func (m *mockReconciler) CheckAccountingEquation(ctx context.Context) (*core.Rec
 	return &core.ReconcileResult{Balanced: true, Gap: decimal.Zero, CheckedAt: time.Now()}, nil
 }
 
-func (m *mockReconciler) ReconcileAccount(ctx context.Context, holder int64, currencyID int64) (*core.ReconcileResult, error) {
+func (m *mockReconciler) ReconcileAccount(ctx context.Context, holder int64, currencyUID string) (*core.ReconcileResult, error) {
 	return &core.ReconcileResult{Balanced: true, Gap: decimal.Zero, CheckedAt: time.Now()}, nil
 }
 
@@ -354,96 +354,96 @@ func (m *mockFullReconciler) RunFullReconciliation(ctx context.Context) (*core.R
 type mockSnapshotter struct{}
 
 func (m *mockSnapshotter) CreateDailySnapshot(ctx context.Context, date time.Time) error { return nil }
-func (m *mockSnapshotter) GetSnapshotBalance(ctx context.Context, holder int64, currencyID int64, date time.Time) ([]core.Balance, error) {
+func (m *mockSnapshotter) GetSnapshotBalance(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error) {
 	return nil, nil
 }
 
 type mockAuditQuerier struct {
-	listByAccountFn   func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error)
-	listByTimeRangeFn func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error)
-	traceBookingFn    func(ctx context.Context, bookingID int64) (*core.BookingTrace, error)
-	listReversalsFn   func(ctx context.Context, journalID int64) ([]core.Journal, error)
+	listByAccountFn   func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error)
+	listByTimeRangeFn func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error)
+	traceBookingFn    func(ctx context.Context, bookingUID string) (*core.BookingTrace, error)
+	listReversalsFn   func(ctx context.Context, journalUID string) ([]core.Journal, error)
 }
 
-func (m *mockAuditQuerier) ListJournalsByAccount(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error) {
+func (m *mockAuditQuerier) ListJournalsByAccount(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error) {
 	if m.listByAccountFn != nil {
 		return m.listByAccountFn(ctx, filter)
 	}
 	return []core.Journal{
-		{ID: 1, JournalTypeID: 1, IdempotencyKey: "audit-account", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
-	}, nil
+		{UID: "jr-1", JournalTypeUID: "jt-1", IdempotencyKey: "audit-account", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, "", nil
 }
 
-func (m *mockAuditQuerier) ListEntriesByJournal(ctx context.Context, journalID int64) ([]core.Entry, error) {
+func (m *mockAuditQuerier) ListEntriesByJournal(ctx context.Context, journalUID string) ([]core.Entry, error) {
 	return []core.Entry{
-		{ID: 1, JournalID: journalID, AccountHolder: 100, CurrencyID: 1, ClassificationID: 1, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
+		{JournalUID: journalUID, AccountHolder: 100, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
 	}, nil
 }
 
-func (m *mockAuditQuerier) ListJournalsByTimeRange(ctx context.Context, filter core.AuditFilter) ([]core.Journal, error) {
+func (m *mockAuditQuerier) ListJournalsByTimeRange(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error) {
 	if m.listByTimeRangeFn != nil {
 		return m.listByTimeRangeFn(ctx, filter)
 	}
 	return []core.Journal{
-		{ID: 2, JournalTypeID: 1, IdempotencyKey: "audit-time-range", TotalDebit: decimal.NewFromInt(50), TotalCredit: decimal.NewFromInt(50), CreatedAt: time.Now()},
-	}, nil
+		{UID: "jr-2", JournalTypeUID: "jt-1", IdempotencyKey: "audit-time-range", TotalDebit: decimal.NewFromInt(50), TotalCredit: decimal.NewFromInt(50), CreatedAt: time.Now()},
+	}, "", nil
 }
 
-func (m *mockAuditQuerier) TraceBooking(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+func (m *mockAuditQuerier) TraceBooking(ctx context.Context, bookingUID string) (*core.BookingTrace, error) {
 	if m.traceBookingFn != nil {
-		return m.traceBookingFn(ctx, bookingID)
+		return m.traceBookingFn(ctx, bookingUID)
 	}
 	return &core.BookingTrace{
 		Booking: core.Booking{
-			ID: bookingID, ClassificationID: 1, AccountHolder: 100, CurrencyID: 1,
+			UID: bookingUID, ClassificationUID: "cls-1", AccountHolder: 100, CurrencyUID: "cur-1",
 			Amount: decimal.NewFromInt(500), Status: "confirmed", CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		},
 		Events: []core.Event{
-			{ID: 1, ClassificationCode: "deposit", BookingID: bookingID, AccountHolder: 100, CurrencyID: 1, FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
+			{UID: "evt-1", ClassificationCode: "deposit", BookingUID: bookingUID, AccountHolder: 100, CurrencyUID: "cur-1", FromStatus: "pending", ToStatus: "confirmed", Amount: decimal.NewFromInt(500), OccurredAt: time.Now()},
 		},
 		Journals: []core.Journal{
-			{ID: 10, JournalTypeID: 1, IdempotencyKey: "trace", TotalDebit: decimal.NewFromInt(500), TotalCredit: decimal.NewFromInt(500), CreatedAt: time.Now()},
+			{UID: "jr-10", JournalTypeUID: "jt-1", IdempotencyKey: "trace", TotalDebit: decimal.NewFromInt(500), TotalCredit: decimal.NewFromInt(500), CreatedAt: time.Now()},
 		},
 	}, nil
 }
 
-func (m *mockAuditQuerier) ListReversals(ctx context.Context, journalID int64) ([]core.Journal, error) {
+func (m *mockAuditQuerier) ListReversals(ctx context.Context, journalUID string) ([]core.Journal, error) {
 	if m.listReversalsFn != nil {
-		return m.listReversalsFn(ctx, journalID)
+		return m.listReversalsFn(ctx, journalUID)
 	}
 	return []core.Journal{
-		{ID: journalID, JournalTypeID: 1, IdempotencyKey: "root", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+		{UID: journalUID, JournalTypeUID: "jt-1", IdempotencyKey: "root", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
 	}, nil
 }
 
 type mockPlatformBalanceReader struct{}
 
-func (m *mockPlatformBalanceReader) GetPlatformBalances(ctx context.Context, currencyID int64) (*core.PlatformBalance, error) {
+func (m *mockPlatformBalanceReader) GetPlatformBalances(ctx context.Context, currencyUID string) (*core.PlatformBalance, error) {
 	return &core.PlatformBalance{
-		CurrencyID: currencyID,
-		UserSide:   map[string]decimal.Decimal{"main_wallet": decimal.NewFromInt(1000)},
-		SystemSide: map[string]decimal.Decimal{"custodial": decimal.NewFromInt(1000)},
+		CurrencyUID: currencyUID,
+		UserSide:    map[string]decimal.Decimal{"main_wallet": decimal.NewFromInt(1000)},
+		SystemSide:  map[string]decimal.Decimal{"custodial": decimal.NewFromInt(1000)},
 	}, nil
 }
 
-func (m *mockPlatformBalanceReader) GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error) {
+func (m *mockPlatformBalanceReader) GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error) {
 	return decimal.NewFromInt(1000), nil
 }
 
 type mockSolvencyChecker struct {
-	checkFn func(ctx context.Context, currencyID int64) (*core.SolvencyReport, error)
+	checkFn func(ctx context.Context, currencyUID string) (*core.SolvencyReport, error)
 }
 
-func (m *mockSolvencyChecker) SolvencyCheck(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+func (m *mockSolvencyChecker) SolvencyCheck(ctx context.Context, currencyUID string) (*core.SolvencyReport, error) {
 	if m.checkFn != nil {
-		return m.checkFn(ctx, currencyID)
+		return m.checkFn(ctx, currencyUID)
 	}
 	return &core.SolvencyReport{
-		CurrencyID: currencyID,
-		Liability:  decimal.NewFromInt(1000),
-		Custodial:  decimal.NewFromInt(1200),
-		Solvent:    true,
-		Margin:     decimal.NewFromInt(200),
+		CurrencyUID: currencyUID,
+		Liability:   decimal.NewFromInt(1000),
+		Custodial:   decimal.NewFromInt(1200),
+		Solvent:     true,
+		Margin:      decimal.NewFromInt(200),
 	}, nil
 }
 
@@ -458,7 +458,7 @@ func (m *mockBalanceTrendReader) GetBalanceTrends(ctx context.Context, filter co
 type mockPeriodCloser struct{}
 
 func (m *mockPeriodCloser) ClosePeriod(ctx context.Context, input core.ClosePeriodInput) (*core.PeriodClose, error) {
-	return &core.PeriodClose{ID: 1, CloseBefore: input.CloseBefore, Note: input.Note, ActorID: input.ActorID, CreatedAt: time.Now()}, nil
+	return &core.PeriodClose{UID: "pc-1", CloseBefore: input.CloseBefore, Note: input.Note, ActorID: input.ActorID, CreatedAt: time.Now()}, nil
 }
 
 func (m *mockPeriodCloser) ActiveCloseLine(ctx context.Context) (time.Time, error) {
@@ -466,58 +466,58 @@ func (m *mockPeriodCloser) ActiveCloseLine(ctx context.Context) (time.Time, erro
 }
 
 func (m *mockPeriodCloser) ListPeriodCloses(ctx context.Context, limit int) ([]core.PeriodClose, error) {
-	return []core.PeriodClose{{ID: 1, CloseBefore: time.Now(), CreatedAt: time.Now()}}, nil
+	return []core.PeriodClose{{UID: "pc-1", CloseBefore: time.Now(), CreatedAt: time.Now()}}, nil
 }
 
 type mockTrialBalanceReader struct{}
 
-func (m *mockTrialBalanceReader) TrialBalance(ctx context.Context, currencyID int64, asOf time.Time) (*core.TrialBalanceReport, error) {
+func (m *mockTrialBalanceReader) TrialBalance(ctx context.Context, currencyUID string, asOf time.Time) (*core.TrialBalanceReport, error) {
 	return &core.TrialBalanceReport{
-		CurrencyID:  currencyID,
+		CurrencyUID: currencyUID,
 		AsOf:        asOf,
 		TotalDebit:  decimal.NewFromInt(100),
 		TotalCredit: decimal.NewFromInt(100),
 		Balanced:    true,
 		Rows: []core.TrialBalanceRow{
-			{ClassificationID: 1, ClassificationCode: "wallet", ClassificationName: "Wallet", NormalSide: core.NormalSideDebit, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.Zero, Net: decimal.NewFromInt(100)},
+			{ClassificationUID: "cls-1", ClassificationCode: "wallet", ClassificationName: "Wallet", NormalSide: core.NormalSideDebit, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.Zero, Net: decimal.NewFromInt(100)},
 		},
 	}, nil
 }
 
 type mockQueryProvider struct{}
 
-func (m *mockQueryProvider) GetJournal(ctx context.Context, id int64) (*core.Journal, []core.Entry, error) {
-	j := &core.Journal{ID: id, JournalTypeID: 1, IdempotencyKey: "test", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}
+func (m *mockQueryProvider) GetJournal(ctx context.Context, uid string) (*core.Journal, []core.Entry, error) {
+	j := &core.Journal{UID: uid, JournalTypeUID: "jt-1", IdempotencyKey: "test", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}
 	entries := []core.Entry{
-		{ID: 1, JournalID: id, AccountHolder: 100, CurrencyID: 1, ClassificationID: 1, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
-		{ID: 2, JournalID: id, AccountHolder: -100, CurrencyID: 1, ClassificationID: 1, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
+		{JournalUID: uid, AccountHolder: 100, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
+		{JournalUID: uid, AccountHolder: -100, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
 	}
 	return j, entries, nil
 }
 
-func (m *mockQueryProvider) ListJournals(ctx context.Context, cursorID int64, limit int32) ([]core.Journal, error) {
+func (m *mockQueryProvider) ListJournals(ctx context.Context, cursor string, limit int32) ([]core.Journal, string, error) {
 	return []core.Journal{
-		{ID: 1, JournalTypeID: 1, IdempotencyKey: "j1", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
-	}, nil
+		{UID: "jr-1", JournalTypeUID: "jt-1", IdempotencyKey: "j1", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, "", nil
 }
 
-func (m *mockQueryProvider) ListEntriesByAccount(ctx context.Context, holder, currencyID, cursorID int64, limit int32) ([]core.Entry, error) {
+func (m *mockQueryProvider) ListEntriesByAccount(ctx context.Context, holder int64, currencyUID, cursor string, limit int32) ([]core.Entry, string, error) {
 	return []core.Entry{
-		{ID: 1, JournalID: 1, AccountHolder: holder, CurrencyID: currencyID, ClassificationID: 1, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
-	}, nil
+		{JournalUID: "jr-1", AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: "cls-1", EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, "", nil
 }
 
 func (m *mockQueryProvider) ListReservations(ctx context.Context, holder int64, status string, limit int32) ([]core.Reservation, error) {
 	return []core.Reservation{}, nil
 }
 
-func (m *mockQueryProvider) ListSnapshotsByDateRange(ctx context.Context, holder, currencyID int64, start, end time.Time) ([]core.BalanceSnapshot, error) {
+func (m *mockQueryProvider) ListSnapshotsByDateRange(ctx context.Context, holder int64, currencyUID string, start, end time.Time) ([]core.BalanceSnapshot, error) {
 	return []core.BalanceSnapshot{}, nil
 }
 
 func (m *mockQueryProvider) GetSystemRollups(ctx context.Context) ([]core.SystemRollup, error) {
 	return []core.SystemRollup{
-		{CurrencyID: 1, ClassificationID: 1, TotalBalance: decimal.NewFromInt(10000), UpdatedAt: time.Now()},
+		{CurrencyUID: "cur-1", ClassificationUID: "cls-1", TotalBalance: decimal.NewFromInt(10000), UpdatedAt: time.Now()},
 	}, nil
 }
 
@@ -672,11 +672,11 @@ func TestHealthEndpoint(t *testing.T) {
 func TestPostJournal(t *testing.T) {
 	srv := newTestServer()
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-123",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-123",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -690,10 +690,10 @@ func TestPostJournal_PassesEventID(t *testing.T) {
 			postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 				captured = input
 				return &core.Journal{
-					ID:             1,
-					JournalTypeID:  input.JournalTypeID,
+					UID:            "uid-1",
+					JournalTypeUID: input.JournalTypeUID,
 					IdempotencyKey: input.IdempotencyKey,
-					EventID:        input.EventID,
+					EventUID:       input.EventUID,
 					TotalDebit:     decimal.NewFromInt(100),
 					TotalCredit:    decimal.NewFromInt(100),
 					CreatedAt:      time.Now(),
@@ -703,20 +703,20 @@ func TestPostJournal_PassesEventID(t *testing.T) {
 	})
 
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-event-link",
-		"event_id":        77,
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-event-link",
+		"event_uid":        "evt-77",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
 	require.Equal(t, http.StatusCreated, w.Code)
-	assert.Equal(t, int64(77), captured.EventID)
+	assert.Equal(t, "evt-77", captured.EventUID)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Equal(t, float64(77), data["event_id"])
+	assert.Equal(t, "evt-77", data["event_uid"])
 }
 
 func TestPostDepositTolerance(t *testing.T) {
@@ -726,8 +726,8 @@ func TestPostDepositTolerance(t *testing.T) {
 			templateFn: func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 				calls = append(calls, code)
 				return &core.Journal{
-					ID:             int64(len(calls)),
-					JournalTypeID:  1,
+					UID:            fmt.Sprintf("jr-%d", len(calls)),
+					JournalTypeUID: "jt-1",
 					IdempotencyKey: params.IdempotencyKey,
 					Metadata:       params.Metadata,
 					TotalDebit:     decimal.NewFromInt(100),
@@ -740,7 +740,7 @@ func TestPostDepositTolerance(t *testing.T) {
 
 	body := map[string]any{
 		"holder_id":       100,
-		"currency_id":     1,
+		"currency_uid":    "cur-1",
 		"idempotency_key": "dep-tol-1",
 		"expected_amount": "100",
 		"actual_amount":   "98",
@@ -772,10 +772,10 @@ func TestPostTemplate_PassesEventID(t *testing.T) {
 				capturedCode = code
 				captured = params
 				return &core.Journal{
-					ID:             2,
-					JournalTypeID:  1,
+					UID:            "jr-2",
+					JournalTypeUID: "jt-1",
 					IdempotencyKey: params.IdempotencyKey,
-					EventID:        params.EventID,
+					EventUID:       params.EventUID,
 					TotalDebit:     decimal.NewFromInt(50),
 					TotalCredit:    decimal.NewFromInt(50),
 					CreatedAt:      time.Now(),
@@ -787,9 +787,9 @@ func TestPostTemplate_PassesEventID(t *testing.T) {
 	body := map[string]any{
 		"template_code":   "deposit_confirm",
 		"holder_id":       100,
-		"currency_id":     1,
+		"currency_uid":    "cur-1",
 		"idempotency_key": "tmpl-event-link",
-		"event_id":        88,
+		"event_uid":       "evt-88",
 		"amounts": map[string]any{
 			"amount": "50",
 		},
@@ -797,10 +797,10 @@ func TestPostTemplate_PassesEventID(t *testing.T) {
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", body)
 	require.Equal(t, http.StatusCreated, w.Code)
 	assert.Equal(t, "deposit_confirm", capturedCode)
-	assert.Equal(t, int64(88), captured.EventID)
+	assert.Equal(t, "evt-88", captured.EventUID)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Equal(t, float64(88), data["event_id"])
+	assert.Equal(t, "evt-88", data["event_uid"])
 }
 
 func TestPostJournalUnbalanced(t *testing.T) {
@@ -812,11 +812,11 @@ func TestPostJournalUnbalanced(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-unbalanced",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-unbalanced",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "50"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "50"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -855,7 +855,7 @@ func TestListJournalsWithCursor(t *testing.T) {
 
 func TestGetBalances(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/100?currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/100?currency_uid=cur-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelopeArray(t, w.Body.Bytes())
@@ -864,7 +864,7 @@ func TestGetBalances(t *testing.T) {
 
 func TestBatchBalances(t *testing.T) {
 	srv := newTestServer()
-	body := map[string]any{"holder_ids": []int64{100, 200}, "currency_id": 1}
+	body := map[string]any{"holder_ids": []int64{100, 200}, "currency_uid": "cur-1"}
 	w := doRequest(srv, http.MethodPost, "/api/v1/balances/batch", body)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
@@ -873,7 +873,7 @@ func TestCreateReservation(t *testing.T) {
 	srv := newTestServer()
 	body := map[string]any{
 		"account_holder":  100,
-		"currency_id":     1,
+		"currency_uid":    "cur-1",
 		"amount":          "50.00",
 		"idempotency_key": "res-1",
 	}
@@ -901,7 +901,7 @@ func TestCreateBooking(t *testing.T) {
 	body := map[string]any{
 		"classification_code": "deposit",
 		"account_holder":      100,
-		"currency_id":         1,
+		"currency_uid":        "cur-1",
 		"amount":              "500.00",
 		"channel_name":        "crypto",
 		"idempotency_key":     "op-1",
@@ -910,7 +910,7 @@ func TestCreateBooking(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Equal(t, float64(1), data["id"])
+	assert.Equal(t, "bk-1", data["uid"])
 	assert.Equal(t, "pending", data["status"])
 }
 
@@ -930,11 +930,11 @@ func TestTransitionBooking(t *testing.T) {
 
 func TestGetBooking(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/bookings/1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/bookings/bk-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Equal(t, float64(1), data["id"])
+	assert.Equal(t, "bk-1", data["uid"])
 }
 
 func TestListBookings(t *testing.T) {
@@ -952,17 +952,17 @@ func TestListBookings(t *testing.T) {
 
 func TestGetEvent(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/events/1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/events/evt-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Equal(t, float64(1), data["id"])
+	assert.Equal(t, "evt-1", data["uid"])
 	assert.Equal(t, "confirmed", data["to_status"])
 }
 
 func TestListEvents(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/events?booking_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/events?booking_uid=bk-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
@@ -1029,12 +1029,12 @@ func TestTemplateCRUD(t *testing.T) {
 	srv := newTestServer()
 
 	body := map[string]any{
-		"code":            "deposit",
-		"name":            "Deposit",
-		"journal_type_id": 1,
+		"code":             "deposit",
+		"name":             "Deposit",
+		"journal_type_uid": "jt-1",
 		"lines": []map[string]any{
-			{"classification_id": 1, "entry_type": "debit", "holder_role": "user", "amount_key": "amount", "sort_order": 1},
-			{"classification_id": 1, "entry_type": "credit", "holder_role": "system", "amount_key": "amount", "sort_order": 2},
+			{"classification_uid": "cls-1", "entry_type": "debit", "holder_role": "user", "amount_key": "amount", "sort_order": 1},
+			{"classification_uid": "cls-1", "entry_type": "credit", "holder_role": "system", "amount_key": "amount", "sort_order": 2},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/templates", body)
@@ -1048,10 +1048,10 @@ func TestTemplateCreate_RejectsEmptyLines(t *testing.T) {
 	srv := newTestServer()
 
 	body := map[string]any{
-		"code":            "broken",
-		"name":            "Broken",
-		"journal_type_id": 1,
-		"lines":           []map[string]any{},
+		"code":             "broken",
+		"name":             "Broken",
+		"journal_type_uid": "jt-1",
+		"lines":            []map[string]any{},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/templates", body)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -1061,9 +1061,9 @@ func TestTemplatePreview(t *testing.T) {
 	srv := newTestServer()
 
 	body := map[string]any{
-		"holder_id":   100,
-		"currency_id": 1,
-		"amounts":     map[string]string{"amount": "500"},
+		"holder_id":    100,
+		"currency_uid": "cur-1",
+		"amounts":      map[string]string{"amount": "500"},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/templates/deposit/preview", body)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1111,7 +1111,7 @@ func TestReconcileGlobal(t *testing.T) {
 
 func TestReconcileAccount(t *testing.T) {
 	srv := newTestServer()
-	body := map[string]any{"holder": 100, "currency_id": 1}
+	body := map[string]any{"holder": 100, "currency_uid": "cur-1"}
 	w := doRequest(srv, http.MethodPost, "/api/v1/reconcile/account", body)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
@@ -1144,13 +1144,13 @@ func TestSystemBalances(t *testing.T) {
 
 func TestListSnapshots(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/snapshots?holder=100&currency_id=1&start=2026-01-01&end=2026-12-31", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/snapshots?holder=100&currency_uid=cur-1&start=2026-01-01&end=2026-12-31", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestListEntriesByAccount(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/entries?holder=100&currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/entries?holder=100&currency_uid=cur-1", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	data := parseEnvelope(t, w.Body.Bytes())
@@ -1172,7 +1172,7 @@ func TestMissingRequiredParams(t *testing.T) {
 	srv := newTestServer()
 
 	// Missing holder on balances
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/abc?currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/abc?currency_uid=cur-1", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	// Missing currency_id on balances
@@ -1180,7 +1180,7 @@ func TestMissingRequiredParams(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 
 	// Empty batch
-	w = doRequest(srv, http.MethodPost, "/api/v1/balances/batch", map[string]any{"holder_ids": []int64{}, "currency_id": 1})
+	w = doRequest(srv, http.MethodPost, "/api/v1/balances/batch", map[string]any{"holder_ids": []int64{}, "currency_uid": "cur-1"})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -1189,8 +1189,8 @@ func TestMissingRequiredParams(t *testing.T) {
 func TestPostJournal_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.journals = &mockJournalWriter{
-			reverseFn: func(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
-				return nil, fmt.Errorf("postgres: reverse journal: journal %d: %w", journalID, core.ErrNotFound)
+			reverseFn: func(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
+				return nil, fmt.Errorf("postgres: reverse journal: journal %s: %w", journalUID, core.ErrNotFound)
 			},
 		}
 	})
@@ -1208,11 +1208,11 @@ func TestPostJournal_InvalidInput(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-invalid-input",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-invalid-input",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -1228,11 +1228,11 @@ func TestPostJournal_DuplicateJournal(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-duplicate",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-duplicate",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -1248,11 +1248,11 @@ func TestPostJournal_Conflict(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-conflict",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-conflict",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -1268,11 +1268,11 @@ func TestPostJournal_InternalError(t *testing.T) {
 		}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
-		"idempotency_key": "test-internal",
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "test-internal",
 		"entries": []map[string]any{
-			{"account_holder": 100, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "100"},
-			{"account_holder": -100, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "100"},
+			{"account_holder": 100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "100"},
+			{"account_holder": -100, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "100"},
 		},
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
@@ -1282,7 +1282,7 @@ func TestPostJournal_InternalError(t *testing.T) {
 func TestReverseJournal_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.journals = &mockJournalWriter{
-			reverseFn: func(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
+			reverseFn: func(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
 				return nil, fmt.Errorf("postgres: reverse journal: %w", core.ErrNotFound)
 			},
 		}
@@ -1300,7 +1300,7 @@ func TestReverseJournal_MissingReason(t *testing.T) {
 func TestSettleReservation_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.reserver = &mockReserver{
-			settleFn: func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
+			settleFn: func(ctx context.Context, reservationUID string, actualAmount decimal.Decimal) error {
 				return fmt.Errorf("postgres: settle reservation: %w", core.ErrNotFound)
 			},
 		}
@@ -1312,7 +1312,7 @@ func TestSettleReservation_NotFound(t *testing.T) {
 func TestSettleReservation_InvalidTransition(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.reserver = &mockReserver{
-			settleFn: func(ctx context.Context, reservationID int64, actualAmount decimal.Decimal) error {
+			settleFn: func(ctx context.Context, reservationUID string, actualAmount decimal.Decimal) error {
 				return fmt.Errorf("service: settle: %w", core.ErrInvalidTransition)
 			},
 		}
@@ -1331,7 +1331,7 @@ func TestCreateReservation_InvalidInput(t *testing.T) {
 	})
 	body := map[string]any{
 		"account_holder":  100,
-		"currency_id":     1,
+		"currency_uid":    "cur-1",
 		"amount":          "50.00",
 		"idempotency_key": "res-invalid",
 	}
@@ -1352,7 +1352,7 @@ func TestCreateBooking_NotFound(t *testing.T) {
 	body := map[string]any{
 		"classification_code": "unknown",
 		"account_holder":      100,
-		"currency_id":         1,
+		"currency_uid":        "cur-1",
 		"amount":              "500.00",
 		"idempotency_key":     "op-notfound",
 	}
@@ -1378,7 +1378,7 @@ func TestTransition_InvalidTransition(t *testing.T) {
 func TestGetBooking_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.bookingReader = &mockBookingReader{
-			getFn: func(ctx context.Context, id int64) (*core.Booking, error) {
+			getFn: func(ctx context.Context, uid string) (*core.Booking, error) {
 				return nil, fmt.Errorf("postgres: get booking: %w", core.ErrNotFound)
 			},
 		}
@@ -1390,7 +1390,7 @@ func TestGetBooking_NotFound(t *testing.T) {
 func TestGetEvent_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.eventReader = &mockEventReader{
-			getFn: func(ctx context.Context, id int64) (*core.Event, error) {
+			getFn: func(ctx context.Context, uid string) (*core.Event, error) {
 				return nil, fmt.Errorf("postgres: get event: %w", core.ErrNotFound)
 			},
 		}
@@ -1410,7 +1410,7 @@ func TestCreateBooking_InsufficientBalance(t *testing.T) {
 	body := map[string]any{
 		"classification_code": "withdrawal",
 		"account_holder":      100,
-		"currency_id":         1,
+		"currency_uid":        "cur-1",
 		"amount":              "99999.00",
 		"idempotency_key":     "op-insufficient",
 	}
@@ -1430,7 +1430,7 @@ type serverErrorEnvelope struct {
 
 func TestAuditListJournals_ByAccount(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?holder=100&currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/journals?holder=100&currency_uid=cur-1", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	page := parseEnvelope(t, w.Body.Bytes())
 	arr, ok := page["list"].([]any)
@@ -1475,7 +1475,7 @@ func TestAuditTraceBooking(t *testing.T) {
 func TestAuditTraceBooking_NotFound(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.audit = &mockAuditQuerier{
-			traceBookingFn: func(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+			traceBookingFn: func(ctx context.Context, bookingUID string) (*core.BookingTrace, error) {
 				return nil, fmt.Errorf("postgres: trace booking: %w", core.ErrNotFound)
 			},
 		}
@@ -1491,7 +1491,7 @@ func TestAuditTraceBooking_NotFound(t *testing.T) {
 func TestAuditTraceBooking_InternalError_Retryable(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.audit = &mockAuditQuerier{
-			traceBookingFn: func(ctx context.Context, bookingID int64) (*core.BookingTrace, error) {
+			traceBookingFn: func(ctx context.Context, bookingUID string) (*core.BookingTrace, error) {
 				return nil, fmt.Errorf("postgres: trace booking: connection reset")
 			},
 		}
@@ -1504,10 +1504,12 @@ func TestAuditTraceBooking_InternalError_Retryable(t *testing.T) {
 	assert.True(t, env.Retryable, "unclassified internal errors default to retryable")
 }
 
-func TestAuditTraceBooking_InvalidID(t *testing.T) {
+func TestAuditTraceBooking_OpaqueUIDPassesThrough(t *testing.T) {
+	// uids are opaque strings — the handler no longer rejects non-numeric
+	// path params; resolution happens in the store (unknown uid → 404 there).
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/not-a-number/trace", nil)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
+	w := doRequest(srv, http.MethodGet, "/api/v1/audit/bookings/any-opaque-uid/trace", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestAuditListReversals(t *testing.T) {
@@ -1522,7 +1524,7 @@ func TestAuditListReversals(t *testing.T) {
 
 func TestPlatformBalances(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/platform/balances?currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/balances?currency_uid=cur-1", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Contains(t, data, "user_side")
@@ -1541,7 +1543,7 @@ func TestPlatformBalances_MissingCurrency(t *testing.T) {
 
 func TestPlatformSolvency(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_uid=cur-1", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, true, data["solvent"])
@@ -1550,18 +1552,18 @@ func TestPlatformSolvency(t *testing.T) {
 func TestPlatformSolvency_Insolvent(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.solvency = &mockSolvencyChecker{
-			checkFn: func(ctx context.Context, currencyID int64) (*core.SolvencyReport, error) {
+			checkFn: func(ctx context.Context, currencyUID string) (*core.SolvencyReport, error) {
 				return &core.SolvencyReport{
-					CurrencyID: currencyID,
-					Liability:  decimal.NewFromInt(1000),
-					Custodial:  decimal.NewFromInt(800),
-					Solvent:    false,
-					Margin:     decimal.NewFromInt(-200),
+					CurrencyUID: currencyUID,
+					Liability:   decimal.NewFromInt(1000),
+					Custodial:   decimal.NewFromInt(800),
+					Solvent:     false,
+					Margin:      decimal.NewFromInt(-200),
 				}, nil
 			},
 		}
 	})
-	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_id=1", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/platform/solvency?currency_uid=cur-1", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, false, data["solvent"])
@@ -1578,7 +1580,7 @@ func TestPlatformSolvency_MissingCurrency(t *testing.T) {
 
 func TestBalanceTrends(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_uid=cur-1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
 	require.Equal(t, http.StatusOK, w.Code)
 	arr := parseEnvelopeArray(t, w.Body.Bytes())
 	assert.NotEmpty(t, arr)
@@ -1586,19 +1588,19 @@ func TestBalanceTrends(t *testing.T) {
 
 func TestBalanceTrends_MissingFrom(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&to=2026-01-31T00:00:00Z", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_uid=cur-1&to=2026-01-31T00:00:00Z", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestBalanceTrends_MissingHolder(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?currency_id=1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?currency_uid=cur-1&from=2026-01-01T00:00:00Z&to=2026-01-31T00:00:00Z", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestBalanceTrends_InvalidTo(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_id=1&from=2026-01-01T00:00:00Z&to=not-a-date", nil)
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/trends?holder=100&currency_uid=cur-1&from=2026-01-01T00:00:00Z&to=not-a-date", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -1609,14 +1611,14 @@ func TestIdempotencyHeaderAlias_InjectsIntoBody(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.journals = &mockJournalWriter{postFn: func(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 			captured = input.IdempotencyKey
-			return &core.Journal{ID: 1, IdempotencyKey: input.IdempotencyKey}, nil
+			return &core.Journal{UID: "uid-1", IdempotencyKey: input.IdempotencyKey}, nil
 		}}
 	})
 	body := map[string]any{
-		"journal_type_id": 1,
+		"journal_type_uid": "jt-1",
 		"entries": []map[string]any{
-			{"account_holder": 1, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "5"},
-			{"account_holder": -1, "currency_id": 1, "classification_id": 1, "entry_type": "credit", "amount": "5"},
+			{"account_holder": 1, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "debit", "amount": "5"},
+			{"account_holder": -1, "currency_uid": "cur-1", "classification_uid": "cls-1", "entry_type": "credit", "amount": "5"},
 		},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/journals", jsonBody(t, body))
@@ -1630,7 +1632,7 @@ func TestIdempotencyHeaderAlias_InjectsIntoBody(t *testing.T) {
 
 func TestIdempotencyHeaderAlias_MismatchRejected(t *testing.T) {
 	srv := newTestServer()
-	body := map[string]any{"idempotency_key": "body-key", "journal_type_id": 1}
+	body := map[string]any{"idempotency_key": "body-key", "journal_type_uid": "jt-1"}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/journals", jsonBody(t, body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "different-key")

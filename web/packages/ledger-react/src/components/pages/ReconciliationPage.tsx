@@ -82,9 +82,9 @@ export function ReconciliationPage() {
                 <Button
                   onClick={() => {
                     const h = parseInt(holder, 10);
-                    const c = parseInt(currencyId, 10);
-                    if (isNaN(h) || isNaN(c)) return;
-                    accountMutation.mutate({ holder: h, currencyId: c });
+                    const c = currencyId.trim();
+                    if (isNaN(h) || c === "") return;
+                    accountMutation.mutate({ holder: h, currencyUid: c });
                   }}
                   disabled={accountMutation.isPending || !holder || !currencyId}
                 >
@@ -120,10 +120,10 @@ export function ReconciliationPage() {
                     </TableHeader>
                     <TableBody>
                       {accountResult.details.map((d) => (
-                        <TableRow key={`${d.account_holder}-${d.currency_id}-${d.classification_id}`}>
+                        <TableRow key={`${d.account_holder}-${d.currency_uid}-${d.classification_uid}`}>
                           <TableCell>{d.account_holder}</TableCell>
-                          <TableCell>{d.currency_id}</TableCell>
-                          <TableCell>{d.classification_id}</TableCell>
+                          <TableCell>{d.currency_uid}</TableCell>
+                          <TableCell>{d.classification_uid}</TableCell>
                           <TableCell className="text-right font-mono">{formatAmount(d.expected)}</TableCell>
                           <TableCell className="text-right font-mono">{formatAmount(d.actual)}</TableCell>
                           <TableCell className="text-right font-mono">

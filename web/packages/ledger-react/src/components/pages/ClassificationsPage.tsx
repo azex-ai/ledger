@@ -73,7 +73,7 @@ function CreateDialog() {
   );
 }
 
-function DeactivateDialog({ id, name }: { id: number; name: string }) {
+function DeactivateDialog({ id, name }: { id: string; name: string }) {
   const [open, setOpen] = useState(false);
   const mutation = useDeactivateClassification();
 
@@ -140,15 +140,15 @@ export function ClassificationsPage() {
           </TableHeader>
           <TableBody>
             {classifications.map((c) => (
-              <TableRow key={c.id}>
-                <TableCell>{c.id}</TableCell>
+              <TableRow key={c.uid}>
+                <TableCell>{c.uid}</TableCell>
                 <TableCell className="font-mono text-xs">{c.code}</TableCell>
                 <TableCell>{c.name}</TableCell>
                 <TableCell><StatusBadge status={c.normal_side} /></TableCell>
                 <TableCell>{c.is_system ? "Yes" : "No"}</TableCell>
                 <TableCell><StatusBadge status={c.is_active ? "active" : "inactive"} /></TableCell>
                 <TableCell>
-                  {c.is_active && <DeactivateDialog id={c.id} name={c.name} />}
+                  {c.is_active && <DeactivateDialog id={c.uid} name={c.name} />}
                 </TableCell>
               </TableRow>
             ))}

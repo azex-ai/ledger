@@ -19,11 +19,11 @@ import (
 
 // fakeEventPoller hands out a fixed batch of events once, then returns empty.
 type fakeEventPoller struct {
-	events    []core.Event
+	events    []delivery.PendingEvent
 	delivered []int64
 }
 
-func (f *fakeEventPoller) GetPendingEvents(_ context.Context, limit int) ([]core.Event, error) {
+func (f *fakeEventPoller) GetPendingEvents(_ context.Context, limit int) ([]delivery.PendingEvent, error) {
 	if len(f.events) == 0 {
 		return nil, nil
 	}
@@ -54,18 +54,17 @@ func TestWorker_Subscribe_HandlerReceivesEvent(t *testing.T) {
 	engine := core.NewEngine()
 
 	poller := &fakeEventPoller{
-		events: []core.Event{
-			{ID: 1, ClassificationCode: "deposit", BookingID: 10, ToStatus: "confirmed"},
+		events: []delivery.PendingEvent{
+			{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", BookingUID: "bk-10", ToStatus: "confirmed"}},
 		},
 	}
-
-	var received atomic.Int64
 
 	// Build a minimal worker.
 	worker := newMinimalWorker(engine)
 	worker.SetLocalPoller(poller)
+	var receivedUID atomic.Value
 	worker.Subscribe(func(_ context.Context, e core.Event) error {
-		received.Store(e.ID)
+		receivedUID.Store(e.UID)
 		return nil
 	})
 
@@ -78,8 +77,8 @@ func TestWorker_Subscribe_HandlerReceivesEvent(t *testing.T) {
 	err := worker.Run(ctx)
 	require.NoError(t, err)
 
-	// Handler must have been invoked with event ID 1.
-	assert.Equal(t, int64(1), received.Load(), "expected handler to receive event ID 1")
+	// Handler must have been invoked with event evt-1.
+	assert.Equal(t, "evt-1", receivedUID.Load(), "expected handler to receive event evt-1")
 	// Event must have been marked delivered.
 	assert.Equal(t, []int64{1}, poller.delivered)
 }
@@ -91,9 +90,9 @@ func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 	engine := core.NewEngine()
 
 	poller := &fakeEventPoller{
-		events: []core.Event{
-			{ID: 1, ClassificationCode: "deposit", BookingID: 10, ToStatus: "confirmed"},
-			{ID: 2, ClassificationCode: "deposit", BookingID: 11, ToStatus: "confirmed"},
+		events: []delivery.PendingEvent{
+			{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", BookingUID: "bk-10", ToStatus: "confirmed"}},
+			{InternalID: 2, Event: core.Event{UID: "evt-2", ClassificationCode: "deposit", BookingUID: "bk-11", ToStatus: "confirmed"}},
 		},
 	}
 
@@ -103,7 +102,7 @@ func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 	worker.SetLocalPoller(poller)
 	worker.Subscribe(func(_ context.Context, e core.Event) error {
 		processedCount.Add(1)
-		if e.ID == 1 {
+		if e.UID == "evt-1" {
 			return assert.AnError // handler fails for event 1
 		}
 		return nil

@@ -39,7 +39,7 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 	currencyStore := postgres.NewCurrencyStore(pool)
 	rollupAdapter := postgres.NewRollupAdapter(pool)
 	engine := core.NewEngine()
-	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, classStore, engine)
+	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 
 	usdt, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{
 		Code: "USDT-RB", Name: "Tether Rollup Boundary", Exponent: 18,
@@ -67,11 +67,11 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 	postDeposit := func(amount int64, keySuffix string) {
 		t.Helper()
 		_, err := ledgerStore.PostJournal(ctx, core.JournalInput{
-			JournalTypeID:  jt.ID,
+			JournalTypeUID: jt.UID,
 			IdempotencyKey: postgrestest.UniqueKey("rb-" + keySuffix),
 			Entries: []core.EntryInput{
-				{AccountHolder: sysID, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(amount)},
-				{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: wallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(amount)},
+				{AccountHolder: sysID, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(amount)},
+				{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: wallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(amount)},
 			},
 			Source: "test",
 		})
@@ -89,8 +89,8 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 	var cpCount int
 	require.NoError(t,
 		pool.QueryRow(ctx,
-			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = $1 AND account_holder IN ($2, $3)",
-			usdt.ID, userID, sysID,
+			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid) AND account_holder IN ($2, $3)",
+			usdt.UID, userID, sysID,
 		).Scan(&cpCount),
 	)
 	require.Equal(t, 2, cpCount, "both dimensions should have a checkpoint after the first rollup")
@@ -111,12 +111,12 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 	// Both balances must equal the true sum (500 + 300 = 800). A `>=` boundary
 	// would over-count the round-1 entry; a split-snapshot under-count would
 	// drop it.
-	walletBal, err := ledgerStore.GetBalance(ctx, userID, usdt.ID, wallet.ID)
+	walletBal, err := ledgerStore.GetBalance(ctx, userID, usdt.UID, wallet.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(decimal.NewFromInt(800)),
 		"wallet balance must be 800 (no double-count, no under-count), got %s", walletBal)
 
-	custodialBal, err := ledgerStore.GetBalance(ctx, sysID, usdt.ID, custodial.ID)
+	custodialBal, err := ledgerStore.GetBalance(ctx, sysID, usdt.UID, custodial.UID)
 	require.NoError(t, err)
 	assert.True(t, custodialBal.Equal(decimal.NewFromInt(800)),
 		"custodial balance must be 800 (no double-count, no under-count), got %s", custodialBal)

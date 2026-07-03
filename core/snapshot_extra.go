@@ -27,8 +27,8 @@ type BackfillResult struct {
 // from the most recent previous snapshot for that account dimension.
 type SparseSnapshotter interface {
 	// UpsertSnapshotSparse inserts snap only when the balance differs from the
-	// most recent existing snapshot for (AccountHolder, CurrencyID,
-	// ClassificationID) before snap.SnapshotDate. Returns (inserted, error).
+	// most recent existing snapshot for (AccountHolder, CurrencyUID,
+	// ClassificationUID) before snap.SnapshotDate. Returns (inserted, error).
 	UpsertSnapshotSparse(ctx context.Context, snap BalanceSnapshot) (bool, error)
 }
 
@@ -38,7 +38,7 @@ type LiveBalanceMerger interface {
 	// MergeWithLive returns snapshots for [startDate, endDate].  When endDate
 	// is today (or in the future) the entry for today is replaced by the
 	// current live balance from the checkpoint table.
-	MergeWithLive(ctx context.Context, holder, currencyID int64, startDate, endDate time.Time) ([]BalanceSnapshot, error)
+	MergeWithLive(ctx context.Context, holder int64, currencyUID string, startDate, endDate time.Time) ([]BalanceSnapshot, error)
 }
 
 // SnapshotCountReader can report the total number of stored snapshots. Used

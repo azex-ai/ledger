@@ -11,22 +11,22 @@ import (
 
 func TestEntryTemplate_Render(t *testing.T) {
 	tmpl := EntryTemplate{
-		ID:            1,
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: 1,
-		IsActive:      true,
+		UID:            "uid-1",
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: "jt-1",
+		IsActive:       true,
 		Lines: []EntryTemplateLine{
-			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
-			{ClassificationID: 20, EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
-			{ClassificationID: 30, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "fee"},
-			{ClassificationID: 40, EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "fee"},
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-20", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "amount"},
+			{ClassificationUID: "cls-30", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "fee"},
+			{ClassificationUID: "cls-40", EntryType: EntryTypeCredit, HolderRole: HolderRoleSystem, AmountKey: "fee"},
 		},
 	}
 
 	params := TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "tx-100",
 		Amounts: map[string]decimal.Decimal{
 			"amount": decimal.NewFromInt(1000),
@@ -36,7 +36,7 @@ func TestEntryTemplate_Render(t *testing.T) {
 
 	input, err := tmpl.Render(params)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), input.JournalTypeID)
+	assert.Equal(t, "jt-1", input.JournalTypeUID)
 	assert.Equal(t, "tx-100", input.IdempotencyKey)
 	assert.Len(t, input.Entries, 4)
 
@@ -50,18 +50,18 @@ func TestEntryTemplate_Render(t *testing.T) {
 
 func TestEntryTemplate_Render_MissingAmountKey(t *testing.T) {
 	tmpl := EntryTemplate{
-		ID:            1,
-		Code:          "test",
-		Name:          "Test",
-		JournalTypeID: 1,
-		IsActive:      true,
+		UID:            "uid-1",
+		Code:           "test",
+		Name:           "Test",
+		JournalTypeUID: "jt-1",
+		IsActive:       true,
 		Lines: []EntryTemplateLine{
-			{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+			{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
 		},
 	}
 	params := TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "tx-101",
 		Amounts:        map[string]decimal.Decimal{},
 	}
@@ -72,7 +72,7 @@ func TestEntryTemplate_Render_MissingAmountKey(t *testing.T) {
 
 func TestEntryTemplate_Render_Inactive(t *testing.T) {
 	tmpl := EntryTemplate{
-		ID:       1,
+		UID:      "uid-1",
 		Code:     "test",
 		Name:     "Test",
 		IsActive: false,
@@ -92,7 +92,7 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 		{
 			name: "inactive template",
 			tmpl: EntryTemplate{
-				ID:       1,
+				UID:      "uid-1",
 				Code:     "inactive_tmpl",
 				Name:     "Inactive",
 				IsActive: false,
@@ -103,17 +103,17 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 		{
 			name: "missing amount key",
 			tmpl: EntryTemplate{
-				ID:       2,
+				UID:      "uid-2",
 				Code:     "active_tmpl",
 				Name:     "Active",
 				IsActive: true,
 				Lines: []EntryTemplateLine{
-					{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
+					{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRoleUser, AmountKey: "amount"},
 				},
 			},
 			params: TemplateParams{
 				HolderID:       42,
-				CurrencyID:     1,
+				CurrencyUID:    "cur-1",
 				IdempotencyKey: "tx-tmpl-01",
 				Amounts:        map[string]decimal.Decimal{},
 			},
@@ -121,17 +121,17 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 		{
 			name: "invalid holder role",
 			tmpl: EntryTemplate{
-				ID:       3,
+				UID:      "uid-3",
 				Code:     "active_tmpl2",
 				Name:     "Active 2",
 				IsActive: true,
 				Lines: []EntryTemplateLine{
-					{ClassificationID: 10, EntryType: EntryTypeDebit, HolderRole: HolderRole("admin"), AmountKey: "amount"},
+					{ClassificationUID: "cls-10", EntryType: EntryTypeDebit, HolderRole: HolderRole("admin"), AmountKey: "amount"},
 				},
 			},
 			params: TemplateParams{
 				HolderID:       42,
-				CurrencyID:     1,
+				CurrencyUID:    "cur-1",
 				IdempotencyKey: "tx-tmpl-02",
 				Amounts: map[string]decimal.Decimal{
 					"amount": decimal.NewFromInt(100),
@@ -151,15 +151,15 @@ func TestEntryTemplate_Render_WrapsInvalidInput(t *testing.T) {
 
 func TestTemplateInput_Validate(t *testing.T) {
 	valid := TemplateInput{
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: 1,
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: "jt-1",
 		Lines: []TemplateLineInput{
 			{
-				ClassificationID: 1,
-				EntryType:        EntryTypeDebit,
-				HolderRole:       HolderRoleUser,
-				AmountKey:        "amount",
+				ClassificationUID: "cls-1",
+				EntryType:         EntryTypeDebit,
+				HolderRole:        HolderRoleUser,
+				AmountKey:         "amount",
 			},
 		},
 	}
@@ -174,10 +174,10 @@ func TestTemplateInput_Validate(t *testing.T) {
 
 	invalid = valid
 	invalid.Lines = []TemplateLineInput{{
-		ClassificationID: 0,
-		EntryType:        EntryTypeDebit,
-		HolderRole:       HolderRoleUser,
-		AmountKey:        "amount",
+		ClassificationUID: "",
+		EntryType:         EntryTypeDebit,
+		HolderRole:        HolderRoleUser,
+		AmountKey:         "amount",
 	}}
 	err = invalid.Validate()
 	require.Error(t, err)
@@ -186,16 +186,16 @@ func TestTemplateInput_Validate(t *testing.T) {
 
 func TestEntryTemplate_Render_RejectsEmptyLines(t *testing.T) {
 	tmpl := EntryTemplate{
-		ID:            1,
-		Code:          "broken",
-		Name:          "Broken",
-		JournalTypeID: 1,
-		IsActive:      true,
+		UID:            "uid-1",
+		Code:           "broken",
+		Name:           "Broken",
+		JournalTypeUID: "jt-1",
+		IsActive:       true,
 	}
 
 	_, err := tmpl.Render(TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "preview",
 		Amounts:        map[string]decimal.Decimal{},
 	})

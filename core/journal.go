@@ -8,18 +8,22 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// Journal is a persisted balanced journal.
+// Journal is a persisted balanced journal. UID is the only identifier
+// exposed anywhere (api-contract §3): the internal storage id never leaves
+// the postgres adapter.
 type Journal struct {
-	ID             int64             `json:"id"`
-	JournalTypeID  int64             `json:"journal_type_id"`
+	UID            string            `json:"uid"`
+	JournalTypeUID string            `json:"journal_type_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	TotalDebit     decimal.Decimal   `json:"total_debit"`
 	TotalCredit    decimal.Decimal   `json:"total_credit"`
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
-	ReversalOf     int64             `json:"reversal_of"`
-	EventID        int64             `json:"event_id"`
+	// ReversalOfUID is the uid of the journal this one reverses; empty for
+	// original (non-reversal) journals.
+	ReversalOfUID string `json:"reversal_of_uid,omitempty"`
+	EventUID      string `json:"event_uid,omitempty"`
 	// EffectiveAt is the business date this journal is attributed to, distinct
 	// from CreatedAt (the write-time). Used for as-of reporting (trial balance,
 	// balance trends, snapshots) — see docs/INVARIANTS.md I-14.
@@ -27,40 +31,47 @@ type Journal struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Entry is a single debit or credit line in a journal.
+// Entry is a single debit or credit line in a journal. Entries carry no
+// identifier of their own (identity is positional within the journal);
+// dimension references are uids.
 type Entry struct {
-	ID               int64           `json:"id"`
-	JournalID        int64           `json:"journal_id"`
-	AccountHolder    int64           `json:"account_holder"`
-	CurrencyID       int64           `json:"currency_id"`
-	ClassificationID int64           `json:"classification_id"`
-	EntryType        EntryType       `json:"entry_type"`
-	Amount           decimal.Decimal `json:"amount"`
+	JournalUID        string          `json:"journal_uid"`
+	AccountHolder     int64           `json:"account_holder"`
+	CurrencyUID       string          `json:"currency_uid"`
+	ClassificationUID string          `json:"classification_uid"`
+	EntryType         EntryType       `json:"entry_type"`
+	Amount            decimal.Decimal `json:"amount"`
 	// EffectiveAt is denormalized from the parent journal so as-of aggregation
 	// does not need to join journals (see docs/INVARIANTS.md I-14).
 	EffectiveAt time.Time `json:"effective_at"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// EntryInput is the input for a single entry line.
+// EntryInput is the input for a single entry line. Currency and
+// classification are referenced by uid; the store resolves them to internal
+// ids once per journal.
 type EntryInput struct {
-	AccountHolder    int64           `json:"account_holder"`
-	CurrencyID       int64           `json:"currency_id"`
-	ClassificationID int64           `json:"classification_id"`
-	EntryType        EntryType       `json:"entry_type"`
-	Amount           decimal.Decimal `json:"amount"`
+	AccountHolder     int64           `json:"account_holder"`
+	CurrencyUID       string          `json:"currency_uid"`
+	ClassificationUID string          `json:"classification_uid"`
+	EntryType         EntryType       `json:"entry_type"`
+	Amount            decimal.Decimal `json:"amount"`
 }
 
 // JournalInput is the input to post a journal.
 type JournalInput struct {
-	JournalTypeID  int64             `json:"journal_type_id"`
+	JournalTypeUID string            `json:"journal_type_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	Entries        []EntryInput      `json:"entries"`
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
-	ReversalOf     int64             `json:"reversal_of"`
-	EventID        int64             `json:"event_id"`
+	// ReversalOfUID marks this journal as the reversal of another; empty for
+	// original journals.
+	ReversalOfUID string `json:"reversal_of_uid,omitempty"`
+	// EventUID links this journal to the event that caused it (I-10); empty
+	// when the posting is not event-driven.
+	EventUID string `json:"event_uid,omitempty"`
 	// EffectiveAt is the business date to attribute this journal to. Zero
 	// value means "now" — the store layer defaults it at insert time. Must
 	// not be more than effectiveAtFutureTolerance ahead of the current time.
@@ -91,17 +102,17 @@ type currencyTotals struct {
 	credit decimal.Decimal
 }
 
-func (j *JournalInput) totalsByCurrency() map[int64]currencyTotals {
-	totals := make(map[int64]currencyTotals)
+func (j *JournalInput) totalsByCurrency() map[string]currencyTotals {
+	totals := make(map[string]currencyTotals)
 	for _, e := range j.Entries {
-		current := totals[e.CurrencyID]
+		current := totals[e.CurrencyUID]
 		switch e.EntryType {
 		case EntryTypeDebit:
 			current.debit = current.debit.Add(e.Amount)
 		case EntryTypeCredit:
 			current.credit = current.credit.Add(e.Amount)
 		}
-		totals[e.CurrencyID] = current
+		totals[e.CurrencyUID] = current
 	}
 	return totals
 }
@@ -123,29 +134,29 @@ func (j *JournalInput) Validate() error {
 		if !e.EntryType.IsValid() {
 			return fmt.Errorf("core: journal: entry[%d]: invalid entry type %q: %w", i, e.EntryType, ErrInvalidInput)
 		}
-		if e.CurrencyID <= 0 {
-			return fmt.Errorf("core: journal: entry[%d]: currency_id must be positive: %w", i, ErrInvalidInput)
+		if e.CurrencyUID == "" {
+			return fmt.Errorf("core: journal: entry[%d]: currency_uid required: %w", i, ErrInvalidInput)
 		}
-		if e.ClassificationID <= 0 {
-			return fmt.Errorf("core: journal: entry[%d]: classification_id must be positive: %w", i, ErrInvalidInput)
+		if e.ClassificationUID == "" {
+			return fmt.Errorf("core: journal: entry[%d]: classification_uid required: %w", i, ErrInvalidInput)
 		}
 		if !e.Amount.IsPositive() {
 			return fmt.Errorf("core: journal: entry[%d]: amount must be positive: %w", i, ErrInvalidInput)
 		}
 	}
 	totalsByCurrency := j.totalsByCurrency()
-	currencyIDs := make([]int64, 0, len(totalsByCurrency))
-	for currencyID := range totalsByCurrency {
-		currencyIDs = append(currencyIDs, currencyID)
+	currencyUIDs := make([]string, 0, len(totalsByCurrency))
+	for currencyUID := range totalsByCurrency {
+		currencyUIDs = append(currencyUIDs, currencyUID)
 	}
-	sort.Slice(currencyIDs, func(i, k int) bool { return currencyIDs[i] < currencyIDs[k] })
+	sort.Strings(currencyUIDs)
 
-	for _, currencyID := range currencyIDs {
-		totals := totalsByCurrency[currencyID]
+	for _, currencyUID := range currencyUIDs {
+		totals := totalsByCurrency[currencyUID]
 		if !totals.debit.Equal(totals.credit) {
 			return fmt.Errorf(
-				"core: journal: currency %d unbalanced — debit=%s credit=%s: %w",
-				currencyID,
+				"core: journal: currency %s unbalanced, debit=%s credit=%s: %w",
+				currencyUID,
 				totals.debit,
 				totals.credit,
 				ErrUnbalancedJournal,

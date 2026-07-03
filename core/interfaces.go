@@ -17,7 +17,7 @@ type JournalWriter interface {
 	// partial — since a full reversal after a partial one would double-count
 	// the portion already reversed. Use ReverseJournalFraction for additional
 	// partial reversals once the journal has any reversal history.
-	ReverseJournal(ctx context.Context, journalID int64, reason string) (*Journal, error)
+	ReverseJournal(ctx context.Context, journalUID string, reason string) (*Journal, error)
 	// ReverseJournalFraction reverses num/den of journalID's entries (0 < num
 	// <= den, see ValidateReversalFraction). Each entry's share is computed by
 	// scaling its currency-and-side group's total by num/den and splitting it
@@ -37,7 +37,7 @@ type JournalWriter interface {
 	// fractional steps rounded up (fractions always scale the ORIGINAL
 	// amount, so e.g. two 1/3 steps of 100.01 cover 33.34+33.34 and the exact
 	// remainder 33.33 is not expressible as a fraction of the original).
-	ReverseJournalFraction(ctx context.Context, journalID int64, num, den int64, reason string, idempotencyKey string) (*Journal, error)
+	ReverseJournalFraction(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (*Journal, error)
 }
 
 // TemplateBatchExecutor executes multiple templates as a single atomic unit:
@@ -51,9 +51,9 @@ type TemplateBatchExecutor interface {
 
 // BalanceReader handles balance queries.
 type BalanceReader interface {
-	GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error)
-	GetBalances(ctx context.Context, holder int64, currencyID int64) ([]Balance, error)
-	BatchGetBalances(ctx context.Context, holderIDs []int64, currencyID int64) (map[int64][]Balance, error)
+	GetBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
+	GetBalances(ctx context.Context, holder int64, currencyUID string) ([]Balance, error)
+	BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]Balance, error)
 }
 
 // Reserver handles reserve/settle/lock flow.
@@ -68,7 +68,7 @@ type Reserver interface {
 	// Release cancels an active reservation, freeing its entire reserved
 	// amount without any accounting effect. It is a no-op on the ledger
 	// balance beyond removing the hold — no partial release is supported.
-	Release(ctx context.Context, reservationID int64) error
+	Release(ctx context.Context, reservationUID string) error
 	// SettlePartial settles part of a reservation. input.Amount must be
 	// positive. The first call transitions the reservation from active to
 	// settling; subsequent calls accumulate settled_amount further, which
@@ -86,14 +86,14 @@ type Reserver interface {
 	// particular, calling it on an active reservation that never received a
 	// SettlePartial call is not a valid "settle everything" shortcut; use
 	// Settle for that.
-	FinalizeSettlement(ctx context.Context, reservationID int64) error
+	FinalizeSettlement(ctx context.Context, reservationUID string) error
 	// HeldAmount returns the holder's outstanding holds in the given currency:
 	// full reserved_amount for active reservations plus the unsettled
 	// remainder of settling ones — the exact figure Reserve subtracts
 	// from balance to compute available. Consumers should call this instead of
 	// querying the reservations table directly, so available = balance − held
 	// can be derived without depending on the ledger's internal schema.
-	HeldAmount(ctx context.Context, holder, currencyID int64) (decimal.Decimal, error)
+	HeldAmount(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error)
 }
 
 // Booker handles classification-driven booking lifecycle.
@@ -104,14 +104,18 @@ type Booker interface {
 
 // BookingReader handles booking queries.
 type BookingReader interface {
-	GetBooking(ctx context.Context, id int64) (*Booking, error)
-	ListBookings(ctx context.Context, filter BookingFilter) ([]Booking, error)
+	GetBooking(ctx context.Context, uid string) (*Booking, error)
+	// ListBookings returns one page plus the opaque cursor for the next
+	// page ("" when exhausted).
+	ListBookings(ctx context.Context, filter BookingFilter) ([]Booking, string, error)
 }
 
 // EventReader handles event queries.
 type EventReader interface {
-	GetEvent(ctx context.Context, id int64) (*Event, error)
-	ListEvents(ctx context.Context, filter EventFilter) ([]Event, error)
+	GetEvent(ctx context.Context, uid string) (*Event, error)
+	// ListEvents returns one page plus the opaque cursor for the next page
+	// ("" when exhausted).
+	ListEvents(ctx context.Context, filter EventFilter) ([]Event, string, error)
 }
 
 // EventDeliverer delivers events to external consumers (webhooks, queues, etc.).
@@ -127,7 +131,7 @@ type RollupWorker interface {
 // Reconciler checks accounting equation integrity.
 type Reconciler interface {
 	CheckAccountingEquation(ctx context.Context) (*ReconcileResult, error)
-	ReconcileAccount(ctx context.Context, holder int64, currencyID int64) (*ReconcileResult, error)
+	ReconcileAccount(ctx context.Context, holder int64, currencyUID string) (*ReconcileResult, error)
 }
 
 // ReconcileResult holds the outcome of a reconciliation check.
@@ -139,25 +143,25 @@ type ReconcileResult struct {
 }
 
 type ReconcileDetail struct {
-	AccountHolder    int64
-	CurrencyID       int64
-	ClassificationID int64
-	Expected         decimal.Decimal
-	Actual           decimal.Decimal
-	Drift            decimal.Decimal
+	AccountHolder     int64
+	CurrencyUID       string
+	ClassificationUID string
+	Expected          decimal.Decimal
+	Actual            decimal.Decimal
+	Drift             decimal.Decimal
 }
 
 // Snapshotter handles daily balance snapshots.
 type Snapshotter interface {
 	CreateDailySnapshot(ctx context.Context, date time.Time) error
-	GetSnapshotBalance(ctx context.Context, holder int64, currencyID int64, date time.Time) ([]Balance, error)
+	GetSnapshotBalance(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]Balance, error)
 }
 
 // ClassificationStore manages dynamic classifications.
 type ClassificationStore interface {
 	CreateClassification(ctx context.Context, input ClassificationInput) (*Classification, error)
 	GetByCode(ctx context.Context, code string) (*Classification, error)
-	DeactivateClassification(ctx context.Context, id int64) error
+	DeactivateClassification(ctx context.Context, uid string) error
 	ListClassifications(ctx context.Context, activeOnly bool) ([]Classification, error)
 }
 
@@ -173,7 +177,7 @@ type ClassificationInput struct {
 type JournalTypeStore interface {
 	CreateJournalType(ctx context.Context, input JournalTypeInput) (*JournalType, error)
 	GetJournalTypeByCode(ctx context.Context, code string) (*JournalType, error)
-	DeactivateJournalType(ctx context.Context, id int64) error
+	DeactivateJournalType(ctx context.Context, uid string) error
 	ListJournalTypes(ctx context.Context, activeOnly bool) ([]JournalType, error)
 }
 
@@ -185,32 +189,32 @@ type JournalTypeInput struct {
 // TemplateStore manages entry templates.
 type TemplateStore interface {
 	CreateTemplate(ctx context.Context, input TemplateInput) (*EntryTemplate, error)
-	DeactivateTemplate(ctx context.Context, id int64) error
+	DeactivateTemplate(ctx context.Context, uid string) error
 	GetTemplate(ctx context.Context, code string) (*EntryTemplate, error)
 	ListTemplates(ctx context.Context, activeOnly bool) ([]EntryTemplate, error)
 }
 
 type TemplateInput struct {
-	Code          string
-	Name          string
-	JournalTypeID int64
-	Lines         []TemplateLineInput
+	Code           string
+	Name           string
+	JournalTypeUID string
+	Lines          []TemplateLineInput
 }
 
 type TemplateLineInput struct {
-	ClassificationID int64
-	EntryType        EntryType
-	HolderRole       HolderRole
-	AmountKey        string
-	SortOrder        int
+	ClassificationUID string
+	EntryType         EntryType
+	HolderRole        HolderRole
+	AmountKey         string
+	SortOrder         int
 }
 
 // CurrencyStore manages currencies.
 type CurrencyStore interface {
 	CreateCurrency(ctx context.Context, input CurrencyInput) (*Currency, error)
-	DeactivateCurrency(ctx context.Context, id int64) error
+	DeactivateCurrency(ctx context.Context, uid string) error
 	ListCurrencies(ctx context.Context, activeOnly bool) ([]Currency, error)
-	GetCurrency(ctx context.Context, id int64) (*Currency, error)
+	GetCurrency(ctx context.Context, uid string) (*Currency, error)
 }
 
 type CurrencyInput struct {
@@ -248,7 +252,7 @@ type AccountPolicyStore interface {
 	// matching — use the write-path's internal resolver for "effective
 	// policy" lookups). Returns ErrNotFound if no row exists at that exact
 	// dimension.
-	GetPolicy(ctx context.Context, holder, currencyID, classificationID int64) (*AccountPolicy, error)
+	GetPolicy(ctx context.Context, holder int64, currencyUID, classificationUID string) (*AccountPolicy, error)
 	// ListPolicies returns every policy row for holder, across all
 	// currencies and classifications.
 	ListPolicies(ctx context.Context, holder int64) ([]AccountPolicy, error)
@@ -266,5 +270,5 @@ type PeriodCloser interface {
 
 // TrialBalanceReader computes a trial balance report.
 type TrialBalanceReader interface {
-	TrialBalance(ctx context.Context, currencyID int64, asOf time.Time) (*TrialBalanceReport, error)
+	TrialBalance(ctx context.Context, currencyUID string, asOf time.Time) (*TrialBalanceReport, error)
 }

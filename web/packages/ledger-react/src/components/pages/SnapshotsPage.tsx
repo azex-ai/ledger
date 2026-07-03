@@ -15,7 +15,7 @@ import {
 
 interface SnapshotQuery {
   holder?: number;
-  currency_id?: number;
+  currency_uid?: string;
   start?: string;
   end?: string;
 }
@@ -23,7 +23,7 @@ interface SnapshotQuery {
 export function SnapshotsPage() {
   const [form, setForm] = useState({
     holder: "",
-    currency_id: "",
+    currency_uid: "",
     start: "",
     end: "",
   });
@@ -38,7 +38,7 @@ export function SnapshotsPage() {
   function handleSearch() {
     setQuery({
       holder: form.holder ? parseInt(form.holder, 10) : undefined,
-      currency_id: form.currency_id ? parseInt(form.currency_id, 10) : undefined,
+      currency_uid: form.currency_uid ? form.currency_uid.trim() : undefined,
       start: form.start || undefined,
       end: form.end || undefined,
     });
@@ -55,7 +55,7 @@ export function SnapshotsPage() {
         </div>
         <div className="grid gap-1">
           <Label className="text-xs">Currency</Label>
-          <Input value={form.currency_id} onChange={(e) => setForm({ ...form, currency_id: e.target.value })} placeholder="1" className="w-28" />
+          <Input value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" className="w-28" />
         </div>
         <div className="grid gap-1">
           <Label className="text-xs">Start Date</Label>
@@ -89,11 +89,11 @@ export function SnapshotsPage() {
           </TableHeader>
           <TableBody>
             {snapshots.map((s) => (
-              <TableRow key={`${s.snapshot_date}-${s.account_holder}-${s.currency_id}-${s.classification_id}`}>
+              <TableRow key={`${s.snapshot_date}-${s.account_holder}-${s.currency_uid}-${s.classification_uid}`}>
                 <TableCell>{s.snapshot_date}</TableCell>
                 <TableCell>{s.account_holder}</TableCell>
-                <TableCell>{s.currency_id}</TableCell>
-                <TableCell>{s.classification_id}</TableCell>
+                <TableCell>{s.currency_uid}</TableCell>
+                <TableCell>{s.classification_uid}</TableCell>
                 <TableCell className="text-right font-mono">{formatAmount(s.balance)}</TableCell>
               </TableRow>
             ))}

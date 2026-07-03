@@ -43,7 +43,7 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      42,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(100),
 		IdempotencyKey:     postgrestest.UniqueKey("booking-failed-expiry"),
 		ChannelName:        "test",
@@ -52,15 +52,15 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = bookingStore.Transition(ctx, core.TransitionInput{
-		BookingID: booking.ID,
-		ToStatus:  "failed",
+		BookingUID: booking.UID,
+		ToStatus:   "failed",
 	})
 	require.NoError(t, err)
 
 	expired, err := bookingStore.ListExpiredBookings(ctx, 10)
 	require.NoError(t, err)
 	require.Len(t, expired, 1)
-	assert.Equal(t, booking.ID, expired[0].ID)
+	assert.Equal(t, booking.UID, expired[0].UID)
 }
 
 func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing.T) {
@@ -91,7 +91,7 @@ func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing
 	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      43,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(100),
 		IdempotencyKey:     postgrestest.UniqueKey("booking-done-expiry"),
 		ChannelName:        "test",
@@ -100,15 +100,15 @@ func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing
 	require.NoError(t, err)
 
 	_, err = bookingStore.Transition(ctx, core.TransitionInput{
-		BookingID: booking.ID,
-		ToStatus:  "done",
+		BookingUID: booking.UID,
+		ToStatus:   "done",
 	})
 	require.NoError(t, err)
 
 	expired, err := bookingStore.ListExpiredBookings(ctx, 10)
 	require.NoError(t, err)
 	for _, item := range expired {
-		assert.NotEqual(t, booking.ID, item.ID)
+		assert.NotEqual(t, booking.UID, item.UID)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestBookingStore_CreateBooking_IdempotentPayloadMismatch(t *testing.T) {
 	_, err = bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      51,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(100),
 		IdempotencyKey:     key,
 		ChannelName:        "test",
@@ -151,7 +151,7 @@ func TestBookingStore_CreateBooking_IdempotentPayloadMismatch(t *testing.T) {
 	_, err = bookingStore.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: cls.Code,
 		AccountHolder:      51,
-		CurrencyID:         curID,
+		CurrencyUID:        curID,
 		Amount:             decimal.NewFromInt(200),
 		IdempotencyKey:     key,
 		ChannelName:        "test",

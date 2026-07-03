@@ -12,11 +12,11 @@ import (
 
 func TestJournalInput_Validate_Balanced(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-001",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	require.NoError(t, input.Validate())
@@ -24,11 +24,11 @@ func TestJournalInput_Validate_Balanced(t *testing.T) {
 
 func TestJournalInput_Validate_Unbalanced(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-002",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 	err := input.Validate()
@@ -38,23 +38,23 @@ func TestJournalInput_Validate_Unbalanced(t *testing.T) {
 
 func TestJournalInput_Validate_PerCurrencyBalance(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-currency-balance",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 2, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-2", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 
 	err := input.Validate()
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrUnbalancedJournal), "expected ErrUnbalancedJournal, got: %v", err)
-	assert.Contains(t, err.Error(), "currency 1 unbalanced")
+	assert.Contains(t, err.Error(), "currency cur-1 unbalanced")
 }
 
 func TestJournalInput_Validate_EmptyEntries(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-003",
 		Entries:        []EntryInput{},
 	}
@@ -65,10 +65,10 @@ func TestJournalInput_Validate_EmptyEntries(t *testing.T) {
 
 func TestJournalInput_Validate_ZeroAmount(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-004",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.Zero},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.Zero},
 		},
 	}
 	err := input.Validate()
@@ -78,10 +78,10 @@ func TestJournalInput_Validate_ZeroAmount(t *testing.T) {
 
 func TestJournalInput_Validate_NoIdempotencyKey(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID: 1,
+		JournalTypeUID: "jt-1",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	err := input.Validate()
@@ -91,11 +91,11 @@ func TestJournalInput_Validate_NoIdempotencyKey(t *testing.T) {
 
 func TestJournalInput_Validate_ZeroHolderRejected(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-zero-holder",
 		Entries: []EntryInput{
-			{AccountHolder: 0, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 0, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 
@@ -107,66 +107,34 @@ func TestJournalInput_Validate_ZeroHolderRejected(t *testing.T) {
 
 func TestJournalInput_Validate_ZeroCurrencyRejected(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-zero-currency",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 0, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 
 	err := input.Validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidInput)
-	assert.Contains(t, err.Error(), "currency_id")
-}
-
-func TestJournalInput_Validate_NegativeCurrencyRejected(t *testing.T) {
-	input := JournalInput{
-		JournalTypeID:  1,
-		IdempotencyKey: "tx-negative-currency",
-		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: -1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-		},
-	}
-
-	err := input.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidInput)
-	assert.Contains(t, err.Error(), "currency_id")
+	assert.Contains(t, err.Error(), "currency_uid")
 }
 
 func TestJournalInput_Validate_ZeroClassificationRejected(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-zero-classification",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 0, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 
 	err := input.Validate()
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidInput)
-	assert.Contains(t, err.Error(), "classification_id")
-}
-
-func TestJournalInput_Validate_NegativeClassificationRejected(t *testing.T) {
-	input := JournalInput{
-		JournalTypeID:  1,
-		IdempotencyKey: "tx-negative-classification",
-		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: -1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-		},
-	}
-
-	err := input.Validate()
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrInvalidInput)
-	assert.Contains(t, err.Error(), "classification_id")
+	assert.Contains(t, err.Error(), "classification_uid")
 }
 
 func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
@@ -177,17 +145,17 @@ func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
 		{
 			name: "empty idempotency key",
 			input: JournalInput{
-				JournalTypeID: 1,
+				JournalTypeUID: "jt-1",
 				Entries: []EntryInput{
-					{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-					{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+					{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+					{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 				},
 			},
 		},
 		{
 			name: "empty entries",
 			input: JournalInput{
-				JournalTypeID:  1,
+				JournalTypeUID: "jt-1",
 				IdempotencyKey: "tx-wrap-01",
 				Entries:        []EntryInput{},
 			},
@@ -195,20 +163,20 @@ func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
 		{
 			name: "invalid entry type",
 			input: JournalInput{
-				JournalTypeID:  1,
+				JournalTypeUID: "jt-1",
 				IdempotencyKey: "tx-wrap-02",
 				Entries: []EntryInput{
-					{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryType("bad"), Amount: decimal.NewFromInt(100)},
+					{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryType("bad"), Amount: decimal.NewFromInt(100)},
 				},
 			},
 		},
 		{
 			name: "negative amount",
 			input: JournalInput{
-				JournalTypeID:  1,
+				JournalTypeUID: "jt-1",
 				IdempotencyKey: "tx-wrap-03",
 				Entries: []EntryInput{
-					{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(-1)},
+					{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(-1)},
 				},
 			},
 		},
@@ -225,11 +193,11 @@ func TestJournalInput_Validate_WrapsInvalidInput(t *testing.T) {
 
 func TestJournalInput_Validate_WrapsUnbalanced(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-unbalanced",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -241,11 +209,11 @@ func TestJournalInput_Validate_WrapsUnbalanced(t *testing.T) {
 
 func TestJournalInput_Validate_EffectiveAt_Zero_OK(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-eff-zero",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	require.NoError(t, input.Validate())
@@ -253,12 +221,12 @@ func TestJournalInput_Validate_EffectiveAt_Zero_OK(t *testing.T) {
 
 func TestJournalInput_Validate_EffectiveAt_Past_OK(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-eff-past",
 		EffectiveAt:    time.Now().AddDate(-1, 0, 0),
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	require.NoError(t, input.Validate())
@@ -266,12 +234,12 @@ func TestJournalInput_Validate_EffectiveAt_Past_OK(t *testing.T) {
 
 func TestJournalInput_Validate_EffectiveAt_WithinTolerance_OK(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-eff-tolerance",
 		EffectiveAt:    time.Now().Add(2 * time.Minute),
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	require.NoError(t, input.Validate())
@@ -279,12 +247,12 @@ func TestJournalInput_Validate_EffectiveAt_WithinTolerance_OK(t *testing.T) {
 
 func TestJournalInput_Validate_EffectiveAt_FarFuture_Rejected(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-eff-future",
 		EffectiveAt:    time.Now().Add(time.Hour),
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(100)},
 		},
 	}
 	err := input.Validate()
@@ -295,12 +263,12 @@ func TestJournalInput_Validate_EffectiveAt_FarFuture_Rejected(t *testing.T) {
 
 func TestJournalInput_Totals(t *testing.T) {
 	input := JournalInput{
-		JournalTypeID:  1,
+		JournalTypeUID: "jt-1",
 		IdempotencyKey: "tx-005",
 		Entries: []EntryInput{
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 1, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: 1, ClassificationID: 3, EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(150)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-1", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: 1, CurrencyUID: "cur-1", ClassificationUID: "cls-2", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: "cur-1", ClassificationUID: "cls-3", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(150)},
 		},
 	}
 	debit, credit := input.Totals()

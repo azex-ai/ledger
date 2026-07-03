@@ -23,7 +23,7 @@ import type { Entry } from "../../client/types";
 
 export interface JournalDetailPageProps {
   /** Journal id — the host extracts this from its route param and passes it. */
-  id: number;
+  id: string;
   /**
    * Link renderer supplied by the host's router. Defaults to a plain <a> so the
    * page works without a host router. Used by the reversal-of link to
@@ -46,13 +46,13 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Debit</p>
             {debits.map((e) => (
-              <div key={e.id} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
+              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
                   <span className="font-mono text-sm text-emerald-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Class {e.classification_id} / Currency {e.currency_id}
+                  Class {e.classification_uid} / Currency {e.currency_uid}
                 </p>
               </div>
             ))}
@@ -63,13 +63,13 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Credit</p>
             {credits.map((e) => (
-              <div key={e.id} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
+              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
                   <span className="font-mono text-sm text-rose-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Class {e.classification_id} / Currency {e.currency_id}
+                  Class {e.classification_uid} / Currency {e.currency_uid}
                 </p>
               </div>
             ))}
@@ -80,7 +80,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
   );
 }
 
-function ReverseDialog({ journalId }: { journalId: number }) {
+function ReverseDialog({ journalId }: { journalId: string }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const mutation = useReverseJournal();
@@ -142,15 +142,15 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
   return (
     <div className="space-y-6">
       <PageHeader
-        title={`Journal #${j.id}`}
+        title={`Journal #${j.uid}`}
         actions={
           <>
-            {j.reversal_of && (
-              <Link href={`/journals/${j.reversal_of}`}>
+            {j.reversal_of_uid && (
+              <Link href={`/journals/${j.reversal_of_uid}`}>
                 <StatusBadge status="reversed" />
               </Link>
             )}
-            <ReverseDialog journalId={j.id} />
+            <ReverseDialog journalId={j.uid} />
           </>
         }
       />
@@ -159,7 +159,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Type ID</p>
-            <p className="text-lg font-bold">{j.journal_type_id}</p>
+            <p className="text-lg font-bold">{j.journal_type_uid}</p>
           </CardContent>
         </Card>
         <Card>
@@ -232,11 +232,11 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
             </TableHeader>
             <TableBody>
               {entries.map((e) => (
-                <TableRow key={e.id}>
-                  <TableCell>{e.id}</TableCell>
+                <TableRow key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`}>
+                  <TableCell>{e.entry_type}</TableCell>
                   <TableCell>{e.account_holder}</TableCell>
-                  <TableCell>{e.currency_id}</TableCell>
-                  <TableCell>{e.classification_id}</TableCell>
+                  <TableCell>{e.currency_uid}</TableCell>
+                  <TableCell>{e.classification_uid}</TableCell>
                   <TableCell>
                     <StatusBadge status={e.entry_type} />
                   </TableCell>

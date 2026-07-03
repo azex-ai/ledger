@@ -506,6 +506,33 @@ which a direct journal post bypasses entirely.
 
 ---
 
+## I-18: uid-only external identity
+
+Every entity's externally visible identifier is its `uid` — a UUIDv7 generated
+Go-side at insert time. Internal `BIGSERIAL` ids exist only inside storage
+(primary keys, foreign keys, advisory-lock keys, keyset-pagination cursors) and
+appear in **no public contract**: not in HTTP request or response bodies, not
+in path or query parameters, and not in the library-mode Go API (`core` types
+and interfaces speak uids exclusively). Pagination cursors that encode an
+internal position are opaque base64 strings.
+
+**Why**: bigserial ids leak write ordering and table cardinality, invite
+enumeration, and weld consumers to a storage implementation detail. A single
+identifier namespace (uid) keeps the storage layer free to change and makes
+every external reference stable across dump/restore.
+
+**Enforced by**:
+- Migration 031 (`uid UUID NOT NULL` + unique index on every entity table; no
+  DB default, so a write path that forgets to mint a uid fails loudly)
+- `postgres/dims.go` + per-store `uidToPG`/`pgToUID` conversion at the adapter
+  boundary
+
+**Pinned by**:
+- `server.TestContract_NoInternalIDKeysInJSON` (mechanical source scan: no
+  internal-id JSON key in any handler request/response struct)
+
+---
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

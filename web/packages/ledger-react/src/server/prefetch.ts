@@ -43,7 +43,7 @@ export function prefetchJournals(
 export function prefetchEntries(
   queryClient: QueryClient,
   client: LedgerClient,
-  params: { holder?: number; currency_id?: number },
+  params: { holder?: number; currency_uid?: string },
   limit = 50,
 ): Promise<void> {
   return queryClient.prefetchInfiniteQuery({
@@ -156,7 +156,7 @@ export function prefetchSnapshots(
   client: LedgerClient,
   params: {
     holder?: number;
-    currency_id?: number;
+    currency_uid?: string;
     start?: string;
     end?: string;
   },

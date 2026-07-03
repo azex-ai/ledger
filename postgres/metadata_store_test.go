@@ -34,7 +34,7 @@ func TestClassificationStore_CRUD(t *testing.T) {
 	assert.Contains(t, classificationCodes(list), cls.Code)
 
 	// Deactivate
-	err = store.DeactivateClassification(ctx, cls.ID)
+	err = store.DeactivateClassification(ctx, cls.UID)
 	require.NoError(t, err)
 
 	// Active-only should be empty now
@@ -97,7 +97,7 @@ func TestJournalTypeStore_CRUD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
-	err = store.DeactivateJournalType(ctx, jt.ID)
+	err = store.DeactivateJournalType(ctx, jt.UID)
 	require.NoError(t, err)
 
 	list, err = store.ListJournalTypes(ctx, true)
@@ -123,9 +123,9 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 	assert.True(t, cur.IsActive)
 	assert.Equal(t, int32(18), cur.Exponent)
 
-	got, err := store.GetCurrency(ctx, cur.ID)
+	got, err := store.GetCurrency(ctx, cur.UID)
 	require.NoError(t, err)
-	assert.Equal(t, cur.ID, got.ID)
+	assert.Equal(t, cur.UID, got.UID)
 	assert.True(t, got.IsActive)
 	assert.Equal(t, int32(18), got.Exponent)
 
@@ -135,7 +135,7 @@ func TestCurrencyStore_CRUD(t *testing.T) {
 	assert.Len(t, list, 1)
 
 	// Deactivate (soft delete).
-	err = store.DeactivateCurrency(ctx, cur.ID)
+	err = store.DeactivateCurrency(ctx, cur.UID)
 	require.NoError(t, err)
 
 	// Active-only listing now hides it.
@@ -189,16 +189,16 @@ func TestTemplateStore_CRUD(t *testing.T) {
 	clsID := postgrestest.SeedClassification(t, pool, "wallet", "Wallet", "debit", false)
 
 	tmpl, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
-		Code:          "deposit_confirm",
-		Name:          "Deposit Confirm",
-		JournalTypeID: jtID,
+		Code:           "deposit_confirm",
+		Name:           "Deposit Confirm",
+		JournalTypeUID: jtID,
 		Lines: []core.TemplateLineInput{
 			{
-				ClassificationID: clsID,
-				EntryType:        core.EntryTypeDebit,
-				HolderRole:       core.HolderRoleUser,
-				AmountKey:        "amount",
-				SortOrder:        1,
+				ClassificationUID: clsID,
+				EntryType:         core.EntryTypeDebit,
+				HolderRole:        core.HolderRoleUser,
+				AmountKey:         "amount",
+				SortOrder:         1,
 			},
 		},
 	})
@@ -208,14 +208,14 @@ func TestTemplateStore_CRUD(t *testing.T) {
 
 	got, err := tmplStore.GetTemplate(ctx, "deposit_confirm")
 	require.NoError(t, err)
-	assert.Equal(t, tmpl.ID, got.ID)
+	assert.Equal(t, tmpl.UID, got.UID)
 	assert.Len(t, got.Lines, 1)
 
 	list, err := tmplStore.ListTemplates(ctx, true)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
-	err = tmplStore.DeactivateTemplate(ctx, tmpl.ID)
+	err = tmplStore.DeactivateTemplate(ctx, tmpl.UID)
 	require.NoError(t, err)
 
 	list, err = tmplStore.ListTemplates(ctx, true)
@@ -231,9 +231,9 @@ func TestTemplateStore_RejectsEmptyLines(t *testing.T) {
 	jtID := postgrestest.SeedJournalType(t, pool, "deposit", "Deposit")
 
 	_, err := tmplStore.CreateTemplate(ctx, core.TemplateInput{
-		Code:          "broken",
-		Name:          "Broken",
-		JournalTypeID: jtID,
+		Code:           "broken",
+		Name:           "Broken",
+		JournalTypeUID: jtID,
 	})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)

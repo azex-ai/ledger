@@ -138,8 +138,8 @@ func ExecuteDepositTolerancePlan(
 	if base.HolderID == 0 {
 		return nil, fmt.Errorf("presets: holder_id required: %w", core.ErrInvalidInput)
 	}
-	if base.CurrencyID <= 0 {
-		return nil, fmt.Errorf("presets: currency_id must be positive: %w", core.ErrInvalidInput)
+	if base.CurrencyUID == "" {
+		return nil, fmt.Errorf("presets: currency_uid required: %w", core.ErrInvalidInput)
 	}
 	if base.IdempotencyKey == "" {
 		return nil, fmt.Errorf("presets: idempotency key required: %w", core.ErrInvalidInput)
@@ -152,7 +152,7 @@ func ExecuteDepositTolerancePlan(
 			TemplateCode: step.TemplateCode,
 			Params: core.TemplateParams{
 				HolderID:       base.HolderID,
-				CurrencyID:     base.CurrencyID,
+				CurrencyUID:    base.CurrencyUID,
 				IdempotencyKey: fmt.Sprintf("%s:%s", base.IdempotencyKey, step.IdempotencySuffix),
 				Amounts:        copyDecimalMap(step.Amounts),
 				ActorID:        base.ActorID,

@@ -14,7 +14,7 @@ export function useReservations(params: { holder?: number; status?: string }) {
 export function useSettleReservation() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, actualAmount }: { id: number; actualAmount: string }) =>
+    ({ id, actualAmount }: { id: string; actualAmount: string }) =>
       client.settleReservation(id, actualAmount),
     ["reservations"],
   );
@@ -23,7 +23,7 @@ export function useSettleReservation() {
 export function useReleaseReservation() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: number) => client.releaseReservation(id),
+    (id: string) => client.releaseReservation(id),
     ["reservations"],
   );
 }

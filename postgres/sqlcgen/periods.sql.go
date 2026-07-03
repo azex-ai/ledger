@@ -8,10 +8,12 @@ package sqlcgen
 import (
 	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const getActivePeriodClose = `-- name: GetActivePeriodClose :one
-SELECT id, close_before, note, actor_id, created_at FROM period_closes
+SELECT id, close_before, note, actor_id, created_at, uid FROM period_closes
 ORDER BY created_at DESC, id DESC
 LIMIT 1
 `
@@ -27,26 +29,33 @@ func (q *Queries) GetActivePeriodClose(ctx context.Context) (PeriodClose, error)
 		&i.Note,
 		&i.ActorID,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const insertPeriodClose = `-- name: InsertPeriodClose :one
-INSERT INTO period_closes (close_before, note, actor_id)
-VALUES ($1, $2, $3)
-RETURNING id, close_before, note, actor_id, created_at
+INSERT INTO period_closes (close_before, note, actor_id, uid)
+VALUES ($1, $2, $3, $4)
+RETURNING id, close_before, note, actor_id, created_at, uid
 `
 
 type InsertPeriodCloseParams struct {
-	CloseBefore time.Time `json:"close_before"`
-	Note        string    `json:"note"`
-	ActorID     int64     `json:"actor_id"`
+	CloseBefore time.Time   `json:"close_before"`
+	Note        string      `json:"note"`
+	ActorID     int64       `json:"actor_id"`
+	Uid         pgtype.UUID `json:"uid"`
 }
 
 // Append-only: latest-row-wins semantics come from ordering by created_at in
 // GetActivePeriodClose, not from any uniqueness constraint here.
 func (q *Queries) InsertPeriodClose(ctx context.Context, arg InsertPeriodCloseParams) (PeriodClose, error) {
-	row := q.db.QueryRow(ctx, insertPeriodClose, arg.CloseBefore, arg.Note, arg.ActorID)
+	row := q.db.QueryRow(ctx, insertPeriodClose,
+		arg.CloseBefore,
+		arg.Note,
+		arg.ActorID,
+		arg.Uid,
+	)
 	var i PeriodClose
 	err := row.Scan(
 		&i.ID,
@@ -54,12 +63,13 @@ func (q *Queries) InsertPeriodClose(ctx context.Context, arg InsertPeriodClosePa
 		&i.Note,
 		&i.ActorID,
 		&i.CreatedAt,
+		&i.Uid,
 	)
 	return i, err
 }
 
 const listPeriodCloses = `-- name: ListPeriodCloses :many
-SELECT id, close_before, note, actor_id, created_at FROM period_closes
+SELECT id, close_before, note, actor_id, created_at, uid FROM period_closes
 ORDER BY created_at DESC, id DESC
 LIMIT $1
 `
@@ -79,6 +89,7 @@ func (q *Queries) ListPeriodCloses(ctx context.Context, limit int32) ([]PeriodCl
 			&i.Note,
 			&i.ActorID,
 			&i.CreatedAt,
+			&i.Uid,
 		); err != nil {
 			return nil, err
 		}

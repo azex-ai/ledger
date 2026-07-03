@@ -20,11 +20,12 @@ import (
 type SnapshotExtraStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewSnapshotExtraStore creates a SnapshotExtraStore.
 func NewSnapshotExtraStore(pool *pgxpool.Pool) *SnapshotExtraStore {
-	return &SnapshotExtraStore{pool: pool, q: sqlcgen.New(pool)}
+	return &SnapshotExtraStore{pool: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool)}
 }
 
 // Compile-time interface assertions.
@@ -40,11 +41,20 @@ var (
 // most recent existing snapshot before snap.SnapshotDate. Returns true when
 // a row was actually written.
 func (s *SnapshotExtraStore) UpsertSnapshotSparse(ctx context.Context, snap core.BalanceSnapshot) (bool, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, snap.CurrencyUID)
+	if err != nil {
+		return false, err
+	}
+	cls, err := s.dims.classByUIDOrErr(ctx, s.q, snap.ClassificationUID)
+	if err != nil {
+		return false, err
+	}
+
 	// Check whether a prior snapshot exists for this account dimension.
 	prev, err := s.q.GetLatestSnapshotBefore(ctx, sqlcgen.GetLatestSnapshotBeforeParams{
 		AccountHolder:    snap.AccountHolder,
-		CurrencyID:       snap.CurrencyID,
-		ClassificationID: snap.ClassificationID,
+		CurrencyID:       cur.ID,
+		ClassificationID: cls.ID,
 		SnapshotDate:     pgtype.Date{Time: snap.SnapshotDate, Valid: true},
 	})
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -62,8 +72,8 @@ func (s *SnapshotExtraStore) UpsertSnapshotSparse(ctx context.Context, snap core
 	// Write the snapshot.
 	if err := s.q.InsertSnapshot(ctx, sqlcgen.InsertSnapshotParams{
 		AccountHolder:    snap.AccountHolder,
-		CurrencyID:       snap.CurrencyID,
-		ClassificationID: snap.ClassificationID,
+		CurrencyID:       cur.ID,
+		ClassificationID: cls.ID,
 		SnapshotDate:     pgtype.Date{Time: snap.SnapshotDate, Valid: true},
 		Balance:          decimalToNumeric(snap.Balance),
 	}); err != nil {
@@ -106,7 +116,12 @@ func (s *SnapshotExtraStore) EarliestJournalDate(ctx context.Context) (time.Time
 // MergeWithLive returns snapshots for [startDate, endDate]. When endDate
 // is today or in the future, today's entry is synthesised from live
 // checkpoint balances rather than the snapshot table.
-func (s *SnapshotExtraStore) MergeWithLive(ctx context.Context, holder, currencyID int64, startDate, endDate time.Time) ([]core.BalanceSnapshot, error) {
+func (s *SnapshotExtraStore) MergeWithLive(ctx context.Context, holder int64, currencyUID string, startDate, endDate time.Time) ([]core.BalanceSnapshot, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
+
 	now := time.Now().UTC()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 
@@ -122,7 +137,7 @@ func (s *SnapshotExtraStore) MergeWithLive(ctx context.Context, holder, currency
 	if !queryEnd.Before(startDate) {
 		rows, err := s.q.ListSnapshotsByDateRange(ctx, sqlcgen.ListSnapshotsByDateRangeParams{
 			AccountHolder: holder,
-			CurrencyID:    currencyID,
+			CurrencyID:    cur.ID,
 			StartDate:     pgtype.Date{Time: startDate, Valid: true},
 			EndDate:       pgtype.Date{Time: queryEnd, Valid: true},
 		})
@@ -131,12 +146,16 @@ func (s *SnapshotExtraStore) MergeWithLive(ctx context.Context, holder, currency
 		}
 		historicRows = make([]core.BalanceSnapshot, len(rows))
 		for i, r := range rows {
+			cls, err := s.dims.classByIDOrErr(ctx, s.q, r.ClassificationID)
+			if err != nil {
+				return nil, err
+			}
 			historicRows[i] = core.BalanceSnapshot{
-				AccountHolder:    r.AccountHolder,
-				CurrencyID:       r.CurrencyID,
-				ClassificationID: r.ClassificationID,
-				SnapshotDate:     r.SnapshotDate.Time,
-				Balance:          mustNumericToDecimal(r.Balance),
+				AccountHolder:     r.AccountHolder,
+				CurrencyUID:       currencyUID,
+				ClassificationUID: cls.UID,
+				SnapshotDate:      r.SnapshotDate.Time,
+				Balance:           mustNumericToDecimal(r.Balance),
 			}
 		}
 	}
@@ -148,35 +167,39 @@ func (s *SnapshotExtraStore) MergeWithLive(ctx context.Context, holder, currency
 	// Fetch live balances from checkpoints for today.
 	liveRows, err := s.q.GetBalanceCheckpoints(ctx, sqlcgen.GetBalanceCheckpointsParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
+		CurrencyID:    cur.ID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: snapshot_extra: live balances: %w", err)
 	}
 
 	for _, r := range liveRows {
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, r.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		historicRows = append(historicRows, core.BalanceSnapshot{
-			AccountHolder:    r.AccountHolder,
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			SnapshotDate:     today,
-			Balance:          mustNumericToDecimal(r.Balance),
+			AccountHolder:     r.AccountHolder,
+			CurrencyUID:       currencyUID,
+			ClassificationUID: cls.UID,
+			SnapshotDate:      today,
+			Balance:           mustNumericToDecimal(r.Balance),
 		})
 	}
 
 	// When no checkpoint exists yet, synthesise a zero balance for each
 	// classification present in historic rows so callers always have today.
 	if len(liveRows) == 0 && len(historicRows) > 0 {
-		seen := make(map[int64]bool)
+		seen := make(map[string]bool)
 		for _, r := range historicRows {
-			if !seen[r.ClassificationID] {
-				seen[r.ClassificationID] = true
+			if !seen[r.ClassificationUID] {
+				seen[r.ClassificationUID] = true
 				historicRows = append(historicRows, core.BalanceSnapshot{
-					AccountHolder:    holder,
-					CurrencyID:       currencyID,
-					ClassificationID: r.ClassificationID,
-					SnapshotDate:     today,
-					Balance:          decimal.Zero,
+					AccountHolder:     holder,
+					CurrencyUID:       currencyUID,
+					ClassificationUID: r.ClassificationUID,
+					SnapshotDate:      today,
+					Balance:           decimal.Zero,
 				})
 			}
 		}

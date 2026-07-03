@@ -29,14 +29,14 @@ export function useReconcileGlobal() {
 export function useReconcileAccount() {
   const client = useLedgerClient();
   return useMutation({
-    mutationFn: ({ holder, currencyId }: { holder: number; currencyId: number }) =>
-      client.reconcileAccount(holder, currencyId),
+    mutationFn: ({ holder, currencyUid }: { holder: number; currencyUid: string }) =>
+      client.reconcileAccount(holder, currencyUid),
   });
 }
 
 export function useSnapshots(params: {
   holder?: number;
-  currency_id?: number;
+  currency_uid?: string;
   start?: string;
   end?: string;
 }) {

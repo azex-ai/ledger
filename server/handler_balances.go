@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/shopspring/decimal"
@@ -11,15 +10,15 @@ import (
 )
 
 type balanceResponse struct {
-	AccountHolder    int64  `json:"account_holder"`
-	CurrencyID       int64  `json:"currency_id"`
-	ClassificationID int64  `json:"classification_id"`
-	Balance          string `json:"balance"`
+	AccountHolder     int64  `json:"account_holder"`
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
+	Balance           string `json:"balance"`
 }
 
 type batchBalancesRequest struct {
-	HolderIDs  []int64 `json:"holder_ids"`
-	CurrencyID int64   `json:"currency_id"`
+	HolderIDs   []int64 `json:"holder_ids"`
+	CurrencyUID string  `json:"currency_uid"`
 }
 
 func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
@@ -29,13 +28,13 @@ func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	currencyID, _ := strconv.ParseInt(r.URL.Query().Get("currency_id"), 10, 64)
-	if currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id query param is required"))
+	currencyUID := r.URL.Query().Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid query param is required"))
 		return
 	}
 
-	balances, err := s.balances.GetBalances(r.Context(), holder, currencyID)
+	balances, err := s.balances.GetBalances(r.Context(), holder, currencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -44,10 +43,10 @@ func (s *Server) handleGetBalances(w http.ResponseWriter, r *http.Request) {
 	data := make([]balanceResponse, len(balances))
 	for i, b := range balances {
 		data[i] = balanceResponse{
-			AccountHolder:    b.AccountHolder,
-			CurrencyID:       b.CurrencyID,
-			ClassificationID: b.ClassificationID,
-			Balance:          b.Balance.String(),
+			AccountHolder:     b.AccountHolder,
+			CurrencyUID:       b.CurrencyUID,
+			ClassificationUID: b.ClassificationUID,
+			Balance:           b.Balance.String(),
 		}
 	}
 	httpx.OK(w, data)
@@ -64,13 +63,13 @@ func (s *Server) handleGetBalanceByCurrency(w http.ResponseWriter, r *http.Reque
 		httpx.Error(w, httpx.ErrBadRequest("invalid holder ID"))
 		return
 	}
-	currencyID, err := parseIDParam(chi.URLParam(r, "currency"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid currency ID"))
+	currencyUID := chi.URLParam(r, "currency")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid currency uid"))
 		return
 	}
 
-	balances, err := s.balances.GetBalances(r.Context(), holder, currencyID)
+	balances, err := s.balances.GetBalances(r.Context(), holder, currencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -82,10 +81,10 @@ func (s *Server) handleGetBalanceByCurrency(w http.ResponseWriter, r *http.Reque
 	for i, b := range balances {
 		total = total.Add(b.Balance)
 		data[i] = balanceResponse{
-			AccountHolder:    b.AccountHolder,
-			CurrencyID:       b.CurrencyID,
-			ClassificationID: b.ClassificationID,
-			Balance:          b.Balance.String(),
+			AccountHolder:     b.AccountHolder,
+			CurrencyUID:       b.CurrencyUID,
+			ClassificationUID: b.ClassificationUID,
+			Balance:           b.Balance.String(),
 		}
 	}
 	httpx.OK(w, balanceByCurrencyResponse{
@@ -100,8 +99,8 @@ func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, err)
 		return
 	}
-	if len(req.HolderIDs) == 0 || req.CurrencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("holder_ids and currency_id required"))
+	if len(req.HolderIDs) == 0 || req.CurrencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("holder_ids and currency_uid required"))
 		return
 	}
 	if len(req.HolderIDs) > 100 {
@@ -109,7 +108,7 @@ func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.balances.BatchGetBalances(r.Context(), req.HolderIDs, req.CurrencyID)
+	result, err := s.balances.BatchGetBalances(r.Context(), req.HolderIDs, req.CurrencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -126,10 +125,10 @@ func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 		hb.Balances = make([]balanceResponse, len(bals))
 		for i, b := range bals {
 			hb.Balances[i] = balanceResponse{
-				AccountHolder:    b.AccountHolder,
-				CurrencyID:       b.CurrencyID,
-				ClassificationID: b.ClassificationID,
-				Balance:          b.Balance.String(),
+				AccountHolder:     b.AccountHolder,
+				CurrencyUID:       b.CurrencyUID,
+				ClassificationUID: b.ClassificationUID,
+				Balance:           b.Balance.String(),
 			}
 		}
 		data = append(data, hb)

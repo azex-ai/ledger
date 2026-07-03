@@ -15,9 +15,9 @@ import (
 // --- JSON request/response types ---
 
 type postJournalRequest struct {
-	JournalTypeID  int64             `json:"journal_type_id"`
+	JournalTypeUID string            `json:"journal_type_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
-	EventID        int64             `json:"event_id"`
+	EventUID       string            `json:"event_uid"`
 	Entries        []entryInputJSON  `json:"entries"`
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
@@ -25,19 +25,19 @@ type postJournalRequest struct {
 }
 
 type entryInputJSON struct {
-	AccountHolder    int64  `json:"account_holder"`
-	CurrencyID       int64  `json:"currency_id"`
-	ClassificationID int64  `json:"classification_id"`
-	EntryType        string `json:"entry_type"`
-	Amount           string `json:"amount"`
+	AccountHolder     int64  `json:"account_holder"`
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
+	EntryType         string `json:"entry_type"`
+	Amount            string `json:"amount"`
 }
 
 type postTemplateRequest struct {
 	TemplateCode   string            `json:"template_code"`
 	HolderID       int64             `json:"holder_id"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
-	EventID        int64             `json:"event_id"`
+	EventUID       string            `json:"event_uid"`
 	Amounts        map[string]string `json:"amounts"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
@@ -57,7 +57,7 @@ type reverseJournalFractionRequest struct {
 
 type postDepositToleranceRequest struct {
 	HolderID       int64             `json:"holder_id"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	ExpectedAmount string            `json:"expected_amount"`
 	ActualAmount   string            `json:"actual_amount"`
@@ -68,29 +68,30 @@ type postDepositToleranceRequest struct {
 }
 
 type journalResponse struct {
-	ID             int64             `json:"id"`
-	JournalTypeID  int64             `json:"journal_type_id"`
+	UID            string            `json:"uid"`
+	JournalTypeUID string            `json:"journal_type_uid"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	TotalDebit     string            `json:"total_debit"`
 	TotalCredit    string            `json:"total_credit"`
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
-	ReversalOf     int64             `json:"reversal_of,omitempty"`
-	EventID        int64             `json:"event_id,omitempty"`
+	ReversalOfUID  string            `json:"reversal_of_uid,omitempty"`
+	EventUID       string            `json:"event_uid,omitempty"`
+	EffectiveAt    time.Time         `json:"effective_at"`
 	CreatedAt      time.Time         `json:"created_at"`
 	Entries        []entryResponse   `json:"entries,omitempty"`
 }
 
 type entryResponse struct {
-	ID               int64     `json:"id"`
-	JournalID        int64     `json:"journal_id"`
-	AccountHolder    int64     `json:"account_holder"`
-	CurrencyID       int64     `json:"currency_id"`
-	ClassificationID int64     `json:"classification_id"`
-	EntryType        string    `json:"entry_type"`
-	Amount           string    `json:"amount"`
-	CreatedAt        time.Time `json:"created_at"`
+	JournalUID        string    `json:"journal_uid"`
+	AccountHolder     int64     `json:"account_holder"`
+	CurrencyUID       string    `json:"currency_uid"`
+	ClassificationUID string    `json:"classification_uid"`
+	EntryType         string    `json:"entry_type"`
+	Amount            string    `json:"amount"`
+	EffectiveAt       time.Time `json:"effective_at"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 type depositToleranceResponse struct {
@@ -105,30 +106,31 @@ type depositToleranceResponse struct {
 
 func toJournalResponse(j *core.Journal) journalResponse {
 	return journalResponse{
-		ID:             j.ID,
-		JournalTypeID:  j.JournalTypeID,
+		UID:            j.UID,
+		JournalTypeUID: j.JournalTypeUID,
 		IdempotencyKey: j.IdempotencyKey,
 		TotalDebit:     j.TotalDebit.String(),
 		TotalCredit:    j.TotalCredit.String(),
 		Metadata:       j.Metadata,
 		ActorID:        j.ActorID,
 		Source:         j.Source,
-		ReversalOf:     j.ReversalOf,
-		EventID:        j.EventID,
+		ReversalOfUID:  j.ReversalOfUID,
+		EventUID:       j.EventUID,
+		EffectiveAt:    j.EffectiveAt,
 		CreatedAt:      j.CreatedAt,
 	}
 }
 
 func toEntryResponse(e *core.Entry) entryResponse {
 	return entryResponse{
-		ID:               e.ID,
-		JournalID:        e.JournalID,
-		AccountHolder:    e.AccountHolder,
-		CurrencyID:       e.CurrencyID,
-		ClassificationID: e.ClassificationID,
-		EntryType:        string(e.EntryType),
-		Amount:           e.Amount.String(),
-		CreatedAt:        e.CreatedAt,
+		JournalUID:        e.JournalUID,
+		AccountHolder:     e.AccountHolder,
+		CurrencyUID:       e.CurrencyUID,
+		ClassificationUID: e.ClassificationUID,
+		EntryType:         string(e.EntryType),
+		Amount:            e.Amount.String(),
+		EffectiveAt:       e.EffectiveAt,
+		CreatedAt:         e.CreatedAt,
 	}
 }
 
@@ -149,18 +151,18 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		entries[i] = core.EntryInput{
-			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
-			EntryType:        core.EntryType(e.EntryType),
-			Amount:           amount,
+			AccountHolder:     e.AccountHolder,
+			CurrencyUID:       e.CurrencyUID,
+			ClassificationUID: e.ClassificationUID,
+			EntryType:         core.EntryType(e.EntryType),
+			Amount:            amount,
 		}
 	}
 
 	input := core.JournalInput{
-		JournalTypeID:  req.JournalTypeID,
+		JournalTypeUID: req.JournalTypeUID,
 		IdempotencyKey: req.IdempotencyKey,
-		EventID:        req.EventID,
+		EventUID:       req.EventUID,
 		Entries:        entries,
 		Metadata:       req.Metadata,
 		ActorID:        req.ActorID,
@@ -194,9 +196,9 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 
 	params := core.TemplateParams{
 		HolderID:       req.HolderID,
-		CurrencyID:     req.CurrencyID,
+		CurrencyUID:    req.CurrencyUID,
 		IdempotencyKey: req.IdempotencyKey,
-		EventID:        req.EventID,
+		EventUID:       req.EventUID,
 		Amounts:        amounts,
 		ActorID:        req.ActorID,
 		Source:         req.Source,
@@ -244,7 +246,7 @@ func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Reque
 
 	journals, err := presets.ExecuteDepositTolerancePlan(r.Context(), s.journals, core.TemplateParams{
 		HolderID:       req.HolderID,
-		CurrencyID:     req.CurrencyID,
+		CurrencyUID:    req.CurrencyUID,
 		IdempotencyKey: req.IdempotencyKey,
 		ActorID:        req.ActorID,
 		Source:         req.Source,
@@ -271,9 +273,9 @@ func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal uid"))
 		return
 	}
 
@@ -287,7 +289,7 @@ func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	journal, err := s.journals.ReverseJournal(r.Context(), id, req.Reason)
+	journal, err := s.journals.ReverseJournal(r.Context(), uid, req.Reason)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -296,9 +298,9 @@ func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReverseJournalFraction(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal uid"))
 		return
 	}
 
@@ -316,7 +318,7 @@ func (s *Server) handleReverseJournalFraction(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	journal, err := s.journals.ReverseJournalFraction(r.Context(), id, req.Num, req.Den, req.Reason, req.IdempotencyKey)
+	journal, err := s.journals.ReverseJournalFraction(r.Context(), uid, req.Num, req.Den, req.Reason, req.IdempotencyKey)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -325,13 +327,13 @@ func (s *Server) handleReverseJournalFraction(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleGetJournal(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid journal ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid journal uid"))
 		return
 	}
 
-	journal, entries, err := s.queries.GetJournal(r.Context(), id)
+	journal, entries, err := s.queries.GetJournal(r.Context(), uid)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -346,27 +348,20 @@ func (s *Server) handleGetJournal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListJournals(w http.ResponseWriter, r *http.Request) {
-	cursor, err := decodeCursor(r.URL.Query().Get("cursor"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
-		return
-	}
 	limit := parsePageLimit(r)
 
-	journals, err := s.queries.ListJournals(r.Context(), cursor, limit)
+	journals, nextCursor, err := s.queries.ListJournals(r.Context(), r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	resp := PagedResponse[journalResponse]{
-		List: make([]journalResponse, len(journals)),
+		List:       make([]journalResponse, len(journals)),
+		NextCursor: nextCursor,
 	}
 	for i, j := range journals {
 		resp.List[i] = toJournalResponse(&j)
-	}
-	if len(journals) == int(limit) {
-		resp.NextCursor = encodeCursor(journals[len(journals)-1].ID)
 	}
 	httpx.OK(w, resp)
 }
@@ -379,33 +374,26 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.ErrBadRequest("holder is required"))
 		return
 	}
-	currencyID, err := parseIDParam(q.Get("currency_id"))
-	if err != nil || currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id is required"))
+	currencyUID := q.Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid is required"))
 		return
 	}
 
-	cursor, err := decodeCursor(q.Get("cursor"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
-		return
-	}
 	limit := parsePageLimit(r)
 
-	entries, err := s.queries.ListEntriesByAccount(r.Context(), holder, currencyID, cursor, limit)
+	entries, nextCursor, err := s.queries.ListEntriesByAccount(r.Context(), holder, currencyUID, q.Get("cursor"), limit)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	resp := PagedResponse[entryResponse]{
-		List: make([]entryResponse, len(entries)),
+		List:       make([]entryResponse, len(entries)),
+		NextCursor: nextCursor,
 	}
 	for i, e := range entries {
 		resp.List[i] = toEntryResponse(&e)
-	}
-	if len(entries) == int(limit) {
-		resp.NextCursor = encodeCursor(entries[len(entries)-1].ID)
 	}
 	httpx.OK(w, resp)
 }

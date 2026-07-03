@@ -56,56 +56,56 @@ func SetupDB(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
-// SeedCurrency creates a test currency row and returns its ID. The exponent
+// SeedCurrency creates a test currency row and returns its uid. The exponent
 // column takes its schema default (18 — the loosest setting), matching the
 // pre-exponent behavior most callers still rely on.
-func SeedCurrency(t *testing.T, pool *pgxpool.Pool, code, name string) int64 {
+func SeedCurrency(t *testing.T, pool *pgxpool.Pool, code, name string) string {
 	t.Helper()
-	var id int64
+	var uid string
 	err := pool.QueryRow(context.Background(),
-		"INSERT INTO currencies (code, name) VALUES ($1, $2) RETURNING id",
+		"INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), $1, $2) RETURNING uid::text",
 		code, name,
-	).Scan(&id)
+	).Scan(&uid)
 	require.NoError(t, err)
-	return id
+	return uid
 }
 
 // SeedCurrencyWithExponent creates a test currency row with an explicit
-// exponent and returns its ID. Use this (instead of SeedCurrency) whenever a
+// exponent and returns its uid. Use this (instead of SeedCurrency) whenever a
 // test exercises precision enforcement (I-16).
-func SeedCurrencyWithExponent(t *testing.T, pool *pgxpool.Pool, code, name string, exponent int32) int64 {
+func SeedCurrencyWithExponent(t *testing.T, pool *pgxpool.Pool, code, name string, exponent int32) string {
 	t.Helper()
-	var id int64
+	var uid string
 	err := pool.QueryRow(context.Background(),
-		"INSERT INTO currencies (code, name, exponent) VALUES ($1, $2, $3) RETURNING id",
+		"INSERT INTO currencies (uid, code, name, exponent) VALUES (gen_random_uuid(), $1, $2, $3) RETURNING uid::text",
 		code, name, exponent,
-	).Scan(&id)
+	).Scan(&uid)
 	require.NoError(t, err)
-	return id
+	return uid
 }
 
-// SeedClassification creates a test classification row and returns its ID.
-func SeedClassification(t *testing.T, pool *pgxpool.Pool, code, name, normalSide string, isSystem bool) int64 {
+// SeedClassification creates a test classification row and returns its uid.
+func SeedClassification(t *testing.T, pool *pgxpool.Pool, code, name, normalSide string, isSystem bool) string {
 	t.Helper()
-	var id int64
+	var uid string
 	err := pool.QueryRow(context.Background(),
-		"INSERT INTO classifications (code, name, normal_side, is_system) VALUES ($1, $2, $3, $4) RETURNING id",
+		"INSERT INTO classifications (uid, code, name, normal_side, is_system) VALUES (gen_random_uuid(), $1, $2, $3, $4) RETURNING uid::text",
 		code, name, normalSide, isSystem,
-	).Scan(&id)
+	).Scan(&uid)
 	require.NoError(t, err)
-	return id
+	return uid
 }
 
-// SeedJournalType creates a test journal_type row and returns its ID.
-func SeedJournalType(t *testing.T, pool *pgxpool.Pool, code, name string) int64 {
+// SeedJournalType creates a test journal_type row and returns its uid.
+func SeedJournalType(t *testing.T, pool *pgxpool.Pool, code, name string) string {
 	t.Helper()
-	var id int64
+	var uid string
 	err := pool.QueryRow(context.Background(),
-		"INSERT INTO journal_types (code, name) VALUES ($1, $2) RETURNING id",
+		"INSERT INTO journal_types (uid, code, name) VALUES (gen_random_uuid(), $1, $2) RETURNING uid::text",
 		code, name,
-	).Scan(&id)
+	).Scan(&uid)
 	require.NoError(t, err)
-	return id
+	return uid
 }
 
 // keyCounter generates monotonically-increasing suffixes for idempotency keys
@@ -115,4 +115,18 @@ var keyCounter atomic.Int64
 // UniqueKey returns a unique idempotency key by appending a counter to prefix.
 func UniqueKey(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, keyCounter.Add(1))
+}
+
+// InternalID resolves a uid string (as returned by the Seed helpers) back to
+// the table's internal bigint id. For tests that manipulate or assert against
+// internal storage with raw SQL; the internal id never crosses the library's
+// public API.
+func InternalID(t testing.TB, pool *pgxpool.Pool, table, uid string) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(context.Background(),
+		fmt.Sprintf("SELECT id FROM %s WHERE uid = $1::uuid", table), uid,
+	).Scan(&id)
+	require.NoError(t, err)
+	return id
 }

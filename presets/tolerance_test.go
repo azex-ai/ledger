@@ -91,7 +91,7 @@ func TestExecuteDepositTolerancePlan(t *testing.T) {
 
 	journals, err := ExecuteDepositTolerancePlan(context.Background(), writer, core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "dep-42",
 		Source:         "deposit",
 		Metadata:       map[string]string{"request_id": "req-1"},
@@ -122,7 +122,7 @@ func TestExecuteDepositTolerancePlan_UsesBatchExecutorWhenAvailable(t *testing.T
 
 	journals, err := ExecuteDepositTolerancePlan(context.Background(), writer, core.TemplateParams{
 		HolderID:       42,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "dep-42",
 		Source:         "deposit",
 	}, plan)
@@ -151,7 +151,7 @@ func (f *fakeToleranceJournalWriter) ExecuteTemplate(_ context.Context, code str
 		params:       params,
 	})
 	return &core.Journal{
-		ID:             int64(len(f.calls)),
+		UID:            fmt.Sprintf("jr-%d", len(f.calls)),
 		IdempotencyKey: params.IdempotencyKey,
 		Metadata:       params.Metadata,
 	}, nil
@@ -161,11 +161,11 @@ func (f *fakeToleranceJournalWriter) PostJournal(context.Context, core.JournalIn
 	return nil, nil
 }
 
-func (f *fakeToleranceJournalWriter) ReverseJournal(context.Context, int64, string) (*core.Journal, error) {
+func (f *fakeToleranceJournalWriter) ReverseJournal(context.Context, string, string) (*core.Journal, error) {
 	return nil, nil
 }
 
-func (f *fakeToleranceJournalWriter) ReverseJournalFraction(context.Context, int64, int64, int64, string, string) (*core.Journal, error) {
+func (f *fakeToleranceJournalWriter) ReverseJournalFraction(context.Context, string, int64, int64, string, string) (*core.Journal, error) {
 	return nil, nil
 }
 
@@ -179,7 +179,7 @@ func (f *fakeBatchToleranceJournalWriter) ExecuteTemplateBatch(_ context.Context
 	journals := make([]*core.Journal, 0, len(requests))
 	for i, req := range requests {
 		journals = append(journals, &core.Journal{
-			ID:             int64(i + 1),
+			UID:            fmt.Sprintf("jr-%d", i+1),
 			IdempotencyKey: req.Params.IdempotencyKey,
 			Metadata:       req.Params.Metadata,
 		})
@@ -199,10 +199,10 @@ func (f *fakeBatchToleranceJournalWriter) PostJournal(context.Context, core.Jour
 	return nil, nil
 }
 
-func (f *fakeBatchToleranceJournalWriter) ReverseJournal(context.Context, int64, string) (*core.Journal, error) {
+func (f *fakeBatchToleranceJournalWriter) ReverseJournal(context.Context, string, string) (*core.Journal, error) {
 	return nil, nil
 }
 
-func (f *fakeBatchToleranceJournalWriter) ReverseJournalFraction(context.Context, int64, int64, int64, string, string) (*core.Journal, error) {
+func (f *fakeBatchToleranceJournalWriter) ReverseJournalFraction(context.Context, string, int64, int64, string, string) (*core.Journal, error) {
 	return nil, nil
 }

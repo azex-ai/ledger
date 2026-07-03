@@ -59,7 +59,7 @@ func TestCapitalBundle_Templates_Balance(t *testing.T) {
 	amount := decimal.NewFromInt(1_000_000)
 	params := core.TemplateParams{
 		HolderID:       7, // ops workspace
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "cap-inj-1",
 		Amounts:        map[string]decimal.Decimal{"amount": amount},
 	}

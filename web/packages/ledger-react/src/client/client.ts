@@ -112,16 +112,16 @@ export function createLedgerClient(config: LedgerClientConfig) {
     listJournals: (params: { cursor?: string; limit?: number }) =>
       request<PaginatedResponse<Journal>>(`/api/v1/journals${qs(params)}`),
 
-    getJournal: (id: number) =>
+    getJournal: (id: string) =>
       request<JournalWithEntries>(`/api/v1/journals/${id}`),
 
     postJournal: (body: {
-      journal_type_id: number;
+      journal_type_uid: string;
       idempotency_key: string;
       entries: Array<{
         account_holder: number;
-        currency_id: number;
-        classification_id: number;
+        currency_uid: string;
+        classification_uid: string;
         entry_type: "debit" | "credit";
         amount: string;
       }>;
@@ -136,7 +136,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
     postTemplateJournal: (body: {
       template_code: string;
       holder_id: number;
-      currency_id: number;
+      currency_uid: string;
       idempotency_key: string;
       amounts: Record<string, string>;
       source?: string;
@@ -146,7 +146,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    reverseJournal: (id: number, reason: string) =>
+    reverseJournal: (id: string, reason: string) =>
       request<Journal>(`/api/v1/journals/${id}/reverse`, {
         method: "POST",
         body: JSON.stringify({ reason }),
@@ -155,7 +155,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // Entries
     listEntries: (params: {
       holder?: number;
-      currency_id?: number;
+      currency_uid?: string;
       cursor?: string;
       limit?: number;
     }) => request<PaginatedResponse<Entry>>(`/api/v1/entries${qs(params)}`),
@@ -164,15 +164,15 @@ export function createLedgerClient(config: LedgerClientConfig) {
     getBalances: (holder: number) =>
       request<Balance[]>(`/api/v1/balances/${holder}`),
 
-    getBalancesByCurrency: (holder: number, currency: number) =>
+    getBalancesByCurrency: (holder: number, currency: string) =>
       request<Balance[]>(`/api/v1/balances/${holder}/${currency}`),
 
-    batchBalances: (holderIds: number[], currencyId: number) =>
+    batchBalances: (holderIds: number[], currencyUid: string) =>
       request<Record<string, Balance[]>>("/api/v1/balances/batch", {
         method: "POST",
         body: JSON.stringify({
           holder_ids: holderIds,
-          currency_id: currencyId,
+          currency_uid: currencyUid,
         }),
       }),
 
@@ -185,7 +185,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     createReservation: (body: {
       account_holder: number;
-      currency_id: number;
+      currency_uid: string;
       amount: string;
       idempotency_key: string;
       expires_in?: string;
@@ -195,13 +195,13 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    settleReservation: (id: number, actualAmount: string) =>
+    settleReservation: (id: string, actualAmount: string) =>
       request<void>(`/api/v1/reservations/${id}/settle`, {
         method: "POST",
         body: JSON.stringify({ actual_amount: actualAmount }),
       }),
 
-    releaseReservation: (id: number) =>
+    releaseReservation: (id: string) =>
       request<void>(`/api/v1/reservations/${id}/release`, { method: "POST" }),
 
     // Bookings (unified — replaces v1 deposits + withdrawals)
@@ -211,13 +211,13 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    transitionBooking: (id: number, body: TransitionBookingBody) =>
+    transitionBooking: (id: string, body: TransitionBookingBody) =>
       request<Event>(`/api/v1/bookings/${id}/transition`, {
         method: "POST",
         body: JSON.stringify(body),
       }),
 
-    getBooking: (id: number) => request<Booking>(`/api/v1/bookings/${id}`),
+    getBooking: (id: string) => request<Booking>(`/api/v1/bookings/${id}`),
 
     listBookings: (params: ListBookingsParams) =>
       request<PaginatedResponse<Booking>>(
@@ -225,11 +225,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
       ),
 
     // Events (outbound)
-    getEvent: (id: number) => request<Event>(`/api/v1/events/${id}`),
+    getEvent: (id: string) => request<Event>(`/api/v1/events/${id}`),
 
     listEvents: (params: {
       classification_code?: string;
-      booking_id?: number;
+      booking_uid?: string;
       to_status?: string;
       cursor?: string;
       limit?: number;
@@ -252,7 +252,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateClassification: (id: number) =>
+    deactivateClassification: (id: string) =>
       request<void>(`/api/v1/classifications/${id}/deactivate`, {
         method: "POST",
       }),
@@ -269,7 +269,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateJournalType: (id: number) =>
+    deactivateJournalType: (id: string) =>
       request<void>(`/api/v1/journal-types/${id}/deactivate`, {
         method: "POST",
       }),
@@ -283,9 +283,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
     createTemplate: (body: {
       code: string;
       name: string;
-      journal_type_id: number;
+      journal_type_uid: string;
       lines: Array<{
-        classification_id: number;
+        classification_uid: string;
         entry_type: "debit" | "credit";
         holder_role: "user" | "system";
         amount_key: string;
@@ -297,12 +297,12 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateTemplate: (id: number) =>
+    deactivateTemplate: (id: string) =>
       request<void>(`/api/v1/templates/${id}/deactivate`, { method: "POST" }),
 
     previewTemplate: (
       code: string,
-      params: { holder_id: number; currency_id: number } & Record<
+      params: { holder_id: number; currency_uid: string } & Record<
         string,
         string | number
       >,
@@ -322,23 +322,23 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateCurrency: (id: number) =>
+    deactivateCurrency: (id: string) =>
       request<void>(`/api/v1/currencies/${id}/deactivate`, { method: "POST" }),
 
     // Reconciliation
     reconcileGlobal: () =>
       request<ReconcileResult>("/api/v1/reconcile", { method: "POST" }),
 
-    reconcileAccount: (holder: number, currencyId: number) =>
+    reconcileAccount: (holder: number, currencyUid: string) =>
       request<ReconcileResult>("/api/v1/reconcile/account", {
         method: "POST",
-        body: JSON.stringify({ holder, currency_id: currencyId }),
+        body: JSON.stringify({ holder, currency_uid: currencyUid }),
       }),
 
     // Snapshots
     listSnapshots: (params: {
       holder?: number;
-      currency_id?: number;
+      currency_uid?: string;
       start?: string;
       end?: string;
     }) => request<Snapshot[]>(`/api/v1/snapshots${qs(params)}`),

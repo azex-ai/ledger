@@ -30,11 +30,11 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 
 	day1 := time.Date(2025, 1, 10, 0, 0, 0, 0, time.UTC)
 	snap1 := core.BalanceSnapshot{
-		AccountHolder:    holderID,
-		CurrencyID:       currencyID,
-		ClassificationID: classID,
-		SnapshotDate:     day1,
-		Balance:          decimal.NewFromInt(500),
+		AccountHolder:     holderID,
+		CurrencyUID:       currencyID,
+		ClassificationUID: classID,
+		SnapshotDate:      day1,
+		Balance:           decimal.NewFromInt(500),
 	}
 	inserted, err := extra.UpsertSnapshotSparse(ctx, snap1)
 	require.NoError(t, err)
@@ -43,11 +43,11 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 	// Day 2: same balance — should be skipped by sparse logic.
 	day2 := day1.AddDate(0, 0, 1)
 	snap2 := core.BalanceSnapshot{
-		AccountHolder:    holderID,
-		CurrencyID:       currencyID,
-		ClassificationID: classID,
-		SnapshotDate:     day2,
-		Balance:          decimal.NewFromInt(500),
+		AccountHolder:     holderID,
+		CurrencyUID:       currencyID,
+		ClassificationUID: classID,
+		SnapshotDate:      day2,
+		Balance:           decimal.NewFromInt(500),
 	}
 	inserted, err = extra.UpsertSnapshotSparse(ctx, snap2)
 	require.NoError(t, err)
@@ -55,7 +55,7 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 
 	var count int
 	err = pgpool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
+		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=(SELECT id FROM currencies WHERE uid=$2::uuid) AND classification_id=(SELECT id FROM classifications WHERE uid=$3::uuid)",
 		holderID, currencyID, classID,
 	).Scan(&count)
 	require.NoError(t, err)
@@ -64,30 +64,34 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 	// Day 3: balance changes → should be inserted.
 	day3 := day2.AddDate(0, 0, 1)
 	snap3 := core.BalanceSnapshot{
-		AccountHolder:    holderID,
-		CurrencyID:       currencyID,
-		ClassificationID: classID,
-		SnapshotDate:     day3,
-		Balance:          decimal.NewFromInt(600),
+		AccountHolder:     holderID,
+		CurrencyUID:       currencyID,
+		ClassificationUID: classID,
+		SnapshotDate:      day3,
+		Balance:           decimal.NewFromInt(600),
 	}
 	inserted, err = extra.UpsertSnapshotSparse(ctx, snap3)
 	require.NoError(t, err)
 	assert.True(t, inserted, "day 3 snapshot should be inserted (balance changed)")
 
 	err = pgpool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
+		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=(SELECT id FROM currencies WHERE uid=$2::uuid) AND classification_id=(SELECT id FROM classifications WHERE uid=$3::uuid)",
 		holderID, currencyID, classID,
 	).Scan(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count, "2 snapshot rows expected after balance change on day 3")
 }
 
-// seedJournal inserts a balanced debit+credit journal pair at the given timestamp
-// and returns the journal ID.
+// seedJournal inserts a balanced debit+credit journal pair at the given
+// timestamp and returns the journal's internal ID. Dimension arguments are
+// the uid strings returned by the postgrestest Seed helpers; the raw SQL
+// resolves them to internal ids the storage rows are keyed on.
 func seedJournal(
 	t *testing.T,
 	pgpool *pgxpool.Pool,
-	jtID, holderID, currencyID, classID, sysClassID int64,
+	jtUID string,
+	holderID int64,
+	currencyUID, classUID, sysClassUID string,
 	amount decimal.Decimal,
 	at time.Time,
 	ikey string,
@@ -99,23 +103,23 @@ func seedJournal(
 	// journal whose business date is `at`, which is what the as-of queries
 	// under test (ListBalancesAt et al.) key off since migration 025.
 	err := pgpool.QueryRow(ctx,
-		`INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id, created_at, effective_at)
-		 VALUES ($1, $2, $3, $3, 0, 'test', 0, $4, $4) RETURNING id`,
-		jtID, ikey, amount.String(), at,
+		`INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id, created_at, effective_at)
+		 VALUES (gen_random_uuid(), (SELECT id FROM journal_types WHERE uid=$1::uuid), $2, $3, $3, 0, 'test', 0, $4, $4) RETURNING id`,
+		jtUID, ikey, amount.String(), at,
 	).Scan(&jID)
 	require.NoError(t, err)
 
 	_, err = pgpool.Exec(ctx,
 		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
-		 VALUES ($1,$2,$3,$4,'debit',$5,$6,$6)`,
-		jID, holderID, currencyID, classID, amount.String(), at,
+		 VALUES ($1,$2,(SELECT id FROM currencies WHERE uid=$3::uuid),(SELECT id FROM classifications WHERE uid=$4::uuid),'debit',$5,$6,$6)`,
+		jID, holderID, currencyUID, classUID, amount.String(), at,
 	)
 	require.NoError(t, err)
 
 	_, err = pgpool.Exec(ctx,
 		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
-		 VALUES ($1,$2,$3,$4,'credit',$5,$6,$6)`,
-		jID, -holderID, currencyID, sysClassID, amount.String(), at,
+		 VALUES ($1,$2,(SELECT id FROM currencies WHERE uid=$3::uuid),(SELECT id FROM classifications WHERE uid=$4::uuid),'credit',$5,$6,$6)`,
+		jID, -holderID, currencyUID, sysClassUID, amount.String(), at,
 	)
 	require.NoError(t, err)
 
@@ -163,7 +167,7 @@ func TestBackfill_FiveDays(t *testing.T) {
 	// Balance grows each day so each day should have its own snapshot row for the holder.
 	var holderSnaps int
 	err = pgpool.QueryRow(ctx,
-		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
+		"SELECT COUNT(*) FROM balance_snapshots WHERE account_holder=$1 AND currency_id=(SELECT id FROM currencies WHERE uid=$2::uuid) AND classification_id=(SELECT id FROM classifications WHERE uid=$3::uuid)",
 		holderID, currencyID, classID,
 	).Scan(&holderSnaps)
 	require.NoError(t, err)

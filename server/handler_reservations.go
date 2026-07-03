@@ -14,7 +14,7 @@ import (
 
 type createReservationRequest struct {
 	AccountHolder  int64  `json:"account_holder"`
-	CurrencyID     int64  `json:"currency_id"`
+	CurrencyUID    string `json:"currency_uid"`
 	Amount         string `json:"amount"`
 	IdempotencyKey string `json:"idempotency_key"`
 	ExpiresInSec   int64  `json:"expires_in_sec"`
@@ -29,13 +29,13 @@ type settlePartialReservationRequest struct {
 }
 
 type reservationResponse struct {
-	ID             int64     `json:"id"`
+	UID            string    `json:"uid"`
 	AccountHolder  int64     `json:"account_holder"`
-	CurrencyID     int64     `json:"currency_id"`
+	CurrencyUID    string    `json:"currency_uid"`
 	ReservedAmount string    `json:"reserved_amount"`
 	SettledAmount  *string   `json:"settled_amount,omitempty"`
 	Status         string    `json:"status"`
-	JournalID      *int64    `json:"journal_id,omitempty"`
+	JournalUID     string    `json:"journal_uid,omitempty"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -44,12 +44,12 @@ type reservationResponse struct {
 
 func toReservationResponse(r *core.Reservation) reservationResponse {
 	resp := reservationResponse{
-		ID:             r.ID,
+		UID:            r.UID,
 		AccountHolder:  r.AccountHolder,
-		CurrencyID:     r.CurrencyID,
+		CurrencyUID:    r.CurrencyUID,
 		ReservedAmount: r.ReservedAmount.String(),
 		Status:         string(r.Status),
-		JournalID:      r.JournalID,
+		JournalUID:     r.JournalUID,
 		IdempotencyKey: r.IdempotencyKey,
 		ExpiresAt:      r.ExpiresAt,
 		CreatedAt:      r.CreatedAt,
@@ -79,7 +79,7 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 
 	input := core.ReserveInput{
 		AccountHolder:  req.AccountHolder,
-		CurrencyID:     req.CurrencyID,
+		CurrencyUID:    req.CurrencyUID,
 		Amount:         amount,
 		IdempotencyKey: req.IdempotencyKey,
 		ExpiresIn:      expiresIn,
@@ -94,9 +94,9 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation uid"))
 		return
 	}
 
@@ -112,7 +112,7 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationID: id, Amount: amount}); err != nil {
+	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationUID: uid, Amount: amount}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -120,9 +120,9 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation uid"))
 		return
 	}
 
@@ -138,7 +138,7 @@ func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationID: id, Amount: amount}); err != nil {
+	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationUID: uid, Amount: amount}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -146,13 +146,13 @@ func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) handleFinalizeReservationSettlement(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation uid"))
 		return
 	}
 
-	if err := s.reserver.FinalizeSettlement(r.Context(), id); err != nil {
+	if err := s.reserver.FinalizeSettlement(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -160,13 +160,13 @@ func (s *Server) handleFinalizeReservationSettlement(w http.ResponseWriter, r *h
 }
 
 func (s *Server) handleReleaseReservation(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid reservation ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid reservation uid"))
 		return
 	}
 
-	if err := s.reserver.Release(r.Context(), id); err != nil {
+	if err := s.reserver.Release(r.Context(), uid); err != nil {
 		httpx.Error(w, err)
 		return
 	}

@@ -45,19 +45,19 @@ describe("use-journals", () => {
   test("useJournal keys ['ledger','journal',id]", async () => {
     const qc = new QueryClient();
     server.use(
-      http.get(`${BASE}/api/v1/journals/7`, () =>
+      http.get(`${BASE}/api/v1/journals/uid-7`, () =>
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: { journal: { id: 7 }, entries: [] },
+          data: { journal: { uid: "uid-7" }, entries: [] },
         }),
       ),
     );
-    const { result } = renderHook(() => useJournal(7), {
+    const { result } = renderHook(() => useJournal("uid-7"), {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journal", 7] })).toBeDefined();
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journal", "uid-7"] })).toBeDefined();
   });
 
   test("useEntries keys ['ledger','entries',params]", async () => {
@@ -93,7 +93,7 @@ describe("use-journals", () => {
       wrapper: wrapperWith(qc),
     });
     result.current.mutate({
-      journal_type_id: 1,
+      journal_type_uid: "uid-1",
       idempotency_key: "k",
       entries: [],
     });

@@ -47,11 +47,11 @@ func TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal(t *testing.
 	sysID := core.SystemAccountHolder(userID)
 
 	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jt.ID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: postgrestest.UniqueKey("qs-rt"),
 		Entries: []core.EntryInput{
-			{AccountHolder: sysID, CurrencyID: usdt.ID, ClassificationID: custodial.ID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
-			{AccountHolder: userID, CurrencyID: usdt.ID, ClassificationID: mainWallet.ID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: sysID, CurrencyUID: usdt.UID, ClassificationUID: custodial.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(500)},
+			{AccountHolder: userID, CurrencyUID: usdt.UID, ClassificationUID: mainWallet.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(500)},
 		},
 		Source: "test",
 	})
@@ -60,8 +60,8 @@ func TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal(t *testing.
 	var checkpointCount int
 	require.NoError(t,
 		pool.QueryRow(ctx,
-			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = $1 AND account_holder IN ($2, $3)",
-			usdt.ID, userID, sysID,
+			"SELECT count(*) FROM balance_checkpoints WHERE currency_id = (SELECT id FROM currencies WHERE uid=$1::uuid) AND account_holder IN ($2, $3)",
+			usdt.UID, userID, sysID,
 		).Scan(&checkpointCount),
 	)
 	require.Zero(t, checkpointCount, "test invalid: checkpoints should not exist before rollup runs")
@@ -70,14 +70,14 @@ func TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal(t *testing.
 	require.NoError(t, err)
 	require.Len(t, rollups, 2, "realtime system balances should include both classifications immediately")
 
-	byClass := make(map[int64]core.SystemRollup, len(rollups))
+	byClass := make(map[string]core.SystemRollup, len(rollups))
 	for _, r := range rollups {
-		byClass[r.ClassificationID] = r
-		assert.Equal(t, usdt.ID, r.CurrencyID)
+		byClass[r.ClassificationUID] = r
+		assert.Equal(t, usdt.UID, r.CurrencyUID)
 		assert.False(t, r.UpdatedAt.IsZero())
 		assert.WithinDuration(t, time.Now(), r.UpdatedAt, 5*time.Second)
 	}
 
-	assert.True(t, byClass[custodial.ID].TotalBalance.Equal(decimal.NewFromInt(500)))
-	assert.True(t, byClass[mainWallet.ID].TotalBalance.Equal(decimal.NewFromInt(500)))
+	assert.True(t, byClass[custodial.UID].TotalBalance.Equal(decimal.NewFromInt(500)))
+	assert.True(t, byClass[mainWallet.UID].TotalBalance.Equal(decimal.NewFromInt(500)))
 }

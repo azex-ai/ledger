@@ -1,12 +1,16 @@
 package postgres
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
@@ -68,13 +72,6 @@ func int64ToInt8(v *int64) pgtype.Int8 {
 		return pgtype.Int8{Valid: false}
 	}
 	return pgtype.Int8{Int64: *v, Valid: true}
-}
-
-func int8ToInt64Ptr(v pgtype.Int8) *int64 {
-	if !v.Valid {
-		return nil
-	}
-	return &v.Int64
 }
 
 func zeroInt64ToNil(v int64) *int64 {
@@ -165,43 +162,65 @@ func anyToTime(v any) (time.Time, error) {
 
 // --- sqlcgen model -> core model converters ---
 
-func journalFromRow(row sqlcgen.Journal) *core.Journal {
-	reversalOf := int64(0)
+func journalFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.Journal) (*core.Journal, error) {
+	jt, err := dims.jtByIDOrErr(ctx, q, row.JournalTypeID)
+	if err != nil {
+		return nil, err
+	}
+	reversalOfUID := ""
 	if row.ReversalOf.Valid {
-		reversalOf = row.ReversalOf.Int64
+		u, err := q.GetJournalUIDByID(ctx, row.ReversalOf.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve reversal_of uid: %w", err)
+		}
+		reversalOfUID = pgToUID(u)
+	}
+	eventUID := ""
+	if row.EventID != 0 {
+		u, err := q.GetEventUIDByID(ctx, row.EventID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve event uid: %w", err)
+		}
+		eventUID = pgToUID(u)
 	}
 	return &core.Journal{
-		ID:             row.ID,
-		JournalTypeID:  row.JournalTypeID,
+		UID:            pgToUID(row.Uid),
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: row.IdempotencyKey,
 		TotalDebit:     mustNumericToDecimal(row.TotalDebit),
 		TotalCredit:    mustNumericToDecimal(row.TotalCredit),
 		Metadata:       jsonToMetadata(row.Metadata),
 		ActorID:        row.ActorID,
 		Source:         row.Source,
-		ReversalOf:     reversalOf,
-		EventID:        row.EventID,
+		ReversalOfUID:  reversalOfUID,
+		EventUID:       eventUID,
 		EffectiveAt:    row.EffectiveAt,
 		CreatedAt:      row.CreatedAt,
-	}
+	}, nil
 }
 
-func entryFromRow(row sqlcgen.JournalEntry) *core.Entry {
-	var id int64
-	if row.ID.Valid {
-		id = row.ID.Int64
+// entryCore assembles a core.Entry from raw entry columns plus the parent
+// journal's uid (joined into entry list queries so no per-row lookup is
+// needed). Dimension ids resolve through the dims cache.
+func entryCore(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, journalUID pgtype.UUID, accountHolder, currencyID, classificationID int64, entryType string, amount pgtype.Numeric, effectiveAt, createdAt time.Time) (*core.Entry, error) {
+	cur, err := dims.currencyByIDOrErr(ctx, q, currencyID)
+	if err != nil {
+		return nil, err
+	}
+	cls, err := dims.classByIDOrErr(ctx, q, classificationID)
+	if err != nil {
+		return nil, err
 	}
 	return &core.Entry{
-		ID:               id,
-		JournalID:        row.JournalID,
-		AccountHolder:    row.AccountHolder,
-		CurrencyID:       row.CurrencyID,
-		ClassificationID: row.ClassificationID,
-		EntryType:        core.EntryType(row.EntryType),
-		Amount:           mustNumericToDecimal(row.Amount),
-		EffectiveAt:      row.EffectiveAt,
-		CreatedAt:        row.CreatedAt,
-	}
+		JournalUID:        pgToUID(journalUID),
+		AccountHolder:     accountHolder,
+		CurrencyUID:       cur.UID,
+		ClassificationUID: cls.UID,
+		EntryType:         core.EntryType(entryType),
+		Amount:            mustNumericToDecimal(amount),
+		EffectiveAt:       effectiveAt,
+		CreatedAt:         createdAt,
+	}, nil
 }
 
 func classificationFromRow(row sqlcgen.Classification) *core.Classification {
@@ -213,7 +232,7 @@ func classificationFromRow(row sqlcgen.Classification) *core.Classification {
 		}
 	}
 	return &core.Classification{
-		ID:         row.ID,
+		UID:        pgToUID(row.Uid),
 		Code:       row.Code,
 		Name:       row.Name,
 		NormalSide: core.NormalSide(row.NormalSide),
@@ -226,7 +245,7 @@ func classificationFromRow(row sqlcgen.Classification) *core.Classification {
 
 func journalTypeFromRow(row sqlcgen.JournalType) *core.JournalType {
 	return &core.JournalType{
-		ID:        row.ID,
+		UID:       pgToUID(row.Uid),
 		Code:      row.Code,
 		Name:      row.Name,
 		IsActive:  row.IsActive,
@@ -236,7 +255,7 @@ func journalTypeFromRow(row sqlcgen.JournalType) *core.JournalType {
 
 func currencyFromRow(row sqlcgen.Currency) *core.Currency {
 	return &core.Currency{
-		ID:       row.ID,
+		UID:      pgToUID(row.Uid),
 		Code:     row.Code,
 		Name:     row.Name,
 		IsActive: row.IsActive,
@@ -244,82 +263,143 @@ func currencyFromRow(row sqlcgen.Currency) *core.Currency {
 	}
 }
 
-func templateFromRow(row sqlcgen.EntryTemplate, lines []sqlcgen.EntryTemplateLine) *core.EntryTemplate {
+func templateFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.EntryTemplate, lines []sqlcgen.EntryTemplateLine) (*core.EntryTemplate, error) {
 	coreLines := make([]core.EntryTemplateLine, len(lines))
 	for i, l := range lines {
+		classDim, err := dims.classByIDOrErr(ctx, q, l.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
 		coreLines[i] = core.EntryTemplateLine{
-			ID:               l.ID,
-			TemplateID:       l.TemplateID,
-			ClassificationID: l.ClassificationID,
-			EntryType:        core.EntryType(l.EntryType),
-			HolderRole:       core.HolderRole(l.HolderRole),
-			AmountKey:        l.AmountKey,
-			SortOrder:        int(l.SortOrder),
+			ClassificationUID: classDim.UID,
+			EntryType:         core.EntryType(l.EntryType),
+			HolderRole:        core.HolderRole(l.HolderRole),
+			AmountKey:         l.AmountKey,
+			SortOrder:         int(l.SortOrder),
 		}
 	}
-	return &core.EntryTemplate{
-		ID:            row.ID,
-		Code:          row.Code,
-		Name:          row.Name,
-		JournalTypeID: row.JournalTypeID,
-		IsActive:      row.IsActive,
-		Lines:         coreLines,
-		CreatedAt:     row.CreatedAt,
+	jt, err := dims.jtByIDOrErr(ctx, q, row.JournalTypeID)
+	if err != nil {
+		return nil, err
 	}
+	return &core.EntryTemplate{
+		UID:            pgToUID(row.Uid),
+		Code:           row.Code,
+		Name:           row.Name,
+		JournalTypeUID: jt.UID,
+		IsActive:       row.IsActive,
+		Lines:          coreLines,
+		CreatedAt:      row.CreatedAt,
+	}, nil
 }
 
-func reservationFromRow(row sqlcgen.Reservation) *core.Reservation {
+func reservationFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.Reservation) (*core.Reservation, error) {
+	cur, err := dims.currencyByIDOrErr(ctx, q, row.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
 	// reservations.journal_id is still a NOT NULL DEFAULT 0 column (no FK);
-	// migration 017 forced that. Map sentinel 0 -> nil pointer for callers.
-	journalID := zeroInt64ToNil(row.JournalID)
+	// migration 017 forced that. 0 = no journal linked -> empty uid.
+	journalUID := ""
+	if row.JournalID != 0 {
+		u, err := q.GetJournalUIDByID(ctx, row.JournalID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve reservation journal uid: %w", err)
+		}
+		journalUID = pgToUID(u)
+	}
 	return &core.Reservation{
-		ID:             row.ID,
+		UID:            pgToUID(row.Uid),
 		AccountHolder:  row.AccountHolder,
-		CurrencyID:     row.CurrencyID,
+		CurrencyUID:    cur.UID,
 		ReservedAmount: mustNumericToDecimal(row.ReservedAmount),
 		SettledAmount:  numericPtrToDecimalPtr(row.SettledAmount),
 		Status:         core.ReservationStatus(row.Status),
-		JournalID:      journalID,
+		JournalUID:     journalUID,
 		IdempotencyKey: row.IdempotencyKey,
 		ExpiresAt:      row.ExpiresAt,
 		CreatedAt:      row.CreatedAt,
 		UpdatedAt:      row.UpdatedAt,
-	}
+	}, nil
 }
 
-func bookingFromRow(row sqlcgen.Booking) *core.Booking {
+func bookingFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.Booking) (*core.Booking, error) {
+	cls, err := dims.classByIDOrErr(ctx, q, row.ClassificationID)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := dims.currencyByIDOrErr(ctx, q, row.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	reservationUID := ""
+	if row.ReservationID.Valid {
+		u, err := q.GetReservationUIDByID(ctx, row.ReservationID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve booking reservation uid: %w", err)
+		}
+		reservationUID = pgToUID(u)
+	}
+	journalUID := ""
+	if row.JournalID.Valid {
+		u, err := q.GetJournalUIDByID(ctx, row.JournalID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve booking journal uid: %w", err)
+		}
+		journalUID = pgToUID(u)
+	}
 	return &core.Booking{
-		ID:               row.ID,
-		ClassificationID: row.ClassificationID,
-		AccountHolder:    row.AccountHolder,
-		CurrencyID:       row.CurrencyID,
-		Amount:           mustNumericToDecimal(row.Amount),
-		SettledAmount:    mustNumericToDecimal(row.SettledAmount),
-		Status:           core.Status(row.Status),
-		ChannelName:      row.ChannelName,
-		ChannelRef:       row.ChannelRef,
-		ReservationID:    int8ToInt64Ptr(row.ReservationID),
-		JournalID:        int8ToInt64Ptr(row.JournalID),
-		IdempotencyKey:   row.IdempotencyKey,
-		Metadata:         jsonToStringMetadata(row.Metadata),
-		ExpiresAt:        row.ExpiresAt,
-		CreatedAt:        row.CreatedAt,
-		UpdatedAt:        row.UpdatedAt,
-	}
+		UID:               pgToUID(row.Uid),
+		ClassificationUID: cls.UID,
+		AccountHolder:     row.AccountHolder,
+		CurrencyUID:       cur.UID,
+		Amount:            mustNumericToDecimal(row.Amount),
+		SettledAmount:     mustNumericToDecimal(row.SettledAmount),
+		Status:            core.Status(row.Status),
+		ChannelName:       row.ChannelName,
+		ChannelRef:        row.ChannelRef,
+		ReservationUID:    reservationUID,
+		JournalUID:        journalUID,
+		IdempotencyKey:    row.IdempotencyKey,
+		Metadata:          jsonToStringMetadata(row.Metadata),
+		ExpiresAt:         row.ExpiresAt,
+		CreatedAt:         row.CreatedAt,
+		UpdatedAt:         row.UpdatedAt,
+	}, nil
 }
 
-func eventFromRow(row sqlcgen.Event) *core.Event {
+func eventFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.Event) (*core.Event, error) {
+	cur, err := dims.currencyByIDOrErr(ctx, q, row.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	bookingUID := ""
+	if row.BookingID != 0 {
+		u, err := q.GetBookingUIDByID(ctx, row.BookingID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve event booking uid: %w", err)
+		}
+		bookingUID = pgToUID(u)
+	}
+	journalUID := ""
+	if row.JournalID.Valid {
+		u, err := q.GetJournalUIDByID(ctx, row.JournalID.Int64)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: resolve event journal uid: %w", err)
+		}
+		journalUID = pgToUID(u)
+	}
 	return &core.Event{
-		ID:                 row.ID,
+		UID:                pgToUID(row.Uid),
+		BookingUID:         bookingUID,
+		CurrencyUID:        cur.UID,
+		JournalUID:         journalUID,
 		ClassificationCode: row.ClassificationCode,
-		BookingID:          row.BookingID,
 		AccountHolder:      row.AccountHolder,
-		CurrencyID:         row.CurrencyID,
 		FromStatus:         core.Status(row.FromStatus),
 		ToStatus:           core.Status(row.ToStatus),
 		Amount:             mustNumericToDecimal(row.Amount),
 		SettledAmount:      mustNumericToDecimal(row.SettledAmount),
-		JournalID:          int8ToInt64Ptr(row.JournalID),
 		Metadata:           jsonToStringMetadata(row.Metadata),
 		OccurredAt:         row.OccurredAt,
 		ActorID:            row.ActorID,
@@ -327,22 +407,38 @@ func eventFromRow(row sqlcgen.Event) *core.Event {
 		Attempts:           row.Attempts,
 		MaxAttempts:        row.MaxAttempts,
 		NextAttemptAt:      row.NextAttemptAt,
-	}
+	}, nil
 }
 
-func accountPolicyFromRow(row sqlcgen.AccountPolicy) *core.AccountPolicy {
+func accountPolicyFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row sqlcgen.AccountPolicy) (*core.AccountPolicy, error) {
+	currencyUID := ""
+	if row.CurrencyID != 0 {
+		d, err := dims.currencyByIDOrErr(ctx, q, row.CurrencyID)
+		if err != nil {
+			return nil, err
+		}
+		currencyUID = d.UID
+	}
+	classUID := ""
+	if row.ClassificationID != 0 {
+		d, err := dims.classByIDOrErr(ctx, q, row.ClassificationID)
+		if err != nil {
+			return nil, err
+		}
+		classUID = d.UID
+	}
 	return &core.AccountPolicy{
-		ID:                row.ID,
+		UID:               pgToUID(row.Uid),
 		AccountHolder:     row.AccountHolder,
-		CurrencyID:        row.CurrencyID,
-		ClassificationID:  row.ClassificationID,
+		CurrencyUID:       currencyUID,
+		ClassificationUID: classUID,
 		Status:            core.AccountPolicyStatus(row.Status),
 		MinBalance:        mustNumericToDecimal(row.MinBalance),
 		EnforceMinBalance: row.EnforceMinBalance,
 		Note:              row.Note,
 		UpdatedAt:         row.UpdatedAt,
 		CreatedAt:         row.CreatedAt,
-	}
+	}, nil
 }
 
 // jsonToStringMetadata reads a JSONB metadata blob into the canonical
@@ -380,4 +476,57 @@ func stringMetadataToJSON(m map[string]string) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// --- uid helpers (api-contract §3: uid is the only external identifier) ---
+
+// newUID mints a UUIDv7 for a new row. V7 is time-ordered, which keeps the
+// uq_*_uid indexes append-friendly. Failure is impossible in practice
+// (crypto/rand); if the platform's entropy source is broken we cannot safely
+// write financial rows anyway, so panic instead of threading an error through
+// every insert path.
+func newUID() pgtype.UUID {
+	u, err := uuid.NewV7()
+	if err != nil {
+		panic(fmt.Sprintf("postgres: uuid v7 generation failed: %v", err))
+	}
+	return pgtype.UUID{Bytes: u, Valid: true}
+}
+
+// uidToPG parses an external uid string into a pgtype.UUID for query params.
+// Returns ErrNotFound for malformed input: from the caller's perspective a
+// syntactically invalid uid cannot name any row, and mapping it to "not
+// found" avoids a distinct error branch on every lookup.
+func uidToPG(uid string) (pgtype.UUID, error) {
+	u, err := uuid.Parse(uid)
+	if err != nil {
+		return pgtype.UUID{}, fmt.Errorf("postgres: invalid uid %q: %w", uid, core.ErrNotFound)
+	}
+	return pgtype.UUID{Bytes: u, Valid: true}, nil
+}
+
+func pgToUID(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	return uuid.UUID(u.Bytes).String()
+}
+
+// Opaque keyset cursors: base64 of the internal ordering position. The value
+// is deliberately opaque to consumers — it is pagination state, not an entity
+// identifier (api-contract §3 note in the v0.4 plan).
+func encodeCursorString(id int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
+}
+
+func decodeCursorString(cursor string) (int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: invalid cursor: %w", core.ErrInvalidInput)
+	}
+	v, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: invalid cursor: %w", core.ErrInvalidInput)
+	}
+	return v, nil
 }

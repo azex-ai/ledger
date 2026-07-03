@@ -14,13 +14,13 @@ import (
 )
 
 type mockEventPoller struct {
-	events      []core.Event
+	events      []PendingEvent
 	delivered   []int64
 	retried     []int64
 	lastRetryAt time.Time
 }
 
-func (m *mockEventPoller) GetPendingEvents(_ context.Context, _ int) ([]core.Event, error) {
+func (m *mockEventPoller) GetPendingEvents(_ context.Context, _ int) ([]PendingEvent, error) {
 	return m.events, nil
 }
 
@@ -79,7 +79,7 @@ func TestWebhookDeliverer_ProcessBatch_NilSubscriberLister(t *testing.T) {
 
 func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T) {
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 42, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+		events: []PendingEvent{{InternalID: 42, Event: core.Event{UID: "evt-42", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
 	metrics := &recordingMetrics{}
 	deliverer := NewWebhookDeliverer(poller, &mockSubscriberLister{}, core.NopLogger(), metrics)
@@ -94,7 +94,7 @@ func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T)
 
 func TestWebhookDeliverer_ProcessBatch_NilMetricsDefaultsToNop(t *testing.T) {
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 1, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+		events: []PendingEvent{{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
 	deliverer := NewWebhookDeliverer(poller, &mockSubscriberLister{}, core.NopLogger(), nil)
 
@@ -106,7 +106,7 @@ func TestWebhookDeliverer_ProcessBatch_NilMetricsDefaultsToNop(t *testing.T) {
 
 func TestWebhookDeliverer_DeliverEvent_SubscriberFailureEmitsFailedMetric(t *testing.T) {
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 7, ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 0, MaxAttempts: 10}},
+		events: []PendingEvent{{InternalID: 7, Event: core.Event{UID: "evt-7", ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 0, MaxAttempts: 10}}},
 	}
 	// A subscriber whose URL will fail to dial — sendHTTP returns an error.
 	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
@@ -124,7 +124,7 @@ func TestWebhookDeliverer_DeliverEvent_SubscriberFailureEmitsFailedMetric(t *tes
 
 func TestWebhookDeliverer_DeliverEvent_LastAttemptEmitsDeadMetric(t *testing.T) {
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 8, ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 9, MaxAttempts: 10}},
+		events: []PendingEvent{{InternalID: 8, Event: core.Event{UID: "evt-8", ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 9, MaxAttempts: 10}}},
 	}
 	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
 		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", IsActive: true},
@@ -145,7 +145,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsSuccessStatus(t *testing.T) {
 	defer srv.Close()
 
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 1, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+		events: []PendingEvent{{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
 	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 7, Name: "sub", URL: srv.URL}}}
 	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
@@ -166,7 +166,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsFailureStatus(t *testing.T) {
 	defer srv.Close()
 
 	poller := &mockEventPoller{
-		events: []core.Event{{ID: 2, ClassificationCode: "deposit", ToStatus: "confirmed"}},
+		events: []PendingEvent{{InternalID: 2, Event: core.Event{UID: "evt-2", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
 	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 9, Name: "sub", URL: srv.URL}}}
 	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())

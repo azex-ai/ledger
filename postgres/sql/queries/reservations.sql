@@ -1,18 +1,18 @@
 -- name: InsertReservation :one
-INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at;
+INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid;
 
 -- name: GetReservation :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE id = $1;
 
 -- name: GetReservationByIdempotencyKey :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE idempotency_key = $1;
 
 -- name: GetReservationForUpdate :one
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE id = $1 FOR UPDATE;
 
 -- name: UpdateReservationStatus :exec
@@ -36,7 +36,7 @@ UPDATE reservations SET status = 'settling', settled_amount = settled_amount + $
 UPDATE reservations SET status = 'settled', updated_at = now() WHERE id = $1;
 
 -- name: ListReservationsByAccount :many
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations
 WHERE (sqlc.arg(account_holder)::bigint = 0 OR account_holder = sqlc.arg(account_holder))
   AND (sqlc.arg(filter_status)::text = '' OR status = sqlc.arg(filter_status))
@@ -50,7 +50,7 @@ LIMIT sqlc.arg(page_limit)::int;
 -- dangling forever. NB: idx_reservations_expired is a partial index WHERE
 -- status = 'active', so this query no longer hits it for 'settling' rows;
 -- acceptable at current scale (see docs/plans/2026-07-02-financial-core-hardening-design.md §5b).
-SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 FROM reservations WHERE status IN ('active', 'settling') AND expires_at < now()
 ORDER BY expires_at ASC
 LIMIT $1;
@@ -73,3 +73,14 @@ SELECT COALESCE(SUM(
     END), 0) as total
 FROM reservations
 WHERE account_holder = $1 AND currency_id = $2 AND status IN ('active', 'settling');
+
+-- name: GetReservationByUID :one
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
+FROM reservations WHERE uid = $1;
+
+-- name: GetReservationForUpdateByUID :one
+SELECT id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
+FROM reservations WHERE uid = $1 FOR UPDATE;
+
+-- name: GetReservationUIDByID :one
+SELECT uid FROM reservations WHERE id = $1;

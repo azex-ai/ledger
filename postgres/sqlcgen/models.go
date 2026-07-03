@@ -21,6 +21,7 @@ type AccountPolicy struct {
 	Note              string         `json:"note"`
 	UpdatedAt         time.Time      `json:"updated_at"`
 	CreatedAt         time.Time      `json:"created_at"`
+	Uid               pgtype.UUID    `json:"uid"`
 }
 
 type AccountPolicyChange struct {
@@ -68,25 +69,28 @@ type Booking struct {
 	ExpiresAt        time.Time      `json:"expires_at"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
+	Uid              pgtype.UUID    `json:"uid"`
 }
 
 type Classification struct {
-	ID         int64     `json:"id"`
-	Code       string    `json:"code"`
-	Name       string    `json:"name"`
-	NormalSide string    `json:"normal_side"`
-	IsSystem   bool      `json:"is_system"`
-	IsActive   bool      `json:"is_active"`
-	CreatedAt  time.Time `json:"created_at"`
-	Lifecycle  []byte    `json:"lifecycle"`
+	ID         int64       `json:"id"`
+	Code       string      `json:"code"`
+	Name       string      `json:"name"`
+	NormalSide string      `json:"normal_side"`
+	IsSystem   bool        `json:"is_system"`
+	IsActive   bool        `json:"is_active"`
+	CreatedAt  time.Time   `json:"created_at"`
+	Lifecycle  []byte      `json:"lifecycle"`
+	Uid        pgtype.UUID `json:"uid"`
 }
 
 type Currency struct {
-	ID       int64  `json:"id"`
-	Code     string `json:"code"`
-	Name     string `json:"name"`
-	IsActive bool   `json:"is_active"`
-	Exponent int16  `json:"exponent"`
+	ID       int64       `json:"id"`
+	Code     string      `json:"code"`
+	Name     string      `json:"name"`
+	IsActive bool        `json:"is_active"`
+	Exponent int16       `json:"exponent"`
+	Uid      pgtype.UUID `json:"uid"`
 }
 
 type Deposit struct {
@@ -107,12 +111,13 @@ type Deposit struct {
 }
 
 type EntryTemplate struct {
-	ID            int64     `json:"id"`
-	Code          string    `json:"code"`
-	Name          string    `json:"name"`
-	JournalTypeID int64     `json:"journal_type_id"`
-	IsActive      bool      `json:"is_active"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            int64       `json:"id"`
+	Code          string      `json:"code"`
+	Name          string      `json:"name"`
+	JournalTypeID int64       `json:"journal_type_id"`
+	IsActive      bool        `json:"is_active"`
+	CreatedAt     time.Time   `json:"created_at"`
+	Uid           pgtype.UUID `json:"uid"`
 }
 
 type EntryTemplateLine struct {
@@ -146,6 +151,7 @@ type Event struct {
 	CreatedAt          time.Time      `json:"created_at"`
 	ActorID            int64          `json:"actor_id"`
 	Source             string         `json:"source"`
+	Uid                pgtype.UUID    `json:"uid"`
 }
 
 type Journal struct {
@@ -161,6 +167,7 @@ type Journal struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	EventID        int64          `json:"event_id"`
 	EffectiveAt    time.Time      `json:"effective_at"`
+	Uid            pgtype.UUID    `json:"uid"`
 }
 
 type JournalEntriesDefault struct {
@@ -187,19 +194,21 @@ type JournalEntry struct {
 }
 
 type JournalType struct {
-	ID        int64     `json:"id"`
-	Code      string    `json:"code"`
-	Name      string    `json:"name"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64       `json:"id"`
+	Code      string      `json:"code"`
+	Name      string      `json:"name"`
+	IsActive  bool        `json:"is_active"`
+	CreatedAt time.Time   `json:"created_at"`
+	Uid       pgtype.UUID `json:"uid"`
 }
 
 type PeriodClose struct {
-	ID          int64     `json:"id"`
-	CloseBefore time.Time `json:"close_before"`
-	Note        string    `json:"note"`
-	ActorID     int64     `json:"actor_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64       `json:"id"`
+	CloseBefore time.Time   `json:"close_before"`
+	Note        string      `json:"note"`
+	ActorID     int64       `json:"actor_id"`
+	CreatedAt   time.Time   `json:"created_at"`
+	Uid         pgtype.UUID `json:"uid"`
 }
 
 type Reservation struct {
@@ -214,6 +223,7 @@ type Reservation struct {
 	ExpiresAt      time.Time      `json:"expires_at"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+	Uid            pgtype.UUID    `json:"uid"`
 }
 
 type RollupQueue struct {

@@ -56,18 +56,18 @@ func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type systemBalanceResp struct {
-		CurrencyID       int64  `json:"currency_id"`
-		ClassificationID int64  `json:"classification_id"`
-		TotalBalance     string `json:"total_balance"`
-		UpdatedAt        string `json:"updated_at"`
+		CurrencyUID       string `json:"currency_uid"`
+		ClassificationUID string `json:"classification_uid"`
+		TotalBalance      string `json:"total_balance"`
+		UpdatedAt         string `json:"updated_at"`
 	}
 	data := make([]systemBalanceResp, len(rollups))
 	for i, r := range rollups {
 		data[i] = systemBalanceResp{
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			TotalBalance:     r.TotalBalance.String(),
-			UpdatedAt:        r.UpdatedAt.Format(time.RFC3339),
+			CurrencyUID:       r.CurrencyUID,
+			ClassificationUID: r.ClassificationUID,
+			TotalBalance:      r.TotalBalance.String(),
+			UpdatedAt:         r.UpdatedAt.Format(time.RFC3339),
 		}
 	}
 	httpx.OK(w, data)
@@ -76,12 +76,12 @@ func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 // --- Reconciliation ---
 
 type reconcileDetailResponse struct {
-	AccountHolder    int64  `json:"account_holder"`
-	CurrencyID       int64  `json:"currency_id"`
-	ClassificationID int64  `json:"classification_id"`
-	Expected         string `json:"expected"`
-	Actual           string `json:"actual"`
-	Drift            string `json:"drift"`
+	AccountHolder     int64  `json:"account_holder"`
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
+	Expected          string `json:"expected"`
+	Actual            string `json:"actual"`
+	Drift             string `json:"drift"`
 }
 
 type reconcileResponse struct {
@@ -100,12 +100,12 @@ func (s *Server) handleReconcileGlobal(w http.ResponseWriter, r *http.Request) {
 	details := make([]reconcileDetailResponse, len(result.Details))
 	for i, d := range result.Details {
 		details[i] = reconcileDetailResponse{
-			AccountHolder:    d.AccountHolder,
-			CurrencyID:       d.CurrencyID,
-			ClassificationID: d.ClassificationID,
-			Expected:         d.Expected.String(),
-			Actual:           d.Actual.String(),
-			Drift:            d.Drift.String(),
+			AccountHolder:     d.AccountHolder,
+			CurrencyUID:       d.CurrencyUID,
+			ClassificationUID: d.ClassificationUID,
+			Expected:          d.Expected.String(),
+			Actual:            d.Actual.String(),
+			Drift:             d.Drift.String(),
 		}
 	}
 	httpx.OK(w, reconcileResponse{
@@ -117,8 +117,8 @@ func (s *Server) handleReconcileGlobal(w http.ResponseWriter, r *http.Request) {
 }
 
 type reconcileAccountRequest struct {
-	Holder     int64 `json:"holder"`
-	CurrencyID int64 `json:"currency_id"`
+	Holder      int64  `json:"holder"`
+	CurrencyUID string `json:"currency_uid"`
 }
 
 func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) {
@@ -127,12 +127,12 @@ func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, err)
 		return
 	}
-	if req.Holder == 0 || req.CurrencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("holder and currency_id required"))
+	if req.Holder == 0 || req.CurrencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("holder and currency_uid required"))
 		return
 	}
 
-	result, err := s.reconciler.ReconcileAccount(r.Context(), req.Holder, req.CurrencyID)
+	result, err := s.reconciler.ReconcileAccount(r.Context(), req.Holder, req.CurrencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -140,12 +140,12 @@ func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) 
 	details := make([]reconcileDetailResponse, len(result.Details))
 	for i, d := range result.Details {
 		details[i] = reconcileDetailResponse{
-			AccountHolder:    d.AccountHolder,
-			CurrencyID:       d.CurrencyID,
-			ClassificationID: d.ClassificationID,
-			Expected:         d.Expected.String(),
-			Actual:           d.Actual.String(),
-			Drift:            d.Drift.String(),
+			AccountHolder:     d.AccountHolder,
+			CurrencyUID:       d.CurrencyUID,
+			ClassificationUID: d.ClassificationUID,
+			Expected:          d.Expected.String(),
+			Actual:            d.Actual.String(),
+			Drift:             d.Drift.String(),
 		}
 	}
 	httpx.OK(w, reconcileResponse{
@@ -179,9 +179,9 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, httpx.ErrBadRequest("holder is required"))
 		return
 	}
-	currencyID, err := strconv.ParseInt(q.Get("currency_id"), 10, 64)
-	if err != nil || currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id is required"))
+	currencyUID := q.Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid is required"))
 		return
 	}
 
@@ -202,27 +202,27 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snapshots, err := s.queries.ListSnapshotsByDateRange(r.Context(), holder, currencyID, start, end)
+	snapshots, err := s.queries.ListSnapshotsByDateRange(r.Context(), holder, currencyUID, start, end)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	type snapshotResp struct {
-		AccountHolder    int64  `json:"account_holder"`
-		CurrencyID       int64  `json:"currency_id"`
-		ClassificationID int64  `json:"classification_id"`
-		SnapshotDate     string `json:"snapshot_date"`
-		Balance          string `json:"balance"`
+		AccountHolder     int64  `json:"account_holder"`
+		CurrencyUID       string `json:"currency_uid"`
+		ClassificationUID string `json:"classification_uid"`
+		SnapshotDate      string `json:"snapshot_date"`
+		Balance           string `json:"balance"`
 	}
 	data := make([]snapshotResp, len(snapshots))
 	for i, s := range snapshots {
 		data[i] = snapshotResp{
-			AccountHolder:    s.AccountHolder,
-			CurrencyID:       s.CurrencyID,
-			ClassificationID: s.ClassificationID,
-			SnapshotDate:     s.SnapshotDate.Format("2006-01-02"),
-			Balance:          s.Balance.String(),
+			AccountHolder:     s.AccountHolder,
+			CurrencyUID:       s.CurrencyUID,
+			ClassificationUID: s.ClassificationUID,
+			SnapshotDate:      s.SnapshotDate.Format("2006-01-02"),
+			Balance:           s.Balance.String(),
 		}
 	}
 	httpx.OK(w, data)

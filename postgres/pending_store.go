@@ -40,8 +40,8 @@ type PendingStore struct {
 	classStore *ClassificationStore
 
 	// resolved IDs — populated by NewPendingStore or lazily on first use
-	pendingClassID  int64
-	suspenseClassID int64
+	pendingClassID  string
+	suspenseClassID string
 }
 
 // NewPendingStore constructs a PendingStore.  It resolves the classification
@@ -99,32 +99,32 @@ func (s *PendingStore) AddPending(ctx context.Context, in core.AddPendingInput) 
 		Entries: []core.EntryInput{
 			// DR suspense (system) — funds held by platform
 			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.suspense,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
+				AccountHolder:     systemHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.suspense,
+				EntryType:         core.EntryTypeDebit,
+				Amount:            in.Amount,
 			},
 			// CR pending (user) — in-flight deposit credited to user pending
 			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.pending,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
+				AccountHolder:     in.AccountHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.pending,
+				EntryType:         core.EntryTypeCredit,
+				Amount:            in.Amount,
 			},
 		},
 	}
 
-	// Resolve journal_type_id for "deposit_pending"
-	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_pending")
+	// Resolve the journal type uid for "deposit_pending"
+	jt, err := s.q.GetJournalTypeByCode(ctx, "deposit_pending")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("pending: add: journal type 'deposit_pending' not found — install pending bundle first: %w", core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("pending: add: resolve journal type: %w", err)
 	}
-	input.JournalTypeID = jtID
+	input.JournalTypeUID = pgToUID(jt.Uid)
 
 	return s.ledger.PostJournal(ctx, input)
 }
@@ -149,7 +149,7 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 		return nil, fmt.Errorf("pending: confirm: %w", err)
 	}
 
-	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_confirm_pending")
+	jt, err := s.q.GetJournalTypeByCode(ctx, "deposit_confirm_pending")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("pending: confirm: journal type 'deposit_confirm_pending' not found: %w", core.ErrNotFound)
@@ -158,18 +158,18 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 	}
 
 	input := s.buildConfirmPendingJournalInput(in, clsIDs)
-	input.JournalTypeID = jtID
+	input.JournalTypeUID = pgToUID(jt.Uid)
 
 	// Idempotency check first — avoid acquiring a balance lock if already posted.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
-		return ensureJournalMatchesInput(ctx, s.q, existing, input)
+		return s.ledger.ensureJournalMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("pending: confirm: idempotency check: %w", err)
 	}
 
-	return s.checkPendingBalanceAndPost(ctx, "pending: confirm", in.AccountHolder, in.CurrencyID, clsIDs.pending, in.Amount, input)
+	return s.checkPendingBalanceAndPost(ctx, "pending: confirm", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input)
 }
 
 // CancelPending reverses a pending deposit (two-phase step 2 — cancel path).
@@ -187,7 +187,7 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 		return nil, fmt.Errorf("pending: cancel: %w", err)
 	}
 
-	jtID, err := s.q.GetJournalTypeIDByCode(ctx, "deposit_release_pending")
+	jt, err := s.q.GetJournalTypeByCode(ctx, "deposit_release_pending")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("pending: cancel: journal type 'deposit_release_pending' not found: %w", core.ErrNotFound)
@@ -196,18 +196,18 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 	}
 
 	input := s.buildCancelPendingJournalInput(in, clsIDs)
-	input.JournalTypeID = jtID
+	input.JournalTypeUID = pgToUID(jt.Uid)
 
 	// Idempotency check first — avoid acquiring a balance lock if already posted.
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
-		return ensureJournalMatchesInput(ctx, s.q, existing, input)
+		return s.ledger.ensureJournalMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("pending: cancel: idempotency check: %w", err)
 	}
 
-	return s.checkPendingBalanceAndPost(ctx, "pending: cancel", in.AccountHolder, in.CurrencyID, clsIDs.pending, in.Amount, input)
+	return s.checkPendingBalanceAndPost(ctx, "pending: cancel", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input)
 }
 
 // checkPendingBalanceAndPost serializes the (holder, currency_id) balance with
@@ -220,18 +220,23 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 func (s *PendingStore) checkPendingBalanceAndPost(
 	ctx context.Context,
 	errPrefix string,
-	holder, currencyID, pendingClsID int64,
+	holder int64,
+	currencyUID, pendingClsUID string,
 	required decimal.Decimal,
 	input core.JournalInput,
 ) (*core.Journal, error) {
 	run := func(qtx *sqlcgen.Queries, ledger *LedgerStore) (*core.Journal, error) {
+		cur, err := ledger.dims.currencyByUIDOrErr(ctx, qtx, currencyUID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", errPrefix, err)
+		}
 		if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
 			holder:     holder,
-			currencyID: currencyID,
+			currencyID: cur.ID,
 		}}); err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
 		}
-		bal, err := ledger.GetBalance(ctx, holder, currencyID, pendingClsID)
+		bal, err := ledger.GetBalance(ctx, holder, currencyUID, pendingClsUID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: get pending balance: %w", errPrefix, err)
 		}
@@ -274,32 +279,32 @@ func (s *PendingStore) buildConfirmPendingJournalInput(in core.ConfirmPendingInp
 		Metadata:       in.Metadata,
 		Entries: []core.EntryInput{
 			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.pending,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
+				AccountHolder:     in.AccountHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.pending,
+				EntryType:         core.EntryTypeDebit,
+				Amount:            in.Amount,
 			},
 			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.mainWallet,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
+				AccountHolder:     in.AccountHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.mainWallet,
+				EntryType:         core.EntryTypeDebit,
+				Amount:            in.Amount,
 			},
 			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.suspense,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
+				AccountHolder:     systemHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.suspense,
+				EntryType:         core.EntryTypeCredit,
+				Amount:            in.Amount,
 			},
 			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.custodial,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
+				AccountHolder:     systemHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.custodial,
+				EntryType:         core.EntryTypeCredit,
+				Amount:            in.Amount,
 			},
 		},
 	}
@@ -325,18 +330,18 @@ func (s *PendingStore) buildCancelPendingJournalInput(in core.CancelPendingInput
 		Metadata:       meta,
 		Entries: []core.EntryInput{
 			{
-				AccountHolder:    in.AccountHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.pending,
-				EntryType:        core.EntryTypeDebit,
-				Amount:           in.Amount,
+				AccountHolder:     in.AccountHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.pending,
+				EntryType:         core.EntryTypeDebit,
+				Amount:            in.Amount,
 			},
 			{
-				AccountHolder:    systemHolder,
-				CurrencyID:       in.CurrencyID,
-				ClassificationID: clsIDs.suspense,
-				EntryType:        core.EntryTypeCredit,
-				Amount:           in.Amount,
+				AccountHolder:     systemHolder,
+				CurrencyUID:       in.CurrencyUID,
+				ClassificationUID: clsIDs.suspense,
+				EntryType:         core.EntryTypeCredit,
+				Amount:            in.Amount,
 			},
 		},
 	}
@@ -360,8 +365,12 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 
 	cutoff := time.Now().UTC().Add(-threshold)
 
+	pendingCls, err := s.ledger.dims.classByUIDOrErr(ctx, s.q, clsIDs.pending)
+	if err != nil {
+		return 0, fmt.Errorf("pending: expire: %w", err)
+	}
 	rows, err := s.q.ListPendingJournalsOlderThan(ctx, sqlcgen.ListPendingJournalsOlderThanParams{
-		PendingClassificationID: clsIDs.pending,
+		PendingClassificationID: pendingCls.ID,
 		Cutoff:                  cutoff,
 	})
 	if err != nil {
@@ -375,7 +384,12 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 		amount := mustNumericToDecimal(row.Amount)
 
 		// Check actual pending balance — skip if already drained (confirmed/cancelled).
-		bal, err := s.ledger.GetBalance(ctx, row.AccountHolder, row.CurrencyID, clsIDs.pending)
+		rowCur, err := s.ledger.dims.currencyByIDOrErr(ctx, s.q, row.CurrencyID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("holder=%d currency=%d resolve currency: %w", row.AccountHolder, row.CurrencyID, err))
+			continue
+		}
+		bal, err := s.ledger.GetBalance(ctx, row.AccountHolder, rowCur.UID, clsIDs.pending)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("holder=%d currency=%d get balance: %w", row.AccountHolder, row.CurrencyID, err))
 			continue
@@ -390,7 +404,7 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 
 		_, err = s.CancelPending(ctx, core.CancelPendingInput{
 			AccountHolder:  row.AccountHolder,
-			CurrencyID:     row.CurrencyID,
+			CurrencyUID:    rowCur.UID,
 			Amount:         amount,
 			Reason:         "expired",
 			IdempotencyKey: fmt.Sprintf("pending:expire:journal=%d", row.JournalID),
@@ -414,24 +428,24 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 
 // pendingClassIDs holds the resolved classification IDs needed for entry construction.
 type pendingClassIDs struct {
-	pending    int64
-	suspense   int64
-	mainWallet int64
-	custodial  int64
+	pending    string
+	suspense   string
+	mainWallet string
+	custodial  string
 }
 
 // resolveClassificationIDs loads all four required classification IDs.
 // Results are cached on the store after first resolution.
 func (s *PendingStore) resolveClassificationIDs(ctx context.Context) (pendingClassIDs, error) {
-	resolve := func(code string) (int64, error) {
+	resolve := func(code string) (string, error) {
 		cls, err := s.classStore.GetByCode(ctx, code)
 		if err != nil {
 			if errors.Is(err, core.ErrNotFound) {
-				return 0, fmt.Errorf("classification %q not found — install pending bundle first: %w", code, core.ErrNotFound)
+				return "", fmt.Errorf("classification %q not found — install pending bundle first: %w", code, core.ErrNotFound)
 			}
-			return 0, fmt.Errorf("get classification %q: %w", code, err)
+			return "", fmt.Errorf("get classification %q: %w", code, err)
 		}
-		return cls.ID, nil
+		return cls.UID, nil
 	}
 
 	pendingID, err := resolve("pending")

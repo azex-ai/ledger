@@ -13,7 +13,7 @@ info:
       - `docs/api.md`         — long-form prose
       - `docs/INVARIANTS.md`  — what the ledger guarantees
       - `docs/RUNBOOK.md`     — incident response
-  version: "0.3.0"
+  version: "0.4.0"
   license:
     name: Apache-2.0
 servers:
@@ -88,7 +88,7 @@ paths:
       parameters:
         - in: query
           name: cursor
-          schema: { type: integer, format: int64 }
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
         - in: query
           name: limit
           schema: { type: integer, default: 50, maximum: 200 }
@@ -144,15 +144,15 @@ paths:
           description: Plan executed.
         "422":
           $ref: "#/components/responses/DomainError"
-  /journals/{id}:
+  /journals/{uid}:
     get:
       tags: [Journals]
       summary: Get one journal with all its entries.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Journal + entries.
@@ -161,7 +161,7 @@ paths:
               schema: { $ref: "#/components/schemas/JournalWithEntriesEnvelope" }
         "404":
           $ref: "#/components/responses/NotFound"
-  /journals/{id}/reverse:
+  /journals/{uid}/reverse:
     post:
       tags: [Journals]
       summary: Post the full reversal of an existing journal.
@@ -170,9 +170,9 @@ paths:
         partial — use reverse-partial to continue a partially-reversed journal.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -188,7 +188,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: Already reversed.
-  /journals/{id}/reverse-partial:
+  /journals/{uid}/reverse-partial:
     post:
       tags: [Journals]
       summary: Reverse num/den of a journal (partial reversal).
@@ -200,9 +200,9 @@ paths:
         whose earlier fractional steps rounded up.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -233,10 +233,10 @@ paths:
         - in: query
           name: currency
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
         - in: query
           name: cursor
-          schema: { type: integer, format: int64 }
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
         - in: query
           name: limit
           schema: { type: integer, default: 50, maximum: 200 }
@@ -271,7 +271,7 @@ paths:
         - in: path
           name: currency
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Balance list.
@@ -288,12 +288,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [holders, currency_id]
+              required: [holders, currency_uid]
               properties:
                 holders:
                   type: array
                   items: { type: integer, format: int64 }
-                currency_id: { type: integer, format: int64 }
+                currency_uid: { type: string, format: uuid }
       responses:
         "200":
           description: Map of holder → balances.
@@ -320,15 +320,15 @@ paths:
               schema: { $ref: "#/components/schemas/ReservationEnvelope" }
         "422":
           $ref: "#/components/responses/DomainError"
-  /reservations/{id}/settle:
+  /reservations/{uid}/settle:
     post:
       tags: [Reservations]
       summary: Settle reservation with actual amount; remainder auto-released.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -341,7 +341,7 @@ paths:
       responses:
         "200": { description: Settled. }
         "422": { $ref: "#/components/responses/DomainError" }
-  /reservations/{id}/settle-partial:
+  /reservations/{uid}/settle-partial:
     post:
       tags: [Reservations]
       summary: Settle part of a reservation; call repeatedly to accumulate.
@@ -349,12 +349,12 @@ paths:
         First call transitions active → settling. Cumulative settled amount
         may never exceed the reserved amount. The unsettled remainder stays
         held against the balance until finalize. Finish with
-        /reservations/{id}/finalize.
+        /reservations/{uid}/finalize.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -367,28 +367,28 @@ paths:
       responses:
         "200": { description: Partial settlement recorded. }
         "422": { $ref: "#/components/responses/DomainError" }
-  /reservations/{id}/finalize:
+  /reservations/{uid}/finalize:
     post:
       tags: [Reservations]
       summary: Finish a partially-settled reservation (settling → settled).
       description: Releases the unsettled remainder. Rejected on a reservation with no partial settlements.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Finalized. }
         "422": { $ref: "#/components/responses/DomainError" }
-  /reservations/{id}/release:
+  /reservations/{uid}/release:
     post:
       tags: [Reservations]
       summary: Release a reservation without settling.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Released. }
         "422": { $ref: "#/components/responses/DomainError" }
@@ -447,15 +447,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BookingEnvelope" }
         "422": { $ref: "#/components/responses/DomainError" }
-  /bookings/{id}:
+  /bookings/{uid}:
     get:
       tags: [Bookings]
       summary: Get one booking.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Booking.
@@ -463,15 +463,15 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BookingEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
-  /bookings/{id}/transition:
+  /bookings/{uid}/transition:
     post:
       tags: [Bookings]
       summary: Advance a booking's lifecycle state.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -490,15 +490,15 @@ paths:
       summary: List events.
       responses:
         "200": { description: Events page. }
-  /events/{id}:
+  /events/{uid}:
     get:
       tags: [Events]
       summary: Get one event.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Event.
@@ -535,15 +535,15 @@ paths:
             schema: { $ref: "#/components/schemas/ClassificationInput" }
       responses:
         "201": { description: Created. }
-  /classifications/{id}/deactivate:
+  /classifications/{uid}/deactivate:
     post:
       tags: [Metadata]
       summary: Deactivate a classification.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Deactivated. }
 
@@ -568,14 +568,14 @@ paths:
                 name: { type: string }
       responses:
         "201": { description: Created. }
-  /journal-types/{id}/deactivate:
+  /journal-types/{uid}/deactivate:
     post:
       tags: [Metadata]
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Deactivated. }
 
@@ -611,14 +611,14 @@ paths:
             schema: { $ref: "#/components/schemas/TemplateParams" }
       responses:
         "200": { description: Rendered JournalInput. }
-  /templates/{id}/deactivate:
+  /templates/{uid}/deactivate:
     post:
       tags: [Metadata]
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Deactivated. }
 
@@ -649,15 +649,15 @@ paths:
                     value, so it cannot be defaulted.
       responses:
         "201": { description: Created. }
-  /currencies/{id}/deactivate:
+  /currencies/{uid}/deactivate:
     post:
       tags: [Metadata]
       summary: Deactivate a currency.
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200": { description: Deactivated. }
 
@@ -681,10 +681,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [holder, currency_id]
+              required: [holder, currency_uid]
               properties:
                 holder: { type: integer, format: int64 }
-                currency_id: { type: integer, format: int64 }
+                currency_uid: { type: string, format: uuid }
       responses:
         "200":
           description: Reconciliation result.
@@ -719,7 +719,7 @@ paths:
         - in: query
           name: currency
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
         - in: query
           name: from
           schema: { type: string, format: date }
@@ -735,20 +735,20 @@ paths:
       summary: List journals by account dimension or by global time range.
       description: |
         Exactly one mode is selected by the params provided: pass `holder` +
-        `currency_id` (optionally narrowed by `classification_id` and/or
+        `currency_uid` (optionally narrowed by `classification_uid` and/or
         `from`/`to`) to list journals touching that account dimension; pass
         `from`/`to` alone to scan a global time range instead. Providing
-        neither, or `holder` without `currency_id`, is a 400.
+        neither, or `holder` without `currency_uid`, is a 400.
       parameters:
         - in: query
           name: holder
           schema: { type: integer, format: int64 }
         - in: query
-          name: currency_id
-          schema: { type: integer, format: int64 }
+          name: currency_uid
+          schema: { type: string, format: uuid }
         - in: query
-          name: classification_id
-          schema: { type: integer, format: int64, description: '0 = all classifications.' }
+          name: classification_uid
+          schema: { type: string, format: uuid }
         - in: query
           name: from
           schema: { $ref: "#/components/schemas/Timestamp" }
@@ -757,7 +757,7 @@ paths:
           schema: { $ref: "#/components/schemas/Timestamp" }
         - in: query
           name: cursor
-          schema: { type: integer, format: int64 }
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
         - in: query
           name: limit
           schema: { type: integer, default: 50, maximum: 200 }
@@ -769,15 +769,15 @@ paths:
               schema: { $ref: "#/components/schemas/JournalListEnvelope" }
         "400":
           $ref: "#/components/responses/DomainError"
-  /audit/bookings/{id}/trace:
+  /audit/bookings/{uid}/trace:
     get:
       tags: [Audit]
       summary: Trace a booking end-to-end (booking + every event + every linked journal).
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Booking trace.
@@ -786,15 +786,15 @@ paths:
               schema: { $ref: "#/components/schemas/BookingTraceEnvelope" }
         "404":
           $ref: "#/components/responses/NotFound"
-  /audit/journals/{id}/reversals:
+  /audit/journals/{uid}/reversals:
     get:
       tags: [Audit]
       summary: List the reversal chain for a journal (root journal + every journal that transitively reverses it).
       parameters:
         - in: path
-          name: id
+          name: uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Reversal chain, oldest first.
@@ -811,9 +811,9 @@ paths:
         committed journal immediately without waiting for the rollup worker.
       parameters:
         - in: query
-          name: currency_id
+          name: currency_uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Platform balance breakdown.
@@ -828,9 +828,9 @@ paths:
       summary: Compare total user-side liability against custodial system balance for a currency.
       parameters:
         - in: query
-          name: currency_id
+          name: currency_uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Solvency report.
@@ -854,12 +854,12 @@ paths:
           required: true
           schema: { type: integer, format: int64 }
         - in: query
-          name: currency_id
+          name: currency_uid
           required: true
-          schema: { type: integer, format: int64 }
+          schema: { type: string, format: uuid }
         - in: query
-          name: classification_id
-          schema: { type: integer, format: int64, description: '0 (default) = sum across all classifications.' }
+          name: classification_uid
+          schema: { type: string, format: uuid }
         - in: query
           name: from
           required: true
@@ -939,21 +939,21 @@ components:
 
     EntryInput:
       type: object
-      required: [account_holder, currency_id, classification_id, entry_type, amount]
+      required: [account_holder, currency_uid, classification_uid, entry_type, amount]
       properties:
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         entry_type: { $ref: "#/components/schemas/EntryType" }
         amount:     { $ref: "#/components/schemas/Decimal" }
 
     JournalInput:
       type: object
-      required: [journal_type_id, idempotency_key, entries]
+      required: [journal_type_uid, idempotency_key, entries]
       properties:
-        journal_type_id: { type: integer, format: int64 }
+        journal_type_uid: { type: string, format: uuid }
         idempotency_key: { type: string }
-        event_id: { type: integer, format: int64 }
+        event_uid: { type: string, format: uuid }
         entries:
           type: array
           minItems: 1
@@ -967,8 +967,8 @@ components:
     Journal:
       type: object
       properties:
-        id: { type: integer, format: int64 }
-        journal_type_id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
+        journal_type_uid: { type: string, format: uuid }
         idempotency_key: { type: string }
         total_debit:  { $ref: "#/components/schemas/Decimal" }
         total_credit: { $ref: "#/components/schemas/Decimal" }
@@ -977,17 +977,17 @@ components:
           additionalProperties: { type: string }
         actor_id:    { type: integer, format: int64 }
         source:      { type: string }
-        reversal_of: { type: integer, format: int64, nullable: true }
-        event_id:    { type: integer, format: int64, nullable: true }
+        reversal_of_uid: { type: string, format: uuid, description: "Empty when this journal is not a reversal." }
+        event_uid:   { type: string, format: uuid, description: "Empty when not event-driven." }
         created_at:  { $ref: "#/components/schemas/Timestamp" }
     Entry:
       type: object
       properties:
-        id: { type: integer, format: int64 }
-        journal_id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
+        journal_uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         entry_type: { $ref: "#/components/schemas/EntryType" }
         amount:     { $ref: "#/components/schemas/Decimal" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
@@ -1023,8 +1023,8 @@ components:
       type: object
       properties:
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         balance: { $ref: "#/components/schemas/Decimal" }
     BalancesEnvelope:
       allOf:
@@ -1038,8 +1038,8 @@ components:
     SystemRollup:
       type: object
       properties:
-        currency_id: { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         total_balance: { $ref: "#/components/schemas/Decimal" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
     SystemRollupsEnvelope:
@@ -1053,25 +1053,25 @@ components:
 
     ReserveInput:
       type: object
-      required: [account_holder, currency_id, amount, idempotency_key]
+      required: [account_holder, currency_uid, amount, idempotency_key]
       properties:
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         amount:         { $ref: "#/components/schemas/Decimal" }
         idempotency_key: { type: string }
         expires_in:     { type: string, description: 'Go duration string (e.g. 1h, 30m).' }
     Reservation:
       type: object
       properties:
-        id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         reserved_amount: { $ref: "#/components/schemas/Decimal" }
         settled_amount:  { $ref: "#/components/schemas/Decimal", nullable: true }
         status:
           type: string
           enum: [active, settling, settled, released]
-        journal_id: { type: integer, format: int64, nullable: true }
+        journal_uid: { type: string, format: uuid, description: "Empty when no journal linked." }
         idempotency_key: { type: string }
         expires_at: { $ref: "#/components/schemas/Timestamp" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
@@ -1087,8 +1087,8 @@ components:
       type: object
       required: [status]
       properties:
-        currency_id:      { type: integer, format: int64, description: '0 = all currencies for this holder.' }
-        classification_id: { type: integer, format: int64, description: '0 = all classifications for this holder/currency.' }
+        currency_uid:      { type: string, format: uuid, description: 'Empty = all currencies for this holder.' }
+        classification_uid: { type: string, format: uuid, description: 'Empty = all classifications for this holder/currency.' }
         status:
           type: string
           enum: [active, frozen, closed]
@@ -1099,10 +1099,10 @@ components:
     AccountPolicy:
       type: object
       properties:
-        id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         status:
           type: string
           enum: [active, frozen, closed]
@@ -1120,11 +1120,11 @@ components:
 
     CreateBookingInput:
       type: object
-      required: [classification_code, account_holder, currency_id, amount, idempotency_key]
+      required: [classification_code, account_holder, currency_uid, amount, idempotency_key]
       properties:
         classification_code: { type: string }
         account_holder: { type: integer, format: int64 }
-        currency_id:    { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         amount:         { $ref: "#/components/schemas/Decimal" }
         idempotency_key: { type: string }
         channel_name:    { type: string }
@@ -1147,17 +1147,17 @@ components:
     Booking:
       type: object
       properties:
-        id: { type: integer, format: int64 }
-        classification_id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         amount: { $ref: "#/components/schemas/Decimal" }
         settled_amount: { $ref: "#/components/schemas/Decimal" }
         status: { type: string }
         channel_name: { type: string }
         channel_ref:  { type: string }
-        reservation_id: { type: integer, format: int64, nullable: true }
-        journal_id:     { type: integer, format: int64, nullable: true }
+        reservation_uid: { type: string, format: uuid, description: "Empty when no reservation linked." }
+        journal_uid:    { type: string, format: uuid, description: "Empty when no journal linked." }
         idempotency_key: { type: string }
         metadata:
           type: object
@@ -1175,16 +1175,16 @@ components:
     Event:
       type: object
       properties:
-        id: { type: integer, format: int64 }
+        uid: { type: string, format: uuid }
         classification_code: { type: string }
-        booking_id: { type: integer, format: int64 }
+        booking_uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         from_status: { type: string }
         to_status:   { type: string }
         amount: { $ref: "#/components/schemas/Decimal" }
         settled_amount: { $ref: "#/components/schemas/Decimal" }
-        journal_id: { type: integer, format: int64, nullable: true }
+        journal_uid: { type: string, format: uuid, description: "Empty when no journal linked." }
         metadata:
           type: object
           additionalProperties: true
@@ -1223,20 +1223,20 @@ components:
 
     TemplateLineInput:
       type: object
-      required: [classification_id, entry_type, holder_role, amount_key]
+      required: [classification_uid, entry_type, holder_role, amount_key]
       properties:
-        classification_id: { type: integer, format: int64 }
+        classification_uid: { type: string, format: uuid }
         entry_type: { $ref: "#/components/schemas/EntryType" }
         holder_role: { $ref: "#/components/schemas/HolderRole" }
         amount_key: { type: string }
         sort_order: { type: integer }
     TemplateInput:
       type: object
-      required: [code, name, journal_type_id, lines]
+      required: [code, name, journal_type_uid, lines]
       properties:
         code: { type: string }
         name: { type: string }
-        journal_type_id: { type: integer, format: int64 }
+        journal_type_uid: { type: string, format: uuid }
         lines:
           type: array
           minItems: 1
@@ -1244,12 +1244,12 @@ components:
 
     TemplateParams:
       type: object
-      required: [holder_id, currency_id, idempotency_key, amounts]
+      required: [holder_id, currency_uid, idempotency_key, amounts]
       properties:
         holder_id: { type: integer, format: int64 }
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         idempotency_key: { type: string }
-        event_id: { type: integer, format: int64 }
+        event_uid: { type: string, format: uuid }
         amounts:
           type: object
           additionalProperties: { $ref: "#/components/schemas/Decimal" }
@@ -1260,13 +1260,13 @@ components:
           additionalProperties: { type: string }
     TemplateExecutionRequest:
       type: object
-      required: [template_code, holder_id, currency_id, idempotency_key, amounts]
+      required: [template_code, holder_id, currency_uid, idempotency_key, amounts]
       properties:
         template_code: { type: string }
         holder_id: { type: integer, format: int64 }
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         idempotency_key: { type: string }
-        event_id: { type: integer, format: int64 }
+        event_uid: { type: string, format: uuid }
         amounts:
           type: object
           additionalProperties: { $ref: "#/components/schemas/Decimal" }
@@ -1287,8 +1287,8 @@ components:
             type: object
             properties:
               account_holder: { type: integer, format: int64 }
-              currency_id: { type: integer, format: int64 }
-              classification_id: { type: integer, format: int64 }
+              currency_uid: { type: string, format: uuid }
+              classification_uid: { type: string, format: uuid }
               expected: { $ref: "#/components/schemas/Decimal" }
               actual:   { $ref: "#/components/schemas/Decimal" }
               drift:    { $ref: "#/components/schemas/Decimal" }
@@ -1314,7 +1314,7 @@ components:
     PlatformBalance:
       type: object
       properties:
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         user_side:
           type: object
           description: classification code → total (holder > 0).
@@ -1333,7 +1333,7 @@ components:
     SolvencyReport:
       type: object
       properties:
-        currency_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
         liability: { $ref: "#/components/schemas/Decimal" }
         custodial: { $ref: "#/components/schemas/Decimal" }
         solvent: { type: boolean }

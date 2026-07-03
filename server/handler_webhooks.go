@@ -68,9 +68,9 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Ownership check: a compromised channel adapter could otherwise transition
-	// any booking by passing an arbitrary booking_id in the payload. Trust the
+	// any booking by passing an arbitrary booking_uid in the payload. Trust the
 	// channel→booking mapping in the database, not what the payload claims.
-	booking, err := s.bookingReader.GetBooking(r.Context(), payload.BookingID)
+	booking, err := s.bookingReader.GetBooking(r.Context(), payload.BookingUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -81,7 +81,7 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	evt, err := s.booker.Transition(r.Context(), core.TransitionInput{
-		BookingID:  payload.BookingID,
+		BookingUID: payload.BookingUID,
 		ToStatus:   core.Status(payload.Status),
 		ChannelRef: payload.ChannelRef,
 		Amount:     payload.ActualAmount,

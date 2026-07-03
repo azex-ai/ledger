@@ -29,11 +29,11 @@ func TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow(t *testing.T) {
 
 	before := time.Now()
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("eff-default"),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -64,12 +64,12 @@ func TestLedgerStore_PostJournal_EffectiveAt_Backdated(t *testing.T) {
 
 	backdated := time.Now().AddDate(0, 0, -10).Truncate(time.Microsecond)
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("eff-backdated"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -87,7 +87,7 @@ func TestLedgerStore_PostJournal_EffectiveAt_Backdated(t *testing.T) {
 
 	// I-14: every entry's effective_at must equal the parent journal's.
 	queries := postgres.NewQueryStore(pool)
-	_, entries, err := queries.GetJournal(ctx, journal.ID)
+	_, entries, err := queries.GetJournal(ctx, journal.UID)
 	require.NoError(t, err)
 	for _, e := range entries {
 		assert.True(t, e.EffectiveAt.Equal(backdated), "entry effective_at must equal journal effective_at")
@@ -107,12 +107,12 @@ func TestLedgerStore_PostJournal_EffectiveAt_RejectsFarFuture(t *testing.T) {
 	clsB := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	input := core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("eff-future"),
 		EffectiveAt:    time.Now().Add(time.Hour),
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	}
 
@@ -136,18 +136,18 @@ func TestLedgerStore_ReverseJournal_EffectiveAt_DoesNotInheritOriginal(t *testin
 
 	backdated := time.Now().AddDate(0, -1, 0)
 	original, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("eff-reverse-original"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 1, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: -1, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: 1, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+			{AccountHolder: -1, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
 		},
 	})
 	require.NoError(t, err)
 
 	before := time.Now()
-	reversal, err := store.ReverseJournal(ctx, original.ID, "correction")
+	reversal, err := store.ReverseJournal(ctx, original.UID, "correction")
 	require.NoError(t, err)
 	after := time.Now()
 
@@ -174,12 +174,12 @@ func TestRollupAdapter_ListBalancesAt_UsesEffectiveAt(t *testing.T) {
 	// Posted "now" (created_at ~= now) but attributed to 10 days ago.
 	backdated := time.Now().AddDate(0, 0, -10)
 	_, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeID:  jtID,
+		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("eff-asof"),
 		EffectiveAt:    backdated,
 		Entries: []core.EntryInput{
-			{AccountHolder: 42, CurrencyID: curID, ClassificationID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(75)},
-			{AccountHolder: -42, CurrencyID: curID, ClassificationID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(75)},
+			{AccountHolder: 42, CurrencyUID: curID, ClassificationUID: clsA, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(75)},
+			{AccountHolder: -42, CurrencyUID: curID, ClassificationUID: clsB, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(75)},
 		},
 	})
 	require.NoError(t, err)
@@ -193,7 +193,7 @@ func TestRollupAdapter_ListBalancesAt_UsesEffectiveAt(t *testing.T) {
 
 	var found bool
 	for _, b := range balances {
-		if b.AccountHolder == 42 && b.CurrencyID == curID && b.ClassificationID == clsA {
+		if b.AccountHolder == 42 && b.CurrencyUID == curID && b.ClassificationUID == clsA {
 			found = true
 			assert.True(t, b.Balance.Equal(decimal.NewFromInt(75)))
 		}

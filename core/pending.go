@@ -24,7 +24,7 @@ type PendingBalanceWriter interface {
 
 	// ConfirmPending settles a pending deposit: clears the pending classification
 	// and credits the user's main wallet.  Must be called with the same
-	// (AccountHolder, CurrencyID) that was used in the matching AddPending call.
+	// (AccountHolder, CurrencyUID) that was used in the matching AddPending call.
 	ConfirmPending(ctx context.Context, in ConfirmPendingInput) (*Journal, error)
 
 	// CancelPending reverses a pending deposit by posting a compensating journal
@@ -48,7 +48,7 @@ type AddPendingInput struct {
 	// AccountHolder is the positive user ID.  The system counterpart (-AccountHolder)
 	// is derived automatically.
 	AccountHolder  int64             `json:"account_holder"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	Amount         decimal.Decimal   `json:"amount"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	ActorID        int64             `json:"actor_id"`
@@ -60,8 +60,8 @@ func (i AddPendingInput) Validate() error {
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: add: account_holder required: %w", ErrInvalidInput)
 	}
-	if i.CurrencyID <= 0 {
-		return fmt.Errorf("pending: add: currency_id must be positive: %w", ErrInvalidInput)
+	if i.CurrencyUID == "" {
+		return fmt.Errorf("pending: add: currency_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("pending: add: amount must be positive: %w", ErrInvalidInput)
@@ -75,7 +75,7 @@ func (i AddPendingInput) Validate() error {
 // ConfirmPendingInput is the input to ConfirmPending.
 type ConfirmPendingInput struct {
 	AccountHolder  int64             `json:"account_holder"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	Amount         decimal.Decimal   `json:"amount"`
 	IdempotencyKey string            `json:"idempotency_key"`
 	ActorID        int64             `json:"actor_id"`
@@ -87,8 +87,8 @@ func (i ConfirmPendingInput) Validate() error {
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: confirm: account_holder required: %w", ErrInvalidInput)
 	}
-	if i.CurrencyID <= 0 {
-		return fmt.Errorf("pending: confirm: currency_id must be positive: %w", ErrInvalidInput)
+	if i.CurrencyUID == "" {
+		return fmt.Errorf("pending: confirm: currency_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("pending: confirm: amount must be positive: %w", ErrInvalidInput)
@@ -102,7 +102,7 @@ func (i ConfirmPendingInput) Validate() error {
 // CancelPendingInput is the input to CancelPending.
 type CancelPendingInput struct {
 	AccountHolder  int64             `json:"account_holder"`
-	CurrencyID     int64             `json:"currency_id"`
+	CurrencyUID    string            `json:"currency_uid"`
 	Amount         decimal.Decimal   `json:"amount"`
 	Reason         string            `json:"reason"`
 	IdempotencyKey string            `json:"idempotency_key"`
@@ -115,8 +115,8 @@ func (i CancelPendingInput) Validate() error {
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: cancel: account_holder required: %w", ErrInvalidInput)
 	}
-	if i.CurrencyID <= 0 {
-		return fmt.Errorf("pending: cancel: currency_id must be positive: %w", ErrInvalidInput)
+	if i.CurrencyUID == "" {
+		return fmt.Errorf("pending: cancel: currency_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("pending: cancel: amount must be positive: %w", ErrInvalidInput)

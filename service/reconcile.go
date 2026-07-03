@@ -303,7 +303,7 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 		result.Passed = false
 		for _, d := range r.Details {
 			result.Findings = append(result.Findings, core.Finding{
-				Description: fmt.Sprintf("currency %d: global debit/credit imbalance", d.CurrencyID),
+				Description: fmt.Sprintf("currency %s: global debit/credit imbalance", d.CurrencyUID),
 				Detail:      fmt.Sprintf("debit=%s credit=%s gap=%s", d.Expected, d.Actual, d.Drift),
 			})
 		}
@@ -362,7 +362,11 @@ pageLoop:
 				break pageLoop
 			}
 
-			acctResult, err := s.basic.ReconcileAccount(scanCtx, p.AccountHolder, p.CurrencyID)
+			pairCurrencyUID, err := s.basic.classifications.CurrencyUIDByID(scanCtx, p.CurrencyID)
+			var acctResult *core.ReconcileResult
+			if err == nil {
+				acctResult, err = s.basic.ReconcileAccount(scanCtx, p.AccountHolder, pairCurrencyUID)
+			}
 			if err != nil {
 				if scanCtx.Err() != nil {
 					partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
@@ -382,7 +386,7 @@ pageLoop:
 				result.Passed = false
 				for _, d := range acctResult.Details {
 					result.Findings = append(result.Findings, core.Finding{
-						Description: fmt.Sprintf("holder %d currency %d classification %d: checkpoint balance drift", d.AccountHolder, d.CurrencyID, d.ClassificationID),
+						Description: fmt.Sprintf("holder %d currency %s classification %s: checkpoint balance drift", d.AccountHolder, d.CurrencyUID, d.ClassificationUID),
 						Detail:      fmt.Sprintf("expected=%s actual(checkpoint)=%s drift=%s", d.Expected, d.Actual, d.Drift),
 					})
 				}
@@ -735,11 +739,15 @@ func (s *ReconciliationService) CheckAccountingEquation(ctx context.Context) (*c
 
 		result.Balanced = false
 		result.Gap = result.Gap.Add(gap.Abs())
+		currencyUID, uidErr := s.classifications.CurrencyUIDByID(ctx, total.CurrencyID)
+		if uidErr != nil {
+			return nil, fmt.Errorf("service: reconcile: resolve currency %d: %w", total.CurrencyID, uidErr)
+		}
 		result.Details = append(result.Details, core.ReconcileDetail{
-			CurrencyID: total.CurrencyID,
-			Expected:   total.Debit,
-			Actual:     total.Credit,
-			Drift:      gap,
+			CurrencyUID: currencyUID,
+			Expected:    total.Debit,
+			Actual:      total.Credit,
+			Drift:       gap,
 		})
 
 		s.logger.Warn("service: reconcile: accounting equation imbalance",
@@ -756,15 +764,21 @@ func (s *ReconciliationService) CheckAccountingEquation(ctx context.Context) (*c
 }
 
 // ReconcileAccount verifies checkpoint balances vs actual entry sums for a specific account.
-func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int64, currencyID int64) (*core.ReconcileResult, error) {
+func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int64, currencyUID string) (*core.ReconcileResult, error) {
+	currencyID, err := s.classifications.CurrencyIDByUID(ctx, currencyUID)
+	if err != nil {
+		return nil, fmt.Errorf("service: reconcile account: resolve currency: %w", err)
+	}
 	// Get classifications for normal_side
-	clsList, err := s.classifications.ListClassifications(ctx, false)
+	clsList, err := s.classifications.ClassificationDims(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("service: reconcile account: list classifications: %w", err)
 	}
 	normalSides := make(map[int64]core.NormalSide, len(clsList))
+	classDimByID := make(map[int64]ClassificationDim, len(clsList))
 	for _, c := range clsList {
 		normalSides[c.ID] = c.NormalSide
+		classDimByID[c.ID] = c
 	}
 
 	// Get checkpoints
@@ -830,13 +844,17 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 		if !drift.IsZero() {
 			result.Balanced = false
 			result.Gap = result.Gap.Add(drift.Abs())
+			classUID := ""
+			if dim, ok := classDimByID[classID]; ok {
+				classUID = dim.UID
+			}
 			result.Details = append(result.Details, core.ReconcileDetail{
-				AccountHolder:    holder,
-				CurrencyID:       currencyID,
-				ClassificationID: classID,
-				Expected:         expected,
-				Actual:           actual,
-				Drift:            drift,
+				AccountHolder:     holder,
+				CurrencyUID:       currencyUID,
+				ClassificationUID: classUID,
+				Expected:          expected,
+				Actual:            actual,
+				Drift:             drift,
 			})
 
 			s.logger.Warn("service: reconcile account: checkpoint drift",

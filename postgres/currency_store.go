@@ -50,6 +50,7 @@ func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyI
 		Code:     input.Code,
 		Name:     input.Name,
 		Exponent: int16(input.Exponent),
+		Uid:      newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create currency", err)
@@ -58,8 +59,12 @@ func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyI
 }
 
 // DeactivateCurrency soft-deletes a currency by setting is_active = false.
-func (s *CurrencyStore) DeactivateCurrency(ctx context.Context, id int64) error {
-	if err := s.q.DeactivateCurrency(ctx, id); err != nil {
+func (s *CurrencyStore) DeactivateCurrency(ctx context.Context, uid string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.DeactivateCurrency(ctx, pgUID); err != nil {
 		return wrapStoreError("postgres: deactivate currency", err)
 	}
 	return nil
@@ -78,12 +83,16 @@ func (s *CurrencyStore) ListCurrencies(ctx context.Context, activeOnly bool) ([]
 	return result, nil
 }
 
-// GetCurrency retrieves a currency by ID.
-func (s *CurrencyStore) GetCurrency(ctx context.Context, id int64) (*core.Currency, error) {
-	row, err := s.q.GetCurrency(ctx, id)
+// GetCurrency retrieves a currency by uid.
+func (s *CurrencyStore) GetCurrency(ctx context.Context, uid string) (*core.Currency, error) {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.q.GetCurrency(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get currency: id %d: %w", id, core.ErrNotFound)
+			return nil, fmt.Errorf("postgres: get currency %q: %w", uid, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: get currency: %w", err)
 	}

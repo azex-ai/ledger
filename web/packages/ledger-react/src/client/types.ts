@@ -13,24 +13,23 @@ export interface ApiError {
 }
 
 export interface Journal {
-  id: number;
-  journal_type_id: number;
+  uid: string;
+  journal_type_uid: string;
   idempotency_key: string;
   total_debit: string;
   total_credit: string;
   metadata: Record<string, unknown>;
   actor_id: number;
   source: string;
-  reversal_of: number | null;
+  reversal_of_uid: string;  // "" = not linked
   created_at: string;
 }
 
 export interface Entry {
-  id: number;
-  journal_id: number;
+  journal_uid: string;
   account_holder: number;
-  currency_id: number;
-  classification_id: number;
+  currency_uid: string;
+  classification_uid: string;
   entry_type: "debit" | "credit";
   amount: string;
   created_at: string;
@@ -43,19 +42,19 @@ export interface JournalWithEntries {
 
 export interface Balance {
   account_holder: number;
-  currency_id: number;
-  classification_id: number;
+  currency_uid: string;
+  classification_uid: string;
   balance: string;
 }
 
 export interface Reservation {
-  id: number;
+  uid: string;
   account_holder: number;
-  currency_id: number;
+  currency_uid: string;
   reserved_amount: string;
   settled_amount: string;
   status: "active" | "settling" | "settled" | "released";
-  journal_id: number | null;
+  journal_uid: string;  // "" = not linked
   idempotency_key: string;
   expires_at: string;
   created_at: string;
@@ -71,19 +70,18 @@ export interface Lifecycle {
 // Booking is the unified record replacing v1 Deposit/Withdrawal.
 // Its lifecycle is governed by the classification.
 export interface Booking {
-  id: number;
-  classification_id: number;
+  uid: string;
+  classification_uid: string;
   account_holder: number;
-  currency_id: number;
+  currency_uid: string;
   amount: string;
   settled_amount: string;
   status: string;
   channel_name: string;
   channel_ref: string;
-  // ReservationID and JournalID are nullable on the backend (NULL means
-  // not yet linked). The remaining fields are NOT NULL.
-  reservation_id: number | null;
-  journal_id: number | null;
+  // reservation_uid / journal_uid are empty strings until linked.
+  reservation_uid: string;  // "" = not linked
+  journal_uid: string;  // "" = not linked
   idempotency_key: string;
   metadata: Record<string, unknown>;
   expires_at: string;
@@ -92,22 +90,22 @@ export interface Booking {
 }
 
 export interface Event {
-  id: number;
+  uid: string;
   classification_code: string;
-  booking_id: number;
+  booking_uid: string;
   account_holder: number;
-  currency_id: number;
+  currency_uid: string;
   from_status: string;
   to_status: string;
   amount: string;
   settled_amount: string;
-  journal_id: number | null;
+  journal_uid: string;  // "" = not linked
   metadata: Record<string, unknown>;
   occurred_at: string;
 }
 
 export interface Classification {
-  id: number;
+  uid: string;
   code: string;
   name: string;
   normal_side: "debit" | "credit";
@@ -118,7 +116,7 @@ export interface Classification {
 }
 
 export interface JournalType {
-  id: number;
+  uid: string;
   code: string;
   name: string;
   is_active: boolean;
@@ -126,8 +124,7 @@ export interface JournalType {
 }
 
 export interface TemplateLine {
-  id: number;
-  classification_id: number;
+  classification_uid: string;
   entry_type: "debit" | "credit";
   holder_role: "user" | "system";
   amount_key: string;
@@ -135,17 +132,17 @@ export interface TemplateLine {
 }
 
 export interface EntryTemplate {
-  id: number;
+  uid: string;
   code: string;
   name: string;
-  journal_type_id: number;
+  journal_type_uid: string;
   is_active: boolean;
   lines: TemplateLine[];
   created_at: string;
 }
 
 export interface Currency {
-  id: number;
+  uid: string;
   code: string;
   name: string;
   is_active: boolean;
@@ -161,8 +158,8 @@ export interface HealthStatus {
 }
 
 export interface SystemBalance {
-  currency_id: number;
-  classification_id: number;
+  currency_uid: string;
+  classification_uid: string;
   total_balance: string;
   updated_at: string;
 }
@@ -172,8 +169,8 @@ export interface ReconcileResult {
   gap: string;
   details: Array<{
     account_holder: number;
-    currency_id: number;
-    classification_id: number;
+    currency_uid: string;
+    classification_uid: string;
     expected: string;
     actual: string;
     drift: string;
@@ -183,8 +180,8 @@ export interface ReconcileResult {
 
 export interface Snapshot {
   account_holder: number;
-  currency_id: number;
-  classification_id: number;
+  currency_uid: string;
+  classification_uid: string;
   snapshot_date: string;
   balance: string;
 }
@@ -197,8 +194,8 @@ export interface PaginatedResponse<T> {
 export interface PreviewResult {
   entries: Array<{
     account_holder: number;
-    currency_id: number;
-    classification_id: number;
+    currency_uid: string;
+    classification_uid: string;
     entry_type: "debit" | "credit";
     amount: string;
   }>;
@@ -209,7 +206,7 @@ export interface PreviewResult {
 export interface CreateBookingBody {
   classification_code: string;
   account_holder: number;
-  currency_id: number;
+  currency_uid: string;
   amount: string;
   idempotency_key: string;
   channel_name: string;
@@ -227,7 +224,7 @@ export interface TransitionBookingBody {
 
 export interface ListBookingsParams {
   holder?: number;
-  classification_id?: number;
+  classification_uid?: string;
   status?: string;
   cursor?: string;
   limit?: number;

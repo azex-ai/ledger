@@ -34,7 +34,7 @@ func TestPendingStore_AddPending(t *testing.T) {
 
 	j, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("add-pending"),
 		Source:         "test",
@@ -47,7 +47,7 @@ func TestPendingStore_AddPending(t *testing.T) {
 	// Verify pending classification balance for user.
 	pendingCls, err := cs.GetByCode(ctx, "pending")
 	require.NoError(t, err)
-	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.Equal(amount), "pending balance should equal added amount, got %s", pendingBal)
 
@@ -55,7 +55,7 @@ func TestPendingStore_AddPending(t *testing.T) {
 	suspenseCls, err := cs.GetByCode(ctx, "suspense")
 	require.NoError(t, err)
 	systemHolder := core.SystemAccountHolder(userID)
-	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.ID)
+	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.UID)
 	require.NoError(t, err)
 	assert.True(t, suspenseBal.Equal(amount), "suspense balance should equal added amount, got %s", suspenseBal)
 }
@@ -80,7 +80,7 @@ func TestPendingStore_AddPending_Idempotent(t *testing.T) {
 
 	j1, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: key,
 		Source:         "test",
@@ -89,19 +89,19 @@ func TestPendingStore_AddPending_Idempotent(t *testing.T) {
 
 	j2, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: key,
 		Source:         "test",
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, j1.ID, j2.ID, "idempotent calls should return the same journal ID")
+	assert.Equal(t, j1.UID, j2.UID, "idempotent calls should return the same journal ID")
 
 	// Balance should only reflect one addition.
 	pendingCls, err := cs.GetByCode(ctx, "pending")
 	require.NoError(t, err)
-	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.Equal(amount), "balance should only reflect one addition")
 }
@@ -128,7 +128,7 @@ func TestPendingStore_ConfirmPending(t *testing.T) {
 	// Step 1: Add pending
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         addAmount,
 		IdempotencyKey: postgrestest.UniqueKey("confirm-add"),
 		Source:         "test",
@@ -138,7 +138,7 @@ func TestPendingStore_ConfirmPending(t *testing.T) {
 	// Step 2: Confirm with a smaller amount (partial)
 	j, err := ps.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         confirmAmount,
 		IdempotencyKey: postgrestest.UniqueKey("confirm-confirm"),
 		Source:         "test",
@@ -159,19 +159,19 @@ func TestPendingStore_ConfirmPending(t *testing.T) {
 	systemHolder := core.SystemAccountHolder(userID)
 	remaining := addAmount.Sub(confirmAmount)
 
-	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.Equal(remaining), "pending should be %s after partial confirm, got %s", remaining, pendingBal)
 
-	walletBal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.ID)
+	walletBal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(confirmAmount), "main_wallet should equal confirmed amount, got %s", walletBal)
 
-	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.ID)
+	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.UID)
 	require.NoError(t, err)
 	assert.True(t, suspenseBal.Equal(remaining), "suspense should be %s after partial confirm, got %s", remaining, suspenseBal)
 
-	custodialBal, err := ls.GetBalance(ctx, systemHolder, curID, custodialCls.ID)
+	custodialBal, err := ls.GetBalance(ctx, systemHolder, curID, custodialCls.UID)
 	require.NoError(t, err)
 	assert.True(t, custodialBal.Equal(confirmAmount), "custodial should equal confirmed amount, got %s", custodialBal)
 }
@@ -196,7 +196,7 @@ func TestPendingStore_ConfirmPending_Idempotent(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("confidem-add"),
 		Source:         "test",
@@ -206,7 +206,7 @@ func TestPendingStore_ConfirmPending_Idempotent(t *testing.T) {
 	key := postgrestest.UniqueKey("confidem-confirm")
 	j1, err := ps.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: key,
 		Source:         "test",
@@ -215,18 +215,18 @@ func TestPendingStore_ConfirmPending_Idempotent(t *testing.T) {
 
 	j2, err := ps.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: key,
 		Source:         "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, j1.ID, j2.ID)
+	assert.Equal(t, j1.UID, j2.UID)
 
 	// Balance should only reflect one confirmation.
 	mainWalletCls, err := cs.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
-	walletBal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.ID)
+	walletBal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
 	require.NoError(t, err)
 	assert.True(t, walletBal.Equal(amount), "wallet should reflect exactly one confirmation")
 }
@@ -251,7 +251,7 @@ func TestPendingStore_CancelPending_Idempotent(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("cancelidem-add"),
 		Source:         "test",
@@ -261,7 +261,7 @@ func TestPendingStore_CancelPending_Idempotent(t *testing.T) {
 	key := postgrestest.UniqueKey("cancelidem-cancel")
 	j1, err := ps.CancelPending(ctx, core.CancelPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		Reason:         "timeout",
 		IdempotencyKey: key,
@@ -271,18 +271,18 @@ func TestPendingStore_CancelPending_Idempotent(t *testing.T) {
 
 	j2, err := ps.CancelPending(ctx, core.CancelPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		Reason:         "timeout",
 		IdempotencyKey: key,
 		Source:         "test",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, j1.ID, j2.ID)
+	assert.Equal(t, j1.UID, j2.UID)
 
 	pendingCls, err := cs.GetByCode(ctx, "pending")
 	require.NoError(t, err)
-	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.IsZero(), "pending should be released exactly once")
 }
@@ -306,7 +306,7 @@ func TestPendingStore_CancelPending(t *testing.T) {
 
 	addJournal, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("cancel-add"),
 		Source:         "test",
@@ -315,7 +315,7 @@ func TestPendingStore_CancelPending(t *testing.T) {
 
 	cancelJournal, err := ps.CancelPending(ctx, core.CancelPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		Reason:         "test_cancellation",
 		IdempotencyKey: postgrestest.UniqueKey("cancel-cancel"),
@@ -325,7 +325,7 @@ func TestPendingStore_CancelPending(t *testing.T) {
 	require.NotNil(t, cancelJournal)
 
 	// Cancel journal must be a different journal from the original.
-	assert.NotEqual(t, addJournal.ID, cancelJournal.ID, "cancel must create a new journal")
+	assert.NotEqual(t, addJournal.UID, cancelJournal.UID, "cancel must create a new journal")
 
 	// Balances must be zero after cancel.
 	pendingCls, err := cs.GetByCode(ctx, "pending")
@@ -335,11 +335,11 @@ func TestPendingStore_CancelPending(t *testing.T) {
 
 	systemHolder := core.SystemAccountHolder(userID)
 
-	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.ID)
+	pendingBal, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, pendingBal.IsZero(), "pending balance must be zero after cancel, got %s", pendingBal)
 
-	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.ID)
+	suspenseBal, err := ls.GetBalance(ctx, systemHolder, curID, suspenseCls.UID)
 	require.NoError(t, err)
 	assert.True(t, suspenseBal.IsZero(), "suspense balance must be zero after cancel, got %s", suspenseBal)
 }
@@ -363,7 +363,7 @@ func TestPendingStore_CancelPending_OriginalNotMutated(t *testing.T) {
 
 	addJ, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("nomut-add"),
 		Source:         "test",
@@ -372,7 +372,7 @@ func TestPendingStore_CancelPending_OriginalNotMutated(t *testing.T) {
 
 	cancelJ, err := ps.CancelPending(ctx, core.CancelPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		Reason:         "expired",
 		IdempotencyKey: postgrestest.UniqueKey("nomut-cancel"),
@@ -381,9 +381,9 @@ func TestPendingStore_CancelPending_OriginalNotMutated(t *testing.T) {
 	require.NoError(t, err)
 
 	// The cancel must write a NEW journal, never touch the original.
-	assert.NotEqual(t, addJ.ID, cancelJ.ID, "cancel journal ID must differ from add journal ID")
+	assert.NotEqual(t, addJ.UID, cancelJ.UID, "cancel journal ID must differ from add journal ID")
 	// The original journal must NOT reference the cancel journal.
-	assert.Equal(t, int64(0), addJ.ReversalOf, "add journal must not have reversal_of set")
+	assert.Empty(t, addJ.ReversalOfUID, "add journal must not have reversal_of set")
 }
 
 // TestPendingStore_CancelPending_InsufficientBalance ensures cancelling more
@@ -405,7 +405,7 @@ func TestPendingStore_CancelPending_InsufficientBalance(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("insuf-add"),
 		Source:         "test",
@@ -415,7 +415,7 @@ func TestPendingStore_CancelPending_InsufficientBalance(t *testing.T) {
 	// Attempt to cancel more than pending.
 	_, err = ps.CancelPending(ctx, core.CancelPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         decimal.NewFromInt(100), // > 50
 		Reason:         "test",
 		IdempotencyKey: postgrestest.UniqueKey("insuf-cancel"),
@@ -452,7 +452,7 @@ func TestPendingStore_ExpirePendingOlderThan(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userA,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amountA,
 		IdempotencyKey: postgrestest.UniqueKey("expire-add-a"),
 		Source:         "test",
@@ -468,7 +468,7 @@ func TestPendingStore_ExpirePendingOlderThan(t *testing.T) {
 	pendingCls, err := cs.GetByCode(ctx, "pending")
 	require.NoError(t, err)
 
-	balA, err := ls.GetBalance(ctx, userA, curID, pendingCls.ID)
+	balA, err := ls.GetBalance(ctx, userA, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, balA.IsZero(), "user A pending balance must be zero after expiry, got %s", balA)
 
@@ -479,7 +479,7 @@ func TestPendingStore_ExpirePendingOlderThan(t *testing.T) {
 	amountB := decimal.NewFromInt(200)
 	_, err = ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userB,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amountB,
 		IdempotencyKey: postgrestest.UniqueKey("expire-add-b"),
 		Source:         "test",
@@ -492,7 +492,7 @@ func TestPendingStore_ExpirePendingOlderThan(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, cancelled2, "fresh deposit must not be expired with 24h threshold")
 
-	balB, err := ls.GetBalance(ctx, userB, curID, pendingCls.ID)
+	balB, err := ls.GetBalance(ctx, userB, curID, pendingCls.UID)
 	require.NoError(t, err)
 	assert.True(t, balB.Equal(amountB), "user B pending balance should be intact, got %s", balB)
 }
@@ -516,7 +516,7 @@ func TestPendingStore_ExpirePendingOlderThan_AlreadySettled(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("settled-add"),
 		Source:         "test",
@@ -526,7 +526,7 @@ func TestPendingStore_ExpirePendingOlderThan_AlreadySettled(t *testing.T) {
 	// Confirm the deposit (clears pending balance).
 	_, err = ps.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("settled-confirm"),
 		Source:         "test",
@@ -560,7 +560,7 @@ func TestPendingStore_AccountingEquation(t *testing.T) {
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("eq-add"),
 		Source:         "test",
@@ -569,7 +569,7 @@ func TestPendingStore_AccountingEquation(t *testing.T) {
 
 	_, err = ps.ConfirmPending(ctx, core.ConfirmPendingInput{
 		AccountHolder:  userID,
-		CurrencyID:     curID,
+		CurrencyUID:    curID,
 		Amount:         amount,
 		IdempotencyKey: postgrestest.UniqueKey("eq-confirm"),
 		Source:         "test",

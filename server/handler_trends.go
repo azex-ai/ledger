@@ -30,18 +30,10 @@ func (s *Server) handleGetBalanceTrends(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, httpx.ErrBadRequest("holder query param is required"))
 		return
 	}
-	currencyID, err := strconv.ParseInt(q.Get("currency_id"), 10, 64)
-	if err != nil || currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id query param is required"))
+	currencyUID := q.Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid query param is required"))
 		return
-	}
-
-	var classificationID int64
-	if c := q.Get("classification_id"); c != "" {
-		if classificationID, err = strconv.ParseInt(c, 10, 64); err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("classification_id must be a number"))
-			return
-		}
 	}
 
 	from, err := parseRFC3339Param("from", q.Get("from"))
@@ -64,11 +56,11 @@ func (s *Server) handleGetBalanceTrends(w http.ResponseWriter, r *http.Request) 
 	}
 
 	filter := core.BalanceTrendFilter{
-		AccountHolder:    holder,
-		CurrencyID:       currencyID,
-		ClassificationID: classificationID,
-		From:             from,
-		Until:            until,
+		AccountHolder:     holder,
+		CurrencyUID:       currencyUID,
+		ClassificationUID: q.Get("classification_uid"),
+		From:              from,
+		Until:             until,
 	}
 
 	points, err := s.balanceTrends.GetBalanceTrends(r.Context(), filter)

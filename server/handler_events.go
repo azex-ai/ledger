@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -11,13 +10,13 @@ import (
 )
 
 func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
-	id, err := parseIDParam(chi.URLParam(r, "id"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid event ID"))
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid event uid"))
 		return
 	}
 
-	evt, err := s.eventReader.GetEvent(r.Context(), id)
+	evt, err := s.eventReader.GetEvent(r.Context(), uid)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -28,50 +27,28 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	classificationCode := q.Get("classification_code")
-
-	var bookingID int64
-	if o := q.Get("booking_id"); o != "" {
-		var err error
-		bookingID, err = strconv.ParseInt(o, 10, 64)
-		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("booking_id must be a number"))
-			return
-		}
-	}
-
-	toStatus := q.Get("to_status")
-
-	cursor, err := decodeCursor(q.Get("cursor"))
-	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("invalid cursor value"))
-		return
-	}
-
 	limit := parsePageLimit(r)
 
 	filter := core.EventFilter{
-		ClassificationCode: classificationCode,
-		BookingID:          bookingID,
-		ToStatus:           toStatus,
-		Cursor:             cursor,
+		ClassificationCode: q.Get("classification_code"),
+		BookingUID:         q.Get("booking_uid"),
+		ToStatus:           q.Get("to_status"),
+		Cursor:             q.Get("cursor"),
 		Limit:              int(limit),
 	}
 
-	events, err := s.eventReader.ListEvents(r.Context(), filter)
+	events, nextCursor, err := s.eventReader.ListEvents(r.Context(), filter)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	resp := PagedResponse[eventResponse]{
-		List: make([]eventResponse, len(events)),
+		List:       make([]eventResponse, len(events)),
+		NextCursor: nextCursor,
 	}
 	for i, evt := range events {
 		resp.List[i] = eventToResponse(&evt)
-	}
-	if len(events) == int(limit) {
-		resp.NextCursor = encodeCursor(events[len(events)-1].ID)
 	}
 	httpx.OK(w, resp)
 }

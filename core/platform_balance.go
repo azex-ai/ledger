@@ -20,9 +20,9 @@ import (
 // Reads therefore reflect every committed journal immediately, without waiting
 // for the rollup worker.
 type PlatformBalance struct {
-	CurrencyID int64                      `json:"currency_id"`
-	UserSide   map[string]decimal.Decimal `json:"user_side"`   // classification code → total
-	SystemSide map[string]decimal.Decimal `json:"system_side"` // classification code → total
+	CurrencyUID string                     `json:"currency_uid"`
+	UserSide    map[string]decimal.Decimal `json:"user_side"`   // classification code → total
+	SystemSide  map[string]decimal.Decimal `json:"system_side"` // classification code → total
 }
 
 // SolvencyReport is the result of a solvency check for a single currency.
@@ -41,11 +41,11 @@ type PlatformBalance struct {
 // the platform is under-collateralised in the ledger picture. Comparing this
 // figure to an off-chain custody position is the consumer's responsibility.
 type SolvencyReport struct {
-	CurrencyID int64           `json:"currency_id"`
-	Liability  decimal.Decimal `json:"liability"`
-	Custodial  decimal.Decimal `json:"custodial"`
-	Solvent    bool            `json:"solvent"`
-	Margin     decimal.Decimal `json:"margin"`
+	CurrencyUID string          `json:"currency_uid"`
+	Liability   decimal.Decimal `json:"liability"`
+	Custodial   decimal.Decimal `json:"custodial"`
+	Solvent     bool            `json:"solvent"`
+	Margin      decimal.Decimal `json:"margin"`
 }
 
 // PlatformBalanceReader reads structured platform-wide balance breakdowns from
@@ -54,11 +54,11 @@ type PlatformBalanceReader interface {
 	// GetPlatformBalances returns a per-classification breakdown for the given
 	// currency. Both UserSide and SystemSide maps are keyed by classification
 	// code; missing classifications have zero balance.
-	GetPlatformBalances(ctx context.Context, currencyID int64) (*PlatformBalance, error)
+	GetPlatformBalances(ctx context.Context, currencyUID string) (*PlatformBalance, error)
 
 	// GetTotalLiabilityByAsset returns the sum of all user-side balances
 	// (holder > 0) across all classifications for the given currency.
-	GetTotalLiabilityByAsset(ctx context.Context, currencyID int64) (decimal.Decimal, error)
+	GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error)
 }
 
 // SolvencyChecker computes a solvency report for a single currency.
@@ -68,5 +68,5 @@ type SolvencyChecker interface {
 	// Liability is the total of all user-side balances.
 	// Implementations should ensure the custodial and liability figures describe
 	// the same point in time.
-	SolvencyCheck(ctx context.Context, currencyID int64) (*SolvencyReport, error)
+	SolvencyCheck(ctx context.Context, currencyUID string) (*SolvencyReport, error)
 }

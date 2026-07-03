@@ -56,7 +56,7 @@ func TestTransferBundle_Templates_Balance(t *testing.T) {
 	amount := decimal.NewFromInt(100)
 	params := core.TemplateParams{
 		HolderID:       1,
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "tx-1",
 		Amounts:        map[string]decimal.Decimal{"amount": amount},
 	}

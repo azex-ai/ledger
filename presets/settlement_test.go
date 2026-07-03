@@ -54,7 +54,7 @@ func TestSettlementBundle_GrossTemplate_Balance(t *testing.T) {
 	gross := decimal.NewFromInt(500)
 	params := core.TemplateParams{
 		HolderID:       10, // merchant
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "settle-gross-1",
 		Amounts:        map[string]decimal.Decimal{"gross_amount": gross},
 	}
@@ -90,7 +90,7 @@ func TestSettlementBundle_NetTemplate_Balance(t *testing.T) {
 
 	params := core.TemplateParams{
 		HolderID:       10, // merchant
-		CurrencyID:     1,
+		CurrencyUID:    "cur-1",
 		IdempotencyKey: "settle-net-1",
 		Amounts: map[string]decimal.Decimal{
 			"gross_amount": gross,

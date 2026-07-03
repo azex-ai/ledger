@@ -7,45 +7,44 @@ package server
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
 type platformBalanceResponse struct {
-	CurrencyID int64             `json:"currency_id"`
-	UserSide   map[string]string `json:"user_side"`
-	SystemSide map[string]string `json:"system_side"`
+	CurrencyUID string            `json:"currency_uid"`
+	UserSide    map[string]string `json:"user_side"`
+	SystemSide  map[string]string `json:"system_side"`
 }
 
 type solvencyResponse struct {
-	CurrencyID int64  `json:"currency_id"`
-	Liability  string `json:"liability"`
-	Custodial  string `json:"custodial"`
-	Solvent    bool   `json:"solvent"`
-	Margin     string `json:"margin"`
+	CurrencyUID string `json:"currency_uid"`
+	Liability   string `json:"liability"`
+	Custodial   string `json:"custodial"`
+	Solvent     bool   `json:"solvent"`
+	Margin      string `json:"margin"`
 }
 
 // handleGetPlatformBalances returns the per-classification user-side vs
 // system-side balance breakdown for a currency, computed in real time
 // (checkpoint + delta, no rollup-worker lag).
 func (s *Server) handleGetPlatformBalances(w http.ResponseWriter, r *http.Request) {
-	currencyID, err := strconv.ParseInt(r.URL.Query().Get("currency_id"), 10, 64)
-	if err != nil || currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id query param is required"))
+	currencyUID := r.URL.Query().Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid query param is required"))
 		return
 	}
 
-	pb, err := s.platformBalances.GetPlatformBalances(r.Context(), currencyID)
+	pb, err := s.platformBalances.GetPlatformBalances(r.Context(), currencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	resp := platformBalanceResponse{
-		CurrencyID: pb.CurrencyID,
-		UserSide:   make(map[string]string, len(pb.UserSide)),
-		SystemSide: make(map[string]string, len(pb.SystemSide)),
+		CurrencyUID: pb.CurrencyUID,
+		UserSide:    make(map[string]string, len(pb.UserSide)),
+		SystemSide:  make(map[string]string, len(pb.SystemSide)),
 	}
 	for k, v := range pb.UserSide {
 		resp.UserSide[k] = v.String()
@@ -59,23 +58,23 @@ func (s *Server) handleGetPlatformBalances(w http.ResponseWriter, r *http.Reques
 // handleGetSolvency compares total user-side liability against the
 // custodial system balance for a currency.
 func (s *Server) handleGetSolvency(w http.ResponseWriter, r *http.Request) {
-	currencyID, err := strconv.ParseInt(r.URL.Query().Get("currency_id"), 10, 64)
-	if err != nil || currencyID == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("currency_id query param is required"))
+	currencyUID := r.URL.Query().Get("currency_uid")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("currency_uid query param is required"))
 		return
 	}
 
-	report, err := s.solvency.SolvencyCheck(r.Context(), currencyID)
+	report, err := s.solvency.SolvencyCheck(r.Context(), currencyUID)
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
 
 	httpx.OK(w, solvencyResponse{
-		CurrencyID: report.CurrencyID,
-		Liability:  report.Liability.String(),
-		Custodial:  report.Custodial.String(),
-		Solvent:    report.Solvent,
-		Margin:     report.Margin.String(),
+		CurrencyUID: report.CurrencyUID,
+		Liability:   report.Liability.String(),
+		Custodial:   report.Custodial.String(),
+		Solvent:     report.Solvent,
+		Margin:      report.Margin.String(),
 	})
 }

@@ -34,13 +34,14 @@ type BookingStore struct {
 	pool *pgxpool.Pool
 	db   DBTX
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewBookingStore creates a new BookingStore backed by a connection pool. The
 // internal sqlc Queries instance is built from pool so library consumers don't
 // need to import the generated sqlcgen package.
 func NewBookingStore(pool *pgxpool.Pool) *BookingStore {
-	return &BookingStore{pool: pool, db: pool, q: sqlcgen.New(pool)}
+	return &BookingStore{pool: pool, db: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool)}
 }
 
 // WithDB returns a clone of the BookingStore bound to an existing transaction.
@@ -49,6 +50,7 @@ func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 		pool: nil, // tx mode
 		db:   db,
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
@@ -59,7 +61,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.create_booking",
 		attribute.String("classification_code", input.ClassificationCode),
 		attribute.Int64("account_holder", input.AccountHolder),
-		attribute.Int64("currency_id", input.CurrencyID),
+		attribute.String("currency_uid", input.CurrencyUID),
 		attribute.String("idempotency_key", input.IdempotencyKey),
 		attribute.String("amount", input.Amount.String()),
 	)
@@ -73,7 +75,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 	// Check idempotency
 	existing, err := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return ensureBookingMatchesInput(ctx, s.q, existing, input)
+		return s.ensureBookingMatchesInput(ctx, s.q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		retErr := fmt.Errorf("postgres: create booking: check idempotency: %w", err)
@@ -111,21 +113,27 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		return nil, retErr
 	}
 
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, input.CurrencyUID)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, fmt.Errorf("postgres: create booking: %w", err)
+	}
 	row, err := s.q.InsertBooking(ctx, sqlcgen.InsertBookingParams{
 		ClassificationID: class.ID,
 		AccountHolder:    input.AccountHolder,
-		CurrencyID:       input.CurrencyID,
+		CurrencyID:       cur.ID,
 		Amount:           decimalToNumeric(input.Amount),
 		Status:           string(lifecycle.Initial),
 		ChannelName:      input.ChannelName,
 		IdempotencyKey:   input.IdempotencyKey,
 		Metadata:         stringMetadataToJSON(input.Metadata),
 		ExpiresAt:        input.ExpiresAt,
+		Uid:              newUID(),
 	})
 	if err != nil {
 		existing, lookupErr := s.q.GetBookingByIdempotencyKey(ctx, input.IdempotencyKey)
 		if lookupErr == nil {
-			return ensureBookingMatchesInput(ctx, s.q, existing, input)
+			return s.ensureBookingMatchesInput(ctx, s.q, existing, input)
 		}
 		var retErr error
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
@@ -136,7 +144,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 		ledgerotel.RecordError(span, retErr)
 		return nil, retErr
 	}
-	return bookingFromRow(row), nil
+	return bookingFromRow(ctx, s.dims, s.q, row)
 }
 
 // Transition advances a booking's status and records an event atomically.
@@ -146,7 +154,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 // transaction; commit/rollback is the caller's responsibility.
 func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.transition",
-		attribute.Int64("booking_id", input.BookingID),
+		attribute.String("booking_uid", input.BookingUID),
 		attribute.String("to_status", string(input.ToStatus)),
 		attribute.Int64("actor_id", input.ActorID),
 		attribute.String("source", input.Source),
@@ -190,12 +198,16 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 
 func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TransitionInput) (*core.Event, error) {
 	// Lock booking
-	op, err := qtx.GetBookingForUpdate(ctx, input.BookingID)
+	pgUID, err := uidToPG(input.BookingUID)
+	if err != nil {
+		return nil, err
+	}
+	op, err := qtx.GetBookingForUpdateByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: transition: booking %d: %w", input.BookingID, core.ErrNotFound)
+			return nil, fmt.Errorf("postgres: transition: booking %q: %w", input.BookingUID, core.ErrNotFound)
 		}
-		return nil, fmt.Errorf("postgres: transition: get booking %d: %w", input.BookingID, err)
+		return nil, fmt.Errorf("postgres: transition: get booking %q: %w", input.BookingUID, err)
 	}
 
 	// Load classification for lifecycle validation
@@ -222,7 +234,15 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 			return nil, fmt.Errorf("postgres: transition: latest event: %w", err)
 		}
 		if err == nil {
-			reused, reuseErr := idempotentTransitionEvent(bookingFromRow(op), eventFromRow(latestEvent), input)
+			currentBooking, mapErr := bookingFromRow(ctx, s.dims, qtx, op)
+			if mapErr != nil {
+				return nil, mapErr
+			}
+			latestCore, mapErr := eventFromRow(ctx, s.dims, qtx, latestEvent)
+			if mapErr != nil {
+				return nil, mapErr
+			}
+			reused, reuseErr := idempotentTransitionEvent(currentBooking, latestCore, input)
 			if reuseErr != nil {
 				return nil, reuseErr
 			}
@@ -285,12 +305,13 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		OccurredAt:         time.Now(),
 		ActorID:            input.ActorID,
 		Source:             input.Source,
+		Uid:                newUID(),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: transition: insert event", err)
 	}
 
-	return eventFromRow(eventRow), nil
+	return eventFromRow(ctx, s.dims, qtx, eventRow)
 }
 
 func idempotentTransitionEvent(current *core.Booking, latest *core.Event, input core.TransitionInput) (*core.Event, error) {
@@ -310,15 +331,19 @@ func idempotentTransitionEvent(current *core.Booking, latest *core.Event, input 
 }
 
 // GetBooking returns a booking by ID.
-func (s *BookingStore) GetBooking(ctx context.Context, id int64) (*core.Booking, error) {
-	row, err := s.q.GetBooking(ctx, id)
+func (s *BookingStore) GetBooking(ctx context.Context, uid string) (*core.Booking, error) {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.q.GetBookingByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get booking %d: %w", id, core.ErrNotFound)
+			return nil, fmt.Errorf("postgres: get booking %q: %w", uid, core.ErrNotFound)
 		}
-		return nil, fmt.Errorf("postgres: get booking %d: %w", id, err)
+		return nil, fmt.Errorf("postgres: get booking %q: %w", uid, err)
 	}
-	return bookingFromRow(row), nil
+	return bookingFromRow(ctx, s.dims, s.q, row)
 }
 
 // ListExpiredBookings returns bookings past their expiration time that can transition to expired.
@@ -329,26 +354,51 @@ func (s *BookingStore) ListExpiredBookings(ctx context.Context, limit int) ([]co
 	}
 	ops := make([]core.Booking, len(rows))
 	for i, row := range rows {
-		ops[i] = *bookingFromRow(row)
+		b, err := bookingFromRow(ctx, s.dims, s.q, row)
+		if err != nil {
+			return nil, err
+		}
+		ops[i] = *b
 	}
 	return ops, nil
 }
 
-// ListBookings returns bookings matching the filter.
-func (s *BookingStore) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, error) {
+// ListBookings returns bookings matching the filter plus the opaque cursor
+// for the next page ("" when exhausted).
+func (s *BookingStore) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, string, error) {
+	classificationID := int64(0)
+	if filter.ClassificationUID != "" {
+		d, err := s.dims.classByUIDOrErr(ctx, s.q, filter.ClassificationUID)
+		if err != nil {
+			return nil, "", err
+		}
+		classificationID = d.ID
+	}
+	cursorID, err := decodeCursorString(filter.Cursor)
+	if err != nil {
+		cursorID = 0
+	}
 	rows, err := s.q.ListBookingsByFilter(ctx, sqlcgen.ListBookingsByFilterParams{
 		AccountHolder:    filter.AccountHolder,
-		ClassificationID: filter.ClassificationID,
+		ClassificationID: classificationID,
 		Status:           filter.Status,
-		ID:               filter.Cursor,
+		ID:               cursorID,
 		Limit:            int32(filter.Limit),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list bookings: %w", err)
+		return nil, "", fmt.Errorf("postgres: list bookings: %w", err)
 	}
 	ops := make([]core.Booking, len(rows))
 	for i, row := range rows {
-		ops[i] = *bookingFromRow(row)
+		b, err := bookingFromRow(ctx, s.dims, s.q, row)
+		if err != nil {
+			return nil, "", err
+		}
+		ops[i] = *b
 	}
-	return ops, nil
+	nextCursor := ""
+	if filter.Limit > 0 && len(rows) == filter.Limit {
+		nextCursor = encodeCursorString(rows[len(rows)-1].ID)
+	}
+	return ops, nextCursor, nil
 }

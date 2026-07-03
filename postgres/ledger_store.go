@@ -46,6 +46,7 @@ type LedgerStore struct {
 	pool *pgxpool.Pool
 	db   DBTX
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // balancePair identifies a (holder, currency_id) pair targeted by an advisory
@@ -60,11 +61,47 @@ type balancePair struct {
 // locks in the same global order across concurrent transactions, otherwise
 // deadlocks become possible (tx A locks pair P1 then P2 while tx B locks P2
 // then P1).
-func balancePairsFromEntries(entries []core.EntryInput) []balancePair {
+// resolvedEntry is an EntryInput whose uid dimension references have been
+// resolved to internal storage ids (plus the dimension metadata the write
+// pipeline needs). It exists only inside the postgres adapter — internal ids
+// never cross back into core types (api-contract §3).
+type resolvedEntry struct {
+	core.EntryInput
+	currencyID       int64
+	classificationID int64
+	exponent         int32
+	normalSide       core.NormalSide
+}
+
+// resolveEntries maps every entry's currency/classification uid to internal
+// dimensions via the dims cache (one refresh at most for the whole batch).
+func (s *LedgerStore) resolveEntries(ctx context.Context, q *sqlcgen.Queries, entries []core.EntryInput) ([]resolvedEntry, error) {
+	out := make([]resolvedEntry, len(entries))
+	for i, e := range entries {
+		cur, err := s.dims.currencyByUIDOrErr(ctx, q, e.CurrencyUID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: entry[%d]: %w", i, err)
+		}
+		cls, err := s.dims.classByUIDOrErr(ctx, q, e.ClassificationUID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: entry[%d]: %w", i, err)
+		}
+		out[i] = resolvedEntry{
+			EntryInput:       e,
+			currencyID:       cur.ID,
+			classificationID: cls.ID,
+			exponent:         cur.Exponent,
+			normalSide:       cls.NormalSide,
+		}
+	}
+	return out, nil
+}
+
+func balancePairsFromEntries(entries []resolvedEntry) []balancePair {
 	seen := make(map[balancePair]struct{}, len(entries))
 	pairs := make([]balancePair, 0, len(entries))
 	for _, e := range entries {
-		p := balancePair{holder: e.AccountHolder, currencyID: e.CurrencyID}
+		p := balancePair{holder: e.AccountHolder, currencyID: e.currencyID}
 		if _, ok := seen[p]; ok {
 			continue
 		}
@@ -100,11 +137,6 @@ func acquireIdempotencyLock(ctx context.Context, q *sqlcgen.Queries, key string)
 	return nil
 }
 
-type queryProvider interface {
-	GetTemplateByCode(ctx context.Context, code string) (sqlcgen.EntryTemplate, error)
-	GetTemplateLines(ctx context.Context, templateID int64) ([]sqlcgen.EntryTemplateLine, error)
-}
-
 // NewLedgerStore creates a new LedgerStore backed by a connection pool. The
 // store starts its own transactions for write operations and uses REPEATABLE
 // READ isolation for GetBalance.
@@ -113,6 +145,7 @@ func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
 		pool: pool,
 		db:   pool,
 		q:    sqlcgen.New(pool),
+		dims: dimCacheFor(pool),
 	}
 }
 
@@ -125,6 +158,7 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 		pool: nil, // tx mode: pool deliberately nil
 		db:   db,
 		q:    sqlcgen.New(db),
+		dims: s.dims,
 	}
 }
 
@@ -138,7 +172,7 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.post_journal",
 		attribute.String("idempotency_key", input.IdempotencyKey),
-		attribute.Int64("journal_type_id", input.JournalTypeID),
+		attribute.String("journal_type_uid", input.JournalTypeUID),
 		attribute.Int64("actor_id", input.ActorID),
 		attribute.String("source", input.Source),
 	)
@@ -252,37 +286,44 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 // It rejects (ErrConflict) if journalID already has any reversal recorded
 // against it, full or partial — see ReverseJournalFraction for posting
 // additional partial reversals against a journal that already has history.
-func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reason string) (*core.Journal, error) {
-	original, err := s.q.GetJournal(ctx, journalID)
+func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
+	pgUID, err := uidToPG(journalUID)
+	if err != nil {
+		return nil, err
+	}
+	original, err := s.q.GetJournalByUID(ctx, pgUID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: reverse journal: journal %d: %w", journalID, core.ErrNotFound)
+			return nil, fmt.Errorf("postgres: reverse journal: journal %q: %w", journalUID, core.ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: reverse journal: get journal: %w", err)
 	}
+	journalID := original.ID
 	if original.ReversalOf.Valid {
-		return nil, fmt.Errorf("postgres: reverse journal: journal %d is already a reversal: %w", journalID, core.ErrConflict)
+		return nil, fmt.Errorf("postgres: reverse journal: journal %q is already a reversal: %w", journalUID, core.ErrConflict)
 	}
 
-	expectedKey := fmt.Sprintf("reversal:%d:%s", journalID, reason)
+	// The derived idempotency key stays keyed on the journal's uid so it is
+	// stable across replays and never mentions the internal id.
+	expectedKey := fmt.Sprintf("reversal:%s:%s", journalUID, reason)
 	existingReversals, err := s.q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal: lookup reversals: %w", err)
 	}
 	if len(existingReversals) > 0 {
-		// Same (journalID, reason) as an existing reversal → idempotent retry,
+		// Same (journal, reason) as an existing reversal → idempotent retry,
 		// return it. Any other existing reversal — full or partial, any
 		// reason — means this journal already has reversal history; a second
 		// full reversal on top of that would double-count whatever was
 		// already reversed, so it is rejected regardless of reason text.
 		for _, r := range existingReversals {
 			if r.IdempotencyKey == expectedKey {
-				return journalFromRow(r), nil
+				return journalFromRow(ctx, s.dims, s.q, r)
 			}
 		}
 		return nil, fmt.Errorf(
-			"postgres: reverse journal: journal %d already has %d reversal(s) recorded; use ReverseJournalFraction for further partial reversals: %w",
-			journalID, len(existingReversals), core.ErrConflict,
+			"postgres: reverse journal: journal %q already has %d reversal(s) recorded; use ReverseJournalFraction for further partial reversals: %w",
+			journalUID, len(existingReversals), core.ErrConflict,
 		)
 	}
 
@@ -291,35 +332,48 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalID int64, reaso
 		return nil, fmt.Errorf("postgres: reverse journal: list entries: %w", err)
 	}
 
-	// Build reversed entries (swap debit/credit)
+	// Build reversed entries (swap debit/credit), mapping internal dimension
+	// ids back to the uid space PostJournal consumes.
 	reversedEntries := make([]core.EntryInput, len(entries))
 	for i, e := range entries {
 		entryType := core.EntryTypeDebit
 		if core.EntryType(e.EntryType) == core.EntryTypeDebit {
 			entryType = core.EntryTypeCredit
 		}
+		cur, err := s.dims.currencyByIDOrErr(ctx, s.q, e.CurrencyID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
+		}
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, e.ClassificationID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
+		}
 		reversedEntries[i] = core.EntryInput{
-			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
-			EntryType:        entryType,
-			Amount:           mustNumericToDecimal(e.Amount),
+			AccountHolder:     e.AccountHolder,
+			CurrencyUID:       cur.UID,
+			ClassificationUID: cls.UID,
+			EntryType:         entryType,
+			Amount:            mustNumericToDecimal(e.Amount),
 		}
 	}
 
+	jt, err := s.dims.jtByIDOrErr(ctx, s.q, original.JournalTypeID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reverse journal: %w", err)
+	}
 	input := core.JournalInput{
-		JournalTypeID:  original.JournalTypeID,
+		JournalTypeUID: jt.UID,
 		IdempotencyKey: expectedKey,
 		Entries:        reversedEntries,
 		Source:         "reversal",
-		ReversalOf:     journalID,
+		ReversalOfUID:  journalUID,
 		Metadata:       map[string]string{"reason": reason},
 	}
 
 	return s.PostJournal(ctx, input)
 }
 
-func (s *LedgerStore) renderTemplate(ctx context.Context, q queryProvider, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
+func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
 	tmplRow, err := q.GetTemplateByCode(ctx, templateCode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -333,7 +387,10 @@ func (s *LedgerStore) renderTemplate(ctx context.Context, q queryProvider, templ
 		return nil, fmt.Errorf("postgres: execute template: get lines: %w", err)
 	}
 
-	tmpl := templateFromRow(tmplRow, lines)
+	tmpl, err := templateFromRow(ctx, s.dims, q, tmplRow, lines)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: execute template: %w", err)
+	}
 	input, err := tmpl.Render(params)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: execute template: render: %w", err)
@@ -345,13 +402,10 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
 	}
-	if err := validateEntriesPrecision(ctx, q, input.Entries); err != nil {
-		return nil, err
-	}
 
 	existing, err := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return ensureJournalMatchesInput(ctx, q, existing, input)
+		return s.ensureJournalMatchesInput(ctx, q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: post journal: check idempotency: %w", err)
@@ -363,10 +417,55 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 
 	existing, err = q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 	if err == nil {
-		return ensureJournalMatchesInput(ctx, q, existing, input)
+		return s.ensureJournalMatchesInput(ctx, q, existing, input)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: post journal: check idempotency after lock: %w", err)
+	}
+
+	// Resolve every uid reference to internal storage ids up front: entry
+	// dimensions, journal type, and the optional event/reversal links. This is
+	// the single boundary where uid-space input becomes id-space storage.
+	resolved, err := s.resolveEntries(ctx, q, input.Entries)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
+	jt, err := s.dims.jtByUIDOrErr(ctx, q, input.JournalTypeUID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
+	eventID := int64(0)
+	if input.EventUID != "" {
+		pgUID, err := uidToPG(input.EventUID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: post journal: event %q: %w", input.EventUID, core.ErrNotFound)
+		}
+		id, err := q.GetEventIDByUID(ctx, pgUID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("postgres: post journal: event %q: %w", input.EventUID, core.ErrNotFound)
+			}
+			return nil, fmt.Errorf("postgres: post journal: resolve event: %w", err)
+		}
+		eventID = id
+	}
+	if err := validateEntriesPrecision(resolved); err != nil {
+		return nil, err
+	}
+	reversalOfID := int64(0)
+	if input.ReversalOfUID != "" {
+		pgUID, err := uidToPG(input.ReversalOfUID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: post journal: reversal_of %q: %w", input.ReversalOfUID, core.ErrNotFound)
+		}
+		orig, err := q.GetJournalByUID(ctx, pgUID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("postgres: post journal: reversal_of %q: %w", input.ReversalOfUID, core.ErrNotFound)
+			}
+			return nil, fmt.Errorf("postgres: post journal: resolve reversal_of: %w", err)
+		}
+		reversalOfID = orig.ID
 	}
 
 	// EffectiveAt defaults to now() when the caller didn't set it (core.Validate
@@ -396,7 +495,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	// preventing TOCTOU races where a reserve reads stale balance while a journal
 	// is being committed. Locks are taken in lexicographic (holder, currency_id)
 	// order to avoid deadlocks when two journals touch overlapping pairs.
-	if err := acquireBalanceLocks(ctx, q, balancePairsFromEntries(input.Entries)); err != nil {
+	if err := acquireBalanceLocks(ctx, q, balancePairsFromEntries(resolved)); err != nil {
 		return nil, err
 	}
 
@@ -405,28 +504,29 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	// concurrent journals/reserves/policy changes on the same (holder,
 	// currency) pairs. Must run before any row below is written since a
 	// rejection here must abort the whole journal.
-	if err := s.enforceAccountPolicies(ctx, q, input.Entries); err != nil {
+	if err := s.enforceAccountPolicies(ctx, q, resolved); err != nil {
 		return nil, err
 	}
 
 	debit, credit := input.Totals()
 
 	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{
-		JournalTypeID:  input.JournalTypeID,
+		JournalTypeID:  jt.ID,
 		IdempotencyKey: input.IdempotencyKey,
 		TotalDebit:     decimalToNumeric(debit),
 		TotalCredit:    decimalToNumeric(credit),
 		Metadata:       metadataToJSON(input.Metadata),
 		ActorID:        input.ActorID,
 		Source:         input.Source,
-		ReversalOf:     int64ToInt8(zeroInt64ToNil(input.ReversalOf)),
-		EventID:        input.EventID,
+		ReversalOf:     int64ToInt8(zeroInt64ToNil(reversalOfID)),
+		EventID:        eventID,
 		EffectiveAt:    effectiveAt,
+		Uid:            newUID(),
 	})
 	if err != nil {
 		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)
 		if lookupErr == nil {
-			return ensureJournalMatchesInput(ctx, q, existing, input)
+			return s.ensureJournalMatchesInput(ctx, q, existing, input)
 		}
 		if !errors.Is(lookupErr, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("postgres: post journal: insert journal: %w (idempotency recheck: %v)", normalizeStoreError(err), lookupErr)
@@ -441,12 +541,12 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	}
 	seen := make(map[rollupKey]struct{})
 
-	for i, e := range input.Entries {
+	for i, e := range resolved {
 		_, err := q.InsertJournalEntry(ctx, sqlcgen.InsertJournalEntryParams{
 			JournalID:        row.ID,
 			AccountHolder:    e.AccountHolder,
-			CurrencyID:       e.CurrencyID,
-			ClassificationID: e.ClassificationID,
+			CurrencyID:       e.currencyID,
+			ClassificationID: e.classificationID,
 			EntryType:        string(e.EntryType),
 			Amount:           decimalToNumeric(e.Amount),
 			EffectiveAt:      effectiveAt,
@@ -455,7 +555,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 			return nil, wrapStoreError(fmt.Sprintf("postgres: post journal: insert entry[%d]", i), err)
 		}
 
-		key := rollupKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID}
+		key := rollupKey{holder: e.AccountHolder, currencyID: e.currencyID, classificationID: e.classificationID}
 		seen[key] = struct{}{}
 	}
 
@@ -481,13 +581,13 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: post journal: journal %d unbalanced in currency %d: %w", row.ID, badCurrency, core.ErrUnbalancedJournal)
 	}
 
-	if input.EventID != 0 {
-		if err := s.linkJournalToEventAndBooking(ctx, q, input.EventID, row.ID); err != nil {
+	if eventID != 0 {
+		if err := s.linkJournalToEventAndBooking(ctx, q, eventID, row.ID); err != nil {
 			return nil, err
 		}
 	}
 
-	return journalFromRow(row), nil
+	return journalFromRow(ctx, s.dims, q, row)
 }
 
 func (s *LedgerStore) linkJournalToEventAndBooking(ctx context.Context, q *sqlcgen.Queries, eventID, journalID int64) error {
@@ -563,13 +663,25 @@ func (s *LedgerStore) linkJournalToEventAndBooking(ctx context.Context, q *sqlcg
 // caller's transaction isolation level applies. If the caller requires
 // snapshot consistency, it should begin its transaction with REPEATABLE READ
 // before calling GetBalance.
-func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, classificationID int64) (decimal.Decimal, error) {
+func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.get_balance",
 		attribute.Int64("account_holder", holder),
-		attribute.Int64("currency_id", currencyID),
-		attribute.Int64("classification_id", classificationID),
+		attribute.String("currency_uid", currencyUID),
+		attribute.String("classification_uid", classificationUID),
 	)
 	defer span.End()
+
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return decimal.Zero, err
+	}
+	cls, err := s.dims.classByUIDOrErr(ctx, s.q, classificationUID)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return decimal.Zero, err
+	}
+	currencyID, classificationID := cur.ID, cls.ID
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly — no inner tx.
@@ -580,10 +692,10 @@ func (s *LedgerStore) GetBalance(ctx context.Context, holder int64, currencyID, 
 
 	// Pool mode: wrap in REPEATABLE READ to prevent phantom reads between the
 	// checkpoint query and the entry-sum query.
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		ledgerotel.RecordError(span, err)
-		return decimal.Zero, fmt.Errorf("postgres: get balance: begin tx: %w", err)
+	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if txErr != nil {
+		ledgerotel.RecordError(span, txErr)
+		return decimal.Zero, fmt.Errorf("postgres: get balance: begin tx: %w", txErr)
 	}
 	defer tx.Rollback(ctx)
 
@@ -668,11 +780,15 @@ func (s *LedgerStore) getBalanceWithQueries(ctx context.Context, q *sqlcgen.Quer
 }
 
 // GetBalances returns balances across all classifications for a (holder, currency).
-func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyID int64) ([]core.Balance, error) {
+func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyUID string) ([]core.Balance, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
 	// Discover all classifications that have entries for this account
 	clsRows, err := s.q.DistinctClassificationsForAccount(ctx, sqlcgen.DistinctClassificationsForAccountParams{
 		AccountHolder: holder,
-		CurrencyID:    currencyID,
+		CurrencyID:    cur.ID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get balances: list classifications: %w", err)
@@ -680,15 +796,19 @@ func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyID 
 
 	balances := make([]core.Balance, 0, len(clsRows))
 	for _, clsID := range clsRows {
-		bal, err := s.GetBalance(ctx, holder, currencyID, clsID)
+		cls, err := s.dims.classByIDOrErr(ctx, s.q, clsID)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: get balances: classification %d: %w", clsID, err)
+			return nil, err
+		}
+		bal, err := s.GetBalance(ctx, holder, currencyUID, cls.UID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: get balances: classification %s: %w", cls.UID, err)
 		}
 		balances = append(balances, core.Balance{
-			AccountHolder:    holder,
-			CurrencyID:       currencyID,
-			ClassificationID: clsID,
-			Balance:          bal,
+			AccountHolder:     holder,
+			CurrencyUID:       currencyUID,
+			ClassificationUID: cls.UID,
+			Balance:           bal,
 		})
 	}
 
@@ -696,10 +816,10 @@ func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyID 
 }
 
 // BatchGetBalances returns balances for multiple holders.
-func (s *LedgerStore) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyID int64) (map[int64][]core.Balance, error) {
+func (s *LedgerStore) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]core.Balance, error) {
 	result := make(map[int64][]core.Balance, len(holderIDs))
 	for _, id := range holderIDs {
-		bals, err := s.GetBalances(ctx, id, currencyID)
+		bals, err := s.GetBalances(ctx, id, currencyUID)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: batch get balances: holder %d: %w", id, err)
 		}

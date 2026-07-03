@@ -42,12 +42,12 @@ const BalancesPage = lazy(() =>
  * components and wire them to their own router instead.
  */
 
-const JOURNAL_DETAIL_RE = /^\/journals\/(\d+)$/;
+const JOURNAL_DETAIL_RE = /^\/journals\/([^/]+)$/;
 
 function renderSection(pathname: string, link: LinkComponent): ReactNode {
   const detailMatch = JOURNAL_DETAIL_RE.exec(pathname);
   if (detailMatch) {
-    return <JournalDetailPage id={parseInt(detailMatch[1], 10)} linkComponent={link} />;
+    return <JournalDetailPage id={detailMatch[1]} linkComponent={link} />;
   }
   switch (pathname) {
     case "/":

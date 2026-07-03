@@ -19,7 +19,7 @@ Four ideas make every recipe below fall out mechanically:
    "Support credits" = "add one currency". Nothing about credits is special.
 
 2. **Every journal is single-currency.** The template renderer applies one
-   `currency_id` to all lines (`core/template.go`). So anything cross-currency
+   `currency_uid` to all lines (`core/template.go`). So anything cross-currency
    (buying credits with USDT, cashing credits back out) is modeled as **two
    single-currency legs**, each balancing on its own. Post them atomically
    (`ExecuteTemplateBatch`, or two `ExecuteTemplate` calls inside `RunInTx`) so a
@@ -29,7 +29,7 @@ Four ideas make every recipe below fall out mechanically:
    `settlement`, `equity` classifications work for every currency. A user's
    credits balance is `main_wallet` in currency `credits`; their USDT balance is
    `main_wallet` in currency `USDT`. Balances are keyed by
-   `(holder, currency_id, classification_id)`.
+   `(holder, currency_uid, classification_uid)`.
 
 4. **Holder sign encodes user vs system.** Positive holder = a user account;
    negative = the system counterpart (`core.SystemAccountHolder(userID)`).
@@ -154,12 +154,12 @@ mw, _ := svc.Classifications().GetByCode(ctx, "main_wallet")
 st, _ := svc.Classifications().GetByCode(ctx, "settlement")
 eq, _ := svc.Classifications().GetByCode(ctx, "equity")
 _, _ = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
-    Code: "credits_topup", Name: "Credits Top-up with Bonus", JournalTypeID: jt.ID,
+    Code: "credits_topup", Name: "Credits Top-up with Bonus", JournalTypeUID: jt.UID,
     Lines: []core.TemplateLineInput{
-        {ClassificationID: mw.ID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleUser,   AmountKey: "purchased", SortOrder: 1},
-        {ClassificationID: st.ID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "purchased", SortOrder: 2},
-        {ClassificationID: mw.ID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleUser,   AmountKey: "bonus",     SortOrder: 3},
-        {ClassificationID: eq.ID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "bonus",     SortOrder: 4},
+        {ClassificationUID: mw.UID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleUser,   AmountKey: "purchased", SortOrder: 1},
+        {ClassificationUID: st.UID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "purchased", SortOrder: 2},
+        {ClassificationUID: mw.UID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleUser,   AmountKey: "bonus",     SortOrder: 3},
+        {ClassificationUID: eq.UID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "bonus",     SortOrder: 4},
     },
 })
 
@@ -178,7 +178,7 @@ _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_topup", core.Templat
 Same as (b) but point the bonus counterparty at a purpose-built `promo` system
 classification instead of `equity`, so promo cost is tracked separately from
 general equity. Create it with `CreateClassification(code:"promo",
-NormalSide: credit, IsSystem: true)` and swap `eq.ID` for `promo.ID` above.
+NormalSide: credit, IsSystem: true)` and swap `eq.UID` for `promo.UID` above.
 
 **Choosing:** (a) when the discount is just a lower price; (b) when you literally
 hand out extra units and want it in equity; (c) when finance wants promo spend
@@ -236,14 +236,14 @@ rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
 })
 
 // run finishes; actual cost was 32 credits → 18 released automatically
-err = svc.Reserver().Settle(ctx, rsv.ID, decimal.RequireFromString("32"))
+err = svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32")})
 ```
 
 - Reserve does **not** move the balance — it's a soft lock reducing *available*.
   Post the actual debit journal (credits leaving `main_wallet` to a `fee_revenue`
   or consumption account) as part of your settle flow if you need the spend on
   the books, composed in the same `RunInTx` as the `Settle`.
-- To abandon a hold explicitly (job never ran), call `Release(rsv.ID)`.
+- To abandon a hold explicitly (job never ran), call `Release(rsv.UID)`.
 
 ---
 
