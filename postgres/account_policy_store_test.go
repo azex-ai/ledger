@@ -147,7 +147,7 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 	policies := postgres.NewAccountPolicyStore(p)
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-MATRIX", "Test USDT")
-	walletID := postgrestest.SeedClassification(t, p, "wallet_matrix", "Wallet", "debit", false)
+	walletID := postgrestest.SeedClassificationWithRole(t, p, "wallet_matrix", "Wallet", "debit", false, "available")
 	custodialID := postgrestest.SeedClassification(t, p, "custodial_matrix", "Custodial", "credit", true)
 	jtID := postgrestest.SeedJournalType(t, p, "jt_matrix", "Test JT")
 

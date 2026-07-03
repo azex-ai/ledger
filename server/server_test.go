@@ -70,6 +70,20 @@ func (m *mockBalanceReader) GetBalances(ctx context.Context, holder int64, curre
 	}, nil
 }
 
+func (m *mockBalanceReader) GetBalanceBreakdown(ctx context.Context, holder int64, currencyUID string) (*core.BalanceBreakdown, error) {
+	available := decimal.NewFromInt(80)
+	pending := decimal.NewFromInt(100)
+	locked := decimal.NewFromInt(20)
+	return &core.BalanceBreakdown{
+		AccountHolder: holder,
+		CurrencyUID:   currencyUID,
+		Available:     available,
+		Pending:       pending,
+		Locked:        locked,
+		Total:         available.Add(locked).Add(pending),
+	}, nil
+}
+
 func (m *mockBalanceReader) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]core.Balance, error) {
 	result := make(map[int64][]core.Balance)
 	for _, id := range holderIDs {
@@ -229,6 +243,10 @@ func (m *mockClassificationStore) CreateClassification(ctx context.Context, inpu
 
 func (m *mockClassificationStore) GetByCode(ctx context.Context, code string) (*core.Classification, error) {
 	return &core.Classification{UID: "cls-1", Code: code, Name: code, NormalSide: core.NormalSideDebit, IsActive: true, CreatedAt: time.Now()}, nil
+}
+
+func (m *mockClassificationStore) SetBalanceRole(ctx context.Context, uid string, role core.BalanceRole) error {
+	return nil
 }
 
 func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
@@ -860,6 +878,24 @@ func TestGetBalances(t *testing.T) {
 
 	data := parseEnvelopeArray(t, w.Body.Bytes())
 	assert.Len(t, data, 2)
+}
+
+func TestGetBalanceBreakdown(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/100/cur-1/breakdown", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "80", data["available"])
+	assert.Equal(t, "100", data["pending"])
+	assert.Equal(t, "20", data["locked"])
+	assert.Equal(t, "200", data["total"])
+}
+
+func TestGetBalanceBreakdown_InvalidHolder(t *testing.T) {
+	srv := newTestServer()
+	w := doRequest(srv, http.MethodGet, "/api/v1/balances/abc/cur-1/breakdown", nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestBatchBalances(t *testing.T) {

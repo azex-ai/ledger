@@ -140,7 +140,7 @@ func TestPrecision_Reserve_AcceptsWholeYen(t *testing.T) {
 	reserver := postgres.NewReserverStore(pool, ledgerStore)
 
 	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-RSV-OK", "Japanese Yen Reserve OK", 0)
-	mainWallet := postgrestest.SeedClassification(t, pool, "main_wallet_jpy_rsv_ok", "Main Wallet", "debit", false)
+	mainWallet := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet_jpy_rsv_ok", "Main Wallet", "debit", false, "available")
 	custodial := postgrestest.SeedClassification(t, pool, "custodial_jpy_rsv_ok", "Custodial", "credit", true)
 	jt := postgrestest.SeedJournalType(t, pool, "test_jpy_rsv_ok", "Test JPY Reserve OK")
 

@@ -387,3 +387,48 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, custodialBal.IsZero())
 }
+
+// Pins the expand-safe balance_role upgrade: a classification created before
+// balance_role existed (role '') is retagged in place by preset install; a
+// conflicting non-empty role is rejected instead of silently re-bucketed.
+func TestInstallPresets_BalanceRoleUpgradeAndConflict(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+
+	// Pre-existing row without a role (pre-032 install).
+	preexisting, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.BalanceRoleNone, preexisting.BalanceRole)
+
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+
+	upgraded, err := classStore.GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+	assert.Equal(t, core.BalanceRoleAvailable, upgraded.BalanceRole)
+
+	locked, err := classStore.GetByCode(ctx, "locked")
+	require.NoError(t, err)
+	assert.Equal(t, core.BalanceRoleLocked, locked.BalanceRole)
+
+	pending, err := classStore.GetByCode(ctx, "pending")
+	require.NoError(t, err)
+	assert.Equal(t, core.BalanceRolePending, pending.BalanceRole)
+
+	feeExpense, err := classStore.GetByCode(ctx, "fee_expense")
+	require.NoError(t, err)
+	assert.Equal(t, core.BalanceRoleNone, feeExpense.BalanceRole)
+
+	// Re-install is a no-op (roles already match).
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+
+	// A conflicting non-empty role must be rejected, not silently retagged.
+	require.NoError(t, classStore.SetBalanceRole(ctx, upgraded.UID, core.BalanceRoleLocked))
+	err = presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}

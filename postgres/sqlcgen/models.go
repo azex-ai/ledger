@@ -73,15 +73,16 @@ type Booking struct {
 }
 
 type Classification struct {
-	ID         int64       `json:"id"`
-	Code       string      `json:"code"`
-	Name       string      `json:"name"`
-	NormalSide string      `json:"normal_side"`
-	IsSystem   bool        `json:"is_system"`
-	IsActive   bool        `json:"is_active"`
-	CreatedAt  time.Time   `json:"created_at"`
-	Lifecycle  []byte      `json:"lifecycle"`
-	Uid        pgtype.UUID `json:"uid"`
+	ID          int64       `json:"id"`
+	Code        string      `json:"code"`
+	Name        string      `json:"name"`
+	NormalSide  string      `json:"normal_side"`
+	IsSystem    bool        `json:"is_system"`
+	IsActive    bool        `json:"is_active"`
+	CreatedAt   time.Time   `json:"created_at"`
+	Lifecycle   []byte      `json:"lifecycle"`
+	Uid         pgtype.UUID `json:"uid"`
+	BalanceRole string      `json:"balance_role"`
 }
 
 type Currency struct {

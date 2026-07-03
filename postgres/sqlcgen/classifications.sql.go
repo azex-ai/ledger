@@ -12,18 +12,19 @@ import (
 )
 
 const createClassification = `-- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role
 `
 
 type CreateClassificationParams struct {
-	Code       string      `json:"code"`
-	Name       string      `json:"name"`
-	NormalSide string      `json:"normal_side"`
-	IsSystem   bool        `json:"is_system"`
-	Lifecycle  []byte      `json:"lifecycle"`
-	Uid        pgtype.UUID `json:"uid"`
+	Code        string      `json:"code"`
+	Name        string      `json:"name"`
+	NormalSide  string      `json:"normal_side"`
+	IsSystem    bool        `json:"is_system"`
+	Lifecycle   []byte      `json:"lifecycle"`
+	Uid         pgtype.UUID `json:"uid"`
+	BalanceRole string      `json:"balance_role"`
 }
 
 func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassificationParams) (Classification, error) {
@@ -34,6 +35,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		arg.IsSystem,
 		arg.Lifecycle,
 		arg.Uid,
+		arg.BalanceRole,
 	)
 	var i Classification
 	err := row.Scan(
@@ -46,6 +48,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		&i.CreatedAt,
 		&i.Lifecycle,
 		&i.Uid,
+		&i.BalanceRole,
 	)
 	return i, err
 }
@@ -95,7 +98,7 @@ func (q *Queries) DeactivateJournalType(ctx context.Context, uid pgtype.UUID) er
 }
 
 const getClassification = `-- name: GetClassification :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications WHERE id = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications WHERE id = $1
 `
 
 func (q *Queries) GetClassification(ctx context.Context, id int64) (Classification, error) {
@@ -111,12 +114,13 @@ func (q *Queries) GetClassification(ctx context.Context, id int64) (Classificati
 		&i.CreatedAt,
 		&i.Lifecycle,
 		&i.Uid,
+		&i.BalanceRole,
 	)
 	return i, err
 }
 
 const getClassificationByCode = `-- name: GetClassificationByCode :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications WHERE code = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications WHERE code = $1
 `
 
 func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Classification, error) {
@@ -132,6 +136,7 @@ func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Cla
 		&i.CreatedAt,
 		&i.Lifecycle,
 		&i.Uid,
+		&i.BalanceRole,
 	)
 	return i, err
 }
@@ -157,14 +162,15 @@ func (q *Queries) GetJournalTypeByCode(ctx context.Context, code string) (Journa
 }
 
 const listClassificationDims = `-- name: ListClassificationDims :many
-SELECT id, uid, code, normal_side FROM classifications
+SELECT id, uid, code, normal_side, balance_role FROM classifications
 `
 
 type ListClassificationDimsRow struct {
-	ID         int64       `json:"id"`
-	Uid        pgtype.UUID `json:"uid"`
-	Code       string      `json:"code"`
-	NormalSide string      `json:"normal_side"`
+	ID          int64       `json:"id"`
+	Uid         pgtype.UUID `json:"uid"`
+	Code        string      `json:"code"`
+	NormalSide  string      `json:"normal_side"`
+	BalanceRole string      `json:"balance_role"`
 }
 
 // Full config-table scan for the in-process id<->uid dimension cache.
@@ -182,6 +188,7 @@ func (q *Queries) ListClassificationDims(ctx context.Context) ([]ListClassificat
 			&i.Uid,
 			&i.Code,
 			&i.NormalSide,
+			&i.BalanceRole,
 		); err != nil {
 			return nil, err
 		}
@@ -194,7 +201,7 @@ func (q *Queries) ListClassificationDims(ctx context.Context) ([]ListClassificat
 }
 
 const listClassifications = `-- name: ListClassifications :many
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid FROM classifications
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -218,6 +225,7 @@ func (q *Queries) ListClassifications(ctx context.Context, activeOnly bool) ([]C
 			&i.CreatedAt,
 			&i.Lifecycle,
 			&i.Uid,
+			&i.BalanceRole,
 		); err != nil {
 			return nil, err
 		}
@@ -291,4 +299,20 @@ func (q *Queries) ListJournalTypes(ctx context.Context, activeOnly bool) ([]Jour
 		return nil, err
 	}
 	return items, nil
+}
+
+const setClassificationBalanceRole = `-- name: SetClassificationBalanceRole :exec
+UPDATE classifications SET balance_role = $2 WHERE uid = $1
+`
+
+type SetClassificationBalanceRoleParams struct {
+	Uid         pgtype.UUID `json:"uid"`
+	BalanceRole string      `json:"balance_role"`
+}
+
+// Role upgrades are expand-safe (” -> role); anything else is a semantic
+// change the caller must guard (presets only upgrade from ”).
+func (q *Queries) SetClassificationBalanceRole(ctx context.Context, arg SetClassificationBalanceRoleParams) error {
+	_, err := q.db.Exec(ctx, setClassificationBalanceRole, arg.Uid, arg.BalanceRole)
+	return err
 }

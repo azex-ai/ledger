@@ -54,6 +54,9 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 	if !input.NormalSide.IsValid() {
 		return nil, fmt.Errorf("postgres: create classification: invalid normal side %q: %w", input.NormalSide, core.ErrInvalidInput)
 	}
+	if !input.BalanceRole.IsValid() {
+		return nil, fmt.Errorf("postgres: create classification: invalid balance role %q: %w", input.BalanceRole, core.ErrInvalidInput)
+	}
 
 	var lifecycle []byte
 	if input.Lifecycle != nil {
@@ -69,17 +72,39 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 		lifecycle = []byte("{}")
 	}
 	row, err := s.q.CreateClassification(ctx, sqlcgen.CreateClassificationParams{
-		Code:       input.Code,
-		Name:       input.Name,
-		NormalSide: string(input.NormalSide),
-		IsSystem:   input.IsSystem,
-		Lifecycle:  lifecycle,
-		Uid:        newUID(),
+		Code:        input.Code,
+		Name:        input.Name,
+		NormalSide:  string(input.NormalSide),
+		IsSystem:    input.IsSystem,
+		Lifecycle:   lifecycle,
+		Uid:         newUID(),
+		BalanceRole: string(input.BalanceRole),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create classification", err)
 	}
 	return classificationFromRow(row), nil
+}
+
+// SetBalanceRole retags a classification's balance role. Intended for
+// expand-style upgrades ('' -> role); switching between two non-empty roles
+// re-buckets historical balances in the breakdown view — the caller owns that
+// decision (presets only ever upgrade from '').
+func (s *ClassificationStore) SetBalanceRole(ctx context.Context, uid string, role core.BalanceRole) error {
+	if !role.IsValid() {
+		return fmt.Errorf("postgres: set balance role: invalid balance role %q: %w", role, core.ErrInvalidInput)
+	}
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.SetClassificationBalanceRole(ctx, sqlcgen.SetClassificationBalanceRoleParams{
+		Uid:         pgUID,
+		BalanceRole: string(role),
+	}); err != nil {
+		return wrapStoreError("postgres: set balance role", err)
+	}
+	return nil
 }
 
 // GetByCode returns a classification by its unique code.

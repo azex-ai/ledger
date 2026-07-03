@@ -249,8 +249,8 @@ also holds: an audit trail starting from the journal can always find its
 
 ## I-11: Reservation cannot exceed available balance
 
-`available = total_balance - SUM(outstanding holds on same dimension)`. A
-reservation request for `amount > available` is rejected with
+`available = Σ balance(role=available) - SUM(outstanding holds on same
+dimension)`. A reservation request for `amount > available` is rejected with
 `ErrInsufficientBalance`. An `active` reservation holds its full
 `reserved_amount`; a `settling` one (partially settled via `SettlePartial`,
 since migration `029`'s companion changes) holds its unsettled remainder
@@ -258,14 +258,40 @@ since migration `029`'s companion changes) holds its unsettled remainder
 would let a concurrent Reserve over-commit the moment the first partial
 settlement lands.
 
+The availability **base** is the sum of the holder's classifications tagged
+`balance_role = 'available'` (migration `032`) — not the sum of every
+classification. Pending deposits (`role=pending`), journal-locked funds
+(`role=locked`), and role-less classifications (`fee_expense` and friends)
+are not reservable. The old all-classifications basis let a holder reserve
+against an unconfirmed deposit (double-spend if the deposit is later
+cancelled) and let a debit-normal expense classification *inflate* the
+reservable figure.
+
+The same role sums power `BalanceReader.GetBalanceBreakdown`
+(`GET /balances/{holder}/{currency}/breakdown`):
+
+    pending   = Σ balance(role=pending)
+    locked    = Σ balance(role=locked) + held
+    available = Σ balance(role=available) − held
+    total     = available + locked + pending
+
+so the `available` a consumer reads is exactly the figure Reserve enforces.
+
 **Why**: the obvious one — overdraft prevention. The non-obvious part: this
 must be checked **inside** the advisory lock (see I-4), not before.
 
-**Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert).
+**Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert),
+`postgres.LedgerStore.sumBalancesByRoleWithQueries` (shared basis),
+`classifications.balance_role` CHECK constraint (migration `032`).
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent`
 - `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
+- `postgres.TestGetBalanceBreakdown_RolesPlusHolds`
+- `postgres.TestReserve_AvailableBasisExcludesPendingLockedAndRoleless`
+- `postgres.TestReserve_PendingOnlyBalanceNotReservable`
+- `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict` (expand-safe
+  role upgrade on preset re-install)
 
 ## I-12: Money conservation across the system
 

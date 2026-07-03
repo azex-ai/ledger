@@ -239,7 +239,9 @@ func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.L
 	t.Helper()
 
 	journalTypeID := postgrestest.SeedJournalType(t, pool, "fund_account", "Fund Account")
-	walletID := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	// main_wallet must carry balance_role='available' — Reserve's availability
+	// base sums role=available classifications only.
+	walletID := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet", "Main Wallet", "debit", false, "available")
 	custodialID := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
 
 	_, err := ledger.PostJournal(ctx, core.JournalInput{

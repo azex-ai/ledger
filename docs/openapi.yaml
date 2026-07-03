@@ -278,6 +278,31 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BalancesEnvelope" }
+  /balances/{holder}/{currency}/breakdown:
+    get:
+      tags: [Balances]
+      summary: Holder-facing liquidity view (available / pending / locked / total).
+      description: >
+        Aggregates the holder's classification balances by balance_role and
+        layers reservation holds on top: available = Σ role=available − held,
+        locked = Σ role=locked + held, pending = Σ role=pending,
+        total = available + locked + pending. Reserve enforces its
+        availability check against the same available figure.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+        - in: path
+          name: currency
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Balance breakdown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BalanceBreakdownEnvelope" }
   /balances/batch:
     post:
       tags: [Balances]
@@ -1034,6 +1059,22 @@ components:
             data:
               type: array
               items: { $ref: "#/components/schemas/Balance" }
+
+    BalanceBreakdown:
+      type: object
+      properties:
+        account_holder: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        available: { $ref: "#/components/schemas/Decimal" }
+        pending: { $ref: "#/components/schemas/Decimal" }
+        locked: { $ref: "#/components/schemas/Decimal" }
+        total: { $ref: "#/components/schemas/Decimal" }
+    BalanceBreakdownEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/BalanceBreakdown" }
 
     SystemRollup:
       type: object

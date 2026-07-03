@@ -32,11 +32,13 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	// Step 2: Create classifications
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 
 	locked, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleLocked,
 	})
 	require.NoError(t, err)
 

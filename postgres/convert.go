@@ -232,14 +232,15 @@ func classificationFromRow(row sqlcgen.Classification) *core.Classification {
 		}
 	}
 	return &core.Classification{
-		UID:        pgToUID(row.Uid),
-		Code:       row.Code,
-		Name:       row.Name,
-		NormalSide: core.NormalSide(row.NormalSide),
-		IsSystem:   row.IsSystem,
-		IsActive:   row.IsActive,
-		Lifecycle:  lifecycle,
-		CreatedAt:  row.CreatedAt,
+		UID:         pgToUID(row.Uid),
+		Code:        row.Code,
+		Name:        row.Name,
+		NormalSide:  core.NormalSide(row.NormalSide),
+		IsSystem:    row.IsSystem,
+		IsActive:    row.IsActive,
+		BalanceRole: core.BalanceRole(row.BalanceRole),
+		Lifecycle:   lifecycle,
+		CreatedAt:   row.CreatedAt,
 	}
 }
 

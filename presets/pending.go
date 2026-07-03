@@ -12,7 +12,7 @@ import (
 // InstallPendingBundle is called alongside InstallDefaultTemplatePresets.
 var pendingOnlyClassifications = []ClassificationPreset{
 	// pending: credit-normal — user's in-flight deposit balance.
-	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit},
+	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit, BalanceRole: core.BalanceRolePending},
 	// suspense: debit-normal — system counterpart holding unconfirmed funds.
 	{Code: "suspense", Name: "Suspense", NormalSide: core.NormalSideDebit, IsSystem: true},
 }

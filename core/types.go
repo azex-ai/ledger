@@ -166,17 +166,44 @@ type Currency struct {
 	Exponent int32  `json:"exponent"`
 }
 
+// BalanceRole is the semantic liquidity tag of a classification in the
+// holder-facing balance breakdown. It decouples the breakdown (and the
+// Reserve availability base) from hardcoded classification codes — presets
+// tag their classifications, consumers can tag their own.
+type BalanceRole string
+
+const (
+	// BalanceRoleNone excludes the classification from the holder's
+	// spendable-money view (fee/revenue/suspense/custodial style accounts).
+	BalanceRoleNone BalanceRole = ""
+	// BalanceRoleAvailable marks immediately spendable funds (main_wallet).
+	BalanceRoleAvailable BalanceRole = "available"
+	// BalanceRolePending marks inbound funds awaiting confirmation.
+	BalanceRolePending BalanceRole = "pending"
+	// BalanceRoleLocked marks journal-locked funds (withdrawal in flight).
+	BalanceRoleLocked BalanceRole = "locked"
+)
+
+func (r BalanceRole) IsValid() bool {
+	switch r {
+	case BalanceRoleNone, BalanceRoleAvailable, BalanceRolePending, BalanceRoleLocked:
+		return true
+	}
+	return false
+}
+
 // Classification represents a dynamic account classification.
 // Lifecycle is nil for label-only classifications (no state machine).
 type Classification struct {
-	UID        string     `json:"uid"`
-	Code       string     `json:"code"`
-	Name       string     `json:"name"`
-	NormalSide NormalSide `json:"normal_side"`
-	IsSystem   bool       `json:"is_system"`
-	IsActive   bool       `json:"is_active"`
-	Lifecycle  *Lifecycle `json:"lifecycle,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	UID         string      `json:"uid"`
+	Code        string      `json:"code"`
+	Name        string      `json:"name"`
+	NormalSide  NormalSide  `json:"normal_side"`
+	IsSystem    bool        `json:"is_system"`
+	IsActive    bool        `json:"is_active"`
+	BalanceRole BalanceRole `json:"balance_role"`
+	Lifecycle   *Lifecycle  `json:"lifecycle,omitempty"`
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
 // JournalType represents a dynamic journal category.
@@ -194,4 +221,26 @@ type Balance struct {
 	CurrencyUID       string          `json:"currency_uid"`
 	ClassificationUID string          `json:"classification_uid"`
 	Balance           decimal.Decimal `json:"balance"`
+}
+
+// BalanceBreakdown is the holder-facing liquidity view of one
+// (holder, currency) pair, aggregated from classification balance roles plus
+// reservation holds:
+//
+//	Pending   = Σ balance(role=pending)                 — deposits awaiting confirmation
+//	Locked    = Σ balance(role=locked) + reservation holds
+//	Available = Σ balance(role=available) − reservation holds
+//	Total     = Available + Locked + Pending
+//
+// Classifications with an empty role (fees, suspense, custodial, ...) are not
+// part of this view. Reserve enforces its availability check against the same
+// Available figure, so a consumer reading Available can rely on Reserve
+// accepting up to exactly that amount (barring concurrent writes).
+type BalanceBreakdown struct {
+	AccountHolder int64           `json:"account_holder"`
+	CurrencyUID   string          `json:"currency_uid"`
+	Available     decimal.Decimal `json:"available"`
+	Pending       decimal.Decimal `json:"pending"`
+	Locked        decimal.Decimal `json:"locked"`
+	Total         decimal.Decimal `json:"total"`
 }

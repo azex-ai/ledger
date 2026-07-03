@@ -1,7 +1,12 @@
 -- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
+
+-- name: SetClassificationBalanceRole :exec
+-- Role upgrades are expand-safe ('' -> role); anything else is a semantic
+-- change the caller must guard (presets only upgrade from '').
+UPDATE classifications SET balance_role = $2 WHERE uid = $1;
 
 -- name: DeactivateClassification :exec
 UPDATE classifications SET is_active = false WHERE uid = $1;
@@ -38,7 +43,7 @@ ORDER BY id;
 
 -- name: ListClassificationDims :many
 -- Full config-table scan for the in-process id<->uid dimension cache.
-SELECT id, uid, code, normal_side FROM classifications;
+SELECT id, uid, code, normal_side, balance_role FROM classifications;
 
 -- name: ListJournalTypeDims :many
 SELECT id, uid, code FROM journal_types;

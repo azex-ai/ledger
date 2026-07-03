@@ -93,6 +93,46 @@ func (s *Server) handleGetBalanceByCurrency(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+type balanceBreakdownResponse struct {
+	AccountHolder int64  `json:"account_holder"`
+	CurrencyUID   string `json:"currency_uid"`
+	Available     string `json:"available"`
+	Pending       string `json:"pending"`
+	Locked        string `json:"locked"`
+	Total         string `json:"total"`
+}
+
+// handleGetBalanceBreakdown returns the holder-facing liquidity view:
+// available / pending / locked / total (see core.BalanceBreakdown for the
+// aggregation contract).
+func (s *Server) handleGetBalanceBreakdown(w http.ResponseWriter, r *http.Request) {
+	holder, err := parseIDParam(chi.URLParam(r, "holder"))
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid holder ID"))
+		return
+	}
+	currencyUID := chi.URLParam(r, "currency")
+	if currencyUID == "" {
+		httpx.Error(w, httpx.ErrBadRequest("invalid currency uid"))
+		return
+	}
+
+	b, err := s.balances.GetBalanceBreakdown(r.Context(), holder, currencyUID)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+
+	httpx.OK(w, balanceBreakdownResponse{
+		AccountHolder: b.AccountHolder,
+		CurrencyUID:   b.CurrencyUID,
+		Available:     b.Available.String(),
+		Pending:       b.Pending.String(),
+		Locked:        b.Locked.String(),
+		Total:         b.Total.String(),
+	})
+}
+
 func (s *Server) handleBatchBalances(w http.ResponseWriter, r *http.Request) {
 	req, err := httpx.Decode[batchBalancesRequest](r)
 	if err != nil {

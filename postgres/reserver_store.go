@@ -181,14 +181,17 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// Check sufficient balance before reserving.
 	// The advisory lock above serializes concurrent reserves for the same (holder, currency),
 	// so this read is safe against TOCTOU races.
-	balances, err := s.ledger.GetBalances(ctx, input.AccountHolder, input.CurrencyUID)
+	//
+	// The availability base is the sum of balance_role='available'
+	// classifications ONLY — pending deposits (role=pending), journal-locked
+	// funds (role=locked), and role-less classifications (fee_expense etc.)
+	// are not reservable. This is the same figure GetBalanceBreakdown reports
+	// as Available (before subtracting holds).
+	roleSums, err := s.ledger.sumBalancesByRoleWithQueries(ctx, qtx, input.AccountHolder, currencyID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: get balances: %w", err)
+		return nil, fmt.Errorf("postgres: reserve: sum balances by role: %w", err)
 	}
-	var totalBalance decimal.Decimal
-	for _, b := range balances {
-		totalBalance = totalBalance.Add(b.Balance)
-	}
+	availableBase := roleSums[core.BalanceRoleAvailable]
 
 	activeReserved, err := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 		AccountHolder: input.AccountHolder,
@@ -202,7 +205,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: reserve: convert active reservations: %w", err)
 	}
 
-	available := totalBalance.Sub(activeReservedDecimal)
+	available := availableBase.Sub(activeReservedDecimal)
 	if available.LessThan(input.Amount) {
 		return nil, fmt.Errorf("postgres: reserve: available %s < requested %s: %w", available.String(), input.Amount.String(), core.ErrInsufficientBalance)
 	}

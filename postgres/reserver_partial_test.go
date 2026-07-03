@@ -24,7 +24,7 @@ func seedFundedReservation(t *testing.T, reserveAmt decimal.Decimal) (*postgres.
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 	jtID := postgrestest.SeedJournalType(t, pool, "deposit", "Deposit")
-	clsWallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "credit", false)
+	clsWallet := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet", "Main Wallet", "credit", false, "available")
 	clsCustodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "debit", true)
 
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{

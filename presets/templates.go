@@ -13,6 +13,10 @@ type ClassificationPreset struct {
 	Name       string
 	NormalSide core.NormalSide
 	IsSystem   bool
+	// BalanceRole tags the classification's bucket in the holder-facing
+	// balance breakdown (available/pending/locked); empty means "not part of
+	// the holder's spendable-money view" (fees, suspense, custodial, ...).
+	BalanceRole core.BalanceRole
 }
 
 type JournalTypePreset struct {
@@ -47,17 +51,17 @@ type TemplateBundle struct {
 // sharedTemplateClassifications are referenced by both deposit and withdrawal
 // templates. Installing either bundle pulls them in.
 var sharedTemplateClassifications = []ClassificationPreset{
-	{Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit},
+	{Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleAvailable},
 	{Code: "suspense", Name: "Suspense", NormalSide: core.NormalSideDebit, IsSystem: true},
 	{Code: "custodial", Name: "Custodial", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
 
 var depositOnlyClassifications = []ClassificationPreset{
-	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit},
+	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit, BalanceRole: core.BalanceRolePending},
 }
 
 var withdrawalOnlyClassifications = []ClassificationPreset{
-	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit},
+	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleLocked},
 	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit},
 	{Code: "fee_revenue", Name: "Fee Revenue", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
@@ -322,7 +326,6 @@ func InstallExtendedPresets(
 		FeeBundle(),
 		CapitalBundle(),
 		SettlementBundle(),
-		CardBundle(),
 		SpreadBundle(),
 		FXBundle(),
 	}
@@ -394,10 +397,11 @@ func ensureClassificationPreset(
 	classification, err := classifications.GetByCode(ctx, preset.Code)
 	if errors.Is(err, core.ErrNotFound) {
 		return classifications.CreateClassification(ctx, core.ClassificationInput{
-			Code:       preset.Code,
-			Name:       preset.Name,
-			NormalSide: preset.NormalSide,
-			IsSystem:   preset.IsSystem,
+			Code:        preset.Code,
+			Name:        preset.Name,
+			NormalSide:  preset.NormalSide,
+			IsSystem:    preset.IsSystem,
+			BalanceRole: preset.BalanceRole,
 		})
 	}
 	if err != nil {
@@ -417,6 +421,22 @@ func ensureClassificationPreset(
 	}
 	if !classification.IsActive {
 		return nil, fmt.Errorf("existing classification %q is inactive: %w", preset.Code, core.ErrInvalidInput)
+	}
+	if classification.BalanceRole != preset.BalanceRole {
+		// Expand-safe upgrade: rows created before balance_role existed (or
+		// before this preset carried one) hold '' and are retagged in place.
+		// Any other divergence is a semantic conflict the operator must
+		// resolve — silently retagging would re-bucket historical balances.
+		if classification.BalanceRole != core.BalanceRoleNone {
+			return nil, fmt.Errorf(
+				"existing classification %q has balance_role=%q, want %q: %w",
+				preset.Code, classification.BalanceRole, preset.BalanceRole, core.ErrInvalidInput,
+			)
+		}
+		if err := classifications.SetBalanceRole(ctx, classification.UID, preset.BalanceRole); err != nil {
+			return nil, fmt.Errorf("upgrade balance_role of %q: %w", preset.Code, err)
+		}
+		classification.BalanceRole = preset.BalanceRole
 	}
 	return classification, nil
 }

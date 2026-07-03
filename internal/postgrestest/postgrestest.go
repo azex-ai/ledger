@@ -133,6 +133,21 @@ func SeedClassification(t *testing.T, pool *pgxpool.Pool, code, name, normalSide
 	return uid
 }
 
+// SeedClassificationWithRole creates a test classification row with an
+// explicit balance_role (”, 'available', 'pending', 'locked') and returns
+// its uid. Use this whenever a test exercises the balance breakdown or the
+// Reserve availability base.
+func SeedClassificationWithRole(t *testing.T, pool *pgxpool.Pool, code, name, normalSide string, isSystem bool, balanceRole string) string {
+	t.Helper()
+	var uid string
+	err := pool.QueryRow(context.Background(),
+		"INSERT INTO classifications (uid, code, name, normal_side, is_system, balance_role) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5) RETURNING uid::text",
+		code, name, normalSide, isSystem, balanceRole,
+	).Scan(&uid)
+	require.NoError(t, err)
+	return uid
+}
+
 // SeedJournalType creates a test journal_type row and returns its uid.
 func SeedJournalType(t *testing.T, pool *pgxpool.Pool, code, name string) string {
 	t.Helper()

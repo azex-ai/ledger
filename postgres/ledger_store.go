@@ -779,6 +779,123 @@ func (s *LedgerStore) getBalanceWithQueries(ctx context.Context, q *sqlcgen.Quer
 	return checkpointBalance.Add(delta), nil
 }
 
+// GetBalanceBreakdown aggregates the holder's classification balances by
+// core.BalanceRole and layers reservation holds on top:
+//
+//	pending   = Σ balance(role=pending)
+//	locked    = Σ balance(role=locked) + held (reservations)
+//	available = Σ balance(role=available) − held
+//	total     = available + locked + pending
+//
+// In pool mode the whole read runs inside one REPEATABLE READ transaction so
+// the role sums and the holds figure describe the same point in time. In tx
+// mode the caller's transaction (and isolation level) applies.
+func (s *LedgerStore) GetBalanceBreakdown(ctx context.Context, holder int64, currencyUID string) (*core.BalanceBreakdown, error) {
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.get_balance_breakdown",
+		attribute.Int64("account_holder", holder),
+		attribute.String("currency_uid", currencyUID),
+	)
+	defer span.End()
+
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, err
+	}
+
+	if s.pool == nil {
+		b, err := s.getBalanceBreakdownWithQueries(ctx, s.q, holder, cur.ID, currencyUID)
+		ledgerotel.RecordError(span, err)
+		return b, err
+	}
+
+	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if txErr != nil {
+		ledgerotel.RecordError(span, txErr)
+		return nil, fmt.Errorf("postgres: get balance breakdown: begin tx: %w", txErr)
+	}
+	defer tx.Rollback(ctx)
+
+	b, err := s.getBalanceBreakdownWithQueries(ctx, s.q.WithTx(tx), holder, cur.ID, currencyUID)
+	ledgerotel.RecordError(span, err)
+	return b, err
+}
+
+func (s *LedgerStore) getBalanceBreakdownWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID int64, currencyUID string) (*core.BalanceBreakdown, error) {
+	roleSums, err := s.sumBalancesByRoleWithQueries(ctx, q, holder, currencyID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get balance breakdown: %w", err)
+	}
+
+	heldRaw, err := q.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get balance breakdown: sum reservations: %w", err)
+	}
+	held, err := anyToDecimal(heldRaw)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get balance breakdown: convert held: %w", err)
+	}
+
+	available := roleSums[core.BalanceRoleAvailable].Sub(held)
+	pending := roleSums[core.BalanceRolePending]
+	locked := roleSums[core.BalanceRoleLocked].Add(held)
+
+	return &core.BalanceBreakdown{
+		AccountHolder: holder,
+		CurrencyUID:   currencyUID,
+		Available:     available,
+		Pending:       pending,
+		Locked:        locked,
+		Total:         available.Add(locked).Add(pending),
+	}, nil
+}
+
+// sumBalancesByRoleWithQueries sums checkpoint+delta balances of every
+// classification the holder has entries in, bucketed by the classification's
+// balance_role. Role-less ('') classifications are skipped. Roles are read
+// fresh from the config table (not the dims cache) because SetBalanceRole can
+// retag a classification after creation — the dims cache only holds immutable
+// fields.
+func (s *LedgerStore) sumBalancesByRoleWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID int64) (map[core.BalanceRole]decimal.Decimal, error) {
+	dims, err := q.ListClassificationDims(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list classification roles: %w", err)
+	}
+	roleByClassID := make(map[int64]core.BalanceRole, len(dims))
+	for _, d := range dims {
+		roleByClassID[d.ID] = core.BalanceRole(d.BalanceRole)
+	}
+
+	clsIDs, err := q.DistinctClassificationsForAccount(ctx, sqlcgen.DistinctClassificationsForAccountParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list account classifications: %w", err)
+	}
+
+	sums := map[core.BalanceRole]decimal.Decimal{
+		core.BalanceRoleAvailable: decimal.Zero,
+		core.BalanceRolePending:   decimal.Zero,
+		core.BalanceRoleLocked:    decimal.Zero,
+	}
+	for _, clsID := range clsIDs {
+		role := roleByClassID[clsID]
+		if role == core.BalanceRoleNone {
+			continue
+		}
+		bal, err := s.getBalanceWithQueries(ctx, q, holder, currencyID, clsID)
+		if err != nil {
+			return nil, fmt.Errorf("balance for classification %d: %w", clsID, err)
+		}
+		sums[role] = sums[role].Add(bal)
+	}
+	return sums, nil
+}
+
 // GetBalances returns balances across all classifications for a (holder, currency).
 func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyUID string) ([]core.Balance, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)

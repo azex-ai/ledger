@@ -24,6 +24,7 @@ func (s *Server) setupRoutes() {
 		// Balances
 		r.Get("/balances/{holder}", s.handleGetBalances)
 		r.Get("/balances/{holder}/{currency}", s.handleGetBalanceByCurrency)
+		r.Get("/balances/{holder}/{currency}/breakdown", s.handleGetBalanceBreakdown)
 		r.Post("/balances/batch", s.handleBatchBalances)
 
 		// Reservations

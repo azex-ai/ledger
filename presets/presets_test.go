@@ -92,14 +92,15 @@ func (s *fakeClassificationStore) CreateClassification(_ context.Context, input 
 		return existing, nil
 	}
 	classification := &core.Classification{
-		UID:        fmt.Sprintf("cls-%d", s.nextUID),
-		Code:       input.Code,
-		Name:       input.Name,
-		NormalSide: input.NormalSide,
-		IsSystem:   input.IsSystem,
-		IsActive:   true,
-		Lifecycle:  input.Lifecycle,
-		CreatedAt:  time.Now(),
+		UID:         fmt.Sprintf("cls-%d", s.nextUID),
+		Code:        input.Code,
+		Name:        input.Name,
+		NormalSide:  input.NormalSide,
+		IsSystem:    input.IsSystem,
+		IsActive:    true,
+		BalanceRole: input.BalanceRole,
+		Lifecycle:   input.Lifecycle,
+		CreatedAt:   time.Now(),
 	}
 	s.nextUID++
 	s.classifications[input.Code] = classification
@@ -112,6 +113,16 @@ func (s *fakeClassificationStore) GetByCode(_ context.Context, code string) (*co
 		return nil, core.ErrNotFound
 	}
 	return classification, nil
+}
+
+func (s *fakeClassificationStore) SetBalanceRole(_ context.Context, uid string, role core.BalanceRole) error {
+	for _, classification := range s.classifications {
+		if classification.UID == uid {
+			classification.BalanceRole = role
+			return nil
+		}
+	}
+	return core.ErrNotFound
 }
 
 func (s *fakeClassificationStore) DeactivateClassification(_ context.Context, uid string) error {

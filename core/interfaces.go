@@ -54,6 +54,11 @@ type BalanceReader interface {
 	GetBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
 	GetBalances(ctx context.Context, holder int64, currencyUID string) ([]Balance, error)
 	BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]Balance, error)
+	// GetBalanceBreakdown aggregates the holder's classification balances by
+	// BalanceRole and layers reservation holds on top (see BalanceBreakdown).
+	// The whole read is snapshot-consistent: role sums and the holds figure
+	// describe the same point in time.
+	GetBalanceBreakdown(ctx context.Context, holder int64, currencyUID string) (*BalanceBreakdown, error)
 }
 
 // Reserver handles reserve/settle/lock flow.
@@ -163,14 +168,20 @@ type ClassificationStore interface {
 	GetByCode(ctx context.Context, code string) (*Classification, error)
 	DeactivateClassification(ctx context.Context, uid string) error
 	ListClassifications(ctx context.Context, activeOnly bool) ([]Classification, error)
+	// SetBalanceRole retags a classification's balance role. Intended for
+	// expand-style upgrades (BalanceRoleNone -> a real role) — changing
+	// between two non-empty roles re-buckets historical balances in the
+	// breakdown view and should be treated as a deliberate migration.
+	SetBalanceRole(ctx context.Context, uid string, role BalanceRole) error
 }
 
 type ClassificationInput struct {
-	Code       string
-	Name       string
-	NormalSide NormalSide
-	IsSystem   bool
-	Lifecycle  *Lifecycle
+	Code        string
+	Name        string
+	NormalSide  NormalSide
+	IsSystem    bool
+	BalanceRole BalanceRole
+	Lifecycle   *Lifecycle
 }
 
 // JournalTypeStore manages dynamic journal types.
