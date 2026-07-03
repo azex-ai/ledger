@@ -366,7 +366,7 @@ func (s *Service) InstallDefaultPresets(ctx context.Context) error {
 }
 
 // InstallExtendedPresets installs the full preset suite: deposit, withdrawal,
-// transfer, fee, capital, settlement, card, and spread bundles. Safe to call
+// transfer, fee, capital, settlement, and spread bundles. Safe to call
 // alongside or after InstallDefaultPresets — duplicate rows are validated and
 // skipped.
 func (s *Service) InstallExtendedPresets(ctx context.Context) error {

@@ -29,7 +29,7 @@ Core engine capabilities:
 - **Webhook delivery** -- outbound event delivery with per-attempt exponential backoff and dead-letter handling
 - **In-process event subscription** -- `Worker.Subscribe` for library-mode event callbacks without a webhook server
 - **Transaction composition** -- `RunInTx` lets callers combine ledger writes with their own DB writes in one atomic transaction
-- **Extended preset catalogue** -- deposit, withdrawal, transfer, fee, capital, settlement, card-topup, and spread bundles ship out-of-the-box
+- **Extended preset catalogue** -- deposit, withdrawal, transfer, fee, capital, settlement, and spread bundles ship out-of-the-box
 - **10-check reconciliation engine** -- accounting-equation verification, orphan detection, solvency check, idempotency audit, and stale-rollup detection
 - **Balance trends + audit queries** -- time-series trends, reversal chains, booking traces for customer support and compliance
 - **Platform solvency API** -- `PlatformBalanceReader` + `SolvencyChecker` read from the `system_rollups` materialised view in O(1)
@@ -231,7 +231,6 @@ end-to-end.
 | `FeeBundle()` | `fees` (system) | `fee` | `fee_charge` | Generic platform fee: DR user main_wallet, CR system fees |
 | `CapitalBundle()` | `equity` (system) | `capital_injection`, `capital_withdraw` | matching | Platform equity movements |
 | `SettlementBundle()` | `settlement` (system), `fees` (system) | `checkout_settlement` | `checkout_settlement_gross`, `checkout_settlement_net` | Checkout settlement (gross or net-of-fee) into user wallet |
-| `CardBundle()` | `card_account` | `card_topup` | `card_topup_settle`, `card_topup_settle_net` | Top-up from main_wallet to card account; with optional fee variant |
 | `SpreadBundle()` | `spread` (system) | (none) | (none) | Registers the `spread` classification only — caller posts via `PostJournal` |
 | `FXBundle()` | (shared only) | `fx_sell`, `fx_buy` | matching | Per-currency FX leg pair sharing the settlement pool |
 
@@ -617,7 +616,7 @@ ledger/
     withdrawal.go        locked → reserved → reviewing → processing → confirmed | failed
     templates.go         Default deposit/withdrawal templates; InstallExtendedPresets
     tolerance.go         Deposit tolerance: confirm-pending + release-shortfall (atomic batch)
-    fee.go, transfer.go, capital.go, settlement.go, card.go, spread.go, fx.go
+    fee.go, transfer.go, capital.go, settlement.go, spread.go, fx.go
 
   channel/             Inbound channel adapters
     adapter.go           ChannelAdapter interface (parse + verify webhooks)
@@ -658,7 +657,7 @@ Positive holder IDs are users; negative IDs are system counterparts (`-userID`).
 
 **What's new since v0.x**
 
-The v0.x series had hardcoded `deposit` / `withdrawal` resource types. v2 introduces classification-driven design: deposit and withdrawal are preset configurations of the generic booking lifecycle. This enables arbitrary account types (fee, capital, settlement, spread, card topup, …) without any code change in the engine. The public API is backwards-compatible; callers using the v2 facade (`ledger.New`) did not need to change.
+The v0.x series had hardcoded `deposit` / `withdrawal` resource types. v2 introduces classification-driven design: deposit and withdrawal are preset configurations of the generic booking lifecycle. This enables arbitrary account types (fee, capital, settlement, spread, …) without any code change in the engine. The public API is backwards-compatible; callers using the v2 facade (`ledger.New`) did not need to change.
 
 For the design rationale, see [docs/plans/2026-04-22-ledger-v2-design.md](docs/plans/2026-04-22-ledger-v2-design.md).
 

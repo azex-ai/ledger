@@ -119,7 +119,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `core/reserve.go` | Reservation state machine |
 | `core/checkpoint.go` | BalanceCheckpoint, RollupQueueItem, BalanceSnapshot |
 | `core/interfaces.go` | Booker, EventReader, JournalWriter, BalanceReader, etc. |
-| `presets/` | Deposit + Withdrawal + Transfer + Fee + Capital + Settlement + Card + Spread + FX bundles |
+| `presets/` | Deposit + Withdrawal + Transfer + Fee + Capital + Settlement + Spread + FX bundles |
 | `presets/fx.go` | Cross-currency FX preset (sell + buy templates, settlement absorbs net) |
 | `channel/adapter.go` | ChannelAdapter interface for inbound webhooks |
 | `channel/onchain/evm.go` | Demo EVM adapter with HMAC verification |

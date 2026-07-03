@@ -20,8 +20,8 @@ import (
 //
 // Relationship: fee_revenue and fees serve the same economic purpose but were
 // coined independently.  Callers that previously used fee_revenue for withdrawal
-// accounting may continue to do so.  New journal types (fee, checkout_settlement,
-// card_topup) use "fees" for consistency with the payments reference catalogue.
+// accounting may continue to do so.  New journal types (fee, checkout_settlement)
+// use "fees" for consistency with the payments reference catalogue.
 var feeClassifications = []ClassificationPreset{
 	{Code: "fees", Name: "Fees", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
