@@ -13,6 +13,26 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-03
+
+### Go module — Fixed
+- **Migrations 025 and 031 failed on any database that already contained
+  rows** — the class of database every upgrading library consumer has. Plain
+  CI only ever migrates empty databases, where both bugs are invisible
+  (caught by armatrix's upgrade rehearsal):
+  - 025's `journal_entries.effective_at` backfill UPDATE was rejected by the
+    018 append-only row trigger (0 rows = trigger never fires). The backfill
+    now disables/re-enables the trigger around the one-time statement.
+  - 031's `ADD COLUMN uid UUID NOT NULL` (no DEFAULT) fails on non-empty
+    tables. Every table now uses add → `gen_random_uuid()` backfill →
+    `SET NOT NULL`. Pre-existing rows get v4 uids (uniqueness is the only
+    property the contract needs; v7 time-ordering remains a Go-side nicety
+    for new rows).
+- New pin: `TestMigrate_PopulatedDatabase` migrates to v24, seeds rows into
+  every entity table, then runs the rest — the populated-database upgrade
+  path is now CI-covered. `postgres.NewMigrationSource` and
+  `postgrestest.SetupRawDB` are exposed for such stepwise migration tests.
+
 ## [0.4.0] - 2026-07-03
 
 API-contract alignment (design: docs/plans/2026-07-03-api-contract-alignment-design.md).

@@ -9,12 +9,25 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
 )
 
 //go:embed sql/migrations/*.sql
 var migrations embed.FS
+
+// NewMigrationSource returns a fresh iofs source over the embedded migration
+// files. Exposed so tests can drive golang-migrate directly (e.g. migrate to
+// an intermediate version, seed data, then continue) — production callers use
+// Migrate, which always runs to the latest version.
+func NewMigrationSource() (source.Driver, error) {
+	d, err := iofs.New(migrations, "sql/migrations")
+	if err != nil {
+		return nil, fmt.Errorf("postgres: migrate: init source: %w", err)
+	}
+	return d, nil
+}
 
 // Migrate runs all pending schema migrations against the given database URL.
 // The URL should use the pgx5 scheme, e.g. "pgx5://user:pass@host/db".

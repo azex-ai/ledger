@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,42 @@ import (
 
 	ledgerpg "github.com/azex-ai/ledger/postgres"
 )
+
+// SetupRawDB starts a PostgreSQL container WITHOUT running migrations and
+// returns its connection string. For tests that drive golang-migrate manually
+// (e.g. migrate to an intermediate version, seed, continue). The test is
+// skipped when Docker isn't available.
+func SetupRawDB(t testing.TB) string {
+	t.Helper()
+	ctx := context.Background()
+
+	container, err := tcpostgres.Run(ctx, "postgres:17",
+		tcpostgres.WithDatabase("ledger_test"),
+		tcpostgres.WithUsername("test"),
+		tcpostgres.WithPassword("test"),
+	)
+	if err != nil && strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
+		t.Skip("Docker daemon not running, skipping integration test")
+	}
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(ctx) })
+
+	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	// The container's readiness probe can race the first real connection;
+	// wait until a pgx connect+ping round-trips.
+	require.Eventually(t, func() bool {
+		p, err := pgxpool.New(ctx, connStr)
+		if err != nil {
+			return false
+		}
+		defer p.Close()
+		return p.Ping(ctx) == nil
+	}, 15*time.Second, 250*time.Millisecond)
+
+	return connStr
+}
 
 // SetupDB starts a PostgreSQL container, runs ledger migrations, and returns
 // a *pgxpool.Pool. The test is skipped (not failed) when the Docker daemon

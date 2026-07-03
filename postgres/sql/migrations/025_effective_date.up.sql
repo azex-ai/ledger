@@ -16,8 +16,17 @@ ALTER TABLE journal_entries
     ADD COLUMN IF NOT EXISTS effective_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 UPDATE journals SET effective_at = created_at;
+
+-- The 018 append-only row trigger blocks any UPDATE on journal_entries; this
+-- one-time backfill is schema evolution, not a business mutation, so disable
+-- it for the statement (recursively covers the partition clones) and restore
+-- immediately. Without this the migration fails on any database that already
+-- has journal rows (0-row fresh databases never fire the row trigger, which
+-- is why CI alone did not catch it).
+ALTER TABLE journal_entries DISABLE TRIGGER journal_entries_no_update;
 UPDATE journal_entries je SET effective_at = j.effective_at
     FROM journals j WHERE je.journal_id = j.id;
+ALTER TABLE journal_entries ENABLE TRIGGER journal_entries_no_update;
 
 -- Drives as-of / trial-balance queries (WHERE currency_id = $1 AND
 -- effective_at <= $2). Created on the partitioned parent; propagates to every
