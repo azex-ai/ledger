@@ -28,7 +28,7 @@ describe("use-withdrawals", () => {
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ uid: "cls-4", code: "withdraw", name: "Withdraw" }],
+          data: { list: [{ uid: "cls-4", code: "withdraw", name: "Withdraw" }] },
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>

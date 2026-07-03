@@ -26,7 +26,7 @@ describe("use-metadata", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/classifications`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: [] }),
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
       ),
     );
     const { result } = renderHook(() => useClassifications(true), {
@@ -44,7 +44,7 @@ describe("use-metadata", () => {
     server.use(
       http.get(`${BASE}/api/v1/currencies`, ({ request }) => {
         receivedActiveOnly = new URL(request.url).searchParams.get("active_only");
-        return HttpResponse.json({ code: 200, message: "ok", data: [] });
+        return HttpResponse.json({ code: 200, message: "ok", data: { list: [] } });
       }),
     );
     const { result } = renderHook(() => useCurrencies(true), {

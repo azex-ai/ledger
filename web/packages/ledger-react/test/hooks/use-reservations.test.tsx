@@ -25,7 +25,7 @@ describe("use-reservations", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/reservations`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: [{ id: 1 }] }),
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [{ id: 1 }] } }),
       ),
     );
     const params = { holder: 5 };
@@ -33,7 +33,7 @@ describe("use-reservations", () => {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toHaveLength(1);
+    expect(result.current.data?.list).toHaveLength(1);
     expect(
       qc.getQueryCache().find({ queryKey: ["ledger", "reservations", params] }),
     ).toBeDefined();

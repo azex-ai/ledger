@@ -14,6 +14,16 @@ export function useBalances(holder: number) {
   });
 }
 
+export function useBalanceBreakdown(holder: number, currency: string) {
+  const client = useLedgerClient();
+  return useQuery({
+    queryKey: ledgerKeys.balanceBreakdown(holder, currency),
+    queryFn: () => client.getBalanceBreakdown(holder, currency),
+    enabled: holder !== 0 && currency !== "",
+    refetchInterval: 15_000,
+  });
+}
+
 export function useBalancesByCurrency(holder: number, currency: string) {
   const client = useLedgerClient();
   return useQuery({

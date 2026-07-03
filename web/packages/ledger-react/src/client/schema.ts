@@ -525,6 +525,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/balances/{holder}/{currency}/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Holder-facing liquidity view (available / pending / locked / total).
+         * @description Aggregates the holder's classification balances by balance_role and layers reservation holds on top: available = Σ role=available − held, locked = Σ role=locked + held, pending = Σ role=pending, total = available + locked + pending. Reserve enforces its availability check against the same available figure.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    holder: number;
+                    currency: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Balance breakdown. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BalanceBreakdownEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/balances/batch": {
         parameters: {
             query?: never;
@@ -697,6 +739,8 @@ export interface paths {
                     "application/json": {
                         /** @description Decimal as string. */
                         amount: string;
+                        /** @description Required (I-3). SettlePartial accumulates, so a retried request replays idempotently instead of double-applying: same key + same amount succeeds without effect, same key + different amount is a conflict. */
+                        idempotency_key: string;
                     };
                 };
             };
@@ -2074,7 +2118,11 @@ export interface components {
             data?: components["schemas"]["Journal"];
         };
         JournalListEnvelope: components["schemas"]["Envelope"] & {
-            data?: components["schemas"]["Journal"][];
+            data?: {
+                list?: components["schemas"]["Journal"][];
+                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
+                next_cursor?: string;
+            };
         };
         JournalWithEntriesEnvelope: components["schemas"]["Envelope"] & {
             data?: {
@@ -2092,7 +2140,24 @@ export interface components {
             balance?: components["schemas"]["Decimal"];
         };
         BalancesEnvelope: components["schemas"]["Envelope"] & {
-            data?: components["schemas"]["Balance"][];
+            data?: {
+                list?: components["schemas"]["Balance"][];
+                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
+                next_cursor?: string;
+            };
+        };
+        BalanceBreakdown: {
+            /** Format: int64 */
+            account_holder?: number;
+            /** Format: uuid */
+            currency_uid?: string;
+            available?: components["schemas"]["Decimal"];
+            pending?: components["schemas"]["Decimal"];
+            locked?: components["schemas"]["Decimal"];
+            total?: components["schemas"]["Decimal"];
+        };
+        BalanceBreakdownEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["BalanceBreakdown"];
         };
         SystemRollup: {
             /** Format: uuid */
@@ -2103,7 +2168,11 @@ export interface components {
             updated_at?: components["schemas"]["Timestamp"];
         };
         SystemRollupsEnvelope: components["schemas"]["Envelope"] & {
-            data?: components["schemas"]["SystemRollup"][];
+            data?: {
+                list?: components["schemas"]["SystemRollup"][];
+                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
+                next_cursor?: string;
+            };
         };
         ReserveInput: {
             /** Format: int64 */
@@ -2394,7 +2463,11 @@ export interface components {
             outflow?: components["schemas"]["Decimal"];
         };
         BalanceTrendListEnvelope: components["schemas"]["Envelope"] & {
-            data?: components["schemas"]["BalanceTrendPoint"][];
+            data?: {
+                list?: components["schemas"]["BalanceTrendPoint"][];
+                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
+                next_cursor?: string;
+            };
         };
         ReconcileReport: {
             overall_passed?: boolean;

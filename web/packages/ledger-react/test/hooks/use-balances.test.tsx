@@ -25,7 +25,7 @@ describe("use-balances", () => {
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ account_holder: 5, currency_uid: 1, classification_uid: 1, balance: "10" }],
+          data: { list: [{ account_holder: 5, currency_uid: 1, classification_uid: 1, balance: "10" }] },
         }),
       ),
     );

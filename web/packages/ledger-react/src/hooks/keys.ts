@@ -21,6 +21,8 @@ export const ledgerKeys = {
 
   // Balances
   balances: (holder: number) => ["ledger", "balances", holder] as const,
+  balanceBreakdown: (holder: number, currency: string) =>
+    ["ledger", "balances", holder, currency, "breakdown"] as const,
   balancesByCurrency: (holder: number, currency: string) =>
     ["ledger", "balances", holder, currency] as const,
 

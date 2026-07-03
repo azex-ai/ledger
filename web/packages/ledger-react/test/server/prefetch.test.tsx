@@ -93,7 +93,7 @@ describe("server prefetch round-trip", () => {
         return HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ currency_uid: 1, balance: "100" }],
+          data: { list: [{ currency_uid: 1, balance: "100" }] },
         });
       }),
     );

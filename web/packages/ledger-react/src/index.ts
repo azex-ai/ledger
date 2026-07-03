@@ -16,7 +16,11 @@ export {
   useReverseJournal,
   useEntries,
 } from "./hooks/use-journals";
-export { useBalances, useBalancesByCurrency } from "./hooks/use-balances";
+export {
+  useBalances,
+  useBalancesByCurrency,
+  useBalanceBreakdown,
+} from "./hooks/use-balances";
 export {
   useDepositClassificationId,
   useDeposits,
@@ -52,6 +56,8 @@ export {
 export {
   useReservations,
   useSettleReservation,
+  useSettlePartialReservation,
+  useFinalizeReservationSettlement,
   useReleaseReservation,
 } from "./hooks/use-reservations";
 export {

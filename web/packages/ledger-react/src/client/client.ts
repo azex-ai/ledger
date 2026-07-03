@@ -1,6 +1,8 @@
 import type {
   ApiError,
   Balance,
+  BalanceBreakdown,
+  BalanceByCurrency,
   Booking,
   Classification,
   CreateBookingBody,
@@ -9,6 +11,7 @@ import type {
   EntryTemplate,
   Event,
   HealthStatus,
+  HolderBalances,
   Journal,
   JournalType,
   JournalWithEntries,
@@ -50,8 +53,6 @@ interface Envelope<T> {
   data: T;
 }
 
-const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-
 function qs(
   params: Record<string, string | number | boolean | undefined>,
 ): string {
@@ -71,12 +72,14 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // otherwise the ambient globalThis.fetch (read lazily so test doubles /
     // MSW installed after client construction are still picked up).
     const fetchImpl = config.fetch ?? globalThis.fetch;
-    const method = (init?.method ?? "GET").toUpperCase();
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(init?.headers as Record<string, string> | undefined),
     };
-    if (MUTATING_METHODS.has(method) && config.apiKey) {
+    // Every endpoint requires the key when auth is configured — reads
+    // included (server enforces bearer auth on the whole surface except the
+    // k8s probes and the HMAC-verified webhook path).
+    if (config.apiKey) {
       headers["Authorization"] = `Bearer ${config.apiKey}`;
     }
 
@@ -106,7 +109,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // System
     getHealth: () => request<HealthStatus>("/api/v1/system/health"),
     getSystemBalances: () =>
-      request<SystemBalance[]>("/api/v1/system/balances"),
+      request<PaginatedResponse<SystemBalance>>("/api/v1/system/balances").then(
+        (d) => d.list,
+      ),
 
     // Journals
     listJournals: (params: { cursor?: string; limit?: number }) =>
@@ -162,26 +167,39 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Balances
     getBalances: (holder: number) =>
-      request<Balance[]>(`/api/v1/balances/${holder}`),
+      request<PaginatedResponse<Balance>>(`/api/v1/balances/${holder}`).then(
+        (d) => d.list,
+      ),
 
     getBalancesByCurrency: (holder: number, currency: string) =>
-      request<Balance[]>(`/api/v1/balances/${holder}/${currency}`),
+      request<BalanceByCurrency>(`/api/v1/balances/${holder}/${currency}`),
+
+    // Liquidity view: available / pending / locked / total. `available` is
+    // exactly the figure Reserve enforces (INVARIANTS I-11).
+    getBalanceBreakdown: (holder: number, currency: string) =>
+      request<BalanceBreakdown>(
+        `/api/v1/balances/${holder}/${currency}/breakdown`,
+      ),
 
     batchBalances: (holderIds: number[], currencyUid: string) =>
-      request<Record<string, Balance[]>>("/api/v1/balances/batch", {
+      request<PaginatedResponse<HolderBalances>>("/api/v1/balances/batch", {
         method: "POST",
         body: JSON.stringify({
           holder_ids: holderIds,
           currency_uid: currencyUid,
         }),
-      }),
+      }).then((d) => d.list),
 
     // Reservations
     listReservations: (params: {
       holder?: number;
       status?: string;
+      cursor?: string;
       limit?: number;
-    }) => request<Reservation[]>(`/api/v1/reservations${qs(params)}`),
+    }) =>
+      request<PaginatedResponse<Reservation>>(
+        `/api/v1/reservations${qs(params)}`,
+      ),
 
     createReservation: (body: {
       account_holder: number;
@@ -200,6 +218,21 @@ export function createLedgerClient(config: LedgerClientConfig) {
         method: "POST",
         body: JSON.stringify({ actual_amount: actualAmount }),
       }),
+
+    // Partial settlement accumulates; idempotency_key is REQUIRED (I-3) — a
+    // retried request with the same key replays without double-applying.
+    settlePartialReservation: (
+      id: string,
+      amount: string,
+      idempotencyKey: string,
+    ) =>
+      request<void>(`/api/v1/reservations/${id}/settle-partial`, {
+        method: "POST",
+        body: JSON.stringify({ amount, idempotency_key: idempotencyKey }),
+      }),
+
+    finalizeReservationSettlement: (id: string) =>
+      request<void>(`/api/v1/reservations/${id}/finalize`, { method: "POST" }),
 
     releaseReservation: (id: string) =>
       request<void>(`/api/v1/reservations/${id}/release`, { method: "POST" }),
@@ -237,9 +270,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Classifications
     listClassifications: (activeOnly?: boolean) =>
-      request<Classification[]>(
+      request<PaginatedResponse<Classification>>(
         `/api/v1/classifications${qs({ active_only: activeOnly })}`,
-      ),
+      ).then((d) => d.list),
 
     createClassification: (body: {
       code: string;
@@ -259,9 +292,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Journal Types
     listJournalTypes: (activeOnly?: boolean) =>
-      request<JournalType[]>(
+      request<PaginatedResponse<JournalType>>(
         `/api/v1/journal-types${qs({ active_only: activeOnly })}`,
-      ),
+      ).then((d) => d.list),
 
     createJournalType: (body: { code: string; name: string }) =>
       request<JournalType>("/api/v1/journal-types", {
@@ -276,9 +309,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Templates
     listTemplates: (activeOnly?: boolean) =>
-      request<EntryTemplate[]>(
+      request<PaginatedResponse<EntryTemplate>>(
         `/api/v1/templates${qs({ active_only: activeOnly })}`,
-      ),
+      ).then((d) => d.list),
 
     createTemplate: (body: {
       code: string;
@@ -314,7 +347,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Currencies
     listCurrencies: (activeOnly?: boolean) =>
-      request<Currency[]>(`/api/v1/currencies${qs({ active_only: activeOnly })}`),
+      request<PaginatedResponse<Currency>>(
+        `/api/v1/currencies${qs({ active_only: activeOnly })}`,
+      ).then((d) => d.list),
 
     createCurrency: (body: { code: string; name: string; exponent: number }) =>
       request<Currency>("/api/v1/currencies", {
@@ -341,7 +376,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
       currency_uid?: string;
       start?: string;
       end?: string;
-    }) => request<Snapshot[]>(`/api/v1/snapshots${qs(params)}`),
+    }) =>
+      request<PaginatedResponse<Snapshot>>(`/api/v1/snapshots${qs(params)}`).then(
+        (d) => d.list,
+      ),
   };
 }
 

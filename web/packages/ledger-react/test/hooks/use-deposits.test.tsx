@@ -25,7 +25,7 @@ describe("use-deposits", () => {
         HttpResponse.json({
           code: 200,
           message: "ok",
-          data: [{ uid: "cls-3", code: "deposit", name: "Deposit" }],
+          data: { list: [{ uid: "cls-3", code: "deposit", name: "Deposit" }] },
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>

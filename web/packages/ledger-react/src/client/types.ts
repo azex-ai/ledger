@@ -188,7 +188,30 @@ export interface Snapshot {
 
 export interface PaginatedResponse<T> {
   list: T[];
-  next_cursor: string;
+  /** Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
+  next_cursor?: string;
+}
+
+// Holder-facing liquidity view (see docs/INVARIANTS.md I-11):
+//   total = available + locked + pending; Reserve enforces against the same
+//   available figure this reports.
+export interface BalanceBreakdown {
+  account_holder: number;
+  currency_uid: string;
+  available: string;
+  pending: string;
+  locked: string;
+  total: string;
+}
+
+export interface BalanceByCurrency {
+  total: string;
+  classifications: Balance[];
+}
+
+export interface HolderBalances {
+  holder_id: number;
+  balances: Balance[];
 }
 
 export interface PreviewResult {

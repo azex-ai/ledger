@@ -14,7 +14,10 @@ export function ok<T>(data: T) {
 
 /** A GET handler returning the success envelope for a fixed body. */
 export function getOk<T>(path: string, data: T) {
-  return http.get(`${BASE}${path}`, () => ok(data));
+  // List endpoints wrap their payload as {list} (api-contract §6); object
+  // payloads pass through unchanged.
+  const payload = Array.isArray(data) ? { list: data } : data;
+  return http.get(`${BASE}${path}`, () => ok(payload));
 }
 
 /** A POST handler returning the success envelope for a fixed body. */

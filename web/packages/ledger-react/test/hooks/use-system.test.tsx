@@ -41,7 +41,7 @@ describe("use-system", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/system/balances`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: [] }),
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
       ),
     );
     const { result } = renderHook(() => useSystemBalances(), {
@@ -57,7 +57,7 @@ describe("use-system", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/snapshots`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: [] }),
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
       ),
     );
     const params = { holder: 9 };

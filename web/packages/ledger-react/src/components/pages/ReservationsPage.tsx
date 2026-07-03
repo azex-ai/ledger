@@ -113,7 +113,7 @@ export function ReservationsPage() {
     [statusFilter],
   );
   const { data, isLoading, isError } = useReservations(params);
-  const reservations = data ?? [];
+  const reservations = data?.list ?? [];
 
   return (
     <div className="space-y-6">
