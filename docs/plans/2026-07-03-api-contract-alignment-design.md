@@ -131,3 +131,41 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
    包括 library mode 的 Go 公开 API。armatrix adapter 需一次 bigint→uuid 列适配
    （无存量，代价可控）；每次调用多一次 unique 索引点查，可接受。
 3. ~~存量 uid 回填~~ **已消解**（无存量裁定）：uid 全部 Go 侧 UUIDv7，无回填、无双来源。
+
+---
+
+## 附：P2 执行进度（2026-07-03，供接续会话使用）
+
+已完成（编译通过）：
+- P1 已合入 main（commit 3118bac）。P2 在 main 工作树进行中（未提交；有 stash 备份 "wip-backup"）。
+- migration 031（uid 列+唯一索引，NOT NULL 无 DEFAULT）；全部 INSERT 查询带 uid 参数；
+  Deactivate*/GetCurrency 等查询已改 `WHERE uid=$1`；entry 列表查询 JOIN journals 取 journal_uid；
+  新增 GetJournalUIDByID / GetEventUIDByID / GetEventIDByUID / *ByUID 查询族 / *Dims 缓存查询。
+- `core/` 全包 uid 化并编译通过（实体 UID、交叉引用 *UID、接口签名、AuditFilter.Cursor 改 string）。
+- `service/` 全包编译通过（ClassificationLister 端口改 ClassificationDims/CurrencyIDByUID/CurrencyUIDByID；
+  expiration/reconcile/snapshot/system_rollup 已适配；delivery 用 PendingEvent{InternalID,Event}，
+  header 改 X-Ledger-Event-UID）。
+- `postgres/`：dims.go（per-pool id<->uid 缓存）、convert.go（newUID/uidToPG/pgToUID、
+  journalFromRow(ctx,dims,q)、entryCore、classification/journalType/currency/template/
+  accountPolicy/periodClose mapper 已 uid 化）；classification/currency/template/period/
+  account_policy 五个 store 已完成。
+
+待做（按序）：
+1. postgres/ledger_store.go：加 dims 字段；postJournalWithQueries 顶部把 EntryInput 的
+   currency/classification uid 一次性 resolve 成 resolvedEntry（内部 id+exponent+normalSide），
+   下游 precision/policy/locks/insert 全改用 resolved；JournalTypeUID/EventUID/ReversalOfUID
+   resolve；GetBalance(holder, currencyUID, classificationUID)；ReverseJournal(uid)；
+   ExecuteTemplate 路径；journalFromRow 调用点带 (ctx, s.dims, q)。
+2. postgres/precision.go / account_policy_enforce.go：签名改收 resolvedEntry（含 exponent/
+   normalSide/内部 id），删除对 core.EntryInput 内部 id 的引用。
+3. postgres/idempotency_match.go：entries 比对改在 resolved-id 空间或 uid 空间做一致比较。
+4. postgres/booking_store.go / event_store.go（GetPendingEvents 返回 delivery.PendingEvent，
+   转换需要 booking/journal uid join 或查询）/ reserver_store.go（uid 签名）/
+   reversal_fraction_store.go / pending_store.go / audit_store.go / query_provider.go /
+   platform_balance_store.go / rollup_adapter.go（新增 ClassificationDims/CurrencyIDByUID/
+   CurrencyUIDByID 实现 + snapshot/trends/trial/reconcile 查询的 uid 边界）。
+5. server/（handler 路径 {uid}、响应无 id 键）、ledger.go facade、cmd/ledger-cli、examples。
+6. 测试大军：internal/postgrestest seed helpers 改为“插入带 uid 并返回 uid 字符串”，
+   全部测试的 `.ID`→`.UID`、字段名 CurrencyID:→CurrencyUID: 等机械迁移。
+7. I-18 pin（响应体无 "id":" 键的机械扫描测试）+ openapi 全量重写 + ledger-react uid 化 +
+   CHANGELOG [0.4.0] + tag v0.4.0 / ledger-react-v0.2.0；armatrix 计划改“直升 v0.4.0”。
