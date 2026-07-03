@@ -1,7 +1,7 @@
 # ledger v0.4 — API 契约对齐（api-contract.md 收编）
 
 **Created**: 2026-07-03
-**Status**: Approved 2026-07-03（§6 全部拍板；uid 范围按 Aaron 裁定扩大到全部对外契约）
+**Status**: Done — v0.4.0 + ledger-react-v0.2.0 已 tag（2026-07-03） 2026-07-03（§6 全部拍板；uid 范围按 Aaron 裁定扩大到全部对外契约）
 **权威源**: `~/.claude/rules/api-contract.md`（26-07-03 拍板的跨边界数据契约唯一 SoT）
 **前置**: v0.3.1 已发布。**按全新 lib 对待（Aaron 2026-07-03 裁定）：不存在「存量数据」概念**——
 不设计任何回填/兼容路径，dev 库可随时重建；迁移只需对空库正确。
@@ -136,25 +136,8 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
 
 ## 附：P2 执行进度（2026-07-03，供接续会话使用）
 
-已完成（P2 全部完成，等待最终全量测试确认后 commit + tag v0.4.0）：
-- 非测试层全部 uid 化（core/postgres/service/server/presets/channel/facade/cmd/examples），
-  见 wip commit 4524f95 的说明。
-- migration 031 修正：011 seed 的两行 classifications 回填 gen_random_uuid()
-  （其余表按无存量前提直接 NOT NULL 无 DEFAULT）。
-- 测试大军完成：postgrestest seed helpers 返回 uid + 新 InternalID(t,pool,table,uid) helper；
-  全部 Go 测试迁移（core/presets/channel/service/delivery/server/postgres），
-  raw SQL 断言处用子查询 `(SELECT id FROM x WHERE uid=$n::uuid)` 解析；
-  service 内部数学类型（RollupQueueItem/BalanceCheckpoint/reconcile 行）保留内部 id。
-- I-18 pin：server.TestContract_NoInternalIDKeysInJSON（源级扫描无内部 id JSON 键）
-  + docs/INVARIANTS.md 新增 I-18 条目。
-- docs/openapi.yaml 全量 uid 化（version 0.4.0）；docs/COOKBOOK.md、docs/frontend.md 同步。
-- ledger-react 0.2.0：schema.ts 重新 codegen；types.ts/client.ts/hooks/pages 全 uid string；
-  typecheck 0 错、vitest 87/87、build 通过；web dogfood app tsc 通过。
-- CHANGELOG [0.4.0] 已写。
-- SystemRollupService.GetPlatformBalances/GetTotalLiabilityByAsset/SolvencyCheck 补 uid 化
-  （P2 初扫漏网）。
-
-待做：
-1. 最终 `go test -race ./...` 全绿确认 → commit → push → tag v0.4.0 + ledger-react-v0.2.0。
-2. armatrix 升级计划已另文（armatrix-docs/plans/2026-07-03-ledger-v0.3-upgrade.md），
-   改为直升 v0.4.0，适配清单加 ledger_adapter bigint→uuid 列（armatrix session 处理）。
+全部完成（2026-07-03）：`go test -race ./...` 全绿、`golangci-lint` 0 issues、
+`sqlc diff` 干净、ledger-react vitest 87/87 + typecheck + build 绿、web dogfood tsc 绿。
+commit 6dae461（P2 squash），tag `v0.4.0` + `ledger-react-v0.2.0` 已推送。
+armatrix 升级计划已改为直升 v0.4.0（armatrix-docs/plans/2026-07-03-ledger-v0.3-upgrade.md，
+适配清单含 uid 全面替换 + bigint→uuid 列迁移决策点）。
