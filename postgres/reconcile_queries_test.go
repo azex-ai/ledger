@@ -172,4 +172,3 @@ func TestReconcileAdapter_DuplicateIdempotencyKeys_Clean(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, dupes, "fresh DB should have no duplicate idempotency keys")
 }
-

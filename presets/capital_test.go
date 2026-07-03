@@ -70,8 +70,8 @@ func TestCapitalBundle_Templates_Balance(t *testing.T) {
 	injJournal, err := injTmpl.Render(params)
 	require.NoError(t, err)
 	assertBalanced(t, injJournal.Entries)
-	assert.Equal(t, core.EntryTypeDebit, injJournal.Entries[0].EntryType)   // custodial DR
-	assert.Equal(t, core.EntryTypeCredit, injJournal.Entries[1].EntryType)  // equity CR
+	assert.Equal(t, core.EntryTypeDebit, injJournal.Entries[0].EntryType)  // custodial DR
+	assert.Equal(t, core.EntryTypeCredit, injJournal.Entries[1].EntryType) // equity CR
 
 	// capital_withdraw: DR equity CR custodial
 	params.IdempotencyKey = "cap-wd-1"
@@ -80,8 +80,8 @@ func TestCapitalBundle_Templates_Balance(t *testing.T) {
 	wdJournal, err := wdTmpl.Render(params)
 	require.NoError(t, err)
 	assertBalanced(t, wdJournal.Entries)
-	assert.Equal(t, core.EntryTypeDebit, wdJournal.Entries[0].EntryType)   // equity DR
-	assert.Equal(t, core.EntryTypeCredit, wdJournal.Entries[1].EntryType)  // custodial CR
+	assert.Equal(t, core.EntryTypeDebit, wdJournal.Entries[0].EntryType)  // equity DR
+	assert.Equal(t, core.EntryTypeCredit, wdJournal.Entries[1].EntryType) // custodial CR
 }
 
 func TestCapitalBundle_Idempotent(t *testing.T) {

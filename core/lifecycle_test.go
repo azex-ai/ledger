@@ -12,8 +12,8 @@ func validLifecycle() *Lifecycle {
 		Initial:  "pending",
 		Terminal: []Status{"done", "failed"},
 		Transitions: map[Status][]Status{
-			"pending":    {"active", "failed"},
-			"active":     {"done", "failed"},
+			"pending": {"active", "failed"},
+			"active":  {"done", "failed"},
 		},
 	}
 }

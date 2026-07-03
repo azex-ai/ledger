@@ -36,16 +36,16 @@ const accountPolicyNoteMaxLen = 2000
 // holder"; ClassificationID == 0 means "all classifications for this
 // holder/currency". See docs/INVARIANTS.md I-17 for the enforcement contract.
 type AccountPolicy struct {
-	ID                int64                `json:"id"`
-	AccountHolder     int64                `json:"account_holder"`
-	CurrencyID        int64                `json:"currency_id"`
-	ClassificationID  int64                `json:"classification_id"`
-	Status            AccountPolicyStatus  `json:"status"`
-	MinBalance        decimal.Decimal      `json:"min_balance"`
-	EnforceMinBalance bool                 `json:"enforce_min_balance"`
-	Note              string               `json:"note"`
-	UpdatedAt         time.Time            `json:"updated_at"`
-	CreatedAt         time.Time            `json:"created_at"`
+	ID                int64               `json:"id"`
+	AccountHolder     int64               `json:"account_holder"`
+	CurrencyID        int64               `json:"currency_id"`
+	ClassificationID  int64               `json:"classification_id"`
+	Status            AccountPolicyStatus `json:"status"`
+	MinBalance        decimal.Decimal     `json:"min_balance"`
+	EnforceMinBalance bool                `json:"enforce_min_balance"`
+	Note              string              `json:"note"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+	CreatedAt         time.Time           `json:"created_at"`
 }
 
 // AccountPolicyInput is the input to AccountPolicyStore.SetPolicy. Setting a
@@ -53,14 +53,14 @@ type AccountPolicy struct {
 // journal/reservation writes it carries no idempotency key — SetPolicy is a
 // plain UPSERT keyed on (account_holder, currency_id, classification_id).
 type AccountPolicyInput struct {
-	AccountHolder     int64                `json:"account_holder"`
-	CurrencyID        int64                `json:"currency_id"`
-	ClassificationID  int64                `json:"classification_id"`
-	Status            AccountPolicyStatus  `json:"status"`
-	MinBalance        decimal.Decimal      `json:"min_balance"`
-	EnforceMinBalance bool                 `json:"enforce_min_balance"`
-	Note              string               `json:"note"`
-	ActorID           int64                `json:"actor_id"`
+	AccountHolder     int64               `json:"account_holder"`
+	CurrencyID        int64               `json:"currency_id"`
+	ClassificationID  int64               `json:"classification_id"`
+	Status            AccountPolicyStatus `json:"status"`
+	MinBalance        decimal.Decimal     `json:"min_balance"`
+	EnforceMinBalance bool                `json:"enforce_min_balance"`
+	Note              string              `json:"note"`
+	ActorID           int64               `json:"actor_id"`
 }
 
 func (i AccountPolicyInput) Validate() error {

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: azex-ai/ledger
-  version: 2.0.0
+  version: 0.3.0
   description: |
     Production-grade classification-driven double-entry ledger engine.
     Decimal amounts are encoded as strings to preserve precision.

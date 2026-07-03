@@ -14,7 +14,7 @@ func TestCallbackDeliverer_Deliver(t *testing.T) {
 	ctx := context.Background()
 	event := core.Event{
 		ClassificationCode: "deposit",
-		BookingID:        1,
+		BookingID:          1,
 		FromStatus:         "pending",
 		ToStatus:           "confirmed",
 	}

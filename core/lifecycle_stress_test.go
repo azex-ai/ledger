@@ -15,8 +15,8 @@ func TestLifecycle_MultipleTerminals(t *testing.T) {
 		Initial:  "pending",
 		Terminal: []Status{"confirmed", "rejected", "expired"},
 		Transitions: map[Status][]Status{
-			"pending":    {"reviewing", "rejected", "expired"},
-			"reviewing":  {"confirmed", "rejected"},
+			"pending":   {"reviewing", "rejected", "expired"},
+			"reviewing": {"confirmed", "rejected"},
 		},
 	}
 	require.NoError(t, lc.Validate())

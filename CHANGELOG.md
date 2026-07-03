@@ -13,6 +13,8 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-03
+
 ### Go module — Added (financial-core hardening, design: docs/plans/2026-07-02-financial-core-hardening-design.md)
 - **Effective date** (migration 025): `journals.effective_at` / `journal_entries.effective_at`
   separate business date from posting date. Backdating allowed (future rejected, 5min
@@ -45,6 +47,22 @@ Entries below note which artifact a change affects.
 - Invariants I-14 (effective-date consistency), I-15 (close line is a hard write
   barrier), I-16 (precision bounded by exponent), I-17 (account policy enforcement);
   I-2 revised for cumulative partial reversals; I-11 extended to settling holds.
+- **Inbound webhook replay cache** (migration 030): identical callbacks resent
+  inside the signature timestamp window are rejected with 409 (previously relied
+  solely on downstream transition idempotency). Wired in service mode via
+  `Server.SetWebhookNonceRecorder`; optional for library consumers.
+- `Lifecycle.Version` field (0/1 equivalent today) — a hook for future
+  lifecycle-shape evolution.
+
+### Go module — Breaking (v0.3 cleanups)
+- All `Metadata` fields are now `map[string]string` (`Booking`, `TransitionInput`,
+  `Event`, `channel.CallbackPayload`) — matching journals/pending. Pre-existing
+  JSONB rows with non-string values are read back as their compact JSON text.
+- `Reserver.Settle` / `Reserver.SettlePartial` take `SettleInput` /
+  `SettlePartialInput` structs (Input + Validate discipline).
+- `@azex/ledger-react`: `createCurrency` requires `exponent`; the currencies
+  form gains a required decimal-places field (0 is legal — JPY — so the field
+  cannot default).
 
 ### Go module — Added
 - **Audit / platform reads over HTTP** — the read capabilities previously only

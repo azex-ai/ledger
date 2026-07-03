@@ -29,9 +29,9 @@ func NewSnapshotExtraStore(pool *pgxpool.Pool) *SnapshotExtraStore {
 
 // Compile-time interface assertions.
 var (
-	_ core.SparseSnapshotter  = (*SnapshotExtraStore)(nil)
+	_ core.SparseSnapshotter   = (*SnapshotExtraStore)(nil)
 	_ core.SnapshotCountReader = (*SnapshotExtraStore)(nil)
-	_ core.LiveBalanceMerger  = (*SnapshotExtraStore)(nil)
+	_ core.LiveBalanceMerger   = (*SnapshotExtraStore)(nil)
 )
 
 // --- SparseSnapshotter ---

@@ -17,11 +17,11 @@ func TestReservationStatus_AllTransitions(t *testing.T) {
 	}
 
 	allowed := map[[2]ReservationStatus]bool{
-		{ReservationStatusActive, ReservationStatusSettling}:    true,
-		{ReservationStatusActive, ReservationStatusSettled}:     true, // direct settle path
-		{ReservationStatusActive, ReservationStatusReleased}:    true,
-		{ReservationStatusSettling, ReservationStatusSettled}:   true,
-		{ReservationStatusSettling, ReservationStatusReleased}:  true,
+		{ReservationStatusActive, ReservationStatusSettling}:   true,
+		{ReservationStatusActive, ReservationStatusSettled}:    true, // direct settle path
+		{ReservationStatusActive, ReservationStatusReleased}:   true,
+		{ReservationStatusSettling, ReservationStatusSettled}:  true,
+		{ReservationStatusSettling, ReservationStatusReleased}: true,
 	}
 
 	for _, from := range all {

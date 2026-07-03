@@ -81,4 +81,3 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 
 	return len(events), nil
 }
-

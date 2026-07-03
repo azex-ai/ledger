@@ -47,12 +47,12 @@ type PendingTimeoutSweeper interface {
 type AddPendingInput struct {
 	// AccountHolder is the positive user ID.  The system counterpart (-AccountHolder)
 	// is derived automatically.
-	AccountHolder  int64           `json:"account_holder"`
-	CurrencyID     int64           `json:"currency_id"`
-	Amount         decimal.Decimal `json:"amount"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	ActorID        int64           `json:"actor_id"`
-	Source         string          `json:"source"`
+	AccountHolder  int64             `json:"account_holder"`
+	CurrencyID     int64             `json:"currency_id"`
+	Amount         decimal.Decimal   `json:"amount"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
 	Metadata       map[string]string `json:"metadata"`
 }
 
@@ -74,12 +74,12 @@ func (i AddPendingInput) Validate() error {
 
 // ConfirmPendingInput is the input to ConfirmPending.
 type ConfirmPendingInput struct {
-	AccountHolder  int64           `json:"account_holder"`
-	CurrencyID     int64           `json:"currency_id"`
-	Amount         decimal.Decimal `json:"amount"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	ActorID        int64           `json:"actor_id"`
-	Source         string          `json:"source"`
+	AccountHolder  int64             `json:"account_holder"`
+	CurrencyID     int64             `json:"currency_id"`
+	Amount         decimal.Decimal   `json:"amount"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
 	Metadata       map[string]string `json:"metadata"`
 }
 
@@ -101,13 +101,13 @@ func (i ConfirmPendingInput) Validate() error {
 
 // CancelPendingInput is the input to CancelPending.
 type CancelPendingInput struct {
-	AccountHolder  int64           `json:"account_holder"`
-	CurrencyID     int64           `json:"currency_id"`
-	Amount         decimal.Decimal `json:"amount"`
-	Reason         string          `json:"reason"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	ActorID        int64           `json:"actor_id"`
-	Source         string          `json:"source"`
+	AccountHolder  int64             `json:"account_holder"`
+	CurrencyID     int64             `json:"currency_id"`
+	Amount         decimal.Decimal   `json:"amount"`
+	Reason         string            `json:"reason"`
+	IdempotencyKey string            `json:"idempotency_key"`
+	ActorID        int64             `json:"actor_id"`
+	Source         string            `json:"source"`
 	Metadata       map[string]string `json:"metadata"`
 }
 

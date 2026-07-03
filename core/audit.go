@@ -41,10 +41,10 @@ type BalanceTrendReader interface {
 // It includes the classification + currency dimension so callers can filter
 // without extra lookups.
 type JournalAuditRow struct {
-	Journal          Journal   `json:"journal"`
-	AccountHolder    int64     `json:"account_holder"`
-	CurrencyID       int64     `json:"currency_id"`
-	ClassificationID int64     `json:"classification_id"`
+	Journal          Journal `json:"journal"`
+	AccountHolder    int64   `json:"account_holder"`
+	CurrencyID       int64   `json:"currency_id"`
+	ClassificationID int64   `json:"classification_id"`
 }
 
 // BookingTrace bundles a booking with all its events and linked journals.
