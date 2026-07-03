@@ -3,7 +3,8 @@
 **Created**: 2026-07-03
 **Status**: Draft — pending Aaron review（§6 三个拍板点）
 **权威源**: `~/.claude/rules/api-contract.md`（26-07-03 拍板的跨边界数据契约唯一 SoT）
-**前置**: v0.3.0 已发布。仍处「无外部用户、允许单步破坏性变更」窗口。
+**前置**: v0.3.1 已发布。**按全新 lib 对待（Aaron 2026-07-03 裁定）：不存在「存量数据」概念**——
+不设计任何回填/兼容路径，dev 库可随时重建；迁移只需对空库正确。
 **下游**: armatrix 升级计划（`armatrix-docs/plans/2026-07-03-ledger-v0.3-upgrade.md`）
 **改为直接对齐本批终态（v0.4.0），只适配一次**——该文档的前置条件与适配清单在本批完成后同步修订。
 
@@ -51,10 +52,11 @@
 `account_policies`、`period_closes`
 
 ```sql
-ALTER TABLE journals ADD COLUMN uid UUID NOT NULL DEFAULT gen_random_uuid();
+-- 无存量前提：列直接 NOT NULL、无 DEFAULT 兜底——uid 一律由 Go 侧 UUIDv7 生成，
+-- 不存在两种来源的 uid（插入路径漏传即报错，好事）。
+ALTER TABLE journals ADD COLUMN uid UUID NOT NULL;
 CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
--- 其余实体同型。存量回填用 gen_random_uuid()（v4）；新行由 Go 侧生成 UUIDv7
--- （PG17 无内置 uuidv7()；v4 回填只损失时序局部性，唯一性不受影响）。
+-- 其余实体同型。
 ```
 
 ### Go 侧
@@ -120,4 +122,4 @@ CREATE UNIQUE INDEX uq_journals_uid ON journals (uid);
    若你要严格 header-only，payload 比对改为「key → 请求体哈希」存表，工程量 +1 张表。
 2. **Library mode 接口保持 int64**（uid 只在 HTTP/webhook 表面）。推荐如此——armatrix
    的 ledger_adapter 零改动；反之全接口切 uid 会让每个进程内调用多一次 uid→id 解析。
-3. **存量 uid 回填用 v4**（新行 v7）。推荐接受——回填只发生一次，时序性只影响索引局部性。
+3. ~~存量 uid 回填~~ **已消解**（无存量裁定）：uid 全部 Go 侧 UUIDv7，无回填、无双来源。
