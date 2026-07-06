@@ -29,7 +29,13 @@ function LoginForm() {
       });
       if (res.ok) {
         const from = searchParams.get("from");
-        router.replace(from && from.startsWith("/") ? from : "/");
+        // Same-origin paths only: reject protocol-relative (//host) and
+        // backslash variants browsers normalize to //host.
+        const safeFrom =
+          from && from.startsWith("/") && !from.startsWith("//") && !from.startsWith("/\\")
+            ? from
+            : "/";
+        router.replace(safeFrom);
         router.refresh();
         return;
       }

@@ -4,9 +4,10 @@
 -- default as the safety net. From here the worker's partition job
 -- (service/partition.go) keeps the horizon ahead of now.
 --
--- The whole DO block is one statement — atomic. The deferred journal-balance
--- constraint trigger re-validates at commit, when every moved journal is
--- complete again.
+-- The whole DO block is one statement — atomic. The moved rows need no
+-- re-validation: journal balance is enforced at the application layer on
+-- insert (the old deferred constraint trigger was dropped in migration 018),
+-- and this move copies already-validated journals verbatim.
 DO $$
 DECLARE
     min_month date;

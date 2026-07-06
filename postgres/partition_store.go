@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -48,9 +50,14 @@ func (s *PartitionStore) EnsureMonthlyPartitions(ctx context.Context, now time.T
 		month := start.AddDate(0, i, 0)
 		didCreate, err := s.createPartition(ctx, month)
 		if err != nil {
-			// Likely rows in the default partition overlapping this range —
-			// rebalance moves them into named partitions and retries the
-			// whole horizon.
+			// Only escalate to the (heavily locking) rebalance when the
+			// failure is specifically "default partition holds rows in this
+			// range" (SQLSTATE 23514). Transient errors (timeouts, network)
+			// must surface to the worker's error log instead of triggering
+			// a full-table lock.
+			if !isDefaultOverlapError(err) {
+				return created, err
+			}
 			rebalanced, rbErr := s.rebalanceDefault(ctx, now, monthsAhead)
 			if rbErr != nil {
 				return created, fmt.Errorf("postgres: partition: create %s failed (%w); rebalance also failed: %w", partitionName(month), err, rbErr)
@@ -107,10 +114,27 @@ func (s *PartitionStore) RebalanceDefault(ctx context.Context, now time.Time, mo
 	return s.rebalanceDefault(ctx, now, monthsAhead)
 }
 
+// isDefaultOverlapError reports whether err is PostgreSQL check_violation
+// (SQLSTATE 23514) — raised when creating a partition whose range overlaps
+// rows currently in the default partition. That is the only error the
+// rebalance fallback should fire on.
+func isDefaultOverlapError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23514"
+}
+
 // rebalanceDefault performs the migration-037 dance at runtime: inside one
 // transaction, detach the default partition, create every monthly partition
 // needed to cover its rows plus the requested horizon, move the rows into
 // their monthly homes, and re-attach the emptied default.
+//
+// LOCKING TRADEOFF: DETACH/ATTACH here are non-CONCURRENT (CONCURRENTLY is
+// forbidden inside a transaction, and this dance needs atomicity), so the
+// whole transaction — including the bulk row move — holds an ACCESS
+// EXCLUSIVE lock on journal_entries, blocking every ledger read and write
+// until it commits. With an active partition job the default partition is
+// empty or near-empty and this is milliseconds; it only becomes expensive
+// after the horizon has already lapsed. See RUNBOOK §11.
 func (s *PartitionStore) rebalanceDefault(ctx context.Context, now time.Time, monthsAhead int) ([]string, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {

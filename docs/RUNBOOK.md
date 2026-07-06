@@ -501,6 +501,14 @@ skewed clock somewhere):
 SELECT min(created_at), max(created_at), count(*) FROM journal_entries_default;
 ```
 
+**Blast radius of the automatic rebalance**: the self-heal detaches and
+re-attaches the default partition in one transaction (non-CONCURRENT — it
+needs atomicity), which holds an ACCESS EXCLUSIVE lock on `journal_entries`
+for the duration of the row move. Near-empty default = milliseconds; a large
+stranded backlog = every ledger read/write blocks until it commits. If the
+row count above is large, prefer a maintenance window: scale writers down,
+let the partition job run once, scale back up.
+
 ### Archiving old partitions
 
 The ledger is append-only, so old months are cold immutable data. When a
