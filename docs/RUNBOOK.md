@@ -267,6 +267,33 @@ Webhook delivery is **at-least-once**, not exactly-once and not ordered:
   the order requests arrive in; if ordering matters, compare event
   timestamps/IDs from the payload itself, not arrival order.
 
+### Dead-letter handling & retention
+
+Dead-lettered events (`delivery_status = 'dead'`, alert
+`LedgerEventDeliveryDead`) are **parked, not lost** — the event row is the
+system of record, delivery bookkeeping just marks it undeliverable.
+
+1. Find them:
+   ```sql
+   SELECT id, classification_code, to_status, attempts, occurred_at
+     FROM events WHERE delivery_status = 'dead' ORDER BY id;
+   ```
+2. Fix the cause (subscriber down / signature mismatch / bad URL — see the
+   subscriber checks above).
+3. Requeue — reset the delivery bookkeeping; the event payload is untouched:
+   ```sql
+   UPDATE events SET delivery_status = 'pending', attempts = 0, next_attempt_at = now()
+    WHERE delivery_status = 'dead' AND id IN (...);
+   ```
+
+**Retention policy**: `events` rows are part of the audit trail (each links
+a booking transition to its journal) and are **never deleted** — the
+delivery columns ride on the same row, so there is no separate delivery
+table to prune. Growth is one row per transition, cheap relative to
+`journal_entries`. If events volume ever warrants lifecycle management, the
+sanctioned path is the same as journal entries — range-partition and
+archive detached partitions (RUNBOOK §11) — not `DELETE`.
+
 ---
 
 ## 6. Idempotency collision spike
