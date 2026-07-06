@@ -41,6 +41,9 @@ See `values.yaml` for the full list with comments.
 | `metrics.serviceMonitor.enabled` | `false` | Creates a Prometheus Operator `ServiceMonitor` (requires the monitoring.coreos.com CRDs). |
 | `metrics.prometheusRules.enabled` | `false` | Creates a `PrometheusRule` with alerts mapped to `docs/RUNBOOK.md` scenarios (thresholds tunable under `metrics.prometheusRules.thresholds`). |
 | `ingress.enabled` | `false` | Set to `true` and provide hosts to expose externally. |
+| `podDisruptionBudget.enabled` | `true` | PDB keeping ≥1 replica through node drains. |
+| `autoscaling.enabled` | `false` | HPA on CPU (and optionally memory); worker jobs are multi-replica-safe. |
+| `networkPolicy.enabled` | `false` | Default-deny ingress to the HTTP port except `networkPolicy.ingressFrom`. |
 
 ## Verifying
 

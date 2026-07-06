@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Default-deny ingress except from allowed sources; egress open to the
+database and DNS. The ledger initiates outbound calls only to PostgreSQL,
+webhook subscriber endpoints, and (optionally) an OTLP collector — tighten
+egress further per environment via networkPolicy.extraEgress.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "ledger.fullname" . }}
+  labels:
+    {{- include "ledger.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ledger.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- if .Values.networkPolicy.ingressFrom }}
+        {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+  egress:
+    # DNS
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL + webhook/OTLP targets — restrict via extraEgress if needed.
+    {{- if .Values.networkPolicy.extraEgress }}
+    {{- toYaml .Values.networkPolicy.extraEgress | nindent 4 }}
+    {{- else }}
+    - {}
+    {{- end }}
+{{- end }}

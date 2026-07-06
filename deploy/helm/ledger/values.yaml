@@ -97,6 +97,30 @@ securityContext:
   readOnlyRootFilesystem: true
   runAsUser: 65532
 
+# Keep at least one replica up through voluntary disruptions (node drains).
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# HPA — off by default; rollup/expiration workers scale safely with replicas
+# (SKIP LOCKED + advisory locks), so CPU-based autoscaling is fine to enable.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: ""
+
+# NetworkPolicy — off by default (requires a CNI that enforces it).
+# ingressFrom: list of NetworkPolicy peers allowed to reach the HTTP port
+#   (default: any pod in the namespace).
+# extraEgress: additional egress rules (default: allow all egress + DNS).
+networkPolicy:
+  enabled: false
+  ingressFrom: []
+  extraEgress: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
