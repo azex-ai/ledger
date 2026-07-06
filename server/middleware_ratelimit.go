@@ -130,8 +130,8 @@ func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {
 }
 
 // clientIP extracts the request peer IP. RemoteAddr is the socket peer by
-// default; with TRUST_PROXY_HEADERS=true it was rewritten by
-// trustedProxyRealIP (middleware_realip.go) from proxy-set headers.
+// default; when TRUSTED_PROXY_CIDRS is set and the peer is a trusted proxy it
+// was rewritten by trustedProxyRealIP (middleware_realip.go) to the real client.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

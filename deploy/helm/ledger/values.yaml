@@ -28,10 +28,13 @@ apiKeys: ""
 # CORS — required when env != "dev". Set to your frontend origin.
 corsAllowedOrigin: ""
 
-# Set true only when ledgerd is reachable exclusively through a trusted
-# proxy/ingress that sets X-Real-IP / X-Forwarded-For — enables real client
-# IPs for rate limiting and access logs.
-trustProxyHeaders: false
+# Comma-separated CIDR ranges of your trusted edge proxies / ingress (e.g.
+# "10.0.0.0/8,172.16.0.0/12"). When set, real client IPs are derived from
+# X-Forwarded-For / X-Real-IP / True-Client-IP for rate limiting and access
+# logs — but ONLY for requests whose socket peer is inside these ranges, so a
+# direct caller cannot spoof its IP. Empty = headers never trusted (socket
+# peer is used). An invalid value fails pod startup fast.
+trustedProxyCIDRs: ""
 
 # Schema migrations. Default: every pod runs migrations at startup
 # (MIGRATE_MODE=auto — fine for small deployments; golang-migrate takes a
