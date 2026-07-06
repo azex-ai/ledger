@@ -61,16 +61,36 @@ func run() error {
 		return fmt.Errorf("setup tracing: %w", err)
 	}
 
-	// Run migrations (convert postgres:// to pgx5:// for migrate)
-	migrateURL := databaseURL
-	if strings.HasPrefix(migrateURL, "postgres://") {
-		migrateURL = "pgx5://" + migrateURL[len("postgres://"):]
-	} else if strings.HasPrefix(migrateURL, "postgresql://") {
-		migrateURL = "pgx5://" + migrateURL[len("postgresql://"):]
+	// Migrations. MIGRATE_MODE decouples schema changes from pod startup:
+	//   auto (default) — run migrations, then serve (single-binary deploys)
+	//   only           — run migrations and exit 0 (pre-upgrade Job; the
+	//                    serving pods then run with "off" and no DDL rights)
+	//   off            — skip; another process owns migrations
+	migrateMode := os.Getenv("MIGRATE_MODE")
+	if migrateMode == "" {
+		migrateMode = "auto"
 	}
-	logger.Info("running migrations")
-	if err := postgres.Migrate(migrateURL); err != nil {
-		return fmt.Errorf("migrate: %w", err)
+	switch migrateMode {
+	case "auto", "only":
+		// Convert postgres:// to pgx5:// for migrate.
+		migrateURL := databaseURL
+		if strings.HasPrefix(migrateURL, "postgres://") {
+			migrateURL = "pgx5://" + migrateURL[len("postgres://"):]
+		} else if strings.HasPrefix(migrateURL, "postgresql://") {
+			migrateURL = "pgx5://" + migrateURL[len("postgresql://"):]
+		}
+		logger.Info("running migrations", "mode", migrateMode)
+		if err := postgres.Migrate(migrateURL); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+		if migrateMode == "only" {
+			logger.Info("migrations applied; exiting (MIGRATE_MODE=only)")
+			return nil
+		}
+	case "off":
+		logger.Info("skipping migrations (MIGRATE_MODE=off)")
+	default:
+		return fmt.Errorf("invalid MIGRATE_MODE %q: want auto|only|off", migrateMode)
 	}
 
 	// Create connection pool

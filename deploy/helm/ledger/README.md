@@ -36,6 +36,7 @@ See `values.yaml` for the full list with comments.
 | `existingSecret` | `""` | Name of an existing K8s Secret holding `DATABASE_URL`. |
 | `apiKeys` | `""` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). **Required in production**. |
 | `corsAllowedOrigin` | `""` | Required when `env != "dev"`. |
+| `migrations.job.enabled` | `false` | Runs migrations from a pre-install/pre-upgrade hook Job (`MIGRATE_MODE=only`); serving pods start with `MIGRATE_MODE=off` and need no DDL privileges. |
 | `metrics.enabled` | `true` | Adds Prometheus scrape annotations. |
 | `metrics.serviceMonitor.enabled` | `false` | Creates a Prometheus Operator `ServiceMonitor` (requires the monitoring.coreos.com CRDs). |
 | `metrics.prometheusRules.enabled` | `false` | Creates a `PrometheusRule` with alerts mapped to `docs/RUNBOOK.md` scenarios (thresholds tunable under `metrics.prometheusRules.thresholds`). |

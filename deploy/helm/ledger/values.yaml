@@ -28,6 +28,18 @@ apiKeys: ""
 # CORS — required when env != "dev". Set to your frontend origin.
 corsAllowedOrigin: ""
 
+# Schema migrations. Default: every pod runs migrations at startup
+# (MIGRATE_MODE=auto — fine for small deployments; golang-migrate takes a
+# lock so racing pods are safe). Enable the Job to run migrations once from
+# a pre-install/pre-upgrade hook instead; serving pods then start with
+# MIGRATE_MODE=off and need no DDL privileges.
+migrations:
+  job:
+    enabled: false
+    # Optional: a different key in the DB secret holding a DDL-capable URL,
+    # so serving pods can use a least-privilege role.
+    databaseUrlKey: ""
+
 # Optional Prometheus scrape annotations on the Service.
 metrics:
   enabled: true

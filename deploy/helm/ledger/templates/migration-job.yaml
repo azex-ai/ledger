@@ -1,0 +1,58 @@
+{{- if .Values.migrations.job.enabled }}
+{{/*
+Pre-install/pre-upgrade hook: applies schema migrations from a one-shot Job
+BEFORE the new Deployment rolls out, instead of racing them from every pod
+at startup. The serving pods then run with MIGRATE_MODE=off (deployment.yaml)
+and can use a database role without DDL privileges.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "ledger.fullname" . }}-migrate
+  labels:
+    {{- include "ledger.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        {{- include "ledger.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: MIGRATE_MODE
+              value: "only"
+            - name: ENV
+              value: {{ .Values.env | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ledger.dbSecretName" . }}
+                  key: {{ .Values.migrations.job.databaseUrlKey | default (.Values.existingSecretKey | default "DATABASE_URL") }}
+            {{- if .Values.corsAllowedOrigin }}
+            - name: CORS_ALLOWED_ORIGIN
+              value: {{ .Values.corsAllowedOrigin | quote }}
+            {{- end }}
+            {{- if .Values.apiKeys }}
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "ledger.fullname" . }}-config
+                  key: API_KEYS
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

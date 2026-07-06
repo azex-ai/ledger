@@ -31,6 +31,12 @@ spec:
           env:
             - name: ENV
               value: {{ .Values.env | quote }}
+            {{- if .Values.migrations.job.enabled }}
+            # Migrations run in the pre-upgrade Job (migration-job.yaml);
+            # serving pods never execute DDL.
+            - name: MIGRATE_MODE
+              value: "off"
+            {{- end }}
             - name: HTTP_PORT
               value: "{{ .Values.service.targetPort }}"
             - name: DATABASE_URL
