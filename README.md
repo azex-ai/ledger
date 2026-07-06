@@ -154,11 +154,29 @@ Observability (logger / metrics / tracing) is opt-in — see [Observability](#ob
 ```bash
 git clone https://github.com/azex-ai/ledger.git
 cd ledger
+
+# API keys are name:scope:secret triples (scope: read|write|admin).
+# Generate one per consumer — the name shows up in access logs (audit):
+export API_KEYS="ops:admin:$(openssl rand -hex 32),app:write:$(openssl rand -hex 32)"
+
+export ENV=dev
+export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+export CORS_ALLOWED_ORIGIN=http://localhost:3000
+export EVM_WEBHOOK_SECRET=$(openssl rand -hex 32)
+
 docker compose up --build
 ```
 
 - API: <http://localhost:8080/api/v1/system/health>
 - Frontend: <http://localhost:3000>
+
+Every endpoint except the health probes requires `Authorization: Bearer
+<secret>` — scope semantics and the full key spec live in
+[docs/api.md](docs/api.md#authentication):
+
+```bash
+curl -H "Authorization: Bearer <the-admin-secret>" http://localhost:8080/api/v1/currencies
+```
 
 ## Quick Start -- Frontend (React)
 
