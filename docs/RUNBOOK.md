@@ -472,6 +472,34 @@ to the public internet:
 - Library-mode consumption is unaffected: there is no HTTP surface, and your
   own application owns the auth boundary.
 
+### Trusting proxy headers for client IP (`TRUSTED_PROXY_CIDRS`)
+
+The per-IP rate limiter and access logs key on `r.RemoteAddr`, which is the
+socket peer by default. Behind a proxy that is fine for security but useless
+for attribution — every request appears to come from the proxy, so all
+clients share one rate-limit bucket. Set `TRUSTED_PROXY_CIDRS` to the CIDR
+ranges of your edge proxies/ingress to derive the real client IP instead.
+
+The trust is **peer-gated**: headers are honored only when the socket peer is
+itself inside a configured range, so a direct caller (anyone who can reach the
+pod outside the proxy path) cannot forge `X-Forwarded-For` / `X-Real-IP` /
+`True-Client-IP` to evade the limiter or poison logs. This is why the flag
+takes CIDRs rather than a bare on/off toggle — the ranges are the trust
+boundary, machine-enforced.
+
+- **Precondition still holds**: the pod must be reachable *only* through those
+  proxies. In Kubernetes the pod/ClusterIP is directly reachable in-cluster,
+  so include only the ingress ranges you actually front the service with, and
+  use a NetworkPolicy to block direct pod access from other workloads.
+- Invalid CIDRs fail pod startup fast (no silent fallback to "trust nothing").
+- Leaving it empty is the safe default: no header is trusted, IPs are the
+  socket peer. If you rely on the limiter for abuse control behind a proxy and
+  see all traffic in one bucket, this is the knob you forgot.
+
+Enabling it in a deployment that is *also* directly reachable, or setting
+ranges wider than your real proxies, reopens IP spoofing of the rate limiter
+and access logs — treat that the same as the exposed-port incident below.
+
 ### If you find the port open to the public internet
 
 Treat it the same as any other exposed-data incident:

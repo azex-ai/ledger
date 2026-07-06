@@ -138,7 +138,7 @@ In-memory per-IP token bucket (single-instance only):
 - Mutations (`POST`/`PUT`/`PATCH`/`DELETE`): **100 req/min/IP**
 - Reads (`GET`/`HEAD`): **1000 req/min/IP**
 
-When exceeded, the response is `429` with code `10401` and `Retry-After: 60`. Behind a load balancer you must terminate `X-Forwarded-For` correctly or all traffic shares one bucket. For HA deployments replace with a Redis-backed limiter.
+When exceeded, the response is `429` with code `10401` and `Retry-After: 60`. Behind a load balancer, set `TRUSTED_PROXY_CIDRS` to your proxy ranges so the real client IP is used for keying (see the RUNBOOK "Deployment security boundary" section); otherwise all proxied traffic shares one bucket. For HA deployments replace with a Redis-backed limiter.
 
 ### Body size limit
 

@@ -41,6 +41,20 @@ auth, backup/DR, alerting closure, data lifecycle, deploy hygiene.
   `Reserve` (role=available only) always failed — bench-only, CI never runs
   benchmarks. Now seeds a dedicated available-role wallet.
 
+### Go module — Security
+- **Trusted-proxy client-IP resolution** (BREAKING): replaced the
+  `TRUST_PROXY_HEADERS` boolean with `TRUSTED_PROXY_CIDRS`, a comma-separated
+  list of trusted edge-proxy CIDR ranges. Proxy headers (`X-Forwarded-For`
+  walked right-to-left skipping trusted hops, then `X-Real-IP` /
+  `True-Client-IP`) are honored **only** when the socket peer is inside a
+  configured range, and every candidate is `netip`-validated — so a direct
+  caller can no longer spoof its IP past the rate limiter or into access logs,
+  and non-IP garbage can no longer create unbounded rate-limiter buckets.
+  Migration: deployments that set `TRUST_PROXY_HEADERS=true` must set
+  `TRUSTED_PROXY_CIDRS` to their ingress/proxy ranges instead; an invalid value
+  fails boot. (`server/middleware_realip.go`, `server/server.go`,
+  deploy/helm, docs/RUNBOOK.md, README.md)
+
 ### @azex/ledger-react + web — Changed
 - **Dashboard credential model** (BREAKING): `NEXT_PUBLIC_API_KEY` /
   `NEXT_PUBLIC_API_URL` are gone. The browser talks to a same-origin BFF

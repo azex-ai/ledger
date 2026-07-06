@@ -753,7 +753,7 @@ The service entry point reads:
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply, `OTEL_SERVICE_NAME` defaults to `ledgerd`) | (tracing disabled) |
 | `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` |
-| `TRUST_PROXY_HEADERS` | `true` = derive client IP from `X-Real-IP` / last `X-Forwarded-For` hop for rate limiting and logs. Enable ONLY behind a trusted edge proxy that sets those headers; otherwise callers can spoof their IP. | `false` (socket peer) |
+| `TRUSTED_PROXY_CIDRS` | Comma-separated CIDR ranges of your trusted edge proxies (e.g. `10.0.0.0/8,172.16.0.0/12`). When set, the client IP is derived from `X-Forwarded-For` (walked right-to-left, skipping trusted hops) / `X-Real-IP` / `True-Client-IP` for rate limiting and logs — but **only** for requests whose socket peer is inside these ranges, so a direct caller cannot spoof its IP. Every candidate is IP-validated. Invalid value = startup error. | (empty; socket peer) |
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) are set in `cmd/ledgerd/main.go`.
 

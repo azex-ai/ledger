@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"sync/atomic"
@@ -83,11 +84,13 @@ type Config struct {
 	CORSAllowOrigin string // exact origin to allow; empty in dev = "*"
 	APIKeys         []APIKey
 	MaxBodyBytes    int64 // request body cap; default 256 KB
-	// TrustProxyHeaders enables client-IP extraction from X-Real-IP /
-	// X-Forwarded-For (last hop). Enable ONLY when every request reaches
-	// ledgerd through a trusted edge proxy that sets those headers —
-	// otherwise callers can spoof their IP past the rate limiter.
-	TrustProxyHeaders bool
+	// TrustedProxyCIDRs lists the CIDR ranges of trusted edge proxies. When
+	// non-empty, client-IP extraction from X-Forwarded-For / X-Real-IP /
+	// True-Client-IP is enabled, but ONLY for requests whose socket peer is
+	// inside one of these ranges — a direct caller (peer outside the ranges)
+	// can never spoof its IP past the rate limiter. Empty = headers never
+	// trusted (r.RemoteAddr stays the socket peer).
+	TrustedProxyCIDRs []netip.Prefix
 }
 
 // LoadConfig reads server config from env. Returns an error in production
@@ -117,12 +120,17 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	trustedCIDRs, err := parseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"))
+	if err != nil {
+		return nil, fmt.Errorf("server: invalid TRUSTED_PROXY_CIDRS: %w", err)
+	}
+
 	return &Config{
 		Env:               env,
 		CORSAllowOrigin:   corsOrigin,
 		APIKeys:           keys,
 		MaxBodyBytes:      maxBytes,
-		TrustProxyHeaders: os.Getenv("TRUST_PROXY_HEADERS") == "true",
+		TrustedProxyCIDRs: trustedCIDRs,
 	}, nil
 }
 
@@ -230,10 +238,13 @@ func NewWithConfig(
 	// auth/body-limit so OPTIONS preflight short-circuits without a key; body
 	// limit before rate limit before auth so we reject hostile traffic cheaply.
 	r.Use(middleware.RequestID)
-	if cfg.TrustProxyHeaders {
+	if len(cfg.TrustedProxyCIDRs) > 0 {
 		// Deliberately NOT chi's middleware.RealIP: that trusted
 		// client-controlled headers unconditionally (GHSA-3fxj-6jh8-hvhx).
-		r.Use(trustedProxyRealIP)
+		// trustedProxyRealIP only rewrites when the socket peer is a trusted
+		// proxy, so direct callers cannot spoof their IP.
+		slog.Info("server: trusting proxy headers for client IP", "trusted_proxy_cidrs", len(cfg.TrustedProxyCIDRs))
+		r.Use(trustedProxyRealIP(cfg.TrustedProxyCIDRs))
 	}
 	r.Use(middleware.Recoverer)
 	r.Use(requestLoggerMiddleware)
