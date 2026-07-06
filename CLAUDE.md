@@ -145,6 +145,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
 | `docs/DR.md` | Backup & disaster recovery: PITR, RPO/RTO, restore drill, invariant-based verification |
+| `docs/CAPACITY.md` | Benchmark baseline, sizing guide, suggested SLOs, scaling signals |
 | `docs/openapi.yaml` | Machine-readable OpenAPI 3.1 spec |
 | `docs/frontend.md` | @azex/ledger-react usage guide + full API reference |
 | `docs/COOKBOOK.md` | Business recipes: buy credits (FX rate), discounts, multi-currency, reserve→settle, cash-out, expiry/insufficient edges |

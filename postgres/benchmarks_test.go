@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -119,14 +120,26 @@ func BenchmarkReserveSettle(b *testing.B) {
 	store, deps := setupBenchFixture(b, pool)
 	reserver := postgres.NewReserverStore(pool, store)
 
+	// Reserve only counts classifications tagged role=available (the shared
+	// fixture's main_wallet is role-less on purpose), so seed a dedicated
+	// available-role wallet for the reserve path.
+	classStore := postgres.NewClassificationStore(pool)
+	wallet, err := classStore.CreateClassification(context.Background(), core.ClassificationInput{
+		Code: fmt.Sprintf("bench_avail_%d", time.Now().UnixNano()), Name: "Bench Available Wallet",
+		NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleAvailable,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	const userID int64 = 9200
 	// Top up enough that thousands of reservations don't drain it.
-	_, err := store.PostJournal(context.Background(), core.JournalInput{
+	_, err = store.PostJournal(context.Background(), core.JournalInput{
 		JournalTypeUID: deps.JournalType,
 		IdempotencyKey: postgrestest.UniqueKey("bench-rsv-seed"),
 		Source:         "bench-seed",
 		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1_000_000)},
+			{AccountHolder: userID, CurrencyUID: deps.Currency, ClassificationUID: wallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1_000_000)},
 			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1_000_000)},
 		},
 	})
