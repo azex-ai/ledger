@@ -20,7 +20,10 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 7. [Journal posting failures](#7-journal-posting-failures)
 8. [Common investigation queries](#8-common-investigation-queries)
 9. [Emergency: stop the ledger](#9-emergency-stop-the-ledger)
-10. [Deployment security boundary: unauthenticated reads](#10-deployment-security-boundary-unauthenticated-reads)
+10. [Deployment security boundary](#10-deployment-security-boundary)
+
+Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
+document: [`DR.md`](./DR.md).
 
 ---
 

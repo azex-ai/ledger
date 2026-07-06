@@ -690,6 +690,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 
 - [**INVARIANTS.md**](docs/INVARIANTS.md) -- The 13 invariants the ledger guarantees (per-currency balance, append-only, idempotency, TOCTOU-safe reserve, money conservation, partition coverage, …) with `Why / Enforced by / Pinned by` for each.
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
+- [**DR.md**](docs/DR.md) -- Backup & disaster recovery: PITR strategy, RPO/RTO targets, restore procedure, and invariant-based backup verification (quarterly drill).
 - [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (32 paths, 34 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
