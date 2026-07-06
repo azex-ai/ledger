@@ -1,0 +1,498 @@
+{
+  "title": "Ledger \u2014 Operations",
+  "uid": "ledger-ops",
+  "description": "Operational overview for azex-ai/ledger (ledgerd). Panels map to docs/RUNBOOK.md scenarios; alert rules live in the Helm chart (metrics.prometheusRules).",
+  "tags": [
+    "ledger"
+  ],
+  "schemaVersion": 39,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Datasource"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Reconcile failures (24h)",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(ledger_reconciliations_completed_total{success=\"false\"}[24h])",
+          "refId": "A"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 1
+    },
+    {
+      "type": "stat",
+      "title": "Invariant checks failed (24h)",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(ledger_reconcile_check_results_total{passed=\"false\"}[24h])",
+          "refId": "A"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Dead-lettered events (24h)",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "increase(ledger_events_dead_total[24h])",
+          "refId": "A"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Rollups pending",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "ledger_rollups_pending",
+          "refId": "A"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 4
+    },
+    {
+      "type": "timeseries",
+      "title": "Journals posted / failed (rate)",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_journals_posted_total[5m]))",
+          "refId": "A",
+          "legendFormat": "posted"
+        },
+        {
+          "expr": "sum(rate(ledger_journals_failed_total[5m]))",
+          "refId": "B",
+          "legendFormat": "failed"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Journal post latency (p50 / p99)",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(ledger_journal_post_seconds_bucket[5m])) by (le))",
+          "refId": "A",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_journal_post_seconds_bucket[5m])) by (le))",
+          "refId": "B",
+          "legendFormat": "p99"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "Reservations (rate)",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_reservations_created_total[5m]))",
+          "refId": "A",
+          "legendFormat": "created"
+        },
+        {
+          "expr": "sum(rate(ledger_reservations_settled_total[5m]))",
+          "refId": "B",
+          "legendFormat": "settled"
+        },
+        {
+          "expr": "sum(rate(ledger_reservations_released_total[5m]))",
+          "refId": "C",
+          "legendFormat": "released"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Active reservations & reserved amount",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(ledger_reservations_active)",
+          "refId": "A",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "sum(ledger_reserved_amount_units)",
+          "refId": "B",
+          "legendFormat": "reserved units"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint age by class",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "max(ledger_checkpoint_age_seconds) by (class)",
+          "refId": "A",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 9
+    },
+    {
+      "type": "timeseries",
+      "title": "Rollup queue & rollup duration p99",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "ledger_rollups_pending",
+          "refId": "A",
+          "legendFormat": "pending"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ledger_rollup_seconds_bucket[5m])) by (le))",
+          "refId": "B",
+          "legendFormat": "rollup p99 (s)"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 10
+    },
+    {
+      "type": "timeseries",
+      "title": "Event delivery (rate)",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(ledger_events_delivered_total[5m]))",
+          "refId": "A",
+          "legendFormat": "delivered"
+        },
+        {
+          "expr": "sum(rate(ledger_events_delivery_failed_total[5m]))",
+          "refId": "B",
+          "legendFormat": "failed"
+        },
+        {
+          "expr": "sum(rate(ledger_events_dead_total[5m]))",
+          "refId": "C",
+          "legendFormat": "dead"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 11
+    },
+    {
+      "type": "timeseries",
+      "title": "Integrity: drift / gap / idempotency collisions",
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "ledger_balance_drift_units",
+          "refId": "A",
+          "legendFormat": "balance drift"
+        },
+        {
+          "expr": "ledger_reconcile_gap_units",
+          "refId": "B",
+          "legendFormat": "reconcile gap"
+        },
+        {
+          "expr": "sum(rate(ledger_idempotency_collisions_total[5m]))",
+          "refId": "C",
+          "legendFormat": "collisions/s"
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "id": 12
+    }
+  ]
+}

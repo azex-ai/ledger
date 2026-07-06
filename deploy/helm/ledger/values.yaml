@@ -33,6 +33,22 @@ metrics:
   enabled: true
   port: 8080
   path: /metrics
+  # Prometheus Operator integration (requires monitoring.coreos.com CRDs).
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}    # extra labels for ServiceMonitor discovery (e.g. release: prometheus)
+  # Alert rules mapped to docs/RUNBOOK.md scenarios.
+  prometheusRules:
+    enabled: false
+    labels: {}
+    runbookBaseUrl: "https://github.com/azex-ai/ledger/blob/main/docs/RUNBOOK.md"
+    thresholds:
+      rollupsPending: 1000          # queue depth before LedgerRollupBacklog fires
+      checkpointAgeSeconds: 3600    # oldest checkpoint age before warning
+      deliveryFailureRate: 0.1      # failed deliveries/sec over 10m
+      idempotencyCollisionRate: 0.5 # collisions/sec over 10m
+      journalFailureRate: 1         # failed journals/sec over 10m
 
 service:
   type: ClusterIP

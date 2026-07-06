@@ -1,0 +1,113 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRules.enabled }}
+{{/*
+Alert rules mapped 1:1 to the incident scenarios in docs/RUNBOOK.md —
+each alert's runbook_url anchor is the section that tells on-call what to do.
+Metric names come from observability/prometheus.go (namespace "ledger").
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ledger.fullname" . }}
+  labels:
+    {{- include "ledger.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRules.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: ledger.critical
+      rules:
+        - alert: LedgerReconciliationFailed
+          expr: increase(ledger_reconciliations_completed_total{success="false"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Ledger reconciliation failed"
+            description: "A reconciliation cycle reported an imbalance. This is a violated ledger invariant — treat as P0."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#1-reconciliation-failed"
+        - alert: LedgerInvariantCheckFailed
+          expr: increase(ledger_reconcile_check_results_total{passed="false"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Ledger full-reconcile check {{ printf "{{ $labels.check }}" }} failed"
+            description: "One of the 10 full-reconciliation checks failed (includes solvency). See INVARIANTS.md for what the check pins."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#2-solvency-check-failed"
+        - alert: LedgerBalanceDrift
+          expr: ledger_balance_drift_units != 0 or ledger_reconcile_gap_units != 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Ledger balance drift detected"
+            description: "Checkpoint-vs-entries drift or reconcile gap is non-zero."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#1-reconciliation-failed"
+        - alert: LedgerDown
+          expr: up{job=~".*{{ include "ledger.name" . }}.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Ledger scrape target down"
+            description: "Prometheus cannot scrape ledgerd for 2 minutes."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}"
+
+    - name: ledger.warning
+      rules:
+        - alert: LedgerRollupBacklog
+          expr: ledger_rollups_pending > {{ .Values.metrics.prometheusRules.thresholds.rollupsPending }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger rollup queue backlogged ({{ printf "{{ $value }}" }} pending)"
+            description: "Balance reads degrade to checkpoint+delta over a growing entry range; rollup worker may be stuck."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#3-rollup-queue-is-backlogged"
+        - alert: LedgerCheckpointAgeHigh
+          expr: max(ledger_checkpoint_age_seconds) > {{ .Values.metrics.prometheusRules.thresholds.checkpointAgeSeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger checkpoint age climbing"
+            description: "Oldest checkpoint is stale; balance reads are scanning long entry tails."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#4-checkpoint-age-is-climbing"
+        - alert: LedgerEventDeliveryDead
+          expr: increase(ledger_events_dead_total[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger events dead-lettered"
+            description: "Outbound events exhausted retries and were dead-lettered; consumers are missing events."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#5-webhook-delivery-backlog"
+        - alert: LedgerEventDeliveryFailing
+          expr: rate(ledger_events_delivery_failed_total[10m]) > {{ .Values.metrics.prometheusRules.thresholds.deliveryFailureRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger event delivery failure rate elevated"
+            description: "Webhook/callback delivery is failing repeatedly; backlog is building behind exponential backoff."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#5-webhook-delivery-backlog"
+        - alert: LedgerIdempotencyCollisionSpike
+          expr: rate(ledger_idempotency_collisions_total[10m]) > {{ .Values.metrics.prometheusRules.thresholds.idempotencyCollisionRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger idempotency collision spike"
+            description: "Same-key/different-payload conflicts spiking — usually a buggy client regenerating keys per retry."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#6-idempotency-collision-spike"
+        - alert: LedgerJournalPostFailures
+          expr: rate(ledger_journals_failed_total[10m]) > {{ .Values.metrics.prometheusRules.thresholds.journalFailureRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Ledger journal posting failures elevated"
+            description: "Journals are being rejected at an elevated rate (reason label has the breakdown)."
+            runbook_url: "{{ .Values.metrics.prometheusRules.runbookBaseUrl }}#7-journal-posting-failures"
+{{- end }}

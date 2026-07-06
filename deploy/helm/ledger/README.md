@@ -37,6 +37,8 @@ See `values.yaml` for the full list with comments.
 | `apiKeys` | `""` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). **Required in production**. |
 | `corsAllowedOrigin` | `""` | Required when `env != "dev"`. |
 | `metrics.enabled` | `true` | Adds Prometheus scrape annotations. |
+| `metrics.serviceMonitor.enabled` | `false` | Creates a Prometheus Operator `ServiceMonitor` (requires the monitoring.coreos.com CRDs). |
+| `metrics.prometheusRules.enabled` | `false` | Creates a `PrometheusRule` with alerts mapped to `docs/RUNBOOK.md` scenarios (thresholds tunable under `metrics.prometheusRules.thresholds`). |
 | `ingress.enabled` | `false` | Set to `true` and provide hosts to expose externally. |
 
 ## Verifying

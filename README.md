@@ -732,6 +732,7 @@ The service entry point reads:
 | `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
 | `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply, `OTEL_SERVICE_NAME` defaults to `ledgerd`) | (tracing disabled) |
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) are set in `cmd/ledgerd/main.go`.
 

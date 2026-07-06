@@ -55,6 +55,12 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	coreLogger := slogadapter.New(logger)
 
+	// Tracing (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set).
+	traceShutdown, err := setupTracing(rootCtx, logger)
+	if err != nil {
+		return fmt.Errorf("setup tracing: %w", err)
+	}
+
 	// Run migrations (convert postgres:// to pgx5:// for migrate)
 	migrateURL := databaseURL
 	if strings.HasPrefix(migrateURL, "postgres://") {
@@ -245,6 +251,13 @@ func run() error {
 		}
 	case <-time.After(30 * time.Second):
 		logger.Warn("worker drain timed out after 30s; abandoning in-flight jobs")
+	}
+
+	// Step 3: flush buffered spans (bounded — tracing must not hold shutdown).
+	traceCtx, traceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer traceCancel()
+	if err := traceShutdown(traceCtx); err != nil {
+		logger.Error("trace exporter shutdown failed", "error", err)
 	}
 
 	logger.Info("shutdown complete")
