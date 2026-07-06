@@ -447,7 +447,12 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
 	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
 
-	return service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, cfg, engine)
+	w := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, cfg, engine)
+	// Partition management: keeps the journal_entries monthly-partition
+	// horizon ahead of now (advisory-locked; see service/partition.go).
+	w.SetPartitionService(service.NewPartitionService(postgres.NewPartitionStore(s.pool), engine))
+	w.SetPool(s.pool)
+	return w
 }
 
 // mergeWorkerConfig fills zero-valued fields of cfg with their counterparts
@@ -491,6 +496,12 @@ func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
 	}
 	if cfg.FullReconcileInterval <= 0 {
 		cfg.FullReconcileInterval = d.FullReconcileInterval
+	}
+	if cfg.PartitionInterval <= 0 {
+		cfg.PartitionInterval = d.PartitionInterval
+	}
+	if cfg.PartitionMonthsAhead <= 0 {
+		cfg.PartitionMonthsAhead = d.PartitionMonthsAhead
 	}
 	return cfg
 }

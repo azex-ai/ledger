@@ -21,6 +21,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 8. [Common investigation queries](#8-common-investigation-queries)
 9. [Emergency: stop the ledger](#9-emergency-stop-the-ledger)
 10. [Deployment security boundary](#10-deployment-security-boundary)
+11. [Partition management & archival](#11-partition-management--archival)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -454,6 +455,46 @@ Treat it the same as any other exposed-data incident:
 3. File a postmortem — this is a P1, not a shrug.
 
 ---
+
+## 11. Partition management & archival
+
+`journal_entries` is range-partitioned by `created_at` into monthly
+partitions (`journal_entries_yYYYYmMM`); the worker's `partition` job keeps
+`PartitionMonthsAhead` (default 3) months pre-created and the
+`journal_entries_default` catch-all empty (see INVARIANTS I-13).
+
+### If the partition job errors / default partition has rows
+
+The job log line `partition: journal_entries_default held rows` means rows
+landed outside every named partition — the job rebalances them
+automatically, but find out why (`created_at` outliers usually mean a badly
+skewed clock somewhere):
+
+```sql
+SELECT min(created_at), max(created_at), count(*) FROM journal_entries_default;
+```
+
+### Archiving old partitions
+
+The ledger is append-only, so old months are cold immutable data. When a
+partition ages out of the hot query window (balance reads only scan entries
+after the latest checkpoint; audit reads are the long tail):
+
+1. **Verify** the month is fully rolled up and snapshotted (checkpoints are
+   current, `ledger-cli reconcile --full` passes).
+2. **Detach without locking** (Postgres 14+):
+   `ALTER TABLE journal_entries DETACH PARTITION journal_entries_y2026m01 CONCURRENTLY;`
+3. **Dump** the detached table to your archive store
+   (`pg_dump --table=journal_entries_y2026m01 …`), verify the dump restores,
+   then drop the table.
+4. **Record** the archive location in the ops log. `docs/DR.md` retention
+   still applies — the archive is part of the auditable history, not
+   disposable.
+
+Do NOT detach partitions younger than your reconciliation + audit horizon.
+Balances are unaffected by detaching only if checkpoints already cover the
+detached range — that's what step 1 verifies. When in doubt, don't archive:
+storage is cheaper than a hole in the audit trail.
 
 ## After-action checklist
 

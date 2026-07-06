@@ -362,12 +362,25 @@ partition boundaries.
 **Enforced by**:
 - Migration `004_ledger` declares partitioning.
 - Migration `010_default_partition` creates the catch-all.
+- Migration `037_journal_entries_monthly_partitions` moves historical rows
+  into named monthly partitions (`journal_entries_yYYYYmMM`) and pre-creates
+  a rolling horizon.
+- The worker's `partition` job (`service/partition.go` +
+  `postgres/partition_store.go`) keeps the horizon `PartitionMonthsAhead`
+  months ahead of the clock (advisory-locked, `PartitionInterval` cadence),
+  and rebalances any rows that ever strand in the default partition.
 
-**Current state**: only the default partition exists today. Named,
-date-bounded partitions and any rolling creation / archival automation are
-not implemented — the `PARTITION BY RANGE` declaration is schema groundwork
-for that future work, not an active rollover process. Every row currently
-lands in `journal_entries_default`.
+**Current state**: monthly partitions are active. The default partition
+remains attached as the catch-all safety net and should always be empty —
+rows appearing there are an alertable anomaly (the partition job logs an
+error and rebalances them on its next run). Archival guidance for old
+partitions lives in `RUNBOOK.md` §11.
+
+**Pinned by**: `TestPartitions_MigrationCreatesHorizon`,
+`TestPartitions_EnsureMonthlyPartitions`,
+`TestPartitions_RebalanceStrandedDefaultRows`
+(postgres/partition_store_test.go), plus the pre-existing I-13
+cross-partition read pin in postgres/invariants_test.go.
 
 ## I-14: Effective date consistency
 

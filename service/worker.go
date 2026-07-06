@@ -29,6 +29,14 @@ type WorkerConfig struct {
 	// been registered via SetFullReconciler — nil by default (skip job),
 	// mirroring the EventDeliverer pattern. default: 1h
 	FullReconcileInterval time.Duration
+	// PartitionInterval controls how often the journal_entries monthly
+	// partition horizon is extended. Only takes effect when a
+	// PartitionService has been registered via SetPartitionService.
+	// default: 12h
+	PartitionInterval time.Duration
+	// PartitionMonthsAhead is how many future months of partitions to keep
+	// pre-created. default: 3
+	PartitionMonthsAhead int
 }
 
 // DefaultWorkerConfig returns the default WorkerConfig.
@@ -46,6 +54,8 @@ func DefaultWorkerConfig() WorkerConfig {
 		EventDeliveryBatchSize: 100,
 		EventClaimLease:        2 * time.Minute,
 		FullReconcileInterval:  time.Hour,
+		PartitionInterval:      12 * time.Hour,
+		PartitionMonthsAhead:   3,
 	}
 }
 
@@ -65,6 +75,7 @@ type Worker struct {
 	eventDeliverer EventBatchProcessor // nil = skip webhook delivery (library mode)
 	localDeliverer *delivery.LocalDispatcher
 	fullReconcile  core.FullReconciler // nil = skip the full 10-check suite job
+	partition      *PartitionService   // nil = skip partition management
 	pool           *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
 	config         WorkerConfig
 	logger         core.Logger
@@ -105,6 +116,15 @@ func (w *Worker) SetEventDeliverer(d EventBatchProcessor) {
 // point (cmd/ledgerd), mirroring SetEventDeliverer.
 func (w *Worker) SetFullReconciler(fr core.FullReconciler) {
 	w.fullReconcile = fr
+}
+
+// SetPartitionService registers the journal_entries partition manager so the
+// worker keeps the monthly partition horizon ahead of the clock
+// (PartitionInterval / PartitionMonthsAhead). If not set, the job is
+// skipped — sensible for tests and for deployments that manage partitions
+// externally.
+func (w *Worker) SetPartitionService(p *PartitionService) {
+	w.partition = p
 }
 
 // SetPool attaches a *pgxpool.Pool used for pg_try_advisory_lock-based leader
@@ -206,6 +226,18 @@ func (w *Worker) Run(ctx context.Context) error {
 		g.Go(func() error {
 			return w.runLoop(ctx, "full_reconcile", w.config.FullReconcileInterval, func(ctx context.Context) {
 				fullReconcileJob.Run(ctx)
+			})
+		})
+	}
+
+	if w.partition != nil {
+		// Advisory-locked: partition DDL must run on a single replica.
+		partitionJob := NewLockedJob("partition", func(ctx context.Context) error {
+			return w.partition.EnsureUpcoming(ctx, time.Now(), w.config.PartitionMonthsAhead)
+		}, w.pool, w.logger)
+		g.Go(func() error {
+			return w.runLoop(ctx, "partition", w.config.PartitionInterval, func(ctx context.Context) {
+				partitionJob.Run(ctx)
 			})
 		})
 	}
