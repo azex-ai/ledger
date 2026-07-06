@@ -13,6 +13,55 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+Production-hardening batch (2026-07-06): closes the operational gaps between
+"code-complete" and "runnable in production" — credential model, dashboard
+auth, backup/DR, alerting closure, data lifecycle, deploy hygiene.
+
+### Go module — Added
+- **Scoped API keys** (BREAKING): `API_KEYS` is now comma-separated
+  `name:scope:secret` triples, scope `read` < `write` < `admin`; every route
+  group enforces `requireScope`, insufficient scope returns bizcode `10150`
+  (403), and the key *name* is attached to access-log lines for audit.
+  Malformed `API_KEYS` fails boot. (`server/middleware_auth.go`, docs/api.md)
+- **Active monthly partitioning** (BREAKING migration 037): journal_entries
+  rows move from the default partition into named monthly partitions
+  (`journal_entries_yYYYYmMM`); a new advisory-locked worker `partition` job
+  keeps `PartitionMonthsAhead` (default 3) months pre-created and rebalances
+  stranded default rows (fallback gated on SQLSTATE 23514). I-13 is now an
+  active process; archival guidance in RUNBOOK §11.
+- **OTLP tracing bootstrap**: `OTEL_EXPORTER_OTLP_ENDPOINT` enables an
+  OTLP/HTTP batching exporter behind pkg/otel (flushed on shutdown);
+  unset = no-op as before. (`cmd/ledgerd/tracing.go`)
+- **MIGRATE_MODE** (`auto`|`only`|`off`) decouples schema migrations from
+  pod startup; Helm `migrations.job.enabled` runs them from a
+  pre-install/pre-upgrade hook Job so serving pods need no DDL privileges.
+
+### Go module — Fixed
+- `BenchmarkReserveSettle` seeded funds into a role-less classification, so
+  `Reserve` (role=available only) always failed — bench-only, CI never runs
+  benchmarks. Now seeds a dedicated available-role wallet.
+
+### @azex/ledger-react + web — Changed
+- **Dashboard credential model** (BREAKING): `NEXT_PUBLIC_API_KEY` /
+  `NEXT_PUBLIC_API_URL` are gone. The browser talks to a same-origin BFF
+  proxy (`/api/v1/[...path]`) that holds `LEDGER_API_KEY` server-side;
+  pages are gated by `DASHBOARD_PASSWORD` login (HMAC session cookie,
+  `proxy.ts`), with sign-out in the sidebar (`Sidebar` gains an optional
+  `footer` slot — additive).
+
+### Ops & docs
+- `docs/DR.md`: PITR strategy, RPO/RTO targets, restore drill with
+  invariant-based verification (reconcile full + solvency), quarterly drill.
+- `docs/CAPACITY.md`: measured baseline (PostJournal ~2.5ms, GetBalance
+  ~0.7ms, Reserve→Settle ~2.7ms serial), sizing rules, suggested SLOs.
+- Helm: ServiceMonitor + PrometheusRule (alerts mapped 1:1 to RUNBOOK
+  scenarios), PDB (on by default), HPA + NetworkPolicy (opt-in); Grafana
+  dashboard in `deploy/grafana/`.
+- CI: govulncheck (pinned), Trivy image scan (fails on fixed
+  CRITICAL/HIGH), SPDX SBOM artifact, dependabot (gomod/npm/actions).
+- RUNBOOK: §10 rewritten for the scoped-key model, §11 partition
+  management/archival, §5 dead-letter handling + events retention policy.
+
 ## [0.4.1] - 2026-07-03
 
 ### Go module — Fixed
