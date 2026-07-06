@@ -728,7 +728,7 @@ The service entry point reads:
 | `HTTP_PORT` | HTTP server listen port | `8080` |
 | `ENV` | Deployment environment; anything other than `dev` enables production guards | `production` |
 | `CORS_ALLOWED_ORIGIN` | Allowed CORS origin. Required in non-dev `ENV` -- the service refuses to boot without it. | (required outside dev) |
-| `API_KEYS` | Comma-separated bearer-token keys for mutating endpoints. GETs are open. | (none) |
+| `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
 | `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
 
@@ -736,7 +736,7 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 
 ### Security notes
 
-- **Authentication**: bearer-token API keys via `Authorization: Bearer <key>`. Constant-time compare; only required for state-changing methods.
+- **Authentication**: bearer-token API keys via `Authorization: Bearer <key>`, required on every endpoint (probes and webhook callbacks excepted). Keys are `name:scope:secret` triples — scope `read` < `write` < `admin`; the key name lands in access logs for audit. Constant-time compare.
 - **Rate limits**: in-memory per-IP token bucket -- 100 req/min mutations, 1000 req/min reads. Single-instance only.
 - **Body size**: every request is capped at `MAX_BODY_BYTES`; webhooks have an additional 1 MB cap enforced in the handler.
 - **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected.

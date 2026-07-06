@@ -28,15 +28,17 @@ complete API reference) and the [package README](packages/ledger-react/README.md
 
 The dashboard talks to the Go ledger backend via HTTP:
 
+All configuration is server-only — the browser never holds ledger
+credentials. Browser API calls hit the same-origin BFF proxy
+(`/api/v1/*`), which checks the dashboard session cookie and attaches the
+server-held key.
+
 | Var | Required | Description |
 |-----|----------|-------------|
-| `NEXT_PUBLIC_API_URL` | yes (production) | Base URL of the ledger API, e.g. `https://ledger.internal.example.com`. In production builds the client throws on the first API call if this is unset. |
-| `NEXT_PUBLIC_API_KEY` | yes (any mutating call) | Bearer token sent on `POST` / `PUT` / `PATCH` / `DELETE` requests in `Authorization: Bearer <key>`. The backend rejects mutations without a valid key. |
-| `LEDGER_API_URL_INTERNAL` | no | Server-only base URL for RSC prefetch (internal/private network). Falls back to `NEXT_PUBLIC_API_URL`. |
-| `LEDGER_API_KEY` | no | Server-only API key for RSC prefetch — never enters the client bundle. |
-
-In production deployments use a dedicated dashboard API key (don't reuse a
-worker / service key). Read-only access (GET) does not require a key.
+| `LEDGER_API_URL_INTERNAL` | yes (production) | Server-only base URL of ledgerd (internal/private network), e.g. `http://ledger.internal:8080`. Used by RSC prefetch and the BFF proxy. Falls back to `http://localhost:8080` in dev. |
+| `LEDGER_API_KEY` | yes (production) | Server-only bearer key the BFF proxy and RSC prefetch attach to every upstream call. Issue a dedicated `name:scope:secret` key for the dashboard (see `docs/api.md`); `read` scope unless operators trigger writes from the UI. |
+| `DASHBOARD_PASSWORD` | yes (production) | Operator password for the dashboard login. Unset in dev = login disabled; unset in a production build = the dashboard refuses to serve (503). |
+| `DASHBOARD_SESSION_SECRET` | no | Explicit HMAC key for session cookies; derived from `DASHBOARD_PASSWORD` when unset. Set it when running multiple dashboard replicas so sessions survive uneven rollouts. |
 
 ## Getting Started
 

@@ -30,7 +30,7 @@ services:
       DATABASE_URL: postgres://ledger:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/ledger?sslmode=disable
       HTTP_PORT: "8080"
       ENV: ${ENV:?ENV must be set (dev|production)}
-      API_KEYS: ${API_KEYS:?API_KEYS must be set (comma-separated bearer tokens)}
+      API_KEYS: ${API_KEYS:?API_KEYS must be set (comma-separated name:scope:secret triples, scope=read|write|admin)}
       CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:?CORS_ALLOWED_ORIGIN must be set}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-262144}
       EVM_WEBHOOK_SECRET: ${EVM_WEBHOOK_SECRET:?EVM_WEBHOOK_SECRET must be set}

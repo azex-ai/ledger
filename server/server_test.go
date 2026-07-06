@@ -1689,7 +1689,8 @@ func jsonBody(t *testing.T, v any) *bytes.Buffer {
 // int64; an open GET surface exposes every holder's balances and history).
 // Only the liveness/readiness probes stay open for Kubernetes.
 func TestAuth_ReadsRequireKeyWhenConfigured(t *testing.T) {
-	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, APIKeys: [][]byte{[]byte("test-key-1")}}
+	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024,
+		APIKeys: []server.APIKey{{Name: "test", Scope: server.ScopeAdmin, Secret: []byte("test-key-1")}}}
 	srv := server.NewWithConfig(cfg,
 		&mockJournalWriter{},
 		&mockBalanceReader{},
@@ -1739,7 +1740,8 @@ func TestAuth_ReadsRequireKeyWhenConfigured(t *testing.T) {
 // that surface's authentication, matching the OpenAPI `security: []`
 // declaration. (An unknown channel still 404s, but must not 401.)
 func TestAuth_WebhookPathExemptFromBearerAuth(t *testing.T) {
-	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, APIKeys: [][]byte{[]byte("test-key-1")}}
+	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024,
+		APIKeys: []server.APIKey{{Name: "test", Scope: server.ScopeAdmin, Secret: []byte("test-key-1")}}}
 	srv := server.NewWithConfig(cfg,
 		&mockJournalWriter{},
 		&mockBalanceReader{},
@@ -1768,4 +1770,92 @@ func TestAuth_WebhookPathExemptFromBearerAuth(t *testing.T) {
 
 	w := doRequest(srv, http.MethodPost, "/api/v1/webhooks/evm", map[string]any{"payload": "x"})
 	assert.NotEqual(t, http.StatusUnauthorized, w.Code, "webhook surface must not demand a bearer key; got %d", w.Code)
+}
+
+// newScopedTestServer builds a server with the given API keys configured so
+// scope enforcement is active.
+func newScopedTestServer(keys ...server.APIKey) *server.Server {
+	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, APIKeys: keys}
+	return server.NewWithConfig(cfg,
+		&mockJournalWriter{},
+		&mockBalanceReader{},
+		&mockReserver{},
+		&mockBooker{},
+		&mockBookingReader{},
+		&mockEventReader{},
+		&mockClassificationStore{},
+		&mockJournalTypeStore{},
+		&mockTemplateStore{},
+		&mockCurrencyStore{},
+		nil,
+		&mockReconciler{},
+		&mockSnapshotter{},
+		(*service.SystemRollupService)(nil),
+		&mockQueryProvider{},
+		&mockAuditQuerier{},
+		&mockPlatformBalanceReader{},
+		&mockSolvencyChecker{},
+		&mockBalanceTrendReader{},
+		&mockFullReconciler{},
+		&mockAccountPolicyStore{},
+		&mockPeriodCloser{},
+		&mockTrialBalanceReader{},
+	)
+}
+
+func doAuthedRequest(t *testing.T, srv *server.Server, method, path, key string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body != nil {
+		req = httptest.NewRequest(method, path, jsonBody(t, body))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	return w
+}
+
+// Pins the scope ladder: read < write < admin. A read key can query but not
+// post; a write key can post journals but not mutate configuration; an
+// admin key can do everything.
+func TestAuth_ScopeEnforcement(t *testing.T) {
+	srv := newScopedTestServer(
+		server.APIKey{Name: "reporter", Scope: server.ScopeRead, Secret: []byte("read-key")},
+		server.APIKey{Name: "app", Scope: server.ScopeWrite, Secret: []byte("write-key")},
+		server.APIKey{Name: "ops", Scope: server.ScopeAdmin, Secret: []byte("admin-key")},
+	)
+
+	journalBody := map[string]any{"idempotency_key": "k1", "journal_type_uid": "jt-1"}
+	classificationBody := map[string]any{"code": "c1", "name": "C1"}
+
+	// read key: GETs pass, business writes and admin writes are forbidden.
+	w := doAuthedRequest(t, srv, http.MethodGet, "/api/v1/balances/100?currency_uid=cur-1", "read-key", nil)
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/balances/batch", "read-key",
+		map[string]any{"holders": []int64{100}, "currency_uid": "cur-1"})
+	assert.NotEqual(t, http.StatusForbidden, w.Code, "batch balance lookup is a semantic read")
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/journals", "read-key", journalBody)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/classifications", "read-key", classificationBody)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	// write key: business writes pass, config mutations are forbidden.
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/journals", "write-key", journalBody)
+	assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	w = doAuthedRequest(t, srv, http.MethodGet, "/api/v1/journals", "write-key", nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/classifications", "write-key", classificationBody)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/periods/close", "write-key", map[string]any{})
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	// admin key: everything passes scope (handler-level validation may still 4xx).
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/classifications", "admin-key", classificationBody)
+	assert.NotEqual(t, http.StatusForbidden, w.Code)
+	w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/journals", "admin-key",
+		map[string]any{"idempotency_key": "k2", "journal_type_uid": "jt-1"})
+	assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
 }

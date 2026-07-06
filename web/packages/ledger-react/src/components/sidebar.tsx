@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Menu, X } from "lucide-react";
 import { cn } from "../lib/utils/cn";
 import {
@@ -17,6 +17,8 @@ export interface SidebarProps {
    * the sidebar works without a host router.
    */
   linkComponent?: LinkComponent;
+  /** Optional slot rendered at the bottom of the sidebar (e.g. sign-out). */
+  footer?: ReactNode;
 }
 
 function NavContent({
@@ -59,7 +61,7 @@ function NavContent({
   );
 }
 
-export function Sidebar({ pathname, linkComponent }: SidebarProps) {
+export function Sidebar({ pathname, linkComponent, footer }: SidebarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
@@ -112,7 +114,8 @@ export function Sidebar({ pathname, linkComponent }: SidebarProps) {
               linkComponent={linkComponent}
               onNavigate={() => setMobileOpen(false)}
             />
-            <div className="border-t border-border p-3">
+            <div className="border-t border-border p-3 space-y-2">
+              {footer}
               <p className="text-[10px] text-muted-foreground/50 text-center">
                 Double-Entry Ledger Engine
               </p>
@@ -135,7 +138,8 @@ export function Sidebar({ pathname, linkComponent }: SidebarProps) {
           </div>
         </div>
         <NavContent pathname={pathname} linkComponent={linkComponent} />
-        <div className="border-t border-border p-3">
+        <div className="border-t border-border p-3 space-y-2">
+          {footer}
           <p className="text-[10px] text-muted-foreground/50 text-center">
             Double-Entry Ledger Engine
           </p>

@@ -2,100 +2,107 @@ package server
 
 import "github.com/go-chi/chi/v5"
 
+// setupRoutes registers every endpoint, grouped by the API key scope it
+// requires (read < write < admin — see middleware_auth.go):
+//
+//   - read:  the query surface, plus POST endpoints that are semantically
+//     reads (batch balance lookup, template preview)
+//   - write: business writes — journals, reversals, reservations, bookings
+//   - admin: configuration + control plane — metadata mutations, account
+//     policies, reconciliation triggers, period close
+//
+// Probes and inbound webhooks carry no scope: probes are unauthenticated,
+// webhooks authenticate via the channel adapter's own signature scheme.
 func (s *Server) setupRoutes() {
 	s.router.Route("/api/v1", func(r chi.Router) {
-		// System
+		// Probes (unauthenticated) + webhooks (channel HMAC).
 		r.Get("/system/health", s.handleHealth)
 		r.Get("/system/ready", s.handleReady)
-		r.Get("/system/balances", s.handleSystemBalances)
-
-		// Journals
-		r.Post("/journals", s.handlePostJournal)
-		r.Post("/journals/template", s.handlePostTemplate)
-		r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
-		r.Post("/journals/{uid}/reverse", s.handleReverseJournal)
-		r.Post("/journals/{uid}/reverse-partial", s.handleReverseJournalFraction)
-		r.Get("/journals/{uid}", s.handleGetJournal)
-		r.Get("/journals", s.handleListJournals)
-
-		// Entries
-		r.Get("/entries", s.handleListEntries)
-
-		// Balances
-		r.Get("/balances/{holder}", s.handleGetBalances)
-		r.Get("/balances/{holder}/{currency}", s.handleGetBalanceByCurrency)
-		r.Get("/balances/{holder}/{currency}/breakdown", s.handleGetBalanceBreakdown)
-		r.Post("/balances/batch", s.handleBatchBalances)
-
-		// Reservations
-		r.Post("/reservations", s.handleCreateReservation)
-		r.Post("/reservations/{uid}/settle", s.handleSettleReservation)
-		r.Post("/reservations/{uid}/settle-partial", s.handleSettlePartialReservation)
-		r.Post("/reservations/{uid}/finalize", s.handleFinalizeReservationSettlement)
-		r.Post("/reservations/{uid}/release", s.handleReleaseReservation)
-		r.Get("/reservations", s.handleListReservations)
-
-		// Bookings (unified — replaces deposits + withdrawals)
-		r.Post("/bookings", s.handleCreateBooking)
-		r.Post("/bookings/{uid}/transition", s.handleTransition)
-		r.Get("/bookings/{uid}", s.handleGetBooking)
-		r.Get("/bookings", s.handleListBookings)
-
-		// Webhooks (inbound channel callbacks)
 		r.Post("/webhooks/{channel}", s.handleWebhookCallback)
 
-		// Events (outbound)
-		r.Get("/events", s.handleListEvents)
-		r.Get("/events/{uid}", s.handleGetEvent)
+		// ---- Scope: read ----
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireScope(ScopeRead))
 
-		// Metadata — Classifications
-		r.Post("/classifications", s.handleCreateClassification)
-		r.Post("/classifications/{uid}/deactivate", s.handleDeactivateClassification)
-		r.Get("/classifications", s.handleListClassifications)
+			r.Get("/system/balances", s.handleSystemBalances)
 
-		// Metadata — Journal Types
-		r.Post("/journal-types", s.handleCreateJournalType)
-		r.Post("/journal-types/{uid}/deactivate", s.handleDeactivateJournalType)
-		r.Get("/journal-types", s.handleListJournalTypes)
+			r.Get("/journals/{uid}", s.handleGetJournal)
+			r.Get("/journals", s.handleListJournals)
+			r.Get("/entries", s.handleListEntries)
 
-		// Metadata — Templates
-		r.Post("/templates", s.handleCreateTemplate)
-		r.Post("/templates/{uid}/deactivate", s.handleDeactivateTemplate)
-		r.Post("/templates/{code}/preview", s.handlePreviewTemplate)
-		r.Get("/templates", s.handleListTemplates)
+			r.Get("/balances/{holder}", s.handleGetBalances)
+			r.Get("/balances/{holder}/{currency}", s.handleGetBalanceByCurrency)
+			r.Get("/balances/{holder}/{currency}/breakdown", s.handleGetBalanceBreakdown)
+			r.Post("/balances/batch", s.handleBatchBalances) // POST body, semantic read
 
-		// Accounts (policy: freeze/close + balance-floor overrides)
-		r.Put("/accounts/{holder}/policy", s.handleSetAccountPolicy)
-		r.Get("/accounts/{holder}/policies", s.handleListAccountPolicies)
+			r.Get("/reservations", s.handleListReservations)
+			r.Get("/bookings/{uid}", s.handleGetBooking)
+			r.Get("/bookings", s.handleListBookings)
 
-		// Metadata — Currencies
-		r.Post("/currencies", s.handleCreateCurrency)
-		r.Post("/currencies/{uid}/deactivate", s.handleDeactivateCurrency)
-		r.Get("/currencies", s.handleListCurrencies)
+			r.Get("/events", s.handleListEvents)
+			r.Get("/events/{uid}", s.handleGetEvent)
 
-		// Reconciliation + Snapshots
-		r.Post("/reconcile", s.handleReconcileGlobal)
-		r.Post("/reconcile/account", s.handleReconcileAccount)
-		r.Post("/reconcile/full", s.handleReconcileFull)
-		r.Get("/snapshots", s.handleListSnapshots)
+			r.Get("/classifications", s.handleListClassifications)
+			r.Get("/journal-types", s.handleListJournalTypes)
+			r.Get("/templates", s.handleListTemplates)
+			r.Post("/templates/{code}/preview", s.handlePreviewTemplate) // render only, no mutation
+			r.Get("/currencies", s.handleListCurrencies)
 
-		// Audit (read-only investigation: journals by account/time, booking trace, reversal chain)
-		r.Get("/audit/journals", s.handleListAuditJournals)
-		r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
-		r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
+			r.Get("/accounts/{holder}/policies", s.handleListAccountPolicies)
+			r.Get("/snapshots", s.handleListSnapshots)
 
-		// Platform (read-only, real-time system-wide balance + solvency)
-		r.Get("/platform/balances", s.handleGetPlatformBalances)
-		r.Get("/platform/solvency", s.handleGetSolvency)
+			r.Get("/audit/journals", s.handleListAuditJournals)
+			r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
+			r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
 
-		// Balance trends (historical daily balance series)
-		r.Get("/balances/trends", s.handleGetBalanceTrends)
+			r.Get("/platform/balances", s.handleGetPlatformBalances)
+			r.Get("/platform/solvency", s.handleGetSolvency)
+			r.Get("/balances/trends", s.handleGetBalanceTrends)
 
-		// Period close (accounting close line)
-		r.Post("/periods/close", s.handleClosePeriod)
-		r.Get("/periods/closes", s.handleListPeriodCloses)
+			r.Get("/periods/closes", s.handleListPeriodCloses)
+			r.Get("/reports/trial-balance", s.handleGetTrialBalance)
+		})
 
-		// Reports
-		r.Get("/reports/trial-balance", s.handleGetTrialBalance)
+		// ---- Scope: write ----
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireScope(ScopeWrite))
+
+			r.Post("/journals", s.handlePostJournal)
+			r.Post("/journals/template", s.handlePostTemplate)
+			r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
+			r.Post("/journals/{uid}/reverse", s.handleReverseJournal)
+			r.Post("/journals/{uid}/reverse-partial", s.handleReverseJournalFraction)
+
+			r.Post("/reservations", s.handleCreateReservation)
+			r.Post("/reservations/{uid}/settle", s.handleSettleReservation)
+			r.Post("/reservations/{uid}/settle-partial", s.handleSettlePartialReservation)
+			r.Post("/reservations/{uid}/finalize", s.handleFinalizeReservationSettlement)
+			r.Post("/reservations/{uid}/release", s.handleReleaseReservation)
+
+			r.Post("/bookings", s.handleCreateBooking)
+			r.Post("/bookings/{uid}/transition", s.handleTransition)
+		})
+
+		// ---- Scope: admin ----
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireScope(ScopeAdmin))
+
+			r.Post("/classifications", s.handleCreateClassification)
+			r.Post("/classifications/{uid}/deactivate", s.handleDeactivateClassification)
+			r.Post("/journal-types", s.handleCreateJournalType)
+			r.Post("/journal-types/{uid}/deactivate", s.handleDeactivateJournalType)
+			r.Post("/templates", s.handleCreateTemplate)
+			r.Post("/templates/{uid}/deactivate", s.handleDeactivateTemplate)
+			r.Post("/currencies", s.handleCreateCurrency)
+			r.Post("/currencies/{uid}/deactivate", s.handleDeactivateCurrency)
+
+			r.Put("/accounts/{holder}/policy", s.handleSetAccountPolicy)
+
+			r.Post("/reconcile", s.handleReconcileGlobal)
+			r.Post("/reconcile/account", s.handleReconcileAccount)
+			r.Post("/reconcile/full", s.handleReconcileFull)
+
+			r.Post("/periods/close", s.handleClosePeriod)
+		})
 	})
 }

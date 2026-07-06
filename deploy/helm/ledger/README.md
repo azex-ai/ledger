@@ -9,7 +9,7 @@ instance reachable from the cluster.
 ```bash
 helm install ledger ./deploy/helm/ledger \
   --set databaseUrl='postgres://user:pass@db:5432/ledger?sslmode=require' \
-  --set apiKeys='abc123,def456' \
+  --set apiKeys='ops:admin:abc123,app:write:def456' \
   --set corsAllowedOrigin='https://app.example.com'
 ```
 
@@ -34,7 +34,7 @@ See `values.yaml` for the full list with comments.
 | `image.repository` | `ghcr.io/azex-ai/ledger` | Image. Override during release. |
 | `databaseUrl` | `""` | Inline DB URL (creates a Secret). Use `existingSecret` in production. |
 | `existingSecret` | `""` | Name of an existing K8s Secret holding `DATABASE_URL`. |
-| `apiKeys` | `""` | Comma-separated bearer keys. **Required in production**. |
+| `apiKeys` | `""` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). **Required in production**. |
 | `corsAllowedOrigin` | `""` | Required when `env != "dev"`. |
 | `metrics.enabled` | `true` | Adds Prometheus scrape annotations. |
 | `ingress.enabled` | `false` | Set to `true` and provide hosts to expose externally. |

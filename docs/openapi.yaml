@@ -915,6 +915,14 @@ components:
       type: http
       scheme: bearer
       bearerFormat: API key
+      description: |
+        Keys are configured server-side as name:scope:secret triples; the
+        bearer token is the secret. Scopes are ordered read < write < admin:
+        read covers the query surface (plus POST /balances/batch and template
+        preview), write adds journals/reversals/reservations/bookings, admin
+        adds configuration mutations, account policies, reconcile triggers,
+        and period close. Insufficient scope yields business code 10150
+        (HTTP 403).
 
   responses:
     NotFound:

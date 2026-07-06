@@ -46,16 +46,23 @@ npm install @azex/ledger-react @tanstack/react-query
 
 ## Setup
 
-1. **Wrap your app in `<LedgerProvider>`** with the ledger API base URL (and
-   optional API key — only mutating requests send it):
+1. **Wrap your app in `<LedgerProvider>`**. In the browser, do NOT put the
+   ledger API key in the config — anything the provider holds ships in the
+   public JS bundle. Point the client at a same-origin BFF proxy that holds
+   the key server-side (see `web/src/app/api/v1/[...path]/route.ts` for the
+   reference implementation):
 
    ```tsx
    import { LedgerProvider } from "@azex/ledger-react";
 
-   <LedgerProvider config={{ baseUrl: "https://ledger.example.com", apiKey }}>
+   // Browser: same-origin BFF, no credentials in the bundle.
+   <LedgerProvider config={{ baseUrl: "" }}>
      {children}
    </LedgerProvider>
    ```
+
+   The `apiKey` field is for **server-side** clients only
+   (`createServerLedgerClient`, RSC prefetch, the BFF proxy itself).
 
 2. **Import the stylesheet once** at your app root:
 
@@ -251,15 +258,15 @@ documented in [api.md](api.md) / [openapi.yaml](openapi.yaml).
 
 Framework-agnostic fetch wrapper. Unwraps the backend envelope
 (`{code, message, data}`) and returns `data`; throws `ApiRequestError` on
-non-2xx. Sends `Authorization: Bearer <apiKey>` on mutating methods
-(`POST`/`PUT`/`PATCH`/`DELETE`) only — GET never sends the key.
+non-2xx. Sends `Authorization: Bearer <apiKey>` on every request when the
+key is configured — the backend enforces auth on reads too.
 
 ### `LedgerClientConfig`
 
 | Field | Type | Notes |
 |-------|------|-------|
 | `baseUrl` | `string` | Ledger API origin, e.g. `https://ledger.example.com` |
-| `apiKey?` | `string` | Sent as Bearer token on mutating requests only |
+| `apiKey?` | `string` | Sent as Bearer token on every request. Server-side use only — never hand it to a browser `LedgerProvider`; route browser traffic through a same-origin BFF proxy instead |
 | `fetch?` | `typeof fetch` | Override for server use / tests. **Must be a stable reference** (module-level or `useCallback`'d) — `LedgerProvider` keys its client memo on this field, so an inline arrow rebuilds the client every render |
 
 ### `ApiRequestError`

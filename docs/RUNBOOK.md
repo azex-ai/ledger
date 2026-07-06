@@ -408,34 +408,36 @@ Reads remain available throughout. `GET /balances/*`, `GET /journals*`,
 
 ---
 
-## 10. Deployment security boundary: unauthenticated reads
+## 10. Deployment security boundary
 
-**This is not an incident to fix — it is a known, permanent boundary of the
-current version that every deployment must account for.**
+`authMiddleware` (`server/middleware_auth.go`) requires a bearer API key on
+**every** endpoint, reads included — only the Kubernetes probes and the
+webhook surface (channel-adapter HMAC) are exempt. Keys carry a scope
+(`read` < `write` < `admin`, configured as `name:scope:secret` triples in
+`API_KEYS`; see [`api.md`](./api.md)) and the key name is attached to every
+access log line for audit.
 
-`authMiddleware` (`server/middleware_auth.go`) only checks the bearer API key
-on state-changing methods (`POST`/`PUT`/`PATCH`/`DELETE`). Every `GET`/`HEAD`
-request passes through unauthenticated by design (see the `isMutating`
-check). That includes sensitive read surfaces:
+Operational guidance:
 
-- `GET /balances/*`, `GET /entries`, `GET /journals*` — per-account balances and transaction history
-- `GET /audit/*` — journals by account/time, booking trace, reversal chains
-- `GET /platform/balances`, `GET /platform/solvency` — system-wide liability and custody figures
-
-Per-key holder scoping for reads (so a key can only read its own holder's
-data) is a **future** design item, not implemented today.
+- **Issue the least scope that works.** Reporting/dashboard consumers get
+  `read`; the application that posts journals gets `write`; `admin` keys
+  (metadata mutations, reconcile triggers, period close) belong to operators
+  only and should be rare.
+- **One key per consumer, never shared** — the key name is your audit trail
+  ("which caller did this"). Rotate by appending a new triple, deploying
+  consumers, then removing the old triple.
+- Per-key **holder** scoping for reads (a key that can only read its own
+  holder's data) is still a future design item — a `read` key today sees
+  every holder. Treat `read` keys as sensitive.
 
 ### What this means for deployment
 
-Standalone-service mode (`cmd/ledgerd`) **must not** be exposed directly to
-the public internet. Required posture:
+Standalone-service mode (`cmd/ledgerd`) should still not be exposed directly
+to the public internet:
 
-- Run it inside a private network (VPC-only ingress) or behind a gateway
-  that performs its own authentication/authorization on reads (mTLS, an API
-  gateway, or a reverse proxy with its own auth layer) before traffic
-  reaches the ledger.
-- Treat `API_KEYS` as protecting **writes only** — it is not a substitute
-  for network-level access control on reads.
+- Run it inside a private network (VPC-only ingress) or behind a gateway —
+  defense in depth on top of bearer auth, and the transport that gives you
+  TLS termination.
 - Library-mode consumption is unaffected: there is no HTTP surface, and your
   own application owns the auth boundary.
 

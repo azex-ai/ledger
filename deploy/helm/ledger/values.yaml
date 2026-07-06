@@ -19,8 +19,10 @@ existingSecret: ""
 existingSecretKey: DATABASE_URL
 databaseUrl: ""
 
-# Comma-separated API keys. If empty, mutating endpoints will be unauthenticated
-# (loud warning logged). Production deployments MUST set this.
+# Comma-separated API keys as name:scope:secret triples
+# (scope: read|write|admin — e.g. "ops:admin:s3cret,app:write:t0ken").
+# If empty, ALL endpoints are unauthenticated (loud error logged).
+# Production deployments MUST set this.
 apiKeys: ""
 
 # CORS — required when env != "dev". Set to your frontend origin.

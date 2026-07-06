@@ -6,13 +6,39 @@ Base URL: `http://localhost:8080/api/v1`
 
 ### Authentication
 
-State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) require a bearer token:
+Every endpoint — reads included — requires a bearer token (holder is a
+guessable int64; an open read surface would expose every holder's balances
+and history):
 
 ```
 Authorization: Bearer <api-key>
 ```
 
-Keys are configured via the `API_KEYS` env var (comma-separated). Comparison is constant-time. `GET`, `HEAD`, and `OPTIONS` are open. If `API_KEYS` is empty in non-`dev` `ENV`, the service still boots but logs a loud warning -- mutations go through unauthenticated; do not run that way in production.
+Exceptions: the Kubernetes probes (`/system/health`, `/system/ready`) answer
+without credentials, and inbound webhooks (`/webhooks/{channel}`)
+authenticate via the channel adapter's own signature scheme (e.g. HMAC).
+
+Keys are configured via the `API_KEYS` env var as comma-separated
+`name:scope:secret` triples:
+
+```
+API_KEYS="ops:admin:s3cr3t,app:write:t0k3n,report:read:r34d"
+```
+
+The `name` identifies the caller in access logs (audit); the `scope` is one
+of three ordered levels (each implies the ones below it):
+
+| Scope | Grants |
+|-------|--------|
+| `read` | The query surface: balances, journals, entries, events, audit, platform analytics, metadata listings, batch balance lookup, template preview |
+| `write` | `read` + business writes: posting journals, reversals, reservations, bookings |
+| `admin` | Everything: configuration mutations (classifications, journal types, templates, currencies), account policies, reconciliation triggers, period close |
+
+A request whose key lacks the required scope gets business code `10150`
+(HTTP 403) naming the key and the missing scope. Secret comparison is
+constant-time. If `API_KEYS` is empty in non-`dev` `ENV`, the service still
+boots but logs a loud error — all endpoints go unauthenticated; do not run
+that way in production.
 
 ### Content type
 

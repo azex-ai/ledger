@@ -66,6 +66,10 @@ type Server struct {
 	// chain so it bypasses auth + rate limiting (scrapers usually live on
 	// the internal network and authenticate by host/port).
 	metricsHandler http.Handler
+
+	// authEnabled records whether API keys are configured; when false (dev
+	// only) requireScope checks pass unconditionally.
+	authEnabled bool
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
@@ -77,7 +81,7 @@ func (s *Server) SetMetricsHandler(h http.Handler) { s.metricsHandler = h }
 type Config struct {
 	Env             string // "dev" or "production"; controls fail-fast behavior
 	CORSAllowOrigin string // exact origin to allow; empty in dev = "*"
-	APIKeys         [][]byte
+	APIKeys         []APIKey
 	MaxBodyBytes    int64 // request body cap; default 256 KB
 }
 
@@ -103,10 +107,15 @@ func LoadConfig() (*Config, error) {
 		maxBytes = n
 	}
 
+	keys, err := parseAPIKeys(os.Getenv("API_KEYS"))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		Env:             env,
 		CORSAllowOrigin: corsOrigin,
-		APIKeys:         parseAPIKeys(os.Getenv("API_KEYS")),
+		APIKeys:         keys,
 		MaxBodyBytes:    maxBytes,
 	}, nil
 }
@@ -206,6 +215,7 @@ func NewWithConfig(
 		queries:          queries,
 		ready:            &atomic.Bool{},
 		rateLimiter:      newRateLimiter(defaultRateLimiterConfig()),
+		authEnabled:      len(cfg.APIKeys) > 0,
 	}
 
 	r := chi.NewRouter()
