@@ -42,6 +42,20 @@ jobs:
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/ledger_test?sslmode=disable
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
   sqlc-diff:
     runs-on: ubuntu-latest
     steps:
@@ -79,3 +93,27 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Supply chain: load a single-arch image for scanning + SBOM.
+      - name: Build image for scan (amd64, load)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ledger:scan
+          platforms: linux/amd64
+          cache-from: type=gha
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ledger:scan
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ledger:scan
+          format: spdx-json
+          artifact-name: ledger-sbom.spdx.json
