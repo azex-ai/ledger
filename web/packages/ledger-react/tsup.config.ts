@@ -72,7 +72,9 @@ async function preserveDirectives(distDir: string): Promise<void> {
 export default defineConfig({
   entry: ["src/index.ts", "src/server.ts", "src/charts.ts"],
   format: ["esm"],
-  dts: true,
+  // TS6 deprecates baseUrl (TS5101); tsup's dts build still injects one
+  // internally, so silence the deprecation until tsup stops doing that.
+  dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
   clean: true,
   splitting: true,
   metafile: true,

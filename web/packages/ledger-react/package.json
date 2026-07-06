@@ -19,19 +19,19 @@
   },
   "peerDependencies": { "react": "^19", "react-dom": "^19", "@tanstack/react-query": "^5" },
   "dependencies": {
-    "@base-ui/react": "^1.4.0",
+    "@base-ui/react": "^1.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.8.0",
-    "tailwind-merge": "^3.5.0",
-    "recharts": "^3.8.1",
+    "lucide-react": "^1.23.0",
+    "tailwind-merge": "^3.6.0",
+    "recharts": "^3.9.2",
     "sonner": "^2.0.7",
-    "viem": "^2.48.4"
+    "viem": "^2.54.6"
   },
   "devDependencies": {
-    "tsup": "^8", "vitest": "^2", "msw": "^2", "openapi-typescript": "^7",
+    "tsup": "^8", "vitest": "^4", "msw": "^2.14.6", "openapi-typescript": "^7",
     "@testing-library/react": "^16", "@testing-library/jest-dom": "^6",
-    "jsdom": "^25", "typescript": "^5",
+    "jsdom": "^25", "typescript": "^6",
     "@tailwindcss/postcss": "^4", "tailwindcss": "^4", "postcss": "^8"
   },
   "publishConfig": { "registry": "https://registry.npmjs.org", "access": "public" }
