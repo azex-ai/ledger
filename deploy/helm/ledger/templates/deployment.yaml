@@ -55,6 +55,10 @@ spec:
             - name: CORS_ALLOWED_ORIGIN
               value: {{ .Values.corsAllowedOrigin | quote }}
             {{- end }}
+            {{- if .Values.trustProxyHeaders }}
+            - name: TRUST_PROXY_HEADERS
+              value: "true"
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

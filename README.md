@@ -753,6 +753,7 @@ The service entry point reads:
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply, `OTEL_SERVICE_NAME` defaults to `ledgerd`) | (tracing disabled) |
 | `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` |
+| `TRUST_PROXY_HEADERS` | `true` = derive client IP from `X-Real-IP` / last `X-Forwarded-For` hop for rate limiting and logs. Enable ONLY behind a trusted edge proxy that sets those headers; otherwise callers can spoof their IP. | `false` (socket peer) |
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) are set in `cmd/ledgerd/main.go`.
 

@@ -28,6 +28,11 @@ apiKeys: ""
 # CORS — required when env != "dev". Set to your frontend origin.
 corsAllowedOrigin: ""
 
+# Set true only when ledgerd is reachable exclusively through a trusted
+# proxy/ingress that sets X-Real-IP / X-Forwarded-For — enables real client
+# IPs for rate limiting and access logs.
+trustProxyHeaders: false
+
 # Schema migrations. Default: every pod runs migrations at startup
 # (MIGRATE_MODE=auto — fine for small deployments; golang-migrate takes a
 # lock so racing pods are safe). Enable the Job to run migrations once from

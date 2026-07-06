@@ -83,6 +83,11 @@ type Config struct {
 	CORSAllowOrigin string // exact origin to allow; empty in dev = "*"
 	APIKeys         []APIKey
 	MaxBodyBytes    int64 // request body cap; default 256 KB
+	// TrustProxyHeaders enables client-IP extraction from X-Real-IP /
+	// X-Forwarded-For (last hop). Enable ONLY when every request reaches
+	// ledgerd through a trusted edge proxy that sets those headers —
+	// otherwise callers can spoof their IP past the rate limiter.
+	TrustProxyHeaders bool
 }
 
 // LoadConfig reads server config from env. Returns an error in production
@@ -113,10 +118,11 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &Config{
-		Env:             env,
-		CORSAllowOrigin: corsOrigin,
-		APIKeys:         keys,
-		MaxBodyBytes:    maxBytes,
+		Env:               env,
+		CORSAllowOrigin:   corsOrigin,
+		APIKeys:           keys,
+		MaxBodyBytes:      maxBytes,
+		TrustProxyHeaders: os.Getenv("TRUST_PROXY_HEADERS") == "true",
 	}, nil
 }
 
@@ -224,7 +230,11 @@ func NewWithConfig(
 	// auth/body-limit so OPTIONS preflight short-circuits without a key; body
 	// limit before rate limit before auth so we reject hostile traffic cheaply.
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	if cfg.TrustProxyHeaders {
+		// Deliberately NOT chi's middleware.RealIP: that trusted
+		// client-controlled headers unconditionally (GHSA-3fxj-6jh8-hvhx).
+		r.Use(trustedProxyRealIP)
+	}
 	r.Use(middleware.Recoverer)
 	r.Use(requestLoggerMiddleware)
 	r.Use(corsMiddleware(cfg))

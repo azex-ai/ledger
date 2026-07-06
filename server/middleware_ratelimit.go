@@ -129,8 +129,9 @@ func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {
 	}
 }
 
-// clientIP extracts the request peer IP. RemoteAddr already accounts for the
-// chi RealIP middleware (X-Forwarded-For / X-Real-IP) when configured upstream.
+// clientIP extracts the request peer IP. RemoteAddr is the socket peer by
+// default; with TRUST_PROXY_HEADERS=true it was rewritten by
+// trustedProxyRealIP (middleware_realip.go) from proxy-set headers.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
