@@ -22,6 +22,8 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 import type { PreviewResult } from "../../client/types";
 
 interface LineForm {
@@ -286,6 +288,7 @@ function PreviewSection({ code }: { code: string }) {
 export function TemplatesPage() {
   const { data, isLoading, isError } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(templates);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
@@ -304,7 +307,7 @@ export function TemplatesPage() {
         />
       ) : (
         <div className="space-y-4">
-          {templates.map((t) => (
+          {pageItems.map((t) => (
             <Card key={t.uid}>
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
@@ -344,6 +347,7 @@ export function TemplatesPage() {
               </CardContent>
             </Card>
           ))}
+          <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
         </div>
       )}
     </div>

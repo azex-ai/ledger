@@ -6,7 +6,7 @@
  * everything fits on one page. Server-side cursor lists use "Load more".
  */
 
-import { Pagination } from "@heroui/react";
+import { Button, Pagination, Table } from "@heroui/react";
 
 export function PaginationBar({
   page,
@@ -49,7 +49,32 @@ export function PaginationBar({
   );
 }
 
-/** Slice `items` for the current 1-based page. */
-export function pageSlice<T>(items: T[], page: number, pageSize: number): T[] {
-  return items.slice((page - 1) * pageSize, page * pageSize);
+/**
+ * "Load More" footer for server-side cursor lists (infinite queries). Wire it
+ * straight to useInfiniteQuery's fields; renders nothing once the cursor is
+ * exhausted. Mirrored in the shadcn skin — keep behavior in sync. Renders its
+ * own <Table.Footer>, so place it as a direct child of <Table>.
+ */
+export function LoadMoreBar({
+  hasNextPage,
+  fetchNextPage,
+  isFetchingNextPage,
+}: {
+  hasNextPage: boolean;
+  fetchNextPage: () => void;
+  isFetchingNextPage: boolean;
+}) {
+  if (!hasNextPage) return null;
+  return (
+    <Table.Footer className="flex justify-center">
+      <Button
+        variant="secondary"
+        size="sm"
+        isPending={isFetchingNextPage}
+        onPress={() => fetchNextPage()}
+      >
+        {isFetchingNextPage ? "Loading..." : "Load More"}
+      </Button>
+    </Table.Footer>
+  );
 }

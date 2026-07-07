@@ -126,7 +126,7 @@ export function ReconciliationPage() {
                           <TableCell>{d.classification_uid}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatAmount(d.expected)}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatAmount(d.actual)}</TableCell>
-                          <TableCell className="text-right font-mono">
+                          <TableCell className="text-right tabular-nums">
                             {(() => {
                               const drift = formatSignedAmount(d.drift);
                               return (

@@ -5,10 +5,6 @@
  * components instead of the shadcn set. Shares the headless core (client +
  * hooks + LedgerProvider) with every other skin.
  *
- * Known divergence from the shadcn skin (candidate for backporting there):
- * ReservationsPage additionally exposes settle-partial and finalize actions
- * (the hooks exist in the shared core; the shadcn page never adopted them).
- *
  * Host contract:
  *   - `@heroui/react` (optional peer) is installed and the host runs
  *     Tailwind v4 with `@import "@heroui/styles"` — the premise of choosing

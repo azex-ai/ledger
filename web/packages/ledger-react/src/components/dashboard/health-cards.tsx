@@ -7,9 +7,6 @@ import { Activity, Clock, Lock, Scale, AlertCircle } from "lucide-react";
 export function HealthCards() {
   const { data, isLoading, isError } = useHealth();
 
-  const isHealthy = data?.status === "ok";
-  const isDegraded = data?.status === "degraded";
-
   const cards = [
     {
       title: "Rollup Queue",

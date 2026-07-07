@@ -5,6 +5,8 @@ import { formatAmount } from "../../lib/utils";
 import { useSnapshots } from "../../hooks/use-system";
 import { ErrorState } from "../error-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 import { PageHeader } from "../page-header";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -34,6 +36,7 @@ export function SnapshotsPage() {
 
   const { data, isLoading, isError } = useSnapshots(query);
   const snapshots = data ?? [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
 
   function handleSearch() {
     setQuery({
@@ -77,6 +80,7 @@ export function SnapshotsPage() {
           {Object.keys(query).length === 0 ? "Enter search criteria to view snapshots" : "No snapshots found"}
         </p>
       ) : (
+        <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -88,7 +92,7 @@ export function SnapshotsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {snapshots.map((s) => (
+            {pageItems.map((s) => (
               <TableRow key={`${s.snapshot_date}-${s.account_holder}-${s.currency_uid}-${s.classification_uid}`}>
                 <TableCell>{s.snapshot_date}</TableCell>
                 <TableCell>{s.account_holder}</TableCell>
@@ -99,6 +103,8 @@ export function SnapshotsPage() {
             ))}
           </TableBody>
         </Table>
+        <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+        </>
       )}
     </div>
   );

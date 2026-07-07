@@ -20,6 +20,8 @@ import {
 } from "@heroui/react";
 import { Tags } from "lucide-react";
 import { PageHeader, EmptyState, ErrorState, StatusChip, TableSkeleton } from "../shared";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 function CreateClassificationModal() {
   const [open, setOpen] = useState(false);
@@ -143,6 +145,7 @@ function DeactivateClassificationDialog({ id, name }: { id: string; name: string
 export function ClassificationsPage() {
   const { data, isLoading, isError } = useClassifications();
   const classifications = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(classifications);
 
   return (
     <div className="flex flex-col gap-6">
@@ -172,7 +175,7 @@ export function ClassificationsPage() {
                 <Table.Column className="text-end">Actions</Table.Column>
               </Table.Header>
               <Table.Body>
-                {classifications.map((c) => (
+                {pageItems.map((c) => (
                   <Table.Row key={c.uid} id={c.uid}>
                     <Table.Cell>
                       <span className="block max-w-[160px] truncate font-mono text-xs" title={c.uid}>{c.uid}</span>
@@ -190,6 +193,9 @@ export function ClassificationsPage() {
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
+          <Table.Footer>
+            <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+          </Table.Footer>
         </Table>
       )}
     </div>

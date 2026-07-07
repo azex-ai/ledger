@@ -511,7 +511,7 @@ method):
 | `prefetchBalances` | `holder: number` | `useBalances(holder)` |
 | `prefetchSystemHealth` | — | `useHealth()` |
 | `prefetchSystemBalances` | — | `useSystemBalances()` |
-| `prefetchReservations` | `params: {holder?, status?}` | `useReservations(params)` |
+| `prefetchReservations` | `params: {holder?, status?, limit?}` | `useReservations(params)` (infinite shape) |
 | `prefetchClassifications` | `activeOnly?: boolean` | `useClassifications(activeOnly)` |
 | `prefetchCurrencies` | `activeOnly?` | `useCurrencies(activeOnly)` |
 | `prefetchJournalTypes` | `activeOnly?` | `useJournalTypes(activeOnly)` |

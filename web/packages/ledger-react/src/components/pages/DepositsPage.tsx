@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { LoadMoreBar } from "../pagination-bar";
 
 const DEPOSIT_STATES = ["pending", "confirming", "confirmed", "failed", "expired"];
 
@@ -253,7 +254,7 @@ export function DepositsPage() {
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(d.amount)}</TableCell>
-                  <TableCell className="text-right font-mono">
+                  <TableCell className="text-right tabular-nums">
                     {d.settled_amount && d.settled_amount !== "0" ? formatAmount(d.settled_amount) : "—"}
                   </TableCell>
                   <TableCell><StatusBadge status={d.status} /></TableCell>
@@ -271,13 +272,11 @@ export function DepositsPage() {
               ))}
             </TableBody>
           </Table>
-          {hasNextPage && (
-            <div className="flex justify-center">
-              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </div>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </>
       )}
     </div>

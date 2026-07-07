@@ -25,6 +25,7 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { LoadMoreBar } from "../pagination-bar";
 
 export interface JournalsPageProps {
   /**
@@ -384,13 +385,11 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
               ))}
             </TableBody>
           </Table>
-          {hasNextPage && (
-            <div className="flex justify-center">
-              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </div>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </>
       )}
     </div>

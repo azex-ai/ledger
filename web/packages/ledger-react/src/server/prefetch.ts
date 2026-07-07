@@ -4,6 +4,7 @@ import { ledgerKeys } from "../hooks/keys";
 
 type JournalsPage = Awaited<ReturnType<LedgerClient["listJournals"]>>;
 type EntriesPage = Awaited<ReturnType<LedgerClient["listEntries"]>>;
+type ReservationsPage = Awaited<ReturnType<LedgerClient["listReservations"]>>;
 
 // Server prefetch helpers. Each takes (queryClient, client, ...params) and
 // seeds the QueryClient cache under the SAME key + with the SAME client method
@@ -90,15 +91,19 @@ export function prefetchSystemBalances(
   });
 }
 
-/** Mirrors `useReservations(params)`. */
+/** Mirrors `useReservations(params)` (infinite query). */
 export function prefetchReservations(
   queryClient: QueryClient,
   client: LedgerClient,
-  params: { holder?: number; status?: string },
+  params: { holder?: number; status?: string; limit?: number },
 ): Promise<void> {
-  return queryClient.prefetchQuery({
+  return queryClient.prefetchInfiniteQuery({
     queryKey: ledgerKeys.reservations(params),
-    queryFn: () => client.listReservations(params),
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      client.listReservations({ ...params, cursor: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage: ReservationsPage) =>
+      lastPage.next_cursor || undefined,
   });
 }
 

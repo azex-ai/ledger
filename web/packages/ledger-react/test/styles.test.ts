@@ -59,23 +59,22 @@ describe("dist/styles.css", () => {
     expect(css).toContain("prefers-color-scheme");
   });
 
-  it("system dark tokens stay identical to explicit dark tokens", () => {
-    // theme.css maintains the dark token block twice (.dark, and .system
-    // inside the media query). Pin that they never drift.
+  it("dark tokens are single-source via light-dark(), appearance classes only flip color-scheme", () => {
+    // theme.css writes every color token ONCE as light-dark(light, dark); the
+    // .dark / .system selectors must contain nothing but the color-scheme
+    // flip — a token redeclared there would silently shadow the single source.
     const grab = (re: RegExp) => {
       const m = css.match(re);
       if (!m) throw new Error(`token block not found: ${re}`);
-      return new Set(
-        m[1]
-          .split(";")
-          .map((d) => d.trim())
-          .filter((d) => d.startsWith("--")),
-      );
+      return m[1];
     };
+    expect(css.match(/light-dark\(/g)?.length ?? 0).toBeGreaterThan(10);
     const dark = grab(/\.ledger-root\.dark\{([^}]*)\}/);
     const system = grab(/\.ledger-root\.system\{([^}]*)\}/);
-    expect(dark.size).toBeGreaterThan(10);
-    expect([...system].sort()).toEqual([...dark].sort());
+    for (const block of [dark, system]) {
+      expect(block).toContain("color-scheme:dark");
+      expect(block).not.toContain("--");
+    }
   });
 
   it("emits the font-heading utility", () => {

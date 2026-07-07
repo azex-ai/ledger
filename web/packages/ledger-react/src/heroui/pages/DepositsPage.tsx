@@ -21,6 +21,7 @@ import {
 } from "../../hooks/use-deposits";
 import { formatAmount, validateAmount } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
+import { LoadMoreBar } from "../pagination-bar";
 
 const DEPOSIT_STATES = ["pending", "confirming", "confirmed", "failed", "expired"];
 
@@ -336,18 +337,11 @@ export function DepositsPage() {
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
-          {hasNextPage && (
-            <Table.Footer className="flex justify-center">
-              <Button
-                variant="secondary"
-                size="sm"
-                isPending={isFetchingNextPage}
-                onPress={() => fetchNextPage()}
-              >
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </Table.Footer>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </Table>
       )}
     </div>

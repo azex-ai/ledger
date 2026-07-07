@@ -19,6 +19,8 @@ import {
 } from "@heroui/react";
 import { FileCode2, X } from "lucide-react";
 import { PageHeader, EmptyState, ErrorState, StatusChip, TableSkeleton } from "../shared";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 import type { PreviewResult } from "../../client/types";
 
 interface LineForm {
@@ -442,6 +444,7 @@ function PreviewSection({ code }: { code: string }) {
 export function TemplatesPage() {
   const { data, isLoading, isError } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(templates);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
@@ -460,7 +463,7 @@ export function TemplatesPage() {
         />
       ) : (
         <div className="flex flex-col gap-4">
-          {templates.map((t) => (
+          {pageItems.map((t) => (
             <Card key={t.uid}>
               <Card.Header>
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -500,6 +503,7 @@ export function TemplatesPage() {
               </Card.Content>
             </Card>
           ))}
+          <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
         </div>
       )}
     </div>

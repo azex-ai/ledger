@@ -18,6 +18,8 @@ import {
 } from "@heroui/react";
 import { FileType2 } from "lucide-react";
 import { PageHeader, EmptyState, ErrorState, StatusChip, TableSkeleton } from "../shared";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 function CreateJournalTypeModal() {
   const [open, setOpen] = useState(false);
@@ -118,6 +120,7 @@ function DeactivateJournalTypeDialog({ id, name }: { id: string; name: string })
 export function JournalTypesPage() {
   const { data, isLoading, isError } = useJournalTypes();
   const types = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(types);
 
   return (
     <div className="flex flex-col gap-6">
@@ -146,7 +149,7 @@ export function JournalTypesPage() {
                 <Table.Column className="text-end">Actions</Table.Column>
               </Table.Header>
               <Table.Body>
-                {types.map((t) => (
+                {pageItems.map((t) => (
                   <Table.Row key={t.uid} id={t.uid}>
                     <Table.Cell>
                       <span className="block max-w-[160px] truncate font-mono text-xs" title={t.uid}>{t.uid}</span>
@@ -163,6 +166,9 @@ export function JournalTypesPage() {
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
+          <Table.Footer>
+            <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+          </Table.Footer>
         </Table>
       )}
     </div>

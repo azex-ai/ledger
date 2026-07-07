@@ -25,6 +25,8 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
@@ -110,6 +112,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
 export function ClassificationsPage() {
   const { data, isLoading, isError } = useClassifications();
   const classifications = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(classifications);
 
   return (
     <div className="space-y-6">
@@ -126,6 +129,7 @@ export function ClassificationsPage() {
           description="Create your first classification to get started."
         />
       ) : (
+        <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -139,7 +143,7 @@ export function ClassificationsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {classifications.map((c) => (
+            {pageItems.map((c) => (
               <TableRow key={c.uid}>
                 <TableCell>{c.uid}</TableCell>
                 <TableCell className="font-mono text-xs">{c.code}</TableCell>
@@ -154,6 +158,8 @@ export function ClassificationsPage() {
             ))}
           </TableBody>
         </Table>
+        <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+        </>
       )}
     </div>
   );

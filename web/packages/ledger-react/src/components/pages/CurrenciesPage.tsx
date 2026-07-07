@@ -22,6 +22,8 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
@@ -103,6 +105,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
 export function CurrenciesPage() {
   const { data, isLoading, isError } = useCurrencies();
   const currencies = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(currencies);
 
   return (
     <div className="space-y-6">
@@ -119,6 +122,7 @@ export function CurrenciesPage() {
           description="Create your first currency to get started."
         />
       ) : (
+        <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -130,7 +134,7 @@ export function CurrenciesPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {currencies.map((c) => (
+            {pageItems.map((c) => (
               <TableRow key={c.uid}>
                 <TableCell>{c.uid}</TableCell>
                 <TableCell className="font-mono">{c.code}</TableCell>
@@ -143,6 +147,8 @@ export function CurrenciesPage() {
             ))}
           </TableBody>
         </Table>
+        <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+        </>
       )}
     </div>
   );

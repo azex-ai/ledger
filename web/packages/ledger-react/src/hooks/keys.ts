@@ -27,7 +27,7 @@ export const ledgerKeys = {
     ["ledger", "balances", holder, currency] as const,
 
   // Reservations
-  reservations: (params: { holder?: number; status?: string }) =>
+  reservations: (params: { holder?: number; status?: string; limit?: number }) =>
     ["ledger", "reservations", params] as const,
 
   // Snapshots

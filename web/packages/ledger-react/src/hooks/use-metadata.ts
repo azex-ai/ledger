@@ -143,3 +143,18 @@ export function useDeactivateCurrency() {
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies }),
   });
 }
+
+/**
+ * uid → human code lookups for chart/axis labels. Metadata lists are small
+ * and cached; while they load, fall back to a shortened uid. Shared by every
+ * skin's dashboard so the fallback behavior can't drift between them.
+ */
+export function useUidCodeLookups() {
+  const { data: classifications } = useClassifications();
+  const { data: currencies } = useCurrencies();
+  const classCode = (uid: string) =>
+    classifications?.find((c) => c.uid === uid)?.code ?? uid.slice(0, 8);
+  const currencyCode = (uid: string) =>
+    currencies?.find((c) => c.uid === uid)?.code ?? uid.slice(0, 8);
+  return { classCode, currencyCode };
+}

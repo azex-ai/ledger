@@ -1,7 +1,7 @@
 "use client";
 
 import { useSystemBalances } from "../../hooks/use-system";
-import { useClassifications, useCurrencies } from "../../hooks/use-metadata";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import {
   ResponsiveContainer,
@@ -16,15 +16,7 @@ import { AlertCircle, TrendingUp } from "lucide-react";
 
 export function BalanceTrend() {
   const { data, isLoading, isError } = useSystemBalances();
-  // uid → human code lookups for axis labels. Metadata lists are small and
-  // cached; while they load, fall back to a shortened uid.
-  const { data: classifications } = useClassifications();
-  const { data: currencies } = useCurrencies();
-
-  const classCode = (uid: string) =>
-    classifications?.find((c) => c.uid === uid)?.code ?? uid.slice(0, 8);
-  const currencyCode = (uid: string) =>
-    currencies?.find((c) => c.uid === uid)?.code ?? uid.slice(0, 8);
+  const { classCode, currencyCode } = useUidCodeLookups();
 
   const chartData = (data ?? []).map((b) => ({
     label: `${classCode(b.classification_uid)} · ${currencyCode(b.currency_uid)}`,

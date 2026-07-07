@@ -22,6 +22,8 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
@@ -97,6 +99,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
 export function JournalTypesPage() {
   const { data, isLoading, isError } = useJournalTypes();
   const types = Array.isArray(data) ? data : [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(types);
 
   return (
     <div className="space-y-6">
@@ -113,6 +116,7 @@ export function JournalTypesPage() {
           description="Create your first journal type to get started."
         />
       ) : (
+        <>
         <Table>
           <TableHeader>
             <TableRow>
@@ -125,7 +129,7 @@ export function JournalTypesPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {types.map((t) => (
+            {pageItems.map((t) => (
               <TableRow key={t.uid}>
                 <TableCell>{t.uid}</TableCell>
                 <TableCell className="font-mono text-xs">{t.code}</TableCell>
@@ -139,6 +143,8 @@ export function JournalTypesPage() {
             ))}
           </TableBody>
         </Table>
+        <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+        </>
       )}
     </div>
   );

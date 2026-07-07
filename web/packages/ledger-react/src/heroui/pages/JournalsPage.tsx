@@ -19,6 +19,7 @@ import { useJournals, usePostJournal, usePostTemplateJournal } from "../../hooks
 import { useCurrencies, useJournalTypes, useTemplates } from "../../hooks/use-metadata";
 import { DefaultLink, type LinkComponent } from "../../components/nav";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
+import { LoadMoreBar } from "../pagination-bar";
 
 export interface JournalsPageProps {
   /**
@@ -441,18 +442,11 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
-          {hasNextPage && (
-            <Table.Footer className="flex justify-center">
-              <Button
-                variant="secondary"
-                size="sm"
-                isPending={isFetchingNextPage}
-                onPress={() => fetchNextPage()}
-              >
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </Table.Footer>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </Table>
       )}
     </div>

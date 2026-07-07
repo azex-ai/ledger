@@ -45,7 +45,26 @@ export function PaginationBar({
   );
 }
 
-/** Slice `items` for the current 1-based page. */
-export function pageSlice<T>(items: T[], page: number, pageSize: number): T[] {
-  return items.slice((page - 1) * pageSize, page * pageSize);
+/**
+ * "Load More" footer for server-side cursor lists (infinite queries). Wire it
+ * straight to useInfiniteQuery's fields; renders nothing once the cursor is
+ * exhausted. Mirrored in the HeroUI skin — keep behavior in sync.
+ */
+export function LoadMoreBar({
+  hasNextPage,
+  fetchNextPage,
+  isFetchingNextPage,
+}: {
+  hasNextPage: boolean;
+  fetchNextPage: () => void;
+  isFetchingNextPage: boolean;
+}) {
+  if (!hasNextPage) return null;
+  return (
+    <div className="flex justify-center">
+      <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+        {isFetchingNextPage ? "Loading..." : "Load More"}
+      </Button>
+    </div>
+  );
 }

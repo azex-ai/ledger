@@ -22,6 +22,7 @@ import {
 } from "../../hooks/use-reservations";
 import { formatAmount, formatUTC, validateAmount } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
+import { LoadMoreBar } from "../pagination-bar";
 
 const STATUS_OPTIONS = ["all", "active", "settling", "settled", "released"] as const;
 
@@ -359,18 +360,11 @@ export function ReservationsPage() {
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
-          {hasNextPage && (
-            <Table.Footer className="flex justify-center">
-              <Button
-                variant="secondary"
-                size="sm"
-                isPending={isFetchingNextPage}
-                onPress={() => fetchNextPage()}
-              >
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </Table.Footer>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </Table>
       )}
     </div>

@@ -5,6 +5,8 @@ import { Button, Input, Label, Table, TextField } from "@heroui/react";
 import { useSnapshots } from "../../hooks/use-system";
 import { formatAmount } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, TableSkeleton } from "../shared";
+import { PaginationBar } from "../pagination-bar";
+import { useClientPage } from "../../lib/use-client-page";
 
 interface SnapshotQuery {
   holder?: number;
@@ -27,6 +29,7 @@ export function SnapshotsPage() {
 
   const { data, isLoading, isError } = useSnapshots(query);
   const snapshots = data ?? [];
+  const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
   const hasSearched = Object.keys(query).length > 0;
 
   function handleSearch() {
@@ -100,7 +103,7 @@ export function SnapshotsPage() {
                 <Table.Column className="text-end">Balance</Table.Column>
               </Table.Header>
               <Table.Body>
-                {snapshots.map((s) => {
+                {pageItems.map((s) => {
                   const rowId = `${s.snapshot_date}-${s.account_holder}-${s.currency_uid}-${s.classification_uid}`;
                   return (
                     <Table.Row key={rowId} id={rowId}>
@@ -117,6 +120,9 @@ export function SnapshotsPage() {
               </Table.Body>
             </Table.Content>
           </Table.ScrollContainer>
+          <Table.Footer>
+            <PaginationBar page={page} pageCount={pageCount} onPageChange={setPage} />
+          </Table.Footer>
         </Table>
       )}
     </div>

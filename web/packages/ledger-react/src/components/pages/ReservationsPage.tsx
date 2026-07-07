@@ -1,11 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { formatAmount, validateAmount, formatUTC } from "../../lib/utils";
 import {
+  useFinalizeReservationSettlement,
   useReservations,
-  useSettleReservation,
   useReleaseReservation,
+  useSettlePartialReservation,
+  useSettleReservation,
 } from "../../hooks/use-reservations";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -26,6 +28,7 @@ import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { EmptyState } from "../empty-state";
 import { TableSkeleton } from "../loading-skeleton";
+import { LoadMoreBar } from "../pagination-bar";
 
 function SettleDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
@@ -63,6 +66,92 @@ function SettleDialog({ id }: { id: string }) {
             disabled={mutation.isPending || !amount}
           >
             {mutation.isPending ? "Settling..." : "Settle"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SettlePartialDialog({ id }: { id: string }) {
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  // Generated once per dialog open, reused across retries of this submission
+  // (api-contract.md §9) — never regenerated inside the retry path.
+  const idempotencyKeyRef = useRef("");
+  const mutation = useSettlePartialReservation();
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) idempotencyKeyRef.current = crypto.randomUUID();
+        setOpen(next);
+      }}
+    >
+      <DialogTrigger render={<Button size="sm" variant="secondary" />}>Settle Partial</DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Partially Settle Reservation #{id}</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-4 py-4">
+          <div className="grid gap-2">
+            <Label htmlFor="rsv-settle-partial-amount">Partial Amount</Label>
+            <Input id="rsv-settle-partial-amount" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="25.00" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button
+            onClick={() => {
+              const amountErr = validateAmount(amount);
+              if (amountErr) {
+                toast.error(amountErr);
+                return;
+              }
+              mutation.mutate({ id, amount, idempotencyKey: idempotencyKeyRef.current }, {
+                onSuccess: () => {
+                  toast.success("Partial settlement recorded");
+                  setOpen(false);
+                  setAmount("");
+                },
+              });
+            }}
+            disabled={mutation.isPending || !amount}
+          >
+            {mutation.isPending ? "Settling..." : "Settle Partial"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function FinalizeConfirmDialog({ id }: { id: string }) {
+  const [open, setOpen] = useState(false);
+  const mutation = useFinalizeReservationSettlement();
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button size="sm" variant="outline" />}>Finalize</DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Finalize Reservation #{id}</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground py-4">
+          This closes out the reservation after its partial settlements. This action cannot be undone.
+        </p>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
+          <Button
+            onClick={() => mutation.mutate(id, {
+              onSuccess: () => {
+                toast.success("Reservation finalized");
+                setOpen(false);
+              },
+            })}
+            disabled={mutation.isPending}
+          >
+            {mutation.isPending ? "Finalizing..." : "Finalize"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -176,24 +265,26 @@ export function ReservationsPage() {
                     {formatUTC(r.expires_at)}
                   </TableCell>
                   <TableCell>
-                    {r.status === "active" && (
-                      <div className="flex gap-1">
-                        <SettleDialog id={r.uid} />
-                        <ReleaseConfirmDialog id={r.uid} />
-                      </div>
-                    )}
+                    <div className="flex gap-1 flex-wrap">
+                      {r.status === "active" && (
+                        <>
+                          <SettleDialog id={r.uid} />
+                          <SettlePartialDialog id={r.uid} />
+                          <ReleaseConfirmDialog id={r.uid} />
+                        </>
+                      )}
+                      {r.status === "settling" && <FinalizeConfirmDialog id={r.uid} />}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          {hasNextPage && (
-            <div className="flex justify-center">
-              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
-                {isFetchingNextPage ? "Loading..." : "Load More"}
-              </Button>
-            </div>
-          )}
+          <LoadMoreBar
+            hasNextPage={hasNextPage}
+            fetchNextPage={fetchNextPage}
+            isFetchingNextPage={isFetchingNextPage}
+          />
         </>
       )}
     </div>
