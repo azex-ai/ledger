@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -117,6 +118,28 @@ func run() error {
 	r.Get("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("host app is up — ledger API under /api/v1, dashboard on :3090\n"))
 	})
+
+	// ------------------------------------------------------------------
+	// End-user wallet surface (holder-scoped, read-only). Two pieces:
+	//  1. The /api/v1/holder/* endpoints, enabled on the ledger API below
+	//     (SetHolderSurface). A library host that doesn't want the admin
+	//     API in-process would mount server.HolderHandler(...) instead —
+	//     same three endpoints, zero admin routes.
+	//  2. A host session endpoint that mints holder tokens IN-PROCESS.
+	//     Real apps authenticate their session here and map user → holder;
+	//     the demo fixes holder 1001 (seeded above). The ledger API key
+	//     never reaches the browser — only this short-lived token does.
+	// ------------------------------------------------------------------
+	r.Post("/api/session/wallet-token", func(w http.ResponseWriter, _ *http.Request) {
+		token, err := server.MintHolderToken(walletTokenSecret, 1001, 15*time.Minute, time.Now())
+		if err != nil {
+			http.Error(w, "mint failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"token": token})
+	})
+
 	ledgerAPI := newLedgerAPI(svc, pool)
 	rlStop := make(chan struct{})
 	ledgerAPI.StartRateLimiterGC(rlStop) // reaps idle per-IP rate-limit buckets
@@ -192,8 +215,15 @@ func newLedgerAPI(svc *ledger.Service, pool *pgxpool.Pool) *server.Server {
 		svc.TrialBalanceReader(),
 	)
 	srv.SetReady(true)
+	if err := srv.SetHolderSurface(server.HolderConfig{TokenSecret: walletTokenSecret}, svc.HolderReader()); err != nil {
+		panic(err) // static demo secret; cannot fail
+	}
 	return srv
 }
+
+// walletTokenSecret signs the demo's holder tokens (32+ bytes). Use an env
+// secret (HOLDER_TOKEN_SECRET) in anything beyond a local demo.
+var walletTokenSecret = []byte("fullstack-demo-wallet-secret-0123456789")
 
 // seed posts a few confirmed deposits through the preset template so the
 // dashboard renders real balances. Idempotent: fixed keys + identical payloads

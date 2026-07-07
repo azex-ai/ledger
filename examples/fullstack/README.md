@@ -133,6 +133,21 @@ npm install
 npm run dev            # http://localhost:3091
 ```
 
+## 3. End-user wallet — `/wallet` (topology A)
+
+The backend enables the holder wallet surface (`SetHolderSurface`) and adds a
+demo session endpoint (`POST /api/session/wallet-token`) that mints a
+short-lived, read-only holder token in-process via `server.MintHolderToken`
+— stand-in for "session auth resolves user → holder". The web app's
+`/wallet` page then renders `<WalletPanel/>` from
+`@azex/ledger-react/wallet` with `getToken` pointed at that endpoint: the
+ledger API key never reaches the browser, and an expired token is refreshed
+automatically (401 → one `getToken` retry).
+
+A host that doesn't want the admin API in its process would mount
+`server.HolderHandler(...)` instead — the same three read endpoints, zero
+admin routes.
+
 ## What this example deliberately skips
 
 - **Auth** — see `server.LoadConfig` (API keys with read/write/admin scopes)

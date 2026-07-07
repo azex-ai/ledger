@@ -2,3 +2,4 @@
 /ledgerd
 .next/
 .codegraph/
+examples/fullstack/backend/backend

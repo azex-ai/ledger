@@ -173,6 +173,28 @@ components:
 import { LedgerProvider, useJournals } from "@azex/ledger-react/headless";
 ```
 
+## End-user wallet — `@azex/ledger-react/wallet`
+
+The holder-scoped wallet surface for YOUR users (not operators): balances
+(available / pending / on hold), translated transaction history, refund
+markers. Read-only by design — top-up / cash-out flows stay in the host
+product and slot in via `actions`.
+
+```tsx
+import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
+
+<WalletProvider config={{ baseUrl: "/api/v1", getToken: fetchWalletToken }}>
+  <WalletPanel actions={<TopUpButton />} kindLabels={{ deposit_confirm: "Top up" }} />
+</WalletProvider>;
+```
+
+`getToken` returns a holder token your backend mints (HTTP
+`POST /holder-tokens` or in-process `server.MintHolderToken`); it is called
+lazily and once more after a 401. Omit it behind a same-origin BFF.
+Components: `WalletPanel`, `WalletBalances`, `WalletBalanceCard`,
+`TransactionList`. HeroUI variant at `@azex/ledger-react/wallet/heroui`,
+UI-free core (client + hooks) at `@azex/ledger-react/wallet/headless`.
+
 ## Theming
 
 The Provider (and `<LedgerAdmin/>`) render a `<div className="ledger-root">`

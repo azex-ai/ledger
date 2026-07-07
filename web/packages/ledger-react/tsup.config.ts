@@ -77,6 +77,8 @@ export default defineConfig({
     headless: "src/headless.ts",
     heroui: "src/heroui/index.ts",
     "wallet-headless": "src/wallet-headless.ts",
+    wallet: "src/wallet.ts",
+    "wallet-heroui": "src/wallet-heroui.ts",
   },
   format: ["esm"],
   // TS6 deprecates baseUrl (TS5101); tsup's dts build still injects one

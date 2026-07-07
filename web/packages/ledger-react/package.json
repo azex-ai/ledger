@@ -1,6 +1,6 @@
 {
   "name": "@azex/ledger-react",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "sideEffects": [
     "*.css"
@@ -25,6 +25,14 @@
     "./wallet/headless": {
       "types": "./dist/wallet-headless.d.ts",
       "default": "./dist/wallet-headless.js"
+    },
+    "./wallet": {
+      "types": "./dist/wallet.d.ts",
+      "default": "./dist/wallet.js"
+    },
+    "./wallet/heroui": {
+      "types": "./dist/wallet-heroui.d.ts",
+      "default": "./dist/wallet-heroui.js"
     },
     "./heroui": {
       "types": "./dist/heroui.d.ts",
