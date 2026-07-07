@@ -238,6 +238,8 @@ createWalletClient({
 
 ## 6. Phase 拆解与验收
 
+> **进度（26-07-08）**：P1 `c318954` / P2 `da8dd30` / P3 `6d66202` / P4 `ff4e6be` 已合入 main 并推送（各 phase 验收全过：投影规则集成测试、token 表驱动测试、codegen gate、双皮肤护栏断言、fullstack `/wallet` demo）。剩 P5（armatrix 迁移）在消费方仓库进行；`@azex/ledger-react` 0.4.0 已 bump 未发版（等 tag）。
+
 按现有「Adding Features」工作流（SQL → sqlc → core/server → openapi → react）排序，每个 phase 独立可交付、独立过 CI：
 
 | Phase | 动作 | 验收 |
