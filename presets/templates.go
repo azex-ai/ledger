@@ -13,6 +13,11 @@ type ClassificationPreset struct {
 	Name       string
 	NormalSide core.NormalSide
 	IsSystem   bool
+	// DisplayLabel seeds the user-facing label for the holder transaction
+	// view. Presets deliberately leave it empty on generic balance-holding
+	// classifications (main_wallet, ...) — a label there would override the
+	// journal-type label on every single-classification transaction.
+	DisplayLabel string
 	// BalanceRole tags the classification's bucket in the holder-facing
 	// balance breakdown (available/pending/locked); empty means "not part of
 	// the holder's spendable-money view" (fees, suspense, custodial, ...).
@@ -22,6 +27,9 @@ type ClassificationPreset struct {
 type JournalTypePreset struct {
 	Code string
 	Name string
+	// DisplayLabel seeds the user-facing wording for transactions of this
+	// type (holder wallet surface). Empty = fall back to Name.
+	DisplayLabel string
 }
 
 type TemplateLinePreset struct {
@@ -75,20 +83,20 @@ var DefaultTemplateClassifications = combineClassifications(
 )
 
 var depositJournalTypes = []JournalTypePreset{
-	{Code: "deposit_pending", Name: "Deposit Pending"},
-	{Code: "deposit_confirm", Name: "Deposit Confirm"},
-	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending"},
-	{Code: "deposit_release_pending", Name: "Deposit Release Pending"},
-	{Code: "deposit_record_overage", Name: "Deposit Record Overage"},
-	{Code: "deposit_resolve_overage", Name: "Deposit Resolve Overage"},
-	{Code: "deposit_release_overage", Name: "Deposit Release Overage"},
+	{Code: "deposit_pending", Name: "Deposit Pending", DisplayLabel: "Deposit"},
+	{Code: "deposit_confirm", Name: "Deposit Confirm", DisplayLabel: "Deposit"},
+	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending", DisplayLabel: "Deposit"},
+	{Code: "deposit_release_pending", Name: "Deposit Release Pending", DisplayLabel: "Deposit released"},
+	{Code: "deposit_record_overage", Name: "Deposit Record Overage", DisplayLabel: "Deposit adjustment"},
+	{Code: "deposit_resolve_overage", Name: "Deposit Resolve Overage", DisplayLabel: "Deposit adjustment"},
+	{Code: "deposit_release_overage", Name: "Deposit Release Overage", DisplayLabel: "Deposit adjustment"},
 }
 
 var withdrawalJournalTypes = []JournalTypePreset{
-	{Code: "lock_funds", Name: "Lock Funds"},
-	{Code: "unlock_funds", Name: "Unlock Funds"},
-	{Code: "withdraw_confirm", Name: "Withdraw Confirm"},
-	{Code: "withdraw_fee", Name: "Withdraw Fee"},
+	{Code: "lock_funds", Name: "Lock Funds", DisplayLabel: "Withdrawal"},
+	{Code: "unlock_funds", Name: "Unlock Funds", DisplayLabel: "Withdrawal canceled"},
+	{Code: "withdraw_confirm", Name: "Withdraw Confirm", DisplayLabel: "Withdrawal"},
+	{Code: "withdraw_fee", Name: "Withdraw Fee", DisplayLabel: "Fee"},
 }
 
 var DefaultTemplateJournalTypes = combineJournalTypes(depositJournalTypes, withdrawalJournalTypes)
@@ -397,11 +405,12 @@ func ensureClassificationPreset(
 	classification, err := classifications.GetByCode(ctx, preset.Code)
 	if errors.Is(err, core.ErrNotFound) {
 		return classifications.CreateClassification(ctx, core.ClassificationInput{
-			Code:        preset.Code,
-			Name:        preset.Name,
-			NormalSide:  preset.NormalSide,
-			IsSystem:    preset.IsSystem,
-			BalanceRole: preset.BalanceRole,
+			Code:         preset.Code,
+			Name:         preset.Name,
+			NormalSide:   preset.NormalSide,
+			IsSystem:     preset.IsSystem,
+			DisplayLabel: preset.DisplayLabel,
+			BalanceRole:  preset.BalanceRole,
 		})
 	}
 	if err != nil {
@@ -438,6 +447,14 @@ func ensureClassificationPreset(
 		}
 		classification.BalanceRole = preset.BalanceRole
 	}
+	if preset.DisplayLabel != "" && classification.DisplayLabel == "" {
+		// Expand-safe label seeding on pre-existing installs; never clobbers
+		// an operator's override (the query guards on display_label = '').
+		if err := classifications.SetDisplayLabelIfEmpty(ctx, classification.UID, preset.DisplayLabel); err != nil {
+			return nil, fmt.Errorf("seed display_label of %q: %w", preset.Code, err)
+		}
+		classification.DisplayLabel = preset.DisplayLabel
+	}
 	return classification, nil
 }
 
@@ -449,8 +466,9 @@ func ensureJournalTypePreset(
 	journalType, err := journalTypes.GetJournalTypeByCode(ctx, preset.Code)
 	if errors.Is(err, core.ErrNotFound) {
 		return journalTypes.CreateJournalType(ctx, core.JournalTypeInput{
-			Code: preset.Code,
-			Name: preset.Name,
+			Code:         preset.Code,
+			Name:         preset.Name,
+			DisplayLabel: preset.DisplayLabel,
 		})
 	}
 	if err != nil {
@@ -458,6 +476,14 @@ func ensureJournalTypePreset(
 	}
 	if !journalType.IsActive {
 		return nil, fmt.Errorf("existing journal type %q is inactive: %w", preset.Code, core.ErrInvalidInput)
+	}
+	if preset.DisplayLabel != "" && journalType.DisplayLabel == "" {
+		// Expand-safe label seeding on pre-existing installs (see the
+		// classification counterpart above).
+		if err := journalTypes.SetDisplayLabelIfEmpty(ctx, journalType.UID, preset.DisplayLabel); err != nil {
+			return nil, fmt.Errorf("seed display_label of %q: %w", preset.Code, err)
+		}
+		journalType.DisplayLabel = preset.DisplayLabel
 	}
 	return journalType, nil
 }

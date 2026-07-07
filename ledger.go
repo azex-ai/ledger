@@ -184,9 +184,12 @@ func (s *Service) EventReader() core.EventReader { return s.eventStore }
 // Classifications manages classifications. Also satisfies core.JournalTypeStore.
 func (s *Service) Classifications() core.ClassificationStore { return s.classStore }
 
-// JournalTypes manages journal types. (ClassificationStore in postgres also
-// implements JournalTypeStore — this accessor exposes that capability cleanly.)
-func (s *Service) JournalTypes() core.JournalTypeStore { return s.classStore }
+// JournalTypes manages journal types. The adapter re-routes
+// SetDisplayLabelIfEmpty to the journal-type variant — the bare classStore
+// would structurally satisfy the interface but write classification labels.
+func (s *Service) JournalTypes() core.JournalTypeStore {
+	return postgres.JournalTypeStoreAdapter{ClassificationStore: s.classStore}
+}
 
 // Templates manages entry templates.
 func (s *Service) Templates() core.TemplateStore { return s.tmplStore }
@@ -360,7 +363,7 @@ func Migrate(databaseURL string) error {
 // journal-type, and template presets. Safe to call on every startup — existing
 // rows are validated and reused.
 func (s *Service) InstallDefaultPresets(ctx context.Context) error {
-	if err := presets.InstallDefaultTemplatePresets(ctx, s.classStore, s.classStore, s.tmplStore); err != nil {
+	if err := presets.InstallDefaultTemplatePresets(ctx, s.classStore, s.JournalTypes(), s.tmplStore); err != nil {
 		return fmt.Errorf("ledger: install default presets: %w", err)
 	}
 	return nil
@@ -371,7 +374,7 @@ func (s *Service) InstallDefaultPresets(ctx context.Context) error {
 // alongside or after InstallDefaultPresets — duplicate rows are validated and
 // skipped.
 func (s *Service) InstallExtendedPresets(ctx context.Context) error {
-	if err := presets.InstallExtendedPresets(ctx, s.classStore, s.classStore, s.tmplStore); err != nil {
+	if err := presets.InstallExtendedPresets(ctx, s.classStore, s.JournalTypes(), s.tmplStore); err != nil {
 		return fmt.Errorf("ledger: install extended presets: %w", err)
 	}
 	return nil

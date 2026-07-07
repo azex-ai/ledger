@@ -195,24 +195,32 @@ func (r BalanceRole) IsValid() bool {
 // Classification represents a dynamic account classification.
 // Lifecycle is nil for label-only classifications (no state machine).
 type Classification struct {
-	UID         string      `json:"uid"`
-	Code        string      `json:"code"`
-	Name        string      `json:"name"`
-	NormalSide  NormalSide  `json:"normal_side"`
-	IsSystem    bool        `json:"is_system"`
-	IsActive    bool        `json:"is_active"`
-	BalanceRole BalanceRole `json:"balance_role"`
-	Lifecycle   *Lifecycle  `json:"lifecycle,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
+	UID        string     `json:"uid"`
+	Code       string     `json:"code"`
+	Name       string     `json:"name"`
+	NormalSide NormalSide `json:"normal_side"`
+	IsSystem   bool       `json:"is_system"`
+	IsActive   bool       `json:"is_active"`
+	// DisplayLabel is the user-facing wording for the holder transaction
+	// view's kind translation (empty = not configured; the projection falls
+	// back to the journal type's label, then its Name).
+	DisplayLabel string      `json:"display_label"`
+	BalanceRole  BalanceRole `json:"balance_role"`
+	Lifecycle    *Lifecycle  `json:"lifecycle,omitempty"`
+	CreatedAt    time.Time   `json:"created_at"`
 }
 
 // JournalType represents a dynamic journal category.
 type JournalType struct {
-	UID       string    `json:"uid"`
-	Code      string    `json:"code"`
-	Name      string    `json:"name"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	UID      string `json:"uid"`
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	IsActive bool   `json:"is_active"`
+	// DisplayLabel is the user-facing wording for the holder transaction
+	// view's kind translation (empty = not configured; the projection falls
+	// back to Name).
+	DisplayLabel string    `json:"display_label"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Balance represents a computed balance for an account dimension.

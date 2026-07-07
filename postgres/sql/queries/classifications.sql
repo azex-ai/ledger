@@ -1,7 +1,12 @@
 -- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role, display_label)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING *;
+
+-- name: SetClassificationDisplayLabelIfEmpty :exec
+-- Seeds the user-facing label only when unset — presets re-install must not
+-- clobber an operator's override (same expand-safe stance as balance_role).
+UPDATE classifications SET display_label = $2 WHERE uid = $1 AND display_label = '';
 
 -- name: SetClassificationBalanceRole :exec
 -- Role upgrades are expand-safe ('' -> role); anything else is a semantic
@@ -23,12 +28,16 @@ WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;
 
 -- name: CreateJournalType :one
-INSERT INTO journal_types (code, name, uid)
-VALUES ($1, $2, $3)
-RETURNING id, code, name, is_active, created_at, uid;
+INSERT INTO journal_types (code, name, uid, display_label)
+VALUES ($1, $2, $3, $4)
+RETURNING id, code, name, is_active, created_at, uid, display_label;
+
+-- name: SetJournalTypeDisplayLabelIfEmpty :exec
+-- See SetClassificationDisplayLabelIfEmpty.
+UPDATE journal_types SET display_label = $2 WHERE uid = $1 AND display_label = '';
 
 -- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at, uid
+SELECT id, code, name, is_active, created_at, uid, display_label
 FROM journal_types
 WHERE code = $1;
 
@@ -36,7 +45,7 @@ WHERE code = $1;
 UPDATE journal_types SET is_active = false WHERE uid = $1;
 
 -- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at, uid
+SELECT id, code, name, is_active, created_at, uid, display_label
 FROM journal_types
 WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;

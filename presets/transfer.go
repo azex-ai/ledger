@@ -17,7 +17,7 @@ var transferClassifications = []ClassificationPreset{
 }
 
 var transferJournalTypes = []JournalTypePreset{
-	{Code: "transfer", Name: "User-to-user Transfer"},
+	{Code: "transfer", Name: "User-to-user Transfer", DisplayLabel: "Transfer"},
 }
 
 // transferTemplates defines the four-leg transfer pattern:

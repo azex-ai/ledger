@@ -249,6 +249,10 @@ func (m *mockClassificationStore) SetBalanceRole(ctx context.Context, uid string
 	return nil
 }
 
+func (m *mockClassificationStore) SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
+	return nil
+}
+
 func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
 	return nil
 }
@@ -268,6 +272,10 @@ func (m *mockJournalTypeStore) CreateJournalType(ctx context.Context, input core
 
 func (m *mockJournalTypeStore) GetJournalTypeByCode(ctx context.Context, code string) (*core.JournalType, error) {
 	return &core.JournalType{UID: "jt-1", Code: code, Name: code, IsActive: true, CreatedAt: time.Now()}, nil
+}
+
+func (m *mockJournalTypeStore) SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
+	return nil
 }
 
 func (m *mockJournalTypeStore) DeactivateJournalType(ctx context.Context, uid string) error {

@@ -173,15 +173,20 @@ type ClassificationStore interface {
 	// between two non-empty roles re-buckets historical balances in the
 	// breakdown view and should be treated as a deliberate migration.
 	SetBalanceRole(ctx context.Context, uid string, role BalanceRole) error
+	// SetDisplayLabelIfEmpty sets the user-facing display label only when the
+	// current label is '' — presets use it to seed defaults on existing
+	// installs without ever clobbering an operator's override.
+	SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error
 }
 
 type ClassificationInput struct {
-	Code        string
-	Name        string
-	NormalSide  NormalSide
-	IsSystem    bool
-	BalanceRole BalanceRole
-	Lifecycle   *Lifecycle
+	Code         string
+	Name         string
+	NormalSide   NormalSide
+	IsSystem     bool
+	DisplayLabel string
+	BalanceRole  BalanceRole
+	Lifecycle    *Lifecycle
 }
 
 // JournalTypeStore manages dynamic journal types.
@@ -190,11 +195,30 @@ type JournalTypeStore interface {
 	GetJournalTypeByCode(ctx context.Context, code string) (*JournalType, error)
 	DeactivateJournalType(ctx context.Context, uid string) error
 	ListJournalTypes(ctx context.Context, activeOnly bool) ([]JournalType, error)
+	// SetDisplayLabelIfEmpty sets the user-facing display label only when the
+	// current label is '' (see ClassificationStore.SetDisplayLabelIfEmpty).
+	SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error
 }
 
 type JournalTypeInput struct {
-	Code string
-	Name string
+	Code         string
+	Name         string
+	DisplayLabel string
+}
+
+// HolderReader serves the holder-scoped wallet read surface: balances,
+// translated transactions, and active holds for ONE account holder
+// (docs/plans/2026-07-08-holder-scoped-wallet-surface.md). Read-only.
+type HolderReader interface {
+	// ListHolderBalances returns one HolderBalance per currency the holder
+	// has touched. currencyUID filters to a single currency when non-empty.
+	ListHolderBalances(ctx context.Context, holder int64, currencyUID string) ([]HolderBalance, error)
+	// ListHolderTransactions returns the translated transaction view, newest
+	// first, cursor-paginated at journal granularity (a journal's rows are
+	// never split across pages). Empty cursor starts from the newest.
+	ListHolderTransactions(ctx context.Context, holder int64, cursor string, limit int32) ([]HolderTransaction, string, error)
+	// ListHolderHolds returns the holder's outstanding reservation holds.
+	ListHolderHolds(ctx context.Context, holder int64) ([]HolderHold, error)
 }
 
 // TemplateStore manages entry templates.

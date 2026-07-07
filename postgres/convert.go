@@ -232,25 +232,27 @@ func classificationFromRow(row sqlcgen.Classification) *core.Classification {
 		}
 	}
 	return &core.Classification{
-		UID:         pgToUID(row.Uid),
-		Code:        row.Code,
-		Name:        row.Name,
-		NormalSide:  core.NormalSide(row.NormalSide),
-		IsSystem:    row.IsSystem,
-		IsActive:    row.IsActive,
-		BalanceRole: core.BalanceRole(row.BalanceRole),
-		Lifecycle:   lifecycle,
-		CreatedAt:   row.CreatedAt,
+		UID:          pgToUID(row.Uid),
+		Code:         row.Code,
+		Name:         row.Name,
+		NormalSide:   core.NormalSide(row.NormalSide),
+		IsSystem:     row.IsSystem,
+		IsActive:     row.IsActive,
+		DisplayLabel: row.DisplayLabel,
+		BalanceRole:  core.BalanceRole(row.BalanceRole),
+		Lifecycle:    lifecycle,
+		CreatedAt:    row.CreatedAt,
 	}
 }
 
 func journalTypeFromRow(row sqlcgen.JournalType) *core.JournalType {
 	return &core.JournalType{
-		UID:       pgToUID(row.Uid),
-		Code:      row.Code,
-		Name:      row.Name,
-		IsActive:  row.IsActive,
-		CreatedAt: row.CreatedAt,
+		UID:          pgToUID(row.Uid),
+		Code:         row.Code,
+		Name:         row.Name,
+		IsActive:     row.IsActive,
+		DisplayLabel: row.DisplayLabel,
+		CreatedAt:    row.CreatedAt,
 	}
 }
 

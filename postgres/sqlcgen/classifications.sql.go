@@ -12,19 +12,20 @@ import (
 )
 
 const createClassification = `-- name: CreateClassification :one
-INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role
+INSERT INTO classifications (code, name, normal_side, is_system, lifecycle, uid, balance_role, display_label)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role, display_label
 `
 
 type CreateClassificationParams struct {
-	Code        string      `json:"code"`
-	Name        string      `json:"name"`
-	NormalSide  string      `json:"normal_side"`
-	IsSystem    bool        `json:"is_system"`
-	Lifecycle   []byte      `json:"lifecycle"`
-	Uid         pgtype.UUID `json:"uid"`
-	BalanceRole string      `json:"balance_role"`
+	Code         string      `json:"code"`
+	Name         string      `json:"name"`
+	NormalSide   string      `json:"normal_side"`
+	IsSystem     bool        `json:"is_system"`
+	Lifecycle    []byte      `json:"lifecycle"`
+	Uid          pgtype.UUID `json:"uid"`
+	BalanceRole  string      `json:"balance_role"`
+	DisplayLabel string      `json:"display_label"`
 }
 
 func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassificationParams) (Classification, error) {
@@ -36,6 +37,7 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		arg.Lifecycle,
 		arg.Uid,
 		arg.BalanceRole,
+		arg.DisplayLabel,
 	)
 	var i Classification
 	err := row.Scan(
@@ -49,24 +51,31 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 		&i.Lifecycle,
 		&i.Uid,
 		&i.BalanceRole,
+		&i.DisplayLabel,
 	)
 	return i, err
 }
 
 const createJournalType = `-- name: CreateJournalType :one
-INSERT INTO journal_types (code, name, uid)
-VALUES ($1, $2, $3)
-RETURNING id, code, name, is_active, created_at, uid
+INSERT INTO journal_types (code, name, uid, display_label)
+VALUES ($1, $2, $3, $4)
+RETURNING id, code, name, is_active, created_at, uid, display_label
 `
 
 type CreateJournalTypeParams struct {
-	Code string      `json:"code"`
-	Name string      `json:"name"`
-	Uid  pgtype.UUID `json:"uid"`
+	Code         string      `json:"code"`
+	Name         string      `json:"name"`
+	Uid          pgtype.UUID `json:"uid"`
+	DisplayLabel string      `json:"display_label"`
 }
 
 func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypeParams) (JournalType, error) {
-	row := q.db.QueryRow(ctx, createJournalType, arg.Code, arg.Name, arg.Uid)
+	row := q.db.QueryRow(ctx, createJournalType,
+		arg.Code,
+		arg.Name,
+		arg.Uid,
+		arg.DisplayLabel,
+	)
 	var i JournalType
 	err := row.Scan(
 		&i.ID,
@@ -75,6 +84,7 @@ func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypePa
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.Uid,
+		&i.DisplayLabel,
 	)
 	return i, err
 }
@@ -98,7 +108,7 @@ func (q *Queries) DeactivateJournalType(ctx context.Context, uid pgtype.UUID) er
 }
 
 const getClassification = `-- name: GetClassification :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications WHERE id = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role, display_label FROM classifications WHERE id = $1
 `
 
 func (q *Queries) GetClassification(ctx context.Context, id int64) (Classification, error) {
@@ -115,12 +125,13 @@ func (q *Queries) GetClassification(ctx context.Context, id int64) (Classificati
 		&i.Lifecycle,
 		&i.Uid,
 		&i.BalanceRole,
+		&i.DisplayLabel,
 	)
 	return i, err
 }
 
 const getClassificationByCode = `-- name: GetClassificationByCode :one
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications WHERE code = $1
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role, display_label FROM classifications WHERE code = $1
 `
 
 func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Classification, error) {
@@ -137,12 +148,13 @@ func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Cla
 		&i.Lifecycle,
 		&i.Uid,
 		&i.BalanceRole,
+		&i.DisplayLabel,
 	)
 	return i, err
 }
 
 const getJournalTypeByCode = `-- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at, uid
+SELECT id, code, name, is_active, created_at, uid, display_label
 FROM journal_types
 WHERE code = $1
 `
@@ -157,6 +169,7 @@ func (q *Queries) GetJournalTypeByCode(ctx context.Context, code string) (Journa
 		&i.IsActive,
 		&i.CreatedAt,
 		&i.Uid,
+		&i.DisplayLabel,
 	)
 	return i, err
 }
@@ -201,7 +214,7 @@ func (q *Queries) ListClassificationDims(ctx context.Context) ([]ListClassificat
 }
 
 const listClassifications = `-- name: ListClassifications :many
-SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role FROM classifications
+SELECT id, code, name, normal_side, is_system, is_active, created_at, lifecycle, uid, balance_role, display_label FROM classifications
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
 `
@@ -226,6 +239,7 @@ func (q *Queries) ListClassifications(ctx context.Context, activeOnly bool) ([]C
 			&i.Lifecycle,
 			&i.Uid,
 			&i.BalanceRole,
+			&i.DisplayLabel,
 		); err != nil {
 			return nil, err
 		}
@@ -268,7 +282,7 @@ func (q *Queries) ListJournalTypeDims(ctx context.Context) ([]ListJournalTypeDim
 }
 
 const listJournalTypes = `-- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at, uid
+SELECT id, code, name, is_active, created_at, uid, display_label
 FROM journal_types
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
@@ -290,6 +304,7 @@ func (q *Queries) ListJournalTypes(ctx context.Context, activeOnly bool) ([]Jour
 			&i.IsActive,
 			&i.CreatedAt,
 			&i.Uid,
+			&i.DisplayLabel,
 		); err != nil {
 			return nil, err
 		}
@@ -314,5 +329,36 @@ type SetClassificationBalanceRoleParams struct {
 // change the caller must guard (presets only upgrade from ”).
 func (q *Queries) SetClassificationBalanceRole(ctx context.Context, arg SetClassificationBalanceRoleParams) error {
 	_, err := q.db.Exec(ctx, setClassificationBalanceRole, arg.Uid, arg.BalanceRole)
+	return err
+}
+
+const setClassificationDisplayLabelIfEmpty = `-- name: SetClassificationDisplayLabelIfEmpty :exec
+UPDATE classifications SET display_label = $2 WHERE uid = $1 AND display_label = ''
+`
+
+type SetClassificationDisplayLabelIfEmptyParams struct {
+	Uid          pgtype.UUID `json:"uid"`
+	DisplayLabel string      `json:"display_label"`
+}
+
+// Seeds the user-facing label only when unset — presets re-install must not
+// clobber an operator's override (same expand-safe stance as balance_role).
+func (q *Queries) SetClassificationDisplayLabelIfEmpty(ctx context.Context, arg SetClassificationDisplayLabelIfEmptyParams) error {
+	_, err := q.db.Exec(ctx, setClassificationDisplayLabelIfEmpty, arg.Uid, arg.DisplayLabel)
+	return err
+}
+
+const setJournalTypeDisplayLabelIfEmpty = `-- name: SetJournalTypeDisplayLabelIfEmpty :exec
+UPDATE journal_types SET display_label = $2 WHERE uid = $1 AND display_label = ''
+`
+
+type SetJournalTypeDisplayLabelIfEmptyParams struct {
+	Uid          pgtype.UUID `json:"uid"`
+	DisplayLabel string      `json:"display_label"`
+}
+
+// See SetClassificationDisplayLabelIfEmpty.
+func (q *Queries) SetJournalTypeDisplayLabelIfEmpty(ctx context.Context, arg SetJournalTypeDisplayLabelIfEmptyParams) error {
+	_, err := q.db.Exec(ctx, setJournalTypeDisplayLabelIfEmpty, arg.Uid, arg.DisplayLabel)
 	return err
 }

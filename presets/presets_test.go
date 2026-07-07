@@ -125,6 +125,18 @@ func (s *fakeClassificationStore) SetBalanceRole(_ context.Context, uid string, 
 	return core.ErrNotFound
 }
 
+func (s *fakeClassificationStore) SetDisplayLabelIfEmpty(_ context.Context, uid string, label string) error {
+	for _, classification := range s.classifications {
+		if classification.UID == uid {
+			if classification.DisplayLabel == "" {
+				classification.DisplayLabel = label
+			}
+			return nil
+		}
+	}
+	return core.ErrNotFound
+}
+
 func (s *fakeClassificationStore) DeactivateClassification(_ context.Context, uid string) error {
 	for _, classification := range s.classifications {
 		if classification.UID == uid {
@@ -180,6 +192,18 @@ func (s *fakeJournalTypeStore) GetJournalTypeByCode(_ context.Context, code stri
 		return nil, core.ErrNotFound
 	}
 	return journalType, nil
+}
+
+func (s *fakeJournalTypeStore) SetDisplayLabelIfEmpty(_ context.Context, uid string, label string) error {
+	for _, jt := range s.journalTypes {
+		if jt.UID == uid {
+			if jt.DisplayLabel == "" {
+				jt.DisplayLabel = label
+			}
+			return nil
+		}
+	}
+	return core.ErrNotFound
 }
 
 func (s *fakeJournalTypeStore) DeactivateJournalType(_ context.Context, uid string) error {

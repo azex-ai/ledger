@@ -73,16 +73,17 @@ type Booking struct {
 }
 
 type Classification struct {
-	ID          int64       `json:"id"`
-	Code        string      `json:"code"`
-	Name        string      `json:"name"`
-	NormalSide  string      `json:"normal_side"`
-	IsSystem    bool        `json:"is_system"`
-	IsActive    bool        `json:"is_active"`
-	CreatedAt   time.Time   `json:"created_at"`
-	Lifecycle   []byte      `json:"lifecycle"`
-	Uid         pgtype.UUID `json:"uid"`
-	BalanceRole string      `json:"balance_role"`
+	ID           int64       `json:"id"`
+	Code         string      `json:"code"`
+	Name         string      `json:"name"`
+	NormalSide   string      `json:"normal_side"`
+	IsSystem     bool        `json:"is_system"`
+	IsActive     bool        `json:"is_active"`
+	CreatedAt    time.Time   `json:"created_at"`
+	Lifecycle    []byte      `json:"lifecycle"`
+	Uid          pgtype.UUID `json:"uid"`
+	BalanceRole  string      `json:"balance_role"`
+	DisplayLabel string      `json:"display_label"`
 }
 
 type Currency struct {
@@ -195,12 +196,13 @@ type JournalEntry struct {
 }
 
 type JournalType struct {
-	ID        int64       `json:"id"`
-	Code      string      `json:"code"`
-	Name      string      `json:"name"`
-	IsActive  bool        `json:"is_active"`
-	CreatedAt time.Time   `json:"created_at"`
-	Uid       pgtype.UUID `json:"uid"`
+	ID           int64       `json:"id"`
+	Code         string      `json:"code"`
+	Name         string      `json:"name"`
+	IsActive     bool        `json:"is_active"`
+	CreatedAt    time.Time   `json:"created_at"`
+	Uid          pgtype.UUID `json:"uid"`
+	DisplayLabel string      `json:"display_label"`
 }
 
 type PeriodClose struct {

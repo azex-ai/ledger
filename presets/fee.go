@@ -27,7 +27,7 @@ var feeClassifications = []ClassificationPreset{
 }
 
 var feeJournalTypes = []JournalTypePreset{
-	{Code: "fee", Name: "Fee Charge"},
+	{Code: "fee", Name: "Fee Charge", DisplayLabel: "Fee"},
 }
 
 // feeTemplates: DR main_wallet (user) CR fees (system)

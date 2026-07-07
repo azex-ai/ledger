@@ -35,8 +35,8 @@ import (
 // where the inventory physically lives.
 
 var fxJournalTypes = []JournalTypePreset{
-	{Code: "fx_sell", Name: "FX Sell Leg"},
-	{Code: "fx_buy", Name: "FX Buy Leg"},
+	{Code: "fx_sell", Name: "FX Sell Leg", DisplayLabel: "Exchange"},
+	{Code: "fx_buy", Name: "FX Buy Leg", DisplayLabel: "Exchange"},
 }
 
 // fx_sell — user gives up their CCY-A; platform settlement pool absorbs it.

@@ -11,7 +11,7 @@ import (
 // also used by the transfer bundle; importing it here would create a duplicate.
 // Both bundles share the same classification declaration via combineClassifications.
 var settlementJournalTypes = []JournalTypePreset{
-	{Code: "checkout_settlement", Name: "Checkout Settlement"},
+	{Code: "checkout_settlement", Name: "Checkout Settlement", DisplayLabel: "Payment"},
 }
 
 // settlementTemplates: merchant settlement with optional fee leg.

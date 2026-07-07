@@ -15,7 +15,10 @@ import (
 
 var (
 	_ core.ClassificationStore = (*ClassificationStore)(nil)
-	_ core.JournalTypeStore    = (*ClassificationStore)(nil)
+	// JournalTypeStore must be satisfied via the adapter: the bare
+	// *ClassificationStore would structurally match (same-signature
+	// SetDisplayLabelIfEmpty) but with classification-label behavior.
+	_ core.JournalTypeStore = JournalTypeStoreAdapter{}
 )
 
 // ClassificationStore implements ClassificationStore and JournalTypeStore.
@@ -72,13 +75,14 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 		lifecycle = []byte("{}")
 	}
 	row, err := s.q.CreateClassification(ctx, sqlcgen.CreateClassificationParams{
-		Code:        input.Code,
-		Name:        input.Name,
-		NormalSide:  string(input.NormalSide),
-		IsSystem:    input.IsSystem,
-		Lifecycle:   lifecycle,
-		Uid:         newUID(),
-		BalanceRole: string(input.BalanceRole),
+		Code:         input.Code,
+		Name:         input.Name,
+		NormalSide:   string(input.NormalSide),
+		IsSystem:     input.IsSystem,
+		Lifecycle:    lifecycle,
+		Uid:          newUID(),
+		BalanceRole:  string(input.BalanceRole),
+		DisplayLabel: input.DisplayLabel,
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create classification", err)
@@ -87,9 +91,9 @@ func (s *ClassificationStore) CreateClassification(ctx context.Context, input co
 }
 
 // SetBalanceRole retags a classification's balance role. Intended for
-// expand-style upgrades ('' -> role); switching between two non-empty roles
+// expand-style upgrades (” -> role); switching between two non-empty roles
 // re-buckets historical balances in the breakdown view — the caller owns that
-// decision (presets only ever upgrade from '').
+// decision (presets only ever upgrade from ”).
 func (s *ClassificationStore) SetBalanceRole(ctx context.Context, uid string, role core.BalanceRole) error {
 	if !role.IsValid() {
 		return fmt.Errorf("postgres: set balance role: invalid balance role %q: %w", role, core.ErrInvalidInput)
@@ -103,6 +107,23 @@ func (s *ClassificationStore) SetBalanceRole(ctx context.Context, uid string, ro
 		BalanceRole: string(role),
 	}); err != nil {
 		return wrapStoreError("postgres: set balance role", err)
+	}
+	return nil
+}
+
+// SetDisplayLabelIfEmpty seeds the user-facing display label only when the
+// current label is ” — presets re-install must never clobber an operator's
+// override.
+func (s *ClassificationStore) SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.SetClassificationDisplayLabelIfEmpty(ctx, sqlcgen.SetClassificationDisplayLabelIfEmptyParams{
+		Uid:          pgUID,
+		DisplayLabel: label,
+	}); err != nil {
+		return wrapStoreError("postgres: set classification display label", err)
 	}
 	return nil
 }
@@ -147,9 +168,10 @@ func (s *ClassificationStore) ListClassifications(ctx context.Context, activeOnl
 // CreateJournalType inserts a new journal type.
 func (s *ClassificationStore) CreateJournalType(ctx context.Context, input core.JournalTypeInput) (*core.JournalType, error) {
 	row, err := s.q.CreateJournalType(ctx, sqlcgen.CreateJournalTypeParams{
-		Code: input.Code,
-		Name: input.Name,
-		Uid:  newUID(),
+		Code:         input.Code,
+		Name:         input.Name,
+		Uid:          newUID(),
+		DisplayLabel: input.DisplayLabel,
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create journal type", err)
@@ -181,6 +203,25 @@ func (s *ClassificationStore) DeactivateJournalType(ctx context.Context, uid str
 	return nil
 }
 
+// SetJournalTypeDisplayLabelIfEmpty is the journal-type counterpart of the
+// classification setter: seeds the label only when currently unset. The name
+// carries the JournalType prefix because this receiver already uses
+// SetDisplayLabelIfEmpty for classifications; JournalTypeStoreAdapter maps it
+// onto core.JournalTypeStore's method.
+func (s *ClassificationStore) SetJournalTypeDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.SetJournalTypeDisplayLabelIfEmpty(ctx, sqlcgen.SetJournalTypeDisplayLabelIfEmptyParams{
+		Uid:          pgUID,
+		DisplayLabel: label,
+	}); err != nil {
+		return wrapStoreError("postgres: set journal type display label", err)
+	}
+	return nil
+}
+
 // ListJournalTypes returns journal types, optionally filtering to active only.
 func (s *ClassificationStore) ListJournalTypes(ctx context.Context, activeOnly bool) ([]core.JournalType, error) {
 	rows, err := s.q.ListJournalTypes(ctx, activeOnly)
@@ -192,4 +233,17 @@ func (s *ClassificationStore) ListJournalTypes(ctx context.Context, activeOnly b
 		result[i] = *journalTypeFromRow(row)
 	}
 	return result, nil
+}
+
+// JournalTypeStoreAdapter presents ClassificationStore's journal-type
+// methods as a core.JournalTypeStore. It exists because the interface method
+// SetDisplayLabelIfEmpty has the same signature on both ClassificationStore
+// and JournalTypeStore, and one receiver cannot implement two different
+// behaviors under one name — the adapter re-routes the journal-type variant.
+type JournalTypeStoreAdapter struct{ *ClassificationStore }
+
+// SetDisplayLabelIfEmpty implements core.JournalTypeStore by delegating to
+// the journal-type setter (shadowing the promoted classification method).
+func (a JournalTypeStoreAdapter) SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
+	return a.ClassificationStore.SetJournalTypeDisplayLabelIfEmpty(ctx, uid, label)
 }
