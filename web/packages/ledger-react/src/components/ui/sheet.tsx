@@ -4,6 +4,7 @@ import * as React from "react"
 import { Dialog as SheetPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "../../lib/utils/cn"
+import { useLedgerPortalContainer } from "../../provider/context"
 import { Button } from "./button"
 import { XIcon } from "lucide-react"
 
@@ -19,8 +20,16 @@ function SheetClose({ ...props }: SheetPrimitive.Close.Props) {
   return <SheetPrimitive.Close data-slot="sheet-close" {...props} />
 }
 
-function SheetPortal({ ...props }: SheetPrimitive.Portal.Props) {
-  return <SheetPrimitive.Portal data-slot="sheet-portal" {...props} />
+function SheetPortal({ container, ...props }: SheetPrimitive.Portal.Props) {
+  // Portal into .ledger-root (when mounted) so scoped tokens/preflight apply.
+  const ledgerContainer = useLedgerPortalContainer()
+  return (
+    <SheetPrimitive.Portal
+      data-slot="sheet-portal"
+      container={container ?? ledgerContainer ?? undefined}
+      {...props}
+    />
+  )
 }
 
 function SheetOverlay({ className, ...props }: SheetPrimitive.Backdrop.Props) {

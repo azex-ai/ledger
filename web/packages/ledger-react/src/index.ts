@@ -4,7 +4,7 @@ export type * from "./client/types";
 
 export { LedgerProvider } from "./provider/provider";
 export type { LedgerProviderConfig } from "./provider/provider";
-export { useLedgerClient } from "./provider/context";
+export { useLedgerClient, useLedgerAppearance } from "./provider/context";
 
 // Hooks
 export { useLedgerMutation } from "./hooks/use-ledger-mutation";

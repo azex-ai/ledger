@@ -51,11 +51,31 @@ describe("dist/styles.css", () => {
     expect(css).toContain(".border-border");
   });
 
-  it("uses a class-based dark: variant, not OS media query", () => {
-    // dark: utilities must key off the .ledger-root wrapper class.
-    expect(css).toContain(".ledger-root:not(.light)");
-    // ...and must NOT be gated behind the OS color-scheme media query.
-    expect(css).not.toContain("prefers-color-scheme");
+  it("keys dark: off appearance classes: explicit .dark + system media", () => {
+    // Explicit dark class...
+    expect(css).toContain(".ledger-root.dark");
+    // ...and system mode (default): .system gated behind the OS media query.
+    expect(css).toContain(".ledger-root.system");
+    expect(css).toContain("prefers-color-scheme");
+  });
+
+  it("system dark tokens stay identical to explicit dark tokens", () => {
+    // theme.css maintains the dark token block twice (.dark, and .system
+    // inside the media query). Pin that they never drift.
+    const grab = (re: RegExp) => {
+      const m = css.match(re);
+      if (!m) throw new Error(`token block not found: ${re}`);
+      return new Set(
+        m[1]
+          .split(";")
+          .map((d) => d.trim())
+          .filter((d) => d.startsWith("--")),
+      );
+    };
+    const dark = grab(/\.ledger-root\.dark\{([^}]*)\}/);
+    const system = grab(/\.ledger-root\.system\{([^}]*)\}/);
+    expect(dark.size).toBeGreaterThan(10);
+    expect([...system].sort()).toEqual([...dark].sort());
   });
 
   it("emits the font-heading utility", () => {
@@ -64,13 +84,50 @@ describe("dist/styles.css", () => {
     expect(css).toContain(".font-heading{");
   });
 
-  it("does NOT contain Tailwind's global preflight reset", () => {
-    // Preflight's hallmark global box-sizing reset.
-    expect(css).not.toContain("box-sizing:border-box");
-    // Preflight resets bare html/body globally.
+  it("ships a scoped preflight, never a global one", () => {
+    // The reset must exist (self-contained rendering in bare hosts)...
+    expect(css).toContain("box-sizing:border-box");
+    expect(css).toContain("border-collapse:collapse");
+    // ...but only under .ledger-root — bare html/body/h1 selectors that would
+    // reset the HOST app's elements must never appear.
     expect(css).not.toMatch(/(^|[^a-zA-Z._#-])html\s*\{/);
     expect(css).not.toContain("body{margin:0");
-    // Preflight zeroes heading/blockquote/etc. margins globally.
     expect(css).not.toMatch(/(^|[},])(h1|h2|h3|h4|h5|h6|p|blockquote)[^{]*\{margin:0/);
+    expect(css).not.toMatch(/(^|[},])\*\s*[,{]/); // bare universal selector
+  });
+
+  it("paints its own base: font, background, foreground on .ledger-root", () => {
+    expect(css).toMatch(/\.ledger-root[^{]*\{[^}]*font-family:var\(--font-sans\)/);
+    expect(css).toMatch(/\.ledger-root[^{]*\{[^}]*background-color:var\(--background\)/);
+    expect(css).toMatch(/\.ledger-root[^{]*\{[^}]*color:var\(--foreground\)/);
+  });
+});
+
+describe("dist/heroui.css", () => {
+  const herouiPath = path.join(pkgRoot, "dist", "heroui.css");
+  const css = (() => {
+    try {
+      return readFileSync(herouiPath, "utf8");
+    } catch {
+      throw new Error(
+        `dist/heroui.css not found at ${herouiPath}. Run \`npm run build\` before tests.`,
+      );
+    }
+  })();
+
+  it("exists and emits layout utilities the heroui skin uses", () => {
+    expect(css.length).toBeGreaterThan(0);
+    // Structural classes scanned from src/heroui/** — representative sample.
+    expect(css).toContain(".flex");
+    expect(css).toContain(".min-w-0");
+    expect(css).toContain(".truncate");
+  });
+
+  it("ships no preflight and no ledger tokens (host owns the HeroUI theme)", () => {
+    // No global element resets…
+    expect(css).not.toMatch(/(^|[^a-zA-Z._#-])html\s*\{/);
+    expect(css).not.toContain("body{margin:0");
+    // …and no .ledger-root token block — theming belongs to @heroui/styles.
+    expect(css).not.toMatch(/\.ledger-root[^{]*\{[^}]*--primary:/);
   });
 });

@@ -717,6 +717,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 
 ## Examples
 
+- [**fullstack**](examples/fullstack/) -- Full-stack quickstart: a chi scaffold serving the complete ledger HTTP API next to its own routes, plus Next.js scaffolds rendering the `@azex/ledger-react` admin dashboard against it in both flavors (default shadcn-style skin and the `/heroui` skin).
 - [**embed**](examples/embed/) -- Minimum-viable library embed: PostJournal + GetBalance with no templates, no presets, no HTTP layer.
 - [**crypto-deposit**](examples/crypto-deposit/) -- Full EVM CREATE2 deposit lifecycle: classification install, booking creation, channel-adapter webhook, template-based journaling, reserve/settle, balance queries, and reconciliation.
 - [**billing**](examples/billing/) -- SaaS-style metered billing: top-up wallet, reserve budget, deduct actual cost, release remainder.

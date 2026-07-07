@@ -94,7 +94,7 @@ export function SnapshotsPage() {
                 <TableCell>{s.account_holder}</TableCell>
                 <TableCell>{s.currency_uid}</TableCell>
                 <TableCell>{s.classification_uid}</TableCell>
-                <TableCell className="text-right font-mono">{formatAmount(s.balance)}</TableCell>
+                <TableCell className="text-right tabular-nums">{formatAmount(s.balance)}</TableCell>
               </TableRow>
             ))}
           </TableBody>

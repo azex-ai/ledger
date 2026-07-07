@@ -8,7 +8,11 @@ import {
 } from "@tanstack/react-query";
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { createLedgerClient, type LedgerClientConfig } from "../client/client";
-import { LedgerClientContext } from "./context";
+import {
+  LedgerAppearanceContext,
+  LedgerClientContext,
+  LedgerPortalContainerContext,
+} from "./context";
 
 export interface LedgerProviderConfig extends LedgerClientConfig {
   /** Reuse the host app's QueryClient. Omitted → the provider creates its own. */
@@ -21,6 +25,13 @@ export interface LedgerProviderConfig extends LedgerClientConfig {
   onError?: (err: unknown) => void;
   /** CSS custom-property overrides applied inline to the `.ledger-root` div. */
   theme?: Record<string, string>;
+  /**
+   * Color scheme for everything under the provider. "system" (default)
+   * follows the OS via prefers-color-scheme; "dark"/"light" force a variant
+   * by class on the `.ledger-root` wrapper. Fine-grained re-theming goes
+   * through `theme` overrides.
+   */
+  appearance?: "light" | "dark" | "system";
 }
 
 export function LedgerProvider({
@@ -30,7 +41,15 @@ export function LedgerProvider({
   config: LedgerProviderConfig;
   children: ReactNode;
 }): React.JSX.Element {
-  const { baseUrl, apiKey, fetch, queryClient, onError, theme } = config;
+  const {
+    baseUrl,
+    apiKey,
+    fetch,
+    queryClient,
+    onError,
+    theme,
+    appearance = "system",
+  } = config;
 
   // Build the client once per distinct config; memo keyed on the fields that
   // actually shape requests. Stable inputs → stable client identity (Phase 3
@@ -41,6 +60,10 @@ export function LedgerProvider({
     () => createLedgerClient({ baseUrl, apiKey, fetch }),
     [baseUrl, apiKey, fetch],
   );
+
+  // Root element state (not a ref): floating layers portal into it, so its
+  // availability must trigger a re-render once the div mounts.
+  const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
 
   // Own QueryClient: stable across renders via lazy useState initializer.
   // Wire onError into both caches so query + mutation failures surface to it.
@@ -58,9 +81,23 @@ export function LedgerProvider({
   return (
     <QueryClientProvider client={activeQueryClient}>
       <LedgerClientContext.Provider value={client}>
-        <div className="ledger-root" style={style}>
-          {children}
-        </div>
+        <LedgerAppearanceContext.Provider value={appearance}>
+          <LedgerPortalContainerContext.Provider value={rootEl}>
+            <div
+              ref={setRootEl}
+              className={
+                appearance === "dark"
+                  ? "ledger-root dark"
+                  : appearance === "light"
+                    ? "ledger-root"
+                    : "ledger-root system"
+              }
+              style={style}
+            >
+              {children}
+            </div>
+          </LedgerPortalContainerContext.Provider>
+        </LedgerAppearanceContext.Provider>
       </LedgerClientContext.Provider>
     </QueryClientProvider>
   );

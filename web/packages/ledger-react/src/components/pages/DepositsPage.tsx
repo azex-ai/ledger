@@ -196,8 +196,9 @@ export function DepositsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError } = useDeposits(params);
-  const deposits = data ?? [];
+  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+    useDeposits(params);
+  const deposits = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
     <div className="space-y-6">
@@ -251,7 +252,7 @@ export function DepositsPage() {
                   <TableCell>#{d.uid}</TableCell>
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(d.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(d.amount)}</TableCell>
                   <TableCell className="text-right font-mono">
                     {d.settled_amount && d.settled_amount !== "0" ? formatAmount(d.settled_amount) : "—"}
                   </TableCell>
@@ -270,6 +271,13 @@ export function DepositsPage() {
               ))}
             </TableBody>
           </Table>
+          {hasNextPage && (
+            <div className="flex justify-center">
+              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+                {isFetchingNextPage ? "Loading..." : "Load More"}
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>

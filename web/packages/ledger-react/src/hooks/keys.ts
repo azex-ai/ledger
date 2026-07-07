@@ -53,7 +53,12 @@ export const ledgerKeys = {
   // `classificationId` the hook computes at runtime.
   bookings: (
     code: string,
-    params: { holder?: number; status?: string; classificationUid: string },
+    params: {
+      holder?: number;
+      status?: string;
+      classificationUid: string;
+      limit?: number;
+    },
   ) => ["ledger", "bookings", code, params] as const,
 } as const;
 

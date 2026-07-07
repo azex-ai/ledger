@@ -1,9 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { useLedgerClient } from "../provider/context";
 import { useLedgerMutation } from "./use-ledger-mutation";
 import { useClassificationIdByCode } from "./use-classification-id";
 import { ledgerKeys } from "./keys";
-import type { Booking } from "../client/types";
 
 const DEPOSIT_CODE = "deposit";
 
@@ -11,19 +10,29 @@ export function useDepositClassificationId(): string {
   return useClassificationIdByCode(DEPOSIT_CODE);
 }
 
-export function useDeposits(params: { holder?: number; status?: string }) {
+/**
+ * Cursor-paginated deposit bookings. Pages carry `{list, next_cursor}` —
+ * flatten with `data?.pages.flatMap((p) => p.list)` and drive "Load more"
+ * from `hasNextPage`/`fetchNextPage` (same contract as useJournals).
+ */
+export function useDeposits(
+  params: { holder?: number; status?: string },
+  limit = 20,
+) {
   const client = useLedgerClient();
   const classificationUid = useDepositClassificationId();
-  return useQuery<Booking[]>({
-    queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationUid }),
-    queryFn: async () => {
-      const page = await client.listBookings({
+  return useInfiniteQuery({
+    queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationUid, limit }),
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      client.listBookings({
         holder: params.holder,
         status: params.status,
         classification_uid: classificationUid,
-      });
-      return page.list;
-    },
+        cursor: pageParam,
+        limit,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
     enabled: classificationUid !== "",
   });
 }

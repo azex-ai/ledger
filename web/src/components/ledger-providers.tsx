@@ -11,7 +11,7 @@ import { clientLedgerConfig } from "@/lib/ledger-env";
  */
 export function LedgerProviders({ children }: { children: ReactNode }) {
   return (
-    <LedgerProvider config={clientLedgerConfig()}>
+    <LedgerProvider config={{ ...clientLedgerConfig(), appearance: "dark" }}>
       {children}
       <Toaster
         theme="dark"

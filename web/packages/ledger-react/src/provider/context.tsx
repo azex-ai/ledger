@@ -13,3 +13,30 @@ export function useLedgerClient(): LedgerClient {
   }
   return client;
 }
+
+// Resolved appearance from the provider config. Defaults to "system"
+// (matching the provider default) so components (e.g. LedgerAdmin's Toaster,
+// which passes this straight to sonner's `theme`) behave sensibly even
+// outside a provider in tests.
+export const LedgerAppearanceContext = createContext<
+  "light" | "dark" | "system"
+>("system");
+
+export function useLedgerAppearance(): "light" | "dark" | "system" {
+  return useContext(LedgerAppearanceContext);
+}
+
+// The `.ledger-root` element, used as the portal container for floating
+// layers (dialogs, selects, tooltips, sheets). Portalling INTO the root —
+// instead of Base UI's default document.body — keeps portalled content
+// inside the scope where the package's tokens and preflight apply, so
+// overlays render correctly in hosts without any global Tailwind setup.
+// Null before the root mounts (or outside a provider): consumers fall back
+// to the Base UI default.
+export const LedgerPortalContainerContext = createContext<HTMLElement | null>(
+  null,
+);
+
+export function useLedgerPortalContainer(): HTMLElement | null {
+  return useContext(LedgerPortalContainerContext);
+}

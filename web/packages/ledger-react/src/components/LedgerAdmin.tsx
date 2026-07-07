@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { Toaster } from "sonner";
+import { useLedgerAppearance } from "../provider/context";
 import { Sidebar } from "./sidebar";
 import { type LinkComponent } from "./nav";
 import { ListPageSkeleton } from "./loading-skeleton";
@@ -81,6 +82,7 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
 
 export function LedgerAdmin() {
   const [pathname, setPathname] = useState("/");
+  const appearance = useLedgerAppearance();
 
   // Internal router: clicking a nav/page link sets the active section instead
   // of navigating. Stable identity via useMemo so child memoization holds.
@@ -114,7 +116,7 @@ export function LedgerAdmin() {
         </Suspense>
       </main>
       <Toaster
-        theme="dark"
+        theme={appearance}
         position="bottom-right"
         toastOptions={{
           style: {

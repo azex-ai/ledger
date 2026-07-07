@@ -33,7 +33,7 @@ describe("use-reservations", () => {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data?.list).toHaveLength(1);
+    expect(result.current.data?.pages.flatMap((p) => p.list)).toHaveLength(1);
     expect(
       qc.getQueryCache().find({ queryKey: ["ledger", "reservations", params] }),
     ).toBeDefined();

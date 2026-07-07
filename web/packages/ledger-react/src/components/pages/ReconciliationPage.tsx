@@ -124,8 +124,8 @@ export function ReconciliationPage() {
                           <TableCell>{d.account_holder}</TableCell>
                           <TableCell>{d.currency_uid}</TableCell>
                           <TableCell>{d.classification_uid}</TableCell>
-                          <TableCell className="text-right font-mono">{formatAmount(d.expected)}</TableCell>
-                          <TableCell className="text-right font-mono">{formatAmount(d.actual)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatAmount(d.expected)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatAmount(d.actual)}</TableCell>
                           <TableCell className="text-right font-mono">
                             {(() => {
                               const drift = formatSignedAmount(d.drift);

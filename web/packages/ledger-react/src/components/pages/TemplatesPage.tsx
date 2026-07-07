@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
+  useClassifications, useCurrencies, useJournalTypes,
 } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -40,6 +41,8 @@ function CreateTemplateDialog() {
     { _id: crypto.randomUUID(), classification_uid: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
   ]);
   const mutation = useCreateTemplate();
+  const { data: journalTypes } = useJournalTypes(true);
+  const { data: classifications } = useClassifications(true);
 
   function addLine() {
     setLines([...lines, {
@@ -108,8 +111,20 @@ function CreateTemplateDialog() {
               <Input id="tpl-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Confirm Deposit" />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="tpl-jtype">Journal Type ID</Label>
-              <Input id="tpl-jtype" value={form.journal_type_uid} onChange={(e) => setForm({ ...form, journal_type_uid: e.target.value })} placeholder="1" />
+              <Label htmlFor="tpl-jtype">Journal Type</Label>
+              <Select
+                value={form.journal_type_uid === "" ? null : form.journal_type_uid}
+                onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, journal_type_uid: v }); }}
+              >
+                <SelectTrigger id="tpl-jtype" className="w-full">
+                  <SelectValue placeholder="Select" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(journalTypes ?? []).map((t) => (
+                    <SelectItem key={t.uid} value={t.uid}>{t.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
 
@@ -125,7 +140,14 @@ function CreateTemplateDialog() {
                 {lines.map((l, idx) => l.entry_type !== "debit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-green-500/20 bg-green-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
-                      <Input placeholder="Class ID" value={l.classification_uid} onChange={(e) => updateLine(idx, { classification_uid: e.target.value })} className="w-24" />
+                      <Select value={l.classification_uid === "" ? null : l.classification_uid} onValueChange={(v) => { if (typeof v === "string") updateLine(idx, { classification_uid: v }); }}>
+                        <SelectTrigger className="w-32"><SelectValue placeholder="Class" /></SelectTrigger>
+                        <SelectContent>
+                          {(classifications ?? []).map((c) => (
+                            <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
                         <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -144,7 +166,14 @@ function CreateTemplateDialog() {
                 {lines.map((l, idx) => l.entry_type !== "credit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-red-500/20 bg-red-500/5 p-3 space-y-2">
                     <div className="flex gap-2">
-                      <Input placeholder="Class ID" value={l.classification_uid} onChange={(e) => updateLine(idx, { classification_uid: e.target.value })} className="w-24" />
+                      <Select value={l.classification_uid === "" ? null : l.classification_uid} onValueChange={(v) => { if (typeof v === "string") updateLine(idx, { classification_uid: v }); }}>
+                        <SelectTrigger className="w-32"><SelectValue placeholder="Class" /></SelectTrigger>
+                        <SelectContent>
+                          {(classifications ?? []).map((c) => (
+                            <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
                         <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -209,12 +238,20 @@ function PreviewSection({ code }: { code: string }) {
   const [params, setParams] = useState({ holder_id: "", currency_uid: "", amount: "" });
   const previewMutation = usePreviewTemplate();
   const preview = previewMutation.data as PreviewResult | undefined;
+  const { data: currencies } = useCurrencies(true);
 
   return (
     <div className="space-y-2 mt-2">
       <div className="flex gap-2">
         <Input placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
-        <Input placeholder="Currency ID" value={params.currency_uid} onChange={(e) => setParams({ ...params, currency_uid: e.target.value })} className="w-28" />
+        <Select value={params.currency_uid === "" ? null : params.currency_uid} onValueChange={(v) => { if (typeof v === "string") setParams({ ...params, currency_uid: v }); }}>
+          <SelectTrigger className="w-28"><SelectValue placeholder="Currency" /></SelectTrigger>
+          <SelectContent>
+            {(currencies ?? []).map((c) => (
+              <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Input placeholder="Amount" value={params.amount} onChange={(e) => setParams({ ...params, amount: e.target.value })} className="w-28" />
         <Button
           size="sm"

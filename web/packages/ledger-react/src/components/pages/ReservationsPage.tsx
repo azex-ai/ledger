@@ -112,8 +112,9 @@ export function ReservationsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError } = useReservations(params);
-  const reservations = data?.list ?? [];
+  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+    useReservations(params);
+  const reservations = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
     <div className="space-y-6">
@@ -168,8 +169,8 @@ export function ReservationsPage() {
                   <TableCell>#{r.uid}</TableCell>
                   <TableCell>{r.account_holder}</TableCell>
                   <TableCell>{r.currency_uid}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(r.reserved_amount)}</TableCell>
-                  <TableCell className="text-right font-mono">{r.settled_amount ? formatAmount(r.settled_amount) : "-"}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(r.reserved_amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.settled_amount ? formatAmount(r.settled_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatUTC(r.expires_at)}
@@ -186,6 +187,13 @@ export function ReservationsPage() {
               ))}
             </TableBody>
           </Table>
+          {hasNextPage && (
+            <div className="flex justify-center">
+              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+                {isFetchingNextPage ? "Loading..." : "Load More"}
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>

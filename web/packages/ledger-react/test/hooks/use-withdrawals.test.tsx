@@ -44,10 +44,15 @@ describe("use-withdrawals", () => {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(result.current.data).toHaveLength(1);
+    expect(result.current.data?.pages.flatMap((p) => p.list)).toHaveLength(1);
     expect(
       qc.getQueryCache().find({
-        queryKey: ["ledger", "bookings", "withdraw", { ...params, classificationUid: "cls-4" }],
+        queryKey: [
+          "ledger",
+          "bookings",
+          "withdraw",
+          { ...params, classificationUid: "cls-4", limit: 20 },
+        ],
       }),
     ).toBeDefined();
   });

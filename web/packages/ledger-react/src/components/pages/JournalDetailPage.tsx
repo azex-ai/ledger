@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { useJournal, useReverseJournal } from "../../hooks/use-journals";
+import { useJournalTypes } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -49,7 +50,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
               <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-emerald-400">{formatAmount(e.amount)}</span>
+                  <span className="tabular-nums text-sm text-emerald-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_uid} / Currency {e.currency_uid}
@@ -66,7 +67,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
               <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="font-mono text-sm text-rose-400">{formatAmount(e.amount)}</span>
+                  <span className="tabular-nums text-sm text-rose-400">{formatAmount(e.amount)}</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Class {e.classification_uid} / Currency {e.currency_uid}
@@ -119,6 +120,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
 
 export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: JournalDetailPageProps) {
   const { data, isLoading, isError } = useJournal(id);
+  const { data: journalTypes } = useJournalTypes();
 
   if (isLoading) {
     return (
@@ -158,8 +160,11 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Card>
           <CardContent className="pt-4">
-            <p className="text-xs text-muted-foreground">Type ID</p>
-            <p className="text-lg font-bold">{j.journal_type_uid}</p>
+            <p className="text-xs text-muted-foreground">Type</p>
+            <p className="text-lg font-bold">
+              {journalTypes?.find((t) => t.uid === j.journal_type_uid)?.name ??
+                j.journal_type_uid}
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -171,13 +176,13 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Total Debit</p>
-            <p className="text-lg font-bold font-mono">{formatAmount(j.total_debit)}</p>
+            <p className="text-lg font-bold tabular-nums">{formatAmount(j.total_debit)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Total Credit</p>
-            <p className="text-lg font-bold font-mono">{formatAmount(j.total_credit)}</p>
+            <p className="text-lg font-bold tabular-nums">{formatAmount(j.total_credit)}</p>
           </CardContent>
         </Card>
       </div>
@@ -240,7 +245,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
                   <TableCell>
                     <StatusBadge status={e.entry_type} />
                   </TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(e.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(e.amount)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

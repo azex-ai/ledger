@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { useJournals, usePostJournal, usePostTemplateJournal } from "../../hooks/use-journals";
+import { useCurrencies, useJournalTypes, useTemplates } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -14,6 +15,9 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { DefaultLink, type LinkComponent } from "../nav";
 import { BookOpen } from "lucide-react";
@@ -87,11 +91,12 @@ function PostJournalDialog() {
     entries: "",
   });
   const mutation = usePostJournal();
+  const { data: journalTypes } = useJournalTypes(true);
 
   function handleSubmit() {
     const journalTypeUid = form.journal_type_uid.trim();
     if (journalTypeUid === "") {
-      toast.error("Journal Type ID must be a number");
+      toast.error("Select a journal type");
       return;
     }
     let parsed: unknown;
@@ -131,8 +136,20 @@ function PostJournalDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label htmlFor="pj-type-id">Journal Type ID</Label>
-            <Input id="pj-type-id" value={form.journal_type_uid} onChange={(e) => setForm({ ...form, journal_type_uid: e.target.value })} placeholder="1" />
+            <Label htmlFor="pj-type">Journal Type</Label>
+            <Select
+              value={form.journal_type_uid === "" ? null : form.journal_type_uid}
+              onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, journal_type_uid: v }); }}
+            >
+              <SelectTrigger id="pj-type" className="w-full">
+                <SelectValue placeholder="Select a journal type" />
+              </SelectTrigger>
+              <SelectContent>
+                {(journalTypes ?? []).map((t) => (
+                  <SelectItem key={t.uid} value={t.uid}>{t.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="grid gap-2">
             <Label htmlFor="pj-idem-key">Idempotency Key</Label>
@@ -175,12 +192,18 @@ function TemplateJournalDialog() {
     source: "",
   });
   const mutation = usePostTemplateJournal();
+  const { data: templates } = useTemplates(true);
+  const { data: currencies } = useCurrencies(true);
 
   function handleSubmit() {
     const holderId = parseInt(form.holder_id, 10);
     const currencyUid = form.currency_uid.trim();
-    if (isNaN(holderId) || currencyUid === "") {
-      toast.error("Holder ID and Currency ID must be numbers");
+    if (isNaN(holderId)) {
+      toast.error("Holder ID must be a number");
+      return;
+    }
+    if (currencyUid === "") {
+      toast.error("Select a currency");
       return;
     }
     let amounts: unknown;
@@ -227,8 +250,20 @@ function TemplateJournalDialog() {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label htmlFor="tj-tpl-code">Template Code</Label>
-            <Input id="tj-tpl-code" value={form.template_code} onChange={(e) => setForm({ ...form, template_code: e.target.value })} placeholder="deposit_confirm" />
+            <Label htmlFor="tj-tpl-code">Template</Label>
+            <Select
+              value={form.template_code === "" ? null : form.template_code}
+              onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, template_code: v }); }}
+            >
+              <SelectTrigger id="tj-tpl-code" className="w-full">
+                <SelectValue placeholder="Select a template" />
+              </SelectTrigger>
+              <SelectContent>
+                {(templates ?? []).map((t) => (
+                  <SelectItem key={t.uid} value={t.code}>{t.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="grid gap-2">
@@ -236,8 +271,20 @@ function TemplateJournalDialog() {
               <Input id="tj-holder" value={form.holder_id} onChange={(e) => setForm({ ...form, holder_id: e.target.value })} placeholder="1001" />
             </div>
             <div className="grid gap-2">
-              <Label htmlFor="tj-currency">Currency ID</Label>
-              <Input id="tj-currency" value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" />
+              <Label htmlFor="tj-currency">Currency</Label>
+              <Select
+                value={form.currency_uid === "" ? null : form.currency_uid}
+                onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, currency_uid: v }); }}
+              >
+                <SelectTrigger id="tj-currency" className="w-full">
+                  <SelectValue placeholder="Select" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(currencies ?? []).map((c) => (
+                    <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <div className="grid gap-2">
@@ -269,6 +316,11 @@ function TemplateJournalDialog() {
 export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPageProps = {}) {
   const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } = useJournals();
   const journals = data?.pages.flatMap((p) => p.list) ?? [];
+  // uid → human name for the Type column; falls back to the uid while the
+  // (small, cached) journal-type list loads.
+  const { data: journalTypes } = useJournalTypes();
+  const typeName = (uid: string) =>
+    journalTypes?.find((t) => t.uid === uid)?.name ?? uid;
 
   return (
     <div className="space-y-6">
@@ -316,10 +368,10 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
                     </Link>
                   </TableCell>
                   <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.idempotency_key}</TableCell>
-                  <TableCell>{j.journal_type_uid}</TableCell>
+                  <TableCell>{typeName(j.journal_type_uid)}</TableCell>
                   <TableCell>{j.source}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(j.total_debit)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(j.total_credit)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_credit)}</TableCell>
                   <TableCell>
                     {j.reversal_of_uid ? (
                       <StatusBadge status="reversed" />

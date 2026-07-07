@@ -4,6 +4,7 @@ import * as React from "react"
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog"
 
 import { cn } from "../../lib/utils/cn"
+import { useLedgerPortalContainer } from "../../provider/context"
 import { Button } from "./button"
 import { XIcon } from "lucide-react"
 
@@ -15,8 +16,16 @@ function DialogTrigger({ ...props }: DialogPrimitive.Trigger.Props) {
   return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />
 }
 
-function DialogPortal({ ...props }: DialogPrimitive.Portal.Props) {
-  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />
+function DialogPortal({ container, ...props }: DialogPrimitive.Portal.Props) {
+  // Portal into .ledger-root (when mounted) so scoped tokens/preflight apply.
+  const ledgerContainer = useLedgerPortalContainer()
+  return (
+    <DialogPrimitive.Portal
+      data-slot="dialog-portal"
+      container={container ?? ledgerContainer ?? undefined}
+      {...props}
+    />
+  )
 }
 
 function DialogClose({ ...props }: DialogPrimitive.Close.Props) {

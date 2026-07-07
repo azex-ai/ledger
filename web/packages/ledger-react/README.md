@@ -139,12 +139,58 @@ Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
 `prefetchJournalTypes`, `prefetchTemplates`, `prefetchSnapshots`. The shared
 `ledgerKeys` query-key factory is also exported for advanced cache seeding.
 
+## HeroUI skin — `@azex/ledger-react/heroui`
+
+Building on HeroUI v3 instead of the default shadcn-style components? The same
+admin surface (provider, `<LedgerAdmin/>`, all pages) ships as a second skin
+on the `./heroui` subpath, backed by the identical headless core:
+
+```tsx
+import { LedgerAdmin, LedgerProvider } from "@azex/ledger-react/heroui";
+```
+
+Host contract: `@heroui/react` + `@heroui/styles` installed (optional peer —
+consumers of the default skin never need it), Tailwind v4 configured, and one
+stylesheet import for the skin's layout classes:
+
+```css
+/* globals.css */
+@import "tailwindcss";
+@import "@heroui/styles";
+@import "@azex/ledger-react/heroui.css";
+```
+
+Theme (light/dark, palette) is owned by the host's HeroUI setup — the skin
+renders with whatever theme the surrounding app defines.
+
+### Headless — `@azex/ledger-react/headless`
+
+The UI-free core both skins build on (typed client + provider + every
+TanStack Query hook) is importable directly for hosts that bring their own
+components:
+
+```tsx
+import { LedgerProvider, useJournals } from "@azex/ledger-react/headless";
+```
+
 ## Theming
 
 The Provider (and `<LedgerAdmin/>`) render a `<div className="ledger-root">`
-wrapper. All design tokens are scoped under `.ledger-root` (default **dark**;
-add `.light` for the light variant) so importing the stylesheet never leaks
-tokens into your host app. Re-theme by overriding the CSS custom properties:
+wrapper. All design tokens are scoped under `.ledger-root` so importing the
+stylesheet never leaks tokens into your host app — and the stylesheet is
+**self-contained**: it ships its own `.ledger-root`-scoped preflight (fonts,
+resets, table borders), so it renders correctly even in a host with no
+Tailwind setup at all.
+
+Default appearance is **system** (follows the OS via
+`prefers-color-scheme`); pass `appearance: "dark"` or `"light"` to force a
+variant:
+
+```tsx
+<LedgerProvider config={{ baseUrl, appearance: "dark" }}>
+```
+
+Re-theme by overriding the CSS custom properties:
 
 ```css
 .ledger-root {

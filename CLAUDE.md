@@ -139,8 +139,8 @@ go test ./postgres/ -run TestName -race -count=1
 | `service/worker.go` | Background job runner |
 | `cmd/ledgerd/` | HTTP service entry point |
 | `cmd/ledger-cli/` | Read-only investigation CLI (balance, journals, trace, reconcile, solvency) |
-| `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx) |
-| `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag) |
+| `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
+| `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag). Three consumption surfaces: root = shadcn-style skin (self-contained scoped preflight + tokens in `dist/styles.css`), `./heroui` = HeroUI v3 skin (optional peer `@heroui/react`, host owns theme, layout classes in `dist/heroui.css`), `./headless` = client + hooks + provider only. Both skins share the headless core; page logic must stay mirrored |
 | `deploy/helm/ledger/` | Kubernetes Helm chart |
 | `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |

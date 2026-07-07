@@ -82,7 +82,7 @@ export function RecentJournals({
                     {j.idempotency_key}
                   </TableCell>
                   <TableCell className="text-muted-foreground">{j.source}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(j.total_debit)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">
                     {formatUTC(j.created_at)}
                   </TableCell>

@@ -18,18 +18,34 @@
 @import "tailwindcss/utilities.css" layer(utilities);
 
 /*
- * Class-based `dark:` variant. The package model is class-based — `.ledger-root`
- * is dark by default and `.ledger-root.light` is light — so `dark:` utilities
- * must key off the wrapper class, NOT the OS `prefers-color-scheme` media query
- * (Tailwind's default). Without this, dark: utilities would be media-gated and
- * ignore the .light toggle entirely.
+ * `dark:` variant keyed off the provider's appearance classes: explicit
+ * `.ledger-root.dark`, or `.ledger-root.system` (the default) when the OS
+ * prefers dark. NOT Tailwind's bare media-query default — that would ignore
+ * the appearance toggle entirely.
  */
-@custom-variant dark (&:where(.ledger-root:not(.light), .ledger-root:not(.light) *));
+@custom-variant dark {
+  &:where(.ledger-root.dark, .ledger-root.dark *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(.ledger-root.system, .ledger-root.system *) {
+      @slot;
+    }
+  }
+}
 
 /* Scan the package component sources for utility class candidates. */
 @source "../src/**/*.{ts,tsx}";
 
-/* Scoped runtime tokens (.ledger-root, default dark + .light variant). */
+/*
+ * Scoped preflight (Tailwind v4's reset, every selector under .ledger-root).
+ * This is what makes the stylesheet genuinely self-contained: base font,
+ * paint, table border-collapse, and form-control inheritance hold even in a
+ * host with no Tailwind at all.
+ */
+@import "./preflight.css" layer(base);
+
+/* Scoped runtime tokens (.ledger-root, default light + .dark variant). */
 @import "./theme.css";
 
 /*

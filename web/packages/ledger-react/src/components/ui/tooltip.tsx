@@ -3,6 +3,7 @@
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
 
 import { cn } from "../../lib/utils/cn"
+import { useLedgerPortalContainer } from "../../provider/context"
 
 function TooltipProvider({
   delay = 0,
@@ -38,8 +39,10 @@ function TooltipContent({
     TooltipPrimitive.Positioner.Props,
     "align" | "alignOffset" | "side" | "sideOffset"
   >) {
+  // Portal into .ledger-root (when mounted) so scoped tokens/preflight apply.
+  const ledgerContainer = useLedgerPortalContainer()
   return (
-    <TooltipPrimitive.Portal>
+    <TooltipPrimitive.Portal container={ledgerContainer ?? undefined}>
       <TooltipPrimitive.Positioner
         align={align}
         alignOffset={alignOffset}

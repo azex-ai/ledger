@@ -1,9 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { useLedgerClient } from "../provider/context";
 import { useLedgerMutation } from "./use-ledger-mutation";
 import { useClassificationIdByCode } from "./use-classification-id";
 import { ledgerKeys } from "./keys";
-import type { Booking } from "../client/types";
 
 const WITHDRAW_CODE = "withdraw";
 
@@ -11,19 +10,28 @@ export function useWithdrawClassificationId(): string {
   return useClassificationIdByCode(WITHDRAW_CODE);
 }
 
-export function useWithdrawals(params: { holder?: number; status?: string }) {
+/**
+ * Cursor-paginated withdrawal bookings. Same paging contract as useJournals:
+ * flatten `data?.pages.flatMap((p) => p.list)`, page via `fetchNextPage`.
+ */
+export function useWithdrawals(
+  params: { holder?: number; status?: string },
+  limit = 20,
+) {
   const client = useLedgerClient();
   const classificationUid = useWithdrawClassificationId();
-  return useQuery<Booking[]>({
-    queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationUid }),
-    queryFn: async () => {
-      const page = await client.listBookings({
+  return useInfiniteQuery({
+    queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationUid, limit }),
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      client.listBookings({
         holder: params.holder,
         status: params.status,
         classification_uid: classificationUid,
-      });
-      return page.list;
-    },
+        cursor: pageParam,
+        limit,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
     enabled: classificationUid !== "",
   });
 }

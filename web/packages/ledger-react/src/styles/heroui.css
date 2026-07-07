@@ -1,0 +1,17 @@
+/*
+ * Build input for the HeroUI skin's stylesheet (dist/heroui.css).
+ *
+ * The HeroUI skin runs inside hosts that already have Tailwind v4 +
+ * @heroui/styles configured (that's the premise of choosing the skin), so
+ * this sheet ships ONLY the structural utility classes our heroui/**
+ * components use — no preflight, no tokens, no HeroUI theme. Component
+ * colors/variants come from HeroUI props and the host's theme.
+ */
+
+@layer theme, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* Scan only the HeroUI skin sources for utility candidates. */
+@source "../heroui/**/*.{ts,tsx}";

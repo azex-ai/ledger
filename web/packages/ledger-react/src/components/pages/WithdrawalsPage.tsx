@@ -251,8 +251,9 @@ export function WithdrawalsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError } = useWithdrawals(params);
-  const withdrawals = data ?? [];
+  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+    useWithdrawals(params);
+  const withdrawals = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
     <div className="space-y-6">
@@ -306,7 +307,7 @@ export function WithdrawalsPage() {
                   <TableCell>#{w.uid}</TableCell>
                   <TableCell>{w.account_holder}</TableCell>
                   <TableCell>{w.channel_name}</TableCell>
-                  <TableCell className="text-right font-mono">{formatAmount(w.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatAmount(w.amount)}</TableCell>
                   <TableCell><StatusBadge status={w.status} /></TableCell>
                   <TableCell className="font-mono text-xs max-w-[160px] truncate">
                     {w.channel_ref || "—"}
@@ -332,6 +333,13 @@ export function WithdrawalsPage() {
               ))}
             </TableBody>
           </Table>
+          {hasNextPage && (
+            <div className="flex justify-center">
+              <Button variant="outline" size="sm" onClick={() => fetchNextPage()} disabled={isFetchingNextPage}>
+                {isFetchingNextPage ? "Loading..." : "Load More"}
+              </Button>
+            </div>
+          )}
         </>
       )}
     </div>

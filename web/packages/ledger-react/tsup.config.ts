@@ -70,7 +70,13 @@ async function preserveDirectives(distDir: string): Promise<void> {
 }
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/server.ts", "src/charts.ts"],
+  entry: {
+    index: "src/index.ts",
+    server: "src/server.ts",
+    charts: "src/charts.ts",
+    headless: "src/headless.ts",
+    heroui: "src/heroui/index.ts",
+  },
   format: ["esm"],
   // TS6 deprecates baseUrl (TS5101); tsup's dts build still injects one
   // internally, so silence the deprecation until tsup stops doing that.
@@ -83,6 +89,8 @@ export default defineConfig({
     "react-dom",
     "react/jsx-runtime",
     "@tanstack/react-query",
+    // Optional peer: only consumers importing ./heroui need it installed.
+    "@heroui/react",
   ],
   async onSuccess() {
     await preserveDirectives("dist");

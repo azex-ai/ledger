@@ -72,7 +72,8 @@ export function BalancesPage() {
         <Button onClick={() => setHolder(parseInt(holderInput) || 0)}>Search</Button>
       </div>
 
-      {holder > 0 && (
+      {/* Negative holders are the system-side counterpart accounts — equally queryable. */}
+      {holder !== 0 && (
         <>
           {isLoading ? (
             <div className="h-40 animate-shimmer rounded" />
@@ -101,7 +102,7 @@ export function BalancesPage() {
                       <TableRow key={`${b.currency_uid}-${b.classification_uid}`}>
                         <TableCell>{b.currency_uid}</TableCell>
                         <TableCell>{b.classification_uid}</TableCell>
-                        <TableCell className="text-right font-mono">{formatAmount(b.balance)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatAmount(b.balance)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

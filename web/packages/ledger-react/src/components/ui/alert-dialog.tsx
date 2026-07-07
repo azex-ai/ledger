@@ -4,6 +4,7 @@ import * as React from "react"
 import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog"
 
 import { cn } from "../../lib/utils/cn"
+import { useLedgerPortalContainer } from "../../provider/context"
 import { Button } from "./button"
 import { XIcon } from "lucide-react"
 
@@ -15,8 +16,19 @@ function AlertDialogTrigger({ ...props }: AlertDialogPrimitive.Trigger.Props) {
   return <AlertDialogPrimitive.Trigger data-slot="alert-dialog-trigger" {...props} />
 }
 
-function AlertDialogPortal({ ...props }: AlertDialogPrimitive.Portal.Props) {
-  return <AlertDialogPrimitive.Portal data-slot="alert-dialog-portal" {...props} />
+function AlertDialogPortal({
+  container,
+  ...props
+}: AlertDialogPrimitive.Portal.Props) {
+  // Portal into .ledger-root (when mounted) so scoped tokens/preflight apply.
+  const ledgerContainer = useLedgerPortalContainer()
+  return (
+    <AlertDialogPrimitive.Portal
+      data-slot="alert-dialog-portal"
+      container={container ?? ledgerContainer ?? undefined}
+      {...props}
+    />
+  )
 }
 
 function AlertDialogOverlay({

@@ -1,18 +1,24 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { useLedgerClient } from "../provider/context";
 import { useLedgerMutation } from "./use-ledger-mutation";
 import { ledgerKeys } from "./keys";
 
+/**
+ * Cursor-paginated reservations. Same paging contract as useJournals:
+ * flatten `data?.pages.flatMap((p) => p.list)`, page via `fetchNextPage`.
+ */
 export function useReservations(params: {
   holder?: number;
   status?: string;
-  cursor?: string;
   limit?: number;
 }) {
   const client = useLedgerClient();
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: ledgerKeys.reservations(params),
-    queryFn: () => client.listReservations(params),
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      client.listReservations({ ...params, cursor: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
   });
 }
 
