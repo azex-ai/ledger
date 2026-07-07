@@ -196,6 +196,12 @@ func run() error {
 		svc.TrialBalanceReader(),
 	)
 	srv.SetMetricsHandler(promMetrics.Handler())
+	// Holder wallet surface (feature-gated on HOLDER_TOKEN_SECRET).
+	if len(srvCfg.HolderTokenSecret) > 0 {
+		if err := srv.SetHolderSurface(server.HolderConfig{TokenSecret: srvCfg.HolderTokenSecret}, svc.HolderReader()); err != nil {
+			return fmt.Errorf("holder surface: %w", err)
+		}
+	}
 	// Inbound webhook replay cache — rejects identical callbacks resent inside
 	// the signature timestamp window (migration 030).
 	srv.SetWebhookNonceRecorder(webhookSubscriberStore)

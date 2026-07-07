@@ -104,11 +104,17 @@ var unauthenticatedPaths = map[string]struct{}{
 // webhook path `security: []`.
 const webhookPathPrefix = "/api/v1/webhooks/"
 
+// holderPathPrefix carves the holder wallet read surface out of API-key
+// auth: those routes authenticate with holder tokens via their own
+// middleware (holderAuthMiddleware). NOTE: /api/v1/holder-tokens (minting)
+// does NOT match this prefix and stays under API-key auth.
+const holderPathPrefix = "/api/v1/holder/"
+
 func isUnauthenticatedPath(path string) bool {
 	if _, ok := unauthenticatedPaths[path]; ok {
 		return true
 	}
-	return strings.HasPrefix(path, webhookPathPrefix)
+	return strings.HasPrefix(path, webhookPathPrefix) || strings.HasPrefix(path, holderPathPrefix)
 }
 
 // authMiddleware enforces bearer-token API key auth on every request except

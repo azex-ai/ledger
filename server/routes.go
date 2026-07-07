@@ -63,9 +63,21 @@ func (s *Server) setupRoutes() {
 			r.Get("/reports/trial-balance", s.handleGetTrialBalance)
 		})
 
+		// ---- Holder wallet surface (holder-token auth, not API keys) ----
+		// Registered unconditionally; every handler 404s via
+		// requireHolderSurface until SetHolderSurface configures it.
+		r.Group(func(r chi.Router) {
+			r.Use(s.holderTokenAuth)
+			r.Get("/holder/balances", s.withHolderSurface((*holderSurface).handleHolderBalances))
+			r.Get("/holder/transactions", s.withHolderSurface((*holderSurface).handleHolderTransactions))
+			r.Get("/holder/holds", s.withHolderSurface((*holderSurface).handleHolderHolds))
+		})
+
 		// ---- Scope: write ----
 		r.Group(func(r chi.Router) {
 			r.Use(s.requireScope(ScopeWrite))
+
+			r.Post("/holder-tokens", s.withHolderSurface((*holderSurface).handleMintHolderToken))
 
 			r.Post("/journals", s.handlePostJournal)
 			r.Post("/journals/template", s.handlePostTemplate)

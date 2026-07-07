@@ -71,6 +71,10 @@ type Server struct {
 	// authEnabled records whether API keys are configured; when false (dev
 	// only) requireScope checks pass unconditionally.
 	authEnabled bool
+
+	// holder is the optional holder wallet surface (SetHolderSurface); nil
+	// keeps every /holder* route answering 404.
+	holder *holderSurface
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
@@ -91,6 +95,10 @@ type Config struct {
 	// can never spoof its IP past the rate limiter. Empty = headers never
 	// trusted (r.RemoteAddr stays the socket peer).
 	TrustedProxyCIDRs []netip.Prefix
+	// HolderTokenSecret (HOLDER_TOKEN_SECRET) enables the holder wallet
+	// surface when set (min 32 bytes; boot fails on a shorter value).
+	// Empty = surface disabled, /holder* routes answer 404.
+	HolderTokenSecret []byte
 }
 
 // LoadConfig reads server config from env. Returns an error in production
@@ -104,6 +112,14 @@ func LoadConfig() (*Config, error) {
 	corsOrigin := os.Getenv("CORS_ALLOWED_ORIGIN")
 	if env != "dev" && corsOrigin == "" {
 		return nil, fmt.Errorf("server: CORS_ALLOWED_ORIGIN is required when ENV=%q (refusing to default to *)", env)
+	}
+
+	var holderSecret []byte
+	if v := os.Getenv("HOLDER_TOKEN_SECRET"); v != "" {
+		if len(v) < 32 {
+			return nil, fmt.Errorf("server: HOLDER_TOKEN_SECRET must be at least 32 bytes (got %d)", len(v))
+		}
+		holderSecret = []byte(v)
 	}
 
 	maxBytes := int64(256 * 1024)
@@ -131,6 +147,7 @@ func LoadConfig() (*Config, error) {
 		APIKeys:           keys,
 		MaxBodyBytes:      maxBytes,
 		TrustedProxyCIDRs: trustedCIDRs,
+		HolderTokenSecret: holderSecret,
 	}, nil
 }
 

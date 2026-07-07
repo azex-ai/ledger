@@ -191,6 +191,11 @@ func (s *Service) JournalTypes() core.JournalTypeStore {
 	return postgres.JournalTypeStoreAdapter{ClassificationStore: s.classStore}
 }
 
+// HolderReader serves the holder-scoped wallet read surface (balances,
+// translated transactions, holds) — feed it to server.HolderHandler or
+// consume it directly.
+func (s *Service) HolderReader() core.HolderReader { return s.ledgerStore }
+
 // Templates manages entry templates.
 func (s *Service) Templates() core.TemplateStore { return s.tmplStore }
 
