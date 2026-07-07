@@ -909,8 +909,102 @@ paths:
         "400":
           $ref: "#/components/responses/DomainError"
 
+
+  /holder-tokens:
+    post:
+      tags: [Holder]
+      summary: Mint a holder-scoped read token (host backend, write scope).
+      description: >
+        Mints a short-lived, read-only token bound to ONE account holder
+        (lht_ prefix on the shared bearer header). The host backend calls
+        this after its own session auth and hands the token to its frontend;
+        the token then authenticates the /holder/* read surface. Leak blast
+        radius: one holder, read-only, until exp. TTL defaults to 15m and is
+        capped server-side (default 1h).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [holder]
+              properties:
+                holder: { type: integer, format: int64 }
+                ttl_seconds: { type: integer, format: int64, description: "Optional; capped by the server." }
+      responses:
+        "200":
+          description: Minted token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HolderTokenEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+  /holder/balances:
+    get:
+      tags: [Holder]
+      summary: The token-bound holder's balances, one row per currency.
+      security:
+        - holderToken: []
+      parameters:
+        - in: query
+          name: currency_uid
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Balance breakdown per currency (total = available + pending + locked).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HolderBalanceListEnvelope" }
+  /holder/transactions:
+    get:
+      tags: [Holder]
+      summary: The token-bound holder's translated transaction view.
+      description: >
+        One row per (journal, currency) net effect on the holder, newest
+        first, in user language (kind/kind_label/direction/amount) — no
+        double-entry vocabulary. Cursor-paginated at journal granularity.
+      security:
+        - holderToken: []
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, format: int32, maximum: 100 }
+      responses:
+        "200":
+          description: Transaction page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HolderTransactionListEnvelope" }
+  /holder/holds:
+    get:
+      tags: [Holder]
+      summary: The token-bound holder's outstanding holds.
+      security:
+        - holderToken: []
+      responses:
+        "200":
+          description: Active holds (locked amounts with expiry).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HolderHoldListEnvelope" }
+
 components:
   securitySchemes:
+    holderToken:
+      type: http
+      scheme: bearer
+      bearerFormat: Holder token
+      description: >
+        Stateless HMAC-signed token minted via POST /holder-tokens (or
+        in-process by an embedding host), lht_ prefix, bound to one account
+        holder, read-only. Shares the Authorization header with API keys;
+        the server disambiguates by prefix.
     bearerAuth:
       type: http
       scheme: bearer
@@ -945,6 +1039,92 @@ components:
       type: string
       format: date-time
       example: "2026-04-29T10:00:00Z"
+
+    HolderTokenEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [token, expires_at]
+              properties:
+                token: { type: string, example: "lht_eyJob2xkZXIiOjQyfQ.c2ln" }
+                expires_at: { $ref: "#/components/schemas/Timestamp" }
+
+    HolderBalance:
+      type: object
+      required: [currency_uid, currency_code, available, pending, locked, total]
+      properties:
+        currency_uid: { type: string, format: uuid }
+        currency_code: { type: string, example: "USD" }
+        available: { $ref: "#/components/schemas/Decimal" }
+        pending: { $ref: "#/components/schemas/Decimal" }
+        locked: { $ref: "#/components/schemas/Decimal" }
+        total: { $ref: "#/components/schemas/Decimal", description: "= available + pending + locked" }
+    HolderBalanceListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [list]
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/HolderBalance" }
+
+    HolderTransaction:
+      type: object
+      required: [uid, kind, kind_label, direction, amount, currency_uid, currency_code, occurred_at, reversal_of_uid, memo]
+      properties:
+        uid: { type: string, format: uuid, description: "Journal uid — trace anchor, safe to display." }
+        kind: { type: string, example: "deposit_confirm", description: "Stable code (journal type code); anchor for product-side label overrides / i18n." }
+        kind_label: { type: string, example: "Deposit", description: "Library-side default display label." }
+        direction: { type: string, enum: [in, out] }
+        amount: { $ref: "#/components/schemas/Decimal", description: "Absolute net amount for this (journal, currency)." }
+        currency_uid: { type: string, format: uuid }
+        currency_code: { type: string, example: "USD" }
+        occurred_at: { $ref: "#/components/schemas/Timestamp" }
+        reversal_of_uid: { type: string, description: "Non-empty when this row is a reversal of that journal." }
+        memo: { type: string, description: "journal.metadata[\"memo\"] — host-written user-readable copy; empty when absent." }
+    HolderTransactionListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [list, next_cursor]
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/HolderTransaction" }
+                next_cursor: { type: string, description: "Empty when exhausted." }
+
+    HolderHold:
+      type: object
+      required: [uid, amount, currency_uid, currency_code, created_at, expires_at]
+      properties:
+        uid: { type: string, format: uuid }
+        amount: { $ref: "#/components/schemas/Decimal", description: "Outstanding hold (unsettled remainder while settling)." }
+        currency_uid: { type: string, format: uuid }
+        currency_code: { type: string, example: "USD" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        expires_at: { $ref: "#/components/schemas/Timestamp" }
+    HolderHoldListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [list]
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/HolderHold" }
 
     Envelope:
       type: object

@@ -2008,6 +2008,174 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/holder-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Mint a holder-scoped read token (host backend, write scope).
+         * @description Mints a short-lived, read-only token bound to ONE account holder (lht_ prefix on the shared bearer header). The host backend calls this after its own session auth and hands the token to its frontend; the token then authenticates the /holder/* read surface. Leak blast radius: one holder, read-only, until exp. TTL defaults to 15m and is capped server-side (default 1h).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        holder: number;
+                        /**
+                         * Format: int64
+                         * @description Optional; capped by the server.
+                         */
+                        ttl_seconds?: number;
+                    };
+                };
+            };
+            responses: {
+                /** @description Minted token. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HolderTokenEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/holder/balances": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The token-bound holder's balances, one row per currency. */
+        get: {
+            parameters: {
+                query?: {
+                    currency_uid?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Balance breakdown per currency (total = available + pending + locked). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HolderBalanceListEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/holder/transactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The token-bound holder's translated transaction view.
+         * @description One row per (journal, currency) net effect on the holder, newest first, in user language (kind/kind_label/direction/amount) — no double-entry vocabulary. Cursor-paginated at journal granularity.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Transaction page. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HolderTransactionListEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/holder/holds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The token-bound holder's outstanding holds. */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Active holds (locked amounts with expiry). */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["HolderHoldListEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2022,6 +2190,83 @@ export interface components {
          * @example 2026-04-29T10:00:00Z
          */
         Timestamp: string;
+        HolderTokenEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                /** @example lht_eyJob2xkZXIiOjQyfQ.c2ln */
+                token: string;
+                expires_at: components["schemas"]["Timestamp"];
+            };
+        };
+        HolderBalance: {
+            /** Format: uuid */
+            currency_uid: string;
+            /** @example USD */
+            currency_code: string;
+            available: components["schemas"]["Decimal"];
+            pending: components["schemas"]["Decimal"];
+            locked: components["schemas"]["Decimal"];
+            /** @description = available + pending + locked */
+            total: components["schemas"]["Decimal"];
+        };
+        HolderBalanceListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list: components["schemas"]["HolderBalance"][];
+            };
+        };
+        HolderTransaction: {
+            /**
+             * Format: uuid
+             * @description Journal uid — trace anchor, safe to display.
+             */
+            uid: string;
+            /**
+             * @description Stable code (journal type code); anchor for product-side label overrides / i18n.
+             * @example deposit_confirm
+             */
+            kind: string;
+            /**
+             * @description Library-side default display label.
+             * @example Deposit
+             */
+            kind_label: string;
+            /** @enum {string} */
+            direction: "in" | "out";
+            /** @description Absolute net amount for this (journal, currency). */
+            amount: components["schemas"]["Decimal"];
+            /** Format: uuid */
+            currency_uid: string;
+            /** @example USD */
+            currency_code: string;
+            occurred_at: components["schemas"]["Timestamp"];
+            /** @description Non-empty when this row is a reversal of that journal. */
+            reversal_of_uid: string;
+            /** @description journal.metadata["memo"] — host-written user-readable copy; empty when absent. */
+            memo: string;
+        };
+        HolderTransactionListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list: components["schemas"]["HolderTransaction"][];
+                /** @description Empty when exhausted. */
+                next_cursor: string;
+            };
+        };
+        HolderHold: {
+            /** Format: uuid */
+            uid: string;
+            /** @description Outstanding hold (unsettled remainder while settling). */
+            amount: components["schemas"]["Decimal"];
+            /** Format: uuid */
+            currency_uid: string;
+            /** @example USD */
+            currency_code: string;
+            created_at: components["schemas"]["Timestamp"];
+            expires_at: components["schemas"]["Timestamp"];
+        };
+        HolderHoldListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list: components["schemas"]["HolderHold"][];
+            };
+        };
         Envelope: {
             /**
              * @description 200 on success; business error code otherwise

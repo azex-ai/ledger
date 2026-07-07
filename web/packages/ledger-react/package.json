@@ -22,6 +22,10 @@
       "types": "./dist/headless.d.ts",
       "default": "./dist/headless.js"
     },
+    "./wallet/headless": {
+      "types": "./dist/wallet-headless.d.ts",
+      "default": "./dist/wallet-headless.js"
+    },
     "./heroui": {
       "types": "./dist/heroui.d.ts",
       "default": "./dist/heroui.js"
