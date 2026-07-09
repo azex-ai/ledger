@@ -53,6 +53,15 @@ describe("JournalTypesPage", () => {
 describe("TemplatesPage", () => {
   test("renders heading and template cards", async () => {
     server.use(
+      // TemplatesPage resolves classification uids to human codes via
+      // useUidCodeLookups, so both metadata lists must be stubbed too.
+      getOk("/api/v1/classifications", [
+        { uid: "cls-1", code: "main_wallet", name: "Main Wallet", normal_side: "debit", is_system: false, is_active: true },
+        { uid: "cls-2", code: "custodial", name: "Custodial", normal_side: "credit", is_system: true, is_active: true },
+      ]),
+      getOk("/api/v1/currencies", [
+        { uid: "cur-1", code: "USDT", name: "Tether USD", is_active: true },
+      ]),
       getOk("/api/v1/templates", [
         {
           id: 1,
@@ -61,8 +70,8 @@ describe("TemplatesPage", () => {
           journal_type_uid: 1,
           is_active: true,
           lines: [
-            { id: 1, classification_uid: 1, entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
-            { id: 2, classification_uid: 2, entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
+            { id: 1, classification_uid: "cls-1", entry_type: "debit", holder_role: "user", amount_key: "amount", sort_order: 1 },
+            { id: 2, classification_uid: "cls-2", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
           ],
         },
       ]),
@@ -71,5 +80,10 @@ describe("TemplatesPage", () => {
     expect(screen.getByRole("heading", { name: "Templates" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("Confirm Deposit")).toBeInTheDocument());
     expect(screen.getByText("deposit_confirm")).toBeInTheDocument();
+    // Line rows show the human classification code, not the raw uid.
+    await waitFor(() =>
+      expect(screen.getByText(/main_wallet \/ user/)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/cls-1/)).not.toBeInTheDocument();
   });
 });

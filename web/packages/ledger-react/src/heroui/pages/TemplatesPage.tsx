@@ -3,7 +3,7 @@
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
-  useClassifications, useCurrencies, useJournalTypes,
+  useClassifications, useCurrencies, useJournalTypes, useUidCodeLookups,
 } from "../../hooks/use-metadata";
 import {
   AlertDialog,
@@ -445,6 +445,8 @@ export function TemplatesPage() {
   const { data, isLoading, isError } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(templates);
+  // uid → human code for template lines — raw uids are unreadable in review.
+  const { classCode } = useUidCodeLookups();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
@@ -486,7 +488,7 @@ export function TemplatesPage() {
                     <p className="mb-1 text-xs font-medium text-success">DEBIT</p>
                     {t.lines.filter((l) => l.entry_type === "debit").map((l) => (
                       <div key={l.sort_order} className="truncate text-xs text-muted">
-                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
+                        {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
@@ -494,7 +496,7 @@ export function TemplatesPage() {
                     <p className="mb-1 text-xs font-medium text-danger">CREDIT</p>
                     {t.lines.filter((l) => l.entry_type === "credit").map((l) => (
                       <div key={l.sort_order} className="truncate text-xs text-muted">
-                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
+                        {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
-  useClassifications, useCurrencies, useJournalTypes,
+  useClassifications, useCurrencies, useJournalTypes, useUidCodeLookups,
 } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -289,6 +289,8 @@ export function TemplatesPage() {
   const { data, isLoading, isError } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(templates);
+  // uid → human code for template lines — raw uids are unreadable in review.
+  const { classCode } = useUidCodeLookups();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   return (
@@ -330,7 +332,7 @@ export function TemplatesPage() {
                     <p className="text-xs font-medium text-green-400 mb-1">DEBIT</p>
                     {t.lines.filter((l) => l.entry_type === "debit").map((l) => (
                       <div key={l.sort_order} className="text-xs text-muted-foreground">
-                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
+                        {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
@@ -338,7 +340,7 @@ export function TemplatesPage() {
                     <p className="text-xs font-medium text-red-400 mb-1">CREDIT</p>
                     {t.lines.filter((l) => l.entry_type === "credit").map((l) => (
                       <div key={l.sort_order} className="text-xs text-muted-foreground">
-                        Class {l.classification_uid} / {l.holder_role} / key: {l.amount_key}
+                        {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
