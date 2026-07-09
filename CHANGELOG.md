@@ -10,11 +10,11 @@ Two artifacts live in this repo:
 - the **npm package** `@azex/ledger-react`, tagged `ledger-react-vX.Y.Z`.
 
 From 0.5.0 onward the two are **version-aligned**: a coordinated release
-tags both at the same X.Y.Z (npm 0.4.0 was never published; the npm line
-jumps 0.3.0 → 0.5.0 to converge). Entries below note which artifact a
-change affects.
+tags both at the same X.Y.Z (npm 0.4.0 / 0.5.0 were never published; the
+npm line jumps 0.3.0 → 0.5.1 to converge with the Go module). Entries
+below note which artifact a change affects.
 
-## [Unreleased]
+## [0.5.1] - 2026-07-09
 
 Holder-scoped wallet surface (2026-07-08,
 `docs/plans/2026-07-08-holder-scoped-wallet-surface.md`): the end-user
@@ -44,7 +44,7 @@ library capability, so consumer products stop hand-rolling the projection.
   `/wallet/headless` (client + hooks): `WalletPanel`, `WalletBalances`,
   `WalletBalanceCard`, `TransactionList`; `getToken` callback auth with
   single 401 refresh-retry; rendered-surface tests pin that no double-entry
-  vocabulary reaches the DOM. Version 0.5.0 (aligned with the Go module).
+  vocabulary reaches the DOM. Version 0.5.1 (aligned with the Go module).
 
 Production-hardening batch (2026-07-06): closes the operational gaps between
 "code-complete" and "runnable in production" — credential model, dashboard
