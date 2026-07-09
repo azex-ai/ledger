@@ -238,7 +238,8 @@ createWalletClient({
 
 ## 6. Phase 拆解与验收
 
-> **进度（26-07-08）**：P1 `c318954` / P2 `da8dd30` / P3 `6d66202` / P4 `ff4e6be` 已合入 main 并推送（各 phase 验收全过：投影规则集成测试、token 表驱动测试、codegen gate、双皮肤护栏断言、fullstack `/wallet` demo）。剩 P5（armatrix 迁移）在消费方仓库进行；`@azex/ledger-react` 0.4.0 已 bump 未发版（等 tag）。
+> **进度（26-07-08）**：P1 `c318954` / P2 `da8dd30` / P3 `6d66202` / P4 `ff4e6be` 已合入 main 并推送（各 phase 验收全过：投影规则集成测试、token 表驱动测试、codegen gate、双皮肤护栏断言、fullstack `/wallet` demo）。`@azex/ledger-react` 0.4.0 已 bump 未发版（等 tag）。
+> **范围修订（26-07-09，Aaron 拍板）**：P5（armatrix 等消费方迁移）**移出本仓范围**——消费方升级由 Aaron 在各自仓库进行；本仓目标 = 先完成一个高质量版本再谈消费。§4 保留为需求完备性验证用例，不再是本仓验收项。
 
 按现有「Adding Features」工作流（SQL → sqlc → core/server → openapi → react）排序，每个 phase 独立可交付、独立过 CI：
 
@@ -248,9 +249,9 @@ createWalletClient({
 | P2 服务端 | holder token mint/校验 middleware（`lht_` 前缀分流）+ 3 个只读 handler + `server.HolderHandler` 子路由 | token 过期/伪造/跨 holder 访问被拒的表驱动测试；`HolderHandler` 挂进裸 chi server 的集成测试（不含 admin 路由断言）；ledgerd 路由复用同一实现 |
 | P3 契约 | openapi.yaml 新端面 + `codegen:check` + wallet headless（client + `getToken` 刷新重试 + hooks） | codegen 无 diff；401→refresh→重试一次的 msw 测试；hooks 缓存 key 遵循 ledgerKeys 单源 |
 | P4 组件 | wallet 双皮肤组件四件套 + `/wallet` `/wallet/heroui` `/wallet/headless` exports + 三态/极端数据 | vitest：内部词汇不出现在渲染输出（user-facing-surfaces 护栏断言）；双皮肤逻辑镜像；examples/fullstack 增加 wallet 页 demo（两拓扑至少演示 A） |
-| P5 消费方验证 | armatrix 迁移：挂 `HolderHandler`、前端换 `useWalletBalance`/`<TransactionList/>` | armatrix 钱包读路径自建代码归零（credit.go 读投影删除）；其 e2e 通过 |
+| ~~P5 消费方验证~~ | ~~armatrix 迁移~~（26-07-09 移出本仓范围，消费方升级 Aaron 自理） | — |
 
-发版：P1-P4 合入后 ledger 打 minor tag + `@azex/ledger-react` minor 发版（新增 subpath，非 breaking）；P5 在消费方仓库进行，不阻塞本仓发版。
+发版：P1-P4 合入后 ledger 打 minor tag + `@azex/ledger-react` minor 发版（新增 subpath，非 breaking）。
 
 ## 7. See Also
 

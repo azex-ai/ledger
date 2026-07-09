@@ -13,6 +13,36 @@ Entries below note which artifact a change affects.
 
 ## [Unreleased]
 
+Holder-scoped wallet surface (2026-07-08,
+`docs/plans/2026-07-08-holder-scoped-wallet-surface.md`): the end-user
+wallet — balances / translated transactions / holds for ONE holder — as a
+library capability, so consumer products stop hand-rolling the projection.
+
+### Go module — Added (wallet surface)
+
+- Holder read projections (`core.HolderReader` on the ledger store):
+  `ListHolderBalances` (per-currency BalanceBreakdown + currency code),
+  `ListHolderTransactions` ((journal, holder, currency) net aggregation over
+  role-bearing classifications, user-language kind/label/direction, cursor at
+  journal granularity), `ListHolderHolds`.
+- Holder tokens: stateless HMAC (`lht_` prefix), single-holder, read-only,
+  TTL-bound; `server.MintHolderToken` for in-process minting,
+  `POST /api/v1/holder-tokens` (write scope) over HTTP.
+- `server.HolderHandler`: mountable sub-router with exactly the three read
+  endpoints (no admin routes) for library hosts; ledgerd exposes the same
+  surface behind `HOLDER_TOKEN_SECRET`.
+- `display_label` on classifications + journal types (migration 038,
+  expand-only) with preset-seeded user-facing defaults; `SetDisplayLabelIfEmpty`
+  never clobbers operator overrides.
+
+### npm package — Added (wallet surface)
+
+- `@azex/ledger-react/wallet` (shadcn skin), `/wallet/heroui` (HeroUI v3),
+  `/wallet/headless` (client + hooks): `WalletPanel`, `WalletBalances`,
+  `WalletBalanceCard`, `TransactionList`; `getToken` callback auth with
+  single 401 refresh-retry; rendered-surface tests pin that no double-entry
+  vocabulary reaches the DOM. Version 0.4.0.
+
 Production-hardening batch (2026-07-06): closes the operational gaps between
 "code-complete" and "runnable in production" — credential model, dashboard
 auth, backup/DR, alerting closure, data lifecycle, deploy hygiene.

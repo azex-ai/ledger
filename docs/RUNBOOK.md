@@ -457,9 +457,30 @@ Operational guidance:
 - **One key per consumer, never shared** — the key name is your audit trail
   ("which caller did this"). Rotate by appending a new triple, deploying
   consumers, then removing the old triple.
-- Per-key **holder** scoping for reads (a key that can only read its own
-  holder's data) is still a future design item — a `read` key today sees
-  every holder. Treat `read` keys as sensitive.
+- A `read` **API key** sees every holder — treat `read` keys as sensitive.
+  For end-user traffic, do NOT hand out keys at all: use **holder tokens**
+  below.
+
+### Holder tokens (end-user wallet surface)
+
+`HOLDER_TOKEN_SECRET` (min 32 bytes) enables the holder wallet surface:
+`GET /api/v1/holder/{balances,transactions,holds}` authenticate with a
+stateless HMAC token (`lht_` prefix on the same bearer header), bound to ONE
+holder, read-only, default 15m TTL. Your backend mints them per session via
+`POST /api/v1/holder-tokens` (write scope) or in-process with
+`server.MintHolderToken`; library hosts can mount `server.HolderHandler`
+(the three read endpoints, zero admin routes) into their own router.
+
+- Leak blast radius: one holder, read-only, until `exp` — no key rotation
+  needed for a leaked token, it ages out.
+- Revocation is global: rotate `HOLDER_TOKEN_SECRET` and every outstanding
+  token dies; there is deliberately no token table to operate.
+- Access logs carry `holder:<id>` as the principal for these requests.
+- Capacity: this surface serves END-USER traffic (every wallet page view),
+  a different profile from operator/admin calls. Balances ride the
+  checkpoint+delta read path (cheap, see CAPACITY.md); transactions are a
+  per-page aggregate over the holder's recent journals. Rate-limit at your
+  edge accordingly — the mounted sub-router deliberately ships none.
 
 ### What this means for deployment
 

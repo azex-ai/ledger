@@ -490,6 +490,67 @@ mount inside `<LedgerProvider>` and they work.
 Re-export of sonner's `Toaster` so consumers don't need a direct sonner
 dependency. Mount once at the app root (unless using `LedgerAdmin`).
 
+## End-user wallet — `@azex/ledger-react/wallet`
+
+The holder-scoped wallet surface for your product's END USERS (the admin
+surfaces above are for operators). Three subpaths, mirroring the package's
+skin split:
+
+| Subpath | Contents |
+|---|---|
+| `./wallet` | shadcn-style skin components + `WalletProvider` |
+| `./wallet/heroui` | HeroUI v3 skin (optional peer `@heroui/react`) |
+| `./wallet/headless` | `createWalletClient` + hooks, zero UI |
+
+### Auth: `getToken` (topology A) or BFF (topology B)
+
+```tsx
+import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
+
+async function fetchWalletToken(): Promise<string> {
+  const res = await fetch("/api/session/wallet-token", { method: "POST" });
+  const { token } = await res.json();
+  return token; // holder token your backend minted for the session user
+}
+
+<WalletProvider config={{ baseUrl: "/api/v1", getToken: fetchWalletToken }}>
+  <WalletPanel />
+</WalletProvider>;
+```
+
+`getToken` is called lazily before the first request and exactly once more
+when a request returns 401 (expired token) — the request is then retried;
+a second 401 surfaces as `ApiRequestError`. Behind a same-origin BFF that
+injects the holder server-side, omit `getToken` entirely. The ledger API
+key must never appear in this configuration.
+
+`WalletProviderConfig` otherwise matches `LedgerProviderConfig` (`queryClient`,
+`onError`, `theme`, `appearance`) — same chrome, different trust domain.
+
+### Hooks (`./wallet/headless`)
+
+| Hook | Returns | Notes |
+|---|---|---|
+| `useWalletBalance(currencyUid?)` | `WalletBalance[]` | one row per currency; `total = available + pending + locked` |
+| `useWalletTransactions(limit = 20)` | infinite query | `{list, next_cursor}` pages; flatten with `data?.pages.flatMap((p) => p.list)` |
+| `useWalletHolds()` | `WalletHold[]` | outstanding holds (locked amounts + expiry) |
+
+### Components
+
+| Component | Props | Purpose |
+|---|---|---|
+| `<WalletPanel/>` | `actions?`, `kindLabels?` | zero-assembly: balances + activity list |
+| `<WalletBalances/>` | `actions?` | per-currency grid of balance cards |
+| `<WalletBalanceCard/>` | `currencyUid?`, `actions?` | one currency: total + available/pending/on-hold rows, expandable holds detail |
+| `<TransactionList/>` | `kindLabels?`, `renderItem?`, `limit?` | activity list: labels, refund markers, signed colored amounts, Load More |
+
+- `actions` is the slot for YOUR top-up / cash-out buttons — the wallet
+  surface is read-only by design; write flows belong to the host product.
+- `kindLabels` overrides display labels by the stable `kind` code
+  (`{ deposit_confirm: "Top up" }`) — the product-side i18n anchor.
+- Every component ships loading skeletons, sanitized error states, and empty
+  states; raw upstream errors go to `onError`, never the DOM.
+
 ## Server entry — `@azex/ledger-react/server`
 
 ### `createServerLedgerClient(config: LedgerClientConfig): LedgerClient`
