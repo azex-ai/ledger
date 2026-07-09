@@ -238,7 +238,7 @@ createWalletClient({
 
 ## 6. Phase 拆解与验收
 
-> **进度（26-07-08）**：P1 `c318954` / P2 `da8dd30` / P3 `6d66202` / P4 `ff4e6be` 已合入 main 并推送（各 phase 验收全过：投影规则集成测试、token 表驱动测试、codegen gate、双皮肤护栏断言、fullstack `/wallet` demo）。`@azex/ledger-react` 0.4.0 已 bump 未发版（等 tag）。
+> **进度（26-07-08）**：P1 `c318954` / P2 `da8dd30` / P3 `6d66202` / P4 `ff4e6be` 已合入 main 并推送（各 phase 验收全过：投影规则集成测试、token 表驱动测试、codegen gate、双皮肤护栏断言、fullstack `/wallet` demo）。`@azex/ledger-react` 版本与 Go module 对齐为 **0.5.0**（26-07-09 拍板：双 artifact 协同发版同版号；npm 0.4.0 从未发布，直接 0.3.0 → 0.5.0 收敛），已 bump 未发版（等 tag）。
 > **范围修订（26-07-09，Aaron 拍板）**：P5（armatrix 等消费方迁移）**移出本仓范围**——消费方升级由 Aaron 在各自仓库进行；本仓目标 = 先完成一个高质量版本再谈消费。§4 保留为需求完备性验证用例，不再是本仓验收项。
 
 按现有「Adding Features」工作流（SQL → sqlc → core/server → openapi → react）排序，每个 phase 独立可交付、独立过 CI：
@@ -251,7 +251,7 @@ createWalletClient({
 | P4 组件 | wallet 双皮肤组件四件套 + `/wallet` `/wallet/heroui` `/wallet/headless` exports + 三态/极端数据 | vitest：内部词汇不出现在渲染输出（user-facing-surfaces 护栏断言）；双皮肤逻辑镜像；examples/fullstack 增加 wallet 页 demo（两拓扑至少演示 A） |
 | ~~P5 消费方验证~~ | ~~armatrix 迁移~~（26-07-09 移出本仓范围，消费方升级 Aaron 自理） | — |
 
-发版：P1-P4 合入后 ledger 打 minor tag + `@azex/ledger-react` minor 发版（新增 subpath，非 breaking）。
+发版：P1-P4 合入后双 artifact **同版号**发版——Go `v0.5.0` + `ledger-react-v0.5.0`（新增 subpath，非 breaking）。
 
 ## 7. See Also
 

@@ -4,12 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Two independently versioned artifacts live in this repo:
+Two artifacts live in this repo:
 
 - the **Go module** `github.com/azex-ai/ledger`, tagged `vX.Y.Z`;
 - the **npm package** `@azex/ledger-react`, tagged `ledger-react-vX.Y.Z`.
 
-Entries below note which artifact a change affects.
+From 0.5.0 onward the two are **version-aligned**: a coordinated release
+tags both at the same X.Y.Z (npm 0.4.0 was never published; the npm line
+jumps 0.3.0 → 0.5.0 to converge). Entries below note which artifact a
+change affects.
 
 ## [Unreleased]
 
@@ -41,7 +44,7 @@ library capability, so consumer products stop hand-rolling the projection.
   `/wallet/headless` (client + hooks): `WalletPanel`, `WalletBalances`,
   `WalletBalanceCard`, `TransactionList`; `getToken` callback auth with
   single 401 refresh-retry; rendered-surface tests pin that no double-entry
-  vocabulary reaches the DOM. Version 0.4.0.
+  vocabulary reaches the DOM. Version 0.5.0 (aligned with the Go module).
 
 Production-hardening batch (2026-07-06): closes the operational gaps between
 "code-complete" and "runnable in production" — credential model, dashboard
