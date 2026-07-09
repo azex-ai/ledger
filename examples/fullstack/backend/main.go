@@ -130,7 +130,21 @@ func run() error {
 	//     the demo fixes holder 1001 (seeded above). The ledger API key
 	//     never reaches the browser — only this short-lived token does.
 	// ------------------------------------------------------------------
+	// This endpoint lives on the HOST router, outside the ledger API's CORS
+	// middleware — the demo web app calls it cross-origin (:3090 → :8090),
+	// so it needs its own CORS headers (dev-wide "*", match your real CORS
+	// policy in production).
+	sessionCORS := func(w http.ResponseWriter) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	}
+	r.Options("/api/session/wallet-token", func(w http.ResponseWriter, _ *http.Request) {
+		sessionCORS(w)
+		w.WriteHeader(http.StatusNoContent)
+	})
 	r.Post("/api/session/wallet-token", func(w http.ResponseWriter, _ *http.Request) {
+		sessionCORS(w)
 		token, err := server.MintHolderToken(walletTokenSecret, 1001, 15*time.Minute, time.Now())
 		if err != nil {
 			http.Error(w, "mint failed", http.StatusInternalServerError)
