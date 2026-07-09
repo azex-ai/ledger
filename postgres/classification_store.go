@@ -245,5 +245,5 @@ type JournalTypeStoreAdapter struct{ *ClassificationStore }
 // SetDisplayLabelIfEmpty implements core.JournalTypeStore by delegating to
 // the journal-type setter (shadowing the promoted classification method).
 func (a JournalTypeStoreAdapter) SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error {
-	return a.ClassificationStore.SetJournalTypeDisplayLabelIfEmpty(ctx, uid, label)
+	return a.SetJournalTypeDisplayLabelIfEmpty(ctx, uid, label)
 }
