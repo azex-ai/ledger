@@ -524,6 +524,14 @@ a second 401 surfaces as `ApiRequestError`. Behind a same-origin BFF that
 injects the holder server-side, omit `getToken` entirely. The ledger API
 key must never appear in this configuration.
 
+`getToken` deduplicates concurrent callers (one in-flight mint is shared by
+all simultaneous requests) and a rejected mint is never cached.
+
+When your app can switch accounts WITHOUT remounting the provider (or you
+inject a shared long-lived `queryClient`), also set `scope` to a stable
+per-user string (your session user id): it is folded into every wallet query
+key, so holder A's cached balances can never be served to holder B.
+
 `WalletProviderConfig` otherwise matches `LedgerProviderConfig` (`queryClient`,
 `onError`, `theme`, `appearance`) — same chrome, different trust domain.
 

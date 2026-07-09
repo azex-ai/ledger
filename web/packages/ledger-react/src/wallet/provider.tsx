@@ -22,13 +22,14 @@ export function WalletProvider({
   config: WalletProviderConfig;
   children: ReactNode;
 }): React.JSX.Element {
-  const { baseUrl, getToken, fetch } = config;
+  const { baseUrl, getToken, scope, fetch } = config;
 
   // Stable inputs → stable client identity; `getToken`/`fetch` must be
-  // stable references (see WalletClientConfig).
+  // stable references (see WalletClientConfig). A scope change (account
+  // switch) rebuilds the client, which re-keys every wallet query.
   const client = useMemo(
-    () => createWalletClient({ baseUrl, getToken, fetch }),
-    [baseUrl, getToken, fetch],
+    () => createWalletClient({ baseUrl, getToken, scope, fetch }),
+    [baseUrl, getToken, scope, fetch],
   );
 
   return (

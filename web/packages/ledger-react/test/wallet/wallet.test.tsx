@@ -92,6 +92,53 @@ describe("wallet client auth", () => {
     });
   });
 
+  test("concurrent requests share ONE getToken call (promise-cached)", async () => {
+    let minted = 0;
+    const getToken = vi.fn(async () => {
+      minted++;
+      await new Promise((r) => setTimeout(r, 20)); // keep it in-flight
+      return `lht_tok${minted}`;
+    });
+    const ok = () =>
+      HttpResponse.json({ code: 200, message: "ok", data: { list: [] } });
+    server.use(
+      http.get(`${BASE}/holder/balances`, ok),
+      http.get(`${BASE}/holder/holds`, ok),
+      http.get(`${BASE}/holder/transactions`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: "ok",
+          data: { list: [], next_cursor: "" },
+        }),
+      ),
+    );
+    const client = createWalletClient({ baseUrl: BASE, getToken });
+
+    // WalletPanel's real mount pattern: three requests in parallel.
+    await Promise.all([
+      client.listBalances(),
+      client.listHolds(),
+      client.listTransactions({}),
+    ]);
+    expect(getToken).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed getToken is not cached — the next request retries", async () => {
+    const getToken = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("mint endpoint down"))
+      .mockResolvedValue("lht_ok");
+    server.use(
+      http.get(`${BASE}/holder/holds`, () =>
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
+      ),
+    );
+    const client = createWalletClient({ baseUrl: BASE, getToken });
+    await expect(client.listHolds()).rejects.toThrow("mint endpoint down");
+    await expect(client.listHolds()).resolves.toEqual([]);
+    expect(getToken).toHaveBeenCalledTimes(2);
+  });
+
   test("omitting getToken sends no Authorization (BFF topology)", async () => {
     let seenAuth: string | null = "sentinel";
     server.use(
@@ -137,7 +184,7 @@ describe("wallet hooks", () => {
     expect(result.current.data).toHaveLength(1);
     expect(result.current.data?.[0].total).toBe("100");
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "balances", ""] }),
+      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "", "balances", ""] }),
     ).toBeDefined();
   });
 
@@ -182,7 +229,30 @@ describe("wallet hooks", () => {
     expect(result.current.hasNextPage).toBe(false);
   });
 
-  test("useWalletHolds lists under ['ledger-wallet','holds']", async () => {
+  test("scope isolates cache keys across account switches", async () => {
+    const qc = new QueryClient();
+    server.use(
+      http.get(`${BASE}/holder/balances`, () =>
+        HttpResponse.json({ code: 200, message: "ok", data: { list: [BALANCE] } }),
+      ),
+    );
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <WalletProvider config={{ baseUrl: BASE, queryClient: qc, scope: "user-A" }}>
+        {children}
+      </WalletProvider>
+    );
+    const { result } = renderHook(() => useWalletBalance(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    // Key carries the scope — a different user (scope) can never hit it.
+    expect(
+      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "user-A", "balances", ""] }),
+    ).toBeDefined();
+    expect(
+      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "user-B", "balances", ""] }),
+    ).toBeUndefined();
+  });
+
+  test("useWalletHolds lists under ['ledger-wallet','','holds']", async () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/holder/holds`, () =>
@@ -210,7 +280,7 @@ describe("wallet hooks", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.[0].amount).toBe("25");
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "holds"] }),
+      qc.getQueryCache().find({ queryKey: ["ledger-wallet", "", "holds"] }),
     ).toBeDefined();
   });
 });

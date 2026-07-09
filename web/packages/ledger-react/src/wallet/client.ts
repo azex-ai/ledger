@@ -24,6 +24,14 @@ export interface WalletClientConfig {
    * keys its client memo on it.
    */
   getToken?: () => Promise<string>;
+  /**
+   * Cache-identity of the CURRENT user (any stable per-user string — your
+   * session user id). It is folded into every wallet query key, so a host
+   * that reuses one QueryClient across account switches never serves one
+   * holder's cached balances to another. Omit when the provider remounts
+   * with a fresh QueryClient per session (the default provider behavior).
+   */
+  scope?: string;
   /** Optional fetch override (server use / tests). Stable reference, see above. */
   fetch?: typeof fetch;
 }
@@ -89,25 +97,43 @@ function qs(params: Record<string, string | number | undefined>): string {
 }
 
 export function createWalletClient(config: WalletClientConfig) {
-  // Token cache: shared across requests, replaced on 401-refresh.
-  let token: string | null = null;
+  // Token cache holds the PROMISE, not the resolved value: the assignment in
+  // refreshToken is synchronous, so N concurrent requests (WalletPanel
+  // mounts balances + transactions + holds together) share ONE getToken()
+  // call instead of minting N tokens. A rejected fetch clears the cache so
+  // the next request retries instead of caching the failure forever.
+  let tokenPromise: Promise<string> | null = null;
+
+  function refreshToken(): Promise<string> {
+    const p = config.getToken!().catch((err: unknown) => {
+      if (tokenPromise === p) tokenPromise = null;
+      throw err;
+    });
+    tokenPromise = p;
+    return p;
+  }
 
   async function request<T>(path: string, retried = false): Promise<T> {
     const fetchImpl = config.fetch ?? globalThis.fetch;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
+    let usedToken: Promise<string> | null = null;
     if (config.getToken) {
-      token ??= await config.getToken();
-      headers["Authorization"] = `Bearer ${token}`;
+      usedToken = tokenPromise ?? refreshToken();
+      headers["Authorization"] = `Bearer ${await usedToken}`;
     }
 
     const res = await fetchImpl(`${config.baseUrl}${path}`, { headers });
 
     if (res.status === 401 && config.getToken && !retried) {
       // Expired/rotated token: refresh once and retry; a second 401 falls
-      // through to the error path below on the retried call.
-      token = await config.getToken();
+      // through to the error path below on the retried call. Concurrent
+      // 401s dedupe too — only the first replaces the cached promise, the
+      // rest see the already-refreshed one and just retry with it.
+      if (tokenPromise === usedToken) {
+        refreshToken();
+      }
       return request<T>(path, true);
     }
 
@@ -127,6 +153,9 @@ export function createWalletClient(config: WalletClientConfig) {
   }
 
   return {
+    /** Cache-identity for query keys (see WalletClientConfig.scope). */
+    scope: config.scope ?? "",
+
     listBalances: (currencyUid?: string) =>
       request<{ list: WalletBalance[] }>(
         `/holder/balances${qs({ currency_uid: currencyUid })}`,

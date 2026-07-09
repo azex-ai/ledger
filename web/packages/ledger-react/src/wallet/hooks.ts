@@ -10,7 +10,7 @@ import { walletKeys } from "./keys";
 export function useWalletBalance(currencyUid?: string) {
   const client = useWalletClient();
   return useQuery({
-    queryKey: walletKeys.balances(currencyUid),
+    queryKey: walletKeys.balances(client.scope, currencyUid),
     queryFn: () => client.listBalances(currencyUid),
   });
 }
@@ -24,7 +24,7 @@ export function useWalletBalance(currencyUid?: string) {
 export function useWalletTransactions(limit = 20) {
   const client = useWalletClient();
   return useInfiniteQuery({
-    queryKey: walletKeys.transactions(limit),
+    queryKey: walletKeys.transactions(client.scope, limit),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listTransactions({ cursor: pageParam, limit }),
     initialPageParam: undefined as string | undefined,
@@ -36,7 +36,7 @@ export function useWalletTransactions(limit = 20) {
 export function useWalletHolds() {
   const client = useWalletClient();
   return useQuery({
-    queryKey: walletKeys.holds(),
+    queryKey: walletKeys.holds(client.scope),
     queryFn: () => client.listHolds(),
   });
 }
