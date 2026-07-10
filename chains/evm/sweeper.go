@@ -30,9 +30,9 @@ const gasBumpDenominator = 1000
 // decimal.Decimal unit core.SweepPolicy.GasCeiling is configured in.
 const weiGweiDecimals = 9
 
-// Sweeper implements the not-yet-merged core.Sweeper (design doc §4;
-// signature finalized with team-lead on bus task #3 -- see interfaces.go's
-// SweepTarget doc comment). One Sweeper instance owns exactly one signing
+// Sweeper implements core.Sweeper (design doc §4; signature finalized with
+// team-lead on bus task #3 -- see core.SweepTarget's doc comment for the
+// nonce-vs-address rationale). One Sweeper instance owns exactly one signing
 // EOA per the design's "一把 sweeper key 只允许一个部署使用" rule; the caller
 // (service/'s sweep job) is responsible for the advisory-lock single-flight
 // around calls into it.
@@ -63,7 +63,7 @@ func NewSweeper(clients *ClientSet, signer core.Signer, signerAddress string) *S
 	}
 }
 
-var _ sweeper = (*Sweeper)(nil)
+var _ core.Sweeper = (*Sweeper)(nil)
 
 // NextNonce returns the signer EOA's next usable nonce (pending, so an
 // in-flight sweep tx is accounted for) on chainID.
@@ -98,7 +98,7 @@ func (s *Sweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Decimal,
 //
 // Every target's Address is re-derived from AccountHolder via
 // core.DeriveDepositAddress and must match exactly (case-sensitive EIP-55) --
-// a mismatch aborts the whole batch before any signing happens (SweepTarget's
+// a mismatch aborts the whole batch before any signing happens (core.SweepTarget's
 // doc comment).
 //
 // Calling BatchSweep again with the same signerNonce (a stuck-tx retry) is
@@ -106,7 +106,7 @@ func (s *Sweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Decimal,
 // max(current suggested fee, previous fee * 1.125) per chain gas-bump policy.
 // The caller (service/'s sweep job) owns mapping signerNonce -> sweep
 // booking idempotency, per design doc §4.
-func (s *Sweeper) BatchSweep(ctx context.Context, chainID int64, token string, targets []SweepTarget, signerNonce uint64) (string, error) {
+func (s *Sweeper) BatchSweep(ctx context.Context, chainID int64, token string, targets []core.SweepTarget, signerNonce uint64) (string, error) {
 	if len(targets) == 0 {
 		return "", fmt.Errorf("evm: sweeper: batch sweep: no targets: %w", core.ErrInvalidInput)
 	}

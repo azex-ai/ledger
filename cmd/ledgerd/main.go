@@ -206,20 +206,25 @@ func run() error {
 	// the signature timestamp window (migration 030).
 	srv.SetWebhookNonceRecorder(webhookSubscriberStore)
 
-	// Crypto deposit + sweep (optional add-on, S1 #2/#3 — chains/evm watcher
-	// + sweeper, service.OnchainService) — wiring point. Once landed, mount
-	// them here:
+	// Crypto deposit + sweep (optional add-on) is deliberately NOT wired in
+	// ledgerd: its chain adapters live in the separate chains/evm module
+	// (go-ethereum dependency), and importing them here would drag geth into
+	// the root go.mod that every library consumer inherits — the exact thing
+	// the module split exists to prevent. Consumers wanting the add-on embed
+	// the library and wire it in their own composition root:
 	//
-	//   if len(chainSetConfigured) > 0 {
-	//       onchainSvc := svc.Onchain(chainSet, sweepPolicies, reorgPolicy) // *service.OnchainService
-	//       srv.SetDepositAddressProvider(onchainSvc)                     // handler_onchain.go
-	//       srv.SetDepositIngester(onchainSvc)                            // handler_webhooks.go bridge
-	//       worker.SetOnchainWatcher(onchainSvc)                          // watcher + sweep jobs
-	//   }
+	//   onchainSvc, err := svc.EnableOnchain(chainSet, reader, scanner, sweeper,
+	//       service.WithSweepPolicies(...), service.WithReorgPolicy(...))
+	//   srv.SetDepositAddressProvider(onchainSvc) // server/handler_onchain.go
+	//   srv.SetDepositIngester(onchainSvc)        // server/handler_webhooks.go bridge
+	//   go onchainSvc.Run(ctx)                    // watcher + sweep loops
 	//
-	// Until wired, POST/GET /holders/{holder}/deposit-address and the onchain
-	// webhook's sighting-ingestion path both answer bizcode.FeatureNotEnabled
-	// (server/handler_onchain.go, server/handler_webhooks.go).
+	// (reader/scanner/sweeper from chains/evm — see docs/COOKBOOK.md's crypto
+	// deposit recipe and examples/crypto-deposit.) A geth-linked ledgerd
+	// variant, if service mode ever needs it, belongs in the chains/evm
+	// module as its own cmd/, not here. Until wired, POST/GET
+	// /holders/{holder}/deposit-address and the onchain webhook's
+	// sighting-ingestion path answer bizcode.FeatureNotEnabled.
 
 	// Rate limiter GC loop — stopped when rateLimiterStop is closed.
 	rateLimiterStop := make(chan struct{})

@@ -160,7 +160,7 @@ func TestE2E_WatchThenSweep(t *testing.T) {
 	require.NoError(t, err)
 
 	txHash, err := sweeper.BatchSweep(ctx, anvilChainID, usdtAddr.Hex(),
-		[]SweepTarget{{Address: depositAddr, AccountHolder: holder}}, nonce)
+		[]core.SweepTarget{{Address: depositAddr, AccountHolder: holder}}, nonce)
 	require.NoError(t, err)
 	require.NotEmpty(t, txHash)
 

@@ -24,8 +24,8 @@ var erc20TransferSig = crypto.Keccak256Hash([]byte("Transfer(address,address,uin
 // instructions: "地址列表按 provider 上限分片，默认 500/批可配").
 const defaultAddressShardSize = 500
 
-// Reader implements the watcher-facing chain-read port (core.ChainReader,
-// once dev-service lands it -- see interfaces.go) against a ClientSet.
+// Reader implements the watcher-facing chain-read port (core.ChainReader)
+// against a ClientSet.
 type Reader struct {
 	clients         *ClientSet
 	addressShardLen int
@@ -41,7 +41,7 @@ func NewReader(clients *ClientSet, shardLen int) *Reader {
 	return &Reader{clients: clients, addressShardLen: shardLen}
 }
 
-var _ chainReader = (*Reader)(nil)
+var _ core.ChainReader = (*Reader)(nil)
 
 // LatestBlock returns chainID's current head block number.
 func (r *Reader) LatestBlock(ctx context.Context, chainID int64) (int64, error) {

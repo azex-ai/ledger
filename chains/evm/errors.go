@@ -12,6 +12,6 @@ var (
 	// allowlist.
 	ErrTokenNotConfigured = errors.New("evm: token not configured")
 	// ErrUnsupported marks functionality blocked on an unresolved contract
-	// question (see interfaces.go's sweeper doc comment / bus task #3).
+	// question (see core.Sweeper's doc comment in the root module).
 	ErrUnsupported = errors.New("evm: unsupported")
 )
