@@ -307,3 +307,59 @@ type PeriodCloser interface {
 type TrialBalanceReader interface {
 	TrialBalance(ctx context.Context, currencyUID string, asOf time.Time) (*TrialBalanceReport, error)
 }
+
+// AddressRegistry persists the one-holder-to-one-address deposit address
+// registry (design doc §2). It is a pure store: callers derive the address
+// with DeriveDepositAddress and pass the result in -- the registry never
+// derives addresses itself.
+type AddressRegistry interface {
+	// EnsureAddress upserts input, returning the existing row unchanged if
+	// holder was already registered (account_holder is UNIQUE, so a holder
+	// can never be issued a second address). On conflict, input's
+	// Address/Factory/InitHash are NOT compared against the existing row --
+	// reconciling a mismatch is the caller's responsibility, not the
+	// store's.
+	EnsureAddress(ctx context.Context, input AddressRegistrationInput) (*DepositAddress, error)
+	// GetByAddress reverse-looks-up the holder for an observed on-chain
+	// address. address must be in the same canonical EIP-55 casing the row
+	// was registered with. Returns ErrNotFound if unregistered.
+	GetByAddress(ctx context.Context, address string) (*DepositAddress, error)
+	// ListAddresses returns every registered deposit address, for the
+	// watcher to build its `to ∈ registry` filter set.
+	ListAddresses(ctx context.Context) ([]DepositAddress, error)
+}
+
+// ChainScanner enumerates on-chain balances for the sweep job. One
+// implementation per chain family -- chains/evm is the only one this period
+// (design doc §1/§4).
+type ChainScanner interface {
+	// ScanBalances returns the current balance of token (a contract address,
+	// or core.SweepNativeToken for the chain's native asset) at every
+	// address in addresses, on chainID.
+	ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (map[string]decimal.Decimal, error)
+}
+
+// Sweeper collects balances from a batch of registered deposit addresses
+// into the deploying factory's configured treasury (design doc §4). Sweep
+// bookings never post a journal -- see presets.SweepLifecycle -- so this
+// port only needs to report the collection transaction's hash for the
+// caller to track.
+type Sweeper interface {
+	// BatchSweep submits one collection transaction moving token out of
+	// addresses on chainID and returns its transaction hash. Implementations
+	// own nonce management, gas pricing, and retry/gas-bump -- the caller
+	// only needs the resulting hash to track the sweep booking (design doc
+	// §4: booking key is derived from the persisted signer nonce, not from
+	// this call's return value, precisely so a gas-bump retry maps to the
+	// same booking).
+	BatchSweep(ctx context.Context, chainID int64, token string, addresses []string) (txHash string, err error)
+}
+
+// Signer abstracts the private key that authorizes sweep transactions, so
+// the library's default local-key implementation can later be swapped for a
+// KMS/HSM adapter without touching sweep orchestration (design doc §0).
+// Signer never touches factory ownership/treasury-change keys (design doc
+// §5.5) -- it only signs sweep transactions.
+type Signer interface {
+	SignTx(ctx context.Context, chainID int64, unsignedTx []byte) (signedTx []byte, err error)
+}
