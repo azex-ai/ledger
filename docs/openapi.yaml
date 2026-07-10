@@ -458,6 +458,45 @@ paths:
       responses:
         "200": { description: Policies. }
 
+  /holders/{holder}/deposit-address:
+    post:
+      tags: [Crypto Deposit]
+      summary: Issue (idempotently) a holder's CREATE2 custody deposit address.
+      description: >-
+        Derives and registers the address on first call; repeated calls for
+        the same holder always return the same address. Answers
+        FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in
+        (see docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "201":
+          description: Deposit address (created on first call, or already registered).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+    get:
+      tags: [Crypto Deposit]
+      summary: Look up a holder's already-registered deposit address.
+      description: Does not create one -- 404s if the holder has none yet.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Deposit address.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+
   /bookings:
     get:
       tags: [Bookings]
@@ -540,7 +579,17 @@ paths:
     post:
       tags: [Webhooks]
       summary: Inbound channel callback (e.g. on-chain deposit).
-      description: Body shape and signing are channel-specific. Hot path is HMAC-verified.
+      description: >-
+        Body shape and signing are channel-specific. Hot path is
+        HMAC-verified. The `evm` channel understands a deposit-sighting
+        shape ({chain_id, tx_hash, txlog_seq, token, from, to, amount,
+        confirmations}) and routes it to the same IngestDeposit
+        orchestration the chains/evm watcher uses -- see
+        docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3. Answers
+        FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+        Other channels use the legacy shape ({tx_hash, booking_uid, amount,
+        confirmations, status}) that transitions a pre-existing booking_uid,
+        confined to deposit-classification bookings only (design doc §5-5).
       security: []
       parameters:
         - in: path
@@ -548,8 +597,10 @@ paths:
           required: true
           schema: { type: string, enum: [evm, btc, custom] }
       responses:
-        "204": { description: Accepted. }
+        "200": { description: Accepted -- returns the ingested booking (evm sighting path) or the transition event (legacy path). }
         "401": { description: HMAC verification failed. }
+        "403": { description: Channel/classification mismatch (design doc §5-5). }
+        "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
 
   /classifications:
     get:
@@ -1425,6 +1476,23 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Booking" }
+
+    DepositAddress:
+      type: object
+      description: >-
+        The CREATE2 derivation fingerprint (factory/init_hash) is an internal
+        audit-only detail and is deliberately not part of this wire shape.
+      properties:
+        uid: { type: string, format: uuid }
+        account_holder: { type: integer, format: int64 }
+        address: { type: string, description: "EIP-55 checksummed EVM address." }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    DepositAddressEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/DepositAddress" }
 
     Event:
       type: object

@@ -206,6 +206,21 @@ func run() error {
 	// the signature timestamp window (migration 030).
 	srv.SetWebhookNonceRecorder(webhookSubscriberStore)
 
+	// Crypto deposit + sweep (optional add-on, S1 #2/#3 — chains/evm watcher
+	// + sweeper, service.OnchainService) — wiring point. Once landed, mount
+	// them here:
+	//
+	//   if len(chainSetConfigured) > 0 {
+	//       onchainSvc := svc.Onchain(chainSet, sweepPolicies, reorgPolicy) // *service.OnchainService
+	//       srv.SetDepositAddressProvider(onchainSvc)                     // handler_onchain.go
+	//       srv.SetDepositIngester(onchainSvc)                            // handler_webhooks.go bridge
+	//       worker.SetOnchainWatcher(onchainSvc)                          // watcher + sweep jobs
+	//   }
+	//
+	// Until wired, POST/GET /holders/{holder}/deposit-address and the onchain
+	// webhook's sighting-ingestion path both answer bizcode.FeatureNotEnabled
+	// (server/handler_onchain.go, server/handler_webhooks.go).
+
 	// Rate limiter GC loop — stopped when rateLimiterStop is closed.
 	rateLimiterStop := make(chan struct{})
 	srv.StartRateLimiterGC(rateLimiterStop)

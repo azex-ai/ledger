@@ -615,6 +615,91 @@ every external reference stable across dump/restore.
 
 ---
 
+## I-19: Sweep bookings never post a journal
+
+A `sweep` booking (the crypto-deposit design's on-chain collection batches —
+docs/plans/2026-07-11-crypto-deposit-sweep-design.md §4) exists purely for
+lifecycle bookkeeping and audit (`pending -> sent -> confirmed | failed(->
+retry -> pending)`). It is installed with **no journal type and no entry
+template**, and its classification's `BalanceRole` is `none` — a sweep batch
+moving funds from a custody address to treasury is a channel/custody
+movement, not a user-facing accounting event, and never touches the
+accounting equation.
+
+**Why**: sweep addresses are predictable (`salt = account_holder`, factory
+public — design doc §5-2) and their balances are attacker-adjacent dust
+targets; keeping sweep entirely outside the journal means a compromised
+sweep path (forged "confirmed", stuck batch, wrong nonce) can waste gas or
+force a redundant collection, but can **never** fabricate or erase a
+liability, credit a holder, or unbalance a journal. The blast radius of a
+sweep-side bug is bounded to "no-op or wasted gas," by construction, not by
+runtime validation.
+
+**Enforced by**:
+- `presets.InstallSweepClassification` (`presets/sweep.go`) only calls
+  `ClassificationStore.CreateClassification` — it is never given a
+  `JournalTypeStore` or `TemplateStore` handle, so there is no code path by
+  which installing the sweep classification could also install a journal
+  type or template for it.
+- `presets.SweepLifecycle`'s classification is created with
+  `BalanceRole: core.BalanceRoleNone` (inert — no holder balance breakdown
+  bucket includes it).
+
+**Pinned by**:
+- `presets.TestInstallCryptoDepositBundle` (asserts
+  `journalStore.GetJournalTypeByCode(ctx, SweepClassificationCode)` returns
+  `core.ErrNotFound` after installing the full bundle)
+- `presets.TestInstallSweepClassification_CreatesOnce` (asserts
+  `BalanceRole == core.BalanceRoleNone` on the installed classification)
+
+---
+
+## I-20: Deposit booking idempotency survives a reorg
+
+A crypto deposit's booking idempotency key is
+`deposit-{chain_id}-{tx_hash}-{txlog_seq}`, where `txlog_seq` is the
+transfer's ordinal position **among the logs in that transaction that credit
+one of our registered addresses** (tx-local, deterministic) — never the
+chain's block-level `log_index` (design doc §3). A reorg that re-includes the
+same transaction in a different block reassigns block-level log indices, but
+never reorders the transfers within the transaction itself, so `txlog_seq`
+for a given transfer is stable across the reorg while `log_index` is not.
+
+**Why**: both ingestion paths (the chains/evm watcher's `eth_getLogs` poll
+and the onchain webhook) may observe the same transfer more than once as
+confirmations accrue and as the chain reorganizes around it. If the
+idempotency key were built from block-level `log_index`, a reorg would
+silently mint a fresh key for an already-recorded transfer — a duplicate
+deposit booking, i.e. free money. Keying off the tx-local ordinal instead
+means the same transfer, observed any number of times by either path,
+resolves to the same booking (`Booker.CreateBooking`'s existing
+same-key/same-payload idempotency, I-3) instead of creating a duplicate.
+
+**Enforced by**:
+- `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
+  comment and shape deliberately exclude any block-level log index; both
+  ingestion paths (chains/evm watcher and the `channel/onchain` webhook
+  bridge) must derive this from the transaction's internal transfer
+  ordering, not from `eth_getLogs`' block-scoped `logIndex`.
+- The idempotency key itself (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) is
+  constructed once, at booking-creation time, by the caller's `IngestDeposit`
+  orchestration (`service.OnchainService`, design doc §3) — not by either
+  ingestion path individually, so both paths necessarily agree on it for the
+  same transfer.
+
+**Pinned by**:
+- `core.TestDepositSighting_Validate` (chain_id/tx_hash/txlog_seq are
+  required identity fields)
+- `onchain.TestEVMAdapter_ParseSighting` (the webhook bridge derives
+  `TxLogSeq` from the payload's tx-local `txlog_seq` field, never a
+  block-scoped index)
+- The end-to-end guarantee (same sighting observed twice, pre- and
+  post-reorg, resolves to one booking) is exercised by
+  `service.OnchainService`'s testcontainers suite (design doc §7) — this
+  entry should gain that test's name once merged.
+
+---
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

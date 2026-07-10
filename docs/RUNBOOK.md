@@ -22,6 +22,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 9. [Emergency: stop the ledger](#9-emergency-stop-the-ledger)
 10. [Deployment security boundary](#10-deployment-security-boundary)
 11. [Partition management & archival](#11-partition-management--archival)
+12. [Deep reorg on a confirmed crypto deposit](#12-deep-reorg-on-a-confirmed-crypto-deposit)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -579,6 +580,77 @@ Do NOT detach partitions younger than your reconciliation + audit horizon.
 Balances are unaffected by detaching only if checkpoints already cover the
 detached range — that's what step 1 verifies. When in doubt, don't archive:
 storage is cheaper than a hole in the audit trail.
+
+## 12. Deep reorg on a confirmed crypto deposit
+
+**Alert source**: `deposit.reorged` event (emitted by the watcher's periodic
+recheck of recently-confirmed deposit bookings against the canonical chain —
+docs/plans/2026-07-11-crypto-deposit-sweep-design.md §6).
+
+**Severity**: P1 — a confirmed deposit's underlying transaction has
+disappeared from the chain. If unresolved, the ledger credits a user for
+funds that never (or no longer) settled.
+
+**Context**: `ReorgPolicy` (consumer-configured on the crypto-deposit
+add-on) governs what happens next. **`manual` is the default.**
+
+### `manual` (default) — on-call resolves by hand
+
+1. **Verify it's real, not an RPC blip.** Check the transaction against a
+   second, independent RPC provider or a public block explorer for the
+   chain. A single lagging/misbehaving node reporting "not found" is not a
+   reorg — do not act on one source alone.
+   ```sql
+   -- Find the affected booking + its journal.
+   SELECT uid, account_holder, currency_id, amount, status, channel_ref, journal_id
+   FROM bookings WHERE uid = '<booking_uid>';
+   ```
+2. **Confirm the transaction is genuinely gone** (not just re-mined at a
+   different block height — re-orgs commonly re-include a transaction one or
+   two blocks later with the same effect, which is not a reversal case).
+3. **If genuinely reorged out**, post a reversal journal for the booking's
+   linked journal (never `UPDATE`/`DELETE` — see INVARIANTS I-2):
+   ```
+   POST /api/v1/journals/{journal_uid}/reverse
+   { "reason": "deposit reorged: tx <tx_hash> no longer canonical on chain <chain_id>, verified against <second RPC/explorer>" }
+   ```
+   This posts a balanced reversing entry set; it does not delete or mutate
+   the original journal. The booking's `status` stays `confirmed` in its own
+   record — the correction lives in the journal, not the booking (I-2's
+   append-only rule applies here exactly as it does everywhere else).
+4. **If the transaction reappears** (re-mined, same effect) before you've
+   posted a reversal: no action needed, this was a false alarm — file it as
+   one for tuning the recheck window/confirmation threshold if it recurs.
+5. File the incident per the after-action checklist below regardless of
+   outcome — a `manual`-policy deep reorg alert firing at all is worth
+   understanding (chain instability, RPC provider issue, or a confirmation
+   threshold set too low for that chain).
+
+### `auto_reverse` — already handled, verify it landed correctly
+
+If the consumer configured `ReorgPolicyAutoReverse`, the watcher posts the
+reversal journal automatically on detection — no on-call action needed to
+*initiate* the correction. On-call's job is to **verify** the automatic
+reversal was itself correct (not a false positive from a flaky RPC node):
+
+1. Check the reversal journal exists and references the right original
+   journal (`reversal_of`).
+2. Re-verify the underlying tx status against a second RPC/explorer, same as
+   step 1 above — if the automatic reversal was a false positive (the tx was
+   never actually reorged out), you now need to reverse the reversal
+   (post a new correcting journal) and communicate the double-correction to
+   the user.
+
+**Risk statement (read before anyone asks to switch to `auto_reverse`)**:
+`auto_reverse` trades a manual verification step for automatic remediation
+speed. A false positive (a lagging node, a brief RPC provider outage, a
+too-short recheck window) auto-debits a user with no human in the loop before
+the money moves. Selecting `auto_reverse` is an explicit risk acceptance by
+whoever configures the consumer's `ReorgPolicy` — it is not a "safer"
+default, and `manual` remains the default for exactly this reason (design
+doc §6).
+
+---
 
 ## After-action checklist
 
