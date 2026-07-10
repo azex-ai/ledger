@@ -13,6 +13,14 @@ UPDATE classifications SET display_label = $2 WHERE uid = $1 AND display_label =
 -- change the caller must guard (presets only upgrade from '').
 UPDATE classifications SET balance_role = $2 WHERE uid = $1;
 
+-- name: SetClassificationLifecycleIfEmpty :exec
+-- Seeds a classification's lifecycle only when unset ('{}') -- for rows that
+-- predate the lifecycle column and were never assigned one (e.g. migration
+-- 011's seed 'deposit'/'withdraw' rows). Same expand-safe stance as
+-- SetClassificationDisplayLabelIfEmpty/SetClassificationBalanceRole: presets
+-- re-install must never clobber a lifecycle an operator has since customized.
+UPDATE classifications SET lifecycle = $2 WHERE uid = $1 AND lifecycle = '{}'::jsonb;
+
 -- name: DeactivateClassification :exec
 UPDATE classifications SET is_active = false WHERE uid = $1;
 

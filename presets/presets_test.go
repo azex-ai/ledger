@@ -137,6 +137,18 @@ func (s *fakeClassificationStore) SetDisplayLabelIfEmpty(_ context.Context, uid 
 	return core.ErrNotFound
 }
 
+func (s *fakeClassificationStore) SetLifecycleIfEmpty(_ context.Context, uid string, lifecycle *core.Lifecycle) error {
+	for _, classification := range s.classifications {
+		if classification.UID == uid {
+			if classification.Lifecycle == nil {
+				classification.Lifecycle = lifecycle
+			}
+			return nil
+		}
+	}
+	return core.ErrNotFound
+}
+
 func (s *fakeClassificationStore) DeactivateClassification(_ context.Context, uid string) error {
 	for _, classification := range s.classifications {
 		if classification.UID == uid {

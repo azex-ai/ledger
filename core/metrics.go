@@ -58,6 +58,22 @@ type Metrics interface {
 	BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal)
 	ReconcileGap(currencyID int64, gap decimal.Decimal)
 	ReservedAmount(currencyID int64, amount decimal.Decimal)
+
+	// Onchain (crypto deposit + sweep, design doc §6)
+
+	// ChainCursorLag reports how many blocks behind the chain tip the
+	// deposit watcher's cursor currently is, labelled by chain. A stalled
+	// (non-decreasing) lag is the alerting signal for a stuck watcher.
+	ChainCursorLag(chainID int64, lagBlocks int64)
+	// DepositReorgDetected is emitted whenever a previously-confirmed
+	// deposit's transaction is found to have disappeared from the canonical
+	// chain (deep reorg), regardless of ReorgPolicy.
+	DepositReorgDetected(chainID int64)
+	// SweepUnattributed is emitted whenever a sweep batch collects a token
+	// that is not in the chain's CreditTokens allowlist -- value moved to
+	// treasury with no corresponding user ledger balance, requiring manual
+	// reconciliation (design doc §4).
+	SweepUnattributed(chainID int64)
 }
 
 type nopMetrics struct{}
@@ -87,6 +103,10 @@ func (nopMetrics) CheckpointAge(string, time.Duration)         {}
 func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
 func (nopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
 func (nopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
+
+func (nopMetrics) ChainCursorLag(int64, int64) {}
+func (nopMetrics) DepositReorgDetected(int64)  {}
+func (nopMetrics) SweepUnattributed(int64)     {}
 
 // NopMetrics returns a no-op metrics collector.
 func NopMetrics() Metrics { return nopMetrics{} }

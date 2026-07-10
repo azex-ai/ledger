@@ -67,11 +67,66 @@ func InstallSweepClassification(ctx context.Context, classifications core.Classi
 	return created, nil
 }
 
+// DepositClassificationCode is the Classification.Code deposit bookings are
+// created against (CreateBookingInput.ClassificationCode) -- distinct from
+// the accounting-side classifications DepositBundle() installs (main_wallet,
+// suspense, custodial, pending), which are referenced by journal entry
+// templates, not by Booker.
+const DepositClassificationCode = "deposit"
+
+// InstallDepositClassification idempotently creates (or validates) the
+// "deposit" classification carrying DepositLifecycle, mirroring
+// InstallSweepClassification. This is a separate install step from
+// DepositBundle()'s accounting classifications: ClassificationPreset (the
+// type DepositBundle's Classifications are built from) has no Lifecycle
+// field, so none of main_wallet/suspense/custodial/pending are ever
+// booking-capable -- a "deposit" booking needs this classification to exist
+// before Booker.CreateBooking(ClassificationCode: "deposit", ...) can work.
+// NormalSide is inert here (fixed to NormalSideCredit by convention, same as
+// InstallSweepClassification): no journal entry is ever posted directly
+// against classification code "deposit" itself -- entries post against
+// main_wallet/custodial/etc via templates, cross-linked through EventUID.
+//
+// A "deposit" classification row already exists on every install (migration
+// 011 seeds it, predating the lifecycle column) but with NO lifecycle --
+// this function backfills it via SetLifecycleIfEmpty (expand-safe: never
+// clobbers a lifecycle an operator has since customized) rather than trying
+// to CreateClassification, which would conflict on the unique code.
+func InstallDepositClassification(ctx context.Context, classifications core.ClassificationStore) (*core.Classification, error) {
+	existing, err := classifications.GetByCode(ctx, DepositClassificationCode)
+	if err == nil {
+		if !existing.IsActive {
+			return nil, fmt.Errorf("presets: existing deposit classification is inactive: %w", core.ErrInvalidInput)
+		}
+		if existing.Lifecycle == nil {
+			if err := classifications.SetLifecycleIfEmpty(ctx, existing.UID, DepositLifecycle); err != nil {
+				return nil, fmt.Errorf("presets: backfill deposit classification lifecycle: %w", err)
+			}
+			existing.Lifecycle = DepositLifecycle
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, core.ErrNotFound) {
+		return nil, fmt.Errorf("presets: get deposit classification: %w", err)
+	}
+
+	created, err := classifications.CreateClassification(ctx, core.ClassificationInput{
+		Code:       DepositClassificationCode,
+		Name:       "Deposit",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  DepositLifecycle,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("presets: create deposit classification: %w", err)
+	}
+	return created, nil
+}
+
 // InstallCryptoDepositBundle installs the standard deposit accounting bundle
-// (DepositBundle) plus the sweep booking lifecycle. Sweep intentionally
-// carries no journal templates -- it never touches the accounting equation
-// (design doc §4: "sweep 只走 booking + event，无 journal"). Safe to call
-// repeatedly.
+// (DepositBundle), the deposit booking lifecycle classification, and the
+// sweep booking lifecycle. Sweep intentionally carries no journal templates
+// -- it never touches the accounting equation (design doc §4: "sweep 只走
+// booking + event，无 journal"). Safe to call repeatedly.
 func InstallCryptoDepositBundle(
 	ctx context.Context,
 	classifications core.ClassificationStore,
@@ -79,6 +134,9 @@ func InstallCryptoDepositBundle(
 	templates core.TemplateStore,
 ) error {
 	if err := InstallTemplateBundle(ctx, classifications, journalTypes, templates, DepositBundle()); err != nil {
+		return err
+	}
+	if _, err := InstallDepositClassification(ctx, classifications); err != nil {
 		return err
 	}
 	if _, err := InstallSweepClassification(ctx, classifications); err != nil {

@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
@@ -95,7 +96,17 @@ func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen
 		existing.ChannelName != input.ChannelName ||
 		!mustNumericToDecimal(existing.Amount).Equal(input.Amount) ||
 		!existing.ExpiresAt.Equal(input.ExpiresAt) ||
-		string(existing.Metadata) != string(stringMetadataToJSON(input.Metadata)) {
+		// Compare metadata semantically, not by raw byte string: existing.Metadata
+		// is the RAW jsonb column value, which Postgres re-serializes in its own
+		// canonical form (keys ordered by length-then-lexicographic, ": " with a
+		// space) -- never byte-identical to stringMetadataToJSON's compact,
+		// alphabetically-sorted output from encoding/json, even when the two
+		// maps hold identical key/value pairs. A naive string compare here
+		// spuriously ErrConflicts every genuine idempotent replay whose metadata
+		// has more than one key. Route existing's bytes through the same
+		// jsonToStringMetadata parse used everywhere else so both sides compare
+		// as Go maps.
+		!maps.Equal(jsonToStringMetadata(existing.Metadata), input.Metadata) {
 		return nil, fmt.Errorf("postgres: create booking: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 

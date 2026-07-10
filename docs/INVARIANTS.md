@@ -617,14 +617,19 @@ every external reference stable across dump/restore.
 
 ## I-19: Sweep bookings never post a journal
 
-A `sweep` booking (the crypto-deposit design's on-chain collection batches —
+A `sweep` booking (`presets.SweepClassificationCode` — the crypto-deposit
+design's on-chain collection batches,
 docs/plans/2026-07-11-crypto-deposit-sweep-design.md §4) exists purely for
-lifecycle bookkeeping and audit (`pending -> sent -> confirmed | failed(->
-retry -> pending)`). It is installed with **no journal type and no entry
-template**, and its classification's `BalanceRole` is `none` — a sweep batch
-moving funds from a custody address to treasury is a channel/custody
-movement, not a user-facing accounting event, and never touches the
-accounting equation.
+idempotency (booking key = `sweep-{chain_id}-{token}-{signer_nonce}`), for
+lifecycle bookkeeping (`pending -> sent -> confirmed | failed(-> pending
+retry)`), and for an audit trail of one batch collection transaction. It is
+installed with **no journal type, no entry template, and no `BalanceRole`**
+(its `NormalSide` is inert, fixed to `NormalSideCredit` by convention) — a
+sweep batch moving funds from a custody address to treasury is a
+channel/custody movement, not a user-facing accounting event: the value it
+moves was already recognized when the deposit was confirmed. Posting a
+journal for it would double-count that value (`financial.md`:
+"渠道/托管资金移动不进账本").
 
 **Why**: sweep addresses are predictable (`salt = account_holder`, factory
 public — design doc §5-2) and their balances are attacker-adjacent dust
@@ -636,21 +641,25 @@ sweep-side bug is bounded to "no-op or wasted gas," by construction, not by
 runtime validation.
 
 **Enforced by**:
-- `presets.InstallSweepClassification` (`presets/sweep.go`) only calls
-  `ClassificationStore.CreateClassification` — it is never given a
-  `JournalTypeStore` or `TemplateStore` handle, so there is no code path by
-  which installing the sweep classification could also install a journal
-  type or template for it.
-- `presets.SweepLifecycle`'s classification is created with
-  `BalanceRole: core.BalanceRoleNone` (inert — no holder balance breakdown
-  bucket includes it).
+- `presets.SweepLifecycle` / `presets.InstallSweepClassification`
+  (`presets/sweep.go`) only calls `ClassificationStore.CreateClassification`
+  — it is never given a `JournalTypeStore` or `TemplateStore` handle, so no
+  code path exists by which installing the sweep classification could also
+  install a journal type or template for it, and no journal template ever
+  references classification code `sweep`.
+- `service.Onchain`'s sweep orchestration (`service/onchain.go`) never calls
+  `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep booking's
+  transitions — only `Booker.Transition`.
 
 **Pinned by**:
+- `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
+  through pending → sent → confirmed, asserting `journal_uid` stays empty at
+  every step)
 - `presets.TestInstallCryptoDepositBundle` (asserts
   `journalStore.GetJournalTypeByCode(ctx, SweepClassificationCode)` returns
   `core.ErrNotFound` after installing the full bundle)
-- `presets.TestInstallSweepClassification_CreatesOnce` (asserts
-  `BalanceRole == core.BalanceRoleNone` on the installed classification)
+- `service.TestOnchain_Sweep_NonceReuseAndNoJournal` (sweep job end to end:
+  nonce reuse across retries, and no journal on any transition)
 
 ---
 
@@ -670,10 +679,11 @@ and the onchain webhook) may observe the same transfer more than once as
 confirmations accrue and as the chain reorganizes around it. If the
 idempotency key were built from block-level `log_index`, a reorg would
 silently mint a fresh key for an already-recorded transfer — a duplicate
-deposit booking, i.e. free money. Keying off the tx-local ordinal instead
-means the same transfer, observed any number of times by either path,
-resolves to the same booking (`Booker.CreateBooking`'s existing
-same-key/same-payload idempotency, I-3) instead of creating a duplicate.
+deposit booking and, worse, a duplicate `deposit_confirm` journal: free
+money. Keying off the tx-local ordinal instead means the same transfer,
+observed any number of times by either path, resolves to the same booking
+(`Booker.CreateBooking`'s existing same-key/same-payload idempotency, I-3)
+instead of creating a duplicate.
 
 **Enforced by**:
 - `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
@@ -681,22 +691,22 @@ same-key/same-payload idempotency, I-3) instead of creating a duplicate.
   ingestion paths (chains/evm watcher and the `channel/onchain` webhook
   bridge) must derive this from the transaction's internal transfer
   ordering, not from `eth_getLogs`' block-scoped `logIndex`.
-- The idempotency key itself (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) is
-  constructed once, at booking-creation time, by the caller's `IngestDeposit`
-  orchestration (`service.OnchainService`, design doc §3) — not by either
-  ingestion path individually, so both paths necessarily agree on it for the
-  same transfer.
+- `service.Onchain`'s `depositIdempotencyKey`
+  (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) is constructed once, at
+  booking-creation time, by the shared `IngestDeposit` orchestration — not
+  by either ingestion path individually, so both paths necessarily agree on
+  it for the same transfer.
 
 **Pinned by**:
-- `core.TestDepositSighting_Validate` (chain_id/tx_hash/txlog_seq are
-  required identity fields)
+- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn`
+  (re-ingesting the identical sighting resolves to the same booking
+  regardless of what the block-level log_index would have been)
+- `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
+  re-observing the same sighting is a pure no-op; a second Transfer log in
+  the same tx with a different `txlog_seq` does not collide)
 - `onchain.TestEVMAdapter_ParseSighting` (the webhook bridge derives
   `TxLogSeq` from the payload's tx-local `txlog_seq` field, never a
   block-scoped index)
-- The end-to-end guarantee (same sighting observed twice, pre- and
-  post-reorg, resolves to one booking) is exercised by
-  `service.OnchainService`'s testcontainers suite (design doc §7) — this
-  entry should gain that test's name once merged.
 
 ---
 
