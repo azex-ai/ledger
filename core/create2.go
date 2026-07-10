@@ -56,6 +56,21 @@ func DeriveDepositAddress(factory, initHash string, holder int64) (string, error
 	return toChecksumAddress(hash[12:]), nil
 }
 
+// ChecksumAddress normalizes an arbitrary-cased 20-byte hex address (e.g. one
+// observed from a watcher/webhook sighting, or a caller-supplied lookup key)
+// into EIP-55 checksum casing. Callers MUST run every AddressRegistry write
+// or lookup through this first -- deposit_addresses' unique index on
+// `address` is a plain case-sensitive btree (design doc §7-2), so any path
+// that skips this normalization will silently miss the index instead of
+// erroring.
+func ChecksumAddress(address string) (string, error) {
+	b, err := decodeFixedHex(address, 20, "address")
+	if err != nil {
+		return "", err
+	}
+	return toChecksumAddress(b), nil
+}
+
 func decodeFixedHex(s string, wantLen int, field string) ([]byte, error) {
 	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
 	if err != nil {

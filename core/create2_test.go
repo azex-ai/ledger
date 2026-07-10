@@ -119,3 +119,42 @@ func TestToChecksumAddress_EIP55Vectors(t *testing.T) {
 		})
 	}
 }
+
+// ChecksumAddress is the exported entry point store adapters use to
+// normalize an observed/looked-up address before touching deposit_addresses
+// (design doc §7-2). It must accept any input casing and always return the
+// same canonical EIP-55 form.
+func TestChecksumAddress_NormalizesAnyCasing(t *testing.T) {
+	want := "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+	inputs := []string{
+		"0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed", // all lower (the common wire format: RPC/viem/ethers emit lowercase "0x")
+		"0x5AAEB6053F3E94C9B9A09F33669435E7EF1BEAED", // all upper body
+		want, // already canonical
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got, err := ChecksumAddress(in)
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestChecksumAddress_Deterministic(t *testing.T) {
+	addr, err := DeriveDepositAddress(testFactory, testInitHash, 4242)
+	require.NoError(t, err)
+
+	// Round-tripping an already-checksummed address through ChecksumAddress
+	// must be a no-op (idempotent normalization).
+	got, err := ChecksumAddress(addr)
+	require.NoError(t, err)
+	assert.Equal(t, addr, got)
+}
+
+func TestChecksumAddress_RejectsWrongLengthOrInvalidHex(t *testing.T) {
+	_, err := ChecksumAddress("0x1234")
+	assert.ErrorIs(t, err, ErrInvalidInput)
+
+	_, err = ChecksumAddress("0xnothex000000000000000000000000000000000")
+	assert.Error(t, err)
+}

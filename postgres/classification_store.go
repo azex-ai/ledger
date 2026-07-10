@@ -111,6 +111,32 @@ func (s *ClassificationStore) SetBalanceRole(ctx context.Context, uid string, ro
 	return nil
 }
 
+// SetLifecycleIfEmpty seeds a classification's lifecycle only when it
+// currently has none ('{}') — see core.ClassificationStore.SetLifecycleIfEmpty.
+func (s *ClassificationStore) SetLifecycleIfEmpty(ctx context.Context, uid string, lifecycle *core.Lifecycle) error {
+	if lifecycle == nil {
+		return fmt.Errorf("postgres: set lifecycle if empty: lifecycle is nil: %w", core.ErrInvalidInput)
+	}
+	if err := lifecycle.Validate(); err != nil {
+		return fmt.Errorf("postgres: set lifecycle if empty: invalid lifecycle: %w", err)
+	}
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(lifecycle)
+	if err != nil {
+		return fmt.Errorf("postgres: set lifecycle if empty: marshal lifecycle: %w", err)
+	}
+	if err := s.q.SetClassificationLifecycleIfEmpty(ctx, sqlcgen.SetClassificationLifecycleIfEmptyParams{
+		Uid:       pgUID,
+		Lifecycle: b,
+	}); err != nil {
+		return wrapStoreError("postgres: set lifecycle if empty", err)
+	}
+	return nil
+}
+
 // SetDisplayLabelIfEmpty seeds the user-facing display label only when the
 // current label is ” — presets re-install must never clobber an operator's
 // override.

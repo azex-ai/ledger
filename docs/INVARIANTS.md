@@ -615,6 +615,64 @@ every external reference stable across dump/restore.
 
 ---
 
+## I-19: Sweep bookings never post a journal
+
+A sweep booking (`presets.SweepClassificationCode`) exists purely for
+idempotency (booking key = `sweep-{chain_id}-{token}-{signer_nonce}`) and an
+audit trail for one batch collection transaction — the funds it moves were
+already accounted for at deposit time. Its classification carries no
+`EntryTemplate`, so no transition on a sweep booking can ever backfill
+`bookings.journal_id` the way a deposit's `confirmed` transition does.
+
+**Why**: sweep moves custody funds between addresses the platform already
+controls (a channel/custody event, not a user-facing accounting event) —
+posting a journal for it would double-count value already recognized when
+the deposit was confirmed (`financial.md`: "渠道/托管资金移动不进账本").
+
+**Enforced by**:
+- `presets.SweepLifecycle` / `presets.InstallSweepClassification` (no
+  `BalanceRole`, no journal templates ever reference classification code
+  `sweep`)
+- `service.Onchain`'s sweep orchestration (`service/onchain.go`) never calls
+  `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep booking's
+  transitions — only `Booker.Transition`
+
+**Pinned by**:
+- `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
+  through pending → sent → confirmed, asserting `journal_uid` stays empty at
+  every step)
+
+---
+
+## I-20: Deposit ingestion idempotency is stable under log-index churn
+
+A deposit booking's idempotency key is derived from
+`(chain_id, tx_hash, txlog_seq)`, where `txlog_seq` is a Transfer log's
+ordinal position among the logs in that transaction that credit one of our
+registered addresses — deliberately **not** the chain's block-level
+`log_index`, which a reorg reassigns when a transaction is re-mined into a
+different block.
+
+**Why**: keying on the chain's block-level `log_index` would mint a fresh
+idempotency key for an already-recorded transfer every time it is re-observed
+after a reorg, minting a duplicate booking (and, worse, a duplicate
+`deposit_confirm` journal) for value that was already credited.
+
+**Enforced by**:
+- `core.DepositSighting.TxLogSeq` (doc comment spells out the distinction)
+- `service.Onchain`'s `depositIdempotencyKey`
+  (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`)
+
+**Pinned by**:
+- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn`
+  (re-ingesting the identical sighting resolves to the same booking
+  regardless of what the block-level log_index would have been)
+- `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end: re-observing
+  the same sighting is a pure no-op; a second Transfer log in the same tx
+  with a different `txlog_seq` does not collide)
+
+---
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

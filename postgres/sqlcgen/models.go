@@ -172,6 +172,18 @@ type Event struct {
 	Uid                pgtype.UUID    `json:"uid"`
 }
 
+type IngestDeadLetter struct {
+	ID             int64       `json:"id"`
+	Uid            pgtype.UUID `json:"uid"`
+	ChainID        int64       `json:"chain_id"`
+	TxHash         string      `json:"tx_hash"`
+	TxlogSeq       int32       `json:"txlog_seq"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	Reason         string      `json:"reason"`
+	Payload        []byte      `json:"payload"`
+	CreatedAt      time.Time   `json:"created_at"`
+}
+
 type Journal struct {
 	ID             int64          `json:"id"`
 	JournalTypeID  int64          `json:"journal_type_id"`

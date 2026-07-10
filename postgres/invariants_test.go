@@ -20,6 +20,7 @@ import (
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 )
 
 // I-2: A journal can be reversed at most once. The partial unique index
@@ -379,4 +380,112 @@ func TestJournals_UpdateGuard_CoversEffectiveAtAndUID(t *testing.T) {
 
 	_, err = pool.Exec(ctx, "UPDATE journals SET uid = gen_random_uuid() WHERE uid = $1", j.UID)
 	require.Error(t, err, "UPDATE journals.uid must be blocked by the anti-tamper trigger")
+}
+
+// I-19: Sweep bookings never post a journal.
+//
+// A sweep booking's only purpose is idempotency (booking key =
+// sweep-{chain_id}-{token}-{signer_nonce}) and an audit trail for one batch
+// collection transaction moving funds that were already accounted for at
+// deposit time (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §4:
+// "sweep 只走 booking + event，无 journal"). Sweep's classification carries no
+// EntryTemplate, so Transition can never backfill bookings.journal_id the way
+// a deposit's "confirmed" transition does -- this test drives a sweep
+// booking through its full lifecycle (pending -> sent -> confirmed) and pins
+// that journal_uid stays empty at every step.
+func TestSweepBooking_NeverPostsJournal(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	_, err := presets.InstallSweepClassification(ctx, classStore)
+	require.NoError(t, err)
+
+	bookingStore := postgres.NewBookingStore(pool)
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: presets.SweepClassificationCode,
+		AccountHolder:      -9_000_000_000_001, // sentinel system holder, not tied to any user
+		CurrencyUID:        postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("SWEEP-USDT"), "Tether USD"),
+		Amount:             decimal.NewFromInt(500),
+		IdempotencyKey:     postgrestest.UniqueKey("sweep-invariant"),
+		ChannelName:        "onchain",
+		Metadata:           map[string]string{"chain_id": "1", "token": "0xusdt", "nonce": "0"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, booking.JournalUID)
+
+	sentEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "sent", ChannelRef: "0xsweeptx1", Source: "test",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, sentEvt.JournalUID)
+	sent, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, sent.JournalUID)
+
+	confirmedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "confirmed", ChannelRef: "0xsweeptx1", Source: "test",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, confirmedEvt.JournalUID)
+	confirmed, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, confirmed.JournalUID)
+}
+
+// I-20: Deposit ingestion idempotency is stable under log-index churn.
+//
+// A deposit booking's idempotency key is derived from
+// (chain_id, tx_hash, txlog_seq) -- txlog_seq being the Transfer log's
+// ordinal position among the logs in tx_hash that credit one of our
+// registered addresses, NOT the chain's block-level log_index (which a reorg
+// reassigns). This test pins that re-ingesting the identical sighting
+// produces the SAME booking regardless of what the block-level log_index
+// would have been at observation time -- i.e. the key genuinely does not
+// depend on any value that reorgs mutate (docs/plans/2026-07-11-crypto-
+// deposit-sweep-design.md §3).
+func TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	_, err := presets.InstallDepositClassification(ctx, classStore)
+	require.NoError(t, err)
+
+	curUID := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("USDT"), "Tether USD")
+	bookingStore := postgres.NewBookingStore(pool)
+
+	const chainID, txHash, txLogSeq = int64(1), "0xreorgtx", int32(0)
+	idemKey := fmt.Sprintf("deposit-%d-%s-%d", chainID, txHash, txLogSeq)
+
+	makeInput := func(blockLevelLogIndexAtObservationTime int) core.CreateBookingInput {
+		// blockLevelLogIndexAtObservationTime simulates the ONE thing a reorg
+		// can change between two observations of the same underlying
+		// transfer -- it deliberately never enters the idempotency key or
+		// the booking payload.
+		_ = blockLevelLogIndexAtObservationTime
+		return core.CreateBookingInput{
+			ClassificationCode: presets.DepositClassificationCode,
+			AccountHolder:      8001,
+			CurrencyUID:        curUID,
+			Amount:             decimal.NewFromInt(100),
+			IdempotencyKey:     idemKey,
+			ChannelName:        "onchain",
+			Metadata:           map[string]string{"chain_id": "1", "tx_hash": txHash, "txlog_seq": "0", "block_number": "100"},
+		}
+	}
+
+	// First observation: the tx originally landed at block-level log_index 3.
+	first, err := bookingStore.CreateBooking(ctx, makeInput(3))
+	require.NoError(t, err)
+
+	// Second observation, post-reorg: the tx was re-mined and its block-level
+	// log_index is now 7 (a different value) -- but txlog_seq (this
+	// transfer's ordinal position among OUR credits within the tx) and every
+	// other stable field are unchanged, so this must resolve to the exact
+	// same booking, not a duplicate and not ErrConflict.
+	second, err := bookingStore.CreateBooking(ctx, makeInput(7))
+	require.NoError(t, err)
+
+	assert.Equal(t, first.UID, second.UID)
 }

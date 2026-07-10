@@ -348,6 +348,25 @@ func (q *Queries) SetClassificationDisplayLabelIfEmpty(ctx context.Context, arg 
 	return err
 }
 
+const setClassificationLifecycleIfEmpty = `-- name: SetClassificationLifecycleIfEmpty :exec
+UPDATE classifications SET lifecycle = $2 WHERE uid = $1 AND lifecycle = '{}'::jsonb
+`
+
+type SetClassificationLifecycleIfEmptyParams struct {
+	Uid       pgtype.UUID `json:"uid"`
+	Lifecycle []byte      `json:"lifecycle"`
+}
+
+// Seeds a classification's lifecycle only when unset ('{}') -- for rows that
+// predate the lifecycle column and were never assigned one (e.g. migration
+// 011's seed 'deposit'/'withdraw' rows). Same expand-safe stance as
+// SetClassificationDisplayLabelIfEmpty/SetClassificationBalanceRole: presets
+// re-install must never clobber a lifecycle an operator has since customized.
+func (q *Queries) SetClassificationLifecycleIfEmpty(ctx context.Context, arg SetClassificationLifecycleIfEmptyParams) error {
+	_, err := q.db.Exec(ctx, setClassificationLifecycleIfEmpty, arg.Uid, arg.Lifecycle)
+	return err
+}
+
 const setJournalTypeDisplayLabelIfEmpty = `-- name: SetJournalTypeDisplayLabelIfEmpty :exec
 UPDATE journal_types SET display_label = $2 WHERE uid = $1 AND display_label = ''
 `

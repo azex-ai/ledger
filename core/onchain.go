@@ -97,6 +97,14 @@ type DepositSighting struct {
 	// was observed; the caller compares it against the chain's configured
 	// threshold to decide whether to advance the booking to confirmed.
 	Confirmations int32 `json:"confirmations"`
+	// BlockNumber is the block the transfer log was mined in. Unlike
+	// Confirmations (which is only valid at the moment of observation), this
+	// is a stable value the ingestion orchestration persists on the deposit
+	// booking so a later recheck can recompute confirmations as
+	// latest-block minus BlockNumber, without needing to re-scan the
+	// original log range (service/onchain.go's pending/confirming recheck
+	// loop, design doc §3 "pending booking 的确认数推进").
+	BlockNumber int64 `json:"block_number"`
 }
 
 func (s DepositSighting) Validate() error {
@@ -124,10 +132,36 @@ func (s DepositSighting) Validate() error {
 	return nil
 }
 
+// IngestDeadLetter is a deposit sighting that IngestDeposit could not
+// idempotently reconcile (CreateBooking returned ErrConflict -- design doc
+// §6, a normalization bug signal, not a transient error). Read-only ops
+// model for on-call triage; written by postgres.IngestDeadLetterStore.
+type IngestDeadLetter struct {
+	UID            string    `json:"uid"`
+	ChainID        int64     `json:"chain_id"`
+	TxHash         string    `json:"tx_hash"`
+	TxLogSeq       int32     `json:"txlog_seq"`
+	IdempotencyKey string    `json:"idempotency_key"`
+	Reason         string    `json:"reason"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 // SweepNativeToken is the sentinel token key for a chain's native asset
 // (ETH, ...) in ChainConfig.SweepTokens / SweepPolicy.Token -- native assets
 // have no ERC-20 contract address to key by.
 const SweepNativeToken = "native"
+
+// SweepTarget is one registered deposit address the sweep job is collecting
+// from, passed to Sweeper.BatchSweep. AccountHolder rides along with Address
+// because the factory's on-chain batchSweep ABI takes CREATE2 salts (account
+// holder ids), not addresses -- CREATE2 derivation is one-way, so the
+// chains/evm adapter cannot recover a holder's salt from its address alone;
+// the caller (service/onchain.go, which already has both from the address
+// registry) must supply it.
+type SweepTarget struct {
+	Address       string `json:"address"`
+	AccountHolder int64  `json:"account_holder"`
+}
 
 // TokenConfig maps one ERC-20 contract address on a chain to the ledger
 // currency it credits (deposit side) or is swept as (sweep side), plus the
