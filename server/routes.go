@@ -51,6 +51,11 @@ func (s *Server) setupRoutes() {
 			r.Get("/accounts/{holder}/policies", s.handleListAccountPolicies)
 			r.Get("/snapshots", s.handleListSnapshots)
 
+			// Crypto deposit add-on (query side). 404s via
+			// bizcode.FeatureNotEnabled until SetDepositAddressProvider is
+			// called (see handler_onchain.go).
+			r.Get("/holders/{holder}/deposit-address", s.handleGetDepositAddress)
+
 			r.Get("/audit/journals", s.handleListAuditJournals)
 			r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
 			r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
@@ -93,6 +98,10 @@ func (s *Server) setupRoutes() {
 
 			r.Post("/bookings", s.handleCreateBooking)
 			r.Post("/bookings/{uid}/transition", s.handleTransition)
+
+			// Crypto deposit add-on (issuance side) — idempotent, safe to
+			// call repeatedly for the same holder.
+			r.Post("/holders/{holder}/deposit-address", s.handleEnsureDepositAddress)
 		})
 
 		// ---- Scope: admin ----
