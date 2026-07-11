@@ -264,6 +264,15 @@ func WithMaxSweepBumps(n int) OnchainOption {
 	return func(o *Onchain) { o.maxSweepBumps = n }
 }
 
+// WithMaxConcurrentRegistrationRescans bounds how many
+// EnsureDepositAddress-triggered background rescans (design doc §5-2b) may
+// run at once, so a burst of holder onboarding does not fan out an unbounded
+// number of concurrent full-history log scans against the RPC provider.
+// Default: 4.
+func WithMaxConcurrentRegistrationRescans(n int) OnchainOption {
+	return func(o *Onchain) { o.maxConcurrentRescans = n }
+}
+
 // Onchain orchestrates crypto deposit ingestion and sweep collection
 // (design doc). Construct via NewOnchain and start its background jobs via
 // Run; EnsureDepositAddress and IngestDeposit may also be called directly
@@ -284,9 +293,15 @@ type Onchain struct {
 	registrationRescanTimeout time.Duration
 	sweepStuckAfter           time.Duration
 	maxSweepBumps             int
+	maxConcurrentRescans      int
 
 	currencies *currencyResolver
 	classes    *classResolver
+
+	// rescanSem bounds concurrent launchRegistrationRescan goroutines to
+	// maxConcurrentRescans (M4 hardening: batch holder onboarding must not
+	// fan out one full-history-scan goroutine per holder unbounded).
+	rescanSem chan struct{}
 
 	sweepMu   sync.Mutex
 	sweepTx   map[string]string // booking uid -> latest broadcast tx hash
@@ -314,6 +329,7 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		registrationRescanTimeout: 10 * time.Minute,
 		sweepStuckAfter:           5 * time.Minute,
 		maxSweepBumps:             5,
+		maxConcurrentRescans:      4,
 		currencies:                newCurrencyResolver(),
 		classes:                   newClassResolver(),
 		sweepTx:                   make(map[string]string),
@@ -322,6 +338,10 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 	for _, opt := range opts {
 		opt(o)
 	}
+	if o.maxConcurrentRescans <= 0 {
+		o.maxConcurrentRescans = 1
+	}
+	o.rescanSem = make(chan struct{}, o.maxConcurrentRescans)
 	return o
 }
 
@@ -386,10 +406,26 @@ func (o *Onchain) EnsureDepositAddress(ctx context.Context, holder int64) (*core
 // bounded by registrationRescanTimeout (its own ctx.Done() exit path,
 // decoupled from the caller's request context -- a rescan must outlive the
 // HTTP request that triggered registration).
+//
+// Concurrency is bounded by rescanSem (M4 hardening): a burst of
+// EnsureDepositAddress calls (batch holder onboarding) must not each spawn
+// an unbounded full-history-scan goroutine -- that is RPC-provider-facing
+// amplification a single onboarding batch could turn into a self-inflicted
+// DoS. A goroutine that cannot acquire a slot before registrationRescanTimeout
+// elapses gives up entirely (design doc §5-2b's gap stays open for that
+// address until a subsequent rescan -- e.g. a manual retry -- succeeds).
 func (o *Onchain) launchRegistrationRescan(addr core.DepositAddress) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), o.registrationRescanTimeout)
 		defer cancel()
+
+		select {
+		case o.rescanSem <- struct{}{}:
+			defer func() { <-o.rescanSem }()
+		case <-ctx.Done():
+			o.log().Warn("service: onchain: registration rescan: gave up waiting for a rescan slot", "holder", addr.AccountHolder, "address", addr.Address)
+			return
+		}
 
 		for chainID := range o.chains {
 			select {
@@ -399,24 +435,43 @@ func (o *Onchain) launchRegistrationRescan(addr core.DepositAddress) {
 			default:
 			}
 			if err := o.rescanAddressOnChain(ctx, chainID, addr.Address); err != nil {
-				o.log().Warn("service: onchain: registration rescan failed", "holder", addr.AccountHolder, "address", addr.Address, "chain_id", chainID, "error", err)
+				o.log().Error("service: onchain: registration rescan failed", "holder", addr.AccountHolder, "address", addr.Address, "chain_id", chainID, "error", err)
+				o.metrics().RegistrationRescanFailed(chainID)
 			}
 		}
 	}()
 }
 
+// rescanAddressOnChain scans chainID's full history (block 0 -> current tip)
+// for deposits to address, in maxBlocksPerScan-sized chunks -- the same
+// window scanChainOnce's forward scan uses, so a single call never requests
+// an unbounded eth_getLogs block range from the RPC provider (a main-net
+// chain with a genesis-to-tip history would otherwise be rejected/timed out
+// by most providers, silently leaving design doc §5-2b's gap open, per the
+// caller's failure handling above).
 func (o *Onchain) rescanAddressOnChain(ctx context.Context, chainID int64, address string) error {
 	latest, err := o.deps.Reader.LatestBlock(ctx, chainID)
 	if err != nil {
 		return fmt.Errorf("latest block: %w", err)
 	}
-	sightings, err := o.deps.Reader.FetchDeposits(ctx, chainID, 0, latest, []string{address})
-	if err != nil {
-		return fmt.Errorf("fetch deposits: %w", err)
-	}
-	for _, s := range sightings {
-		if _, err := o.IngestDeposit(ctx, s); err != nil {
-			o.log().Warn("service: onchain: registration rescan: ingest failed", "chain_id", chainID, "tx_hash", s.TxHash, "error", err)
+	for from := int64(0); from <= latest; from += o.maxBlocksPerScan {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		to := from + o.maxBlocksPerScan - 1
+		if to > latest {
+			to = latest
+		}
+		sightings, err := o.deps.Reader.FetchDeposits(ctx, chainID, from, to, []string{address})
+		if err != nil {
+			return fmt.Errorf("fetch deposits [%d,%d]: %w", from, to, err)
+		}
+		for _, s := range sightings {
+			if _, err := o.IngestDeposit(ctx, s); err != nil {
+				o.log().Warn("service: onchain: registration rescan: ingest failed", "chain_id", chainID, "tx_hash", s.TxHash, "error", err)
+			}
 		}
 	}
 	return nil
@@ -912,6 +967,21 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return o.advanceSweep(ctx, inFlight, policy)
 	}
 
+	// M5 hardening: a booking that exhausted its gas-bump retries and
+	// transitioned to terminal "failed" (advanceSweep/recheckSweepSent
+	// below) is invisible to findInFlightSweep (it only looks at
+	// pending/sent) -- without this lookup, the code below would try to
+	// CreateBooking a fresh sweep whose idempotency key collides with the
+	// failed booking's whenever NextNonce still reports the same nonce
+	// (the common case: the failed tx's nonce slot is never actually freed
+	// by anything we do), silently returning that same terminal "failed"
+	// booking forever and permanently stalling this (chain,token)'s
+	// collection. See reviveFailedSweep.
+	failed, err := o.findFailedSweep(ctx, policy.ChainID, policy.Token)
+	if err != nil {
+		return err
+	}
+
 	addrRows, err := o.deps.Registry.ListAddresses(ctx)
 	if err != nil {
 		return fmt.Errorf("sweep: list addresses: %w", err)
@@ -957,6 +1027,15 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return err
 	}
 
+	if unattributed {
+		o.log().Warn("service: onchain: sweep.unattributed: collecting token with no ledger attribution", "chain_id", policy.ChainID, "token", policy.Token, "amount", total.String(), "address_count", len(eligible))
+		o.metrics().SweepUnattributed(policy.ChainID)
+	}
+
+	if failed != nil {
+		return o.reviveFailedSweep(ctx, failed, nonce, eligible, policy)
+	}
+
 	idemKey := fmt.Sprintf("sweep-%d-%s-%d", policy.ChainID, policy.Token, nonce)
 	booking, err := o.deps.Booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: presets.SweepClassificationCode,
@@ -976,12 +1055,52 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return fmt.Errorf("sweep: create booking: %w", err)
 	}
 
-	if unattributed {
-		o.log().Warn("service: onchain: sweep.unattributed: collecting token with no ledger attribution", "chain_id", policy.ChainID, "token", policy.Token, "amount", total.String(), "address_count", len(eligible))
-		o.metrics().SweepUnattributed(policy.ChainID)
-	}
-
 	return o.advanceSweep(ctx, booking, policy)
+}
+
+// reviveFailedSweep re-drives a sweep booking that exhausted its gas-bump
+// retries and was transitioned to terminal "failed" (SweepLifecycle's
+// failed->pending retry edge, presets/sweep.go), instead of leaving it
+// stuck forever (M5).
+//
+// Nonce lifecycle: failed's signerNonce was broadcast repeatedly (up to
+// maxSweepBumps times, each a fee-bump replacement of the SAME nonce) but
+// never observed included on-chain. From the signer EOA's perspective that
+// nonce slot is still "next" -- NextNonce (PendingNonceAt) will keep
+// reporting it until either the stuck tx eventually lands, or something
+// external moves the EOA past it (an on-call operator manually clearing it
+// per RUNBOOK, or the node's mempool view of it changing). The nonce
+// passed in here is a FRESH NextNonce call made by the caller (sweepTick):
+// if the EOA has moved on, it is a genuinely new nonce; if not, it is the
+// same stale value and this retry re-attempts with current gas pricing.
+//
+// The failed booking is reused via Transition rather than a new
+// CreateBooking call: its idempotency key was minted against its now-stale
+// nonce and can never be safely reissued (a second CreateBooking with a
+// colliding key is exactly the ErrConflict/silent-no-op M5 describes), so
+// there is deliberately no "new booking key" here to collide with anything
+// -- reusing the same booking UID both avoids that collision and keeps one
+// audit trail per (chain,token) sweep saga. Metadata (nonce, addresses) is
+// refreshed to the just-rescanned values; the booking's original Amount
+// column is immutable and is not corrected to the re-scanned total (sweep
+// bookings never drive accounting -- design doc §4 -- so this is cosmetic).
+func (o *Onchain) reviveFailedSweep(ctx context.Context, failed *core.Booking, nonce uint64, eligible []string, policy core.SweepPolicy) error {
+	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
+		BookingUID: failed.UID,
+		ToStatus:   "pending",
+		Source:     onchainSource,
+		Metadata: map[string]string{
+			"nonce":     strconv.FormatUint(nonce, 10),
+			"addresses": strings.Join(eligible, ","),
+		},
+	}); err != nil {
+		return fmt.Errorf("sweep: revive failed booking %s: %w", failed.UID, err)
+	}
+	revived, err := o.deps.BookingReader.GetBooking(ctx, failed.UID)
+	if err != nil {
+		return fmt.Errorf("sweep: revive failed booking %s: reload: %w", failed.UID, err)
+	}
+	return o.advanceSweep(ctx, revived, policy)
 }
 
 // resolveSweepCurrency looks up the ledger currency a sweep batch's booking
@@ -1002,13 +1121,28 @@ func (o *Onchain) resolveSweepCurrency(ctx context.Context, cfg core.ChainConfig
 	return currencyUID, !credited, nil
 }
 
+// findInFlightSweep returns the (chain,token)'s currently in-flight sweep
+// booking, if any -- one still being actively driven toward a terminal
+// state (as opposed to "failed", which is terminal-but-stuck; see
+// findFailedSweep/reviveFailedSweep).
 func (o *Onchain) findInFlightSweep(ctx context.Context, chainID int64, token string) (*core.Booking, error) {
+	return o.findSweepBookingByStatus(ctx, chainID, token, "pending", "sent")
+}
+
+// findFailedSweep returns the (chain,token)'s sweep booking currently
+// parked in terminal "failed" (gas-bump retries exhausted without
+// on-chain inclusion), if any -- see reviveFailedSweep (M5).
+func (o *Onchain) findFailedSweep(ctx context.Context, chainID int64, token string) (*core.Booking, error) {
+	return o.findSweepBookingByStatus(ctx, chainID, token, "failed")
+}
+
+func (o *Onchain) findSweepBookingByStatus(ctx context.Context, chainID int64, token string, statuses ...core.Status) (*core.Booking, error) {
 	sweepUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.SweepClassificationCode)
 	if err != nil {
 		return nil, fmt.Errorf("sweep: resolve sweep classification: %w", err)
 	}
 	chainIDStr := strconv.FormatInt(chainID, 10)
-	for _, status := range []core.Status{"pending", "sent"} {
+	for _, status := range statuses {
 		cursor := ""
 		for {
 			bookings, next, err := o.deps.BookingReader.ListBookings(ctx, core.BookingFilter{
@@ -1018,7 +1152,7 @@ func (o *Onchain) findInFlightSweep(ctx context.Context, chainID int64, token st
 				Limit:             100,
 			})
 			if err != nil {
-				return nil, fmt.Errorf("sweep: list in-flight: %w", err)
+				return nil, fmt.Errorf("sweep: list bookings (status=%s): %w", status, err)
 			}
 			for i := range bookings {
 				b := bookings[i]
@@ -1270,14 +1404,21 @@ func (o *Onchain) runLoop(ctx context.Context, name string, interval time.Durati
 	}
 }
 
-// newSweepLockedJob wraps one policy's sweepTick in a per-(chain,token)
-// advisory lock, so the same sweep never runs concurrently across replicas
-// (design doc §4 "全局单飞" -- scoped to the specific chain/token pair
-// rather than one lock for every policy, so unrelated policies are not
-// serialized behind each other). pool may be nil (single-instance
-// deployments, per NewLockedJob's own contract).
+// newSweepLockedJob wraps one policy's sweepTick in a per-chain advisory
+// lock, so the same chain's sweep never runs concurrently across replicas
+// (design doc §4 "全局单飞"). The lock is scoped to the chain, NOT to
+// (chain,token): every token on a given chain shares the same signer EOA
+// (core.Sweeper.NextNonce is per-(chainID, signerAddress), see
+// chains/evm/sweeper.go), so two tokens' sweepTicks racing on that one
+// nonce sequence would both observe the same "next" nonce, broadcast two
+// txs at the same nonce, and have one silently supersede the other (M2:
+// the stuck loser then gas-bumps into ErrConflict/failed for no on-chain
+// reason). Serializing per-chain closes that race; per-token locking would
+// only be safe if the signer used one EOA per token, which it does not. A
+// per-chain lock is still sufficient headroom for multi-chain deployments
+// (different chains never share a nonce space).
 func newSweepLockedJob(policy core.SweepPolicy, o *Onchain, pool *pgxpool.Pool) func(context.Context) {
-	lockName := fmt.Sprintf("sweep:%d:%s", policy.ChainID, policy.Token)
+	lockName := fmt.Sprintf("sweep:%d", policy.ChainID)
 	lj := NewLockedJob(lockName, func(ctx context.Context) error {
 		return o.sweepTick(ctx, policy)
 	}, pool, o.deps.Logger)

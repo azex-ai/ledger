@@ -84,8 +84,9 @@ type PrometheusMetrics struct {
 	chainCursorLag     *prometheus.GaugeVec
 
 	// Onchain counters
-	depositReorgDetected *prometheus.CounterVec
-	sweepUnattributed    *prometheus.CounterVec
+	depositReorgDetected     *prometheus.CounterVec
+	sweepUnattributed        *prometheus.CounterVec
+	registrationRescanFailed *prometheus.CounterVec
 }
 
 // NewPrometheusMetrics returns a Prometheus-backed core.Metrics implementation
@@ -244,6 +245,11 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "sweep_unattributed_total",
 			Help:      "Total sweep batches collecting a token with no ledger attribution, labelled by chain.",
 		}, []string{"chain_id"}),
+		registrationRescanFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "registration_rescan_failed_total",
+			Help:      "Total EnsureDepositAddress background historical rescan failures, labelled by chain.",
+		}, []string{"chain_id"}),
 	}
 
 	registry.MustRegister(
@@ -257,6 +263,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.reconcileGap, m.reservedAmount,
 		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
+		m.registrationRescanFailed,
 	)
 
 	return m
@@ -393,4 +400,9 @@ func (m *PrometheusMetrics) DepositReorgDetected(chainID int64) {
 // SweepUnattributed increments the unattributed-sweep counter.
 func (m *PrometheusMetrics) SweepUnattributed(chainID int64) {
 	m.sweepUnattributed.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// RegistrationRescanFailed increments the registration-rescan failure counter.
+func (m *PrometheusMetrics) RegistrationRescanFailed(chainID int64) {
+	m.registrationRescanFailed.WithLabelValues(int64Label(chainID)).Inc()
 }

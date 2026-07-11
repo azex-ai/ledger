@@ -74,6 +74,12 @@ type Metrics interface {
 	// treasury with no corresponding user ledger balance, requiring manual
 	// reconciliation (design doc §4).
 	SweepUnattributed(chainID int64)
+	// RegistrationRescanFailed is emitted whenever EnsureDepositAddress's
+	// background historical rescan of one chain fails (design doc §5-2b):
+	// the "deposit sent before registration" gap this rescan exists to close
+	// stays open for that address/chain until a retry succeeds, so a failure
+	// here must be visible to alerting, not just a log line.
+	RegistrationRescanFailed(chainID int64)
 }
 
 type nopMetrics struct{}
@@ -104,9 +110,10 @@ func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
 func (nopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
 func (nopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 
-func (nopMetrics) ChainCursorLag(int64, int64) {}
-func (nopMetrics) DepositReorgDetected(int64)  {}
-func (nopMetrics) SweepUnattributed(int64)     {}
+func (nopMetrics) ChainCursorLag(int64, int64)    {}
+func (nopMetrics) DepositReorgDetected(int64)     {}
+func (nopMetrics) SweepUnattributed(int64)        {}
+func (nopMetrics) RegistrationRescanFailed(int64) {}
 
 // NopMetrics returns a no-op metrics collector.
 func NopMetrics() Metrics { return nopMetrics{} }
