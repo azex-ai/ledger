@@ -20,6 +20,7 @@ export type {
   WalletTransaction,
   WalletTransactionsPage,
   WalletHold,
+  WalletDepositAddress,
 } from "./wallet/client";
 
 export { WalletProvider } from "./wallet/provider";
@@ -27,4 +28,8 @@ export type { WalletProviderConfig } from "./wallet/provider";
 export { useWalletClient } from "./wallet/context";
 
 export { useWalletBalance, useWalletTransactions, useWalletHolds } from "./wallet/hooks";
+export {
+  useWalletDepositAddress,
+  useEnsureWalletDepositAddress,
+} from "./wallet/use-deposit-address";
 export { walletKeys, walletKeyPrefix } from "./wallet/keys";

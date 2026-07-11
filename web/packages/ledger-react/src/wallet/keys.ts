@@ -14,6 +14,8 @@ export const walletKeys = {
   transactions: (scope: string, limit: number) =>
     ["ledger-wallet", scope, "transactions", limit] as const,
   holds: (scope: string) => ["ledger-wallet", scope, "holds"] as const,
+  depositAddress: (scope: string) =>
+    ["ledger-wallet", scope, "deposit-address"] as const,
 } as const;
 
 export const walletKeyPrefix = {

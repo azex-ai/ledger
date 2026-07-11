@@ -2425,6 +2425,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/holder/deposit-address": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up the token-bound holder's already-registered deposit address.
+         * @description Holder-scoped mirror of GET /holders/{holder}/deposit-address -- same DepositAddressProvider, but the holder comes exclusively from the holder token, never a request parameter. Does not create one -- 404s if the holder has none yet. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Issue (idempotently) the token-bound holder's CREATE2 deposit address.
+         * @description Holder-scoped mirror of POST /holders/{holder}/deposit-address -- derives and registers the address on first call, repeated calls return the same address. The holder is bound to the token; the route moves no funds, it only provisions the caller's own receiving address. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address (created on first call, or already registered). */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
