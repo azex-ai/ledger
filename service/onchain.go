@@ -390,11 +390,13 @@ func (o *Onchain) canonicalFactory() (factory, initHash string, err error) {
 // "unbounded", because that silent default is exactly the pre-M3
 // single-source-RPC unbounded-mint trust model M3 exists to close.
 //
-// Called from Run() -- a consumer that never calls Run() at all (e.g. a
-// pure webhook-only deployment driving IngestDeposit directly from an HTTP
-// handler with no background jobs) does not get this check for free; see
-// docs/RUNBOOK.md / docs/COOKBOOK.md's crypto-deposit sections, which
-// require calling Run() at least once at startup for exactly this reason.
+// Called from both ValidateAutoCreditCeilings (the exported form composition
+// roots call right after NewOnchain -- see that method's doc comment) and
+// Run() (defense in depth for callers that construct Onchain directly and
+// only ever call Run()). Neither call site is optional: a push-only/
+// webhook-only consumer that wires Onchain via a composition root but never
+// calls Run() (no background jobs needed) still gets this check via
+// EnableOnchain -> ValidateAutoCreditCeilings.
 func (o *Onchain) validateAutoCreditCeilings() error {
 	for chainID, cfg := range o.chains {
 		for token, tc := range cfg.CreditTokens {
@@ -404,6 +406,19 @@ func (o *Onchain) validateAutoCreditCeilings() error {
 		}
 	}
 	return nil
+}
+
+// ValidateAutoCreditCeilings is the exported form of the M3.1
+// secure-by-default startup check (see validateAutoCreditCeilings): every
+// CreditTokens entry, on every configured chain, must deliberately set
+// AutoCreditCeiling. Composition roots that wire Onchain via NewOnchain
+// directly (e.g. ledger.go's EnableOnchain) must call this right after
+// construction and refuse to hand back the instance on error -- Run() alone
+// is not enough, since some consumers (push-only/webhook-only deployments
+// driving IngestDeposit from an HTTP handler with no background jobs) never
+// call Run() at all.
+func (o *Onchain) ValidateAutoCreditCeilings() error {
+	return o.validateAutoCreditCeilings()
 }
 
 // EnsureDepositAddress derives holder's CREATE2 deposit address from the

@@ -441,6 +441,18 @@ func (s *Service) Channels() map[string]channel.Adapter {
 // corresponding background jobs (e.g. a webhook-only deployment passes a nil
 // reader and skips the pull watcher entirely -- service.Onchain.Run degrades
 // gracefully per missing dependency).
+//
+// Validates the M3.1 secure-by-default AutoCreditCeiling fence
+// (service.Onchain.ValidateAutoCreditCeilings, design doc §9.2 addendum,
+// docs/bugs/2026-07-11-m3-security-review.md MJ1) right here, not only in
+// Run(): a push-only/webhook-only consumer that drives IngestDeposit
+// straight from an HTTP handler and never calls Run() at all (no background
+// jobs needed) must not be able to skip this check simply by not calling
+// Run(). On validation failure, no *service.Onchain is handed back and
+// s.onchain is left unset, so a caller cannot route deposits through an
+// unvalidated instance nor retry EnableOnchain with a fixed config (the
+// "already configured" guard above only trips once s.onchain is actually
+// set).
 func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, scanner core.ChainScanner, sweeper core.Sweeper, opts ...service.OnchainOption) (*service.Onchain, error) {
 	if s.onchain != nil {
 		return nil, fmt.Errorf("ledger: EnableOnchain: already configured")
@@ -461,7 +473,11 @@ func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, s
 		Logger:          s.logger,
 		Metrics:         s.metrics,
 	}
-	s.onchain = service.NewOnchain(deps, chains, opts...)
+	onchain := service.NewOnchain(deps, chains, opts...)
+	if err := onchain.ValidateAutoCreditCeilings(); err != nil {
+		return nil, fmt.Errorf("ledger: EnableOnchain: %w", err)
+	}
+	s.onchain = onchain
 	return s.onchain, nil
 }
 
