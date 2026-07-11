@@ -7,6 +7,7 @@ import type {
   Classification,
   CreateBookingBody,
   Currency,
+  DepositAddress,
   Entry,
   EntryTemplate,
   Event,
@@ -256,6 +257,37 @@ export function createLedgerClient(config: LedgerClientConfig) {
       request<PaginatedResponse<Booking>>(
         `/api/v1/bookings${qs(params as Record<string, string | number | undefined>)}`,
       ),
+
+    // Crypto deposit (docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
+    // 404s if the holder has none yet — use ensureDepositAddress to issue one.
+    getDepositAddress: (holder: number) =>
+      request<DepositAddress>(`/api/v1/holders/${holder}/deposit-address`),
+
+    // Idempotent: repeated calls for the same holder always return the same
+    // address.
+    ensureDepositAddress: (holder: number) =>
+      request<DepositAddress>(`/api/v1/holders/${holder}/deposit-address`, {
+        method: "POST",
+      }),
+
+    // Deposits parked in human review (M3 compensating controls) — the
+    // `review` status IS the queue. Zero ledger effect until approved.
+    listDepositReviews: (params: { cursor?: string; limit?: number }) =>
+      request<PaginatedResponse<Booking>>(`/api/v1/deposits/reviews${qs(params)}`),
+
+    // Idempotent: no-op returning the current booking if already confirmed.
+    approveDepositReview: (uid: string) =>
+      request<Booking>(`/api/v1/deposits/${uid}/review/approve`, {
+        method: "POST",
+      }),
+
+    // Idempotent: no-op returning the current booking if already failed.
+    // No journal is ever posted.
+    rejectDepositReview: (uid: string, reason: string) =>
+      request<Booking>(`/api/v1/deposits/${uid}/review/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
 
     // Events (outbound)
     getEvent: (id: string) => request<Event>(`/api/v1/events/${id}`),

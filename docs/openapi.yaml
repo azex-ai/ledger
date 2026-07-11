@@ -684,7 +684,7 @@ paths:
           required: true
           schema: { type: string, enum: [evm, btc, custom] }
       responses:
-        "200": { description: Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). }
+        "200": { description: 'Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path).' }
         "401": { description: HMAC verification failed. }
         "403": { description: Channel/classification mismatch (design doc §5-5). }
         "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
