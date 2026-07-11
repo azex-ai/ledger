@@ -16,6 +16,7 @@ import { TemplatesPage } from "./pages/TemplatesPage";
 import { CurrenciesPage } from "./pages/CurrenciesPage";
 import { ReconciliationPage } from "./pages/ReconciliationPage";
 import { SnapshotsPage } from "./pages/SnapshotsPage";
+import { SweepMonitorPage } from "./pages/SweepMonitorPage";
 
 // Chart-bearing pages statically import recharts. Lazy-load them so recharts
 // becomes a separate async chunk loaded on demand, NOT part of dist/index.js.
@@ -74,6 +75,8 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
       return <ReconciliationPage />;
     case "/snapshots":
       return <SnapshotsPage />;
+    case "/sweeps":
+      return <SweepMonitorPage />;
     default:
       return <DashboardPage linkComponent={link} />;
   }

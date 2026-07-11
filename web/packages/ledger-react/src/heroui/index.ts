@@ -37,4 +37,5 @@ export { TemplatesPage } from "./pages/TemplatesPage";
 export { CurrenciesPage } from "./pages/CurrenciesPage";
 export { ReconciliationPage } from "./pages/ReconciliationPage";
 export { SnapshotsPage } from "./pages/SnapshotsPage";
+export { SweepMonitorPage } from "./pages/SweepMonitorPage";
 export { DashboardPage } from "./pages/DashboardPage";

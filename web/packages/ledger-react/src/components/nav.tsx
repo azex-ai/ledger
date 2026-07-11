@@ -12,6 +12,7 @@ import {
   Coins,
   Scale,
   Camera,
+  Combine,
   type LucideIcon,
 } from "lucide-react";
 
@@ -45,6 +46,7 @@ export const LEDGER_NAV_ITEMS: readonly LedgerNavItem[] = [
   { type: "separator", label: "Operations" },
   { href: "/reconciliation", label: "Reconciliation", icon: Scale },
   { href: "/snapshots", label: "Snapshots", icon: Camera },
+  { href: "/sweeps", label: "Sweep Monitor", icon: Combine },
 ];
 
 /** Default link renderer — plain anchor, works without a host router. */
