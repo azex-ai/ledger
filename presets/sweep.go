@@ -14,7 +14,11 @@ import (
 // key = sweep-{chain_id}-{token}-{signer_nonce}) and an audit trail for one
 // batch collection transaction.
 // States: pending -> sent -> confirmed | failed
-// Retry: failed -> pending (same nonce, gas-bump reuses the same booking).
+// Retry: failed -> pending, same booking (service.Onchain.reviveFailedSweep) --
+// gas-bump exhaustion re-requests a fresh signer nonce rather than reusing
+// the stale one (which the signer EOA may still report as "next" forever),
+// but stays on this same booking UID/idempotency key rather than minting a
+// new one, so there is exactly one audit trail per (chain,token) sweep saga.
 var SweepLifecycle = &core.Lifecycle{
 	Initial:  "pending",
 	Terminal: []core.Status{"confirmed"},

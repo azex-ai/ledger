@@ -543,6 +543,78 @@ func TestOnchain_Sweep_NonceReuseAndNoJournal(t *testing.T) {
 	assert.Len(t, h.sweeper.batchSweeps, 1, "BatchSweep must be called exactly once across the whole flow (no gas-bump needed, tx included on first check)")
 }
 
+// TestOnchain_Sweep_FailedRevivesToSentWithNewNonce pins the M5 fix: a sweep
+// booking that exhausts its gas-bump retries and terminates in "failed" must
+// not stay stuck there forever. MaxSweepBumps(0) forces the very first stuck
+// check to transition straight to "failed" (no bump attempts needed to
+// reproduce the terminal state), then a subsequent sweep tick must revive
+// the SAME booking (SweepLifecycle's failed->pending retry edge) with a
+// freshly-requested nonce and drive it back to "sent" -- not silently no-op
+// on the terminal booking, and not ErrConflict on a colliding idempotency
+// key.
+func TestOnchain_Sweep_FailedRevivesToSentWithNewNonce(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-revive", 2)
+	h := setupOnchain(t, chains, []string{"USDT-revive"},
+		service.WithMaxSweepBumps(0),
+		service.WithSweepStuckAfter(0),
+	)
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 7601)
+	require.NoError(t, err)
+	h.scanner.balances[da.Address] = decimal.NewFromInt(50)
+
+	policy := core.SweepPolicy{
+		ChainID:      chainID,
+		Token:        token,
+		MinThreshold: decimal.NewFromInt(10),
+		GasCeiling:   decimal.NewFromInt(100),
+		BatchLimit:   10,
+		Interval:     time.Minute,
+	}
+
+	// Tick 1: pending -> sent, nonce 0.
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	sweepUID := h.classificationUID(t, "sweep")
+	bookings, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{ClassificationUID: sweepUID, Status: "sent", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, bookings, 1)
+	firstBookingUID := bookings[0].UID
+	require.Equal(t, "0", bookings[0].Metadata["nonce"])
+
+	// Tick 2: not included, maxSweepBumps=0 -> straight to terminal "failed".
+	h.reader.setIncluded(chainID, bookings[0].ChannelRef, false)
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	failedBooking, err := h.bookings.GetBooking(ctx, firstBookingUID)
+	require.NoError(t, err)
+	require.Equal(t, core.Status("failed"), failedBooking.Status)
+
+	// Tick 3: must revive the SAME booking (not ErrConflict, not a silent
+	// no-op) using a freshly-requested nonce, and re-broadcast.
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	revived, err := h.bookings.GetBooking(ctx, firstBookingUID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("sent"), revived.Status, "failed sweep must be revived to sent, not stuck or silently ignored")
+	assert.Equal(t, firstBookingUID, revived.UID, "revival reuses the same booking (audit trail), not a new one")
+	assert.Equal(t, "1", revived.Metadata["nonce"], "revival must use a freshly-requested nonce, not the stale/stuck one")
+
+	require.Len(t, h.sweeper.batchSweeps, 2, "the revived attempt broadcasts a second batchSweep call")
+	assert.Equal(t, uint64(0), h.sweeper.batchSweeps[0].nonce)
+	assert.Equal(t, uint64(1), h.sweeper.batchSweeps[1].nonce, "revival's broadcast must carry the new nonce, not the stale one")
+
+	// Tick 4: the revived broadcast gets included -> confirms cleanly.
+	h.reader.setIncluded(chainID, revived.ChannelRef, true)
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	confirmed, err := h.bookings.GetBooking(ctx, firstBookingUID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), confirmed.Status)
+	assert.Empty(t, confirmed.JournalUID, "sweep bookings must never post a journal, even after a revival")
+}
+
 func TestOnchain_Sweep_UnattributedToken(t *testing.T) {
 	const chainID = int64(1)
 	chains := core.ChainSet{
