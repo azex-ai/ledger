@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -433,18 +434,24 @@ func TestSweepBooking_NeverPostsJournal(t *testing.T) {
 	assert.Empty(t, confirmed.JournalUID)
 }
 
-// I-20: Deposit ingestion idempotency is stable under log-index churn.
+// I-20: Deposit ingestion idempotency is stable under a reorg that reassigns
+// block_number.
 //
 // A deposit booking's idempotency key is derived from
 // (chain_id, tx_hash, txlog_seq) -- txlog_seq being the Transfer log's
 // ordinal position among the logs in tx_hash that credit one of our
 // registered addresses, NOT the chain's block-level log_index (which a reorg
-// reassigns). This test pins that re-ingesting the identical sighting
-// produces the SAME booking regardless of what the block-level log_index
-// would have been at observation time -- i.e. the key genuinely does not
-// depend on any value that reorgs mutate (docs/plans/2026-07-11-crypto-
-// deposit-sweep-design.md §3).
-func TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn(t *testing.T) {
+// reassigns). block_number itself is also reorg-variant: the same
+// transaction can be re-mined into a different block. This test pins that
+// re-ingesting the identical sighting with a CHANGED block_number (simulating
+// exactly that: a crashed watcher retries the same unscanned block range
+// after a reorg moved the tx) still resolves to the SAME booking -- not
+// ErrConflict, not a dead-lettered duplicate (C1/M1 regression:
+// service/onchain.go's IngestDeposit keeps block_number in the booking's
+// Metadata for the recheck loop to read back, but
+// postgres/idempotency_match.go's bookingMetadataMatches deliberately
+// excludes that one key from the equality check -- see its doc comment).
+func TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -458,12 +465,7 @@ func TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn(t *testing.T) {
 	const chainID, txHash, txLogSeq = int64(1), "0xreorgtx", int32(0)
 	idemKey := fmt.Sprintf("deposit-%d-%s-%d", chainID, txHash, txLogSeq)
 
-	makeInput := func(blockLevelLogIndexAtObservationTime int) core.CreateBookingInput {
-		// blockLevelLogIndexAtObservationTime simulates the ONE thing a reorg
-		// can change between two observations of the same underlying
-		// transfer -- it deliberately never enters the idempotency key or
-		// the booking payload.
-		_ = blockLevelLogIndexAtObservationTime
+	makeInput := func(blockNumberAtObservationTime int) core.CreateBookingInput {
 		return core.CreateBookingInput{
 			ClassificationCode: presets.DepositClassificationCode,
 			AccountHolder:      8001,
@@ -471,21 +473,31 @@ func TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn(t *testing.T) {
 			Amount:             decimal.NewFromInt(100),
 			IdempotencyKey:     idemKey,
 			ChannelName:        "onchain",
-			Metadata:           map[string]string{"chain_id": "1", "tx_hash": txHash, "txlog_seq": "0", "block_number": "100"},
+			Metadata: map[string]string{
+				"chain_id":     "1",
+				"tx_hash":      txHash,
+				"txlog_seq":    "0",
+				"block_number": strconv.Itoa(blockNumberAtObservationTime),
+			},
 		}
 	}
 
-	// First observation: the tx originally landed at block-level log_index 3.
-	first, err := bookingStore.CreateBooking(ctx, makeInput(3))
+	// First observation: the tx originally landed at block 100.
+	first, err := bookingStore.CreateBooking(ctx, makeInput(100))
 	require.NoError(t, err)
 
-	// Second observation, post-reorg: the tx was re-mined and its block-level
-	// log_index is now 7 (a different value) -- but txlog_seq (this
-	// transfer's ordinal position among OUR credits within the tx) and every
-	// other stable field are unchanged, so this must resolve to the exact
-	// same booking, not a duplicate and not ErrConflict.
-	second, err := bookingStore.CreateBooking(ctx, makeInput(7))
+	// Second observation, post-reorg: the tx was re-mined into block 137 (a
+	// DIFFERENT block_number) -- but txlog_seq and every other stable field
+	// are unchanged, so this must resolve to the exact same booking: an
+	// idempotent no-op, not ErrConflict and not a dead-lettered duplicate.
+	second, err := bookingStore.CreateBooking(ctx, makeInput(137))
 	require.NoError(t, err)
 
 	assert.Equal(t, first.UID, second.UID)
+
+	// The stored booking keeps whichever block_number the FIRST successful
+	// create recorded -- CreateBooking's idempotent-replay path never
+	// updates an existing row, it just returns it unchanged.
+	assert.Equal(t, "100", first.Metadata["block_number"])
+	assert.Equal(t, "100", second.Metadata["block_number"])
 }

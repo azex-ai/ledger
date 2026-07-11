@@ -66,14 +66,29 @@ func (c *testTxComposer) RunInTx(ctx context.Context, fn func(ctx context.Contex
 type fakeChainReader struct {
 	mu       sync.Mutex
 	included map[string]bool // key: "chainID:txHash"
+	latest   map[int64]int64 // key: chainID -- see setLatestBlock
 }
 
 func newFakeChainReader() *fakeChainReader {
-	return &fakeChainReader{included: make(map[string]bool)}
+	return &fakeChainReader{included: make(map[string]bool), latest: make(map[int64]int64)}
 }
 
 func (f *fakeChainReader) LatestBlock(ctx context.Context, chainID int64) (int64, error) {
-	return 0, nil // not exercised: these tests drive IngestDeposit/sweep directly, not the watcher loop
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.latest[chainID], nil // 0 (map zero value) unless setLatestBlock was called
+}
+
+// setLatestBlock drives the recheck loop's confirmations math
+// (latest - booking's stored BlockNumber + 1) against a specific chain head
+// -- see TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber, which
+// needs a real, controllable head to pin the C1 regression (recheck must
+// derive confirmations from the booking's actual stored BlockNumber, not
+// silently treat every deposit as already past its confirmation threshold).
+func (f *fakeChainReader) setLatestBlock(chainID, block int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latest[chainID] = block
 }
 
 func (f *fakeChainReader) FetchDeposits(ctx context.Context, chainID, fromBlock, toBlock int64, addresses []string) ([]core.DepositSighting, error) {
@@ -397,6 +412,69 @@ func TestOnchain_IngestDeposit_IgnoresNonWhitelistedTokenAndUnregisteredAddress(
 	})
 	require.NoError(t, err)
 	assert.Nil(t, booking)
+}
+
+// TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber is C1's
+// regression: recheckPendingDeposits must compute confirmations from the
+// booking's actually-stored BlockNumber against the chain's real current
+// head, not silently treat every pending/confirming deposit as already past
+// its confirmation threshold. Earlier tests all drive IngestDeposit/recheck
+// with a fakeChainReader whose LatestBlock stub returned a constant 0,
+// which never exercises this math at all -- that is exactly how both C1
+// (BlockNumber never populated by either producer) and the recheck loop's
+// blind spot went unnoticed. This test drives the real recheck loop
+// (RunPendingRecheckOnce, not IngestDeposit's inline advanceConfirmation
+// call) against a controllable chain head.
+func TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber(t *testing.T) {
+	const (
+		chainID       = int64(1)
+		token         = "0xusdttoken"
+		confirmations = int32(6)
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-recheck", confirmations)
+	h := setupOnchain(t, chains, []string{"USDT-recheck"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 7501)
+	require.NoError(t, err)
+
+	const txHash = "0xreallatest"
+	h.reader.setIncluded(chainID, txHash, true) // tx is genuinely still on-chain throughout
+
+	// First sighting: 0 confirmations at observation time, mined at block
+	// 100 -- IngestDeposit's own advanceConfirmation call only ever sees this
+	// single (stale) confirmations count, so it correctly stays "confirming"
+	// (0 < 6). The bug this test targets is entirely in what happens AFTER,
+	// on the recheck loop's own re-derivation.
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 0, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("confirming"), booking.Status)
+
+	// Chain head is only 2 blocks past the deposit's block -- 102-100+1 = 3
+	// confirmations, still below the 6-confirmation threshold. Pre-fix, with
+	// BlockNumber never persisted (always 0), this would have computed
+	// 102-0+1 = 103 >= 6 and wrongly confirmed the deposit on this very
+	// first recheck tick.
+	h.reader.setLatestBlock(chainID, 102)
+	h.svc.RunPendingRecheckOnce(ctx)
+
+	stillPending, err := h.bookings.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirming"), stillPending.Status, "must not confirm before the real confirmation threshold is met")
+	assert.Empty(t, stillPending.JournalUID)
+
+	// Chain head advances enough to cross the threshold -- 106-100+1 = 7 >= 6.
+	h.reader.setLatestBlock(chainID, 106)
+	h.svc.RunPendingRecheckOnce(ctx)
+
+	confirmed, err := h.bookings.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), confirmed.Status)
+	assert.NotEmpty(t, confirmed.JournalUID)
 }
 
 // --- Sweep ---

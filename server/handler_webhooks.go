@@ -142,5 +142,26 @@ func (s *Server) handleDepositSighting(w http.ResponseWriter, r *http.Request, s
 		httpx.Error(w, err)
 		return
 	}
+	// IngestDeposit returns (nil, nil) for a sighting this ledger has no
+	// business booking -- unregistered address, non-whitelisted token, or an
+	// unconfigured chain (its own doc comment). That is a normal "nothing to
+	// do" outcome, not an error: respond 200 no-op so the external scanner
+	// marks the callback delivered and does not retry it forever. Passing a
+	// nil booking into bookingToResponse would panic on its first field
+	// dereference (op.UID) -- chi's Recoverer middleware would turn that
+	// into a 500, which the scanner treats as a delivery failure and retries
+	// indefinitely (M2).
+	if booking == nil {
+		httpx.OK(w, depositSightingIgnoredResponse{Status: "ignored"})
+		return
+	}
 	httpx.OK(w, bookingToResponse(booking))
+}
+
+// depositSightingIgnoredResponse is handleDepositSighting's response body
+// when IngestDeposit had nothing to book (see its doc comment) -- distinct
+// from bookingResponse so callers can tell "no booking exists for this
+// sighting" apart from an actual booking payload.
+type depositSightingIgnoredResponse struct {
+	Status string `json:"status"`
 }

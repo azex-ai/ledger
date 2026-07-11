@@ -473,12 +473,24 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 		Amount:             s.Amount,
 		IdempotencyKey:     idemKey,
 		ChannelName:        onchainChannelName,
-		// Stable identity fields only -- Confirmations is deliberately
-		// excluded (design doc §3): it varies across observations of the
-		// same transfer and CreateBooking's idempotency check compares
-		// Metadata byte-for-byte, so including it would make the watcher
-		// and webhook paths derive divergent "payloads" for the same
-		// sighting and spuriously ErrConflict.
+		// Confirmations is deliberately excluded (design doc §3): it varies
+		// across observations of the same transfer and CreateBooking's
+		// idempotency check compares Metadata, so including it would make
+		// the watcher and webhook paths derive divergent "payloads" for the
+		// same sighting and spuriously ErrConflict.
+		//
+		// block_number IS included, unlike Confirmations -- the recheck loop
+		// (recheckOneDeposit/recheckOneConfirmedDeposit below) needs it back
+		// from the booking to recompute confirmations without re-scanning
+		// the chain, so it must be persisted somewhere reachable even for a
+		// booking that never advances past "pending" (e.g. a crash between
+		// this call and the pending->confirming transition below). It is
+		// also observation-variant (a reorg can re-mine the same tx into a
+		// different block between two observations of the identical
+		// idempotency key), so postgres's ensureBookingMatchesInput
+		// (postgres/idempotency_match.go's bookingMetadataMatches)
+		// deliberately excludes this one key from its equality check --
+		// everything else here is still compared exactly.
 		Metadata: map[string]string{
 			"chain_id":     strconv.FormatInt(s.ChainID, 10),
 			"tx_hash":      s.TxHash,
@@ -690,6 +702,14 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 }
 
 // --- pending/confirming recheck + shallow reorg ---
+
+// RunPendingRecheckOnce runs a single pending/confirming recheck pass outside
+// Run's ticker loop -- mirrors RunSweepOnce, useful for an ops-triggered
+// manual recheck and for tests that need to exercise the recheck path
+// directly against a fake ChainReader without waiting on recheckInterval.
+func (o *Onchain) RunPendingRecheckOnce(ctx context.Context) {
+	o.recheckPendingDeposits(ctx)
+}
 
 func (o *Onchain) recheckPendingDeposits(ctx context.Context) {
 	depositUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.DepositClassificationCode)

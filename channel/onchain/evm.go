@@ -77,14 +77,19 @@ func (a *EVMAdapter) VerifySignature(header http.Header, body []byte) error {
 // This is the push-path counterpart to chains/evm's eth_getLogs watcher (pull
 // path); see ParseSighting.
 type sightingPayload struct {
-	ChainID       int64  `json:"chain_id"`
-	TxHash        string `json:"tx_hash"`
-	TxLogSeq      int32  `json:"txlog_seq"`
-	Token         string `json:"token"`
-	From          string `json:"from"`
-	To            string `json:"to"`
-	Amount        string `json:"amount"`
-	Confirmations int32  `json:"confirmations"`
+	ChainID  int64  `json:"chain_id"`
+	TxHash   string `json:"tx_hash"`
+	TxLogSeq int32  `json:"txlog_seq"`
+	Token    string `json:"token"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Amount   string `json:"amount"`
+	// BlockNumber is required -- see core.DepositSighting.BlockNumber's doc
+	// comment and Validate(), which rejects <= 0. The external block scanner
+	// pushing this webhook must report the block the transfer log was mined
+	// in, not just its confirmation count at push time.
+	BlockNumber   int64 `json:"block_number"`
+	Confirmations int32 `json:"confirmations"`
 }
 
 // ParseSighting normalizes a webhook body into a core.DepositSighting
@@ -113,6 +118,7 @@ func (a *EVMAdapter) ParseSighting(header http.Header, body []byte) (*core.Depos
 		To:            raw.To,
 		Amount:        amount,
 		Confirmations: raw.Confirmations,
+		BlockNumber:   raw.BlockNumber,
 	}
 	if err := sighting.Validate(); err != nil {
 		return nil, fmt.Errorf("channel: evm: %w", err)

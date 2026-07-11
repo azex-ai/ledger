@@ -49,6 +49,7 @@ func TestDepositSighting_Validate(t *testing.T) {
 		To:            "0xto",
 		Amount:        decimal.NewFromInt(100),
 		Confirmations: 3,
+		BlockNumber:   1000,
 	}
 	require.NoError(t, valid.Validate())
 
@@ -63,6 +64,13 @@ func TestDepositSighting_Validate(t *testing.T) {
 		{"missing to", func(s *DepositSighting) { s.To = "" }},
 		{"non-positive amount", func(s *DepositSighting) { s.Amount = decimal.Zero }},
 		{"negative confirmations", func(s *DepositSighting) { s.Confirmations = -1 }},
+		// C1 regression: a zero (or negative) BlockNumber must fail
+		// validation -- this is the exact value both ingestion producers
+		// (chains/evm's watcher, channel/onchain's webhook) used to leave
+		// unset, which silently made recheckOneDeposit compute confirmations
+		// as latest-0+1 and bypass the confirmation threshold entirely.
+		{"zero block_number", func(s *DepositSighting) { s.BlockNumber = 0 }},
+		{"negative block_number", func(s *DepositSighting) { s.BlockNumber = -1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

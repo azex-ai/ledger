@@ -110,7 +110,7 @@ func TestWebhookOnchain_RoutesToSightingIngestion(t *testing.T) {
 	})
 	srv.SetDepositIngester(ingester)
 
-	body := []byte(`{"chain_id":1,"tx_hash":"0xabc123","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xTo1234","amount":"12.5","confirmations":3}`)
+	body := []byte(`{"chain_id":1,"tx_hash":"0xabc123","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xTo1234","amount":"12.5","confirmations":3,"block_number":1000}`)
 	w := signedWebhookRequest(srv, "evm", webhookTestKey, body)
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -120,9 +120,39 @@ func TestWebhookOnchain_RoutesToSightingIngestion(t *testing.T) {
 	assert.Equal(t, "0xabc123", captured.TxHash)
 	assert.Equal(t, "0xusdt", captured.Token)
 	assert.True(t, decimal.RequireFromString("12.5").Equal(captured.Amount))
+	assert.Equal(t, int64(1000), captured.BlockNumber)
 
 	data := parseEnvelope(t, w.Body.Bytes())
 	assert.Equal(t, "bk-onchain-1", data["uid"])
+}
+
+// TestWebhookOnchain_UnregisteredAddress_ReturnsNoOp is M2's regression:
+// IngestDeposit returns (nil, nil) for a sighting to an address/token/chain
+// this ledger has no business booking (its own doc comment) -- that must
+// surface as a 200 no-op, not a panic (bookingToResponse dereferencing a nil
+// *core.Booking's first field) that chi's Recoverer would turn into a 500
+// the external scanner retries forever.
+func TestWebhookOnchain_UnregisteredAddress_ReturnsNoOp(t *testing.T) {
+	rec := &recordingBooker{}
+	ingester := &mockDepositIngester{fn: func(ctx context.Context, s core.DepositSighting) (*core.Booking, error) {
+		return nil, nil // unregistered address -- IngestDeposit's contract for "nothing to do"
+	}}
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.channels = map[string]channel.Adapter{"evm": chanOnchain.New(webhookTestKey)}
+		o.booker = rec
+	})
+	srv.SetDepositIngester(ingester)
+
+	body := []byte(`{"chain_id":1,"tx_hash":"0xabc123","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xUnregistered","amount":"12.5","confirmations":3,"block_number":1000}`)
+
+	assert.NotPanics(t, func() {
+		w := signedWebhookRequest(srv, "evm", webhookTestKey, body)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		data := parseEnvelope(t, w.Body.Bytes())
+		assert.Equal(t, "ignored", data["status"])
+	})
+	assert.Equal(t, 1, ingester.calls)
+	assert.False(t, rec.transitionCalled)
 }
 
 func TestWebhookOnchain_NotEnabledWithoutIngester(t *testing.T) {
