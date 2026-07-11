@@ -81,6 +81,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/holder/balances", s.withHolderSurface((*holderSurface).handleHolderBalances))
 			r.Get("/holder/transactions", s.withHolderSurface((*holderSurface).handleHolderTransactions))
 			r.Get("/holder/holds", s.withHolderSurface((*holderSurface).handleHolderHolds))
+
+			// Crypto deposit add-on, holder-scoped: reuses the same
+			// DepositAddressProvider as /holders/{holder}/deposit-address
+			// (see handler_onchain.go) so the holder wallet surface never
+			// needs an admin API key to fetch its own address. 404s via
+			// bizcode.FeatureNotEnabled until SetDepositAddressProvider is
+			// called.
+			r.Get("/holder/deposit-address", s.handleHolderGetDepositAddress)
+			r.Post("/holder/deposit-address", s.handleHolderEnsureDepositAddress)
 		})
 
 		// ---- Scope: write ----

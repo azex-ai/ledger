@@ -1131,6 +1131,45 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HolderHoldListEnvelope" }
+  /holder/deposit-address:
+    get:
+      tags: [Holder, Crypto Deposit]
+      summary: Look up the token-bound holder's already-registered deposit address.
+      description: >-
+        Holder-scoped mirror of GET /holders/{holder}/deposit-address --
+        same DepositAddressProvider, but the holder comes exclusively from
+        the holder token, never a request parameter. Does not create one --
+        404s if the holder has none yet. Answers FeatureNotEnabled (503)
+        unless the crypto-deposit add-on is wired in.
+      security:
+        - holderToken: []
+      responses:
+        "200":
+          description: Deposit address.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+    post:
+      tags: [Holder, Crypto Deposit]
+      summary: Issue (idempotently) the token-bound holder's CREATE2 deposit address.
+      description: >-
+        Holder-scoped mirror of POST /holders/{holder}/deposit-address --
+        derives and registers the address on first call, repeated calls
+        return the same address. The holder is bound to the token; the route
+        moves no funds, it only provisions the caller's own receiving
+        address. Answers FeatureNotEnabled (503) unless the crypto-deposit
+        add-on is wired in.
+      security:
+        - holderToken: []
+      responses:
+        "201":
+          description: Deposit address (created on first call, or already registered).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
 
 components:
   securitySchemes:
