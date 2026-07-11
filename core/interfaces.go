@@ -412,6 +412,23 @@ type Sweeper interface {
 	GasPrice(ctx context.Context, chainID int64) (decimal.Decimal, error)
 }
 
+// DepositConfirmer is the deposit path's second, independent data source for
+// reconciliation (design doc §9.3: M3 compensating controls). A consumer
+// wires this by pointing a second core.ChainReader-equivalent implementation
+// (chains/evm's Reader already satisfies this method shape) at a DIFFERENT
+// RPC provider -- no new adapter code is required, just a second instance.
+// Nil (the default) disables the reconciliation gate entirely; only the
+// threshold gate (TokenConfig.AutoCreditCeiling) applies.
+type DepositConfirmer interface {
+	// ConfirmDeposit re-derives, from this provider's own view of the chain,
+	// the amount transferred by the log at (chainID, txHash, txLogSeq) and
+	// whether that transaction is currently included on the canonical chain.
+	// The caller compares amount/included against the primary sighting;
+	// disagreement (either source) routes the deposit to review rather than
+	// auto-crediting it.
+	ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (amount decimal.Decimal, included bool, err error)
+}
+
 // Signer abstracts the private key that authorizes sweep transactions, so
 // the library's default local-key implementation can later be swapped for a
 // KMS/HSM adapter without touching sweep orchestration (design doc §0).

@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -164,6 +165,47 @@ func (f *fakeSweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Deci
 	return f.gasPrice, nil
 }
 
+// fakeDepositConfirmer implements service.DepositConfirmer for the M3
+// reconciliation gate tests (design doc §9.3). Each (chainID, txHash,
+// txLogSeq) must be explicitly seeded via set -- an unseeded key returns
+// included=false, matching "this second source has no idea about this
+// transfer," which is exactly the disagreement reviewGate must catch.
+type fakeDepositConfirmer struct {
+	mu        sync.Mutex
+	responses map[string]fakeConfirmResponse
+	calls     int
+}
+
+type fakeConfirmResponse struct {
+	amount   decimal.Decimal
+	included bool
+}
+
+func newFakeDepositConfirmer() *fakeDepositConfirmer {
+	return &fakeDepositConfirmer{responses: make(map[string]fakeConfirmResponse)}
+}
+
+func confirmKey(chainID int64, txHash string, txLogSeq int32) string {
+	return fmt.Sprintf("%d:%s:%d", chainID, txHash, txLogSeq)
+}
+
+func (f *fakeDepositConfirmer) set(chainID int64, txHash string, txLogSeq int32, amount decimal.Decimal, included bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.responses[confirmKey(chainID, txHash, txLogSeq)] = fakeConfirmResponse{amount: amount, included: included}
+}
+
+func (f *fakeDepositConfirmer) ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (decimal.Decimal, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	r, ok := f.responses[confirmKey(chainID, txHash, txLogSeq)]
+	if !ok {
+		return decimal.Zero, false, nil
+	}
+	return r.amount, r.included, nil
+}
+
 // --- test harness ---
 
 type onchainHarness struct {
@@ -245,6 +287,30 @@ func chainSetWithToken(chainID int64, token, currencyCode string, confirmations 
 			InitHash:      itInitHash,
 			CreditTokens:  map[string]core.TokenConfig{token: {TokenAddress: token, CurrencyCode: currencyCode}},
 			SweepTokens:   map[string]core.TokenConfig{token: {TokenAddress: token, CurrencyCode: currencyCode}},
+		},
+	}
+}
+
+// chainSetWithCeilings mirrors chainSetWithToken but also wires the M3
+// compensating-control ceilings (design doc §9.2/§9.3) onto the credit
+// token's config -- zero disables the corresponding gate, same as
+// chainSetWithToken's implicit zero-value defaults.
+func chainSetWithCeilings(chainID int64, token, currencyCode string, confirmations int32, autoCreditCeiling, reconcileCeiling decimal.Decimal) core.ChainSet {
+	return core.ChainSet{
+		chainID: {
+			ChainID:       chainID,
+			Confirmations: confirmations,
+			Factory:       itFactory,
+			InitHash:      itInitHash,
+			CreditTokens: map[string]core.TokenConfig{
+				token: {
+					TokenAddress:      token,
+					CurrencyCode:      currencyCode,
+					AutoCreditCeiling: autoCreditCeiling,
+					ReconcileCeiling:  reconcileCeiling,
+				},
+			},
+			SweepTokens: map[string]core.TokenConfig{token: {TokenAddress: token, CurrencyCode: currencyCode}},
 		},
 	}
 }
@@ -652,4 +718,274 @@ func TestOnchain_Sweep_UnattributedToken(t *testing.T) {
 	require.Len(t, bookings, 1)
 	assert.Equal(t, "native", bookings[0].Metadata["token"])
 	assert.Empty(t, bookings[0].JournalUID)
+}
+
+// --- M3 compensating controls: threshold gate + reconciliation -> review
+// (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9, I-21) ---
+
+// TestOnchain_IngestDeposit_OverCeiling_RoutesToReview is the safety
+// regression this whole control exists for (design doc §9.2): a single-source
+// sighting whose amount exceeds AutoCreditCeiling must be parked in review,
+// not auto-credited, even though it clears the confirmation threshold on its
+// own -- this is exactly the unbounded-mint path M3 closes.
+func TestOnchain_IngestDeposit_OverCeiling_RoutesToReview(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-overceil", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-overceil"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8001)
+	require.NoError(t, err)
+
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xoverceil", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("150"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booking)
+	assert.Equal(t, core.Status("review"), booking.Status)
+	assert.Empty(t, booking.JournalUID, "review must not post a journal (I-21)")
+	assert.Equal(t, "over_ceiling", booking.Metadata["review_reason"])
+
+	// Re-observing the same sighting while parked in review must be a no-op
+	// (advanceConfirmation's "review" early-return), not re-evaluate the gate
+	// or re-transition.
+	replay, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xoverceil", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("150"),
+		Confirmations: 6, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("review"), replay.Status)
+	assert.Empty(t, replay.JournalUID)
+}
+
+// TestOnchain_IngestDeposit_UnderCeiling_StillConfirms pins the opt-in
+// contract: a deposit below AutoCreditCeiling takes the pre-M3 path
+// unchanged (auto-credited with a journal as soon as it clears the
+// confirmation threshold).
+func TestOnchain_IngestDeposit_UnderCeiling_StillConfirms(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-underceil", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-underceil"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8002)
+	require.NoError(t, err)
+
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xunderceil", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("50"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booking)
+	assert.Equal(t, core.Status("confirmed"), booking.Status)
+	assert.NotEmpty(t, booking.JournalUID)
+}
+
+// TestOnchain_IngestDeposit_ReconcileMismatch_RoutesToReview drives the
+// reconciliation gate in isolation (AutoCreditCeiling disabled): a second,
+// independent source disagreeing with the primary sighting's amount routes
+// to review even though the primary sighting alone would have confirmed.
+func TestOnchain_IngestDeposit_ReconcileMismatch_RoutesToReview(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xreconcilemismatch"
+	)
+	confirmer := newFakeDepositConfirmer()
+	confirmer.set(chainID, txHash, 0, decimal.RequireFromString("999"), true) // disagrees with the primary sighting's amount
+
+	chains := chainSetWithCeilings(chainID, token, "USDT-mismatch", 2, decimal.Zero, decimal.NewFromInt(10))
+	h := setupOnchain(t, chains, []string{"USDT-mismatch"}, service.WithDepositConfirmer(confirmer))
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8003)
+	require.NoError(t, err)
+
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booking)
+	assert.Equal(t, core.Status("review"), booking.Status)
+	assert.Empty(t, booking.JournalUID)
+	assert.Equal(t, "reconcile_mismatch", booking.Metadata["review_reason"])
+	assert.Equal(t, 1, confirmer.calls)
+}
+
+// TestOnchain_IngestDeposit_ReconcileMatch_Confirms: the second source
+// agreeing exactly (same amount, included=true) lets the deposit proceed to
+// confirmed as normal.
+func TestOnchain_IngestDeposit_ReconcileMatch_Confirms(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xreconcilematch"
+	)
+	confirmer := newFakeDepositConfirmer()
+	confirmer.set(chainID, txHash, 0, decimal.RequireFromString("100"), true)
+
+	chains := chainSetWithCeilings(chainID, token, "USDT-match", 2, decimal.Zero, decimal.NewFromInt(10))
+	h := setupOnchain(t, chains, []string{"USDT-match"}, service.WithDepositConfirmer(confirmer))
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8004)
+	require.NoError(t, err)
+
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booking)
+	assert.Equal(t, core.Status("confirmed"), booking.Status)
+	assert.NotEmpty(t, booking.JournalUID)
+	assert.Equal(t, 1, confirmer.calls)
+}
+
+// TestOnchain_IngestDeposit_ReconcileBelowCeiling_SkipsRPCCall: amounts at or
+// below ReconcileCeiling never call the second source at all (design doc
+// §9.3: "小额不值得双查 RPC 成本").
+func TestOnchain_IngestDeposit_ReconcileBelowCeiling_SkipsRPCCall(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	confirmer := newFakeDepositConfirmer() // no responses seeded -- any call would report included=false
+
+	chains := chainSetWithCeilings(chainID, token, "USDT-belowreconcile", 2, decimal.Zero, decimal.NewFromInt(1000))
+	h := setupOnchain(t, chains, []string{"USDT-belowreconcile"}, service.WithDepositConfirmer(confirmer))
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8005)
+	require.NoError(t, err)
+
+	booking, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xbelowreconcile", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("50"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booking)
+	assert.Equal(t, core.Status("confirmed"), booking.Status)
+	assert.NotEmpty(t, booking.JournalUID)
+	assert.Zero(t, confirmer.calls, "amount at/below ReconcileCeiling must never call the second source")
+}
+
+// TestOnchain_ApproveReview_PostsJournalWithEventLink pins the approve half
+// of I-21: a reviewed booking has zero ledger effect until ApproveReview is
+// called, at which point it posts the SAME deposit_confirm journal path
+// (EventUID cross-link) the normal confirming->confirmed transition uses.
+// Idempotent re-approval is a no-op, not a second journal.
+func TestOnchain_ApproveReview_PostsJournalWithEventLink(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-approve", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-approve"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8006)
+	require.NoError(t, err)
+
+	reviewed, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xapprove", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("150"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("review"), reviewed.Status)
+	require.Empty(t, reviewed.JournalUID)
+
+	approved, err := h.svc.ApproveReview(ctx, reviewed.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), approved.Status)
+	assert.NotEmpty(t, approved.JournalUID)
+
+	journalUID := approved.JournalUID
+
+	// Idempotent re-approval: no error, same booking, no second journal.
+	again, err := h.svc.ApproveReview(ctx, reviewed.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), again.Status)
+	assert.Equal(t, journalUID, again.JournalUID)
+}
+
+// TestOnchain_RejectReview_NoJournal pins the reject half of I-21: a rejected
+// booking transitions to failed and NEVER posts a journal -- the deposit is
+// never credited. Idempotent re-rejection is a no-op.
+func TestOnchain_RejectReview_NoJournal(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-reject", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-reject"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8007)
+	require.NoError(t, err)
+
+	reviewed, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xreject", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("150"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("review"), reviewed.Status)
+
+	rejected, err := h.svc.RejectReview(ctx, reviewed.UID, "suspected fraud")
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("failed"), rejected.Status)
+	assert.Empty(t, rejected.JournalUID, "reject must never post a journal (I-21)")
+	assert.Equal(t, "suspected fraud", rejected.Metadata["reject_reason"])
+
+	// Idempotent re-rejection: no error, same terminal booking, still no journal.
+	again, err := h.svc.RejectReview(ctx, reviewed.UID, "suspected fraud")
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("failed"), again.Status)
+	assert.Empty(t, again.JournalUID)
+}
+
+// TestOnchain_ApproveReview_RejectReview_ConflictWhenNotReview: calling
+// either operation on a booking that never entered review is a conflict, not
+// a silent no-op or a forced transition.
+func TestOnchain_ApproveReview_RejectReview_ConflictWhenNotReview(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-notreview", 10) // high confirmation threshold -- stays "confirming"
+	h := setupOnchain(t, chains, []string{"USDT-notreview"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8008)
+	require.NoError(t, err)
+
+	confirming, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xnotreview", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("50"),
+		Confirmations: 0, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("confirming"), confirming.Status)
+
+	_, err = h.svc.ApproveReview(ctx, confirming.UID)
+	assert.ErrorIs(t, err, core.ErrConflict)
+
+	_, err = h.svc.RejectReview(ctx, confirming.UID, "n/a")
+	assert.ErrorIs(t, err, core.ErrConflict)
 }

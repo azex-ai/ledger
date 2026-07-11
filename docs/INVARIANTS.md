@@ -718,6 +718,59 @@ instead of creating a duplicate.
   block-scoped index; also requires `block_number` per
   `core.DepositSighting.Validate`)
 
+## I-21: Review holds a deposit with zero ledger effect
+
+A crypto deposit routed to `review` instead of `confirmed`
+(docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9: M3 compensating
+controls -- the threshold gate, `TokenConfig.AutoCreditCeiling`, or the
+reconciliation gate, `OnchainDeps.DepositConfirmer` disagreeing with the
+primary sighting) has **posted no journal**. Its `journal_uid` is empty for
+as long as it sits in `review`, exactly like a `pending`/`confirming`
+booking that has not yet reached its confirmation threshold. The account
+holder's balance is unaffected. Only a human calling
+`service.Onchain.ApproveReview` moves it to `confirmed` and, at that point
+(and not before), posts the `deposit_confirm` journal via the same
+`postDepositConfirmedJournal` path (and same `EventUID` cross-link) the
+normal `confirming -> confirmed` transition uses. `RejectReview` moves it to
+`failed` and never posts a journal at all.
+
+**Why**: `review` exists specifically because a single-source "confirmed"
+signal (RPC lied, webhook secret leaked) is otherwise the deposit path's
+whole trust boundary (design doc §5-1) -- an unbounded free-money bug if a
+sighting could reach `confirmed`, and therefore a journal, without this
+compensating control ever having a chance to catch it. If routing to review
+had any accounting side effect (even a provisional credit), the control
+would be theater: the "free money" the gate exists to prevent would already
+be sitting in the user's balance by the time a human looks at the queue.
+
+**Enforced by**:
+- `presets.DepositLifecycle` (`presets/deposit.go`) -- `review` is reachable
+  only from `confirming`, and its own only outgoing edges are `confirmed`
+  and `failed`; no other status can reach `review`, and `review` cannot
+  reach anything but a human-driven `ApproveReview`/`RejectReview` call.
+- `service.Onchain.routeToReview` (`service/onchain.go`) calls only
+  `Booker.Transition` -- it never touches `TxComposer`/`JournalWriter`.
+- `service.Onchain.postDepositConfirmedJournal` is the ONLY function in the
+  onchain subsystem that posts a `deposit_confirm` journal; both
+  `advanceConfirmation`'s normal path and `ApproveReview` call through it,
+  so there is exactly one code path that can ever credit a deposit.
+- `service.Onchain.RejectReview` calls only `Booker.Transition` to `failed`,
+  mirroring `routeToReview` -- never `TxComposer`.
+
+**Pinned by**:
+- `service.TestOnchain_IngestDeposit_OverCeiling_RoutesToReview` (an amount
+  above `AutoCreditCeiling` reaching its confirmation threshold transitions
+  to `review`, not `confirmed`, with an empty `journal_uid`)
+- `service.TestOnchain_IngestDeposit_ReconcileMismatch_RoutesToReview` (a
+  configured `DepositConfirmer` disagreeing with the primary sighting routes
+  to `review` with an empty `journal_uid`, even though the primary source
+  alone would have confirmed)
+- `service.TestOnchain_ApproveReview_PostsJournalWithEventLink` (approving a
+  reviewed booking transitions it to `confirmed` and posts its
+  `deposit_confirm` journal, cross-linked via `EventUID`, only at that point)
+- `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
+  transitions it to `failed` with `journal_uid` remaining empty forever)
+
 ---
 
 ## How to add a new invariant

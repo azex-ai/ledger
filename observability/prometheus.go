@@ -87,6 +87,7 @@ type PrometheusMetrics struct {
 	depositReorgDetected     *prometheus.CounterVec
 	sweepUnattributed        *prometheus.CounterVec
 	registrationRescanFailed *prometheus.CounterVec
+	depositReviewRequired    *prometheus.CounterVec
 }
 
 // NewPrometheusMetrics returns a Prometheus-backed core.Metrics implementation
@@ -250,6 +251,11 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "registration_rescan_failed_total",
 			Help:      "Total EnsureDepositAddress background historical rescan failures, labelled by chain.",
 		}, []string{"chain_id"}),
+		depositReviewRequired: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "deposit_review_required_total",
+			Help:      "Total deposits routed to human review instead of auto-crediting, labelled by chain and reason.",
+		}, []string{"chain_id", "reason"}),
 	}
 
 	registry.MustRegister(
@@ -263,7 +269,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.reconcileGap, m.reservedAmount,
 		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
-		m.registrationRescanFailed,
+		m.registrationRescanFailed, m.depositReviewRequired,
 	)
 
 	return m
@@ -405,4 +411,9 @@ func (m *PrometheusMetrics) SweepUnattributed(chainID int64) {
 // RegistrationRescanFailed increments the registration-rescan failure counter.
 func (m *PrometheusMetrics) RegistrationRescanFailed(chainID int64) {
 	m.registrationRescanFailed.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// DepositReviewRequired increments the review-required counter.
+func (m *PrometheusMetrics) DepositReviewRequired(chainID int64, reason string) {
+	m.depositReviewRequired.WithLabelValues(int64Label(chainID), safeLabel(reason)).Inc()
 }
