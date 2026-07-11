@@ -217,6 +217,7 @@ func run() error {
 	//       service.WithSweepPolicies(...), service.WithReorgPolicy(...))
 	//   srv.SetDepositAddressProvider(onchainSvc) // server/handler_onchain.go
 	//   srv.SetDepositIngester(onchainSvc)        // server/handler_webhooks.go bridge
+	//   srv.SetDepositReviewer(onchainSvc)        // server/handler_deposit_reviews.go (M3 review queue)
 	//   go onchainSvc.Run(ctx)                    // watcher + sweep loops
 	//
 	// (reader/scanner/sweeper from chains/evm — see docs/COOKBOOK.md's crypto

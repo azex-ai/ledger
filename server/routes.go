@@ -56,6 +56,11 @@ func (s *Server) setupRoutes() {
 			// called (see handler_onchain.go).
 			r.Get("/holders/{holder}/deposit-address", s.handleGetDepositAddress)
 
+			// Crypto deposit add-on (human-review queue). 404s via
+			// bizcode.FeatureNotEnabled until SetDepositReviewer is called
+			// (see handler_deposit_reviews.go).
+			r.Get("/deposits/reviews", s.handleListDepositReviews)
+
 			r.Get("/audit/journals", s.handleListAuditJournals)
 			r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
 			r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
@@ -102,6 +107,11 @@ func (s *Server) setupRoutes() {
 			// Crypto deposit add-on (issuance side) — idempotent, safe to
 			// call repeatedly for the same holder.
 			r.Post("/holders/{holder}/deposit-address", s.handleEnsureDepositAddress)
+
+			// Crypto deposit add-on (human-review resolution). Idempotent —
+			// see DepositReviewer's ApproveReview/RejectReview contracts.
+			r.Post("/deposits/{uid}/review/approve", s.handleApproveDepositReview)
+			r.Post("/deposits/{uid}/review/reject", s.handleRejectDepositReview)
 		})
 
 		// ---- Scope: admin ----

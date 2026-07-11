@@ -840,6 +840,30 @@ func (o *Onchain) RejectReview(ctx context.Context, bookingUID, reason string) (
 	return refreshed, nil
 }
 
+// ListReviews lists deposit bookings currently parked in review status
+// (design doc §9.4: the `review` status is itself the review queue -- no
+// dedicated table), oldest first, cursor-paginated. Backs the HTTP review
+// queue endpoint (server.DepositReviewer).
+func (o *Onchain) ListReviews(ctx context.Context, cursor string, limit int32) ([]core.Booking, string, error) {
+	if err := o.deps.validateCore(); err != nil {
+		return nil, "", err
+	}
+	depositUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.DepositClassificationCode)
+	if err != nil {
+		return nil, "", fmt.Errorf("service: onchain: list reviews: %w", err)
+	}
+	bookings, next, err := o.deps.BookingReader.ListBookings(ctx, core.BookingFilter{
+		ClassificationUID: depositUID,
+		Status:            "review",
+		Cursor:            cursor,
+		Limit:             int(limit),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("service: onchain: list reviews: %w", err)
+	}
+	return bookings, next, nil
+}
+
 // parseDepositMeta extracts the stable identity fields IngestDeposit records
 // on every deposit booking's metadata. ok is false if any field is missing
 // or malformed -- callers should log and skip rather than fail a whole
