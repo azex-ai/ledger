@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -11,26 +12,27 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/server"
 )
 
 // --- Mock DepositReviewer ---
 
 type mockDepositReviewer struct {
 	listFn    func(ctx context.Context, cursor string, limit int32) ([]core.Booking, string, error)
-	approveFn func(ctx context.Context, bookingUID string) (*core.Booking, error)
-	rejectFn  func(ctx context.Context, bookingUID, reason string) (*core.Booking, error)
+	approveFn func(ctx context.Context, bookingUID, actor string) (*core.Booking, error)
+	rejectFn  func(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error)
 }
 
 func (m *mockDepositReviewer) ListReviews(ctx context.Context, cursor string, limit int32) ([]core.Booking, string, error) {
 	return m.listFn(ctx, cursor, limit)
 }
 
-func (m *mockDepositReviewer) ApproveReview(ctx context.Context, bookingUID string) (*core.Booking, error) {
-	return m.approveFn(ctx, bookingUID)
+func (m *mockDepositReviewer) ApproveReview(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
+	return m.approveFn(ctx, bookingUID, actor)
 }
 
-func (m *mockDepositReviewer) RejectReview(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
-	return m.rejectFn(ctx, bookingUID, reason)
+func (m *mockDepositReviewer) RejectReview(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
+	return m.rejectFn(ctx, bookingUID, actor, reason)
 }
 
 func reviewBooking(uid string) *core.Booking {
@@ -90,10 +92,12 @@ func TestApproveDepositReview(t *testing.T) {
 	approved.JournalUID = "journal-1"
 
 	calls := 0
+	var gotActor string
 	srv.SetDepositReviewer(&mockDepositReviewer{
-		approveFn: func(ctx context.Context, bookingUID string) (*core.Booking, error) {
+		approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
 			calls++
 			assert.Equal(t, "booking-1", bookingUID)
+			gotActor = actor
 			return approved, nil
 		},
 	})
@@ -105,12 +109,41 @@ func TestApproveDepositReview(t *testing.T) {
 	assert.Equal(t, "confirmed", data["status"])
 	assert.Equal(t, "journal-1", data["journal_uid"])
 	assert.Equal(t, 1, calls)
+	// MJ2: no API key configured in this test server -- the defensive
+	// fallback records "unknown" rather than an empty/missing actor.
+	assert.Equal(t, "unknown", gotActor)
+}
+
+// TestApproveDepositReview_ForwardsAuthenticatedActor pins MJ2: when an API
+// key is configured and the request authenticates, the key's Name is
+// forwarded as the approving actor (audit attribution for the deposit
+// path's highest-privilege action).
+func TestApproveDepositReview_ForwardsAuthenticatedActor(t *testing.T) {
+	srv := newScopedTestServer(server.APIKey{Name: "ops-carol", Scope: server.ScopeWrite, Secret: []byte("secret-1")})
+	approved := reviewBooking("booking-1")
+	approved.Status = "confirmed"
+	approved.JournalUID = "journal-1"
+
+	var gotActor string
+	srv.SetDepositReviewer(&mockDepositReviewer{
+		approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
+			gotActor = actor
+			return approved, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/deposits/booking-1/review/approve", nil)
+	req.Header.Set("Authorization", "Bearer secret-1")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "ops-carol", gotActor)
 }
 
 func TestApproveDepositReview_Conflict(t *testing.T) {
 	srv := newTestServer()
 	srv.SetDepositReviewer(&mockDepositReviewer{
-		approveFn: func(ctx context.Context, bookingUID string) (*core.Booking, error) {
+		approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
 			return nil, core.ErrConflict
 		},
 	})
@@ -131,11 +164,12 @@ func TestRejectDepositReview(t *testing.T) {
 	rejected.Status = "failed"
 	rejected.Metadata = map[string]string{"reject_reason": "suspected fraud"}
 
-	var gotReason string
+	var gotReason, gotActor string
 	srv.SetDepositReviewer(&mockDepositReviewer{
-		rejectFn: func(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
+		rejectFn: func(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
 			assert.Equal(t, "booking-1", bookingUID)
 			gotReason = reason
+			gotActor = actor
 			return rejected, nil
 		},
 	})
@@ -147,12 +181,39 @@ func TestRejectDepositReview(t *testing.T) {
 	assert.Equal(t, "failed", data["status"])
 	assert.Empty(t, data["journal_uid"], "reject must never carry a journal_uid (I-21)")
 	assert.Equal(t, "suspected fraud", gotReason)
+	// MJ2: no API key configured in this test server -- the defensive
+	// fallback records "unknown" rather than an empty/missing actor.
+	assert.Equal(t, "unknown", gotActor)
+}
+
+// TestRejectDepositReview_ForwardsAuthenticatedActor pins MJ2's reject half:
+// the authenticated API key's Name is forwarded as the rejecting actor.
+func TestRejectDepositReview_ForwardsAuthenticatedActor(t *testing.T) {
+	srv := newScopedTestServer(server.APIKey{Name: "ops-dave", Scope: server.ScopeWrite, Secret: []byte("secret-2")})
+	rejected := reviewBooking("booking-1")
+	rejected.Status = "failed"
+
+	var gotActor string
+	srv.SetDepositReviewer(&mockDepositReviewer{
+		rejectFn: func(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
+			gotActor = actor
+			return rejected, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/deposits/booking-1/review/reject", jsonBody(t, map[string]string{"reason": "n/a"}))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret-2")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "ops-dave", gotActor)
 }
 
 func TestRejectDepositReview_MissingReason(t *testing.T) {
 	srv := newTestServer()
 	srv.SetDepositReviewer(&mockDepositReviewer{
-		rejectFn: func(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
+		rejectFn: func(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
 			t.Fatal("must not reach the reviewer without a reason")
 			return nil, nil
 		},
@@ -165,7 +226,7 @@ func TestRejectDepositReview_MissingReason(t *testing.T) {
 func TestRejectDepositReview_Conflict(t *testing.T) {
 	srv := newTestServer()
 	srv.SetDepositReviewer(&mockDepositReviewer{
-		rejectFn: func(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
+		rejectFn: func(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
 			return nil, core.ErrConflict
 		},
 	})

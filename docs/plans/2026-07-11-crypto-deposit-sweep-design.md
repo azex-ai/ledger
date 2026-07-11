@@ -181,6 +181,16 @@ review
   0 或缺省 = 无上限 = 关闭该机制，opt-in 语义与整个 onchain 子系统一致）。Aaron 部署时定具体数值。
 - 判定在 adapter 边界之后、过账之前，纯 service 逻辑，无外部调用。
 
+**§9.2 addendum（M3.1 secure-by-default，2026-07-11 安全评审 MJ1 拍板，见
+`docs/bugs/2026-07-11-m3-security-review.md`）**：上面「0 或缺省 = 关闭」的
+opt-in 默认值被推翻——0（从未设置）现在是 `service.Onchain.Run` 的**启动错误**，
+不是「关闭该机制」。消费方必须显式二选一：正数 ceiling，或哨兵值
+`core.UnboundedAutoCredit`（明确接受无上限单源信任）。理由：这一项的默认值直接
+等于「信任边界敞开」，与整个 onchain 子系统其余部分（`DepositConfirmer`/
+`ReconcileCeiling`/watcher/sweep 均可无害地保持 nil/0）不同类——0 default 会让
+「已加固」的 M3 反而制造一种虚假的安全感。`ReconcileCeiling` 不受影响，仍是
+opt-in（0 = 不对账，但不影响铸币上限本身）。
+
 ### 9.3 双 provider 对账（reconciliation）
 
 - 新 port（消费方定义，`core/interfaces.go`）：
@@ -222,3 +232,5 @@ review
 
 - `review` 状态是 lifecycle 的**新增**（expand-safe）：老 booking 不受影响，新增转移边不破坏现有 confirmed/failed 路径。
 - AutoCreditCeiling/ReconcileCeiling 缺省 = 关闭 → 未配置的消费方行为与今天完全一致（向后兼容）。
+  **（M3.1 addendum 推翻此条，见 §9.2 addendum：`AutoCreditCeiling` 缺省改为启动即报错，
+  不再是「行为不变」的向后兼容默认——这是本次安全评审后的刻意破例，理由同上。）**

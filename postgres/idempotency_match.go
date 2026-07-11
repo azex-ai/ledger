@@ -131,6 +131,16 @@ var bookingMetadataObservationVariantKeys = []string{
 	// present in CreateBookingInput's own Metadata.
 	"review_reason",
 	"reject_reason",
+	// service.Onchain.ApproveReview's approvedByMetaKey / RejectReview's
+	// rejectedByMetaKey (MJ2 audit attribution) -- same class of problem as
+	// review_reason/reject_reason above: added by a post-CreateBooking
+	// Transition call, so a watcher rescan or retried webhook delivery of
+	// the original sighting re-derives the same idempotency key and the
+	// same CreateBookingInput.Metadata (which never had these keys) and
+	// must still resolve to the existing booking, not spuriously
+	// ErrConflict on a key it never had a chance to set.
+	"approved_by",
+	"rejected_by",
 }
 
 // bookingMetadataMatches is ensureBookingMatchesInput's booking-Metadata
