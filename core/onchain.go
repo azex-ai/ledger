@@ -173,6 +173,18 @@ type SweepTarget struct {
 	AccountHolder int64  `json:"account_holder"`
 }
 
+// UnboundedAutoCredit is the explicit sentinel a consumer sets
+// TokenConfig.AutoCreditCeiling to when they deliberately want NO cap on
+// this token's auto-credit path -- an explicit, reviewed risk acceptance
+// that a single confirmed sighting (the primary RPC's word alone, absent a
+// matching second-source reconciliation) may auto-credit any amount. This is
+// DISTINCT from the zero value, which means "nobody ever set this field"
+// and is refused at startup (service.Onchain.Run) rather than silently
+// treated as unbounded -- see AutoCreditCeiling's doc comment and design doc
+// §9.2 addendum (M3.1 secure-by-default, docs/bugs/2026-07-11-m3-security-review.md
+// MJ1).
+var UnboundedAutoCredit = decimal.NewFromInt(-1)
+
 // TokenConfig maps one ERC-20 contract address on a chain to the ledger
 // currency it credits (deposit side) or is swept as (sweep side), plus the
 // token's on-chain decimals so adapter code can normalize raw integer
@@ -189,18 +201,35 @@ type TokenConfig struct {
 	// units) this token may auto-credit through the confirming->confirmed
 	// path without pausing for human review (design doc §9.2: M3
 	// compensating controls -- the deposit path's RPC oracle is otherwise
-	// unbounded trusted). Zero (the default) disables the gate -- every
-	// deposit that reaches its confirmation threshold auto-credits, matching
-	// pre-M3 behavior. Only meaningful on ChainConfig.CreditTokens entries;
-	// SweepTokens never route through the review gate (sweep bookings never
-	// post a journal, I-19).
+	// unbounded trusted). MUST be deliberately set on every
+	// ChainConfig.CreditTokens entry -- either to a positive ceiling, or to
+	// UnboundedAutoCredit to explicitly accept an unbounded single-source
+	// trust model. The zero value ("never touched this field") is NOT
+	// "unbounded": service.Onchain.Run refuses to start with any
+	// CreditTokens entry left at zero, precisely because that silent
+	// default is the pre-M3 unbounded-mint trust model M3 exists to close
+	// (see UnboundedAutoCredit's doc comment). Only meaningful on
+	// ChainConfig.CreditTokens entries; SweepTokens never route through the
+	// review gate (sweep bookings never post a journal, I-19).
 	AutoCreditCeiling decimal.Decimal `json:"auto_credit_ceiling"`
 	// ReconcileCeiling is the minimum deposit amount that requires a second,
 	// independent-source confirmation (OnchainDeps.DepositConfirmer) before
 	// auto-crediting (design doc §9.3). Zero disables the gate even when a
 	// DepositConfirmer is configured. Independent of AutoCreditCeiling -- a
-	// consumer may set either, both, or neither.
+	// consumer may set either, both, or neither. Unlike AutoCreditCeiling,
+	// leaving this at zero is a legitimate ("no reconciliation gate")
+	// choice, not a startup error: the ceiling that actually bounds mint
+	// exposure is AutoCreditCeiling.
 	ReconcileCeiling decimal.Decimal `json:"reconcile_ceiling"`
+}
+
+// AutoCreditCeilingConfigured reports whether AutoCreditCeiling has been
+// deliberately set: either to a positive bound, or to the explicit
+// UnboundedAutoCredit sentinel. false means "left at the zero value" --
+// service.Onchain.Run's startup validation treats that as a configuration
+// error for every CreditTokens entry (see AutoCreditCeiling's doc comment).
+func (c TokenConfig) AutoCreditCeilingConfigured() bool {
+	return c.AutoCreditCeiling.IsPositive() || c.AutoCreditCeiling.Equal(UnboundedAutoCredit)
 }
 
 // ChainConfig is one chain's onchain deposit + sweep parameters, injected by

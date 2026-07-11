@@ -561,9 +561,18 @@ shortfall. See design doc §5-4.
 
 ### 7. M3 compensating controls — threshold gate + reconciliation → human review
 
+> ⚠️ **`AutoCreditCeiling` is REQUIRED, not opt-in.** For every
+> `(chain, token)` you configure in `CreditTokens`, you must set
+> `AutoCreditCeiling` — either to a positive cap, or to
+> `core.UnboundedAutoCredit` if you deliberately accept unbounded
+> single-source-RPC trust. Leave it unset and `svc.Onchain().Run(ctx)`
+> refuses to start: this is a startup error, not a silently-disabled gate.
+> `ReconcileCeiling`, below, is genuinely optional — zero disables only the
+> reconciliation gate, not the mint-exposure cap.
+
 RPC is the deposit path's single trusted oracle by default (the watcher's
-own `ChainReader`) — the M3 add-on layers two independent, opt-in
-compensating controls on top before a deposit is ever auto-credited, and a
+own `ChainReader`) — the M3 add-on layers two independent compensating
+controls on top before a deposit is ever auto-credited, and a
 human-review surface for whatever they catch. Design:
 `docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §9.
 
@@ -613,8 +622,11 @@ all — small deposits aren't worth the extra RPC cost. Above it, a mismatch
 (source disagrees on amount, or doesn't see the tx included) routes to
 `review` instead of confirming, same as the threshold gate.
 
-Both ceilings default to zero (disabled) — M3 is entirely opt-in; a
-consumer that never sets either ceiling gets pre-M3 behavior unchanged.
+`ReconcileCeiling` defaults to zero (reconciliation gate disabled) — that
+part of M3 is genuinely opt-in. `AutoCreditCeiling` is NOT: it has no zero
+default (see the warning at the top of this section) — every `CreditTokens`
+entry must set it to either a positive cap or `core.UnboundedAutoCredit`,
+or `Run(ctx)` fails to start.
 
 **Human review surface** — a deposit parked in `review` has zero ledger
 effect (I-21: `journal_uid` stays empty) until a human resolves it. Wire the

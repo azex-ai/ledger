@@ -209,9 +209,10 @@ func (f *fakeDepositConfirmer) ConfirmDeposit(ctx context.Context, chainID int64
 // --- test harness ---
 
 type onchainHarness struct {
-	svc      *service.Onchain
-	classes  *postgres.ClassificationStore
-	bookings *postgres.BookingStore
+	svc        *service.Onchain
+	classes    *postgres.ClassificationStore
+	bookings   *postgres.BookingStore
+	currencies *postgres.CurrencyStore
 
 	reader      *fakeChainReader
 	scanner     *fakeChainScanner
@@ -264,6 +265,7 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		svc:         onchain,
 		classes:     classStore,
 		bookings:    bookingStore,
+		currencies:  currencyStore,
 		reader:      reader,
 		scanner:     scanner,
 		sweeper:     sweeper,
@@ -884,6 +886,103 @@ func TestOnchain_IngestDeposit_ReconcileBelowCeiling_SkipsRPCCall(t *testing.T) 
 	assert.Zero(t, confirmer.calls, "amount at/below ReconcileCeiling must never call the second source")
 }
 
+// erroringDepositConfirmer implements service.DepositConfirmer by always
+// returning err -- the mi4 regression fixture (a real second-source outage:
+// RPC timeout, provider 5xx, etc.), as opposed to fakeDepositConfirmer's
+// "no idea about this transfer" (included=false, no error) which models a
+// second source that is reachable but disagrees.
+type erroringDepositConfirmer struct{ err error }
+
+func (c *erroringDepositConfirmer) ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (decimal.Decimal, bool, error) {
+	return decimal.Zero, false, c.err
+}
+
+// TestOnchain_IngestDeposit_ReconcileError_FailsClosedStaysConfirming pins
+// mi4 (docs/bugs/2026-07-11-m3-security-review.md): when the reconciliation
+// gate's second source itself errors (as opposed to disagreeing), the
+// deposit path must fail CLOSED -- IngestDeposit returns an error, the
+// booking stays in "confirming" (neither auto-confirmed -- no unbounded
+// mint on a source outage -- nor pushed into "review", which is reserved for
+// a genuine disagreement a human needs to adjudicate), and no journal is
+// ever posted. This is the safety-critical branch reviewGate/advanceConfirmation
+// take when DepositConfirmer.ConfirmDeposit itself errors (onchain.go's
+// reviewGate: "reconcile: %w" wrap), previously exercised only by
+// inspection, never asserted.
+func TestOnchain_IngestDeposit_ReconcileError_FailsClosedStaysConfirming(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xreconcileerr"
+	)
+	confirmer := &erroringDepositConfirmer{err: fmt.Errorf("second source unreachable: timeout")}
+
+	chains := chainSetWithCeilings(chainID, token, "USDT-reconcileerr", 2, decimal.Zero, decimal.NewFromInt(10))
+	h := setupOnchain(t, chains, []string{"USDT-reconcileerr"}, service.WithDepositConfirmer(confirmer))
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8010)
+	require.NoError(t, err)
+
+	_, err = h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.Error(t, err, "a reconciliation-source error must fail closed, not be swallowed")
+
+	depositUID := h.classificationUID(t, presets.DepositClassificationCode)
+	bookings, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{
+		ClassificationUID: depositUID,
+		Status:            "confirming",
+		Limit:             100,
+	})
+	require.NoError(t, err)
+	var found *core.Booking
+	for i := range bookings {
+		if bookings[i].ChannelRef == txHash+"#0" {
+			found = &bookings[i]
+		}
+	}
+	require.NotNil(t, found, "booking must exist and be parked in confirming, not lost")
+	assert.Equal(t, core.Status("confirming"), found.Status, "must stay confirming -- neither auto-confirmed nor routed to review on a source ERROR (as opposed to a genuine disagreement)")
+	assert.Empty(t, found.JournalUID, "no journal may be posted while fail-closed (I-21)")
+}
+
+// --- M3.1 secure-by-default: Run() refuses to start with an unconfigured
+// AutoCreditCeiling (design doc §9.2 addendum, MJ1) ---
+
+// TestOnchain_Run_RejectsUnconfiguredAutoCreditCeiling pins MJ1: a
+// CreditTokens entry that never set AutoCreditCeiling (chainSetWithToken's
+// implicit zero value) must fail Run() outright, rather than silently
+// running with the pre-M3 unbounded-mint trust model.
+func TestOnchain_Run_RejectsUnconfiguredAutoCreditCeiling(t *testing.T) {
+	chains := chainSetWithToken(1, "0xusdttoken", "USDT-run-reject", 2) // AutoCreditCeiling left at zero
+	h := setupOnchain(t, chains, []string{"USDT-run-reject"})
+
+	err := h.svc.Run(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+	assert.Contains(t, err.Error(), "AutoCreditCeiling")
+}
+
+// TestOnchain_Run_AllowsExplicitUnboundedSentinel pins MJ1's escape hatch: a
+// consumer that deliberately sets AutoCreditCeiling to
+// core.UnboundedAutoCredit (an explicit risk acceptance) is NOT blocked by
+// the same startup check.
+func TestOnchain_Run_AllowsExplicitUnboundedSentinel(t *testing.T) {
+	chains := chainSetWithCeilings(1, "0xusdttoken", "USDT-run-allow", 2, core.UnboundedAutoCredit, decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-run-allow"})
+
+	// Pre-cancel: Run()'s background loops (watch/recheck/reorg-recheck) hit
+	// their ctx.Done() case immediately, so Run() returns as soon as startup
+	// validation passes -- this test only cares that validation didn't
+	// reject the sentinel, not about the loops actually ticking.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := h.svc.Run(ctx)
+	require.NoError(t, err)
+}
+
 // TestOnchain_ApproveReview_PostsJournalWithEventLink pins the approve half
 // of I-21: a reviewed booking has zero ledger effect until ApproveReview is
 // called, at which point it posts the SAME deposit_confirm journal path
@@ -910,15 +1009,17 @@ func TestOnchain_ApproveReview_PostsJournalWithEventLink(t *testing.T) {
 	require.Equal(t, core.Status("review"), reviewed.Status)
 	require.Empty(t, reviewed.JournalUID)
 
-	approved, err := h.svc.ApproveReview(ctx, reviewed.UID)
+	approved, err := h.svc.ApproveReview(ctx, reviewed.UID, "ops-alice")
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("confirmed"), approved.Status)
 	assert.NotEmpty(t, approved.JournalUID)
+	// MJ2: the approving actor must land on the booking's audit trail.
+	assert.Equal(t, "ops-alice", approved.Metadata["approved_by"])
 
 	journalUID := approved.JournalUID
 
 	// Idempotent re-approval: no error, same booking, no second journal.
-	again, err := h.svc.ApproveReview(ctx, reviewed.UID)
+	again, err := h.svc.ApproveReview(ctx, reviewed.UID, "ops-alice")
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("confirmed"), again.Status)
 	assert.Equal(t, journalUID, again.JournalUID)
@@ -947,14 +1048,16 @@ func TestOnchain_RejectReview_NoJournal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, core.Status("review"), reviewed.Status)
 
-	rejected, err := h.svc.RejectReview(ctx, reviewed.UID, "suspected fraud")
+	rejected, err := h.svc.RejectReview(ctx, reviewed.UID, "ops-bob", "suspected fraud")
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("failed"), rejected.Status)
 	assert.Empty(t, rejected.JournalUID, "reject must never post a journal (I-21)")
 	assert.Equal(t, "suspected fraud", rejected.Metadata["reject_reason"])
+	// MJ2: the rejecting actor must land on the booking's audit trail.
+	assert.Equal(t, "ops-bob", rejected.Metadata["rejected_by"])
 
 	// Idempotent re-rejection: no error, same terminal booking, still no journal.
-	again, err := h.svc.RejectReview(ctx, reviewed.UID, "suspected fraud")
+	again, err := h.svc.RejectReview(ctx, reviewed.UID, "ops-bob", "suspected fraud")
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("failed"), again.Status)
 	assert.Empty(t, again.JournalUID)
@@ -983,10 +1086,71 @@ func TestOnchain_ApproveReview_RejectReview_ConflictWhenNotReview(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, core.Status("confirming"), confirming.Status)
 
-	_, err = h.svc.ApproveReview(ctx, confirming.UID)
+	_, err = h.svc.ApproveReview(ctx, confirming.UID, "ops-key")
 	assert.ErrorIs(t, err, core.ErrConflict)
 
-	_, err = h.svc.RejectReview(ctx, confirming.UID, "n/a")
+	_, err = h.svc.RejectReview(ctx, confirming.UID, "ops-key", "n/a")
+	assert.ErrorIs(t, err, core.ErrConflict)
+}
+
+// TestOnchain_ApproveReview_RejectReview_RefuseNonDepositClassification pins
+// mi1 (defense-in-depth, docs/bugs/2026-07-11-m3-security-review.md): even
+// though today only the deposit classification's lifecycle ever reaches
+// "review", ApproveReview/RejectReview must not trust a booking's status
+// alone. A booking under a DIFFERENT classification that happens to reach a
+// state also named "review" (simulating a hypothetical future preset, not
+// today's installed bundle) must be refused, not silently driven through
+// depositConfirmTemplate.
+func TestOnchain_ApproveReview_RejectReview_RefuseNonDepositClassification(t *testing.T) {
+	chains := chainSetWithCeilings(1, "0xusdttoken", "USDT-mi1", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-mi1"})
+	ctx := context.Background()
+
+	otherLifecycle := &core.Lifecycle{
+		Initial:  "pending",
+		Terminal: []core.Status{"done"},
+		Transitions: map[core.Status][]core.Status{
+			"pending": {"review"},
+			"review":  {"done"},
+		},
+	}
+	otherClass, err := h.classes.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "other-thing",
+		Name:       "Other Thing",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  otherLifecycle,
+	})
+	require.NoError(t, err)
+
+	currencies, err := h.currencies.ListCurrencies(ctx, false)
+	require.NoError(t, err)
+	var currencyUID string
+	for _, c := range currencies {
+		if c.Code == "USDT-mi1" {
+			currencyUID = c.UID
+		}
+	}
+	require.NotEmpty(t, currencyUID)
+
+	otherBooking, err := h.bookings.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: otherClass.Code,
+		AccountHolder:      9999,
+		CurrencyUID:        currencyUID,
+		Amount:             decimal.NewFromInt(1),
+		IdempotencyKey:     "other-thing-1",
+	})
+	require.NoError(t, err)
+	_, err = h.bookings.Transition(ctx, core.TransitionInput{
+		BookingUID: otherBooking.UID,
+		ToStatus:   "review",
+		Source:     "test",
+	})
+	require.NoError(t, err)
+
+	_, err = h.svc.ApproveReview(ctx, otherBooking.UID, "attacker")
+	assert.ErrorIs(t, err, core.ErrConflict)
+
+	_, err = h.svc.RejectReview(ctx, otherBooking.UID, "attacker", "n/a")
 	assert.ErrorIs(t, err, core.ErrConflict)
 }
 
@@ -1023,7 +1187,7 @@ func TestOnchain_ListReviews(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, core.Status("review"), resolved.Status)
-	_, err = h.svc.ApproveReview(ctx, resolved.UID)
+	_, err = h.svc.ApproveReview(ctx, resolved.UID, "ops-key")
 	require.NoError(t, err)
 
 	// Never routed to review at all -- must not appear.

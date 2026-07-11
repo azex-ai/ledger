@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -29,12 +30,15 @@ type DepositReviewer interface {
 	// deposit_confirm journal. Idempotent: a no-op returning the current
 	// booking if already confirmed; core.ErrConflict for any other non-review
 	// status.
-	ApproveReview(ctx context.Context, bookingUID string) (*core.Booking, error)
+	// actor identifies who approved this (MJ2 audit attribution) --
+	// typically the authenticated API key's name; "" records no actor.
+	ApproveReview(ctx context.Context, bookingUID, actor string) (*core.Booking, error)
 	// RejectReview rejects a review-parked deposit booking to failed -- no
 	// journal is ever posted. Idempotent: a no-op returning the current
 	// booking if already failed; core.ErrConflict for any other non-review
-	// status.
-	RejectReview(ctx context.Context, bookingUID, reason string) (*core.Booking, error)
+	// status. actor identifies who rejected this (MJ2), same as
+	// ApproveReview.
+	RejectReview(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error)
 }
 
 // SetDepositReviewer installs the crypto-deposit human-review service. Pass
@@ -44,6 +48,23 @@ func (s *Server) SetDepositReviewer(r DepositReviewer) { s.depositReviewer = r }
 
 type rejectDepositReviewRequest struct {
 	Reason string `json:"reason"`
+}
+
+// reviewActorFrom extracts the authenticated API key's name to attribute an
+// approve/reject call to (MJ2, design doc §9.4 addendum) -- approve/reject
+// is the deposit path's highest-privilege action (it directly triggers
+// minting), so it must be attributable to a specific caller. The auth
+// middleware guarantees an identity is present on every scoped route in
+// production; "unknown" + a warning log is a defensive fallback only (e.g.
+// auth disabled in dev), never expected to fire when API keys are
+// configured.
+func reviewActorFrom(ctx context.Context) string {
+	id, ok := identityFrom(ctx)
+	if !ok {
+		slog.Warn("server: deposit review: no authenticated identity on scoped route, recording actor as unknown")
+		return "unknown"
+	}
+	return id.Name
 }
 
 // handleListDepositReviews lists deposit bookings currently parked in
@@ -87,7 +108,8 @@ func (s *Server) handleApproveDepositReview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	booking, err := s.depositReviewer.ApproveReview(r.Context(), uid)
+	actor := reviewActorFrom(r.Context())
+	booking, err := s.depositReviewer.ApproveReview(r.Context(), uid, actor)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -121,7 +143,8 @@ func (s *Server) handleRejectDepositReview(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	booking, err := s.depositReviewer.RejectReview(r.Context(), uid, req.Reason)
+	actor := reviewActorFrom(r.Context())
+	booking, err := s.depositReviewer.RejectReview(r.Context(), uid, actor, req.Reason)
 	if err != nil {
 		httpx.Error(w, err)
 		return

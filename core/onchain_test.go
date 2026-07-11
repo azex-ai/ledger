@@ -116,6 +116,29 @@ func TestSweepPolicy_Validate(t *testing.T) {
 	}
 }
 
+// TestTokenConfig_AutoCreditCeilingConfigured pins the M3.1 secure-by-default
+// sentinel contract (design doc §9.2 addendum, MJ1): zero is "unconfigured"
+// (service.Onchain.Run refuses to start on it), a positive ceiling and the
+// explicit UnboundedAutoCredit sentinel are both "deliberately configured".
+func TestTokenConfig_AutoCreditCeilingConfigured(t *testing.T) {
+	cases := []struct {
+		name     string
+		ceiling  decimal.Decimal
+		expected bool
+	}{
+		{"zero value (never set)", decimal.Zero, false},
+		{"positive ceiling", decimal.NewFromInt(10_000), true},
+		{"explicit unbounded sentinel", UnboundedAutoCredit, true},
+		{"arbitrary negative is not the sentinel", decimal.NewFromInt(-2), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := TokenConfig{AutoCreditCeiling: tc.ceiling}
+			assert.Equal(t, tc.expected, cfg.AutoCreditCeilingConfigured())
+		})
+	}
+}
+
 func TestReorgPolicy_IsValid(t *testing.T) {
 	assert.True(t, ReorgPolicyManual.IsValid())
 	assert.True(t, ReorgPolicyAutoReverse.IsValid())

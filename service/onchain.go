@@ -381,6 +381,46 @@ func (o *Onchain) canonicalFactory() (factory, initHash string, err error) {
 	return factory, initHash, nil
 }
 
+// validateAutoCreditCeilings enforces the M3.1 secure-by-default fence
+// (design doc §9.2 addendum, docs/bugs/2026-07-11-m3-security-review.md
+// MJ1): every configured CreditTokens entry, on every chain, must
+// deliberately set TokenConfig.AutoCreditCeiling -- either to a positive
+// bound, or to the explicit core.UnboundedAutoCredit sentinel. A token left
+// at the zero value is refused here rather than silently treated as
+// "unbounded", because that silent default is exactly the pre-M3
+// single-source-RPC unbounded-mint trust model M3 exists to close.
+//
+// Called from both ValidateAutoCreditCeilings (the exported form composition
+// roots call right after NewOnchain -- see that method's doc comment) and
+// Run() (defense in depth for callers that construct Onchain directly and
+// only ever call Run()). Neither call site is optional: a push-only/
+// webhook-only consumer that wires Onchain via a composition root but never
+// calls Run() (no background jobs needed) still gets this check via
+// EnableOnchain -> ValidateAutoCreditCeilings.
+func (o *Onchain) validateAutoCreditCeilings() error {
+	for chainID, cfg := range o.chains {
+		for token, tc := range cfg.CreditTokens {
+			if !tc.AutoCreditCeilingConfigured() {
+				return fmt.Errorf("service: onchain: chain %d token %q has no AutoCreditCeiling configured -- set a positive ceiling to cap unreviewed auto-credit, or core.UnboundedAutoCredit to explicitly accept unbounded single-source-RPC trust (design doc §9.2): %w", chainID, token, core.ErrInvalidInput)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateAutoCreditCeilings is the exported form of the M3.1
+// secure-by-default startup check (see validateAutoCreditCeilings): every
+// CreditTokens entry, on every configured chain, must deliberately set
+// AutoCreditCeiling. Composition roots that wire Onchain via NewOnchain
+// directly (e.g. ledger.go's EnableOnchain) must call this right after
+// construction and refuse to hand back the instance on error -- Run() alone
+// is not enough, since some consumers (push-only/webhook-only deployments
+// driving IngestDeposit from an HTTP handler with no background jobs) never
+// call Run() at all.
+func (o *Onchain) ValidateAutoCreditCeilings() error {
+	return o.validateAutoCreditCeilings()
+}
+
 // EnsureDepositAddress derives holder's CREATE2 deposit address from the
 // canonical (factory, initHash) shared across every configured chain,
 // registers it (idempotent), and launches a bounded background rescan of
@@ -637,7 +677,7 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 			return o.routeToReview(ctx, booking, channelRef, reason)
 		}
 
-		refreshed, err := o.postDepositConfirmedJournal(ctx, booking, channelRef)
+		refreshed, err := o.postDepositConfirmedJournal(ctx, booking, channelRef, "")
 		if err != nil {
 			return nil, fmt.Errorf("advance to confirmed: %w", err)
 		}
@@ -658,6 +698,15 @@ const (
 	// rejectReasonMetaKey is the TransitionInput.Metadata key RejectReview
 	// records its caller-supplied reason under.
 	rejectReasonMetaKey = "reject_reason"
+	// approvedByMetaKey / rejectedByMetaKey record the caller-supplied actor
+	// identity (design doc §9.4 addendum, MJ2: approve/reject is the
+	// highest-privilege action on the deposit path -- it directly triggers
+	// minting -- and must be attributable). ApproveReview/RejectReview leave
+	// these unset (no key written) when actor is "" (no authenticated
+	// identity available), rather than writing an empty string -- see each
+	// method's doc comment.
+	approvedByMetaKey = "approved_by"
+	rejectedByMetaKey = "rejected_by"
 )
 
 // reviewGate decides whether a confirming deposit that has reached its
@@ -722,9 +771,21 @@ func (o *Onchain) routeToReview(ctx context.Context, booking *core.Booking, chan
 // postDepositConfirmedJournal transitions booking to confirmed and posts its
 // deposit_confirm journal atomically, cross-linked via EventUID (design doc
 // §3) -- shared by advanceConfirmation's normal confirming->confirmed path
-// and ApproveReview's review->confirmed path (design doc §9.4), so the two
-// can never diverge on how a deposit's journal gets posted.
-func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core.Booking, channelRef string) (*core.Booking, error) {
+// (actor "": system/watcher-driven, nobody to attribute) and ApproveReview's
+// review->confirmed path (design doc §9.4), so the two can never diverge on
+// how a deposit's journal gets posted.
+//
+// actor is the human/API-key identity that triggered this posting (MJ2:
+// approve is the highest-privilege action on the deposit path). "" means
+// "no actor to record" (the normal automatic path) -- in that case
+// approvedByMetaKey is left off the transition/journal metadata entirely,
+// rather than written as an empty string.
+func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core.Booking, channelRef, actor string) (*core.Booking, error) {
+	var transitionMeta, journalMeta map[string]string
+	if actor != "" {
+		transitionMeta = map[string]string{approvedByMetaKey: actor}
+		journalMeta = map[string]string{approvedByMetaKey: actor}
+	}
 	err := o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
 		evt, err := booker.Transition(ctx, core.TransitionInput{
 			BookingUID: booking.UID,
@@ -732,6 +793,7 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 			ChannelRef: channelRef,
 			Amount:     booking.Amount,
 			Source:     onchainSource,
+			Metadata:   transitionMeta,
 		})
 		if err != nil {
 			return err
@@ -743,6 +805,7 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 			EventUID:       evt.UID,
 			Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
 			Source:         onchainSource,
+			Metadata:       journalMeta,
 		})
 		return err
 	})
@@ -760,20 +823,49 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 	return refreshed, nil
 }
 
+// requireDepositBooking loads bookingUID and verifies it is actually a
+// deposit booking (mi1, design doc §9.4 addendum): ApproveReview/RejectReview
+// only make sense against the deposit lifecycle's "review" status, and
+// today no other classification ever reaches "review" -- but that is a
+// coincidence of the currently-installed presets, not something the
+// classification's own lifecycle enforces. Without this check, a future
+// classification that reuses the "review" status name would let a
+// ScopeWrite caller drive it to "confirmed" through the deposit
+// approve/reject endpoints, forcing it through depositConfirmTemplate.
+func (o *Onchain) requireDepositBooking(ctx context.Context, bookingUID string) (*core.Booking, error) {
+	booking, err := o.deps.BookingReader.GetBooking(ctx, bookingUID)
+	if err != nil {
+		return nil, err
+	}
+	depositUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.DepositClassificationCode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve deposit classification: %w", err)
+	}
+	if booking.ClassificationUID != depositUID {
+		return nil, fmt.Errorf("booking %s is not a deposit booking: %w", bookingUID, core.ErrConflict)
+	}
+	return booking, nil
+}
+
 // ApproveReview approves a deposit booking parked in review (design doc
 // §9.4), posting its deposit_confirm journal via the same
 // postDepositConfirmedJournal path advanceConfirmation's normal
 // confirming->confirmed transition uses (EventUID cross-link, I-21).
 //
+// actor identifies who approved this (MJ2: audit attribution for the
+// deposit path's highest-privilege action) -- typically the authenticated
+// API key's name (server/handler_deposit_reviews.go). "" records no actor
+// (see postDepositConfirmedJournal's doc comment).
+//
 // Idempotent: calling it again once the booking is already confirmed
 // (i.e. a prior ApproveReview call already succeeded) is a no-op returning
 // the current booking. Calling it on any other non-review status is
 // core.ErrConflict.
-func (o *Onchain) ApproveReview(ctx context.Context, bookingUID string) (*core.Booking, error) {
+func (o *Onchain) ApproveReview(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
 	if err := o.deps.validateCore(); err != nil {
 		return nil, err
 	}
-	booking, err := o.deps.BookingReader.GetBooking(ctx, bookingUID)
+	booking, err := o.requireDepositBooking(ctx, bookingUID)
 	if err != nil {
 		return nil, fmt.Errorf("service: onchain: approve review: %w", err)
 	}
@@ -786,11 +878,11 @@ func (o *Onchain) ApproveReview(ctx context.Context, bookingUID string) (*core.B
 		return nil, fmt.Errorf("service: onchain: approve review: booking %s is %s, not review: %w", bookingUID, booking.Status, core.ErrConflict)
 	}
 
-	refreshed, err := o.postDepositConfirmedJournal(ctx, booking, booking.ChannelRef)
+	refreshed, err := o.postDepositConfirmedJournal(ctx, booking, booking.ChannelRef, actor)
 	if err != nil {
 		return nil, fmt.Errorf("service: onchain: approve review: %w", err)
 	}
-	o.log().Warn("service: onchain: deposit.review_approved", "booking_uid", booking.UID, "amount", booking.Amount.String())
+	o.log().Warn("service: onchain: deposit.review_approved", "booking_uid", booking.UID, "amount", booking.Amount.String(), "actor", actor)
 	return refreshed, nil
 }
 
@@ -799,17 +891,18 @@ func (o *Onchain) ApproveReview(ctx context.Context, bookingUID string) (*core.B
 // credited. reason is recorded verbatim on the transition's metadata (design
 // doc §9.4: "脱敏入事件" -- callers are responsible for sanitizing reason
 // before it reaches here, since it flows into the booking's audit trail and
-// emitted event).
+// emitted event). actor identifies who rejected this (MJ2, same attribution
+// as ApproveReview); "" records no actor.
 //
 // Idempotent: calling it again once the booking is already failed (i.e. a
 // prior RejectReview call already succeeded) is a no-op returning the
 // current booking. Calling it on any other non-review status is
 // core.ErrConflict.
-func (o *Onchain) RejectReview(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
+func (o *Onchain) RejectReview(ctx context.Context, bookingUID, actor, reason string) (*core.Booking, error) {
 	if err := o.deps.validateCore(); err != nil {
 		return nil, err
 	}
-	booking, err := o.deps.BookingReader.GetBooking(ctx, bookingUID)
+	booking, err := o.requireDepositBooking(ctx, bookingUID)
 	if err != nil {
 		return nil, fmt.Errorf("service: onchain: reject review: %w", err)
 	}
@@ -822,16 +915,20 @@ func (o *Onchain) RejectReview(ctx context.Context, bookingUID, reason string) (
 		return nil, fmt.Errorf("service: onchain: reject review: booking %s is %s, not review: %w", bookingUID, booking.Status, core.ErrConflict)
 	}
 
+	rejectMeta := map[string]string{rejectReasonMetaKey: reason}
+	if actor != "" {
+		rejectMeta[rejectedByMetaKey] = actor
+	}
 	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
 		BookingUID: booking.UID,
 		ToStatus:   "failed",
 		ChannelRef: booking.ChannelRef,
 		Source:     onchainSource,
-		Metadata:   map[string]string{rejectReasonMetaKey: reason},
+		Metadata:   rejectMeta,
 	}); err != nil {
 		return nil, fmt.Errorf("service: onchain: reject review: %w", err)
 	}
-	o.log().Warn("service: onchain: deposit.review_rejected", "booking_uid", booking.UID, "reason", reason)
+	o.log().Warn("service: onchain: deposit.review_rejected", "booking_uid", booking.UID, "reason", reason, "actor", actor)
 
 	refreshed, err := o.deps.BookingReader.GetBooking(ctx, booking.UID)
 	if err != nil {
@@ -1562,6 +1659,9 @@ func (o *Onchain) bumpSweep(bookingUID string) {
 // failing the whole subsystem (design doc: onchain is opt-in a la carte).
 func (o *Onchain) Run(ctx context.Context) error {
 	if err := o.deps.validateCore(); err != nil {
+		return fmt.Errorf("service: onchain: run: %w", err)
+	}
+	if err := o.validateAutoCreditCeilings(); err != nil {
 		return fmt.Errorf("service: onchain: run: %w", err)
 	}
 

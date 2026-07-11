@@ -655,6 +655,19 @@ doc §6).
 
 ## 13. Large / unreconciled deposit parked in review
 
+> ⚠️ **MUST READ before enabling onchain deposit ingestion**: `AutoCreditCeiling`
+> has **no safe default**. `service.Onchain.Run` refuses to start if ANY
+> `ChainConfig.CreditTokens` entry left it at the zero value (unconfigured) —
+> you must explicitly set either a positive ceiling (deposits above it park in
+> `review` instead of auto-crediting) or `core.UnboundedAutoCredit` (an
+> explicit, reviewed acceptance that a single RPC sighting may credit any
+> amount, with no cap at all). There is no way to silently skip this decision:
+> not setting it is a startup error, not "pre-M3 behavior." See
+> docs/COOKBOOK.md's crypto-deposit recipe §7 and
+> docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2. `ReconcileCeiling`
+> is unaffected — leaving it at zero is a legitimate choice (no reconciliation
+> gate), since `AutoCreditCeiling` is what actually bounds mint exposure.
+
 **Alert source**: `deposit.review_required` (emitted by the deposit path's M3
 compensating controls when a deposit clears its confirmation threshold but
 must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-design.md
