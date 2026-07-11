@@ -583,13 +583,21 @@ paths:
         Body shape and signing are channel-specific. Hot path is
         HMAC-verified. The `evm` channel understands a deposit-sighting
         shape ({chain_id, tx_hash, txlog_seq, token, from, to, amount,
-        confirmations}) and routes it to the same IngestDeposit
-        orchestration the chains/evm watcher uses -- see
-        docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3. Answers
-        FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
-        Other channels use the legacy shape ({tx_hash, booking_uid, amount,
-        confirmations, status}) that transitions a pre-existing booking_uid,
-        confined to deposit-classification bookings only (design doc §5-5).
+        confirmations, block_number}) and routes it to the same
+        IngestDeposit orchestration the chains/evm watcher uses -- see
+        docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3.
+        `block_number` is required and must be a positive integer (the
+        block the transfer log was mined in) -- the confirmation-threshold
+        recheck loop is computed from it, so a missing or zero value is
+        rejected rather than silently treated as an unconfirmable deposit
+        (core.DepositSighting.Validate). Answers FeatureNotEnabled (503)
+        unless the crypto-deposit add-on is wired in, and answers 200 with a
+        `{status: "ignored"}` no-op body (not an error) when the sighting
+        has nothing to book -- unregistered address, non-whitelisted token,
+        or an unconfigured chain. Other channels use the legacy shape
+        ({tx_hash, booking_uid, amount, confirmations, status}) that
+        transitions a pre-existing booking_uid, confined to
+        deposit-classification bookings only (design doc §5-5).
       security: []
       parameters:
         - in: path
@@ -597,7 +605,7 @@ paths:
           required: true
           schema: { type: string, enum: [evm, btc, custom] }
       responses:
-        "200": { description: Accepted -- returns the ingested booking (evm sighting path) or the transition event (legacy path). }
+        "200": { description: Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). }
         "401": { description: HMAC verification failed. }
         "403": { description: Channel/classification mismatch (design doc §5-5). }
         "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }

@@ -124,6 +124,7 @@ func run() error {
 		To:            depositAddr.Address,
 		Amount:        decimal.RequireFromString("500.00"),
 		Confirmations: chain.Confirmations, // already past threshold -> confirms immediately
+		BlockNumber:   1_000_000,           // the block this (simulated) transfer was mined in
 	}
 	booking, err := ingestDeposit(ctx, svc, registry, currencyUID, sighting, chain.Confirmations)
 	if err != nil {

@@ -129,6 +129,16 @@ func (s DepositSighting) Validate() error {
 	if s.Confirmations < 0 {
 		return fmt.Errorf("core: deposit sighting: confirmations must not be negative: %w", ErrInvalidInput)
 	}
+	// BlockNumber must be a real, positive block height -- both ingestion
+	// producers (chains/evm's watcher, channel/onchain's webhook) are
+	// required to fill it (see this field's doc comment). A zero value here
+	// is not "genesis block", it is "producer forgot to set it", and letting
+	// it through silently reintroduces the confirmation-threshold bypass
+	// design doc §3 depends on (recheck would compute confirmations against
+	// block 0, i.e. always far past any real threshold).
+	if s.BlockNumber <= 0 {
+		return fmt.Errorf("core: deposit sighting: block_number must be positive: %w", ErrInvalidInput)
+	}
 	return nil
 }
 

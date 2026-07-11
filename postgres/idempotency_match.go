@@ -105,12 +105,56 @@ func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen
 		// spuriously ErrConflicts every genuine idempotent replay whose metadata
 		// has more than one key. Route existing's bytes through the same
 		// jsonToStringMetadata parse used everywhere else so both sides compare
-		// as Go maps.
-		!maps.Equal(jsonToStringMetadata(existing.Metadata), input.Metadata) {
+		// as Go maps -- and, per bookingMetadataMatches's doc comment,
+		// tolerate "block_number" changing across replays (design doc §3 /
+		// I-20).
+		!bookingMetadataMatches(jsonToStringMetadata(existing.Metadata), input.Metadata) {
 		return nil, fmt.Errorf("postgres: create booking: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
 	return bookingFromRow(ctx, s.dims, q, existing)
+}
+
+// bookingMetadataKeyBlockNumber is the one booking Metadata key this file's
+// idempotency comparison treats as observation-variant rather than part of
+// the compared payload. It must match the literal key IngestDeposit writes
+// in service/onchain.go's CreateBooking call.
+const bookingMetadataKeyBlockNumber = "block_number"
+
+// bookingMetadataMatches is ensureBookingMatchesInput's booking-Metadata
+// comparison. It is maps.Equal for every key except
+// bookingMetadataKeyBlockNumber, which is stripped from both sides first.
+//
+// core.DepositSighting.BlockNumber is deliberately persisted on the deposit
+// booking (see that field's doc comment) so a later recheck can recompute
+// confirmations without re-scanning the chain -- it cannot simply be omitted
+// from CreateBooking's Metadata the way Confirmations is (line ~476 in
+// service/onchain.go), because a booking that crashes before its first
+// pending->confirming transition would otherwise have nowhere to read a
+// block number back from at all.
+//
+// But unlike every other field in Metadata, block_number is expected to
+// legitimately differ across two CreateBooking calls carrying the exact same
+// idempotency key: a chain reorg can reassign the identical transaction to a
+// different block between the first observation (already durably booked)
+// and a retried one (e.g. a watcher crash-recovers and re-scans the same
+// unconsumed block range after the reorg). Comparing it exactly would turn
+// that legitimate idempotent retry into a spurious ErrConflict -- exactly
+// the failure design doc §3 / invariant I-20 rule out. The retry must still
+// resolve to the original booking, keeping whichever block_number the first
+// successful create recorded; every other Metadata key is still compared
+// exactly, so this is not a general escape hatch.
+func bookingMetadataMatches(existing, input map[string]string) bool {
+	strip := func(m map[string]string) map[string]string {
+		if _, ok := m[bookingMetadataKeyBlockNumber]; !ok {
+			return m
+		}
+		out := make(map[string]string, len(m))
+		maps.Copy(out, m)
+		delete(out, bookingMetadataKeyBlockNumber)
+		return out
+	}
+	return maps.Equal(strip(existing), strip(input))
 }
 
 func totalDebit(entries []core.EntryInput) decimal.Decimal {

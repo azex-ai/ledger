@@ -696,17 +696,27 @@ instead of creating a duplicate.
   booking-creation time, by the shared `IngestDeposit` orchestration — not
   by either ingestion path individually, so both paths necessarily agree on
   it for the same transfer.
+- `core.DepositSighting.BlockNumber` is also reorg-variant (the same tx can
+  be re-mined into a different block) but, unlike `Confirmations`, it IS
+  persisted on the booking's `Metadata` — the recheck loop needs it back to
+  recompute confirmations without re-scanning the chain. To keep it from
+  breaking idempotent replays, `postgres.bookingMetadataMatches`
+  (`postgres/idempotency_match.go`) deliberately excludes this one metadata
+  key from `CreateBooking`'s payload-equality check; every other field
+  (including every other `Metadata` key) is still compared exactly.
 
 **Pinned by**:
-- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossLogIndexChurn`
-  (re-ingesting the identical sighting resolves to the same booking
-  regardless of what the block-level log_index would have been)
+- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn`
+  (re-ingesting the identical sighting with a DIFFERENT `block_number`,
+  simulating a reorg re-mining the tx into a different block, resolves to
+  the same booking — not `ErrConflict`)
 - `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
   re-observing the same sighting is a pure no-op; a second Transfer log in
   the same tx with a different `txlog_seq` does not collide)
 - `onchain.TestEVMAdapter_ParseSighting` (the webhook bridge derives
   `TxLogSeq` from the payload's tx-local `txlog_seq` field, never a
-  block-scoped index)
+  block-scoped index; also requires `block_number` per
+  `core.DepositSighting.Validate`)
 
 ---
 

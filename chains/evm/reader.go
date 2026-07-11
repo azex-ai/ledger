@@ -166,6 +166,11 @@ func (r *Reader) FetchDeposits(ctx context.Context, chainID int64, fromBlock, to
 			To:            to.Hex(),
 			Amount:        normalizeAmount(amount, tokenCfg.Decimals),
 			Confirmations: confirmations,
+			// BlockNumber persists the block this log was mined in, so a
+			// later recheck can recompute confirmations without re-scanning
+			// (core.DepositSighting's doc comment) -- confirmations above is
+			// only valid at this exact moment of observation.
+			BlockNumber: int64(lg.BlockNumber),
 		})
 	}
 	return sightings, nil

@@ -9,10 +9,14 @@
 //
 // Two body shapes are understood:
 //   - ParseSighting: {chain_id, tx_hash, txlog_seq, token, from, to, amount,
-//     confirmations} -- normalizes into a core.DepositSighting, the shape
-//     the crypto-deposit design (docs/plans/2026-07-11-crypto-deposit-sweep-design.md
-//     §3) routes to IngestDeposit. This is the path a server prefers when
-//     available (see server.sightingParser).
+//     confirmations, block_number} -- normalizes into a core.DepositSighting,
+//     the shape the crypto-deposit design
+//     (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3) routes to
+//     IngestDeposit. This is the path a server prefers when available (see
+//     server.sightingParser). block_number is required (the block the
+//     transfer log was mined in) -- core.DepositSighting.Validate rejects a
+//     missing or zero value, since the confirmation-threshold recheck loop
+//     is computed from it.
 //   - ParseCallback: {tx_hash, booking_uid, amount, confirmations, status} --
 //     the legacy shape that transitions a pre-existing booking_uid. Kept for
 //     channel.Adapter compliance and any caller still using it directly.
