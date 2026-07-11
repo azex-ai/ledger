@@ -185,6 +185,22 @@ type TokenConfig struct {
 	// Decimals is the token contract's on-chain decimals() value (e.g. 6 for
 	// USDT/USDC, 18 for most ERC-20s and native ETH).
 	Decimals int32 `json:"decimals"`
+	// AutoCreditCeiling is the maximum deposit amount (in ledger currency
+	// units) this token may auto-credit through the confirming->confirmed
+	// path without pausing for human review (design doc §9.2: M3
+	// compensating controls -- the deposit path's RPC oracle is otherwise
+	// unbounded trusted). Zero (the default) disables the gate -- every
+	// deposit that reaches its confirmation threshold auto-credits, matching
+	// pre-M3 behavior. Only meaningful on ChainConfig.CreditTokens entries;
+	// SweepTokens never route through the review gate (sweep bookings never
+	// post a journal, I-19).
+	AutoCreditCeiling decimal.Decimal `json:"auto_credit_ceiling"`
+	// ReconcileCeiling is the minimum deposit amount that requires a second,
+	// independent-source confirmation (OnchainDeps.DepositConfirmer) before
+	// auto-crediting (design doc §9.3). Zero disables the gate even when a
+	// DepositConfirmer is configured. Independent of AutoCreditCeiling -- a
+	// consumer may set either, both, or neither.
+	ReconcileCeiling decimal.Decimal `json:"reconcile_ceiling"`
 }
 
 // ChainConfig is one chain's onchain deposit + sweep parameters, injected by

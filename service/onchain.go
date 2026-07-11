@@ -147,20 +147,25 @@ func sweepSystemHolder(chainID int64) int64 {
 // error) -- calling EnsureDepositAddress/IngestDeposit directly with missing
 // deps fails fast with a wrapped core.ErrInvalidInput instead of panicking.
 type OnchainDeps struct {
-	Registry        core.AddressRegistry
-	Cursors         core.ChainCursorStore
-	Booker          core.Booker
-	BookingReader   core.BookingReader
-	Journals        core.JournalWriter // used directly only for standalone ReverseJournal (deep-reorg auto-reverse); the confirm path goes through TxComposer
-	TxComposer      TxComposer
-	Reader          core.ChainReader  // nil: watcher/recheck/reorg loops are skipped
-	Scanner         core.ChainScanner // nil: sweep loop is skipped
-	Sweeper         core.Sweeper      // nil: sweep loop is skipped
-	DeadLetters     DeadLetterRecorder
-	Currencies      core.CurrencyStore
-	Classifications core.ClassificationStore
-	Logger          core.Logger  // defaults to core.NopLogger()
-	Metrics         core.Metrics // defaults to core.NopMetrics()
+	Registry      core.AddressRegistry
+	Cursors       core.ChainCursorStore
+	Booker        core.Booker
+	BookingReader core.BookingReader
+	Journals      core.JournalWriter // used directly only for standalone ReverseJournal (deep-reorg auto-reverse); the confirm path goes through TxComposer
+	TxComposer    TxComposer
+	Reader        core.ChainReader  // nil: watcher/recheck/reorg loops are skipped
+	Scanner       core.ChainScanner // nil: sweep loop is skipped
+	Sweeper       core.Sweeper      // nil: sweep loop is skipped
+	// DepositConfirmer is the deposit path's second, independent
+	// reconciliation source (design doc §9.3). Nil (the default) disables
+	// the reconciliation gate entirely -- only TokenConfig.AutoCreditCeiling
+	// applies.
+	DepositConfirmer core.DepositConfirmer
+	DeadLetters      DeadLetterRecorder
+	Currencies       core.CurrencyStore
+	Classifications  core.ClassificationStore
+	Logger           core.Logger  // defaults to core.NopLogger()
+	Metrics          core.Metrics // defaults to core.NopMetrics()
 }
 
 // validateCore checks the dependencies required for the deposit ingestion
@@ -215,6 +220,14 @@ func WithSweepPolicies(policies ...core.SweepPolicy) OnchainOption {
 // unconditionally on every replica -- fine for single-instance deployments.
 func WithPool(pool *pgxpool.Pool) OnchainOption {
 	return func(o *Onchain) { o.pool = pool }
+}
+
+// WithDepositConfirmer wires the deposit path's second, independent
+// reconciliation source (design doc §9.3). Without it, the reconciliation
+// gate is disabled regardless of TokenConfig.ReconcileCeiling -- only the
+// threshold gate (TokenConfig.AutoCreditCeiling) applies.
+func WithDepositConfirmer(c core.DepositConfirmer) OnchainOption {
+	return func(o *Onchain) { o.deps.DepositConfirmer = c }
 }
 
 // WithWatchInterval sets the per-chain forward-scan tick interval. Default: 15s.
@@ -581,13 +594,18 @@ func depositChannelRef(txHash string, txLogSeq int32) string {
 }
 
 // advanceConfirmation pushes booking through pending -> confirming ->
-// confirmed as confirmations allows, sharing logic between IngestDeposit's
-// first-seen call and the pending/confirming recheck loop's re-invocation.
-// channelRef is the booking's ChannelRef value (depositChannelRef's output),
-// not a raw tx hash.
+// confirmed|review as confirmations allows, sharing logic between
+// IngestDeposit's first-seen call and the pending/confirming recheck loop's
+// re-invocation. channelRef is the booking's ChannelRef value
+// (depositChannelRef's output), not a raw tx hash. "review" is included
+// alongside the terminal statuses in the early no-op switch below
+// deliberately (design doc §9.1): only a human calling ApproveReview /
+// RejectReview may move a booking out of review, never this function --
+// e.g. a webhook/watcher re-observing an already-reviewed sighting must be a
+// no-op here, not re-evaluate the gate.
 func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking, confirmations int32, channelRef string, cfg core.ChainConfig) (*core.Booking, error) {
 	switch booking.Status {
-	case "confirmed", "failed", "expired":
+	case "confirmed", "failed", "expired", "review":
 		return booking, nil
 	case "pending":
 		if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
@@ -604,42 +622,222 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 		if confirmations < cfg.Confirmations {
 			return booking, nil
 		}
-		err := o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
-			evt, err := booker.Transition(ctx, core.TransitionInput{
-				BookingUID: booking.UID,
-				ToStatus:   "confirmed",
-				ChannelRef: channelRef,
-				Amount:     booking.Amount,
-				Source:     onchainSource,
-			})
-			if err != nil {
-				return err
-			}
-			_, err = journals.ExecuteTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
-				HolderID:       booking.AccountHolder,
-				CurrencyUID:    booking.CurrencyUID,
-				IdempotencyKey: "deposit-confirm-" + booking.UID,
-				EventUID:       evt.UID,
-				Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
-				Source:         onchainSource,
-			})
-			return err
-		})
+
+		// M3 compensating controls (design doc §9): before ever posting the
+		// journal that credits this deposit, check whether it must instead be
+		// parked for human review. tc's zero value (token config not found,
+		// or configured with zero ceilings) disables both gates -- pre-M3
+		// behavior.
+		tc := cfg.CreditTokens[booking.Metadata["token"]]
+		reason, err := o.reviewGate(ctx, booking, tc)
+		if err != nil {
+			return nil, fmt.Errorf("advance to confirmed: review gate: %w", err)
+		}
+		if reason != "" {
+			return o.routeToReview(ctx, booking, channelRef, reason)
+		}
+
+		refreshed, err := o.postDepositConfirmedJournal(ctx, booking, channelRef)
 		if err != nil {
 			return nil, fmt.Errorf("advance to confirmed: %w", err)
-		}
-		// Re-fetch: the RunInTx callback posted a journal and backfilled
-		// bookings.journal_id atomically (design doc: EventUID cross-link) --
-		// the in-memory booking passed into this function predates that
-		// write, so its JournalUID/Status would otherwise be reported stale.
-		refreshed, err := o.deps.BookingReader.GetBooking(ctx, booking.UID)
-		if err != nil {
-			return nil, fmt.Errorf("advance to confirmed: reload booking: %w", err)
 		}
 		return refreshed, nil
 	default:
 		return booking, nil
 	}
+}
+
+// Review reasons recorded on a deposit booking's review-transition metadata
+// and on the emitted deposit.review_required signal (design doc §9.1/§9.4).
+const (
+	reviewReasonOverCeiling       = "over_ceiling"
+	reviewReasonReconcileMismatch = "reconcile_mismatch"
+	// reviewReasonMetaKey is the TransitionInput.Metadata key routeToReview
+	// records reviewReasonOverCeiling/reviewReasonReconcileMismatch under.
+	reviewReasonMetaKey = "review_reason"
+	// rejectReasonMetaKey is the TransitionInput.Metadata key RejectReview
+	// records its caller-supplied reason under.
+	rejectReasonMetaKey = "reject_reason"
+)
+
+// reviewGate decides whether a confirming deposit that has reached its
+// confirmation threshold may proceed straight to confirmed, or must be
+// routed to human review first (design doc §9: RPC is the deposit path's
+// single trusted oracle, and threshold-gate + reconciliation are its only
+// compensating controls). Returns "" when the booking may proceed, or one of
+// reviewReasonOverCeiling / reviewReasonReconcileMismatch when it must not.
+//
+// The reconciliation RPC call (DepositConfirmer.ConfirmDeposit) happens
+// here, deliberately outside any DB transaction -- golang.md forbids
+// external calls inside a tx, and this always runs before
+// postDepositConfirmedJournal ever opens TxComposer.RunInTx.
+func (o *Onchain) reviewGate(ctx context.Context, booking *core.Booking, tc core.TokenConfig) (reason string, err error) {
+	if tc.AutoCreditCeiling.IsPositive() && booking.Amount.GreaterThan(tc.AutoCreditCeiling) {
+		return reviewReasonOverCeiling, nil
+	}
+	if o.deps.DepositConfirmer == nil || !tc.ReconcileCeiling.IsPositive() || booking.Amount.LessThanOrEqual(tc.ReconcileCeiling) {
+		return "", nil
+	}
+
+	chainID, txHash, txLogSeq, _, ok := parseDepositMeta(booking.Metadata)
+	if !ok {
+		return "", fmt.Errorf("reconcile: booking %s missing identity metadata", booking.UID)
+	}
+	amount, included, err := o.deps.DepositConfirmer.ConfirmDeposit(ctx, chainID, txHash, txLogSeq)
+	if err != nil {
+		return "", fmt.Errorf("reconcile: %w", err)
+	}
+	if !included || !amount.Equal(booking.Amount) {
+		return reviewReasonReconcileMismatch, nil
+	}
+	return "", nil
+}
+
+// routeToReview transitions a confirming deposit to review instead of
+// confirmed (design doc §9.1) -- no journal is posted; the booking's
+// account_holder balance does not move (I-21) until a human calls
+// ApproveReview or RejectReview.
+func (o *Onchain) routeToReview(ctx context.Context, booking *core.Booking, channelRef, reason string) (*core.Booking, error) {
+	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID,
+		ToStatus:   "review",
+		ChannelRef: channelRef,
+		Source:     onchainSource,
+		Metadata:   map[string]string{reviewReasonMetaKey: reason},
+	}); err != nil {
+		return nil, fmt.Errorf("route to review: %w", err)
+	}
+
+	chainID, _, _, _, _ := parseDepositMeta(booking.Metadata)
+	o.log().Warn("service: onchain: deposit.review_required", "booking_uid", booking.UID, "reason", reason, "amount", booking.Amount.String(), "chain_id", chainID)
+	o.metrics().DepositReviewRequired(chainID, reason)
+
+	refreshed, err := o.deps.BookingReader.GetBooking(ctx, booking.UID)
+	if err != nil {
+		return nil, fmt.Errorf("route to review: reload booking: %w", err)
+	}
+	return refreshed, nil
+}
+
+// postDepositConfirmedJournal transitions booking to confirmed and posts its
+// deposit_confirm journal atomically, cross-linked via EventUID (design doc
+// §3) -- shared by advanceConfirmation's normal confirming->confirmed path
+// and ApproveReview's review->confirmed path (design doc §9.4), so the two
+// can never diverge on how a deposit's journal gets posted.
+func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core.Booking, channelRef string) (*core.Booking, error) {
+	err := o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
+		evt, err := booker.Transition(ctx, core.TransitionInput{
+			BookingUID: booking.UID,
+			ToStatus:   "confirmed",
+			ChannelRef: channelRef,
+			Amount:     booking.Amount,
+			Source:     onchainSource,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = journals.ExecuteTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
+			HolderID:       booking.AccountHolder,
+			CurrencyUID:    booking.CurrencyUID,
+			IdempotencyKey: "deposit-confirm-" + booking.UID,
+			EventUID:       evt.UID,
+			Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
+			Source:         onchainSource,
+		})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Re-fetch: the RunInTx callback posted a journal and backfilled
+	// bookings.journal_id atomically (design doc: EventUID cross-link) --
+	// the in-memory booking passed into this function predates that write,
+	// so its JournalUID/Status would otherwise be reported stale.
+	refreshed, err := o.deps.BookingReader.GetBooking(ctx, booking.UID)
+	if err != nil {
+		return nil, fmt.Errorf("reload booking: %w", err)
+	}
+	return refreshed, nil
+}
+
+// ApproveReview approves a deposit booking parked in review (design doc
+// §9.4), posting its deposit_confirm journal via the same
+// postDepositConfirmedJournal path advanceConfirmation's normal
+// confirming->confirmed transition uses (EventUID cross-link, I-21).
+//
+// Idempotent: calling it again once the booking is already confirmed
+// (i.e. a prior ApproveReview call already succeeded) is a no-op returning
+// the current booking. Calling it on any other non-review status is
+// core.ErrConflict.
+func (o *Onchain) ApproveReview(ctx context.Context, bookingUID string) (*core.Booking, error) {
+	if err := o.deps.validateCore(); err != nil {
+		return nil, err
+	}
+	booking, err := o.deps.BookingReader.GetBooking(ctx, bookingUID)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: approve review: %w", err)
+	}
+	switch booking.Status {
+	case "confirmed":
+		return booking, nil
+	case "review":
+		// proceed below
+	default:
+		return nil, fmt.Errorf("service: onchain: approve review: booking %s is %s, not review: %w", bookingUID, booking.Status, core.ErrConflict)
+	}
+
+	refreshed, err := o.postDepositConfirmedJournal(ctx, booking, booking.ChannelRef)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: approve review: %w", err)
+	}
+	o.log().Warn("service: onchain: deposit.review_approved", "booking_uid", booking.UID, "amount", booking.Amount.String())
+	return refreshed, nil
+}
+
+// RejectReview rejects a deposit booking parked in review, transitioning it
+// to failed with no journal ever posted (I-21) -- the deposit is never
+// credited. reason is recorded verbatim on the transition's metadata (design
+// doc §9.4: "脱敏入事件" -- callers are responsible for sanitizing reason
+// before it reaches here, since it flows into the booking's audit trail and
+// emitted event).
+//
+// Idempotent: calling it again once the booking is already failed (i.e. a
+// prior RejectReview call already succeeded) is a no-op returning the
+// current booking. Calling it on any other non-review status is
+// core.ErrConflict.
+func (o *Onchain) RejectReview(ctx context.Context, bookingUID, reason string) (*core.Booking, error) {
+	if err := o.deps.validateCore(); err != nil {
+		return nil, err
+	}
+	booking, err := o.deps.BookingReader.GetBooking(ctx, bookingUID)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: reject review: %w", err)
+	}
+	switch booking.Status {
+	case "failed":
+		return booking, nil
+	case "review":
+		// proceed below
+	default:
+		return nil, fmt.Errorf("service: onchain: reject review: booking %s is %s, not review: %w", bookingUID, booking.Status, core.ErrConflict)
+	}
+
+	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID,
+		ToStatus:   "failed",
+		ChannelRef: booking.ChannelRef,
+		Source:     onchainSource,
+		Metadata:   map[string]string{rejectReasonMetaKey: reason},
+	}); err != nil {
+		return nil, fmt.Errorf("service: onchain: reject review: %w", err)
+	}
+	o.log().Warn("service: onchain: deposit.review_rejected", "booking_uid", booking.UID, "reason", reason)
+
+	refreshed, err := o.deps.BookingReader.GetBooking(ctx, booking.UID)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: reject review: reload booking: %w", err)
+	}
+	return refreshed, nil
 }
 
 // parseDepositMeta extracts the stable identity fields IngestDeposit records

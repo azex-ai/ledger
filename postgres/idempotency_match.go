@@ -115,15 +115,28 @@ func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen
 	return bookingFromRow(ctx, s.dims, q, existing)
 }
 
-// bookingMetadataKeyBlockNumber is the one booking Metadata key this file's
-// idempotency comparison treats as observation-variant rather than part of
-// the compared payload. It must match the literal key IngestDeposit writes
-// in service/onchain.go's CreateBooking call.
-const bookingMetadataKeyBlockNumber = "block_number"
+// bookingMetadataObservationVariantKeys are booking Metadata keys this
+// file's idempotency comparison treats as observation-variant rather than
+// part of the compared payload. Each must match a literal key
+// service/onchain.go writes, either into CreateBooking's Metadata directly
+// or by merging a later Transition's Metadata onto the booking row (see
+// bookingMetadataMatches's doc comment for why each one is here).
+var bookingMetadataObservationVariantKeys = []string{
+	// core.DepositSighting.BlockNumber, written by IngestDeposit's
+	// CreateBooking call.
+	"block_number",
+	// service.Onchain.routeToReview's reviewReasonMetaKey and
+	// RejectReview's rejectReasonMetaKey -- both are added to the booking's
+	// Metadata by a Transition call that happens AFTER CreateBooking, never
+	// present in CreateBookingInput's own Metadata.
+	"review_reason",
+	"reject_reason",
+}
 
 // bookingMetadataMatches is ensureBookingMatchesInput's booking-Metadata
 // comparison. It is maps.Equal for every key except
-// bookingMetadataKeyBlockNumber, which is stripped from both sides first.
+// bookingMetadataObservationVariantKeys, which are stripped from both sides
+// first.
 //
 // core.DepositSighting.BlockNumber is deliberately persisted on the deposit
 // booking (see that field's doc comment) so a later recheck can recompute
@@ -140,18 +153,27 @@ const bookingMetadataKeyBlockNumber = "block_number"
 // and a retried one (e.g. a watcher crash-recovers and re-scans the same
 // unconsumed block range after the reorg). Comparing it exactly would turn
 // that legitimate idempotent retry into a spurious ErrConflict -- exactly
-// the failure design doc §3 / invariant I-20 rule out. The retry must still
-// resolve to the original booking, keeping whichever block_number the first
-// successful create recorded; every other Metadata key is still compared
-// exactly, so this is not a general escape hatch.
+// the failure design doc §3 / invariant I-20 rule out.
+//
+// review_reason/reject_reason are the same class of problem, introduced by
+// M3 (design doc §9): once a deposit has been routed to review (or rejected
+// out of it), its stored Metadata carries a key no CreateBooking replay of
+// the original sighting will ever include -- a watcher rescan or a retried
+// webhook delivery of the identical transfer re-derives the exact same
+// idempotency key and the exact same CreateBookingInput.Metadata (chain
+// id/tx hash/txlog_seq/token/block_number only), and must still resolve to
+// the existing booking rather than spuriously ErrConflict-ing on a key it
+// never had a chance to set. The retry must still resolve to the original
+// booking, keeping whichever value the first successful create/transition
+// recorded; every other Metadata key is still compared exactly, so this is
+// not a general escape hatch.
 func bookingMetadataMatches(existing, input map[string]string) bool {
 	strip := func(m map[string]string) map[string]string {
-		if _, ok := m[bookingMetadataKeyBlockNumber]; !ok {
-			return m
-		}
 		out := make(map[string]string, len(m))
 		maps.Copy(out, m)
-		delete(out, bookingMetadataKeyBlockNumber)
+		for _, k := range bookingMetadataObservationVariantKeys {
+			delete(out, k)
+		}
 		return out
 	}
 	return maps.Equal(strip(existing), strip(input))

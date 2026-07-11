@@ -80,6 +80,12 @@ type Metrics interface {
 	// stays open for that address/chain until a retry succeeds, so a failure
 	// here must be visible to alerting, not just a log line.
 	RegistrationRescanFailed(chainID int64)
+	// DepositReviewRequired is emitted whenever a deposit that reached its
+	// confirmation threshold is routed to human review instead of
+	// auto-crediting (design doc §9: M3 compensating controls), labelled by
+	// chain and reason ("over_ceiling" | "reconcile_mismatch" -- a bounded
+	// set, safe for Prometheus cardinality).
+	DepositReviewRequired(chainID int64, reason string)
 }
 
 type nopMetrics struct{}
@@ -110,10 +116,11 @@ func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
 func (nopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
 func (nopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 
-func (nopMetrics) ChainCursorLag(int64, int64)    {}
-func (nopMetrics) DepositReorgDetected(int64)     {}
-func (nopMetrics) SweepUnattributed(int64)        {}
-func (nopMetrics) RegistrationRescanFailed(int64) {}
+func (nopMetrics) ChainCursorLag(int64, int64)         {}
+func (nopMetrics) DepositReorgDetected(int64)          {}
+func (nopMetrics) SweepUnattributed(int64)             {}
+func (nopMetrics) RegistrationRescanFailed(int64)      {}
+func (nopMetrics) DepositReviewRequired(int64, string) {}
 
 // NopMetrics returns a no-op metrics collector.
 func NopMetrics() Metrics { return nopMetrics{} }
