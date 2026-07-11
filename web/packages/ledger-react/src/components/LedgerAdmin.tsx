@@ -10,6 +10,7 @@ import { JournalsPage } from "./pages/JournalsPage";
 import { JournalDetailPage } from "./pages/JournalDetailPage";
 import { ReservationsPage } from "./pages/ReservationsPage";
 import { DepositsPage } from "./pages/DepositsPage";
+import { DepositReviewsPage } from "./pages/DepositReviewsPage";
 import { WithdrawalsPage } from "./pages/WithdrawalsPage";
 import { ClassificationsPage } from "./pages/ClassificationsPage";
 import { JournalTypesPage } from "./pages/JournalTypesPage";
@@ -61,6 +62,8 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
       return <ReservationsPage />;
     case "/deposits":
       return <DepositsPage />;
+    case "/deposit-reviews":
+      return <DepositReviewsPage />;
     case "/withdrawals":
       return <WithdrawalsPage />;
     case "/classifications":

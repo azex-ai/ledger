@@ -33,6 +33,7 @@ export { JournalDetailPage } from "./components/pages/JournalDetailPage";
 export type { JournalDetailPageProps } from "./components/pages/JournalDetailPage";
 export { ReservationsPage } from "./components/pages/ReservationsPage";
 export { DepositsPage } from "./components/pages/DepositsPage";
+export { DepositReviewsPage } from "./components/pages/DepositReviewsPage";
 export { WithdrawalsPage } from "./components/pages/WithdrawalsPage";
 export { ClassificationsPage } from "./components/pages/ClassificationsPage";
 export { JournalTypesPage } from "./components/pages/JournalTypesPage";
