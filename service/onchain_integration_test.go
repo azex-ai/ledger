@@ -989,3 +989,56 @@ func TestOnchain_ApproveReview_RejectReview_ConflictWhenNotReview(t *testing.T) 
 	_, err = h.svc.RejectReview(ctx, confirming.UID, "n/a")
 	assert.ErrorIs(t, err, core.ErrConflict)
 }
+
+// TestOnchain_ListReviews pins the HTTP review queue's backing query (design
+// doc §9.4): only deposit bookings currently parked in review are returned --
+// a booking that is confirming (never routed to review) or already resolved
+// (approved back to confirmed) must not appear.
+func TestOnchain_ListReviews(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-listreviews", 2, decimal.NewFromInt(100), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-listreviews"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8009)
+	require.NoError(t, err)
+
+	// Stays in review.
+	reviewed, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xlistreview1", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("150"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("review"), reviewed.Status)
+
+	// Resolved out of review -- must not appear in the queue anymore.
+	resolved, err := h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xlistreview2", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("200"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.Status("review"), resolved.Status)
+	_, err = h.svc.ApproveReview(ctx, resolved.UID)
+	require.NoError(t, err)
+
+	// Never routed to review at all -- must not appear.
+	_, err = h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xlistreview3", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("50"),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+
+	bookings, next, err := h.svc.ListReviews(ctx, "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, next)
+	require.Len(t, bookings, 1)
+	assert.Equal(t, reviewed.UID, bookings[0].UID)
+	assert.Equal(t, core.Status("review"), bookings[0].Status)
+	assert.Empty(t, bookings[0].JournalUID)
+}

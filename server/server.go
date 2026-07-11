@@ -71,6 +71,12 @@ type Server struct {
 	depositAddresses DepositAddressProvider
 	depositIngester  DepositIngester
 
+	// Optional crypto-deposit human-review add-on (see SetDepositReviewer in
+	// handler_deposit_reviews.go). Nil until a consumer's composition root
+	// wires service.OnchainService in; every /deposits/reviews* route
+	// answers bizcode.FeatureNotEnabled until then.
+	depositReviewer DepositReviewer
+
 	// Optional Prometheus /metrics handler. Mounted outside chi's middleware
 	// chain so it bypasses auth + rate limiting (scrapers usually live on
 	// the internal network and authenticate by host/port).

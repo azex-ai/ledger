@@ -23,6 +23,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 10. [Deployment security boundary](#10-deployment-security-boundary)
 11. [Partition management & archival](#11-partition-management--archival)
 12. [Deep reorg on a confirmed crypto deposit](#12-deep-reorg-on-a-confirmed-crypto-deposit)
+13. [Large / unreconciled deposit parked in review](#13-large--unreconciled-deposit-parked-in-review)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -649,6 +650,79 @@ the money moves. Selecting `auto_reverse` is an explicit risk acceptance by
 whoever configures the consumer's `ReorgPolicy` — it is not a "safer"
 default, and `manual` remains the default for exactly this reason (design
 doc §6).
+
+---
+
+## 13. Large / unreconciled deposit parked in review
+
+**Alert source**: `deposit.review_required` (emitted by the deposit path's M3
+compensating controls when a deposit clears its confirmation threshold but
+must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-design.md
+§9). Two possible reasons, recorded on the alert and on the booking's
+`metadata.review_reason`:
+
+- `over_ceiling` — the amount exceeds the chain/token's configured
+  `AutoCreditCeiling`.
+- `reconcile_mismatch` — a second, independent confirmation source
+  (`DepositConfirmer`) either does not see the transaction included, or sees a
+  different amount than the primary sighting.
+
+**Severity**: P2 by default — the deposit is safely parked, no ledger effect
+has happened yet (invariant I-21: a `review` booking's `journal_uid` is
+always empty). Escalate to P1 if `reconcile_mismatch` volume spikes (possible
+sign of a compromised or lagging primary RPC source, or genuinely forged
+sightings — exactly the unbounded-mint path this control exists to catch).
+
+### Work the queue
+
+1. **List pending reviews**:
+   ```
+   GET /api/v1/deposits/reviews?limit=50
+   ```
+   Returns deposit bookings currently in `review`, oldest first, cursor
+   paginated. Each entry's `metadata.review_reason` tells you why it's here,
+   and `amount` / `account_holder` / `channel_ref` (chain tx hash + log
+   index) give you everything needed to verify against a block explorer or a
+   second RPC provider.
+2. **Verify the deposit independently** — same due diligence as an
+   auto-reversed reorg (§12): check the transaction, its confirmations, and
+   its amount against a source you trust that is *not* the primary sighting
+   path (a second RPC provider, a public explorer, or your own
+   `DepositConfirmer` backing service if one is configured).
+3. **If genuine** (real deposit, just over the ceiling, or the reconciliation
+   mismatch was a transient RPC blip and the amount independently checks
+   out):
+   ```
+   POST /api/v1/deposits/{uid}/review/approve
+   ```
+   This posts the deposit's `deposit_confirm` journal through the exact same
+   code path a normal auto-confirmed deposit uses (cross-linked via
+   `event_id` — I-21) and moves the booking to `confirmed`. Idempotent: safe
+   to retry, a second call on an already-confirmed booking is a no-op.
+4. **If not genuine** (sighting does not independently verify, amounts
+   disagree and you cannot reconcile them, or you suspect a forged/duplicated
+   sighting):
+   ```
+   POST /api/v1/deposits/{uid}/review/reject
+   { "reason": "<why -- goes on the booking's audit trail>" }
+   ```
+   Moves the booking to `failed`. **No journal is ever posted** — the
+   deposit is never credited (I-21). Idempotent: safe to retry.
+5. Calling either endpoint on a booking that is not currently in `review`
+   (already resolved, or never routed there) returns a 409 conflict, not a
+   silent no-op or a forced transition — if you see this, someone else
+   already resolved it (or you have the wrong `uid`).
+
+### Tuning false-positive rate
+
+A high volume of `over_ceiling` reviews for legitimate large depositors means
+`AutoCreditCeiling` is set too low for that chain/token — raise it (a
+config-only change, not a code change). A high volume of
+`reconcile_mismatch` against a stable `DepositConfirmer` backing service
+more often signals a real problem with the *primary* sighting source (RPC
+lag, wrong contract address, log-parsing bug) than the reconciliation
+control being wrong — investigate the primary source before touching
+`ReconcileCeiling`.
 
 ---
 

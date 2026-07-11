@@ -559,6 +559,82 @@ tokens swept but never credited). `ledger-cli reconcile` / solvency checks
 must carve this out as its own line — don't let it silently mask a real
 shortfall. See design doc §5-4.
 
+### 7. M3 compensating controls — threshold gate + reconciliation → human review
+
+RPC is the deposit path's single trusted oracle by default (the watcher's
+own `ChainReader`) — the M3 add-on layers two independent, opt-in
+compensating controls on top before a deposit is ever auto-credited, and a
+human-review surface for whatever they catch. Design:
+`docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §9.
+
+**Threshold gate** — set `AutoCreditCeiling` per `(chain, token)` in
+`core.TokenConfig`. Any single deposit above it is parked in `review`
+instead of auto-confirmed, no matter how many confirmations it has:
+
+```go
+CreditTokens: map[string]core.TokenConfig{
+    "0xusdt...": {
+        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
+        AutoCreditCeiling: decimal.NewFromInt(10_000), // > 10k USDT -> review
+    },
+},
+```
+
+**Reconciliation gate** — wire a second, independent confirmation source
+(a different RPC provider, a block explorer API, your own indexer — anything
+that answers "was this tx included, and for how much?" without sharing a
+failure mode with your primary watcher) via `service.WithDepositConfirmer`,
+and set `ReconcileCeiling` to the amount above which it's worth the extra RPC
+round trip:
+
+```go
+type explorerConfirmer struct{ client *explorerClient } // your own adapter
+
+func (c *explorerConfirmer) ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (amount decimal.Decimal, included bool, err error) {
+    // query a *different* RPC/indexer than your primary watcher's Reader
+}
+
+onchain := service.NewOnchain(deps, chainSet,
+    service.WithDepositConfirmer(&explorerConfirmer{client: secondProviderClient}),
+)
+```
+
+```go
+CreditTokens: map[string]core.TokenConfig{
+    "0xusdt...": {
+        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
+        ReconcileCeiling: decimal.NewFromInt(1_000), // > 1k USDT -> double-check
+    },
+},
+```
+
+A deposit at or below `ReconcileCeiling` never calls the second source at
+all — small deposits aren't worth the extra RPC cost. Above it, a mismatch
+(source disagrees on amount, or doesn't see the tx included) routes to
+`review` instead of confirming, same as the threshold gate.
+
+Both ceilings default to zero (disabled) — M3 is entirely opt-in; a
+consumer that never sets either ceiling gets pre-M3 behavior unchanged.
+
+**Human review surface** — a deposit parked in `review` has zero ledger
+effect (I-21: `journal_uid` stays empty) until a human resolves it. Wire the
+review endpoints in alongside the address/ingestion services:
+
+```go
+srv.SetDepositReviewer(onchain) // *service.Onchain satisfies server.DepositReviewer
+```
+
+```
+GET  /api/v1/deposits/reviews?limit=50            -- list the queue, oldest first
+POST /api/v1/deposits/{uid}/review/approve         -- confirm + post the deposit_confirm journal
+POST /api/v1/deposits/{uid}/review/reject
+     { "reason": "..." }                           -- fail, no journal ever posted
+```
+
+See `docs/RUNBOOK.md` §13 for the on-call triage process. Both resolution
+endpoints are idempotent (repeat calls on an already-resolved booking are a
+no-op) and return a 409 conflict on any booking not currently in `review`.
+
 ---
 
 ## Running the example
