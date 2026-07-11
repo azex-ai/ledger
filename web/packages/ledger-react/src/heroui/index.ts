@@ -30,6 +30,7 @@ export { JournalDetailPage } from "./pages/JournalDetailPage";
 export { BalancesPage } from "./pages/BalancesPage";
 export { ReservationsPage } from "./pages/ReservationsPage";
 export { DepositsPage } from "./pages/DepositsPage";
+export { DepositReviewsPage } from "./pages/DepositReviewsPage";
 export { WithdrawalsPage } from "./pages/WithdrawalsPage";
 export { ClassificationsPage } from "./pages/ClassificationsPage";
 export { JournalTypesPage } from "./pages/JournalTypesPage";
