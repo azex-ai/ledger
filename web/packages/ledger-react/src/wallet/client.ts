@@ -74,6 +74,13 @@ export interface WalletHold {
   expires_at: string;
 }
 
+export interface WalletDepositAddress {
+  uid: string;
+  /** EIP-55 checksummed EVM address. */
+  address: string;
+  created_at: string;
+}
+
 export interface WalletTransactionsPage {
   list: WalletTransaction[];
   next_cursor: string;
@@ -113,10 +120,15 @@ export function createWalletClient(config: WalletClientConfig) {
     return p;
   }
 
-  async function request<T>(path: string, retried = false): Promise<T> {
+  async function request<T>(
+    path: string,
+    init?: RequestInit,
+    retried = false,
+  ): Promise<T> {
     const fetchImpl = config.fetch ?? globalThis.fetch;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      ...(init?.headers as Record<string, string> | undefined),
     };
     let usedToken: Promise<string> | null = null;
     if (config.getToken) {
@@ -124,7 +136,10 @@ export function createWalletClient(config: WalletClientConfig) {
       headers["Authorization"] = `Bearer ${await usedToken}`;
     }
 
-    const res = await fetchImpl(`${config.baseUrl}${path}`, { headers });
+    const res = await fetchImpl(`${config.baseUrl}${path}`, {
+      ...init,
+      headers,
+    });
 
     if (res.status === 401 && config.getToken && !retried) {
       // Expired/rotated token: refresh once and retry; a second 401 falls
@@ -134,7 +149,7 @@ export function createWalletClient(config: WalletClientConfig) {
       if (tokenPromise === usedToken) {
         refreshToken();
       }
-      return request<T>(path, true);
+      return request<T>(path, init, true);
     }
 
     if (!res.ok) {
@@ -166,6 +181,18 @@ export function createWalletClient(config: WalletClientConfig) {
 
     listHolds: () =>
       request<{ list: WalletHold[] }>("/holder/holds").then((d) => d.list),
+
+    // 404s if the token-bound holder has none yet — use ensureDepositAddress
+    // to issue one. The holder is never a request parameter, only the token.
+    getDepositAddress: () =>
+      request<WalletDepositAddress>("/holder/deposit-address"),
+
+    // Idempotent: repeated calls for the same holder always return the same
+    // address.
+    ensureDepositAddress: () =>
+      request<WalletDepositAddress>("/holder/deposit-address", {
+        method: "POST",
+      }),
   };
 }
 

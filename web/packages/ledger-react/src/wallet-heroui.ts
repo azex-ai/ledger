@@ -18,3 +18,4 @@ export { TransactionList } from "./wallet/heroui/transaction-list";
 export type { TransactionListProps } from "./wallet/heroui/transaction-list";
 export { WalletPanel } from "./wallet/heroui/wallet-panel";
 export type { WalletPanelProps } from "./wallet/heroui/wallet-panel";
+export { DepositAddressCard } from "./wallet/heroui/deposit-address-card";
