@@ -48,7 +48,7 @@ export const ledgerKeys = {
   currencies: (activeOnly?: boolean) =>
     ["ledger", "currencies", activeOnly] as const,
 
-  // Bookings (deposit / withdraw views). The third segment is the
+  // Bookings (deposit / withdraw / sweep views). The third segment is the
   // classification CODE; the params object carries the resolved numeric
   // `classificationId` the hook computes at runtime.
   bookings: (
@@ -60,6 +60,12 @@ export const ledgerKeys = {
       limit?: number;
     },
   ) => ["ledger", "bookings", code, params] as const,
+
+  // Crypto deposit
+  depositAddress: (holder: number) =>
+    ["ledger", "deposit-address", holder] as const,
+  depositReviews: (limit: number) =>
+    ["ledger", "deposit-reviews", limit] as const,
 } as const;
 
 // Partial-key PREFIXES for namespace-wide invalidation. React Query's
