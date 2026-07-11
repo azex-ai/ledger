@@ -68,6 +68,7 @@ const STATUS_COLOR: Record<string, "success" | "warning" | "danger" | "default">
   active: "success",
   ok: "success",
   pending: "warning",
+  sent: "warning",
   confirming: "warning",
   reserved: "warning",
   processing: "warning",

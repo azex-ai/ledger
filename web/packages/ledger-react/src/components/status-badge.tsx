@@ -7,6 +7,7 @@ const STATUS_COLORS: Record<string, string> = {
   settling: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20",
   released: "bg-zinc-500/15 text-zinc-400 border-zinc-500/20",
   pending: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20",
+  sent: "bg-blue-500/15 text-blue-400 border-blue-500/20",
   confirming: "bg-blue-500/15 text-blue-400 border-blue-500/20",
   confirmed: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20",
   failed: "bg-rose-500/15 text-rose-400 border-rose-500/20",
@@ -27,6 +28,7 @@ const DOT_COLORS: Record<string, string> = {
   settling: "bg-yellow-400",
   released: "bg-zinc-400",
   pending: "bg-yellow-400",
+  sent: "bg-blue-400",
   confirming: "bg-blue-400",
   confirmed: "bg-emerald-400",
   failed: "bg-rose-400",
@@ -42,7 +44,7 @@ const DOT_COLORS: Record<string, string> = {
 };
 
 // Statuses that should show an animated pulse (active/live states)
-const PULSE_STATUSES = new Set(["active", "confirming", "processing", "reviewing", "settling"]);
+const PULSE_STATUSES = new Set(["active", "confirming", "sent", "processing", "reviewing", "settling"]);
 
 export function StatusBadge({ status }: { status: string }) {
   return (

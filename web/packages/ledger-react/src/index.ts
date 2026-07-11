@@ -40,6 +40,7 @@ export { TemplatesPage } from "./components/pages/TemplatesPage";
 export { CurrenciesPage } from "./components/pages/CurrenciesPage";
 export { ReconciliationPage } from "./components/pages/ReconciliationPage";
 export { SnapshotsPage } from "./components/pages/SnapshotsPage";
+export { SweepMonitorPage } from "./components/pages/SweepMonitorPage";
 
 // All-in-one admin shell (convenience fallback for hosts that don't wire
 // routes). It lazy-loads the chart pages so recharts stays out of index.js.
