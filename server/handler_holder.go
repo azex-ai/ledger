@@ -1,10 +1,15 @@
 // Package server: handler_holder.go
-// Holder-scoped wallet read surface: balances, translated transactions, and
-// active holds for the token-bound holder
+// Holder-scoped wallet surface: balances, translated transactions, active
+// holds, and (idempotent, self-scoped) deposit-address issuance for the
+// token-bound holder
 // (docs/plans/2026-07-08-holder-scoped-wallet-surface.md §3.2/§3.4).
 //
 // No endpoint accepts a holder parameter — the holder comes exclusively from
-// the verified token. Read-only by construction.
+// the verified token, so a holder can only ever reach its own data. The
+// deposit-address routes are the one write in this surface: they never move
+// funds, only provision the caller's own CREATE2 receiving address (the same
+// DepositAddressProvider the admin API-key surface uses at
+// /holders/{holder}/deposit-address — see handler_onchain.go).
 package server
 
 import (
@@ -282,6 +287,52 @@ func (hs *holderSurface) handleHolderHolds(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	httpx.OK(w, map[string]any{"list": out})
+}
+
+// handleHolderGetDepositAddress looks up the token-bound holder's
+// already-registered deposit address without creating one (404 if absent).
+// Reuses the same DepositAddressProvider as the admin
+// GET /holders/{holder}/deposit-address route (handler_onchain.go) — the
+// holder here is a Server method (not a holderSurface method) because the
+// provider lives on Server, wired once via SetDepositAddressProvider for
+// both surfaces.
+func (s *Server) handleHolderGetDepositAddress(w http.ResponseWriter, r *http.Request) {
+	holder, ok := holderFrom(r.Context())
+	if !ok {
+		httpx.Error(w, bizcode.New(10101, "unauthenticated"))
+		return
+	}
+	if s.depositAddresses == nil {
+		httpx.Error(w, bizcode.FeatureNotEnabled)
+		return
+	}
+	addr, err := s.depositAddresses.GetDepositAddress(r.Context(), holder)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.OK(w, depositAddressToResponse(addr))
+}
+
+// handleHolderEnsureDepositAddress issues (idempotently) the token-bound
+// holder's CREATE2 deposit address, deriving + registering it on first call.
+// See handleHolderGetDepositAddress for the provider-sharing rationale.
+func (s *Server) handleHolderEnsureDepositAddress(w http.ResponseWriter, r *http.Request) {
+	holder, ok := holderFrom(r.Context())
+	if !ok {
+		httpx.Error(w, bizcode.New(10101, "unauthenticated"))
+		return
+	}
+	if s.depositAddresses == nil {
+		httpx.Error(w, bizcode.FeatureNotEnabled)
+		return
+	}
+	addr, err := s.depositAddresses.EnsureDepositAddress(r.Context(), holder)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	httpx.Created(w, depositAddressToResponse(addr))
 }
 
 // ---- ledgerd (service mode) integration ----

@@ -253,6 +253,10 @@ func (m *mockClassificationStore) SetDisplayLabelIfEmpty(ctx context.Context, ui
 	return nil
 }
 
+func (m *mockClassificationStore) SetLifecycleIfEmpty(ctx context.Context, uid string, lifecycle *core.Lifecycle) error {
+	return nil
+}
+
 func (m *mockClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
 	return nil
 }

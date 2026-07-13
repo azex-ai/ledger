@@ -9,6 +9,7 @@ import { JournalsPage } from "./pages/JournalsPage";
 import { JournalDetailPage } from "./pages/JournalDetailPage";
 import { ReservationsPage } from "./pages/ReservationsPage";
 import { DepositsPage } from "./pages/DepositsPage";
+import { DepositReviewsPage } from "./pages/DepositReviewsPage";
 import { WithdrawalsPage } from "./pages/WithdrawalsPage";
 import { ClassificationsPage } from "./pages/ClassificationsPage";
 import { JournalTypesPage } from "./pages/JournalTypesPage";
@@ -16,6 +17,7 @@ import { TemplatesPage } from "./pages/TemplatesPage";
 import { CurrenciesPage } from "./pages/CurrenciesPage";
 import { ReconciliationPage } from "./pages/ReconciliationPage";
 import { SnapshotsPage } from "./pages/SnapshotsPage";
+import { SweepMonitorPage } from "./pages/SweepMonitorPage";
 
 // Chart-bearing pages statically import recharts. Lazy-load them so recharts
 // becomes a separate async chunk loaded on demand, NOT part of dist/index.js.
@@ -60,6 +62,8 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
       return <ReservationsPage />;
     case "/deposits":
       return <DepositsPage />;
+    case "/deposit-reviews":
+      return <DepositReviewsPage />;
     case "/withdrawals":
       return <WithdrawalsPage />;
     case "/classifications":
@@ -74,6 +78,8 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
       return <ReconciliationPage />;
     case "/snapshots":
       return <SnapshotsPage />;
+    case "/sweeps":
+      return <SweepMonitorPage />;
     default:
       return <DashboardPage linkComponent={link} />;
   }

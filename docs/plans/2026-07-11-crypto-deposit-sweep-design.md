@@ -149,3 +149,88 @@ chain_cursors (
 - KMS/HSM Signer adapter（port 已留，默认本地私钥实现先行）。
 - 双 provider 对账的第二实现（port 留口，本期单 provider + 大额人工复核）。
 - 地址轮换 / 一 holder 多地址（salt=holder 锁定一对一）。
+
+---
+
+## 9. M3 补偿控制 — 入账信任模型加固（2026-07-11 增补，Aaron 拍板「两者都做」）
+
+> 背景：安全评审 M3 指出 §5-1「RPC 作为入账 oracle 是最大信任边界」的**唯一补偿控制**在
+> 首版实现中缺失——单次 confirmed sighting 即过账，RPC 被攻破/webhook secret 泄漏 = 无上限铸币。
+> 决策：分层防御，阈值门 + 双 provider 对账，**两者汇聚到同一个 `review` 人工审核状态**。
+
+### 9.1 核心结构：两个机制，一个 review 队列
+
+deposit lifecycle 新增 `review` 状态。`confirming → confirmed` 的过账路径（`advanceConfirmation`
+的 confirming case，过账前）插入一道闸：
+
+```
+confirming (确认数达阈值)
+  ├─ 金额 ≤ AutoCreditCeiling 且 对账通过 → confirmed（过账，同今天）
+  └─ 金额 > AutoCreditCeiling 或 对账不一致 → review（不过账，emit deposit.review_required）
+review
+  ├─ 人工 approve → confirmed（补过账，走同一 RunInTx + EventID 互链）
+  └─ 人工 reject  → failed（无 journal）
+```
+
+新 lifecycle：`pending → confirming → confirmed | failed | expired | review`；`review → confirmed | failed`。
+`review` 非终态。**过账动作只在真正 confirmed 时发生**——review 期间用户余额不增，账本不动。
+
+### 9.2 阈值门（threshold gate）
+
+- 配置：`ChainConfig` 每 (chain, currency) 加 `AutoCreditCeiling decimal.Decimal`（**注入配置，不硬编码数值**；
+  0 或缺省 = 无上限 = 关闭该机制，opt-in 语义与整个 onchain 子系统一致）。Aaron 部署时定具体数值。
+- 判定在 adapter 边界之后、过账之前，纯 service 逻辑，无外部调用。
+
+**§9.2 addendum（M3.1 secure-by-default，2026-07-11 安全评审 MJ1 拍板，见
+`docs/bugs/2026-07-11-m3-security-review.md`）**：上面「0 或缺省 = 关闭」的
+opt-in 默认值被推翻——0（从未设置）现在是 `service.Onchain.Run` 的**启动错误**，
+不是「关闭该机制」。消费方必须显式二选一：正数 ceiling，或哨兵值
+`core.UnboundedAutoCredit`（明确接受无上限单源信任）。理由：这一项的默认值直接
+等于「信任边界敞开」，与整个 onchain 子系统其余部分（`DepositConfirmer`/
+`ReconcileCeiling`/watcher/sweep 均可无害地保持 nil/0）不同类——0 default 会让
+「已加固」的 M3 反而制造一种虚假的安全感。`ReconcileCeiling` 不受影响，仍是
+opt-in（0 = 不对账，但不影响铸币上限本身）。
+
+### 9.3 双 provider 对账（reconciliation）
+
+- 新 port（消费方定义，`core/interfaces.go`）：
+  ```go
+  // DepositConfirmer 是入账对账的第二独立数据源。消费方用第二个 RPC endpoint
+  // 装配一个 core.ChainReader 的等价实现即可（chains/evm 的 Reader 已满足，
+  // 只是连不同的 provider）——无需新 adapter 代码，只是第二个实例 + 不同 URL。
+  type DepositConfirmer interface {
+      // ConfirmDeposit 复核一笔已达确认阈值的 sighting：返回该 provider 观测到的
+      // 金额与是否 canonical 包含。service 比对它与主 sighting 是否一致。
+      ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (amount decimal.Decimal, included bool, err error)
+  }
+  ```
+- 配置：`ReconcileCeiling decimal`（同样 per (chain,currency)，注入）——金额 > 此值才触发对账
+  （小额不值得双查 RPC 成本；可与 AutoCreditCeiling 独立配置，也可设成同值）。
+- 判定：主 sighting 金额 vs 第二源金额必须精确相等 **且** included=true，否则 → review（不是直接 failed，
+  因为不一致可能是某一源暂时落后，交人工判定）。对账 RPC 调用**在 RunInTx 之外**（红线：DB 事务内禁外部调用）。
+- `DepositConfirmer` 为 nil（消费方没配第二源）→ 对账机制关闭，只走阈值门。两个机制各自 opt-in。
+
+### 9.4 人工审核面
+
+- 存储：复用 booking 的 `review` 状态即是队列（无需新表）。查询 = `ListBookings(status=review, classification=deposit)`。
+- HTTP：
+  - `GET /api/v1/deposits/reviews`（列出待审，分页，uid-only）
+  - `POST /api/v1/deposits/{uid}/review/approve`（→ confirmed + 补过账）
+  - `POST /api/v1/deposits/{uid}/review/reject`（→ failed，body 带 reason，脱敏入事件）
+  - 端点在 ScopeWrite API-key 鉴权组内（与现有写端点一致）；approve/reject 幂等（同 uid 重复调返回当前状态，非 review 态返 bizcode 冲突）。
+- 事件：`deposit.review_required`（金额/原因：over_ceiling | reconcile_mismatch）、`deposit.review_approved`、`deposit.review_rejected`——供消费方接告警/工单。
+
+### 9.5 不变量与测试
+
+- 新 invariant I-21：**review 期间账本零变动**——review 态 booking 的 `journal_uid` 恒空，
+  只有 approve→confirmed 才产生 journal（pin：testcontainers 驱动 over-ceiling deposit 到 review，断言无 journal；approve 后才有）。
+- 测试：阈值门（金额跨 AutoCreditCeiling 两侧分别走 confirmed / review）；对账一致→confirmed、不一致→review；
+  approve 补过账走 RunInTx + EventID 互链；reject 无 journal；review approve/reject 幂等。
+- 安全回归：伪造单源 sighting 大额（>ceiling）**必进 review 不自动过账**——这正是 M3 要堵的铸币路径。
+
+### 9.6 分阶段（deployment.md：lifecycle 是 expand 变更）
+
+- `review` 状态是 lifecycle 的**新增**（expand-safe）：老 booking 不受影响，新增转移边不破坏现有 confirmed/failed 路径。
+- AutoCreditCeiling/ReconcileCeiling 缺省 = 关闭 → 未配置的消费方行为与今天完全一致（向后兼容）。
+  **（M3.1 addendum 推翻此条，见 §9.2 addendum：`AutoCreditCeiling` 缺省改为启动即报错，
+  不再是「行为不变」的向后兼容默认——这是本次安全评审后的刻意破例，理由同上。）**

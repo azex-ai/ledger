@@ -615,6 +615,164 @@ every external reference stable across dump/restore.
 
 ---
 
+## I-19: Sweep bookings never post a journal
+
+A `sweep` booking (`presets.SweepClassificationCode` — the crypto-deposit
+design's on-chain collection batches,
+docs/plans/2026-07-11-crypto-deposit-sweep-design.md §4) exists purely for
+idempotency (booking key = `sweep-{chain_id}-{token}-{signer_nonce}`), for
+lifecycle bookkeeping (`pending -> sent -> confirmed | failed(-> pending
+retry)`), and for an audit trail of one batch collection transaction. It is
+installed with **no journal type, no entry template, and no `BalanceRole`**
+(its `NormalSide` is inert, fixed to `NormalSideCredit` by convention) — a
+sweep batch moving funds from a custody address to treasury is a
+channel/custody movement, not a user-facing accounting event: the value it
+moves was already recognized when the deposit was confirmed. Posting a
+journal for it would double-count that value (`financial.md`:
+"渠道/托管资金移动不进账本").
+
+**Why**: sweep addresses are predictable (`salt = account_holder`, factory
+public — design doc §5-2) and their balances are attacker-adjacent dust
+targets; keeping sweep entirely outside the journal means a compromised
+sweep path (forged "confirmed", stuck batch, wrong nonce) can waste gas or
+force a redundant collection, but can **never** fabricate or erase a
+liability, credit a holder, or unbalance a journal. The blast radius of a
+sweep-side bug is bounded to "no-op or wasted gas," by construction, not by
+runtime validation.
+
+**Enforced by**:
+- `presets.SweepLifecycle` / `presets.InstallSweepClassification`
+  (`presets/sweep.go`) only calls `ClassificationStore.CreateClassification`
+  — it is never given a `JournalTypeStore` or `TemplateStore` handle, so no
+  code path exists by which installing the sweep classification could also
+  install a journal type or template for it, and no journal template ever
+  references classification code `sweep`.
+- `service.Onchain`'s sweep orchestration (`service/onchain.go`) never calls
+  `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep booking's
+  transitions — only `Booker.Transition`.
+
+**Pinned by**:
+- `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
+  through pending → sent → confirmed, asserting `journal_uid` stays empty at
+  every step)
+- `presets.TestInstallCryptoDepositBundle` (asserts
+  `journalStore.GetJournalTypeByCode(ctx, SweepClassificationCode)` returns
+  `core.ErrNotFound` after installing the full bundle)
+- `service.TestOnchain_Sweep_NonceReuseAndNoJournal` (sweep job end to end:
+  nonce reuse across retries, and no journal on any transition)
+
+---
+
+## I-20: Deposit booking idempotency survives a reorg
+
+A crypto deposit's booking idempotency key is
+`deposit-{chain_id}-{tx_hash}-{txlog_seq}`, where `txlog_seq` is the
+transfer's ordinal position **among the logs in that transaction that credit
+one of our registered addresses** (tx-local, deterministic) — never the
+chain's block-level `log_index` (design doc §3). A reorg that re-includes the
+same transaction in a different block reassigns block-level log indices, but
+never reorders the transfers within the transaction itself, so `txlog_seq`
+for a given transfer is stable across the reorg while `log_index` is not.
+
+**Why**: both ingestion paths (the chains/evm watcher's `eth_getLogs` poll
+and the onchain webhook) may observe the same transfer more than once as
+confirmations accrue and as the chain reorganizes around it. If the
+idempotency key were built from block-level `log_index`, a reorg would
+silently mint a fresh key for an already-recorded transfer — a duplicate
+deposit booking and, worse, a duplicate `deposit_confirm` journal: free
+money. Keying off the tx-local ordinal instead means the same transfer,
+observed any number of times by either path, resolves to the same booking
+(`Booker.CreateBooking`'s existing same-key/same-payload idempotency, I-3)
+instead of creating a duplicate.
+
+**Enforced by**:
+- `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
+  comment and shape deliberately exclude any block-level log index; both
+  ingestion paths (chains/evm watcher and the `channel/onchain` webhook
+  bridge) must derive this from the transaction's internal transfer
+  ordering, not from `eth_getLogs`' block-scoped `logIndex`.
+- `service.Onchain`'s `depositIdempotencyKey`
+  (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) is constructed once, at
+  booking-creation time, by the shared `IngestDeposit` orchestration — not
+  by either ingestion path individually, so both paths necessarily agree on
+  it for the same transfer.
+- `core.DepositSighting.BlockNumber` is also reorg-variant (the same tx can
+  be re-mined into a different block) but, unlike `Confirmations`, it IS
+  persisted on the booking's `Metadata` — the recheck loop needs it back to
+  recompute confirmations without re-scanning the chain. To keep it from
+  breaking idempotent replays, `postgres.bookingMetadataMatches`
+  (`postgres/idempotency_match.go`) deliberately excludes this one metadata
+  key from `CreateBooking`'s payload-equality check; every other field
+  (including every other `Metadata` key) is still compared exactly.
+
+**Pinned by**:
+- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn`
+  (re-ingesting the identical sighting with a DIFFERENT `block_number`,
+  simulating a reorg re-mining the tx into a different block, resolves to
+  the same booking — not `ErrConflict`)
+- `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
+  re-observing the same sighting is a pure no-op; a second Transfer log in
+  the same tx with a different `txlog_seq` does not collide)
+- `onchain.TestEVMAdapter_ParseSighting` (the webhook bridge derives
+  `TxLogSeq` from the payload's tx-local `txlog_seq` field, never a
+  block-scoped index; also requires `block_number` per
+  `core.DepositSighting.Validate`)
+
+## I-21: Review holds a deposit with zero ledger effect
+
+A crypto deposit routed to `review` instead of `confirmed`
+(docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9: M3 compensating
+controls -- the threshold gate, `TokenConfig.AutoCreditCeiling`, or the
+reconciliation gate, `OnchainDeps.DepositConfirmer` disagreeing with the
+primary sighting) has **posted no journal**. Its `journal_uid` is empty for
+as long as it sits in `review`, exactly like a `pending`/`confirming`
+booking that has not yet reached its confirmation threshold. The account
+holder's balance is unaffected. Only a human calling
+`service.Onchain.ApproveReview` moves it to `confirmed` and, at that point
+(and not before), posts the `deposit_confirm` journal via the same
+`postDepositConfirmedJournal` path (and same `EventUID` cross-link) the
+normal `confirming -> confirmed` transition uses. `RejectReview` moves it to
+`failed` and never posts a journal at all.
+
+**Why**: `review` exists specifically because a single-source "confirmed"
+signal (RPC lied, webhook secret leaked) is otherwise the deposit path's
+whole trust boundary (design doc §5-1) -- an unbounded free-money bug if a
+sighting could reach `confirmed`, and therefore a journal, without this
+compensating control ever having a chance to catch it. If routing to review
+had any accounting side effect (even a provisional credit), the control
+would be theater: the "free money" the gate exists to prevent would already
+be sitting in the user's balance by the time a human looks at the queue.
+
+**Enforced by**:
+- `presets.DepositLifecycle` (`presets/deposit.go`) -- `review` is reachable
+  only from `confirming`, and its own only outgoing edges are `confirmed`
+  and `failed`; no other status can reach `review`, and `review` cannot
+  reach anything but a human-driven `ApproveReview`/`RejectReview` call.
+- `service.Onchain.routeToReview` (`service/onchain.go`) calls only
+  `Booker.Transition` -- it never touches `TxComposer`/`JournalWriter`.
+- `service.Onchain.postDepositConfirmedJournal` is the ONLY function in the
+  onchain subsystem that posts a `deposit_confirm` journal; both
+  `advanceConfirmation`'s normal path and `ApproveReview` call through it,
+  so there is exactly one code path that can ever credit a deposit.
+- `service.Onchain.RejectReview` calls only `Booker.Transition` to `failed`,
+  mirroring `routeToReview` -- never `TxComposer`.
+
+**Pinned by**:
+- `service.TestOnchain_IngestDeposit_OverCeiling_RoutesToReview` (an amount
+  above `AutoCreditCeiling` reaching its confirmation threshold transitions
+  to `review`, not `confirmed`, with an empty `journal_uid`)
+- `service.TestOnchain_IngestDeposit_ReconcileMismatch_RoutesToReview` (a
+  configured `DepositConfirmer` disagreeing with the primary sighting routes
+  to `review` with an empty `journal_uid`, even though the primary source
+  alone would have confirmed)
+- `service.TestOnchain_ApproveReview_PostsJournalWithEventLink` (approving a
+  reviewed booking transitions it to `confirmed` and posts its
+  `deposit_confirm` journal, cross-linked via `EventUID`, only at that point)
+- `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
+  transitions it to `failed` with `journal_uid` remaining empty forever)
+
+---
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

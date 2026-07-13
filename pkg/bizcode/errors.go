@@ -85,6 +85,20 @@ var (
 	PeriodClosed        = New(14009, "accounting period is closed")
 )
 
+// --- Feature availability (18xxx, 503) ---
+
+var (
+	// FeatureNotEnabled is returned by an optional add-on's routes (e.g. the
+	// crypto-deposit address issuance / sighting-ingestion endpoints) when
+	// the consumer's composition root never wired the corresponding service
+	// in (nil until the relevant Set* call on server.Server). Distinct from
+	// 18101 "starting up" -- this is a permanent configuration state, not a
+	// transient one, but still maps to 503 since the caller's remedy (ask an
+	// operator to enable it) looks the same as "try again later" from the
+	// client's perspective.
+	FeatureNotEnabled = New(18102, "feature not enabled")
+)
+
 // --- Display messages ---
 
 var displayMessages = map[int]string{
@@ -96,6 +110,7 @@ var displayMessages = map[int]string{
 	10401: "Rate limit exceeded, please retry later",
 	10901: "Operation conflicts with current state",
 	18101: "Service is starting or temporarily unavailable",
+	18102: "This feature is not enabled on this server",
 	14001: "Insufficient balance for this operation",
 	14002: "This operation has already been processed",
 	14003: "Journal entries are not balanced",

@@ -3,10 +3,12 @@
 // (docs/plans/2026-07-08-holder-scoped-wallet-surface.md §3.1).
 //
 // A holder token is a stateless HMAC-signed credential bound to ONE account
-// holder, read-only by construction (it only ever authenticates the
-// /holder/* read endpoints). It shares the Authorization: Bearer header with
-// API keys and is disambiguated by the "lht_" prefix. Blast radius of a leak:
-// one holder's balances/transactions/holds, until exp.
+// holder (it only ever authenticates the /holder/* endpoints, and only that
+// holder's own data -- the holder is never a request parameter). It shares
+// the Authorization: Bearer header with API keys and is disambiguated by the
+// "lht_" prefix. Blast radius of a leak: one holder's balances/
+// transactions/holds, plus the ability to (re-)issue that same holder's own
+// CREATE2 deposit address -- never funds, never another holder -- until exp.
 //
 // Format: lht_<base64url(payload)>.<base64url(HMAC-SHA256(payload))>
 // payload = {"holder":N,"iat":unix,"exp":unix}. Deliberately not JWT — no

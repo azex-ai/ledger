@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 )
 
 // I-2: A journal can be reversed at most once. The partial unique index
@@ -379,4 +381,123 @@ func TestJournals_UpdateGuard_CoversEffectiveAtAndUID(t *testing.T) {
 
 	_, err = pool.Exec(ctx, "UPDATE journals SET uid = gen_random_uuid() WHERE uid = $1", j.UID)
 	require.Error(t, err, "UPDATE journals.uid must be blocked by the anti-tamper trigger")
+}
+
+// I-19: Sweep bookings never post a journal.
+//
+// A sweep booking's only purpose is idempotency (booking key =
+// sweep-{chain_id}-{token}-{signer_nonce}) and an audit trail for one batch
+// collection transaction moving funds that were already accounted for at
+// deposit time (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §4:
+// "sweep 只走 booking + event，无 journal"). Sweep's classification carries no
+// EntryTemplate, so Transition can never backfill bookings.journal_id the way
+// a deposit's "confirmed" transition does -- this test drives a sweep
+// booking through its full lifecycle (pending -> sent -> confirmed) and pins
+// that journal_uid stays empty at every step.
+func TestSweepBooking_NeverPostsJournal(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	_, err := presets.InstallSweepClassification(ctx, classStore)
+	require.NoError(t, err)
+
+	bookingStore := postgres.NewBookingStore(pool)
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: presets.SweepClassificationCode,
+		AccountHolder:      -9_000_000_000_001, // sentinel system holder, not tied to any user
+		CurrencyUID:        postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("SWEEP-USDT"), "Tether USD"),
+		Amount:             decimal.NewFromInt(500),
+		IdempotencyKey:     postgrestest.UniqueKey("sweep-invariant"),
+		ChannelName:        "onchain",
+		Metadata:           map[string]string{"chain_id": "1", "token": "0xusdt", "nonce": "0"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, booking.JournalUID)
+
+	sentEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "sent", ChannelRef: "0xsweeptx1", Source: "test",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, sentEvt.JournalUID)
+	sent, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, sent.JournalUID)
+
+	confirmedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "confirmed", ChannelRef: "0xsweeptx1", Source: "test",
+	})
+	require.NoError(t, err)
+	assert.Empty(t, confirmedEvt.JournalUID)
+	confirmed, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, confirmed.JournalUID)
+}
+
+// I-20: Deposit ingestion idempotency is stable under a reorg that reassigns
+// block_number.
+//
+// A deposit booking's idempotency key is derived from
+// (chain_id, tx_hash, txlog_seq) -- txlog_seq being the Transfer log's
+// ordinal position among the logs in tx_hash that credit one of our
+// registered addresses, NOT the chain's block-level log_index (which a reorg
+// reassigns). block_number itself is also reorg-variant: the same
+// transaction can be re-mined into a different block. This test pins that
+// re-ingesting the identical sighting with a CHANGED block_number (simulating
+// exactly that: a crashed watcher retries the same unscanned block range
+// after a reorg moved the tx) still resolves to the SAME booking -- not
+// ErrConflict, not a dead-lettered duplicate (C1/M1 regression:
+// service/onchain.go's IngestDeposit keeps block_number in the booking's
+// Metadata for the recheck loop to read back, but
+// postgres/idempotency_match.go's bookingMetadataMatches deliberately
+// excludes that one key from the equality check -- see its doc comment).
+func TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	_, err := presets.InstallDepositClassification(ctx, classStore)
+	require.NoError(t, err)
+
+	curUID := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("USDT"), "Tether USD")
+	bookingStore := postgres.NewBookingStore(pool)
+
+	const chainID, txHash, txLogSeq = int64(1), "0xreorgtx", int32(0)
+	idemKey := fmt.Sprintf("deposit-%d-%s-%d", chainID, txHash, txLogSeq)
+
+	makeInput := func(blockNumberAtObservationTime int) core.CreateBookingInput {
+		return core.CreateBookingInput{
+			ClassificationCode: presets.DepositClassificationCode,
+			AccountHolder:      8001,
+			CurrencyUID:        curUID,
+			Amount:             decimal.NewFromInt(100),
+			IdempotencyKey:     idemKey,
+			ChannelName:        "onchain",
+			Metadata: map[string]string{
+				"chain_id":     "1",
+				"tx_hash":      txHash,
+				"txlog_seq":    "0",
+				"block_number": strconv.Itoa(blockNumberAtObservationTime),
+			},
+		}
+	}
+
+	// First observation: the tx originally landed at block 100.
+	first, err := bookingStore.CreateBooking(ctx, makeInput(100))
+	require.NoError(t, err)
+
+	// Second observation, post-reorg: the tx was re-mined into block 137 (a
+	// DIFFERENT block_number) -- but txlog_seq and every other stable field
+	// are unchanged, so this must resolve to the exact same booking: an
+	// idempotent no-op, not ErrConflict and not a dead-lettered duplicate.
+	second, err := bookingStore.CreateBooking(ctx, makeInput(137))
+	require.NoError(t, err)
+
+	assert.Equal(t, first.UID, second.UID)
+
+	// The stored booking keeps whichever block_number the FIRST successful
+	// create recorded -- CreateBooking's idempotent-replay path never
+	// updates an existing row, it just returns it unchanged.
+	assert.Equal(t, "100", first.Metadata["block_number"])
+	assert.Equal(t, "100", second.Metadata["block_number"])
 }

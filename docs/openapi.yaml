@@ -458,6 +458,124 @@ paths:
       responses:
         "200": { description: Policies. }
 
+  /holders/{holder}/deposit-address:
+    post:
+      tags: [Crypto Deposit]
+      summary: Issue (idempotently) a holder's CREATE2 custody deposit address.
+      description: >-
+        Derives and registers the address on first call; repeated calls for
+        the same holder always return the same address. Answers
+        FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in
+        (see docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "201":
+          description: Deposit address (created on first call, or already registered).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+    get:
+      tags: [Crypto Deposit]
+      summary: Look up a holder's already-registered deposit address.
+      description: Does not create one -- 404s if the holder has none yet.
+      parameters:
+        - in: path
+          name: holder
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Deposit address.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+
+  /deposits/reviews:
+    get:
+      tags: [Crypto Deposit]
+      summary: List deposit bookings parked in human review (M3 compensating controls).
+      description: >-
+        The `review` status is itself the review queue -- a deposit lands
+        here when it exceeds the configured auto-credit ceiling or its
+        second, independent confirmation source disagrees with the primary
+        sighting (see docs/plans/2026-07-11-crypto-deposit-sweep-design.md
+        §9). Zero ledger effect until approved. Answers FeatureNotEnabled
+        (503) unless the crypto-deposit add-on is wired in.
+      parameters:
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Review queue page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositReviewListEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+  /deposits/{uid}/review/approve:
+    post:
+      tags: [Crypto Deposit]
+      summary: Approve a review-parked deposit, posting its deposit_confirm journal.
+      description: >-
+        Idempotent -- a no-op returning the current booking if it is already
+        confirmed (e.g. a prior call already succeeded). Any other non-review
+        status is a 409 conflict.
+      parameters:
+        - in: path
+          name: uid
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Booking, now confirmed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "409": { $ref: "#/components/responses/DomainError" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+  /deposits/{uid}/review/reject:
+    post:
+      tags: [Crypto Deposit]
+      summary: Reject a review-parked deposit to failed -- no journal is ever posted.
+      description: >-
+        Idempotent -- a no-op returning the current booking if it is already
+        failed. Any other non-review status is a 409 conflict. reason is
+        recorded on the booking's audit trail and the emitted
+        deposit.review_rejected signal.
+      parameters:
+        - in: path
+          name: uid
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Booking, now failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "400": { $ref: "#/components/responses/DomainError" }
+        "409": { $ref: "#/components/responses/DomainError" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+
   /bookings:
     get:
       tags: [Bookings]
@@ -540,7 +658,25 @@ paths:
     post:
       tags: [Webhooks]
       summary: Inbound channel callback (e.g. on-chain deposit).
-      description: Body shape and signing are channel-specific. Hot path is HMAC-verified.
+      description: >-
+        Body shape and signing are channel-specific. Hot path is
+        HMAC-verified. The `evm` channel understands a deposit-sighting
+        shape ({chain_id, tx_hash, txlog_seq, token, from, to, amount,
+        confirmations, block_number}) and routes it to the same
+        IngestDeposit orchestration the chains/evm watcher uses -- see
+        docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3.
+        `block_number` is required and must be a positive integer (the
+        block the transfer log was mined in) -- the confirmation-threshold
+        recheck loop is computed from it, so a missing or zero value is
+        rejected rather than silently treated as an unconfirmable deposit
+        (core.DepositSighting.Validate). Answers FeatureNotEnabled (503)
+        unless the crypto-deposit add-on is wired in, and answers 200 with a
+        `{status: "ignored"}` no-op body (not an error) when the sighting
+        has nothing to book -- unregistered address, non-whitelisted token,
+        or an unconfigured chain. Other channels use the legacy shape
+        ({tx_hash, booking_uid, amount, confirmations, status}) that
+        transitions a pre-existing booking_uid, confined to
+        deposit-classification bookings only (design doc §5-5).
       security: []
       parameters:
         - in: path
@@ -548,8 +684,10 @@ paths:
           required: true
           schema: { type: string, enum: [evm, btc, custom] }
       responses:
-        "204": { description: Accepted. }
+        "200": { description: 'Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path).' }
         "401": { description: HMAC verification failed. }
+        "403": { description: Channel/classification mismatch (design doc §5-5). }
+        "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
 
   /classifications:
     get:
@@ -993,6 +1131,45 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HolderHoldListEnvelope" }
+  /holder/deposit-address:
+    get:
+      tags: [Holder, Crypto Deposit]
+      summary: Look up the token-bound holder's already-registered deposit address.
+      description: >-
+        Holder-scoped mirror of GET /holders/{holder}/deposit-address --
+        same DepositAddressProvider, but the holder comes exclusively from
+        the holder token, never a request parameter. Does not create one --
+        404s if the holder has none yet. Answers FeatureNotEnabled (503)
+        unless the crypto-deposit add-on is wired in.
+      security:
+        - holderToken: []
+      responses:
+        "200":
+          description: Deposit address.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+    post:
+      tags: [Holder, Crypto Deposit]
+      summary: Issue (idempotently) the token-bound holder's CREATE2 deposit address.
+      description: >-
+        Holder-scoped mirror of POST /holders/{holder}/deposit-address --
+        derives and registers the address on first call, repeated calls
+        return the same address. The holder is bound to the token; the route
+        moves no funds, it only provisions the caller's own receiving
+        address. Answers FeatureNotEnabled (503) unless the crypto-deposit
+        add-on is wired in.
+      security:
+        - holderToken: []
+      responses:
+        "201":
+          description: Deposit address (created on first call, or already registered).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
 
 components:
   securitySchemes:
@@ -1425,6 +1602,37 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Booking" }
+
+    DepositAddress:
+      type: object
+      description: >-
+        The CREATE2 derivation fingerprint (factory/init_hash) is an internal
+        audit-only detail and is deliberately not part of this wire shape.
+      properties:
+        uid: { type: string, format: uuid }
+        account_holder: { type: integer, format: int64 }
+        address: { type: string, description: "EIP-55 checksummed EVM address." }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    DepositAddressEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/DepositAddress" }
+
+    DepositReviewListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [list, next_cursor]
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Booking" }
+                next_cursor: { type: string, description: "Empty when exhausted." }
 
     Event:
       type: object

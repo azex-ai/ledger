@@ -345,3 +345,40 @@ describe("snapshots", () => {
     );
   });
 });
+
+describe("crypto deposit", () => {
+  test("getDepositAddress + ensureDepositAddress", async () => {
+    const g = intercept("get", "/api/v1/holders/7/deposit-address", {});
+    await client.getDepositAddress(7);
+    expect(g.captured()?.url).toBe(`${BASE}/api/v1/holders/7/deposit-address`);
+
+    const e = intercept("post", "/api/v1/holders/7/deposit-address", {});
+    await client.ensureDepositAddress(7);
+    expect(e.captured()?.method).toBe("POST");
+    expect(e.captured()?.auth).toBe(`Bearer ${API_KEY}`);
+  });
+
+  test("listDepositReviews encodes querystring", async () => {
+    const i = intercept("get", "/api/v1/deposits/reviews", {
+      list: [],
+      next_cursor: "",
+    });
+    await client.listDepositReviews({ cursor: "abc", limit: 10 });
+    expect(i.captured()?.url).toBe(
+      `${BASE}/api/v1/deposits/reviews?cursor=abc&limit=10`,
+    );
+  });
+
+  test("approveDepositReview + rejectDepositReview", async () => {
+    const a = intercept("post", "/api/v1/deposits/uid-1/review/approve", {});
+    await client.approveDepositReview("uid-1");
+    expect(a.captured()?.url).toBe(
+      `${BASE}/api/v1/deposits/uid-1/review/approve`,
+    );
+    expect(a.captured()?.auth).toBe(`Bearer ${API_KEY}`);
+
+    const r = intercept("post", "/api/v1/deposits/uid-1/review/reject", {});
+    await client.rejectDepositReview("uid-1", "amount mismatch");
+    expect(r.captured()?.body).toEqual({ reason: "amount mismatch" });
+  });
+});

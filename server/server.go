@@ -63,6 +63,20 @@ type Server struct {
 	// Optional inbound-webhook replay cache (see SetWebhookNonceRecorder).
 	webhookNonces WebhookNonceRecorder
 
+	// Optional crypto-deposit add-on (see SetDepositAddressProvider /
+	// SetDepositIngester in handler_onchain.go). Nil until a consumer's
+	// composition root wires service.OnchainService in; every deposit-address
+	// route and the onchain webhook sighting path answer
+	// bizcode.FeatureNotEnabled until then.
+	depositAddresses DepositAddressProvider
+	depositIngester  DepositIngester
+
+	// Optional crypto-deposit human-review add-on (see SetDepositReviewer in
+	// handler_deposit_reviews.go). Nil until a consumer's composition root
+	// wires service.OnchainService in; every /deposits/reviews* route
+	// answers bizcode.FeatureNotEnabled until then.
+	depositReviewer DepositReviewer
+
 	// Optional Prometheus /metrics handler. Mounted outside chi's middleware
 	// chain so it bypasses auth + rate limiting (scrapers usually live on
 	// the internal network and authenticate by host/port).

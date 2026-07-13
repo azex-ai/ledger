@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/bizcode"
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
@@ -61,6 +62,19 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// On-chain deposit sightings converge here regardless of ingestion path
+	// (watcher pull vs this webhook push, design doc §3): an adapter offering
+	// this shape is routed to IngestDeposit instead of the legacy
+	// booking_uid transition flow below. This structurally closes design doc
+	// §5-5's "forge a transition on an unrelated booking" concern for this
+	// channel — IngestDeposit only ever creates/advances
+	// deposit-classification bookings and never accepts a caller-supplied
+	// booking_uid.
+	if sp, ok := adapter.(sightingParser); ok {
+		s.handleDepositSighting(w, r, sp, body)
+		return
+	}
+
 	payload, err := adapter.ParseCallback(r.Header, body)
 	if err != nil {
 		httpx.Error(w, httpx.ErrBadRequest("invalid callback"))
@@ -80,6 +94,21 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Classification confinement (design doc §5-5): even with a valid
+	// signature and a matching channel name, a webhook must never be able to
+	// transition a booking outside the deposit lifecycle it exists to serve
+	// — most importantly a `sweep` booking, which has no journal and so a
+	// forged "confirmed" would leave no accounting trace to catch it.
+	depositClass, err := s.classifications.GetByCode(r.Context(), depositClassificationCode)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if booking.ClassificationUID != depositClass.UID {
+		httpx.Error(w, httpx.ErrForbidden("webhook channel may only transition deposit bookings"))
+		return
+	}
+
 	evt, err := s.booker.Transition(r.Context(), core.TransitionInput{
 		BookingUID: payload.BookingUID,
 		ToStatus:   core.Status(payload.Status),
@@ -93,4 +122,46 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.OK(w, eventToResponse(evt))
+}
+
+// handleDepositSighting is the push-path counterpart to chains/evm's watcher
+// (pull path): both normalize into a core.DepositSighting and hand off to
+// the same IngestDeposit orchestration (design doc §3).
+func (s *Server) handleDepositSighting(w http.ResponseWriter, r *http.Request, sp sightingParser, body []byte) {
+	if s.depositIngester == nil {
+		httpx.Error(w, bizcode.FeatureNotEnabled)
+		return
+	}
+	sighting, err := sp.ParseSighting(r.Header, body)
+	if err != nil {
+		httpx.Error(w, httpx.ErrBadRequest("invalid callback"))
+		return
+	}
+	booking, err := s.depositIngester.IngestDeposit(r.Context(), *sighting)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	// IngestDeposit returns (nil, nil) for a sighting this ledger has no
+	// business booking -- unregistered address, non-whitelisted token, or an
+	// unconfigured chain (its own doc comment). That is a normal "nothing to
+	// do" outcome, not an error: respond 200 no-op so the external scanner
+	// marks the callback delivered and does not retry it forever. Passing a
+	// nil booking into bookingToResponse would panic on its first field
+	// dereference (op.UID) -- chi's Recoverer middleware would turn that
+	// into a 500, which the scanner treats as a delivery failure and retries
+	// indefinitely (M2).
+	if booking == nil {
+		httpx.OK(w, depositSightingIgnoredResponse{Status: "ignored"})
+		return
+	}
+	httpx.OK(w, bookingToResponse(booking))
+}
+
+// depositSightingIgnoredResponse is handleDepositSighting's response body
+// when IngestDeposit had nothing to book (see its doc comment) -- distinct
+// from bookingResponse so callers can tell "no booking exists for this
+// sighting" apart from an actual booking payload.
+type depositSightingIgnoredResponse struct {
+	Status string `json:"status"`
 }

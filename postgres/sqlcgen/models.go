@@ -72,6 +72,12 @@ type Booking struct {
 	Uid              pgtype.UUID    `json:"uid"`
 }
 
+type ChainCursor struct {
+	ChainID          int64     `json:"chain_id"`
+	LastScannedBlock int64     `json:"last_scanned_block"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type Classification struct {
 	ID           int64       `json:"id"`
 	Code         string      `json:"code"`
@@ -110,6 +116,16 @@ type Deposit struct {
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt      time.Time          `json:"created_at"`
 	UpdatedAt      time.Time          `json:"updated_at"`
+}
+
+type DepositAddress struct {
+	ID            int64       `json:"id"`
+	Uid           pgtype.UUID `json:"uid"`
+	AccountHolder int64       `json:"account_holder"`
+	Address       string      `json:"address"`
+	Factory       string      `json:"factory"`
+	InitHash      string      `json:"init_hash"`
+	CreatedAt     time.Time   `json:"created_at"`
 }
 
 type EntryTemplate struct {
@@ -154,6 +170,18 @@ type Event struct {
 	ActorID            int64          `json:"actor_id"`
 	Source             string         `json:"source"`
 	Uid                pgtype.UUID    `json:"uid"`
+}
+
+type IngestDeadLetter struct {
+	ID             int64       `json:"id"`
+	Uid            pgtype.UUID `json:"uid"`
+	ChainID        int64       `json:"chain_id"`
+	TxHash         string      `json:"tx_hash"`
+	TxlogSeq       int32       `json:"txlog_seq"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	Reason         string      `json:"reason"`
+	Payload        []byte      `json:"payload"`
+	CreatedAt      time.Time   `json:"created_at"`
 }
 
 type Journal struct {

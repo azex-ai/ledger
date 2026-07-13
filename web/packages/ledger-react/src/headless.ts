@@ -71,6 +71,16 @@ export {
   useReleaseReservation,
 } from "./hooks/use-reservations";
 export {
+  useDepositAddress,
+  useEnsureDepositAddress,
+} from "./hooks/use-deposit-address";
+export {
+  useDepositReviews,
+  useApproveDepositReview,
+  useRejectDepositReview,
+} from "./hooks/use-deposit-reviews";
+export { useSweepClassificationId, useSweeps } from "./hooks/use-sweeps";
+export {
   useHealth,
   useSystemBalances,
   useReconcileGlobal,

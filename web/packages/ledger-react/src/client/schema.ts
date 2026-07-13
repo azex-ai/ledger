@@ -917,6 +917,241 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/holders/{holder}/deposit-address": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up a holder's already-registered deposit address.
+         * @description Does not create one -- 404s if the holder has none yet.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    holder: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Issue (idempotently) a holder's CREATE2 custody deposit address.
+         * @description Derives and registers the address on first call; repeated calls for the same holder always return the same address. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in (see docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    holder: number;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address (created on first call, or already registered). */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deposits/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List deposit bookings parked in human review (M3 compensating controls).
+         * @description The `review` status is itself the review queue -- a deposit lands here when it exceeds the configured auto-credit ceiling or its second, independent confirmation source disagrees with the primary sighting (see docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9). Zero ledger effect until approved. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Review queue page. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositReviewListEnvelope"];
+                    };
+                };
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deposits/{uid}/review/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a review-parked deposit, posting its deposit_confirm journal.
+         * @description Idempotent -- a no-op returning the current booking if it is already confirmed (e.g. a prior call already succeeded). Any other non-review status is a 409 conflict.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Booking, now confirmed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BookingEnvelope"];
+                    };
+                };
+                409: components["responses"]["DomainError"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deposits/{uid}/review/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject a review-parked deposit to failed -- no journal is ever posted.
+         * @description Idempotent -- a no-op returning the current booking if it is already failed. Any other non-review status is a 409 conflict. reason is recorded on the booking's audit trail and the emitted deposit.review_rejected signal.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uid: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        reason: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Booking, now failed. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BookingEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+                409: components["responses"]["DomainError"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/bookings": {
         parameters: {
             query?: never;
@@ -1139,7 +1374,7 @@ export interface paths {
         put?: never;
         /**
          * Inbound channel callback (e.g. on-chain deposit).
-         * @description Body shape and signing are channel-specific. Hot path is HMAC-verified.
+         * @description Body shape and signing are channel-specific. Hot path is HMAC-verified. The `evm` channel understands a deposit-sighting shape ({chain_id, tx_hash, txlog_seq, token, from, to, amount, confirmations, block_number}) and routes it to the same IngestDeposit orchestration the chains/evm watcher uses -- see docs/plans/2026-07-11-crypto-deposit-sweep-design.md §3. `block_number` is required and must be a positive integer (the block the transfer log was mined in) -- the confirmation-threshold recheck loop is computed from it, so a missing or zero value is rejected rather than silently treated as an unconfirmable deposit (core.DepositSighting.Validate). Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in, and answers 200 with a `{status: "ignored"}` no-op body (not an error) when the sighting has nothing to book -- unregistered address, non-whitelisted token, or an unconfigured chain. Other channels use the legacy shape ({tx_hash, booking_uid, amount, confirmations, status}) that transitions a pre-existing booking_uid, confined to deposit-classification bookings only (design doc §5-5).
          */
         post: {
             parameters: {
@@ -1152,8 +1387,8 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Accepted. */
-                204: {
+                /** @description Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). */
+                200: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -1161,6 +1396,20 @@ export interface paths {
                 };
                 /** @description HMAC verification failed. */
                 401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Channel/classification mismatch (design doc §5-5). */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Crypto-deposit add-on not enabled on this server (evm sighting path only). */
+                503: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -2176,6 +2425,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/holder/deposit-address": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up the token-bound holder's already-registered deposit address.
+         * @description Holder-scoped mirror of GET /holders/{holder}/deposit-address -- same DepositAddressProvider, but the holder comes exclusively from the holder token, never a request parameter. Does not create one -- 404s if the holder has none yet. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                404: components["responses"]["NotFound"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Issue (idempotently) the token-bound holder's CREATE2 deposit address.
+         * @description Holder-scoped mirror of POST /holders/{holder}/deposit-address -- derives and registers the address on first call, repeated calls return the same address. The holder is bound to the token; the route moves no funds, it only provisions the caller's own receiving address. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Deposit address (created on first call, or already registered). */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DepositAddressEnvelope"];
+                    };
+                };
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2552,6 +2878,26 @@ export interface components {
         };
         BookingEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Booking"];
+        };
+        /** @description The CREATE2 derivation fingerprint (factory/init_hash) is an internal audit-only detail and is deliberately not part of this wire shape. */
+        DepositAddress: {
+            /** Format: uuid */
+            uid?: string;
+            /** Format: int64 */
+            account_holder?: number;
+            /** @description EIP-55 checksummed EVM address. */
+            address?: string;
+            created_at?: components["schemas"]["Timestamp"];
+        };
+        DepositAddressEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["DepositAddress"];
+        };
+        DepositReviewListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list: components["schemas"]["Booking"][];
+                /** @description Empty when exhausted. */
+                next_cursor: string;
+            };
         };
         Event: {
             /** Format: uuid */

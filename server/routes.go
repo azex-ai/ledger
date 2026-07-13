@@ -51,6 +51,16 @@ func (s *Server) setupRoutes() {
 			r.Get("/accounts/{holder}/policies", s.handleListAccountPolicies)
 			r.Get("/snapshots", s.handleListSnapshots)
 
+			// Crypto deposit add-on (query side). 404s via
+			// bizcode.FeatureNotEnabled until SetDepositAddressProvider is
+			// called (see handler_onchain.go).
+			r.Get("/holders/{holder}/deposit-address", s.handleGetDepositAddress)
+
+			// Crypto deposit add-on (human-review queue). 404s via
+			// bizcode.FeatureNotEnabled until SetDepositReviewer is called
+			// (see handler_deposit_reviews.go).
+			r.Get("/deposits/reviews", s.handleListDepositReviews)
+
 			r.Get("/audit/journals", s.handleListAuditJournals)
 			r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
 			r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
@@ -71,6 +81,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/holder/balances", s.withHolderSurface((*holderSurface).handleHolderBalances))
 			r.Get("/holder/transactions", s.withHolderSurface((*holderSurface).handleHolderTransactions))
 			r.Get("/holder/holds", s.withHolderSurface((*holderSurface).handleHolderHolds))
+
+			// Crypto deposit add-on, holder-scoped: reuses the same
+			// DepositAddressProvider as /holders/{holder}/deposit-address
+			// (see handler_onchain.go) so the holder wallet surface never
+			// needs an admin API key to fetch its own address. 404s via
+			// bizcode.FeatureNotEnabled until SetDepositAddressProvider is
+			// called.
+			r.Get("/holder/deposit-address", s.handleHolderGetDepositAddress)
+			r.Post("/holder/deposit-address", s.handleHolderEnsureDepositAddress)
 		})
 
 		// ---- Scope: write ----
@@ -93,6 +112,15 @@ func (s *Server) setupRoutes() {
 
 			r.Post("/bookings", s.handleCreateBooking)
 			r.Post("/bookings/{uid}/transition", s.handleTransition)
+
+			// Crypto deposit add-on (issuance side) — idempotent, safe to
+			// call repeatedly for the same holder.
+			r.Post("/holders/{holder}/deposit-address", s.handleEnsureDepositAddress)
+
+			// Crypto deposit add-on (human-review resolution). Idempotent —
+			// see DepositReviewer's ApproveReview/RejectReview contracts.
+			r.Post("/deposits/{uid}/review/approve", s.handleApproveDepositReview)
+			r.Post("/deposits/{uid}/review/reject", s.handleRejectDepositReview)
 		})
 
 		// ---- Scope: admin ----

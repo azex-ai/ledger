@@ -81,6 +81,13 @@ type PrometheusMetrics struct {
 	balanceDrift       *prometheus.GaugeVec
 	reconcileGap       *prometheus.GaugeVec
 	reservedAmount     *prometheus.GaugeVec
+	chainCursorLag     *prometheus.GaugeVec
+
+	// Onchain counters
+	depositReorgDetected     *prometheus.CounterVec
+	sweepUnattributed        *prometheus.CounterVec
+	registrationRescanFailed *prometheus.CounterVec
+	depositReviewRequired    *prometheus.CounterVec
 }
 
 // NewPrometheusMetrics returns a Prometheus-backed core.Metrics implementation
@@ -224,6 +231,31 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "reserved_amount_units",
 			Help:      "Total reserved amount per currency.",
 		}, []string{"currency_id"}),
+		chainCursorLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "chain_cursor_lag_blocks",
+			Help:      "Blocks behind the chain tip the deposit watcher's cursor currently is, labelled by chain.",
+		}, []string{"chain_id"}),
+		depositReorgDetected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "deposit_reorg_detected_total",
+			Help:      "Total confirmed deposits found to have disappeared from the canonical chain (deep reorg), labelled by chain.",
+		}, []string{"chain_id"}),
+		sweepUnattributed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "sweep_unattributed_total",
+			Help:      "Total sweep batches collecting a token with no ledger attribution, labelled by chain.",
+		}, []string{"chain_id"}),
+		registrationRescanFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "registration_rescan_failed_total",
+			Help:      "Total EnsureDepositAddress background historical rescan failures, labelled by chain.",
+		}, []string{"chain_id"}),
+		depositReviewRequired: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "deposit_review_required_total",
+			Help:      "Total deposits routed to human review instead of auto-crediting, labelled by chain and reason.",
+		}, []string{"chain_id", "reason"}),
 	}
 
 	registry.MustRegister(
@@ -236,6 +268,8 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.journalLatency, m.rollupLatency, m.snapshotLatency, m.journalEntryCount,
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.reconcileGap, m.reservedAmount,
+		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
+		m.registrationRescanFailed, m.depositReviewRequired,
 	)
 
 	return m
@@ -355,4 +389,31 @@ func (m *PrometheusMetrics) ReconcileGap(currencyID int64, gap decimal.Decimal) 
 
 func (m *PrometheusMetrics) ReservedAmount(currencyID int64, amount decimal.Decimal) {
 	m.reservedAmount.WithLabelValues(int64Label(currencyID)).Set(decimalToFloat(amount))
+}
+
+// --- Onchain (crypto deposit + sweep) ---
+
+// ChainCursorLag records the deposit watcher's current lag behind the chain tip.
+func (m *PrometheusMetrics) ChainCursorLag(chainID int64, lagBlocks int64) {
+	m.chainCursorLag.WithLabelValues(int64Label(chainID)).Set(float64(lagBlocks))
+}
+
+// DepositReorgDetected increments the deep-reorg detection counter.
+func (m *PrometheusMetrics) DepositReorgDetected(chainID int64) {
+	m.depositReorgDetected.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// SweepUnattributed increments the unattributed-sweep counter.
+func (m *PrometheusMetrics) SweepUnattributed(chainID int64) {
+	m.sweepUnattributed.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// RegistrationRescanFailed increments the registration-rescan failure counter.
+func (m *PrometheusMetrics) RegistrationRescanFailed(chainID int64) {
+	m.registrationRescanFailed.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// DepositReviewRequired increments the review-required counter.
+func (m *PrometheusMetrics) DepositReviewRequired(chainID int64, reason string) {
+	m.depositReviewRequired.WithLabelValues(int64Label(chainID), safeLabel(reason)).Inc()
 }

@@ -464,6 +464,191 @@ if !report.Balanced {
 
 ---
 
+## Recipe 9 — Crypto deposit + sweep (CREATE2 shared-address custody)
+
+**Scenario:** users deposit USDT/USDC on an EVM chain to a per-holder
+custody address you control, without asking them to pick a memo/tag; you
+periodically sweep collected funds to a treasury address. Full design:
+`docs/plans/2026-07-11-crypto-deposit-sweep-design.md`.
+
+This is an **optional add-on** — install it only if you want ledger to own
+address issuance + ingestion + sweep orchestration. It composes cleanly on
+top of the deposit accounting bundle (Recipe 1's `deposit_confirm` journal is
+exactly what a confirmed crypto deposit posts).
+
+### 1. Install the bundle
+
+```go
+classStore := postgres.NewClassificationStore(pool)
+tmplStore := postgres.NewTemplateStore(pool)
+if err := presets.InstallCryptoDepositBundle(ctx, classStore, classStore, tmplStore); err != nil {
+    return err
+}
+```
+
+This installs the standard deposit accounting classifications/journal types
+(same as `presets.DepositBundle()`) **plus** the `sweep` booking lifecycle
+(`pending -> sent -> confirmed | failed(-> retry -> pending)`). Sweep gets no
+journal type/template — it never touches the accounting equation (see
+INVARIANTS I-19).
+
+### 2. Configure your `ChainSet`
+
+One `core.ChainConfig` per EVM chain you accept deposits on, keyed by chain
+ID. `Factory`/`InitHash` must be the same CREATE2 deployment fingerprint on
+every chain in the set — that's what makes a holder's address identical
+across all of them:
+
+```go
+chainSet := core.ChainSet{
+    1: { // Ethereum mainnet
+        ChainID: 1, Confirmations: 12,
+        Factory: "0x...", InitHash: "0x...", // your azex-contracts DepositFactory deployment
+        CreditTokens: map[string]core.TokenConfig{
+            "0xusdt...": {TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6},
+            "0xusdc...": {TokenAddress: "0xusdc...", CurrencyCode: "USDC", Decimals: 6},
+        },
+        SweepTokens: map[string]core.TokenConfig{
+            "0xusdt...":         {TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6},
+            core.SweepNativeToken: {TokenAddress: core.SweepNativeToken, CurrencyCode: "ETH", Decimals: 18},
+        },
+    },
+}
+```
+
+`CreditTokens` is the deposit-side allowlist (what credits a holder's
+balance); `SweepTokens` is independent and may include native assets that are
+collected to treasury but never credited to any holder (unattributed —
+handled as its own reconciliation category, design doc §5-4).
+
+### 3. Issue a deposit address per holder
+
+```
+POST /api/v1/holders/1001/deposit-address
+-> {"code":200,"message":"created","data":{"uid":"...","account_holder":1001,"address":"0xB3e7...","created_at":"..."}}
+```
+
+Idempotent — call it again any time and you get the same address back. In
+library mode this is `svc.Onchain().EnsureDepositAddress(ctx, holder)`.
+
+### 4. Wire the ingestion paths
+
+Both the watcher (pull — polls `eth_getLogs` for Transfers into registered
+addresses) and the onchain webhook (push — `POST
+/api/v1/webhooks/evm`) converge on the same `IngestDeposit` orchestration.
+You do not choose one or the other; run the watcher for completeness and the
+webhook as a low-latency accelerant if your indexer provider offers one.
+
+Booking idempotency key = `deposit-{chain_id}-{tx_hash}-{txlog_seq}` — safe
+to observe the same transfer any number of times across both paths and
+across a reorg (INVARIANTS I-20).
+
+### 5. Sweep job
+
+Configure a `core.SweepPolicy` per `(chain_id, token)` — minimum threshold
+(well above per-address gas cost, or dust becomes a standing drain), gas
+ceiling, batch limit, and interval. The sweep job batches registered
+addresses' balances to the factory's treasury; each batch is a `sweep`
+booking (no journal — see Recipe intro), `channel_ref` = the sweep tx hash.
+
+### 6. Reconciliation stays honest about unattributed funds
+
+Treasury's on-chain balance will legitimately exceed the sum of holder
+liabilities by the unattributed amount (native deposits, non-allowlisted
+tokens swept but never credited). `ledger-cli reconcile` / solvency checks
+must carve this out as its own line — don't let it silently mask a real
+shortfall. See design doc §5-4.
+
+### 7. M3 compensating controls — threshold gate + reconciliation → human review
+
+> ⚠️ **`AutoCreditCeiling` is REQUIRED, not opt-in.** For every
+> `(chain, token)` you configure in `CreditTokens`, you must set
+> `AutoCreditCeiling` — either to a positive cap, or to
+> `core.UnboundedAutoCredit` if you deliberately accept unbounded
+> single-source-RPC trust. Leave it unset and `svc.Onchain().Run(ctx)`
+> refuses to start: this is a startup error, not a silently-disabled gate.
+> `ReconcileCeiling`, below, is genuinely optional — zero disables only the
+> reconciliation gate, not the mint-exposure cap.
+
+RPC is the deposit path's single trusted oracle by default (the watcher's
+own `ChainReader`) — the M3 add-on layers two independent compensating
+controls on top before a deposit is ever auto-credited, and a
+human-review surface for whatever they catch. Design:
+`docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §9.
+
+**Threshold gate** — set `AutoCreditCeiling` per `(chain, token)` in
+`core.TokenConfig`. Any single deposit above it is parked in `review`
+instead of auto-confirmed, no matter how many confirmations it has:
+
+```go
+CreditTokens: map[string]core.TokenConfig{
+    "0xusdt...": {
+        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
+        AutoCreditCeiling: decimal.NewFromInt(10_000), // > 10k USDT -> review
+    },
+},
+```
+
+**Reconciliation gate** — wire a second, independent confirmation source
+(a different RPC provider, a block explorer API, your own indexer — anything
+that answers "was this tx included, and for how much?" without sharing a
+failure mode with your primary watcher) via `service.WithDepositConfirmer`,
+and set `ReconcileCeiling` to the amount above which it's worth the extra RPC
+round trip:
+
+```go
+type explorerConfirmer struct{ client *explorerClient } // your own adapter
+
+func (c *explorerConfirmer) ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (amount decimal.Decimal, included bool, err error) {
+    // query a *different* RPC/indexer than your primary watcher's Reader
+}
+
+onchain := service.NewOnchain(deps, chainSet,
+    service.WithDepositConfirmer(&explorerConfirmer{client: secondProviderClient}),
+)
+```
+
+```go
+CreditTokens: map[string]core.TokenConfig{
+    "0xusdt...": {
+        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
+        ReconcileCeiling: decimal.NewFromInt(1_000), // > 1k USDT -> double-check
+    },
+},
+```
+
+A deposit at or below `ReconcileCeiling` never calls the second source at
+all — small deposits aren't worth the extra RPC cost. Above it, a mismatch
+(source disagrees on amount, or doesn't see the tx included) routes to
+`review` instead of confirming, same as the threshold gate.
+
+`ReconcileCeiling` defaults to zero (reconciliation gate disabled) — that
+part of M3 is genuinely opt-in. `AutoCreditCeiling` is NOT: it has no zero
+default (see the warning at the top of this section) — every `CreditTokens`
+entry must set it to either a positive cap or `core.UnboundedAutoCredit`,
+or `Run(ctx)` fails to start.
+
+**Human review surface** — a deposit parked in `review` has zero ledger
+effect (I-21: `journal_uid` stays empty) until a human resolves it. Wire the
+review endpoints in alongside the address/ingestion services:
+
+```go
+srv.SetDepositReviewer(onchain) // *service.Onchain satisfies server.DepositReviewer
+```
+
+```
+GET  /api/v1/deposits/reviews?limit=50            -- list the queue, oldest first
+POST /api/v1/deposits/{uid}/review/approve         -- confirm + post the deposit_confirm journal
+POST /api/v1/deposits/{uid}/review/reject
+     { "reason": "..." }                           -- fail, no journal ever posted
+```
+
+See `docs/RUNBOOK.md` §13 for the on-call triage process. Both resolution
+endpoints are idempotent (repeat calls on an already-resolved booking are a
+no-op) and return a 409 conflict on any booking not currently in `review`.
+
+---
+
 ## Running the example
 
 ```bash

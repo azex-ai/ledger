@@ -252,3 +252,14 @@ export interface ListBookingsParams {
   cursor?: string;
   limit?: number;
 }
+
+// Holder's CREATE2 custody deposit address. The derivation fingerprint
+// (factory/init_hash) is an internal audit-only detail and is deliberately
+// not part of this wire shape (see docs/openapi.yaml DepositAddress schema).
+export interface DepositAddress {
+  uid: string;
+  account_holder: number;
+  /** EIP-55 checksummed EVM address. */
+  address: string;
+  created_at: string;
+}

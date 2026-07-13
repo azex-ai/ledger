@@ -177,6 +177,13 @@ type ClassificationStore interface {
 	// current label is '' — presets use it to seed defaults on existing
 	// installs without ever clobbering an operator's override.
 	SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error
+	// SetLifecycleIfEmpty seeds a classification's lifecycle only when it
+	// currently has none ('{}') — for rows that predate the lifecycle column
+	// (e.g. migration 011's seed 'deposit'/'withdraw' classifications) and
+	// were never assigned one. Same expand-safe stance as
+	// SetDisplayLabelIfEmpty: never clobbers a lifecycle an operator has
+	// since customized.
+	SetLifecycleIfEmpty(ctx context.Context, uid string, lifecycle *Lifecycle) error
 }
 
 type ClassificationInput struct {
@@ -306,4 +313,127 @@ type PeriodCloser interface {
 // TrialBalanceReader computes a trial balance report.
 type TrialBalanceReader interface {
 	TrialBalance(ctx context.Context, currencyUID string, asOf time.Time) (*TrialBalanceReport, error)
+}
+
+// AddressRegistry persists the one-holder-to-one-address deposit address
+// registry (design doc §2). It is a pure store: callers derive the address
+// with DeriveDepositAddress and pass the result in -- the registry never
+// derives addresses itself.
+type AddressRegistry interface {
+	// EnsureAddress upserts input, returning the existing row unchanged if
+	// holder was already registered (account_holder is UNIQUE, so a holder
+	// can never be issued a second address). On conflict, input's
+	// Address/Factory/InitHash are NOT compared against the existing row --
+	// reconciling a mismatch is the caller's responsibility, not the
+	// store's.
+	EnsureAddress(ctx context.Context, input AddressRegistrationInput) (*DepositAddress, error)
+	// GetByAddress reverse-looks-up the holder for an observed on-chain
+	// address. address must be in the same canonical EIP-55 casing the row
+	// was registered with. Returns ErrNotFound if unregistered.
+	GetByAddress(ctx context.Context, address string) (*DepositAddress, error)
+	// ListAddresses returns every registered deposit address, for the
+	// watcher to build its `to ∈ registry` filter set.
+	ListAddresses(ctx context.Context) ([]DepositAddress, error)
+}
+
+// ChainCursorStore persists the deposit watcher's per-chain log-scan
+// progress (core.ChainCursor), so a restart resumes from where it left off
+// instead of rescanning from genesis or silently skipping unseen blocks
+// (design doc §3/§6). Implemented by postgres.ChainCursorStore.
+type ChainCursorStore interface {
+	// GetCursor returns chainID's cursor. Returns ErrNotFound if the chain
+	// has never been scanned -- callers should start from block 0 (or a
+	// configured start height) in that case.
+	GetCursor(ctx context.Context, chainID int64) (*ChainCursor, error)
+	// SetCursor advances chainID's cursor to lastScannedBlock (upsert).
+	// Callers must call this monotonically; the store does not enforce it.
+	SetCursor(ctx context.Context, chainID int64, lastScannedBlock int64) error
+}
+
+// ChainScanner enumerates on-chain balances for the sweep job. One
+// implementation per chain family -- chains/evm is the only one this period
+// (design doc §1/§4).
+type ChainScanner interface {
+	// ScanBalances returns the current balance of token (a contract address,
+	// or core.SweepNativeToken for the chain's native asset) at every
+	// address in addresses, on chainID.
+	ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (map[string]decimal.Decimal, error)
+}
+
+// ChainReader reads chain state for the deposit watcher (service/onchain.go):
+// forward-scanning for new deposits, recheck-polling for confirmation
+// advancement, and reorg detection (design doc §3/§6). One implementation
+// per chain family -- chains/evm is the only one this period.
+type ChainReader interface {
+	// LatestBlock returns the current chain tip for chainID.
+	LatestBlock(ctx context.Context, chainID int64) (int64, error)
+	// FetchDeposits scans [fromBlock, toBlock] (inclusive) for ERC-20 Transfer
+	// logs whose `to` is in addresses, returning normalized sightings with
+	// Confirmations computed against the chain tip at scan time. Callers are
+	// responsible for chunking large address lists to whatever limit the
+	// underlying provider imposes (design doc §3: "provider topic 上限").
+	FetchDeposits(ctx context.Context, chainID int64, fromBlock, toBlock int64, addresses []string) ([]DepositSighting, error)
+	// TxIncluded reports whether txHash is still included in the canonical
+	// chain -- used both for the shallow-reorg recheck (a pending/confirming
+	// booking's tx vanished before reaching the confirmation threshold) and
+	// the deep-reorg recheck (a confirmed booking's tx vanished after).
+	TxIncluded(ctx context.Context, chainID int64, txHash string) (bool, error)
+}
+
+// Sweeper collects balances from a batch of registered deposit addresses
+// into the deploying factory's configured treasury (design doc §4). Sweep
+// bookings never post a journal -- see presets.SweepLifecycle -- so this
+// port only needs to report the collection transaction's hash for the
+// caller to track.
+//
+// Nonce management is "record first, then broadcast" (design doc §4): the
+// caller obtains a nonce via NextNonce, persists it on the sweep booking's
+// metadata *before* calling BatchSweep, and reuses that same persisted nonce
+// on every retry -- including gas-bump replacements, which re-call BatchSweep
+// with the identical nonce rather than requesting a new one.
+type Sweeper interface {
+	// NextNonce returns the next usable account nonce for the sweeper key on
+	// chainID. Callers must persist the result before broadcasting anything
+	// with it (design doc §4 "先记后发").
+	NextNonce(ctx context.Context, chainID int64) (uint64, error)
+	// BatchSweep builds, signs (via Signer), and broadcasts
+	// factory.batchSweep for token over targets using the pinned
+	// signerNonce, returning the resulting transaction hash. Re-calling with
+	// the same signerNonce is a gas-bumped replacement, not a new
+	// transaction -- the caller tracks the latest returned hash for
+	// confirmation polling. targets carries AccountHolder alongside each
+	// address because the factory's batchSweep ABI takes CREATE2 salts
+	// (nonces), not addresses -- CREATE2 is one-way, so the adapter cannot
+	// recover a holder's salt from its address alone.
+	BatchSweep(ctx context.Context, chainID int64, token string, targets []SweepTarget, signerNonce uint64) (txHash string, err error)
+	// GasPrice returns the current suggested gas price (gwei) on chainID, for
+	// the caller to compare against SweepPolicy.GasCeiling before
+	// broadcasting or gas-bumping.
+	GasPrice(ctx context.Context, chainID int64) (decimal.Decimal, error)
+}
+
+// DepositConfirmer is the deposit path's second, independent data source for
+// reconciliation (design doc §9.3: M3 compensating controls). A consumer
+// wires this by pointing a second core.ChainReader-equivalent implementation
+// (chains/evm's Reader already satisfies this method shape) at a DIFFERENT
+// RPC provider -- no new adapter code is required, just a second instance.
+// Nil (the default) disables the reconciliation gate entirely; only the
+// threshold gate (TokenConfig.AutoCreditCeiling) applies.
+type DepositConfirmer interface {
+	// ConfirmDeposit re-derives, from this provider's own view of the chain,
+	// the amount transferred by the log at (chainID, txHash, txLogSeq) and
+	// whether that transaction is currently included on the canonical chain.
+	// The caller compares amount/included against the primary sighting;
+	// disagreement (either source) routes the deposit to review rather than
+	// auto-crediting it.
+	ConfirmDeposit(ctx context.Context, chainID int64, txHash string, txLogSeq int32) (amount decimal.Decimal, included bool, err error)
+}
+
+// Signer abstracts the private key that authorizes sweep transactions, so
+// the library's default local-key implementation can later be swapped for a
+// KMS/HSM adapter without touching sweep orchestration (design doc §0).
+// Signer never touches factory ownership/treasury-change keys (design doc
+// §5.5) -- it only signs sweep transactions.
+type Signer interface {
+	SignTx(ctx context.Context, chainID int64, unsignedTx []byte) (signedTx []byte, err error)
 }

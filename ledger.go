@@ -76,6 +76,11 @@ type Service struct {
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
+
+	// onchain is nil until EnableOnchain is called -- consumers that never
+	// opt into the crypto deposit + sweep bundle see no difference (design
+	// doc 2026-07-11-crypto-deposit-sweep-design.md: "不配 ChainSet 的消费方零感知").
+	onchain *service.Onchain
 }
 
 // Option mutates a Service during construction.
@@ -424,6 +429,74 @@ func (s *Service) Channels() map[string]channel.Adapter {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Onchain (crypto deposit + sweep, optional)
+// ---------------------------------------------------------------------------
+
+// EnableOnchain wires and returns the optional crypto deposit + sweep
+// subsystem (docs/plans/2026-07-11-crypto-deposit-sweep-design.md). Call at
+// most once per Service; reader/scanner/sweeper may be nil to disable the
+// corresponding background jobs (e.g. a webhook-only deployment passes a nil
+// reader and skips the pull watcher entirely -- service.Onchain.Run degrades
+// gracefully per missing dependency).
+//
+// Validates the M3.1 secure-by-default AutoCreditCeiling fence
+// (service.Onchain.ValidateAutoCreditCeilings, design doc §9.2 addendum,
+// docs/bugs/2026-07-11-m3-security-review.md MJ1) right here, not only in
+// Run(): a push-only/webhook-only consumer that drives IngestDeposit
+// straight from an HTTP handler and never calls Run() at all (no background
+// jobs needed) must not be able to skip this check simply by not calling
+// Run(). On validation failure, no *service.Onchain is handed back and
+// s.onchain is left unset, so a caller cannot route deposits through an
+// unvalidated instance nor retry EnableOnchain with a fixed config (the
+// "already configured" guard above only trips once s.onchain is actually
+// set).
+func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, scanner core.ChainScanner, sweeper core.Sweeper, opts ...service.OnchainOption) (*service.Onchain, error) {
+	if s.onchain != nil {
+		return nil, fmt.Errorf("ledger: EnableOnchain: already configured")
+	}
+	deps := service.OnchainDeps{
+		Registry:        postgres.NewDepositAddressStore(s.pool),
+		Cursors:         postgres.NewChainCursorStore(s.pool),
+		Booker:          s.bookingStore,
+		BookingReader:   s.bookingStore,
+		Journals:        s.ledgerStore,
+		TxComposer:      onchainTxComposer{svc: s},
+		Reader:          reader,
+		Scanner:         scanner,
+		Sweeper:         sweeper,
+		DeadLetters:     postgres.NewIngestDeadLetterStore(s.pool),
+		Currencies:      s.currencyStore,
+		Classifications: s.classStore,
+		Logger:          s.logger,
+		Metrics:         s.metrics,
+	}
+	onchain := service.NewOnchain(deps, chains, opts...)
+	if err := onchain.ValidateAutoCreditCeilings(); err != nil {
+		return nil, fmt.Errorf("ledger: EnableOnchain: %w", err)
+	}
+	s.onchain = onchain
+	return s.onchain, nil
+}
+
+// Onchain returns the crypto deposit + sweep subsystem, or nil if
+// EnableOnchain was never called.
+func (s *Service) Onchain() *service.Onchain { return s.onchain }
+
+// onchainTxComposer adapts (*Service).RunInTx to service.TxComposer, so
+// service/onchain.go's confirmed-transition + deposit_confirm journal
+// composition shares the exact same atomic-commit mechanism every other
+// RunInTx caller uses (examples/crypto-deposit's manual flow, now
+// orchestrated), without service/ needing to import this package (which
+// would cycle -- this package already imports service/).
+type onchainTxComposer struct{ svc *Service }
+
+func (c onchainTxComposer) RunInTx(ctx context.Context, fn func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error) error {
+	return c.svc.RunInTx(ctx, func(tx *Service) error {
+		return fn(ctx, tx.Booker(), tx.JournalWriter())
+	})
 }
 
 // ---------------------------------------------------------------------------

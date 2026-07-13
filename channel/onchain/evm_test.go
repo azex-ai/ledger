@@ -149,3 +149,56 @@ func TestEVMAdapter_ParseCallback(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid amount")
 	})
 }
+
+func TestEVMAdapter_ParseSighting(t *testing.T) {
+	a := New(testKey)
+
+	t.Run("valid JSON", func(t *testing.T) {
+		body := []byte(`{"chain_id":1,"tx_hash":"0xabc123","txlog_seq":2,"token":"0xusdt","from":"0xfrom","to":"0xTo1234","amount":"12.5","confirmations":6,"block_number":1000}`)
+		header := http.Header{}
+
+		sighting, err := a.ParseSighting(header, body)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), sighting.ChainID)
+		assert.Equal(t, "0xabc123", sighting.TxHash)
+		assert.Equal(t, int32(2), sighting.TxLogSeq)
+		assert.Equal(t, "0xusdt", sighting.Token)
+		assert.Equal(t, "0xfrom", sighting.From)
+		assert.Equal(t, "0xTo1234", sighting.To)
+		assert.True(t, decimal.NewFromFloat(12.5).Equal(sighting.Amount))
+		assert.Equal(t, int32(6), sighting.Confirmations)
+		assert.Equal(t, int64(1000), sighting.BlockNumber)
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		_, err := a.ParseSighting(http.Header{}, []byte(`not json`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parse sighting")
+	})
+
+	t.Run("invalid amount", func(t *testing.T) {
+		body := []byte(`{"chain_id":1,"tx_hash":"0x1","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xto","amount":"not-a-number","confirmations":1,"block_number":1000}`)
+		_, err := a.ParseSighting(http.Header{}, body)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid amount")
+	})
+
+	t.Run("fails Validate on missing required field", func(t *testing.T) {
+		// chain_id missing (zero value) -- DepositSighting.Validate rejects it.
+		body := []byte(`{"tx_hash":"0x1","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xto","amount":"1","confirmations":1,"block_number":1000}`)
+		_, err := a.ParseSighting(http.Header{}, body)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "chain_id")
+	})
+
+	t.Run("fails Validate on missing block_number", func(t *testing.T) {
+		// C1/M1 regression: a webhook payload that omits block_number (or
+		// sends the zero value) must be rejected, not silently ingested with
+		// BlockNumber=0 -- that reintroduces the confirmation-threshold
+		// bypass this field exists to prevent (core.DepositSighting.Validate).
+		body := []byte(`{"chain_id":1,"tx_hash":"0x1","txlog_seq":0,"token":"0xusdt","from":"0xfrom","to":"0xto","amount":"1","confirmations":1}`)
+		_, err := a.ParseSighting(http.Header{}, body)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "block_number")
+	})
+}

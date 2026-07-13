@@ -276,3 +276,130 @@ func TestLedgerdHolderSurface(t *testing.T) {
 	// Short secret rejected at configuration time.
 	assert.Error(t, srv2.SetHolderSurface(server.HolderConfig{TokenSecret: []byte("short")}, stub))
 }
+
+// TestHolderDepositAddress pins the holder-scoped mirror of
+// /holders/{holder}/deposit-address: same DepositAddressProvider, but the
+// holder comes exclusively from the token — never a path/body/query param —
+// so one holder can never fetch or provision another's address (the bug
+// this endpoint fixes: the frontend previously had to reach through an
+// admin API key to get its own address).
+func TestHolderDepositAddress(t *testing.T) {
+	secret := []byte(testHolderSecret)
+	stub := &stubHolderReader{}
+	srv := newTestServer()
+	require.NoError(t, srv.SetHolderSurface(server.HolderConfig{TokenSecret: secret}, stub))
+
+	addrs := map[int64]*core.DepositAddress{
+		42: {UID: "addr-42", AccountHolder: 42, Address: "0xAAA0000000000000000000000000000000000A", CreatedAt: time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)},
+		7:  {UID: "addr-7", AccountHolder: 7, Address: "0xBBB0000000000000000000000000000000000B", CreatedAt: time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)},
+	}
+	registered := map[int64]bool{}
+	provider := &mockDepositAddressProvider{
+		ensureFn: func(_ context.Context, holder int64) (*core.DepositAddress, error) {
+			registered[holder] = true
+			return addrs[holder], nil
+		},
+		getFn: func(_ context.Context, holder int64) (*core.DepositAddress, error) {
+			if !registered[holder] {
+				return nil, core.ErrNotFound
+			}
+			return addrs[holder], nil
+		},
+	}
+	srv.SetDepositAddressProvider(provider)
+
+	now := time.Now()
+	tokenA, err := server.MintHolderToken(secret, 42, time.Hour, now)
+	require.NoError(t, err)
+	tokenB, err := server.MintHolderToken(secret, 7, time.Hour, now)
+	require.NoError(t, err)
+
+	authedRequest := func(method, path, bearer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// No address registered yet: GET 404s, does not auto-create.
+	rec := authedRequest(http.MethodGet, "/api/v1/holder/deposit-address", tokenA)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// POST issues holder A's own address -- holder comes from the token,
+	// never from a request parameter (there is none to pass).
+	rec = authedRequest(http.MethodPost, "/api/v1/holder/deposit-address", tokenA)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var env map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	data := env["data"].(map[string]any)
+	assert.Equal(t, "addr-42", data["uid"])
+	assert.Equal(t, "0xAAA0000000000000000000000000000000000A", data["address"])
+	assert.Equal(t, float64(42), data["account_holder"])
+	// Internal derivation fingerprint stays off the wire, same as the admin
+	// endpoint (user-facing-surfaces.md).
+	assert.NotContains(t, data, "factory")
+	assert.NotContains(t, data, "init_hash")
+
+	// GET now returns the same, previously-issued address for holder A.
+	rec = authedRequest(http.MethodGet, "/api/v1/holder/deposit-address", tokenA)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	assert.Equal(t, "addr-42", env["data"].(map[string]any)["uid"])
+
+	// Holder B, authenticated with its own token, gets its own address --
+	// never holder A's, and holder B has no way to name holder A even if it
+	// wanted to (no holder-bearing parameter exists on this route).
+	rec = authedRequest(http.MethodGet, "/api/v1/holder/deposit-address", tokenB)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "holder B has not issued its own address yet")
+
+	rec = authedRequest(http.MethodPost, "/api/v1/holder/deposit-address", tokenB)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+	assert.Equal(t, "addr-7", env["data"].(map[string]any)["uid"], "holder B's own address, not holder A's")
+}
+
+// TestHolderDepositAddressNotEnabled pins the same degrade-to-503 contract
+// as the admin surface when no DepositAddressProvider is wired in.
+func TestHolderDepositAddressNotEnabled(t *testing.T) {
+	secret := []byte(testHolderSecret)
+	stub := &stubHolderReader{}
+	srv := newTestServer()
+	require.NoError(t, srv.SetHolderSurface(server.HolderConfig{TokenSecret: secret}, stub))
+	// SetDepositAddressProvider deliberately never called.
+
+	token, err := server.MintHolderToken(secret, 42, time.Hour, time.Now())
+	require.NoError(t, err)
+
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		req := httptest.NewRequest(method, "/api/v1/holder/deposit-address", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, method)
+	}
+}
+
+// TestHolderDepositAddressUnauthenticated pins that the deposit-address
+// routes sit behind the same holder-token auth as the rest of /holder/* --
+// no token, no address, regardless of provider wiring.
+func TestHolderDepositAddressUnauthenticated(t *testing.T) {
+	stub := &stubHolderReader{}
+	srv := newTestServer()
+	require.NoError(t, srv.SetHolderSurface(server.HolderConfig{TokenSecret: []byte(testHolderSecret)}, stub))
+	srv.SetDepositAddressProvider(&mockDepositAddressProvider{
+		ensureFn: func(context.Context, int64) (*core.DepositAddress, error) {
+			t.Fatal("must not reach the provider without a valid holder token")
+			return nil, nil
+		},
+		getFn: func(context.Context, int64) (*core.DepositAddress, error) {
+			t.Fatal("must not reach the provider without a valid holder token")
+			return nil, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/holder/deposit-address", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
