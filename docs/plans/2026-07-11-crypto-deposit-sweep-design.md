@@ -1,6 +1,6 @@
 # Crypto Deposit + Sweep — 可选默认方案设计
 
-> 2026-07-11 · Status: design approved, not yet implemented
+> 2026-07-11 · Status: IMPLEMENTED + merged to main (2026-07-13) — backend + M3 + full frontend. §1-8 core, §9 M3 all shipped. Follow-ups (mi2/mi5 hardening, docs/frontend.md, openapi CI) tracked on the bus board.
 > 目标：把 azex 的多链共享地址加密充值方案（CREATE2 Persistent Proxy）收进 ledger 库，
 > 作为**可选默认方案**——消费方装了就有全套充值 + 归集，不装则 ledger 保持纯账本。
 > 合约侧不变（azex-contracts：DepositFactory / DepositProxy，见其 CLAUDE.md）；本设计只覆盖 ledger 侧。
