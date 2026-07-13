@@ -66,26 +66,26 @@
     "@base-ui/react": "^1.6.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.23.0",
+    "lucide-react": "^1.24.0",
     "qrcode.react": "^4.2.0",
     "recharts": "^3.9.2",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.6.0",
-    "viem": "^2.54.6"
+    "viem": "^2.55.1"
   },
   "devDependencies": {
-    "@heroui/react": "^3.2.1",
+    "@heroui/react": "^3.2.2",
     "@heroui/styles": "^3.2.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6",
     "@testing-library/react": "^16",
-    "jsdom": "^25",
-    "msw": "^2.14.6",
+    "jsdom": "^29",
+    "msw": "^2.15.0",
     "openapi-typescript": "^7",
-    "postcss": "^8",
+    "postcss": "^8.5.18",
     "tailwindcss": "^4",
     "tsup": "^8",
-    "typescript": "^6",
+    "typescript": "^7",
     "vitest": "^4"
   },
   "publishConfig": {
