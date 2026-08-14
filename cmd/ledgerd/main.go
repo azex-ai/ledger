@@ -133,6 +133,17 @@ func run() error {
 	}
 	logger.Info("default template presets installed")
 
+	// The dev-credit bundle rides on the same switch that opens
+	// POST /api/v1/dev/credits, so "can this deployment mint unbacked
+	// balance?" stays one decision. LoadConfig already refused the switch
+	// outside ENV=dev.
+	if srvCfg.DevCreditEnabled {
+		if err := svc.InstallDevCreditPreset(rootCtx); err != nil {
+			return fmt.Errorf("install dev credit preset: %w", err)
+		}
+		logger.Warn("dev credit preset installed — this deployment can credit holders with no custodied asset behind it")
+	}
+
 	// Build worker via facade — claim leases are configured from the config.
 	workerCfg := service.DefaultWorkerConfig()
 	if v := os.Getenv("FULL_RECONCILE_INTERVAL"); v != "" {

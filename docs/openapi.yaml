@@ -50,6 +50,10 @@ tags:
     description: Real-time platform-wide balance breakdown and solvency check.
   - name: Trends
     description: Historical daily balance time-series.
+  - name: Developer
+    description: >-
+      Developer-mode facilities. Off by default and only permitted under
+      ENV=dev; they create ledger state that no external event backs.
 
 paths:
   /system/health:
@@ -1170,6 +1174,54 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
         "503": { description: Crypto-deposit add-on not enabled on this server. }
+
+  /dev/credits:
+    post:
+      tags: [Developer]
+      summary: Credit a holder with no custodied asset behind it (developer mode).
+      description: >-
+        Simulates a deposit: posts the `dev_credit` template
+        (DR main_wallet holder / CR dev_credit system counterpart), so the
+        credited funds land in the holder's available balance and can drive
+        real downstream flows. Disabled by default and answers
+        FeatureNotEnabled (503) unless DEV_CREDIT_ENABLED=true, which the
+        server only accepts when ENV=dev -- boot fails otherwise.
+
+
+        The resulting journal is an ordinary journal: append-only, corrected
+        only through POST /journals/{uid}/reverse. Because its system leg is
+        `dev_credit` rather than `custodial`, GET /platform/solvency counts
+        the new liability with no offsetting asset and reports the shortfall
+        -- by design. The shortfall equals the `dev_credit` account balance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [holder_id, currency_uid, amount, idempotency_key]
+              properties:
+                holder_id: { type: integer, format: int64 }
+                currency_uid: { type: string, format: uuid }
+                amount:
+                  $ref: "#/components/schemas/Decimal"
+                idempotency_key: { type: string }
+                actor_id: { type: integer, format: int64 }
+                source: { type: string }
+                metadata:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        "201":
+          description: Journal created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+        "422":
+          $ref: "#/components/responses/DomainError"
+        "503": { description: Developer credit not enabled on this server. }
 
 components:
   securitySchemes:

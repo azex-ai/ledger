@@ -401,6 +401,23 @@ func (s *Service) InstallExtendedPresets(ctx context.Context) error {
 	return nil
 }
 
+// InstallDevCreditPreset installs the developer-credit bundle: the accounting
+// half of a "simulate a deposit" facility, which credits a holder with no
+// custodied asset behind it. Deliberately absent from both InstallDefaultPresets
+// and InstallExtendedPresets — a deployment gains the ability to mint balance
+// out of nothing only by naming it here, explicitly.
+//
+// Journals posted against it are ordinary journals (append-only, corrected via
+// reversal). Because their system-side leg is presets.DevCreditClassificationCode
+// rather than custodial, the balance they create shows up as a solvency
+// shortfall equal to that account's balance — which is the truth.
+func (s *Service) InstallDevCreditPreset(ctx context.Context) error {
+	if err := presets.InstallDevCreditBundle(ctx, s.classStore, s.JournalTypes(), s.tmplStore); err != nil {
+		return fmt.Errorf("ledger: install dev credit preset: %w", err)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Channel registry
 // ---------------------------------------------------------------------------

@@ -121,6 +121,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `core/interfaces.go` | Booker, EventReader, JournalWriter, BalanceReader, etc. |
 | `presets/` | Deposit + Withdrawal + Transfer + Fee + Capital + Settlement + Spread + FX bundles |
 | `presets/fx.go` | Cross-currency FX preset (sell + buy templates, settlement absorbs net) |
+| `presets/devcredit.go` | Developer-mode credit preset: `dev_credit` classification + template. Excluded from `InstallExtendedPresets` — opt in via `svc.InstallDevCreditPreset` |
 | `channel/adapter.go` | ChannelAdapter interface for inbound webhooks |
 | `channel/onchain/evm.go` | Demo EVM adapter with HMAC verification |
 | `postgres/sql/migrations/` | Schema migrations (embed.FS) |
@@ -134,6 +135,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `server/routes.go` | All endpoint definitions |
 | `server/handler_bookings.go` | Unified booking endpoints |
 | `server/handler_webhooks.go` | Inbound channel callbacks |
+| `server/handler_devcredit.go` | Developer-mode credit endpoint (gated by `Config.DevCreditEnabled`, ENV=dev only) |
 | `server/handler_events.go` | Event query endpoints |
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
@@ -165,6 +167,9 @@ POST   /api/v1/webhooks/{channel}            — Receive channel callback
 # Events (outbound)
 GET    /api/v1/events/{id}                   — Get event
 GET    /api/v1/events                        — List events
+
+# Developer mode (off by default; ENV=dev + DEV_CREDIT_ENABLED=true only)
+POST   /api/v1/dev/credits                   — Credit a holder with no custodied asset
 
 # Journals, Entries, Balances, Reservations — unchanged from v1
 # Classifications, Journal Types, Templates, Currencies — unchanged

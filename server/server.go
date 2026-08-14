@@ -86,6 +86,12 @@ type Server struct {
 	// only) requireScope checks pass unconditionally.
 	authEnabled bool
 
+	// devCreditEnabled gates POST /dev/credits, which mints holder balance
+	// against presets.DevCreditClassificationCode with no custodied asset
+	// behind it. False by default; Config.Validate refuses to set it outside
+	// ENV=dev (see handler_devcredit.go).
+	devCreditEnabled bool
+
 	// holder is the optional holder wallet surface (SetHolderSurface); nil
 	// keeps every /holder* route answering 404.
 	holder *holderSurface
@@ -113,6 +119,13 @@ type Config struct {
 	// surface when set (min 32 bytes; boot fails on a shorter value).
 	// Empty = surface disabled, /holder* routes answer 404.
 	HolderTokenSecret []byte
+	// DevCreditEnabled (DEV_CREDIT_ENABLED) turns on POST /dev/credits, the
+	// developer-mode facility that credits a holder without a matching
+	// custodied asset — a simulated top-up. False by default, and Validate
+	// refuses any value but false unless Env is "dev", so no production
+	// deployment can enable it by config accident. The accounting side is
+	// presets.DevCreditBundle, which must be installed separately.
+	DevCreditEnabled bool
 }
 
 // Validate rejects configurations that would expose a production server or
@@ -132,6 +145,12 @@ func (c *Config) Validate() error {
 		if len(c.APIKeys) == 0 {
 			return fmt.Errorf("server: API_KEYS is required when ENV=%q", c.Env)
 		}
+	}
+	if c.DevCreditEnabled && c.Env != "dev" {
+		// Deliberately fatal rather than a warning: this switch lets a caller
+		// create holder balance out of nothing, which shows up as a solvency
+		// shortfall that no custodied asset can close.
+		return fmt.Errorf("server: DevCreditEnabled requires ENV=dev (got %q)", c.Env)
 	}
 	if c.MaxBodyBytes <= 0 {
 		return fmt.Errorf("server: MaxBodyBytes must be positive")
@@ -179,6 +198,8 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("server: invalid TRUSTED_PROXY_CIDRS: %w", err)
 	}
 
+	devCredit := os.Getenv("DEV_CREDIT_ENABLED") == "true"
+
 	cfg := &Config{
 		Env:               env,
 		CORSAllowOrigin:   corsOrigin,
@@ -186,6 +207,7 @@ func LoadConfig() (*Config, error) {
 		MaxBodyBytes:      maxBytes,
 		TrustedProxyCIDRs: trustedCIDRs,
 		HolderTokenSecret: holderSecret,
+		DevCreditEnabled:  devCredit,
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -288,6 +310,10 @@ func NewWithConfig(
 		ready:            &atomic.Bool{},
 		rateLimiter:      newRateLimiter(defaultRateLimiterConfig()),
 		authEnabled:      len(cfg.APIKeys) > 0,
+		devCreditEnabled: cfg.DevCreditEnabled,
+	}
+	if cfg.DevCreditEnabled {
+		slog.Warn("server: developer credit endpoint is ENABLED — POST /api/v1/dev/credits mints holder balance with no custodied asset behind it")
 	}
 
 	r := chi.NewRouter()

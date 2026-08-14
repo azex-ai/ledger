@@ -143,6 +143,14 @@ func (s *Server) setupRoutes() {
 			r.Post("/reconcile/full", s.handleReconcileFull)
 
 			r.Post("/periods/close", s.handleClosePeriod)
+
+			// Developer mode: credits a holder with no custodied asset
+			// behind it. Registered unconditionally but answers
+			// bizcode.FeatureNotEnabled unless Config.DevCreditEnabled is
+			// set, which Config.Validate only permits under ENV=dev. Admin
+			// scope rather than write: minting unbacked balance is a control
+			// -plane act, not a business write (see handler_devcredit.go).
+			r.Post("/dev/credits", s.handleIssueDevCredit)
 		})
 	})
 }
