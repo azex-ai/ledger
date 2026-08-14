@@ -38,20 +38,15 @@ type PendingStore struct {
 	q          *sqlcgen.Queries
 	ledger     *LedgerStore
 	classStore *ClassificationStore
-
-	// resolved IDs — populated by NewPendingStore or lazily on first use
-	pendingClassID  string
-	suspenseClassID string
 }
 
-// NewPendingStore constructs a PendingStore.  It resolves the classification
-// IDs needed by ExpirePendingOlderThan at construction time — if the pending
-// bundle hasn't been installed yet you should call InstallPendingBundle first.
+// NewPendingStore constructs a PendingStore.  Classification IDs are resolved
+// per call (resolveClassificationIDs), never cached on the store — the store is
+// shared across goroutines, so per-call resolution is what keeps it race-free.
 //
-// If classification IDs cannot be resolved (bundle not installed) the store
-// still works for AddPending / ConfirmPending / CancelPending because those go
-// via LedgerStore template execution; only ExpirePendingOlderThan requires the
-// IDs.  Resolution is attempted lazily in that method as a fallback.
+// AddPending / ConfirmPending / CancelPending work whether or not the pending
+// bundle is installed, because they go via LedgerStore template execution;
+// ExpirePendingOlderThan is the one that needs the IDs and resolves them itself.
 func NewPendingStore(pool *pgxpool.Pool, ledger *LedgerStore, classStore *ClassificationStore) *PendingStore {
 	return &PendingStore{
 		pool:       pool,
@@ -62,17 +57,15 @@ func NewPendingStore(pool *pgxpool.Pool, ledger *LedgerStore, classStore *Classi
 	}
 }
 
-// WithDB returns a clone bound to an existing transaction or DBTX.  The clone
-// shares resolved IDs with the original; the caller owns tx lifecycle.
+// WithDB returns a clone bound to an existing transaction or DBTX.  The caller
+// owns tx lifecycle.
 func (s *PendingStore) WithDB(db DBTX, ledger *LedgerStore, classStore *ClassificationStore) *PendingStore {
 	return &PendingStore{
-		pool:            nil,
-		db:              db,
-		q:               sqlcgen.New(db),
-		ledger:          ledger,
-		classStore:      classStore,
-		pendingClassID:  s.pendingClassID,
-		suspenseClassID: s.suspenseClassID,
+		pool:       nil,
+		db:         db,
+		q:          sqlcgen.New(db),
+		ledger:     ledger,
+		classStore: classStore,
 	}
 }
 
@@ -476,10 +469,6 @@ func (s *PendingStore) resolveClassificationIDs(ctx context.Context) (pendingCla
 	if err != nil {
 		return pendingClassIDs{}, err
 	}
-
-	// Cache the two used by ExpirePendingOlderThan for next call.
-	s.pendingClassID = pendingID
-	s.suspenseClassID = suspenseID
 
 	return pendingClassIDs{
 		pending:    pendingID,
