@@ -31,7 +31,7 @@ describe("wallet client auth", () => {
         seenAuth = request.headers.get("authorization") ?? "";
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [BALANCE] },
         });
       }),
@@ -60,12 +60,12 @@ describe("wallet client auth", () => {
         if (request.headers.get("authorization") === "Bearer fresh") {
           return HttpResponse.json({
             code: 200,
-            message: "ok",
+            message: null,
             data: { list: [] },
           });
         }
         return HttpResponse.json(
-          { code: 10101, message: "invalid holder token", data: null },
+          { code: 10101, message: { text: "Invalid holder token" }, data: null },
           { status: 401 },
         );
       }),
@@ -82,7 +82,7 @@ describe("wallet client auth", () => {
     server.use(
       http.get(`${BASE}/holder/holds`, () =>
         HttpResponse.json(
-          { code: 10101, message: "invalid holder token", data: null },
+          { code: 10101, message: { text: "Invalid holder token" }, data: null },
           { status: 401 },
         ),
       ),
@@ -100,14 +100,14 @@ describe("wallet client auth", () => {
       return `lht_tok${minted}`;
     });
     const ok = () =>
-      HttpResponse.json({ code: 200, message: "ok", data: { list: [] } });
+      HttpResponse.json({ code: 200, message: null, data: { list: [] } });
     server.use(
       http.get(`${BASE}/holder/balances`, ok),
       http.get(`${BASE}/holder/holds`, ok),
       http.get(`${BASE}/holder/transactions`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [], next_cursor: "" },
         }),
       ),
@@ -130,7 +130,7 @@ describe("wallet client auth", () => {
       .mockResolvedValue("lht_ok");
     server.use(
       http.get(`${BASE}/holder/holds`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
+        HttpResponse.json({ code: 200, message: null, data: { list: [] } }),
       ),
     );
     const client = createWalletClient({ baseUrl: BASE, getToken });
@@ -146,7 +146,7 @@ describe("wallet client auth", () => {
         seenAuth = request.headers.get("authorization");
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [] },
         });
       }),
@@ -172,7 +172,7 @@ describe("wallet hooks", () => {
       http.get(`${BASE}/holder/balances`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [BALANCE] },
         }),
       ),
@@ -195,7 +195,7 @@ describe("wallet hooks", () => {
         const cursor = new URL(request.url).searchParams.get("cursor");
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: {
             list: [
               {
@@ -233,7 +233,7 @@ describe("wallet hooks", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/holder/balances`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { list: [BALANCE] } }),
+        HttpResponse.json({ code: 200, message: null, data: { list: [BALANCE] } }),
       ),
     );
     const wrapper = ({ children }: { children: ReactNode }) => (
@@ -258,7 +258,7 @@ describe("wallet hooks", () => {
       http.get(`${BASE}/holder/holds`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: {
             list: [
               {

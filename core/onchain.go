@@ -8,6 +8,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -237,6 +238,10 @@ func (c TokenConfig) AutoCreditCeilingConfigured() bool {
 // the environment directly (abstractions.md Environment Parity).
 type ChainConfig struct {
 	ChainID int64 `json:"chain_id"`
+	// ScanStartBlock is the first block that can contain events from this
+	// chain's DepositFactory deployment. Registration rescans start here
+	// instead of querying the chain from genesis.
+	ScanStartBlock int64 `json:"scan_start_block"`
 	// Confirmations is the number of block confirmations required before a
 	// pending deposit booking transitions to confirmed.
 	Confirmations int32 `json:"confirmations"`
@@ -257,6 +262,26 @@ type ChainConfig struct {
 	// credited to any holder but are still worth sweeping to treasury.
 	// Keyed by lowercase token contract address, or SweepNativeToken.
 	SweepTokens map[string]TokenConfig `json:"sweep_tokens"`
+}
+
+// RegistrationRescan is durable progress for the historical scan triggered
+// when a deposit address is first registered. One row exists per
+// (address, chain), so retries and process restarts resume at NextBlock.
+type RegistrationRescan struct {
+	UID       string
+	ChainID   int64
+	Address   string
+	NextBlock int64
+	Attempts  int32
+}
+
+// RegistrationRescanStore persists and leases address-registration rescans.
+// Implementations must make Claim safe across multiple service replicas.
+type RegistrationRescanStore interface {
+	EnqueueRegistrationRescans(ctx context.Context, jobs []RegistrationRescan) error
+	ClaimRegistrationRescans(ctx context.Context, limit int, lease time.Duration) ([]RegistrationRescan, error)
+	AdvanceRegistrationRescan(ctx context.Context, uid string, nextBlock int64, completed bool) error
+	RetryRegistrationRescan(ctx context.Context, uid, lastError string, retryAt time.Time) error
 }
 
 // ChainSet is the full multi-chain configuration a consumer injects into the

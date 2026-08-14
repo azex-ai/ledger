@@ -54,7 +54,7 @@ describe("server prefetch round-trip", () => {
         calls += 1;
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ id: 1 }, { id: 2 }], next_cursor: "" },
         });
       }),
@@ -92,7 +92,7 @@ describe("server prefetch round-trip", () => {
         calls += 1;
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ currency_uid: 1, balance: "100" }] },
         });
       }),
@@ -125,7 +125,7 @@ describe("server prefetch round-trip", () => {
         calls += 1;
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { status: "healthy" },
         });
       }),

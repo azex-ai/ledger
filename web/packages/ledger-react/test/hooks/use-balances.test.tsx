@@ -24,7 +24,7 @@ describe("use-balances", () => {
       http.get(`${BASE}/api/v1/balances/5`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ account_holder: 5, currency_uid: 1, classification_uid: 1, balance: "10" }] },
         }),
       ),
@@ -41,7 +41,7 @@ describe("use-balances", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/balances/5/cur-2`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: [] }),
+        HttpResponse.json({ code: 200, message: null, data: [] }),
       ),
     );
     const { result } = renderHook(() => useBalancesByCurrency(5, "cur-2"), {

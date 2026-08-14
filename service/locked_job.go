@@ -92,22 +92,23 @@ func NewLockedJob(name string, fn func(ctx context.Context) error, pool *pgxpool
 	return lj
 }
 
-// Run acquires the advisory lock, executes fn, then releases the lock.
-// If the lock is already held, it logs and returns nil immediately.
-func (lj *LockedJob) Run(ctx context.Context) {
+// Run acquires the advisory lock, executes fn, then releases the lock. Lock
+// acquisition errors fail closed: globally single-flight work must never run
+// without the coordination primitive that makes it safe.
+func (lj *LockedJob) Run(ctx context.Context) error {
 	if lj.locker != nil {
 		release, acquired, err := lj.locker.tryAdvisoryLock(ctx, lj.lockKey)
 		if err != nil {
-			lj.logger.Error("service: locked_job: advisory lock failed, proceeding without lock",
+			lj.logger.Error("service: locked_job: advisory lock failed, skipping",
 				"job", lj.name,
 				"error", err,
 			)
-			// Fall through — run anyway rather than silently skip on transient errors.
+			return fmt.Errorf("service: locked_job %s: acquire advisory lock: %w", lj.name, err)
 		} else if !acquired {
 			lj.logger.Info("service: locked_job: advisory lock held by another replica, skipping",
 				"job", lj.name,
 			)
-			return
+			return nil
 		} else {
 			defer func() {
 				// ctx may already be cancelled (e.g. shutdown mid-job) —
@@ -127,5 +128,7 @@ func (lj *LockedJob) Run(ctx context.Context) {
 
 	if err := lj.fn(ctx); err != nil {
 		lj.logger.Error("service: locked_job: fn failed", "job", lj.name, "error", err)
+		return fmt.Errorf("service: locked_job %s: run: %w", lj.name, err)
 	}
+	return nil
 }

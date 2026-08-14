@@ -27,7 +27,7 @@ describe("use-deposit-address", () => {
       http.get(`${BASE}/api/v1/holders/7/deposit-address`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { uid: "da-1", account_holder: 7, address: "0xabc" },
         }),
       ),
@@ -49,7 +49,7 @@ describe("use-deposit-address", () => {
       http.get(`${BASE}/api/v1/holders/9/deposit-address`, () => {
         hits += 1;
         return HttpResponse.json(
-          { code: 40400, message: "not found" },
+          { code: 40400, message: { text: "Not found" }, data: null },
           { status: 404 },
         );
       }),
@@ -68,7 +68,7 @@ describe("use-deposit-address", () => {
       http.post(`${BASE}/api/v1/holders/7/deposit-address`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { uid: "da-1", account_holder: 7, address: "0xabc" },
         }),
       ),

@@ -22,7 +22,11 @@ describe("LedgerAdmin", () => {
     // Suspense boundary (to keep recharts off the root barrel), so wait for the
     // async chunk to resolve before asserting its heading.
     expect(
-      await screen.findByRole("heading", { name: "Dashboard" }),
+      await screen.findByRole(
+        "heading",
+        { name: "Dashboard" },
+        { timeout: 5_000 },
+      ),
     ).toBeInTheDocument();
 
     // The sidebar drives internal section switching: clicking "Reservations"

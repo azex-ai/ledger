@@ -1,19 +1,22 @@
 // Package postgrestest hosts the testcontainers-backed PostgreSQL fixture used
-// by the ledger's integration tests. It lives in its own Go submodule so the
-// heavyweight test dependencies (testcontainers-go, the Docker SDK, moby/*,
-// gopsutil, OpenTelemetry) stay out of `go.sum` for library consumers.
-//
-// Library users never import this package — only ledger's own test suite does.
+// by the ledger's integration tests. A test process shares one server while
+// every test gets a fresh database, preserving isolation without repeatedly
+// paying container startup cost.
 package postgrestest
 
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -21,40 +24,92 @@ import (
 	ledgerpg "github.com/azex-ai/ledger/postgres"
 )
 
+var sharedServer struct {
+	once    sync.Once
+	connStr string
+	err     error
+}
+
+var databaseCounter atomic.Int64
+
+func baseConnection(t testing.TB) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("short mode: skipping PostgreSQL integration test")
+	}
+	if configured := os.Getenv("DATABASE_URL"); configured != "" {
+		return strings.Replace(configured, "pgx5://", "postgres://", 1)
+	}
+	sharedServer.once.Do(func() {
+		ctx := context.Background()
+		// Package test binaries run concurrently under `go test ./...`.
+		// Serialize only container startup because Docker Desktop can race
+		// testcontainers' shared Ryuk creation across processes.
+		startupLock := flock.New(filepath.Join(os.TempDir(), "ledger-postgrestest-container.lock"))
+		locked, lockErr := startupLock.TryLockContext(ctx, 100*time.Millisecond)
+		if lockErr != nil {
+			sharedServer.err = fmt.Errorf("lock container startup: %w", lockErr)
+			return
+		}
+		if !locked {
+			sharedServer.err = fmt.Errorf("lock container startup: lock not acquired")
+			return
+		}
+		defer func() { _ = startupLock.Unlock() }()
+		container, err := tcpostgres.Run(ctx, "postgres:17",
+			tcpostgres.WithDatabase("postgres"),
+			tcpostgres.WithUsername("test"),
+			tcpostgres.WithPassword("test"),
+		)
+		if err != nil {
+			sharedServer.err = err
+			return
+		}
+		// testcontainers' Ryuk sidecar removes the process-scoped shared
+		// container after the test binary exits.
+		sharedServer.connStr, sharedServer.err = container.ConnectionString(ctx, "sslmode=disable")
+	})
+	if sharedServer.err != nil && strings.Contains(sharedServer.err.Error(), "Cannot connect to the Docker daemon") {
+		t.Skip("Docker daemon not running, skipping integration test")
+	}
+	require.NoError(t, sharedServer.err)
+	return sharedServer.connStr
+}
+
+func isolatedConnection(t testing.TB) string {
+	t.Helper()
+	ctx := context.Background()
+	base := baseConnection(t)
+	name := fmt.Sprintf("ledger_test_%d", databaseCounter.Add(1))
+	admin, err := pgxpool.New(ctx, base)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return admin.Ping(ctx) == nil }, 15*time.Second, 250*time.Millisecond)
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
+	require.NoError(t, err)
+	admin.Close()
+
+	u, err := url.Parse(base)
+	require.NoError(t, err)
+	u.Path = "/" + name
+	connStr := u.String()
+	t.Cleanup(func() {
+		admin, err := pgxpool.New(ctx, base)
+		if err != nil {
+			return
+		}
+		defer admin.Close()
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
+	})
+	return connStr
+}
+
 // SetupRawDB starts a PostgreSQL container WITHOUT running migrations and
 // returns its connection string. For tests that drive golang-migrate manually
 // (e.g. migrate to an intermediate version, seed, continue). The test is
 // skipped when Docker isn't available.
 func SetupRawDB(t testing.TB) string {
 	t.Helper()
-	ctx := context.Background()
-
-	container, err := tcpostgres.Run(ctx, "postgres:17",
-		tcpostgres.WithDatabase("ledger_test"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-	)
-	if err != nil && strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
-		t.Skip("Docker daemon not running, skipping integration test")
-	}
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
-
-	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
-
-	// The container's readiness probe can race the first real connection;
-	// wait until a pgx connect+ping round-trips.
-	require.Eventually(t, func() bool {
-		p, err := pgxpool.New(ctx, connStr)
-		if err != nil {
-			return false
-		}
-		defer p.Close()
-		return p.Ping(ctx) == nil
-	}, 15*time.Second, 250*time.Millisecond)
-
-	return connStr
+	return isolatedConnection(t)
 }
 
 // SetupDB starts a PostgreSQL container, runs ledger migrations, and returns
@@ -66,20 +121,7 @@ func SetupRawDB(t testing.TB) string {
 func SetupDB(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
-
-	container, err := tcpostgres.Run(ctx, "postgres:17",
-		tcpostgres.WithDatabase("ledger_test"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-	)
-	if err != nil && strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
-		t.Skip("Docker daemon not running, skipping integration test")
-	}
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
-
-	connStr, err := container.ConnectionString(ctx, "sslmode=disable")
-	require.NoError(t, err)
+	connStr := isolatedConnection(t)
 
 	// Migrate expects a pgx5:// URL for the pgx/v5 driver.
 	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)

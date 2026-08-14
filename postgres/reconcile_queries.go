@@ -25,6 +25,11 @@ func NewReconcileAdapter(pool *pgxpool.Pool) *ReconcileAdapter {
 	return &ReconcileAdapter{q: sqlcgen.New(pool)}
 }
 
+// WithDB returns a transaction-bound clone.
+func (a *ReconcileAdapter) WithDB(db DBTX) *ReconcileAdapter {
+	return &ReconcileAdapter{q: sqlcgen.New(db)}
+}
+
 // OrphanEntriesCount returns the number of journal_entries whose journal_id
 // does not resolve to any row in the journals table.
 func (a *ReconcileAdapter) OrphanEntriesCount(ctx context.Context) (int64, error) {

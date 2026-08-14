@@ -41,7 +41,7 @@ function statefulReviewsHandler(resolved: () => boolean) {
   return http.get(`${BASE}/api/v1/deposits/reviews`, () =>
     HttpResponse.json({
       code: 200,
-      message: "ok",
+      message: null,
       data: { list: resolved() ? [] : [reviewBooking()], next_cursor: "" },
     }),
   );
@@ -77,7 +77,7 @@ describe("DepositReviewsPage", () => {
         approved = true;
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { uid: "bk-1", status: "confirmed" },
         });
       }),
@@ -109,7 +109,7 @@ describe("DepositReviewsPage", () => {
         rejected = true;
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { uid: "bk-1", status: "failed" },
         });
       }),

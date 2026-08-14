@@ -52,6 +52,12 @@ func NewRollupAdapter(pool *pgxpool.Pool) *RollupAdapter {
 	}
 }
 
+// WithDB returns a transaction-bound clone. Pool is deliberately nil so
+// methods use the caller's already-established transaction snapshot.
+func (a *RollupAdapter) WithDB(db DBTX) *RollupAdapter {
+	return &RollupAdapter{q: sqlcgen.New(db), claimLease: a.claimLease, dims: a.dims}
+}
+
 // SetClaimLease overrides the default rollup claim lease duration.
 func (a *RollupAdapter) SetClaimLease(d time.Duration) {
 	if d > 0 {

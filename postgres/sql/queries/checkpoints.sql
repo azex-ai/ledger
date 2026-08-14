@@ -22,6 +22,45 @@ SELECT account_holder, currency_id, classification_id, balance, last_entry_id, l
 FROM balance_checkpoints
 WHERE account_holder = $1 AND currency_id = $2;
 
+-- name: ListComputedBalancesForHolders :many
+-- Computes checkpoint + delta for every populated classification in one
+-- snapshot-consistent query. This is the batch primitive behind GetBalances,
+-- BatchGetBalances, and role breakdowns; callers must not loop GetBalance.
+WITH populated AS (
+    SELECT DISTINCT je.account_holder, je.classification_id
+    FROM journal_entries je
+    WHERE je.account_holder = ANY(sqlc.arg(holder_ids)::bigint[])
+      AND je.currency_id = sqlc.arg(currency_id)::bigint
+)
+SELECT
+    p.account_holder,
+    c.id AS classification_id,
+    c.uid AS classification_uid,
+    c.balance_role,
+    (
+      COALESCE(cp.balance, 0::numeric) +
+      COALESCE(SUM(CASE
+        WHEN c.normal_side = 'debit' AND je.entry_type = 'debit' THEN je.amount
+        WHEN c.normal_side = 'debit' AND je.entry_type = 'credit' THEN -je.amount
+        WHEN c.normal_side = 'credit' AND je.entry_type = 'credit' THEN je.amount
+        WHEN c.normal_side = 'credit' AND je.entry_type = 'debit' THEN -je.amount
+        ELSE 0::numeric
+      END), 0::numeric)
+    )::numeric AS balance
+FROM populated p
+JOIN classifications c ON c.id = p.classification_id
+LEFT JOIN balance_checkpoints cp
+  ON cp.account_holder = p.account_holder
+ AND cp.currency_id = sqlc.arg(currency_id)::bigint
+ AND cp.classification_id = p.classification_id
+LEFT JOIN journal_entries je
+  ON je.account_holder = p.account_holder
+ AND je.currency_id = sqlc.arg(currency_id)::bigint
+ AND je.classification_id = p.classification_id
+ AND je.id > COALESCE(cp.last_entry_id, 0)
+GROUP BY p.account_holder, c.id, c.uid, c.balance_role, cp.balance
+ORDER BY p.account_holder, c.id;
+
 -- name: EnqueueRollup :exec
 -- Re-dirty on conflict: if an unprocessed row already exists for the dimension
 -- (idle OR currently claimed by a worker), reset its claim. This signals "new

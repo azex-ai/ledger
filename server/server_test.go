@@ -562,7 +562,7 @@ func (m *mockQueryProvider) GetHealthMetrics(ctx context.Context) (*core.HealthM
 // --- Test helper ---
 
 func newTestServer() *server.Server {
-	return server.New(
+	return server.NewWithConfig(&server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024},
 		&mockJournalWriter{},
 		&mockBalanceReader{},
 		&mockReserver{},
@@ -617,7 +617,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 	for _, fn := range opts {
 		fn(o)
 	}
-	return server.New(
+	return server.NewWithConfig(&server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024},
 		o.journals, o.balances, o.reserver,
 		o.booker, o.bookingReader, o.eventReader,
 		o.classifications, o.journalTypes, o.templates, o.currencies,
@@ -1466,12 +1466,13 @@ func TestCreateBooking_InsufficientBalance(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
-// serverErrorEnvelope mirrors httpx.ErrorBody for asserting on the
-// "retryable" field from black-box HTTP responses.
+// serverErrorEnvelope mirrors the canonical error response shape.
 type serverErrorEnvelope struct {
-	Code      int    `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
+	Code    int `json:"code"`
+	Message struct {
+		Text string `json:"text"`
+	} `json:"message"`
+	Data any `json:"data"`
 }
 
 // --- Audit ---
@@ -1533,10 +1534,11 @@ func TestAuditTraceBooking_NotFound(t *testing.T) {
 
 	var env serverErrorEnvelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
-	assert.False(t, env.Retryable, "not-found is a permanent outcome, not retryable")
+	assert.NotEmpty(t, env.Message.Text)
+	assert.Nil(t, env.Data)
 }
 
-func TestAuditTraceBooking_InternalError_Retryable(t *testing.T) {
+func TestAuditTraceBooking_InternalError_CanonicalEnvelope(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.audit = &mockAuditQuerier{
 			traceBookingFn: func(ctx context.Context, bookingUID string) (*core.BookingTrace, error) {
@@ -1549,7 +1551,8 @@ func TestAuditTraceBooking_InternalError_Retryable(t *testing.T) {
 
 	var env serverErrorEnvelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
-	assert.True(t, env.Retryable, "unclassified internal errors default to retryable")
+	assert.NotEmpty(t, env.Message.Text)
+	assert.Nil(t, env.Data)
 }
 
 func TestAuditTraceBooking_OpaqueUIDPassesThrough(t *testing.T) {
@@ -1586,7 +1589,8 @@ func TestPlatformBalances_MissingCurrency(t *testing.T) {
 
 	var env serverErrorEnvelope
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
-	assert.False(t, env.Retryable, "invalid input is not retryable")
+	assert.NotEmpty(t, env.Message.Text)
+	assert.Nil(t, env.Data)
 }
 
 func TestPlatformSolvency(t *testing.T) {

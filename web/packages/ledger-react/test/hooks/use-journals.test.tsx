@@ -29,7 +29,7 @@ describe("use-journals", () => {
       http.get(`${BASE}/api/v1/journals`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ id: 1 }], next_cursor: "" },
         }),
       ),
@@ -48,7 +48,7 @@ describe("use-journals", () => {
       http.get(`${BASE}/api/v1/journals/uid-7`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { journal: { uid: "uid-7" }, entries: [] },
         }),
       ),
@@ -66,7 +66,7 @@ describe("use-journals", () => {
       http.get(`${BASE}/api/v1/entries`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [], next_cursor: "" },
         }),
       ),
@@ -86,7 +86,7 @@ describe("use-journals", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/journals`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { id: 9 } }),
+        HttpResponse.json({ code: 200, message: null, data: { id: 9 } }),
       ),
     );
     const { result } = renderHook(() => usePostJournal(), {
@@ -114,14 +114,14 @@ describe("use-journals", () => {
           // page 0
           return HttpResponse.json({
             code: 200,
-            message: "ok",
+            message: null,
             data: { list: [{ id: 1 }], next_cursor: "c1" },
           });
         }
         // page 1 (cursor=c1) — last page, empty next_cursor stops pagination
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ id: 2 }], next_cursor: "" },
         });
       }),

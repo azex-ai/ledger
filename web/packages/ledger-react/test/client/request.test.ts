@@ -11,7 +11,7 @@ describe("request core", () => {
       http.get(`${BASE}/api/v1/system/health`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: {
             status: "healthy",
             rollup_queue_depth: 0,
@@ -31,7 +31,10 @@ describe("request core", () => {
   test("throws ApiRequestError carrying the envelope code on non-2xx", async () => {
     server.use(
       http.get(`${BASE}/api/v1/system/health`, () =>
-        HttpResponse.json({ code: 11001, message: "nope" }, { status: 404 }),
+        HttpResponse.json(
+          { code: 11001, message: { text: "nope" }, data: null },
+          { status: 404 },
+        ),
       ),
     );
 
@@ -42,6 +45,24 @@ describe("request core", () => {
       apiError: { code: 11001, message: "nope" },
     });
     await expect(client.getHealth()).rejects.toBeInstanceOf(ApiRequestError);
+  });
+
+  test("uses the business code even when the HTTP status is 200", async () => {
+    server.use(
+      http.get(`${BASE}/api/v1/system/health`, () =>
+        HttpResponse.json({
+          code: 18101,
+          message: { text: "starting up" },
+          data: null,
+        }),
+      ),
+    );
+
+    const client = createLedgerClient({ baseUrl: BASE });
+    await expect(client.getHealth()).rejects.toMatchObject({
+      status: 200,
+      apiError: { code: 18101, message: "starting up" },
+    });
   });
 
   test("falls back to code 19999 when error body is not JSON", async () => {

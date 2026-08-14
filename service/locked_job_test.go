@@ -77,7 +77,7 @@ func TestLockedJob_RunsWhenLockAcquired(t *testing.T) {
 		logger: engine.Logger(),
 	}
 
-	lj.Run(context.Background())
+	require.NoError(t, lj.Run(context.Background()))
 
 	assert.Equal(t, int64(1), called.Load(), "fn should run once")
 	assert.Equal(t, int64(1), atomic.LoadInt64(&locker.acquired))
@@ -102,7 +102,7 @@ func TestLockedJob_SkipsWhenLockHeld(t *testing.T) {
 		logger: engine.Logger(),
 	}
 
-	lj.Run(context.Background())
+	require.NoError(t, lj.Run(context.Background()))
 
 	assert.Equal(t, int64(0), called.Load(), "fn must not run when lock is held by another replica")
 	assert.Equal(t, int64(1), atomic.LoadInt64(&locker.attempts))
@@ -125,16 +125,15 @@ func TestLockedJob_NilLocker_RunsUnconditionally(t *testing.T) {
 		logger: engine.Logger(),
 	}
 
-	lj.Run(context.Background())
-	lj.Run(context.Background())
+	require.NoError(t, lj.Run(context.Background()))
+	require.NoError(t, lj.Run(context.Background()))
 
 	assert.Equal(t, int64(2), called.Load(), "fn should run on every tick when locker is nil")
 }
 
-// TestLockedJob_LockErrorFallsThrough verifies that when pg_try_advisory_lock
-// returns an error, the job falls through and runs anyway (prefer execution
-// over silent skipping on transient DB errors).
-func TestLockedJob_LockErrorFallsThrough(t *testing.T) {
+// TestLockedJob_LockErrorFailsClosed verifies that a coordination failure
+// never executes the protected job without its global lock.
+func TestLockedJob_LockErrorFailsClosed(t *testing.T) {
 	var called atomic.Int64
 	engine := core.NewEngine()
 
@@ -149,9 +148,10 @@ func TestLockedJob_LockErrorFallsThrough(t *testing.T) {
 		logger: engine.Logger(),
 	}
 
-	lj.Run(context.Background())
+	err := lj.Run(context.Background())
 
-	assert.Equal(t, int64(1), called.Load(), "fn should still run when lock acquisition errors")
+	require.Error(t, err)
+	assert.Equal(t, int64(0), called.Load(), "fn must not run when lock acquisition errors")
 }
 
 // TestLockedJob_ReleasesLockAfterCtxCancelledDuringFn verifies that the
@@ -176,7 +176,7 @@ func TestLockedJob_ReleasesLockAfterCtxCancelledDuringFn(t *testing.T) {
 		logger: engine.Logger(),
 	}
 
-	lj.Run(ctx)
+	require.NoError(t, lj.Run(ctx))
 
 	assert.Equal(t, int64(1), atomic.LoadInt64(&locker.released), "lock must still be released")
 	assert.NoError(t, locker.lastReleaseCtxErr, "release must run on a detached ctx, not the cancelled parent")
@@ -221,11 +221,11 @@ func TestLockedJob_DoubleConcurrentRun(t *testing.T) {
 	lj1 := makeLJ()
 	lj2 := makeLJ()
 
-	lj1.Run(context.Background())
+	require.NoError(t, lj1.Run(context.Background()))
 	// At this point lj1 has released the lock, but we want to test the
 	// "another replica holds it" case.  Re-acquire manually before lj2 runs.
 	lockHolder.Store(true)
-	lj2.Run(context.Background())
+	require.NoError(t, lj2.Run(context.Background()))
 
 	assert.Equal(t, int64(1), runCount.Load(), "only lj1 should have run fn; lj2 sees lock held")
 }

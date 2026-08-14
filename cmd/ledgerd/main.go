@@ -62,13 +62,19 @@ func run() error {
 	}
 
 	// Migrations. MIGRATE_MODE decouples schema changes from pod startup:
-	//   auto (default) — run migrations, then serve (single-binary deploys)
+	//   auto           — run migrations, then serve (local/single-binary deploys)
 	//   only           — run migrations and exit 0 (pre-upgrade Job; the
 	//                    serving pods then run with "off" and no DDL rights)
 	//   off            — skip; another process owns migrations
 	migrateMode := os.Getenv("MIGRATE_MODE")
 	if migrateMode == "" {
-		migrateMode = "auto"
+		if srvCfg.Env == "dev" {
+			migrateMode = "auto"
+		} else {
+			// Production serving processes default to no DDL: migrations may
+			// take heavyweight locks and belong in a pre-deploy job.
+			migrateMode = "off"
+		}
 	}
 	switch migrateMode {
 	case "auto", "only":

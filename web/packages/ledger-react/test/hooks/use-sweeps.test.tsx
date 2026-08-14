@@ -24,14 +24,14 @@ describe("use-sweeps", () => {
       http.get(`${BASE}/api/v1/classifications`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "cls-9", code: "sweep", name: "Sweep" }] },
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "bk-1" }], next_cursor: "" },
         }),
       ),

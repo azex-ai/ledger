@@ -1305,10 +1305,23 @@ components:
 
     Envelope:
       type: object
-      required: [code, message]
+      required: [code, message, data]
       properties:
         code: { type: integer, example: 200, description: "200 on success; business error code otherwise" }
-        message: { type: string, example: "ok" }
+        message:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/ErrorMessage"
+        data: {}
+
+    ErrorMessage:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, example: "Insufficient balance for this operation" }
+        fields:
+          type: object
+          additionalProperties: { type: string }
 
     ErrorResponse:
       allOf:
@@ -1316,13 +1329,8 @@ components:
         - type: object
           properties:
             code: { type: integer, example: 14001 }
-            message: { type: string, example: "Insufficient balance for this operation" }
-            retryable:
-              type: boolean
-              description: |
-                Whether the client may safely retry using the SAME
-                idempotency_key. See docs/api.md "Error handling contract".
-              example: false
+            message: { $ref: "#/components/schemas/ErrorMessage" }
+            data: { type: "null" }
 
     EntryType:
       type: string
@@ -1360,9 +1368,11 @@ components:
           additionalProperties: { type: string }
         actor_id: { type: integer, format: int64 }
         source:   { type: string }
+        effective_at: { $ref: "#/components/schemas/Timestamp", description: "Business time; defaults to now and may not be more than five minutes in the future." }
 
     Journal:
       type: object
+      required: [uid, journal_type_uid, idempotency_key, total_debit, total_credit, metadata, actor_id, source, effective_at, created_at]
       properties:
         uid: { type: string, format: uuid }
         journal_type_uid: { type: string, format: uuid }
@@ -1376,9 +1386,11 @@ components:
         source:      { type: string }
         reversal_of_uid: { type: string, format: uuid, description: "Empty when this journal is not a reversal." }
         event_uid:   { type: string, format: uuid, description: "Empty when not event-driven." }
+        effective_at: { $ref: "#/components/schemas/Timestamp" }
         created_at:  { $ref: "#/components/schemas/Timestamp" }
     Entry:
       type: object
+      required: [journal_uid, account_holder, currency_uid, classification_uid, entry_type, amount, effective_at, created_at]
       properties:
         uid: { type: string, format: uuid }
         journal_uid: { type: string, format: uuid }
@@ -1387,6 +1399,7 @@ components:
         classification_uid: { type: string, format: uuid }
         entry_type: { $ref: "#/components/schemas/EntryType" }
         amount:     { $ref: "#/components/schemas/Decimal" }
+        effective_at: { $ref: "#/components/schemas/Timestamp" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
 
     JournalEnvelope:

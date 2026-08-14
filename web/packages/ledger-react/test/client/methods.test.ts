@@ -12,6 +12,7 @@ interface Captured {
   url: string;
   method: string;
   auth: string | null;
+	idempotencyKey: string | null;
   body: unknown;
 }
 
@@ -31,10 +32,11 @@ function intercept(
         url: request.url,
         method: request.method,
         auth: request.headers.get("authorization"),
+		idempotencyKey: request.headers.get("idempotency-key"),
         body,
       };
       if (status === 204) return new HttpResponse(null, { status: 204 });
-      return HttpResponse.json({ code: 200, message: "ok", data: respond });
+      return HttpResponse.json({ code: 200, message: null, data: respond });
     }),
   );
   return { captured: () => captured };
@@ -76,6 +78,7 @@ describe("journals + entries", () => {
     const c = i.captured();
     expect(c?.method).toBe("POST");
     expect(c?.auth).toBe(`Bearer ${API_KEY}`);
+	expect(c?.idempotencyKey).toBe("k1");
     expect(c?.body).toMatchObject({ journal_type_uid: "uid-1", idempotency_key: "k1" });
   });
 

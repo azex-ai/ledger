@@ -2,6 +2,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -70,6 +71,16 @@ func TestReserveInput_Validate(t *testing.T) {
 				AccountHolder: 7,
 				CurrencyUID:   "cur-1",
 				Amount:        decimal.NewFromInt(100),
+			},
+		},
+		{
+			name: "negative expiry",
+			input: ReserveInput{
+				AccountHolder:  7,
+				CurrencyUID:    "cur-1",
+				Amount:         decimal.NewFromInt(100),
+				IdempotencyKey: "reserve-1",
+				ExpiresIn:      -time.Second,
 			},
 		},
 	}

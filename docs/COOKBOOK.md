@@ -503,6 +503,7 @@ across all of them:
 chainSet := core.ChainSet{
     1: { // Ethereum mainnet
         ChainID: 1, Confirmations: 12,
+        ScanStartBlock: 19_000_000, // DepositFactory deployment block
         Factory: "0x...", InitHash: "0x...", // your azex-contracts DepositFactory deployment
         CreditTokens: map[string]core.TokenConfig{
             "0xusdt...": {TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6},
@@ -516,6 +517,10 @@ chainSet := core.ChainSet{
 }
 ```
 
+Set `ScanStartBlock` to the `DepositFactory` deployment block. The durable
+address-registration rescan starts there; leaving it at zero is valid but may
+cause an unnecessarily expensive genesis-to-tip scan.
+
 `CreditTokens` is the deposit-side allowlist (what credits a holder's
 balance); `SweepTokens` is independent and may include native assets that are
 collected to treasury but never credited to any holder (unattributed —
@@ -525,7 +530,7 @@ handled as its own reconciliation category, design doc §5-4).
 
 ```
 POST /api/v1/holders/1001/deposit-address
--> {"code":200,"message":"created","data":{"uid":"...","account_holder":1001,"address":"0xB3e7...","created_at":"..."}}
+-> {"code":200,"message":null,"data":{"uid":"...","account_holder":1001,"address":"0xB3e7...","created_at":"..."}}
 ```
 
 Idempotent — call it again any time and you get the same address back. In

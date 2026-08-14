@@ -97,7 +97,7 @@ func TestResolveError_WrappedAppError(t *testing.T) {
 
 type successEnvelope struct {
 	Code    int                `json:"code"`
-	Message string             `json:"message"`
+	Message *ErrorMessage      `json:"message"`
 	Data    stdjson.RawMessage `json:"data"`
 }
 
@@ -120,7 +120,7 @@ func TestOK(t *testing.T) {
 	var env successEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 200, env.Code)
-	assert.Equal(t, "ok", env.Message)
+	assert.Nil(t, env.Message)
 
 	var data payload
 	require.NoError(t, stdjson.Unmarshal(env.Data, &data))
@@ -146,7 +146,7 @@ func TestCreated(t *testing.T) {
 	var env successEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 200, env.Code)
-	assert.Equal(t, "created", env.Message)
+	assert.Nil(t, env.Message)
 
 	var data payload
 	require.NoError(t, stdjson.Unmarshal(env.Data, &data))
@@ -156,9 +156,9 @@ func TestCreated(t *testing.T) {
 // --- Error response format ---
 
 type errorEnvelope struct {
-	Code      int    `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
+	Code    int           `json:"code"`
+	Message *ErrorMessage `json:"message"`
+	Data    any           `json:"data"`
 }
 
 func TestError_DomainSentinel(t *testing.T) {
@@ -175,8 +175,9 @@ func TestError_DomainSentinel(t *testing.T) {
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 10201, env.Code)
-	assert.NotEmpty(t, env.Message)
-	assert.False(t, env.Retryable, "not-found is a permanent outcome, not retryable")
+	require.NotNil(t, env.Message)
+	assert.NotEmpty(t, env.Message.Text)
+	assert.Nil(t, env.Data)
 }
 
 func TestError_UnknownError(t *testing.T) {
@@ -192,7 +193,8 @@ func TestError_UnknownError(t *testing.T) {
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 19999, env.Code)
-	assert.True(t, env.Retryable, "unclassified internal errors default to retryable")
+	require.NotNil(t, env.Message)
+	assert.Nil(t, env.Data)
 }
 
 func TestError_AppError(t *testing.T) {
@@ -208,10 +210,11 @@ func TestError_AppError(t *testing.T) {
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
 	assert.Equal(t, 10901, env.Code)
-	assert.False(t, env.Retryable, "idempotency-key conflict is not retryable with the same key")
+	require.NotNil(t, env.Message)
+	assert.Nil(t, env.Data)
 }
 
-func TestError_RateLimited_Retryable(t *testing.T) {
+func TestError_RateLimited_UsesCanonicalEnvelope(t *testing.T) {
 	w := httptest.NewRecorder()
 	Error(w, bizcode.New(10401, "rate limit exceeded"))
 
@@ -220,7 +223,8 @@ func TestError_RateLimited_Retryable(t *testing.T) {
 
 	var env errorEnvelope
 	require.NoError(t, stdjson.Unmarshal(body, &env))
-	assert.True(t, env.Retryable, "rate limiting is transient and should be retried after backoff")
+	require.NotNil(t, env.Message)
+	assert.Nil(t, env.Data)
 }
 
 // --- Decode ---

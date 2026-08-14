@@ -48,10 +48,28 @@ export interface LedgerClientConfig {
   fetch?: typeof fetch;
 }
 
-interface Envelope<T> {
-  code: number;
-  message: string;
-  data: T;
+interface ErrorMessage {
+  text: string;
+  fields?: Record<string, string>;
+}
+
+type Envelope<T> =
+  | { code: 200; message: null; data: T }
+  | { code: number; message: ErrorMessage; data: null };
+
+function idempotencyKeyFromBody(body: BodyInit | null | undefined): string {
+  if (typeof body === "string") {
+    try {
+      const parsed = JSON.parse(body) as { idempotency_key?: unknown };
+      if (typeof parsed.idempotency_key === "string" && parsed.idempotency_key) {
+        return parsed.idempotency_key;
+      }
+    } catch {
+      // The server remains the authority for malformed JSON. The request still
+      // receives a stable key for this logical attempt.
+    }
+  }
+  return crypto.randomUUID();
 }
 
 function qs(
@@ -83,27 +101,35 @@ export function createLedgerClient(config: LedgerClientConfig) {
     if (config.apiKey) {
       headers["Authorization"] = `Bearer ${config.apiKey}`;
     }
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(method) &&
+      !headers["Idempotency-Key"]
+    ) {
+      headers["Idempotency-Key"] = idempotencyKeyFromBody(init?.body);
+    }
 
     const res = await fetchImpl(`${config.baseUrl}${path}`, {
       ...init,
       headers,
+      signal: init?.signal ?? AbortSignal.timeout(15_000),
     });
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({
-        code: 19999,
-        message: res.statusText,
-      }));
-      throw new ApiRequestError(res.status, {
-        code: body.code ?? 19999,
-        message: body.message ?? res.statusText,
-      });
-    }
 
     if (res.status === 204) return undefined as T;
 
-    const envelope: Envelope<T> = await res.json();
-    return envelope.data;
+    const envelope = (await res.json().catch(() => null)) as Envelope<T> | null;
+    if (!envelope || !res.ok || envelope.code !== 200) {
+      const message =
+        envelope?.message && typeof envelope.message === "object"
+          ? envelope.message
+          : { text: res.statusText || "Request failed" };
+      throw new ApiRequestError(res.status, {
+        code: envelope && envelope.code !== 200 ? envelope.code : 19999,
+        message: message.text,
+        fields: message.fields,
+      });
+    }
+    return envelope.data as T;
   }
 
   return {

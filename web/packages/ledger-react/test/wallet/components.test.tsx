@@ -17,7 +17,7 @@ function seedWalletAPI() {
     http.get(`${BASE}/holder/balances`, () =>
       HttpResponse.json({
         code: 200,
-        message: "ok",
+        message: null,
         data: {
           list: [
             {
@@ -35,7 +35,7 @@ function seedWalletAPI() {
     http.get(`${BASE}/holder/transactions`, () =>
       HttpResponse.json({
         code: 200,
-        message: "ok",
+        message: null,
         data: {
           list: [
             {
@@ -70,7 +70,7 @@ function seedWalletAPI() {
     http.get(`${BASE}/holder/holds`, () =>
       HttpResponse.json({
         code: 200,
-        message: "ok",
+        message: null,
         data: {
           list: [
             {
@@ -148,18 +148,18 @@ describe.each([
     server.use(
       http.get(`${BASE}/holder/balances`, () =>
         HttpResponse.json(
-          { code: 19999, message: "pq: deadlock detected on journal_entries", data: null },
+          { code: 19999, message: { text: "Internal server error" }, data: null },
           { status: 500 },
         ),
       ),
       http.get(`${BASE}/holder/transactions`, () =>
         HttpResponse.json(
-          { code: 19999, message: "pq: deadlock detected on journal_entries", data: null },
+          { code: 19999, message: { text: "Internal server error" }, data: null },
           { status: 500 },
         ),
       ),
       http.get(`${BASE}/holder/holds`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { list: [] } }),
+        HttpResponse.json({ code: 200, message: null, data: { list: [] } }),
       ),
     );
     const { container } = render(wrap(<Panel />));

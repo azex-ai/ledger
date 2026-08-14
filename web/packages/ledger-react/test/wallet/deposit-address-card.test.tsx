@@ -22,7 +22,7 @@ function depositAddress(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 function ok<T>(data: T) {
-  return HttpResponse.json({ code: 200, message: "ok", data });
+  return HttpResponse.json({ code: 200, message: null, data });
 }
 
 // user-facing-surfaces.md guard: CREATE2 audit-only fields and internal
@@ -91,7 +91,10 @@ describe.each([
   test("shows a generate CTA and issues an address on 404", async () => {
     server.use(
       http.get(`${BASE}/holder/deposit-address`, () =>
-        HttpResponse.json({ code: 40400, message: "not found" }, { status: 404 }),
+        HttpResponse.json(
+          { code: 40400, message: { text: "Not found" }, data: null },
+          { status: 404 },
+        ),
       ),
     );
     render(wrap(<Card />));
@@ -113,7 +116,7 @@ describe.each([
     server.use(
       http.get(`${BASE}/holder/deposit-address`, () =>
         HttpResponse.json(
-          { code: 19999, message: "pq: deadlock detected on journal_entries" },
+          { code: 19999, message: { text: "Internal server error" }, data: null },
           { status: 500 },
         ),
       ),

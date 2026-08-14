@@ -246,18 +246,19 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 	deadLetters := postgres.NewIngestDeadLetterStore(pool)
 
 	deps := service.OnchainDeps{
-		Registry:        postgres.NewDepositAddressStore(pool),
-		Cursors:         postgres.NewChainCursorStore(pool),
-		Booker:          bookingStore,
-		BookingReader:   bookingStore,
-		Journals:        ledgerStore,
-		TxComposer:      &testTxComposer{pool: pool, bookingStore: bookingStore, ledgerStore: ledgerStore},
-		Reader:          reader,
-		Scanner:         scanner,
-		Sweeper:         sweeper,
-		DeadLetters:     deadLetters,
-		Currencies:      currencyStore,
-		Classifications: classStore,
+		Registry:            postgres.NewDepositAddressStore(pool),
+		Cursors:             postgres.NewChainCursorStore(pool),
+		Booker:              bookingStore,
+		BookingReader:       bookingStore,
+		Journals:            ledgerStore,
+		TxComposer:          &testTxComposer{pool: pool, bookingStore: bookingStore, ledgerStore: ledgerStore},
+		Reader:              reader,
+		RegistrationRescans: postgres.NewRegistrationRescanStore(pool),
+		Scanner:             scanner,
+		Sweeper:             sweeper,
+		DeadLetters:         deadLetters,
+		Currencies:          currencyStore,
+		Classifications:     classStore,
 	}
 	onchain := service.NewOnchain(deps, chains, opts...)
 

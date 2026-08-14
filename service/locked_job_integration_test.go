@@ -31,7 +31,7 @@ func TestLockedJob_RealPool_LockReleasedAcrossRuns(t *testing.T) {
 	}, pool, engine.Logger())
 
 	for i := 0; i < 5; i++ {
-		lj.Run(ctx)
+		require.NoError(t, lj.Run(ctx))
 	}
 	require.Equal(t, 5, ran, "every Run must execute fn — a skipped run means the previous release leaked the lock")
 

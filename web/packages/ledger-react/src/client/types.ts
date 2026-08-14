@@ -10,6 +10,7 @@
 export interface ApiError {
   code: number;
   message: string;
+	fields?: Record<string, string>;
 }
 
 export interface Journal {
@@ -22,6 +23,7 @@ export interface Journal {
   actor_id: number;
   source: string;
   reversal_of_uid: string;  // "" = not linked
+	effective_at: string;
   created_at: string;
 }
 
@@ -32,6 +34,7 @@ export interface Entry {
   classification_uid: string;
   entry_type: "debit" | "credit";
   amount: string;
+	effective_at: string;
   created_at: string;
 }
 

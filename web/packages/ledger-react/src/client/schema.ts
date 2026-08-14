@@ -2599,20 +2599,21 @@ export interface components {
              * @example 200
              */
             code: number;
-            /** @example ok */
-            message: string;
+            message: null | components["schemas"]["ErrorMessage"];
+            data: unknown;
+        };
+        ErrorMessage: {
+            /** @example Insufficient balance for this operation */
+            text: string;
+            fields?: {
+                [key: string]: string;
+            };
         };
         ErrorResponse: components["schemas"]["Envelope"] & {
             /** @example 14001 */
             code?: number;
-            /** @example Insufficient balance for this operation */
-            message?: string;
-            /**
-             * @description Whether the client may safely retry using the SAME
-             *     idempotency_key. See docs/api.md "Error handling contract".
-             * @example false
-             */
-            retryable?: boolean;
+            message?: components["schemas"]["ErrorMessage"];
+            data?: null;
         };
         /** @enum {string} */
         EntryType: "debit" | "credit";
@@ -2643,21 +2644,23 @@ export interface components {
             /** Format: int64 */
             actor_id?: number;
             source?: string;
+            /** @description Business time; defaults to now and may not be more than five minutes in the future. */
+            effective_at?: components["schemas"]["Timestamp"];
         };
         Journal: {
             /** Format: uuid */
-            uid?: string;
+            uid: string;
             /** Format: uuid */
-            journal_type_uid?: string;
-            idempotency_key?: string;
-            total_debit?: components["schemas"]["Decimal"];
-            total_credit?: components["schemas"]["Decimal"];
-            metadata?: {
+            journal_type_uid: string;
+            idempotency_key: string;
+            total_debit: components["schemas"]["Decimal"];
+            total_credit: components["schemas"]["Decimal"];
+            metadata: {
                 [key: string]: string;
             };
             /** Format: int64 */
-            actor_id?: number;
-            source?: string;
+            actor_id: number;
+            source: string;
             /**
              * Format: uuid
              * @description Empty when this journal is not a reversal.
@@ -2668,22 +2671,24 @@ export interface components {
              * @description Empty when not event-driven.
              */
             event_uid?: string;
-            created_at?: components["schemas"]["Timestamp"];
+            effective_at: components["schemas"]["Timestamp"];
+            created_at: components["schemas"]["Timestamp"];
         };
         Entry: {
             /** Format: uuid */
             uid?: string;
             /** Format: uuid */
-            journal_uid?: string;
+            journal_uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
+            currency_uid: string;
             /** Format: uuid */
-            classification_uid?: string;
-            entry_type?: components["schemas"]["EntryType"];
-            amount?: components["schemas"]["Decimal"];
-            created_at?: components["schemas"]["Timestamp"];
+            classification_uid: string;
+            entry_type: components["schemas"]["EntryType"];
+            amount: components["schemas"]["Decimal"];
+            effective_at: components["schemas"]["Timestamp"];
+            created_at: components["schemas"]["Timestamp"];
         };
         JournalEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Journal"];

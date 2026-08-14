@@ -115,6 +115,30 @@ type Config struct {
 	HolderTokenSecret []byte
 }
 
+// Validate rejects configurations that would expose a production server or
+// weaken its request-boundary protections. Dev mode deliberately permits an
+// unauthenticated server for local tests and examples.
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("server: config is required")
+	}
+	if c.Env == "" {
+		return fmt.Errorf("server: ENV is required")
+	}
+	if c.Env != "dev" {
+		if c.CORSAllowOrigin == "" || c.CORSAllowOrigin == "*" {
+			return fmt.Errorf("server: exact CORS_ALLOWED_ORIGIN is required when ENV=%q", c.Env)
+		}
+		if len(c.APIKeys) == 0 {
+			return fmt.Errorf("server: API_KEYS is required when ENV=%q", c.Env)
+		}
+	}
+	if c.MaxBodyBytes <= 0 {
+		return fmt.Errorf("server: MaxBodyBytes must be positive")
+	}
+	return nil
+}
+
 // LoadConfig reads server config from env. Returns an error in production
 // when CORS_ALLOWED_ORIGIN is unset — we refuse to ship with wildcard CORS.
 func LoadConfig() (*Config, error) {
@@ -155,14 +179,18 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("server: invalid TRUSTED_PROXY_CIDRS: %w", err)
 	}
 
-	return &Config{
+	cfg := &Config{
 		Env:               env,
 		CORSAllowOrigin:   corsOrigin,
 		APIKeys:           keys,
 		MaxBodyBytes:      maxBytes,
 		TrustedProxyCIDRs: trustedCIDRs,
 		HolderTokenSecret: holderSecret,
-	}, nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // New creates a new Server with all dependencies. Configuration is read from
@@ -194,11 +222,7 @@ func New(
 ) *Server {
 	cfg, err := LoadConfig()
 	if err != nil {
-		// Tests construct Server directly through New() and may not set the
-		// production env vars; fall back to a permissive dev config so the
-		// existing test suite keeps working unchanged.
-		slog.Warn("server: LoadConfig failed, falling back to dev defaults", "error", err)
-		cfg = &Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024}
+		panic(fmt.Sprintf("server: load config: %v", err))
 	}
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
@@ -234,6 +258,9 @@ func NewWithConfig(
 	periodCloser core.PeriodCloser,
 	trialBalance core.TrialBalanceReader,
 ) *Server {
+	if err := cfg.Validate(); err != nil {
+		panic(fmt.Sprintf("server: invalid config: %v", err))
+	}
 	s := &Server{
 		journals:         journals,
 		balances:         balances,
@@ -286,11 +313,6 @@ func NewWithConfig(
 
 	if len(cfg.APIKeys) > 0 {
 		r.Use(authMiddleware(cfg.APIKeys))
-	} else if cfg.Env != "dev" {
-		// Production without keys would be silently open — refuse.
-		// Logged as an error; main.go's LoadConfig should already have failed
-		// fast, but defend in depth.
-		slog.Error("server: no API_KEYS configured in non-dev ENV; ALL endpoints (reads included) WILL be unauthenticated")
 	}
 
 	s.router = r
@@ -326,7 +348,7 @@ func corsMiddleware(cfg *Config) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key")
 			if allowCredentials {
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}

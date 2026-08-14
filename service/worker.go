@@ -193,7 +193,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	}, w.pool, w.logger)
 	g.Go(func() error {
 		return w.runLoop(ctx, "reconcile", w.config.ReconcileInterval, func(ctx context.Context) {
-			reconcileJob.Run(ctx)
+			if err := reconcileJob.Run(ctx); err != nil {
+				w.logger.Error("worker: reconcile job failed", "error", err)
+			}
 		})
 	})
 
@@ -213,7 +215,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	}, w.pool, w.logger)
 	g.Go(func() error {
 		return w.runLoop(ctx, "system_rollup", w.config.SystemRollupInterval, func(ctx context.Context) {
-			sysRollupJob.Run(ctx)
+			if err := sysRollupJob.Run(ctx); err != nil {
+				w.logger.Error("worker: system rollup job failed", "error", err)
+			}
 		})
 	})
 
@@ -225,7 +229,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		}, w.pool, w.logger)
 		g.Go(func() error {
 			return w.runLoop(ctx, "full_reconcile", w.config.FullReconcileInterval, func(ctx context.Context) {
-				fullReconcileJob.Run(ctx)
+				if err := fullReconcileJob.Run(ctx); err != nil {
+					w.logger.Error("worker: full reconcile job failed", "error", err)
+				}
 			})
 		})
 	}
@@ -237,7 +243,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		}, w.pool, w.logger)
 		g.Go(func() error {
 			return w.runLoop(ctx, "partition", w.config.PartitionInterval, func(ctx context.Context) {
-				partitionJob.Run(ctx)
+				if err := partitionJob.Run(ctx); err != nil {
+					w.logger.Error("worker: partition job failed", "error", err)
+				}
 			})
 		})
 	}

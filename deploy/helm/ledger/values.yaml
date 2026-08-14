@@ -36,14 +36,12 @@ corsAllowedOrigin: ""
 # peer is used). An invalid value fails pod startup fast.
 trustedProxyCIDRs: ""
 
-# Schema migrations. Default: every pod runs migrations at startup
-# (MIGRATE_MODE=auto — fine for small deployments; golang-migrate takes a
-# lock so racing pods are safe). Enable the Job to run migrations once from
-# a pre-install/pre-upgrade hook instead; serving pods then start with
-# MIGRATE_MODE=off and need no DDL privileges.
+# Schema migrations run once in a pre-install/pre-upgrade Job. Serving pods
+# start with MIGRATE_MODE=off, so rollout capacity is not held behind DDL
+# locks and the runtime database role needs no DDL privileges.
 migrations:
   job:
-    enabled: false
+    enabled: true
     # Optional: a different key in the DB secret holding a DDL-capable URL,
     # so serving pods can use a least-privilege role.
     databaseUrlKey: ""

@@ -24,14 +24,14 @@ describe("use-deposits", () => {
       http.get(`${BASE}/api/v1/classifications`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "cls-3", code: "deposit", name: "Deposit" }] },
         }),
       ),
       http.get(`${BASE}/api/v1/bookings`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "bk-1" }], next_cursor: "" },
         }),
       ),
@@ -62,7 +62,7 @@ describe("use-deposits", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/bookings/uid-1/transition`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { id: 99 } }),
+        HttpResponse.json({ code: 200, message: null, data: { id: 99 } }),
       ),
     );
     const { result } = renderHook(() => useConfirmDeposit(), {

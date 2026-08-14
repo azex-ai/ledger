@@ -28,7 +28,7 @@ describe("use-deposit-reviews", () => {
       http.get(`${BASE}/api/v1/deposits/reviews`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "bk-1" }, { uid: "bk-2" }], next_cursor: "" },
         }),
       ),
@@ -49,7 +49,7 @@ describe("use-deposit-reviews", () => {
       http.get(`${BASE}/api/v1/deposits/reviews`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "bk-1" }, { uid: "bk-2" }], next_cursor: "" },
         }),
       ),
@@ -58,7 +58,7 @@ describe("use-deposit-reviews", () => {
       http.post(`${BASE}/api/v1/deposits/bk-1/review/approve`, async () => {
         await new Promise((r) => setTimeout(r, 50));
         return HttpResponse.json(
-          { code: 40900, message: "conflict" },
+          { code: 40900, message: { text: "Conflict" }, data: null },
           { status: 409 },
         );
       }),
@@ -95,7 +95,7 @@ describe("use-deposit-reviews", () => {
       http.get(`${BASE}/api/v1/deposits/reviews`, () =>
         HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { list: [{ uid: "bk-1" }], next_cursor: "" },
         }),
       ),
@@ -106,7 +106,7 @@ describe("use-deposit-reviews", () => {
         capturedBody = await request.json();
         return HttpResponse.json({
           code: 200,
-          message: "ok",
+          message: null,
           data: { uid: "bk-1", status: "failed" },
         });
       }),

@@ -160,12 +160,13 @@ type OnchainDeps struct {
 	// reconciliation source (design doc §9.3). Nil (the default) disables
 	// the reconciliation gate entirely -- only TokenConfig.AutoCreditCeiling
 	// applies.
-	DepositConfirmer core.DepositConfirmer
-	DeadLetters      DeadLetterRecorder
-	Currencies       core.CurrencyStore
-	Classifications  core.ClassificationStore
-	Logger           core.Logger  // defaults to core.NopLogger()
-	Metrics          core.Metrics // defaults to core.NopMetrics()
+	DepositConfirmer    core.DepositConfirmer
+	RegistrationRescans core.RegistrationRescanStore
+	DeadLetters         DeadLetterRecorder
+	Currencies          core.CurrencyStore
+	Classifications     core.ClassificationStore
+	Logger              core.Logger  // defaults to core.NopLogger()
+	Metrics             core.Metrics // defaults to core.NopMetrics()
 }
 
 // validateCore checks the dependencies required for the deposit ingestion
@@ -189,6 +190,7 @@ func (d OnchainDeps) validateCore() error {
 		missing(d.DeadLetters != nil, "DeadLetters"),
 		missing(d.Currencies != nil, "Currencies"),
 		missing(d.Classifications != nil, "Classifications"),
+		missing(d.Reader == nil || d.RegistrationRescans != nil, "RegistrationRescans"),
 	} {
 		if n != "" {
 			names = append(names, n)
@@ -298,23 +300,19 @@ type Onchain struct {
 	sweepPolicies []core.SweepPolicy
 	pool          *pgxpool.Pool
 
-	watchInterval             time.Duration
-	maxBlocksPerScan          int64
-	recheckInterval           time.Duration
-	reorgRecheckInterval      time.Duration
-	reorgRecheckWindow        int64
-	registrationRescanTimeout time.Duration
-	sweepStuckAfter           time.Duration
-	maxSweepBumps             int
-	maxConcurrentRescans      int
+	watchInterval              time.Duration
+	maxBlocksPerScan           int64
+	recheckInterval            time.Duration
+	reorgRecheckInterval       time.Duration
+	reorgRecheckWindow         int64
+	registrationRescanTimeout  time.Duration
+	registrationRescanInterval time.Duration
+	sweepStuckAfter            time.Duration
+	maxSweepBumps              int
+	maxConcurrentRescans       int
 
 	currencies *currencyResolver
 	classes    *classResolver
-
-	// rescanSem bounds concurrent launchRegistrationRescan goroutines to
-	// maxConcurrentRescans (M4 hardening: batch holder onboarding must not
-	// fan out one full-history-scan goroutine per holder unbounded).
-	rescanSem chan struct{}
 
 	sweepMu   sync.Mutex
 	sweepTx   map[string]string // booking uid -> latest broadcast tx hash
@@ -331,22 +329,23 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		deps.Metrics = core.NopMetrics()
 	}
 	o := &Onchain{
-		deps:                      deps,
-		chains:                    chains,
-		reorgPolicy:               core.ReorgPolicyManual,
-		watchInterval:             15 * time.Second,
-		maxBlocksPerScan:          2000,
-		recheckInterval:           20 * time.Second,
-		reorgRecheckInterval:      5 * time.Minute,
-		reorgRecheckWindow:        500,
-		registrationRescanTimeout: 10 * time.Minute,
-		sweepStuckAfter:           5 * time.Minute,
-		maxSweepBumps:             5,
-		maxConcurrentRescans:      4,
-		currencies:                newCurrencyResolver(),
-		classes:                   newClassResolver(),
-		sweepTx:                   make(map[string]string),
-		sweepBump:                 make(map[string]int),
+		deps:                       deps,
+		chains:                     chains,
+		reorgPolicy:                core.ReorgPolicyManual,
+		watchInterval:              15 * time.Second,
+		maxBlocksPerScan:           2000,
+		recheckInterval:            20 * time.Second,
+		reorgRecheckInterval:       5 * time.Minute,
+		reorgRecheckWindow:         500,
+		registrationRescanTimeout:  10 * time.Minute,
+		registrationRescanInterval: time.Second,
+		sweepStuckAfter:            5 * time.Minute,
+		maxSweepBumps:              5,
+		maxConcurrentRescans:       4,
+		currencies:                 newCurrencyResolver(),
+		classes:                    newClassResolver(),
+		sweepTx:                    make(map[string]string),
+		sweepBump:                  make(map[string]int),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -354,7 +353,9 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 	if o.maxConcurrentRescans <= 0 {
 		o.maxConcurrentRescans = 1
 	}
-	o.rescanSem = make(chan struct{}, o.maxConcurrentRescans)
+	if o.maxBlocksPerScan <= 0 {
+		o.maxBlocksPerScan = 2000
+	}
 	return o
 }
 
@@ -369,7 +370,10 @@ func (o *Onchain) canonicalFactory() (factory, initHash string, err error) {
 	if len(o.chains) == 0 {
 		return "", "", fmt.Errorf("service: onchain: no chains configured: %w", core.ErrInvalidInput)
 	}
-	for _, cfg := range o.chains {
+	for chainID, cfg := range o.chains {
+		if cfg.ScanStartBlock < 0 {
+			return "", "", fmt.Errorf("service: onchain: scan_start_block must not be negative for chain %d: %w", chainID, core.ErrInvalidInput)
+		}
 		if factory == "" {
 			factory, initHash = cfg.Factory, cfg.InitHash
 			continue
@@ -423,9 +427,9 @@ func (o *Onchain) ValidateAutoCreditCeilings() error {
 
 // EnsureDepositAddress derives holder's CREATE2 deposit address from the
 // canonical (factory, initHash) shared across every configured chain,
-// registers it (idempotent), and launches a bounded background rescan of
-// every chain's full history for this one address -- closing the "deposit
-// sent before registration" gap (design doc §2/§5-2b).
+// registers it (idempotent), and durably enqueues one historical rescan per
+// chain before returning -- closing the "deposit sent before registration"
+// gap without relying on a request-scoped or fire-and-forget goroutine.
 func (o *Onchain) EnsureDepositAddress(ctx context.Context, holder int64) (*core.DepositAddress, error) {
 	if err := o.deps.validateCore(); err != nil {
 		return nil, err
@@ -449,85 +453,71 @@ func (o *Onchain) EnsureDepositAddress(ctx context.Context, holder int64) (*core
 	}
 
 	if o.deps.Reader != nil {
-		o.launchRegistrationRescan(*da)
+		jobs := make([]core.RegistrationRescan, 0, len(o.chains))
+		for chainID, cfg := range o.chains {
+			jobs = append(jobs, core.RegistrationRescan{
+				ChainID: chainID, Address: da.Address, NextBlock: cfg.ScanStartBlock,
+			})
+		}
+		if err := o.deps.RegistrationRescans.EnqueueRegistrationRescans(ctx, jobs); err != nil {
+			return nil, fmt.Errorf("service: onchain: ensure deposit address: enqueue registration rescan: %w", err)
+		}
 	}
 	return da, nil
 }
 
-// launchRegistrationRescan scans every configured chain's full history
-// (block 0 -> current tip) for deposits to addr, on a background goroutine
-// bounded by registrationRescanTimeout (its own ctx.Done() exit path,
-// decoupled from the caller's request context -- a rescan must outlive the
-// HTTP request that triggered registration).
-//
-// Concurrency is bounded by rescanSem (M4 hardening): a burst of
-// EnsureDepositAddress calls (batch holder onboarding) must not each spawn
-// an unbounded full-history-scan goroutine -- that is RPC-provider-facing
-// amplification a single onboarding batch could turn into a self-inflicted
-// DoS. A goroutine that cannot acquire a slot before registrationRescanTimeout
-// elapses gives up entirely (design doc §5-2b's gap stays open for that
-// address until a subsequent rescan -- e.g. a manual retry -- succeeds).
-func (o *Onchain) launchRegistrationRescan(addr core.DepositAddress) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), o.registrationRescanTimeout)
-		defer cancel()
-
-		select {
-		case o.rescanSem <- struct{}{}:
-			defer func() { <-o.rescanSem }()
-		case <-ctx.Done():
-			o.log().Warn("service: onchain: registration rescan: gave up waiting for a rescan slot", "holder", addr.AccountHolder, "address", addr.Address)
-			return
-		}
-
-		for chainID := range o.chains {
-			select {
-			case <-ctx.Done():
-				o.log().Warn("service: onchain: registration rescan: timed out", "holder", addr.AccountHolder, "address", addr.Address)
-				return
-			default:
+// runRegistrationRescansOnce leases a bounded batch and advances each job by
+// one RPC-sized block window. Progress is persisted only after every sighting
+// in the window has been ingested successfully.
+func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) {
+	jobs, err := o.deps.RegistrationRescans.ClaimRegistrationRescans(ctx, o.maxConcurrentRescans, o.registrationRescanTimeout)
+	if err != nil {
+		o.log().Error("service: onchain: claim registration rescans failed", "error", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		job := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			jobCtx, cancel := context.WithTimeout(ctx, o.registrationRescanTimeout)
+			defer cancel()
+			if err := o.processRegistrationRescan(jobCtx, job); err != nil {
+				delay := time.Second << min(int(job.Attempts), 6)
+				if retryErr := o.deps.RegistrationRescans.RetryRegistrationRescan(ctx, job.UID, err.Error(), time.Now().Add(delay)); retryErr != nil {
+					o.log().Error("service: onchain: persist registration rescan retry failed", "uid", job.UID, "error", retryErr)
+				}
+				o.log().Error("service: onchain: registration rescan failed", "chain_id", job.ChainID, "address", job.Address, "error", err)
+				o.metrics().RegistrationRescanFailed(job.ChainID)
 			}
-			if err := o.rescanAddressOnChain(ctx, chainID, addr.Address); err != nil {
-				o.log().Error("service: onchain: registration rescan failed", "holder", addr.AccountHolder, "address", addr.Address, "chain_id", chainID, "error", err)
-				o.metrics().RegistrationRescanFailed(chainID)
-			}
-		}
-	}()
+		}()
+	}
+	wg.Wait()
 }
 
-// rescanAddressOnChain scans chainID's full history (block 0 -> current tip)
-// for deposits to address, in maxBlocksPerScan-sized chunks -- the same
-// window scanChainOnce's forward scan uses, so a single call never requests
-// an unbounded eth_getLogs block range from the RPC provider (a main-net
-// chain with a genesis-to-tip history would otherwise be rejected/timed out
-// by most providers, silently leaving design doc §5-2b's gap open, per the
-// caller's failure handling above).
-func (o *Onchain) rescanAddressOnChain(ctx context.Context, chainID int64, address string) error {
-	latest, err := o.deps.Reader.LatestBlock(ctx, chainID)
+func (o *Onchain) processRegistrationRescan(ctx context.Context, job core.RegistrationRescan) error {
+	latest, err := o.deps.Reader.LatestBlock(ctx, job.ChainID)
 	if err != nil {
 		return fmt.Errorf("latest block: %w", err)
 	}
-	for from := int64(0); from <= latest; from += o.maxBlocksPerScan {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		to := from + o.maxBlocksPerScan - 1
-		if to > latest {
-			to = latest
-		}
-		sightings, err := o.deps.Reader.FetchDeposits(ctx, chainID, from, to, []string{address})
-		if err != nil {
-			return fmt.Errorf("fetch deposits [%d,%d]: %w", from, to, err)
-		}
-		for _, s := range sightings {
-			if _, err := o.IngestDeposit(ctx, s); err != nil {
-				o.log().Warn("service: onchain: registration rescan: ingest failed", "chain_id", chainID, "tx_hash", s.TxHash, "error", err)
-			}
+	if job.NextBlock > latest {
+		return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, job.NextBlock, true)
+	}
+	to := job.NextBlock + o.maxBlocksPerScan - 1
+	if to > latest {
+		to = latest
+	}
+	sightings, err := o.deps.Reader.FetchDeposits(ctx, job.ChainID, job.NextBlock, to, []string{job.Address})
+	if err != nil {
+		return fmt.Errorf("fetch deposits [%d,%d]: %w", job.NextBlock, to, err)
+	}
+	for _, sighting := range sightings {
+		if _, err := o.IngestDeposit(ctx, sighting); err != nil {
+			return fmt.Errorf("ingest deposit %s/%d: %w", sighting.TxHash, sighting.TxLogSeq, err)
 		}
 	}
-	return nil
+	return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, to+1, to == latest)
 }
 
 // IngestDeposit is the single orchestration entry point both ingestion
@@ -1668,6 +1658,9 @@ func (o *Onchain) Run(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 
 	if o.deps.Reader != nil {
+		g.Go(func() error {
+			return o.runLoop(ctx, "onchain_registration_rescan", o.registrationRescanInterval, o.runRegistrationRescansOnce)
+		})
 		for chainID := range o.chains {
 			chainID := chainID
 			g.Go(func() error {
@@ -1744,5 +1737,9 @@ func newSweepLockedJob(policy core.SweepPolicy, o *Onchain, pool *pgxpool.Pool) 
 	lj := NewLockedJob(lockName, func(ctx context.Context) error {
 		return o.sweepTick(ctx, policy)
 	}, pool, o.deps.Logger)
-	return lj.Run
+	return func(ctx context.Context) {
+		if err := lj.Run(ctx); err != nil {
+			o.log().Error("service: onchain: sweep job failed", "chain_id", policy.ChainID, "error", err)
+		}
+	}
 }

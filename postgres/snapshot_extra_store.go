@@ -28,6 +28,12 @@ func NewSnapshotExtraStore(pool *pgxpool.Pool) *SnapshotExtraStore {
 	return &SnapshotExtraStore{pool: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool)}
 }
 
+// WithDB returns a transaction-bound clone. The dimension cache is safe to
+// share because it only caches immutable identifiers.
+func (s *SnapshotExtraStore) WithDB(db DBTX) *SnapshotExtraStore {
+	return &SnapshotExtraStore{q: sqlcgen.New(db), dims: s.dims}
+}
+
 // Compile-time interface assertions.
 var (
 	_ core.SparseSnapshotter   = (*SnapshotExtraStore)(nil)

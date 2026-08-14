@@ -25,7 +25,7 @@ describe("use-reservations", () => {
     const qc = new QueryClient();
     server.use(
       http.get(`${BASE}/api/v1/reservations`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: { list: [{ id: 1 }] } }),
+        HttpResponse.json({ code: 200, message: null, data: { list: [{ id: 1 }] } }),
       ),
     );
     const params = { holder: 5 };
@@ -44,7 +44,7 @@ describe("use-reservations", () => {
     const spy = vi.spyOn(qc, "invalidateQueries");
     server.use(
       http.post(`${BASE}/api/v1/reservations/uid-1/release`, () =>
-        HttpResponse.json({ code: 200, message: "ok", data: null }),
+        HttpResponse.json({ code: 200, message: null, data: null }),
       ),
     );
     const { result } = renderHook(() => useReleaseReservation(), {

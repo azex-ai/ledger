@@ -763,22 +763,19 @@ func (s *LedgerStore) getBalanceWithQueries(ctx context.Context, q *sqlcgen.Quer
 	}
 
 	// Get entry sums since checkpoint
-	sums, err := q.SumEntriesSinceCheckpoint(ctx, sqlcgen.SumEntriesSinceCheckpointParams{
-		AccountHolder: holder,
-		CurrencyID:    currencyID,
-		SinceEntryID:  sinceEntryID,
+	sums, err := q.SumEntriesSinceForClassification(ctx, sqlcgen.SumEntriesSinceForClassificationParams{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: classificationID,
+		SinceEntryID:     sinceEntryID,
 	})
 	if err != nil {
 		return decimal.Zero, fmt.Errorf("postgres: get balance: sum entries: %w", err)
 	}
 
 	// We need the normal_side to compute balance direction.
-	// For now, sum debits and credits for the specific classification.
 	var debitSum, creditSum decimal.Decimal
 	for _, row := range sums {
-		if row.ClassificationID != classificationID {
-			continue
-		}
 		amount, err := anyToDecimal(row.Total)
 		if err != nil {
 			return decimal.Zero, fmt.Errorf("postgres: get balance: convert total: %w", err)
@@ -896,21 +893,12 @@ func (s *LedgerStore) getBalanceBreakdownWithQueries(ctx context.Context, q *sql
 // retag a classification after creation — the dims cache only holds immutable
 // fields.
 func (s *LedgerStore) sumBalancesByRoleWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID int64) (map[core.BalanceRole]decimal.Decimal, error) {
-	dims, err := q.ListClassificationDims(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list classification roles: %w", err)
-	}
-	roleByClassID := make(map[int64]core.BalanceRole, len(dims))
-	for _, d := range dims {
-		roleByClassID[d.ID] = core.BalanceRole(d.BalanceRole)
-	}
-
-	clsIDs, err := q.DistinctClassificationsForAccount(ctx, sqlcgen.DistinctClassificationsForAccountParams{
-		AccountHolder: holder,
-		CurrencyID:    currencyID,
+	rows, err := q.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
+		CurrencyID: currencyID,
+		HolderIds:  []int64{holder},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list account classifications: %w", err)
+		return nil, fmt.Errorf("compute account balances: %w", err)
 	}
 
 	sums := map[core.BalanceRole]decimal.Decimal{
@@ -918,14 +906,14 @@ func (s *LedgerStore) sumBalancesByRoleWithQueries(ctx context.Context, q *sqlcg
 		core.BalanceRolePending:   decimal.Zero,
 		core.BalanceRoleLocked:    decimal.Zero,
 	}
-	for _, clsID := range clsIDs {
-		role := roleByClassID[clsID]
+	for _, row := range rows {
+		role := core.BalanceRole(row.BalanceRole)
 		if role == core.BalanceRoleNone {
 			continue
 		}
-		bal, err := s.getBalanceWithQueries(ctx, q, holder, currencyID, clsID)
+		bal, err := numericToDecimal(row.Balance)
 		if err != nil {
-			return nil, fmt.Errorf("balance for classification %d: %w", clsID, err)
+			return nil, fmt.Errorf("balance for classification %d: %w", row.ClassificationID, err)
 		}
 		sums[role] = sums[role].Add(bal)
 	}
@@ -938,45 +926,63 @@ func (s *LedgerStore) GetBalances(ctx context.Context, holder int64, currencyUID
 	if err != nil {
 		return nil, err
 	}
-	// Discover all classifications that have entries for this account
-	clsRows, err := s.q.DistinctClassificationsForAccount(ctx, sqlcgen.DistinctClassificationsForAccountParams{
-		AccountHolder: holder,
-		CurrencyID:    cur.ID,
-	})
+	result, err := s.computedBalances(ctx, []int64{holder}, cur.ID, currencyUID)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: get balances: list classifications: %w", err)
+		return nil, fmt.Errorf("postgres: get balances: %w", err)
 	}
-
-	balances := make([]core.Balance, 0, len(clsRows))
-	for _, clsID := range clsRows {
-		cls, err := s.dims.classByIDOrErr(ctx, s.q, clsID)
-		if err != nil {
-			return nil, err
-		}
-		bal, err := s.GetBalance(ctx, holder, currencyUID, cls.UID)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: get balances: classification %s: %w", cls.UID, err)
-		}
-		balances = append(balances, core.Balance{
-			AccountHolder:     holder,
-			CurrencyUID:       currencyUID,
-			ClassificationUID: cls.UID,
-			Balance:           bal,
-		})
-	}
-
-	return balances, nil
+	return result[holder], nil
 }
 
 // BatchGetBalances returns balances for multiple holders.
 func (s *LedgerStore) BatchGetBalances(ctx context.Context, holderIDs []int64, currencyUID string) (map[int64][]core.Balance, error) {
+	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.computedBalances(ctx, holderIDs, cur.ID, currencyUID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: batch get balances: %w", err)
+	}
+	return result, nil
+}
+
+func (s *LedgerStore) computedBalances(ctx context.Context, holderIDs []int64, currencyID int64, currencyUID string) (map[int64][]core.Balance, error) {
 	result := make(map[int64][]core.Balance, len(holderIDs))
-	for _, id := range holderIDs {
-		bals, err := s.GetBalances(ctx, id, currencyUID)
+	for _, holder := range holderIDs {
+		result[holder] = []core.Balance{}
+	}
+	if len(holderIDs) == 0 {
+		return result, nil
+	}
+
+	q := s.q
+	if s.pool != nil {
+		tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 		if err != nil {
-			return nil, fmt.Errorf("postgres: batch get balances: holder %d: %w", id, err)
+			return nil, fmt.Errorf("begin repeatable-read transaction: %w", err)
 		}
-		result[id] = bals
+		defer tx.Rollback(ctx)
+		q = s.q.WithTx(tx)
+	}
+
+	rows, err := q.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
+		CurrencyID: currencyID,
+		HolderIds:  holderIDs,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query computed balances: %w", err)
+	}
+	for _, row := range rows {
+		balance, err := numericToDecimal(row.Balance)
+		if err != nil {
+			return nil, fmt.Errorf("classification %d balance: %w", row.ClassificationID, err)
+		}
+		result[row.AccountHolder] = append(result[row.AccountHolder], core.Balance{
+			AccountHolder:     row.AccountHolder,
+			CurrencyUID:       currencyUID,
+			ClassificationUID: pgToUID(row.ClassificationUid),
+			Balance:           balance,
+		})
 	}
 	return result, nil
 }

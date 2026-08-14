@@ -700,7 +700,7 @@ GET    /api/v1/events
 ```
 
 All list endpoints use cursor-based pagination (`?cursor=...&limit=50`).
-Error responses use a consistent envelope: `{"code": <int>, "message": "..."}`.
+Every response uses `{code,message,data}`: success carries `message:null`; failures carry `message:{text,fields?}` and `data:null`.
 
 See [docs/api.md](docs/api.md) for the complete reference with request/response examples, and [docs/openapi.yaml](docs/openapi.yaml) for the machine-readable OpenAPI 3.1 schema.
 
@@ -753,7 +753,7 @@ The service entry point reads:
 | `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply, `OTEL_SERVICE_NAME` defaults to `ledgerd`) | (tracing disabled) |
-| `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` |
+| `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` in `dev`; `off` otherwise |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated CIDR ranges of your trusted edge proxies (e.g. `10.0.0.0/8,172.16.0.0/12`). When set, the client IP is derived from `X-Forwarded-For` (walked right-to-left, skipping trusted hops) / `X-Real-IP` / `True-Client-IP` for rate limiting and logs — but **only** for requests whose socket peer is inside these ranges, so a direct caller cannot spoof its IP. Every candidate is IP-validated. Invalid value = startup error. | (empty; socket peer) |
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) are set in `cmd/ledgerd/main.go`.

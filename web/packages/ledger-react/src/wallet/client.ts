@@ -86,11 +86,14 @@ export interface WalletTransactionsPage {
   next_cursor: string;
 }
 
-interface Envelope<T> {
-  code: number;
-  message: string;
-  data: T;
+interface ErrorMessage {
+  text: string;
+  fields?: Record<string, string>;
 }
+
+type Envelope<T> =
+  | { code: 200; message: null; data: T }
+  | { code: number; message: ErrorMessage; data: null };
 
 function qs(params: Record<string, string | number | undefined>): string {
   const entries = Object.entries(params).filter(
@@ -135,10 +138,18 @@ export function createWalletClient(config: WalletClientConfig) {
       usedToken = tokenPromise ?? refreshToken();
       headers["Authorization"] = `Bearer ${await usedToken}`;
     }
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(method) &&
+      !headers["Idempotency-Key"]
+    ) {
+      headers["Idempotency-Key"] = crypto.randomUUID();
+    }
 
     const res = await fetchImpl(`${config.baseUrl}${path}`, {
       ...init,
       headers,
+      signal: init?.signal ?? AbortSignal.timeout(15_000),
     });
 
     if (res.status === 401 && config.getToken && !retried) {
@@ -149,22 +160,25 @@ export function createWalletClient(config: WalletClientConfig) {
       if (tokenPromise === usedToken) {
         refreshToken();
       }
-      return request<T>(path, init, true);
+      // Carry the generated Idempotency-Key into the auth retry. The fresh
+      // holder token overwrites Authorization below, while the logical write
+      // keeps one idempotency identity across both HTTP attempts.
+      return request<T>(path, { ...init, headers }, true);
     }
 
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({
-        code: 19999,
-        message: res.statusText,
-      }));
+    const envelope = (await res.json().catch(() => null)) as Envelope<T> | null;
+    if (!envelope || !res.ok || envelope.code !== 200) {
+      const message =
+        envelope?.message && typeof envelope.message === "object"
+          ? envelope.message
+          : { text: res.statusText || "Request failed" };
       throw new ApiRequestError(res.status, {
-        code: body.code ?? 19999,
-        message: body.message ?? res.statusText,
+        code: envelope && envelope.code !== 200 ? envelope.code : 19999,
+        message: message.text,
+        fields: message.fields,
       });
     }
-
-    const envelope: Envelope<T> = await res.json();
-    return envelope.data;
+    return envelope.data as T;
   }
 
   return {

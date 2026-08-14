@@ -29,7 +29,9 @@ package ledger
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -217,7 +219,12 @@ func (s *Service) Queries() core.QueryProvider { return s.queryStore }
 func (s *Service) SnapshotBackfiller() core.SnapshotBackfiller {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 	rollup := postgres.NewRollupAdapter(s.pool)
-	svc := service.NewSnapshotBackfillService(rollup, s.snapshotExtraStore, s.snapshotExtraStore, engine)
+	extra := s.snapshotExtraStore
+	if s.tx != nil {
+		rollup = rollup.WithDB(s.tx)
+		extra = extra.WithDB(s.tx)
+	}
+	svc := service.NewSnapshotBackfillService(rollup, extra, extra, engine)
 	return svc
 }
 
@@ -245,21 +252,25 @@ func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBala
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 	rollupAdapter := postgres.NewRollupAdapter(s.pool)
+	reconcileAdapter := s.reconcileAdapter
+	if s.tx != nil {
+		rollupAdapter = rollupAdapter.WithDB(s.tx)
+		reconcileAdapter = reconcileAdapter.WithDB(s.tx)
+	}
 	basic := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
-	return service.NewFullReconciliationService(basic, s.reconcileAdapter, cfg, engine)
+	return service.NewFullReconciliationService(basic, reconcileAdapter, cfg, engine)
 }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
 // clone with every store rebound to that transaction, and calls fn with the
 // clone. If fn returns nil the transaction is committed; any non-nil error
-// (including a panic recovered internally) causes a rollback.
+// causes a rollback. Panics roll back through the deferred cleanup and are
+// then propagated unchanged to preserve the caller's panic semantics.
 //
 // The *Service passed to fn is valid only for the duration of fn — do not
 // store it or use it after fn returns.
 //
-// Callers that need a specific isolation level should use Pool().BeginTx and
-// call the individual store methods directly; RunInTx always uses the default
-// READ COMMITTED isolation level.
+// Use RunInTxWithOptions when a specific isolation or access mode is required.
 //
 // Caveats when operating inside a RunInTx callback:
 //   - GetBalance does NOT start its own REPEATABLE READ sub-transaction; the
@@ -267,7 +278,12 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 //   - Advisory locks acquired inside fn are held until commit/rollback — this
 //     is correct behaviour for the balance-locking invariant.
 func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
-	tx, err := s.pool.Begin(ctx)
+	return s.RunInTxWithOptions(ctx, pgx.TxOptions{}, fn)
+}
+
+// RunInTxWithOptions is RunInTx with explicit PostgreSQL transaction options.
+func (s *Service) RunInTxWithOptions(ctx context.Context, opts pgx.TxOptions, fn func(*Service) error) error {
+	tx, err := s.pool.BeginTx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("ledger: RunInTx: begin: %w", err)
 	}
@@ -276,25 +292,17 @@ func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 	committed := false
 	defer func() {
 		if !committed {
-			// Ignore rollback error — original error is more informative.
-			_ = tx.Rollback(ctx)
+			// Rollback must still reach PostgreSQL when fn returns because its
+			// request context was cancelled. Bound the detached cleanup so a
+			// broken connection cannot stall the caller indefinitely.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = tx.Rollback(cleanupCtx)
 		}
 	}()
 
-	// Recover panics so the transaction always rolls back; the panic is
-	// converted into the returned error (not re-raised).
-	var callErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				callErr = fmt.Errorf("ledger: RunInTx: panic: %v", r)
-			}
-		}()
-		callErr = fn(s.withTx(tx))
-	}()
-
-	if callErr != nil {
-		return callErr
+	if err := fn(s.withTx(tx)); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -326,6 +334,9 @@ func (s *Service) TrialBalanceReader() core.TrialBalanceReader { return s.trialB
 func (s *Service) withTx(tx pgx.Tx) *Service {
 	ls := s.ledgerStore.WithDB(tx)
 	cs := s.classStore.WithDB(tx)
+	s.channelsMu.RLock()
+	channels := maps.Clone(s.channels)
+	s.channelsMu.RUnlock()
 	return &Service{
 		pool:                 s.pool,
 		tx:                   tx,
@@ -339,16 +350,16 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		tmplStore:            s.tmplStore.WithDB(tx),
 		currencyStore:        s.currencyStore.WithDB(tx),
 		queryStore:           s.queryStore.WithDB(tx),
-		snapshotExtraStore:   s.snapshotExtraStore,
+		snapshotExtraStore:   s.snapshotExtraStore.WithDB(tx),
 		balanceTrendsStore:   s.balanceTrendsStore.WithDB(tx, ls),
 		auditStore:           s.auditStore.WithDB(tx),
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
-		reconcileAdapter:     s.reconcileAdapter, // read-only, pool-backed is fine
+		reconcileAdapter:     s.reconcileAdapter.WithDB(tx),
 		accountPolicyStore:   s.accountPolicyStore.WithDB(tx),
 		periodCloseStore:     s.periodCloseStore.WithDB(tx),
 		trialBalanceStore:    s.trialBalanceStore.WithDB(tx),
-		channels:             s.channels, // shared snapshot; no mutations inside tx
+		channels:             channels,
 	}
 }
 
@@ -458,20 +469,21 @@ func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, s
 		return nil, fmt.Errorf("ledger: EnableOnchain: already configured")
 	}
 	deps := service.OnchainDeps{
-		Registry:        postgres.NewDepositAddressStore(s.pool),
-		Cursors:         postgres.NewChainCursorStore(s.pool),
-		Booker:          s.bookingStore,
-		BookingReader:   s.bookingStore,
-		Journals:        s.ledgerStore,
-		TxComposer:      onchainTxComposer{svc: s},
-		Reader:          reader,
-		Scanner:         scanner,
-		Sweeper:         sweeper,
-		DeadLetters:     postgres.NewIngestDeadLetterStore(s.pool),
-		Currencies:      s.currencyStore,
-		Classifications: s.classStore,
-		Logger:          s.logger,
-		Metrics:         s.metrics,
+		Registry:            postgres.NewDepositAddressStore(s.pool),
+		Cursors:             postgres.NewChainCursorStore(s.pool),
+		Booker:              s.bookingStore,
+		BookingReader:       s.bookingStore,
+		Journals:            s.ledgerStore,
+		TxComposer:          onchainTxComposer{svc: s},
+		Reader:              reader,
+		RegistrationRescans: postgres.NewRegistrationRescanStore(s.pool),
+		Scanner:             scanner,
+		Sweeper:             sweeper,
+		DeadLetters:         postgres.NewIngestDeadLetterStore(s.pool),
+		Currencies:          s.currencyStore,
+		Classifications:     s.classStore,
+		Logger:              s.logger,
+		Metrics:             s.metrics,
 	}
 	onchain := service.NewOnchain(deps, chains, opts...)
 	if err := onchain.ValidateAutoCreditCeilings(); err != nil {

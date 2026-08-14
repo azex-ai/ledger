@@ -349,6 +349,85 @@ func (q *Queries) ListBalancesAt(ctx context.Context, effectiveAt time.Time) ([]
 	return items, nil
 }
 
+const listComputedBalancesForHolders = `-- name: ListComputedBalancesForHolders :many
+WITH populated AS (
+    SELECT DISTINCT je.account_holder, je.classification_id
+    FROM journal_entries je
+    WHERE je.account_holder = ANY($2::bigint[])
+      AND je.currency_id = $1::bigint
+)
+SELECT
+    p.account_holder,
+    c.id AS classification_id,
+    c.uid AS classification_uid,
+    c.balance_role,
+    (
+      COALESCE(cp.balance, 0::numeric) +
+      COALESCE(SUM(CASE
+        WHEN c.normal_side = 'debit' AND je.entry_type = 'debit' THEN je.amount
+        WHEN c.normal_side = 'debit' AND je.entry_type = 'credit' THEN -je.amount
+        WHEN c.normal_side = 'credit' AND je.entry_type = 'credit' THEN je.amount
+        WHEN c.normal_side = 'credit' AND je.entry_type = 'debit' THEN -je.amount
+        ELSE 0::numeric
+      END), 0::numeric)
+    )::numeric AS balance
+FROM populated p
+JOIN classifications c ON c.id = p.classification_id
+LEFT JOIN balance_checkpoints cp
+  ON cp.account_holder = p.account_holder
+ AND cp.currency_id = $1::bigint
+ AND cp.classification_id = p.classification_id
+LEFT JOIN journal_entries je
+  ON je.account_holder = p.account_holder
+ AND je.currency_id = $1::bigint
+ AND je.classification_id = p.classification_id
+ AND je.id > COALESCE(cp.last_entry_id, 0)
+GROUP BY p.account_holder, c.id, c.uid, c.balance_role, cp.balance
+ORDER BY p.account_holder, c.id
+`
+
+type ListComputedBalancesForHoldersParams struct {
+	CurrencyID int64   `json:"currency_id"`
+	HolderIds  []int64 `json:"holder_ids"`
+}
+
+type ListComputedBalancesForHoldersRow struct {
+	AccountHolder     int64          `json:"account_holder"`
+	ClassificationID  int64          `json:"classification_id"`
+	ClassificationUid pgtype.UUID    `json:"classification_uid"`
+	BalanceRole       string         `json:"balance_role"`
+	Balance           pgtype.Numeric `json:"balance"`
+}
+
+// Computes checkpoint + delta for every populated classification in one
+// snapshot-consistent query. This is the batch primitive behind GetBalances,
+// BatchGetBalances, and role breakdowns; callers must not loop GetBalance.
+func (q *Queries) ListComputedBalancesForHolders(ctx context.Context, arg ListComputedBalancesForHoldersParams) ([]ListComputedBalancesForHoldersRow, error) {
+	rows, err := q.db.Query(ctx, listComputedBalancesForHolders, arg.CurrencyID, arg.HolderIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListComputedBalancesForHoldersRow{}
+	for rows.Next() {
+		var i ListComputedBalancesForHoldersRow
+		if err := rows.Scan(
+			&i.AccountHolder,
+			&i.ClassificationID,
+			&i.ClassificationUid,
+			&i.BalanceRole,
+			&i.Balance,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markRollupProcessed = `-- name: MarkRollupProcessed :execrows
 UPDATE rollup_queue
 SET processed_at = now(), claimed_until = NULL

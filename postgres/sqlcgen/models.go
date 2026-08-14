@@ -242,6 +242,21 @@ type PeriodClose struct {
 	Uid         pgtype.UUID `json:"uid"`
 }
 
+type RegistrationRescan struct {
+	ID           int64              `json:"id"`
+	Uid          pgtype.UUID        `json:"uid"`
+	ChainID      int64              `json:"chain_id"`
+	Address      string             `json:"address"`
+	NextBlock    int64              `json:"next_block"`
+	Status       string             `json:"status"`
+	Attempts     int32              `json:"attempts"`
+	AvailableAt  time.Time          `json:"available_at"`
+	ClaimedUntil pgtype.Timestamptz `json:"claimed_until"`
+	LastError    pgtype.Text        `json:"last_error"`
+	CreatedAt    time.Time          `json:"created_at"`
+	UpdatedAt    time.Time          `json:"updated_at"`
+}
+
 type Reservation struct {
 	ID             int64          `json:"id"`
 	AccountHolder  int64          `json:"account_holder"`

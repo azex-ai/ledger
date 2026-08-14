@@ -176,6 +176,38 @@ func TestTxComposition_RunInTx(t *testing.T) {
 	assert.Equal(t, 0, journalCount, "aborted RunInTx must not persist journal")
 }
 
+func TestTxComposition_RunInTx_PanicRollsBackAndPropagates(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-runtx-panic", "Tether USD (panic)")
+	jtID := postgrestest.SeedJournalType(t, pool, "txcomp-runtx-panic", "TxComp RunInTx Panic")
+	clsDebit := postgrestest.SeedClassification(t, pool, "txcomp-panic-dr", "TxComp Panic DR", "debit", false)
+	clsCredit := postgrestest.SeedClassification(t, pool, "txcomp-panic-cr", "TxComp Panic CR", "credit", true)
+	key := postgrestest.UniqueKey("runtx-panic")
+
+	assert.PanicsWithValue(t, "boom", func() {
+		_ = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
+			_, postErr := txSvc.JournalWriter().PostJournal(ctx, core.JournalInput{
+				JournalTypeUID: jtID,
+				IdempotencyKey: key,
+				Entries: []core.EntryInput{
+					{AccountHolder: 31, CurrencyUID: curID, ClassificationUID: clsDebit, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+					{AccountHolder: -31, CurrencyUID: curID, ClassificationUID: clsCredit, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				},
+			})
+			require.NoError(t, postErr)
+			panic("boom")
+		})
+	})
+
+	var count int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT COUNT(*) FROM journals WHERE idempotency_key = $1", key).Scan(&count))
+	assert.Zero(t, count)
+}
+
 func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()

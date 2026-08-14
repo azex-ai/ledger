@@ -73,6 +73,9 @@ func (i ReserveInput) Validate() error {
 	if i.IdempotencyKey == "" {
 		return fmt.Errorf("core: reserve: idempotency key required: %w", ErrInvalidInput)
 	}
+	if i.ExpiresIn < 0 {
+		return fmt.Errorf("core: reserve: expires_in must not be negative: %w", ErrInvalidInput)
+	}
 	return nil
 }
 

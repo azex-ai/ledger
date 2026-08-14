@@ -81,9 +81,9 @@ export default defineConfig({
     "wallet-heroui": "src/wallet-heroui.ts",
   },
   format: ["esm"],
-  // TS6 deprecates baseUrl (TS5101); tsup's dts build still injects one
-  // internally, so silence the deprecation until tsup stops doing that.
-  dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
+  // tsup's declaration build still injects deprecated compiler options;
+  // silence the TypeScript 5.x warning until tsup removes them.
+  dts: { compilerOptions: { ignoreDeprecations: "5.0" } },
   clean: true,
   splitting: true,
   metafile: true,

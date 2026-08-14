@@ -60,30 +60,34 @@ func snakeCase(name string) string {
 
 // Result is the unified success response envelope.
 type Result[T any] struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    T      `json:"data"`
+	Code    int           `json:"code"`
+	Message *ErrorMessage `json:"message"`
+	Data    T             `json:"data"`
 }
 
-// ErrorBody is the unified error response envelope. Data is always null on
-// errors — present so the outermost shape is {code, message, data} for every
-// response, success or failure (api-contract §1). Retryable is an additive
-// extension consumers may ignore.
+// ErrorMessage is the user-facing error carried in the canonical response
+// envelope. Technical details remain server-side in logs.
+type ErrorMessage struct {
+	Text   string            `json:"text"`
+	Fields map[string]string `json:"fields,omitempty"`
+}
+
+// ErrorBody is the unified error response envelope. Message and Data are
+// mutually exclusive: failures carry a message object and a null data field.
 type ErrorBody struct {
-	Code      int    `json:"code"`
-	Message   string `json:"message"`
-	Data      any    `json:"data"`
-	Retryable bool   `json:"retryable"`
+	Code    int          `json:"code"`
+	Message ErrorMessage `json:"message"`
+	Data    any          `json:"data"`
 }
 
 // OK writes a 200 success response.
 func OK[T any](w http.ResponseWriter, data T) {
-	writeJSON(w, http.StatusOK, Result[T]{Code: 200, Message: "ok", Data: data})
+	writeJSON(w, http.StatusOK, Result[T]{Code: 200, Data: data})
 }
 
 // Created writes a 201 success response.
 func Created[T any](w http.ResponseWriter, data T) {
-	writeJSON(w, http.StatusCreated, Result[T]{Code: 200, Message: "created", Data: data})
+	writeJSON(w, http.StatusCreated, Result[T]{Code: 200, Data: data})
 }
 
 // Error resolves an error to a bizcode and writes the error response.
@@ -91,9 +95,8 @@ func Error(w http.ResponseWriter, err error) {
 	ae := resolveError(err)
 	slog.Error("api error", "code", ae.Code, "message", ae.Message, "err", err)
 	writeJSON(w, ae.HTTPStatus(), ErrorBody{
-		Code:      ae.Code,
-		Message:   bizcode.DisplayMessage(ae.Code),
-		Retryable: bizcode.Retryable(ae.Code),
+		Code:    ae.Code,
+		Message: ErrorMessage{Text: bizcode.DisplayMessage(ae.Code)},
 	})
 }
 
@@ -157,10 +160,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"code":19999,"message":"internal error"}`))
+		_, _ = w.Write([]byte(`{"code":19999,"message":{"text":"Internal server error"},"data":null}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(data)
+	_, _ = w.Write(data)
 }

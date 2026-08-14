@@ -37,8 +37,7 @@ of three ordered levels (each implies the ones below it):
 A request whose key lacks the required scope gets business code `10150`
 (HTTP 403) naming the key and the missing scope. Secret comparison is
 constant-time. If `API_KEYS` is empty in non-`dev` `ENV`, the service still
-boots but logs a loud error — all endpoints go unauthenticated; do not run
-that way in production.
+refuses to start. Unauthenticated operation is available only with `ENV=dev`.
 
 ### Content type
 
@@ -50,8 +49,8 @@ Success (200/201):
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": { /* resource or list */ }
 }
 ```
@@ -61,12 +60,12 @@ Error (4xx/5xx):
 ```json
 {
   "code": 14001,
-  "message": "Insufficient balance for this operation",
-  "retryable": false
+  "message": { "text": "Insufficient balance for this operation" },
+  "data": null
 }
 ```
 
-`code` is an integer business code; the HTTP status is derived from it. `retryable` tells the caller whether reissuing the exact same request (same `idempotency_key` for mutations) is expected to eventually succeed — see "Error handling contract" below.
+`code` is an integer business code; the HTTP status is derived from it. Clients determine retry behavior from the code table below and must reuse the same idempotency key.
 
 ### Error handling contract
 
@@ -102,7 +101,7 @@ Common business codes you may see:
 | `14009` | Accounting period is closed | No |
 | `19999` | Internal error | Yes |
 
-**Retry semantics.** `retryable` is derived purely from the code range (`pkg/bizcode.Retryable`), not from request content:
+**Retry semantics.** Retryability is derived from the business code, not from an additional wire field:
 
 - `429` (rate limited) and `503` (service unavailable / starting) are transient by nature — back off (honor `Retry-After` when present) and retry.
 - `400`/`401`/`403`/`404`/`409` and `422` describe either a defect in the request or a business-rule outcome — replaying the identical payload reproduces the identical result, so these are **not** retryable without changing the request.
@@ -112,7 +111,7 @@ Common business codes you may see:
 
 ### Idempotency
 
-All mutation endpoints accepting an `idempotency_key` enforce it via a database `UNIQUE` index. Replaying the **same key with the same payload** returns the original success result and does not create a second side effect. Reusing the **same key with a different payload** returns HTTP `409` with code `10901` (`conflict`). Use a stable, deterministic key (e.g. `deposit:user1001:0xabc...`).
+All mutations enforce idempotency. Client-initiated writes generate one random UUID in the `Idempotency-Key` header per logical submission and reuse it across retries. System events derive a deterministic key from the source event. Replaying the **same key with the same payload** returns the original result; reusing it with a different payload returns HTTP `409` / code `10901`.
 
 ### Pagination
 
@@ -120,8 +119,8 @@ List endpoints use opaque cursor pagination: `?cursor=<base64>&limit=50`. `limit
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "data": [ /* items */ ],
     "next_cursor": "AAAAAAAAAAI="
@@ -179,8 +178,8 @@ Response `201 Created`:
 
 ```json
 {
-  "code": 0,
-  "message": "created",
+  "code": 200,
+  "message": null,
   "data": {
     "id": 42,
     "classification_id": 1,
@@ -226,8 +225,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "id": 99,
     "classification_code": "deposit",
@@ -400,8 +399,8 @@ Response `201 Created`:
 
 ```json
 {
-  "code": 0,
-  "message": "created",
+  "code": 200,
+  "message": null,
   "data": {
     "outcome": "shortfall_auto_released",
     "expected_amount": "100.00",
@@ -439,8 +438,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "id": 1,
     "journal_type_id": 1,
@@ -480,8 +479,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": [
     {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "balance": "404.50"}
   ]
@@ -494,8 +493,8 @@ Same as above but with `currency_id` in the path; the response also includes a p
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "total": "404.50",
     "classifications": [
@@ -519,8 +518,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": [
     {"holder_id": 1001, "balances": [{"account_holder": 1001, "currency_id": 1, "classification_id": 1, "balance": "404.50"}]},
     {"holder_id": 1002, "balances": []}
@@ -554,8 +553,8 @@ Response `201 Created`:
 
 ```json
 {
-  "code": 0,
-  "message": "created",
+  "code": 200,
+  "message": null,
   "data": {
     "id": 1,
     "account_holder": 1001,
@@ -668,8 +667,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "entries": [
       {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "500.00"},
@@ -705,8 +704,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "balanced": true,
     "gap": "0",
@@ -747,8 +746,8 @@ Historical daily balance snapshots.
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": [
     {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "snapshot_date": "2026-04-16", "balance": "404.50"}
   ]
@@ -767,8 +766,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "status": "ok",
     "db": "up",
@@ -794,8 +793,8 @@ the refresh time of the `system_rollups` table.
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": [
     {"currency_id": 1, "classification_id": 1, "total_balance": "50000.00", "updated_at": "2026-04-17T12:00:00Z"}
   ]
@@ -829,8 +828,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "booking": { "id": 42, "status": "confirmed", "...": "..." },
     "events": [ { "id": 99, "from_status": "pending", "to_status": "confirmed", "...": "..." } ],
@@ -863,8 +862,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "currency_id": 1,
     "user_side": { "main_wallet": "125000.00" },
@@ -885,8 +884,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "currency_id": 1,
     "liability": "125000.00",
@@ -917,8 +916,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": [
     {"date": "2026-04-16", "balance": "404.50", "inflow": "50.00", "outflow": "0.00"},
     {"date": "2026-04-17", "balance": "454.50", "inflow": "50.00", "outflow": "0.00"}
@@ -987,8 +986,8 @@ Response `200 OK`:
 
 ```json
 {
-  "code": 0,
-  "message": "ok",
+  "code": 200,
+  "message": null,
   "data": {
     "currency_id": 1,
     "as_of": "2026-04-01T00:00:00Z",
@@ -1009,4 +1008,4 @@ Status codes: `200`, `400`.
 
 ## OpenAPI
 
-A machine-readable spec covering the high-traffic endpoints lives at [`openapi.yaml`](../openapi.yaml). It is the source of truth for SDK generation; this Markdown is human-readable narrative.
+The canonical machine-readable contract lives at [`openapi.yaml`](openapi.yaml). It is the source of truth for SDK generation; this Markdown is human-readable narrative.

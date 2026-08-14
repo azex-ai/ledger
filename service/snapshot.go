@@ -90,10 +90,11 @@ func (s *SnapshotService) CreateDailySnapshot(ctx context.Context, date time.Tim
 	if s.locker != nil {
 		release, acquired, err := s.locker.tryAdvisoryLock(ctx, lockKey)
 		if err != nil {
-			s.logger.Error("service: snapshot: advisory lock failed, proceeding without lock",
+			s.logger.Error("service: snapshot: advisory lock failed, skipping",
 				"date", snapshotDate.Format("2006-01-02"),
 				"error", err,
 			)
+			return fmt.Errorf("service: snapshot: acquire advisory lock: %w", err)
 		} else if !acquired {
 			s.logger.Info("service: snapshot: advisory lock held by another replica, skipping",
 				"date", snapshotDate.Format("2006-01-02"),
