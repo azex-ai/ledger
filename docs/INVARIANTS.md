@@ -833,55 +833,58 @@ committed; see `docs/RUNBOOK.md` §9 for the failure this caused and the
 test that catches it.
 
 **Enforced by**:
-- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
-  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
-  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
-  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
-  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
-  this migration (see "Note on scope" above) — they live in
-  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
-  instead, which must ship in the same release as the `DATABASE_URL`
-  cutover (`docs/RUNBOOK.md` §9).
+- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
+  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
+  three columns inside the transaction that also writes the journal row.
+- `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
+  the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
+  big-endian two's complement, domain-separated SHA-256) both `Sign` and
+  `Verify` agree on. This encoding is the one part of P5 that cannot be
+  changed later without breaking every previously-signed journal -- see
+  its golden vectors below.
+- Immutability of `auth_digest`/`auth_signature`/`auth_key_id` after a
+  journal is signed: enforced by `ledger_journals_block_arbitrary_update()`,
+  but **owned by migration 045 (P4)**, not this migration. Contracts §2
+  (2026-08-21 rewrite) replaced that function's hardcoded per-migration
+  column list with a generic `to_jsonb(OLD)`/`to_jsonb(NEW)` comparison
+  against an explicit mutable-column whitelist, so these three columns are
+  protected automatically once 045 installs it -- migration 046 does not
+  (and must not) touch that function itself.
+- `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
+  key_id at construction time, in the caller's own composition root,
+  never silently inside the ledger.
 
-**Pinned by**:
-- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
-  first and confirms the single connection has *unrestricted* DDL there
-  (proving the restrictions below are not vacuous), then migrates the rest
-  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
-  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
-  journal_entries`/touch `schema_migrations`, while it can still
-  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
-  `journal_entries`.
-- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
-  exactly to 042 through a non-superuser role that owns the database
-  (simulating a managed-Postgres master user) and confirms that role can
-  still write afterward. This is the regression pin for the combined-
-  migration bug described above: it fails with `permission denied for
-  table schema_migrations` against the old (pre-split) combined 042 and
-  passes against the current (pure-expand) 042.
-- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
-  counterpart pin for 049: the same non-superuser role can still write
-  after 042 alone, but loses access to business tables once 049 runs
-  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
-  §9). Also proves 049 itself can apply cleanly under a non-superuser
-  connection -- an earlier revision without its narrow
-  schema-USAGE/schema_migrations re-grants could never successfully apply
-  at all, on any non-superuser connection, regardless of `DATABASE_URL`
-  cutover timing.
-- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — after manually granting `ledger_owner` ownership of `journal_entries`
-  (mirroring what 049 does, scoped to just this one table so the test does
-  not depend on 049's exact implementation), a partition it creates *after*
-  042's grant ran is still writable by `ledger_app` through the parent
-  table name.
-- `postgres.TestMigration042_RoleAttributes` — pins role attributes
-  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
-  role holds (`information_schema.role_table_grants`) on an ordinary table,
-  `journal_entries`, and `schema_migrations`.
-- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
-  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
-  for 042 and 049 each roll back cleanly and leave the original connection
-  able to operate normally.
+**Pinned by** (`postgres/auth_pin_test.go` unless noted):
+- `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
+  digest/signature/key_id round-trip through `core.VerifyJournalAuth`
+  successfully.
+- `TestPostJournal_UnsignedWithoutAttestor` -- `Attestor == nil` leaves
+  `PostJournal` byte-for-byte unchanged from before P5 (expand-safe).
+- `TestPostJournal_IdempotentReplayDoesNotResign` -- a replayed post with
+  the same idempotency key triggers exactly one `Attestor.Sign` call, not
+  two.
+- `TestPostJournal_AttestorErrorRejectsPost` -- a `Sign` error rejects the
+  whole write; nothing is persisted.
+- `TestForgedDirectSQLJournalIsUnauthorized` -- the M5 scenario itself: a
+  balanced journal inserted directly via SQL (bypassing `PostJournal`
+  entirely) passes a live per-journal balance check and still fails
+  `core.VerifyJournalAuth`.
+- `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
+  (`core/auth_test.go`) -- pin the exact byte layout against independently
+  computed values; any diff is a breaking encoding change.
+- `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
+  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
+  of `VerifyJournalAuth`'s three guard clauses; removing any one of them
+  was verified, by hand, to make its corresponding test fail (the
+  mismatch-check removal reaches a nil `AuthVerifier` and panics; the
+  digest-emptiness removal is independently caught by the mismatch check,
+  demonstrating defense-in-depth rather than a redundant no-op check).
+- `authdev.TestNewLocalAttestor_DeterministicFromSameSeed` /
+  `TestNewLocalVerifier_StandaloneFromPublicKey` -- the default Attestor
+  implementation itself: same seed signs identically, and a verify-only
+  process (holding only the public key) can check a signature it never
+  had the private key to produce.
+
 ## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
 
 `balance_checkpoints` is an unreliable cache, not a source of truth — an
@@ -1258,6 +1261,210 @@ release (or `ledger-cli verify`, P6) would call.
 > Whoever merges P1 inserts I-22 into that slot — the number is a contract,
 > not a reflection of merge order.
 
+## I-27: The attestation chain is complete -- gapless, linked, signed, and every entry covered exactly once
+
+(docs/plans/2026-08-21-tamper-evident-ledger-design.md §8, P6 of the
+integrity-hardening wave.) `ledger_attestations` (migration 047) is a
+gapless, hash-linked sequence: attestation `seq` is unique and
+contiguous starting at 1; each row's `prev_root` equals the previous
+row's `root_hash` (seq 1's `prev_root` is `core.GenesisRoot`, 32 zero
+bytes); each row's `root_hash` is `core.AttestationRootHash(seq,
+prev_root, batch_digest, entry_count)` and is signed by a
+`core.Attestor` (`signature`/`key_id`, verifiable by `core.AuthVerifier`
+without the private key). `entry_attestations` (a side table, not a
+column on `journal_entries` -- see the migration's own comment for why)
+covers every `journal_entries` row exactly once: `entry_id` is its
+primary key, so double-coverage is a `UNIQUE` violation, not a logic bug
+waiting to happen.
+
+**Why**: P5's per-journal signature proves a row was authorized *when
+written*; it says nothing about whether the row *still exists* or
+whether the *history around it* has been rewritten. I-27 closes both
+gaps. The critical failure mode (design doc §8.2, this task's explicit
+brief) is a late-arriving entry: two entries from different `(holder,
+currency)` pairs can commit out of id order (I-5's ordering guarantee is
+scoped to one pair), so a batch boundary drawn as `to_entry_id =
+MAX(id)` would let a lower-id entry that commits *after* a higher-id one
+was already batched slip through a gap no seq-continuity check could
+ever notice -- it would neither appear in any batch's coverage nor break
+any id-range invariant. The `entry_attestations` side table turns
+"covered" into a queryable fact (`LEFT JOIN ... WHERE entry_id IS
+NULL`), not an id-range assumption, so the late entry is simply
+"uncovered" until the next run picks it up, and is caught by
+`PRIMARY KEY (entry_id)` if two runs ever tried to cover it twice.
+
+**Enforced by**:
+- `service.AttestationService.RunAttestBatch` (`service/attestation.go`)
+  -- resolves the next seq/prev_root and reads uncovered entries as plain
+  queries, signs `root_hash` strictly before opening any transaction
+  (`financial.md`), then inserts the attestation row and its
+  `entry_attestations` coverage atomically
+  (`postgres.AttestationStore.InsertAttestation`).
+- `core.CanonicalBatchDigest` / `core.AttestationRootHash`
+  (`core/attestation.go`) -- the deterministic, domain-separated
+  encoding (`0x02` / `0x03`, distinct from P5's `0x01`) both the
+  attestation job and `ledger-cli verify` agree on.
+- Migration 047's `entry_attestations` `PRIMARY KEY (entry_id)` -- a
+  structural guarantee against double-coverage, not a runtime check that
+  could be skipped.
+- `postgres/sql/queries/integrity_attestations.sql`'s
+  `ListUncoveredEntries` -- a plain anti-join against
+  `entry_attestations`, deliberately unbounded by any id or time window
+  (see its own comment).
+- `service.VerifyLedger` (`service/attest_verify.go`) -- ledger-cli
+  verify's steps 2-3: walks the chain checking seq continuity, prev_root
+  linkage, signatures, and recomputes each batch's digest from live
+  `journal_entries` content (catching both a content rewrite and a row
+  deletion, since a deleted row shrinks the recount below the stored
+  `entry_count`).
+
+**Pinned by** (`service/attestation_test.go` unless noted):
+- `TestAttestationService_LateArrivingEntryIsEventuallyCoveredExactlyOnce`
+  -- the exact §8.2 scenario: two entries commit out of id order; the
+  late one is covered on the next run, exactly once, without disturbing
+  the earlier one's coverage.
+- `TestNaiveIDRangeWatermark_WouldMissTheLateEntry` -- falsification
+  evidence: the REJECTED alternative (a monotonic `id > watermark`
+  design, no side table) is run against the identical interleaving and
+  shown to structurally exclude the late entry forever, demonstrating
+  why the side-table design is load-bearing, not decorative.
+- `TestAttestationService_EmptyBatchStillProducesAnAttestation` --
+  design doc §8.1's "空批照样出一条": a tick that finds nothing still
+  produces a row, so "the job ran and found nothing" is never confused
+  with "the job never ran" (`working-agreements` §3).
+- `TestAttestationService_ChainLinksPrevRoot` -- seq N's `prev_root`
+  equals seq N-1's `root_hash`.
+- `TestAttestationService_RequiresAttestor` -- there is no "unsigned
+  attestation" state in this schema (unlike P5's expand-safe empty
+  columns); `RunAttestBatch` refuses to run without an `Attestor`.
+- `core.TestCanonicalBatchDigest_*` / `TestAttestationRootHash_*`
+  (`core/attestation_test.go`) -- golden vectors (empty batch, chained
+  root, negative holder, tiny amount) cross-checked against an
+  independently written Python encoder, plus structural properties
+  (deterministic, order-sensitive, rejects wrong-length hashes).
+- `service.TestVerifyLedger_TamperedOnBrokenChainLink` /
+  `TestVerifyLedger_TamperedOnDeletedEntry` (`service/attest_verify_test.go`)
+  -- both simulate this wave's actual threat model (an owner-role
+  bypassing the no-UPDATE/no-DELETE trigger) and confirm `VerifyLedger`
+  classifies the result `TAMPERED`, not `VERIFIED`.
+
+## I-28: The latest external anchor head matches the DB's attestation chain
+
+(design doc §8.3/§8.4.) The external anchor (`core.Anchor`) remembers
+only the latest `(seq, root_hash)` pair (design doc: "几十字节"), but
+because I-27's hash chain links every later `root_hash` back to every
+earlier batch's content, that single remembered value is enough to
+detect a rewrite anywhere in the history: `ledger-cli verify` compares
+the anchor's head against the DB row at the same `seq` and flags a
+mismatch as `TAMPERED`. An anchor that is *behind* the DB's chain (has
+not yet seen the latest attestations) is a distinct, benign state --
+`DRIFT`, not `TAMPERED` -- because nothing about it indicates the
+history was rewritten, only that publishing has not caught up yet.
+
+**Why**: I-27 alone is a closed system -- an attacker with DB write
+access (this wave's whole threat model, design doc §1) who can rewrite
+`ledger_attestations` can also recompute a self-consistent replacement
+chain from scratch, since every input the chain hashes (barring the
+`Attestor`'s private key) lives in the same database. I-28 is what makes
+that rewrite detectable: the anchor lives "somewhere the ledger's own
+database credentials cannot reach" (design doc §8.3), so a rewrite that
+does not also touch the anchor is caught by comparing the two.
+
+**Enforced by**:
+- `service.VerifyLedger` -- step 1 pulls the anchor's head before
+  touching anything else, and step 2's per-seq loop compares the DB row
+  at `seq == anchorSeq` against it.
+- `service.AttestationService.catchUpAnchor` -- the "本地重试队列" design
+  doc §8.3 calls for: the gap between `core.Anchor.Head` and the DB's
+  latest seq IS the retry queue (no separate table), replayed on every
+  run, so a transient `Publish` failure is retried automatically and
+  survives a process restart (the anchor itself is external and
+  durable).
+- `anchordev.LocalFileAnchor` -- the dev-only local-file `core.Anchor`
+  implementation `Publish`/`Head` calls exercise directly. **Not a
+  production adapter** -- see its package doc comment; the real carrier
+  (an object-lock bucket in a separate cloud account, at minimum) is a
+  genuinely unresolved deployment choice this library does not ship
+  (integrity contracts §7).
+
+**Pinned by**:
+- `service.TestAttestationService_PublishesToAnchor` -- the happy path:
+  after a successful `RunAttestBatch`, the anchor's `Head` reflects the
+  new seq/root_hash.
+- `service.TestAttestationService_CatchesUpAnchorAfterTransientFailure`
+  -- a `Publish` failure on one run does not lose the seq; the next
+  run's catch-up step republishes it before creating a new attestation.
+- `service.TestVerifyLedger_DriftWhenAnchorIsBehind` -- an anchor that
+  has not caught up classifies as `DRIFT`, not `TAMPERED` or `VERIFIED`.
+- `service.TestVerifyLedger_NotRunWithoutAnchor` /
+  `TestVerifyLedger_NotRunWithoutVerifier` /
+  `TestVerifyLedger_NotRunWhenAnchorHeadErrors` -- the fail-closed red
+  line (`working-agreements` §3, same discipline as P0's
+  `Complete`/`FullCoverage`): a missing public key, missing anchor, or
+  an anchor that errors on `Head` all produce `NOT_RUN`, never a
+  folded-in `VERIFIED`.
+- `anchordev.TestLocalFileAnchor_IdempotentReplay` /
+  `TestLocalFileAnchor_RejectsMismatchedReplay` /
+  `TestLocalFileAnchor_RejectsNonSequentialSeq` -- `core.Anchor.Publish`'s
+  own idempotency contract ("re-publishing the same seq with identical
+  bytes must succeed, with different bytes must return an error").
+
+---
+
+> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
+> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
+> task that has not merged yet, so this document does not yet contain it.
+> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
+> not a reflection of merge order.
+- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
+  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
+  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
+  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
+  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
+  this migration (see "Note on scope" above) — they live in
+  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
+  instead, which must ship in the same release as the `DATABASE_URL`
+  cutover (`docs/RUNBOOK.md` §9).
+
+**Pinned by**:
+- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
+  first and confirms the single connection has *unrestricted* DDL there
+  (proving the restrictions below are not vacuous), then migrates the rest
+  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
+  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
+  journal_entries`/touch `schema_migrations`, while it can still
+  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
+  `journal_entries`.
+- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
+  exactly to 042 through a non-superuser role that owns the database
+  (simulating a managed-Postgres master user) and confirms that role can
+  still write afterward. This is the regression pin for the combined-
+  migration bug described above: it fails with `permission denied for
+  table schema_migrations` against the old (pre-split) combined 042 and
+  passes against the current (pure-expand) 042.
+- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
+  counterpart pin for 049: the same non-superuser role can still write
+  after 042 alone, but loses access to business tables once 049 runs
+  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
+  §9). Also proves 049 itself can apply cleanly under a non-superuser
+  connection -- an earlier revision without its narrow
+  schema-USAGE/schema_migrations re-grants could never successfully apply
+  at all, on any non-superuser connection, regardless of `DATABASE_URL`
+  cutover timing.
+- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  — after manually granting `ledger_owner` ownership of `journal_entries`
+  (mirroring what 049 does, scoped to just this one table so the test does
+  not depend on 049's exact implementation), a partition it creates *after*
+  042's grant ran is still writable by `ledger_app` through the parent
+  table name.
+- `postgres.TestMigration042_RoleAttributes` — pins role attributes
+  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
+  role holds (`information_schema.role_table_grants`) on an ordinary table,
+  `journal_entries`, and `schema_migrations`.
+- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
+  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
+  for 042 and 049 each roll back cleanly and leave the original connection
+  able to operate normally.
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.
