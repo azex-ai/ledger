@@ -1,6 +1,9 @@
 -- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+-- auth_digest/auth_signature/auth_key_id (migration 046, P5) are empty when
+-- the caller did not sign this posting (no core.Attestor configured, or a
+-- tx-bound store -- see postgres.LedgerStore.PostJournal).
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 RETURNING *;
 
 -- name: InsertJournalEntry :one

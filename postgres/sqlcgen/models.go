@@ -198,6 +198,9 @@ type Journal struct {
 	EventID        int64          `json:"event_id"`
 	EffectiveAt    time.Time      `json:"effective_at"`
 	Uid            pgtype.UUID    `json:"uid"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
 }
 
 type JournalEntriesDefault struct {

@@ -47,6 +47,14 @@ type LedgerStore struct {
 	db   DBTX
 	q    *sqlcgen.Queries
 	dims *dimCache
+
+	// attestor and authPolicy configure per-journal authorization signing
+	// (design doc §7, P5). attestor == nil (the zero value from
+	// NewLedgerStore) means signing is not configured at all -- PostJournal
+	// behaves exactly as it did before P5 existed (expand-safe, design doc
+	// §12). Set via WithAuth, never by mutating a live store.
+	attestor   core.Attestor
+	authPolicy core.AuthPolicy
 }
 
 // balancePair identifies a (holder, currency_id) pair targeted by an advisory
@@ -153,22 +161,170 @@ func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
 // (or any DBTX implementor). The clone shares no mutable state with the
 // original and is safe for concurrent use alongside it. The caller owns the
 // transaction lifecycle (commit/rollback).
+//
+// The clone never signs journals regardless of attestor/authPolicy (carried
+// over here only for field-consistency, not because they are consulted):
+// pool == nil is PostJournal's signal that it is running inside a
+// transaction it did not open, and financial.md forbids the Attestor's
+// external (KMS) call from happening there. See WithAuth's doc comment.
 func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 	return &LedgerStore{
-		pool: nil, // tx mode: pool deliberately nil
-		db:   db,
-		q:    sqlcgen.New(db),
-		dims: s.dims,
+		pool:       nil, // tx mode: pool deliberately nil
+		db:         db,
+		q:          sqlcgen.New(db),
+		dims:       s.dims,
+		attestor:   s.attestor,
+		authPolicy: s.authPolicy,
 	}
+}
+
+// WithAuth returns a clone of s configured to sign journals through
+// attestor according to policy (design doc §7, P5). Call it once, right
+// after NewLedgerStore, before the store does any writes:
+// policy.ValidateFailureMode runs immediately, so a misconfigured
+// FailureMode fails at wiring time rather than on whatever journal happens
+// to post first (M3.1 secure-by-default precedent,
+// docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2 addendum).
+// Per-journal-type Coverage decisions cannot be validated this early --
+// see core.AuthPolicy's doc comment -- RequirementFor enforces those
+// lazily, at post time.
+//
+// attestor == nil is the default, unconfigured state (never calling
+// WithAuth): PostJournal never signs and behaves exactly as it did before
+// P5 existed.
+func (s *LedgerStore) WithAuth(attestor core.Attestor, policy core.AuthPolicy) (*LedgerStore, error) {
+	if attestor != nil {
+		if err := policy.ValidateFailureMode(); err != nil {
+			return nil, fmt.Errorf("postgres: ledger store: with auth: %w", err)
+		}
+	}
+	return &LedgerStore{
+		pool:       s.pool,
+		db:         s.db,
+		q:          s.q,
+		dims:       s.dims,
+		attestor:   attestor,
+		authPolicy: policy,
+	}, nil
+}
+
+// resolveEffectiveAt applies core.JournalInput.EffectiveAt's documented
+// zero-value-means-now default. Pulled out to its own function so
+// PostJournal can resolve it ONCE, before signing (see attestJournal), and
+// thread the exact same value through to postJournalWithQueries -- two
+// independent time.Now() calls a few lines apart would sign one instant and
+// persist a different one, breaking the digest/row correspondence
+// VerifyJournalAuth depends on.
+func resolveEffectiveAt(t time.Time) time.Time {
+	if t.IsZero() {
+		return time.Now()
+	}
+	return t
+}
+
+// journalAuth is the (possibly empty) result of attestJournal. Empty means
+// "post this journal unsigned" -- see attestJournal's doc comment for every
+// case that leads there.
+type journalAuth struct {
+	digest    []byte
+	signature []byte
+	keyID     string
+}
+
+// bytesOrEmpty normalizes a nil slice to a non-nil empty one. auth_digest/
+// auth_signature are BYTEA NOT NULL DEFAULT ”::bytea (migration 046) --
+// passing a nil []byte through pgx would bind SQL NULL, violating that
+// constraint, so every unsigned path must use [] byte{}, never nil.
+func bytesOrEmpty(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
+}
+
+// attestJournal resolves whether and how to sign input before any
+// transaction is opened -- financial.md forbids external (KMS) calls
+// inside a DB transaction, and this is the only place in the PostJournal
+// call chain that runs strictly before one. Only called from PostJournal's
+// pool-mode branch (s.pool != nil); the tx-mode branch never signs at all
+// (see PostJournal's doc comment).
+//
+// Returns a zero journalAuth (no error) when:
+//   - s.attestor is nil (signing not configured at all -- design doc §12:
+//     expand-safe, behavior unchanged from before P5);
+//   - input.IdempotencyKey already has a posted journal (replay -- the
+//     stored journal's own signature is what VerifyJournalAuth will see
+//     when read back; no new KMS call happens, matching design doc §7.3's
+//     "same key + same payload -> digest same -> reuse, don't resign". This
+//     check is a best-effort optimization only: postJournalWithQueries's own
+//     locked recheck is what actually enforces idempotency);
+//   - the journal type's AuthPolicy.Coverage decision is
+//     SignatureRequirementExempt.
+//
+// Returns an error wrapping core.ErrAttestorUnavailable when signing is
+// required, the Attestor's Sign call fails, and
+// AuthPolicy.FailureMode == AttestorFailureModeFailClosed.
+// AttestorFailureModeFailOpen instead returns a zero journalAuth: the
+// journal posts unsigned (no consumer in this phase reads that as a reason
+// to block anything, design doc §12's P5 row).
+func (s *LedgerStore) attestJournal(ctx context.Context, input core.JournalInput, effectiveAt time.Time) (journalAuth, error) {
+	if s.attestor == nil {
+		return journalAuth{}, nil
+	}
+
+	if _, err := s.q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return journalAuth{}, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return journalAuth{}, fmt.Errorf("postgres: post journal: check idempotency before signing: %w", err)
+	}
+
+	jt, err := s.dims.jtByUIDOrErr(ctx, s.q, input.JournalTypeUID)
+	if err != nil {
+		return journalAuth{}, fmt.Errorf("postgres: post journal: resolve journal type for signing: %w", err)
+	}
+	requirement, err := s.authPolicy.RequirementFor(jt.Code)
+	if err != nil {
+		return journalAuth{}, fmt.Errorf("postgres: post journal: %w", err)
+	}
+	if requirement == core.SignatureRequirementExempt {
+		return journalAuth{}, nil
+	}
+
+	digest, err := core.CanonicalJournalDigest(input, effectiveAt)
+	if err != nil {
+		return journalAuth{}, fmt.Errorf("postgres: post journal: canonical digest: %w", err)
+	}
+
+	signature, keyID, err := s.attestor.Sign(ctx, digest)
+	if err != nil {
+		if s.authPolicy.FailureMode == core.AttestorFailureModeFailOpen {
+			return journalAuth{}, nil
+		}
+		return journalAuth{}, fmt.Errorf("postgres: post journal: attestor sign: %w: %w", err, core.ErrAttestorUnavailable)
+	}
+	return journalAuth{digest: digest, signature: signature, keyID: keyID}, nil
 }
 
 // PostJournal posts a balanced journal within a transaction.
 // Idempotent: same key + same payload returns the existing journal; divergent
 // payload returns ErrConflict.
 //
-// In pool mode a new transaction is started and committed here.
-// In tx mode (store bound via withDB) the journal is written directly into
+// In pool mode a new transaction is started and committed here -- and, if
+// an Attestor is configured (WithAuth), this is also the only place
+// signing happens: attestJournal runs to completion, including the
+// Attestor's KMS call, strictly before pool.Begin (financial.md: no
+// external calls inside a DB transaction).
+//
+// In tx mode (store bound via WithDB, i.e. inside ledger.Service.RunInTx or
+// any other caller-owned transaction) the journal is written directly into
 // the caller's transaction; commit/rollback is the caller's responsibility.
+// Signing is deliberately NOT attempted in this mode, regardless of
+// whether an Attestor is configured: the transaction already exists and
+// was opened by someone else, so there is no safe point left at which to
+// call out to KMS without violating financial.md. Journals posted this way
+// keep auth_digest/auth_signature/auth_key_id empty -- indistinguishable
+// from the "no Attestor configured" case until a downstream consumer
+// (design doc §7.3/§7.4, not wired in this phase) decides to care.
 func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) (*core.Journal, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.ledger.post_journal",
 		attribute.String("idempotency_key", input.IdempotencyKey),
@@ -178,14 +334,31 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	)
 	defer span.End()
 
+	if err := input.Validate(); err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
+
 	if s.pool == nil {
-		// Tx mode: use the caller's transaction directly.
-		j, err := s.postJournalWithQueries(ctx, s.q, input)
+		// Tx mode: use the caller's transaction directly. Never signs -- see
+		// doc comment above.
+		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+		j, err := s.postJournalWithQueries(ctx, s.q, input, effectiveAt, journalAuth{})
 		ledgerotel.RecordError(span, err)
 		return j, err
 	}
 
-	// Pool mode: own the transaction lifecycle.
+	// Pool mode: this call owns its transaction, so it is the one place
+	// signing can safely happen. Resolve EffectiveAt once here so the exact
+	// same instant is both signed (attestJournal) and persisted
+	// (postJournalWithQueries) -- see resolveEffectiveAt's doc comment.
+	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+	auth, err := s.attestJournal(ctx, input, effectiveAt)
+	if err != nil {
+		ledgerotel.RecordError(span, err)
+		return nil, err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
@@ -194,7 +367,7 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	journal, err := s.postJournalWithQueries(ctx, qtx, input)
+	journal, err := s.postJournalWithQueries(ctx, qtx, input, effectiveAt, auth)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
@@ -261,6 +434,13 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	return journals, nil
 }
 
+// executeTemplateBatchWithQueries never signs (journalAuth{} for every
+// journal): it always runs inside a transaction (either one it opened
+// itself in pool mode, or the caller's in tx mode), and there is no point
+// at which pulling every rendered input out to sign before the batch's
+// single all-or-nothing transaction opens would still preserve the
+// "all-or-nothing" property renderTemplate's own DB reads depend on. Same
+// documented limitation as PostJournal's tx-mode branch.
 func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sqlcgen.Queries, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	inputs := make([]core.JournalInput, len(requests))
 	for i, req := range requests {
@@ -273,7 +453,8 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 
 	journals := make([]*core.Journal, 0, len(inputs))
 	for i, input := range inputs {
-		journal, err := s.postJournalWithQueries(ctx, q, input)
+		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+		journal, err := s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
 		if err != nil {
 			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
 		}
@@ -406,7 +587,11 @@ func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.
 		Metadata:       map[string]string{"reason": reason},
 	}
 
-	return s.postJournalWithQueries(ctx, q, input)
+	// Never signs -- see executeTemplateBatchWithQueries's doc comment
+	// (same reasoning: this always runs inside a transaction already
+	// opened above, either self-owned or the caller's).
+	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
 }
 
 func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
@@ -434,7 +619,12 @@ func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, te
 	return input, nil
 }
 
-func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput) (*core.Journal, error) {
+// postJournalWithQueries writes input using the already-resolved
+// effectiveAt (see resolveEffectiveAt -- callers must not let this function
+// re-resolve "now" independently, or a signed digest and its persisted row
+// could disagree on the timestamp) and auth (the result of attestJournal,
+// or a zero journalAuth from every caller that never signs).
+func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput, effectiveAt time.Time, auth journalAuth) (*core.Journal, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
 	}
@@ -504,13 +694,6 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		reversalOfID = orig.ID
 	}
 
-	// EffectiveAt defaults to now() when the caller didn't set it (core.Validate
-	// already rejected a future value beyond the clock-skew tolerance).
-	effectiveAt := input.EffectiveAt
-	if effectiveAt.IsZero() {
-		effectiveAt = time.Now()
-	}
-
 	// Period close (I-15): reject postings whose effective date falls before
 	// the active close line. GetActivePeriodClose returns pgx.ErrNoRows when
 	// the period has never been closed — nothing to enforce in that case.
@@ -558,6 +741,9 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		EventID:        eventID,
 		EffectiveAt:    effectiveAt,
 		Uid:            newUID(),
+		AuthDigest:     bytesOrEmpty(auth.digest),
+		AuthSignature:  bytesOrEmpty(auth.signature),
+		AuthKeyID:      auth.keyID,
 	})
 	if err != nil {
 		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)

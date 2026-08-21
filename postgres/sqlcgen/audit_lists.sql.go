@@ -48,7 +48,7 @@ full_chain AS (
     JOIN full_chain fc ON j.reversal_of = fc.journal_id
     WHERE fc.depth < 32
 )
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid, j.auth_digest, j.auth_signature, j.auth_key_id
 FROM journals j
 JOIN full_chain fc ON fc.journal_id = j.id
 ORDER BY j.id ASC
@@ -81,6 +81,9 @@ func (q *Queries) GetReversalChain(ctx context.Context, id int64) ([]Journal, er
 			&i.EventID,
 			&i.EffectiveAt,
 			&i.Uid,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
 		); err != nil {
 			return nil, err
 		}
@@ -94,7 +97,7 @@ func (q *Queries) GetReversalChain(ctx context.Context, id int64) ([]Journal, er
 
 const listJournalsByAccount = `-- name: ListJournalsByAccount :many
 
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid, j.auth_digest, j.auth_signature, j.auth_key_id
 FROM journals j
 JOIN journal_entries je ON je.journal_id = j.id
 WHERE je.account_holder = $1::bigint
@@ -155,6 +158,9 @@ func (q *Queries) ListJournalsByAccount(ctx context.Context, arg ListJournalsByA
 			&i.EventID,
 			&i.EffectiveAt,
 			&i.Uid,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
 		); err != nil {
 			return nil, err
 		}
@@ -167,7 +173,7 @@ func (q *Queries) ListJournalsByAccount(ctx context.Context, arg ListJournalsByA
 }
 
 const listJournalsByTimeRange = `-- name: ListJournalsByTimeRange :many
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id
 FROM journals
 WHERE ($1::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at >= $1::timestamptz)
   AND ($2::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at <= $2::timestamptz)
@@ -213,6 +219,9 @@ func (q *Queries) ListJournalsByTimeRange(ctx context.Context, arg ListJournalsB
 			&i.EventID,
 			&i.EffectiveAt,
 			&i.Uid,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
 		); err != nil {
 			return nil, err
 		}
@@ -275,7 +284,7 @@ func (q *Queries) TraceBookingEvents(ctx context.Context, bookingID int64) ([]Ev
 }
 
 const traceBookingJournals = `-- name: TraceBookingJournals :many
-SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid
+SELECT DISTINCT j.id, j.journal_type_id, j.idempotency_key, j.total_debit, j.total_credit, j.metadata, j.actor_id, j.source, j.reversal_of, j.created_at, j.event_id, j.effective_at, j.uid, j.auth_digest, j.auth_signature, j.auth_key_id
 FROM journals j
 JOIN events e ON e.journal_id = j.id
 WHERE e.booking_id = $1
@@ -306,6 +315,9 @@ func (q *Queries) TraceBookingJournals(ctx context.Context, bookingID int64) ([]
 			&i.EventID,
 			&i.EffectiveAt,
 			&i.Uid,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
 		); err != nil {
 			return nil, err
 		}

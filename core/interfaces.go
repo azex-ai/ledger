@@ -437,3 +437,20 @@ type DepositConfirmer interface {
 type Signer interface {
 	SignTx(ctx context.Context, chainID int64, unsignedTx []byte) (signedTx []byte, err error)
 }
+
+// Attestor abstracts the key that authorizes a posting (design doc §7, P5).
+// The private key lives in a KMS/HSM and never enters the database or the
+// app config: a DB compromise must not yield the ability to mint a valid
+// authorization. Deliberately distinct from Signer (EVM sweep
+// transactions) -- different key, different blast radius, never the same
+// instance (integrity contracts §4).
+type Attestor interface {
+	Sign(ctx context.Context, digest []byte) (signature []byte, keyID string, err error)
+}
+
+// AuthVerifier needs only the public key, so verification can run entirely
+// outside the database host -- that independence is the whole point
+// (design doc §7, P5).
+type AuthVerifier interface {
+	Verify(ctx context.Context, digest, signature []byte, keyID string) error
+}

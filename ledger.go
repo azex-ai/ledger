@@ -83,6 +83,13 @@ type Service struct {
 	// opt into the crypto deposit + sweep bundle see no difference (design
 	// doc 2026-07-11-crypto-deposit-sweep-design.md: "不配 ChainSet 的消费方零感知").
 	onchain *service.Onchain
+
+	// attestor/authVerifier/authPolicy back WithAuthPolicy (design doc §7,
+	// P5). attestor == nil (never calling WithAuthPolicy) is the default:
+	// every journal posts unsigned, exactly as before P5 existed.
+	attestor     core.Attestor
+	authVerifier core.AuthVerifier
+	authPolicy   core.AuthPolicy
 }
 
 // Option mutates a Service during construction.
@@ -103,6 +110,27 @@ func WithMetrics(m core.Metrics) Option {
 		if m != nil {
 			s.metrics = m
 		}
+	}
+}
+
+// WithAuthPolicy configures the per-journal KMS authorization signing
+// subsystem (docs/plans/2026-08-21-tamper-evident-ledger-design.md §7, P5).
+// attestor signs; authVerifier (stored for consumers -- see
+// (*Service).AuthVerifier -- LedgerStore itself never verifies) checks
+// signatures; policy answers design doc §14 items 1-2 (item 3, the
+// withdrawal-gate threshold, is a deliberately separate later release, see
+// core.WithdrawalSignatureThreshold's doc comment).
+//
+// Never calling this option (the default) leaves every journal unsigned,
+// exactly as before P5 existed (expand-safe). Calling it with attestor !=
+// nil but a policy whose FailureMode is unset is a wiring error New()
+// returns, not a silently-coerced default -- see
+// core.AuthPolicy.ValidateFailureMode.
+func WithAuthPolicy(attestor core.Attestor, authVerifier core.AuthVerifier, policy core.AuthPolicy) Option {
+	return func(s *Service) {
+		s.attestor = attestor
+		s.authVerifier = authVerifier
+		s.authPolicy = policy
 	}
 }
 
@@ -127,6 +155,13 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	}
 
 	s.ledgerStore = postgres.NewLedgerStore(pool)
+	if s.attestor != nil {
+		ls, err := s.ledgerStore.WithAuth(s.attestor, s.authPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: %w", err)
+		}
+		s.ledgerStore = ls
+	}
 	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore)
 	s.bookingStore = postgres.NewBookingStore(pool)
 	s.eventStore = postgres.NewEventStore(pool)
@@ -326,6 +361,14 @@ func (s *Service) PeriodCloser() core.PeriodCloser { return s.periodCloseStore }
 
 // TrialBalanceReader computes a trial balance report.
 func (s *Service) TrialBalanceReader() core.TrialBalanceReader { return s.trialBalanceStore }
+
+// AuthVerifier returns the core.AuthVerifier passed to WithAuthPolicy, or
+// nil if it was never called. LedgerStore itself never calls this --
+// signature verification is a downstream concern (a withdrawal gate,
+// reconcile check, or ledger-cli verify -- none wired by P5, design doc
+// §7.3/§7.4/§12); this accessor exists so those future consumers, and pin
+// tests today, can reach the same verifier the composition root wired in.
+func (s *Service) AuthVerifier() core.AuthVerifier { return s.authVerifier }
 
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
