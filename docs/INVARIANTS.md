@@ -876,11 +876,14 @@ verifier that reconstructs `EventUID` from the journal's actual, persisted
 matches the one signed with `EventUID == ""` -- a spurious
 `ErrUnauthorizedJournal` on every legitimately signed, event-linked
 journal, worse than the gap it was fixing. Team Lead's ruling: remove
-`EventUID` from `CanonicalJournalDigest` entirely (domain separator
-bumped `0x01` -> `0x02`; no journal was ever signed under `0x01` in a real
-deployment, so this was the cheapest possible time). `AuthorizedJournal.Input.EventUID`
-may now be set or changed freely, before or after `Authorize` returns,
-without affecting `Digest`/`Signature` at all.
+`EventUID` from `CanonicalJournalDigest` entirely. Domain separator
+bumped to `0x10` (`0x01`, the retired V1 layout, can never be reused;
+`0x02`/`0x03` are `core/attestation.go`'s batch digest / root hash, P6 --
+contracts §2.6 is the allocation table for this shared resource). No
+journal was ever signed under `0x01` in a real deployment, so this was
+the cheapest possible time. `AuthorizedJournal.Input.EventUID` may now be
+set or changed freely, before or after `Authorize` returns, without
+affecting `Digest`/`Signature` at all.
 
 **Disclosed residual limitation**: an attacker with DB write credentials
 can set `event_id` on a journal that originally had none (045 allows the

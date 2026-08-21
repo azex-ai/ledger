@@ -133,10 +133,12 @@ func TestCanonicalJournalDigest_GoldenVector(t *testing.T) {
 	// change requiring a new domain separator, not a silent fix.
 	//
 	// Recomputed 2026-08-21 (board #12/#13, Team Lead ruling): domain
-	// separator bumped 0x01 -> 0x02 and EventUID removed from the layout
-	// entirely -- see authDigestDomainV2's doc comment for why. This value
-	// is NOT the same as the pre-ruling one; that is expected.
-	const want = "ecb1dda72699a137ab821cbbb3adfbced3199cec7ffcb05489876202aebddf69"
+	// separator bumped to 0x10 (0x01 retired; 0x02/0x03 belong to
+	// core/attestation.go's batch digest, P6 -- contracts §2.6) and
+	// EventUID removed from the layout entirely -- see authDigestDomain's
+	// doc comment for why. This value is NOT the same as any pre-ruling
+	// one; that is expected.
+	const want = "730f2859875f3aa10d3f1dbf639ee2505c0b847cbeb36a8f393199b9225c27cb"
 
 	got, err := CanonicalJournalDigest(input, effectiveAt)
 	if err != nil {
@@ -153,7 +155,7 @@ func TestCanonicalJournalDigest_GoldenVector(t *testing.T) {
 // EventUID is provenance metadata, and the event a journal links to is
 // not always known before Authorize must run (booker.Transition mints it
 // inside the very transaction Authorize exists to run ahead of; see
-// authDigestDomainV2's doc comment and AuthorizedJournal's). Asserting
+// authDigestDomain's doc comment and AuthorizedJournal's). Asserting
 // equality here, rather than only pinning a fixed hash, is deliberate:
 // it fails loudly if anyone re-adds EventUID (or any other event-linkage
 // field) to the digest later without thinking through this exact
@@ -211,7 +213,7 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 				Source: "reversal", ReversalOfUID: "journal-orig-uid-999", Entries: entries,
 			},
 			effectiveAt: time.Date(2026, 8, 21, 13, 30, 0, 0, time.UTC),
-			want:        "448ffc00bd2ea0df5a2e5ba2a4fe41db3d155804737521581ea2f057d9029275",
+			want:        "b94fe61c56f1ea4467b25cb9f19104128779abb108ed94a6f79cbafb05330e24",
 		},
 		{
 			name: "multi-currency journal",
@@ -225,7 +227,7 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 				},
 			},
 			effectiveAt: time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC),
-			want:        "c19e72d4cbf155c5a772fbc65e2149d1774f6c924d943ff86926c1582344e746",
+			want:        "d720ceeb4b496a6e6bb79d4a520d5fe8f7cffe0b49af837002e536efeb221064",
 		},
 		{
 			name: "negative actor_id + smallest representable amount",
@@ -237,7 +239,7 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 				},
 			},
 			effectiveAt: time.Date(2026, 8, 21, 15, 0, 0, 0, time.UTC),
-			want:        "66104ecee89a2914bfe166212116274d38c61facfa0f5d9104dfe1c6c7b332da",
+			want:        "464bfd031c852212a8c92f0e3055f380accad3adf3a4e554292f59b5059d5b36",
 		},
 	}
 

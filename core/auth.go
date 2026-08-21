@@ -53,7 +53,7 @@ const amountScale = 18
 // NUMERIC(30,18)'s maximum magnitude (10^30 scaled by 10^18 needs ~100 bits)
 // with headroom; the width itself is part of the wire contract -- changing
 // it is a breaking encoding change exactly like bumping the domain
-// separator (see authDigestDomainV2).
+// separator (see authDigestDomain).
 const authAmountEncodedLen = 16
 
 // EncodeAmount deterministically encodes amt as a fixed-point integer scaled
@@ -122,14 +122,24 @@ func bigIntToFixedTwosComplement(v *big.Int, size int) ([]byte, error) {
 // Canonical journal digest
 // ---------------------------------------------------------------------------
 
-// authDigestDomainV2 domain-separates CanonicalJournalDigest's output from
+// authDigestDomain domain-separates CanonicalJournalDigest's output from
 // any other hash this library might ever compute over similarly-shaped
 // data. A breaking encoding change (field added/removed/reordered, width
 // changed) MUST introduce a new domain separator -- never reuse this byte
 // for an incompatible layout (design doc §7.2 / §12).
 //
-// V1 (0x01) is retired: it included input.EventUID in the digest, which
-// board #12/#13's RunInTx signing-gap fix discovered cannot be known at
+// Domain separator allocation across the package (contracts §2.6, Team
+// Lead, 2026-08-21 -- a cross-task shared resource, same class as
+// migration numbers / .sql files / reconcile check names):
+//   - 0x00 / 0x01: reserved by RFC 6962 (leaf / internal node), external
+//     spec, permanent. This also means the retired auth digest V1 (below)
+//     can never be reused -- it already burned 0x01.
+//   - 0x02 / 0x03: core/attestation.go's batchDigestDomain / root hash
+//     (P6, merged). Do not touch.
+//   - 0x10: this constant (journal auth digest).
+//
+// V1 (0x01, retired) included input.EventUID in the digest, which board
+// #12/#13's RunInTx signing-gap fix discovered cannot be known at
 // Authorize time for an event-linked journal composed via
 // booker.Transition (the event uid is minted inside the transaction that
 // follows). Signing with EventUID="" and later attaching the real event
@@ -141,7 +151,7 @@ func bigIntToFixedTwosComplement(v *big.Int, size int) ([]byte, error) {
 // carry two digest shapes plus a discriminator. No journal was ever
 // signed under V1 in a real deployment (no external users yet), so
 // bumping the domain separator was the cheapest possible time to do this.
-const authDigestDomainV2 = byte(0x02)
+const authDigestDomain = byte(0x10)
 
 // CanonicalJournalDigest computes the deterministic, domain-separated
 // SHA-256 digest of a posting intent, using only input's uid-space fields
@@ -153,7 +163,7 @@ const authDigestDomainV2 = byte(0x02)
 // provenance metadata (which event caused this posting), not posting
 // intent (who/when/which accounts/how much/idempotency key/reversal) --
 // and the event a journal links to is not always known at Authorize time
-// (see authDigestDomainV2's doc comment on why V1 included it and had to
+// (see authDigestDomain's doc comment on why V1 included it and had to
 // be retired). The event/journal link remains a DB-structural guarantee
 // (I-10: same-transaction write, plus 045's set-once FK on
 // journals.event_id), never a cryptographic one -- signing could not add
@@ -162,7 +172,7 @@ const authDigestDomainV2 = byte(0x02)
 // Byte layout (all integers big-endian, unsigned unless noted):
 //
 //	SHA-256(
-//	  0x02                                        -- domain separator
+//	  0x10                                        -- domain separator
 //	  LP(input.JournalTypeUID)
 //	  LP(input.IdempotencyKey)
 //	  BE64(input.ActorID)                         -- bit pattern of the int64
@@ -190,7 +200,7 @@ const authDigestDomainV2 = byte(0x02)
 // separator, not a silent fix.
 func CanonicalJournalDigest(input JournalInput, effectiveAt time.Time) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.WriteByte(authDigestDomainV2)
+	buf.WriteByte(authDigestDomain)
 
 	writeLenPrefixed(&buf, input.JournalTypeUID)
 	writeLenPrefixed(&buf, input.IdempotencyKey)
@@ -317,7 +327,7 @@ const (
 // core.CheckResult.Complete's zero value).
 //
 // EventUID: CanonicalJournalDigest never covers it (see that function's
-// doc comment and authDigestDomainV2's), so a caller MAY freely set or
+// doc comment and authDigestDomain's), so a caller MAY freely set or
 // change Input.EventUID after Authorize returns -- e.g. once
 // booker.Transition mints the real event uid inside the transaction this
 // pre-authorization exists to get into -- without invalidating Digest or
