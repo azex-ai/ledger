@@ -55,3 +55,22 @@ GRANT SELECT ON public.checkpoint_rebuilds TO ledger_ro;
 GRANT SELECT ON public.checkpoint_rebuilds_id_seq TO ledger_ro;
 
 REVOKE UPDATE ON public.period_closes FROM ledger_app;
+
+------------------------------------------------------------
+-- Part 3 -- 047's attestation tables (added by Team Lead during integration,
+-- 2026-08-21). 047 landed on main before 042 did, so like 043 and 050 it
+-- never learned the "grant your own new tables" rule. Both tables carry a
+-- BEFORE UPDATE ledger_block_mutation() trigger, so by the rule Part 2
+-- establishes they get SELECT/INSERT only -- the ACL layer says the same
+-- thing the trigger does.
+--
+-- entry_attestations has no sequence: its primary key is entry_id, supplied
+-- by the caller, not a BIGSERIAL.
+------------------------------------------------------------
+GRANT SELECT, INSERT ON public.ledger_attestations TO ledger_app;
+GRANT SELECT, INSERT ON public.entry_attestations TO ledger_app;
+GRANT USAGE, SELECT ON public.ledger_attestations_id_seq TO ledger_app;
+
+GRANT SELECT ON public.ledger_attestations TO ledger_ro;
+GRANT SELECT ON public.entry_attestations TO ledger_ro;
+GRANT SELECT ON public.ledger_attestations_id_seq TO ledger_ro;
