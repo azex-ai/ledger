@@ -311,3 +311,66 @@ func TestBuildMerkleTree_SharesEncodingWithCanonicalBatchDigest(t *testing.T) {
 		t.Error("changing an entry's amount did not change the Merkle root")
 	}
 }
+
+// rfc6962TestLogInputs are the entry payloads of the eight-entry test log that
+// circulates with RFC 6962 / Certificate Transparency implementations, in hex.
+// The first entry is the empty string, which is what makes n=1 exercise the
+// leaf prefix in isolation.
+var rfc6962TestLogInputs = []string{
+	"",
+	"00",
+	"10",
+	"2021",
+	"3031",
+	"40414243",
+	"5051525354555657",
+	"606162636465666768696a6b6c6d6e6f",
+}
+
+// rfc6962TestLogRoots[n] is MTH over the first n inputs above.
+var rfc6962TestLogRoots = []string{
+	"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	"6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+	"fac54203e7cc696cf0dfcb42c92a1d9dbaf70ad9e621f4bd8d98662f00e3c125",
+	"aeb6bcfe274b70a14fb067a5e5578264db0fa9b51af5e0ba159158f329e06e77",
+	"d37ee418976dd95753c1c73862b9398fa2a2cf9b4ff0fdfe8b30cd95209614b7",
+	"4e3bbb1f7b478dcfe71fb631631519a3bca12c9aefca1612bfce4c13a86264d4",
+	"76e67dadbcdf1e10e1b74ddc608abd2f98dfb16fbce75277b5232a127f2087ef",
+	"ddb89be403809e325750d3d263cd78929c2942b7942a34b77e122c9594a74c8c",
+	"5dc9da79a70659a9ad559cb701ded9a2ab9d823aad2f4960cfe370eff4604328",
+}
+
+// TestMerkleTree_RFC6962TestLogRoots checks this implementation against the
+// canonical CT test log rather than against payloads of our own choosing.
+//
+// Why it exists: the golden vectors above were cross-checked with a Python
+// reimplementation, which catches transcription and structural slips but not a
+// misreading of RFC 6962 §2.1 shared by both, since the same person wrote both.
+// These roots come from a third implementation, written independently from the
+// spec's recursive definition by a different author, over inputs this codebase
+// did not pick.
+//
+// Honest limit: this environment has no network, so the roots were not fetched
+// from the RFC text or a CT test suite -- they were computed locally. The n=0
+// value is independently checkable regardless (it is SHA-256 of the empty
+// string), and n=1 isolates the leaf prefix over an empty payload, so the two
+// base cases of the construction are anchored to values that do not depend on
+// anyone's implementation being right.
+func TestMerkleTree_RFC6962TestLogRoots(t *testing.T) {
+	payloads := make([][]byte, 0, len(rfc6962TestLogInputs))
+	for _, hexIn := range rfc6962TestLogInputs {
+		b, err := hex.DecodeString(hexIn)
+		if err != nil {
+			t.Fatalf("decode test-log input %q: %v", hexIn, err)
+		}
+		payloads = append(payloads, b)
+	}
+
+	for n := 0; n <= len(payloads); n++ {
+		tree := buildMerkleTreeFromPayloads(payloads[:n])
+		got := hex.EncodeToString(tree.Root())
+		if got != rfc6962TestLogRoots[n] {
+			t.Errorf("MTH over the first %d test-log entries = %s, want %s", n, got, rfc6962TestLogRoots[n])
+		}
+	}
+}
