@@ -216,6 +216,7 @@ type Journal struct {
 	AuthDigest     []byte         `json:"auth_digest"`
 	AuthSignature  []byte         `json:"auth_signature"`
 	AuthKeyID      string         `json:"auth_key_id"`
+	AuthStatus     string         `json:"auth_status"`
 }
 
 type JournalEntriesDefault struct {

@@ -36,6 +36,13 @@ func (m *mockJournalWriter) PostJournal(ctx context.Context, input core.JournalI
 	return &core.Journal{UID: "uid-1", JournalTypeUID: input.JournalTypeUID, IdempotencyKey: input.IdempotencyKey, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
+func (m *mockJournalWriter) PostAuthorized(ctx context.Context, authorized core.AuthorizedJournal) (*core.Journal, error) {
+	if m.postFn != nil {
+		return m.postFn(ctx, authorized.Input)
+	}
+	return &core.Journal{UID: "uid-1", JournalTypeUID: authorized.Input.JournalTypeUID, IdempotencyKey: authorized.Input.IdempotencyKey, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
+}
+
 func (m *mockJournalWriter) ExecuteTemplate(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 	if m.templateFn != nil {
 		return m.templateFn(ctx, code, params)

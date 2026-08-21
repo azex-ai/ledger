@@ -200,6 +200,32 @@ func (s *Service) DBTX() postgres.DBTX {
 // JournalWriter posts/reverses journals and executes templates.
 func (s *Service) JournalWriter() core.JournalWriter { return s.ledgerStore }
 
+// Authorize computes input's canonical digest and, if WithAttestor was
+// used, signs it -- entirely outside any transaction, so the result
+// (core.AuthorizedJournal) can safely be posted from inside a RunInTx
+// callback via JournalWriter().PostAuthorized (design doc §7.5). Call it
+// on the top-level Service, strictly before RunInTx opens; calling it on
+// the *Service passed into a RunInTx callback returns an error (that
+// Service is already transaction-bound, and financial.md forbids calling
+// out to an Attestor from inside an open transaction).
+func (s *Service) Authorize(ctx context.Context, input core.JournalInput) (core.AuthorizedJournal, error) {
+	return s.ledgerStore.Authorize(ctx, input)
+}
+
+// AuthorizeTemplate renders templateCode with params into a
+// core.JournalInput, then calls Authorize on it -- the template-driven
+// equivalent of Authorize, for callers (e.g. service.Onchain, via
+// TxComposer) that build their journal from a template rather than a raw
+// JournalInput. Same placement rule as Authorize: call before RunInTx
+// opens.
+func (s *Service) AuthorizeTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (core.AuthorizedJournal, error) {
+	input, err := s.ledgerStore.RenderTemplate(ctx, templateCode, params)
+	if err != nil {
+		return core.AuthorizedJournal{}, err
+	}
+	return s.ledgerStore.Authorize(ctx, *input)
+}
+
 // TemplateBatchExecutor executes multiple templates atomically.
 func (s *Service) TemplateBatchExecutor() core.TemplateBatchExecutor { return s.ledgerStore }
 
@@ -572,6 +598,15 @@ func (c onchainTxComposer) RunInTx(ctx context.Context, fn func(ctx context.Cont
 	return c.svc.RunInTx(ctx, func(tx *Service) error {
 		return fn(ctx, tx.Booker(), tx.JournalWriter())
 	})
+}
+
+// AuthorizeTemplate delegates to the top-level Service (never the
+// transaction-bound clone RunInTx hands to its callback) -- c.svc is
+// always the top-level Service here, since onchainTxComposer is
+// constructed once in EnableOnchain, not inside a RunInTx callback. See
+// design doc §7.5.
+func (c onchainTxComposer) AuthorizeTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (core.AuthorizedJournal, error) {
+	return c.svc.AuthorizeTemplate(ctx, templateCode, params)
 }
 
 // ---------------------------------------------------------------------------

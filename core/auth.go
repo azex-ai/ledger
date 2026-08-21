@@ -233,6 +233,93 @@ func writeBE64(buf *bytes.Buffer, v uint64) {
 }
 
 // ---------------------------------------------------------------------------
+// RunInTx gap fix (design doc §7.5) -- pre-authorization
+// ---------------------------------------------------------------------------
+//
+// §7.2 put the Attestor call outside any DB transaction, but never said how
+// that composes with RunInTx: the caller-owned transaction it wraps has
+// already begun by the time a RunInTx callback runs, so there is no safe
+// point left inside it to call an Attestor without violating financial.md.
+// PostJournal's tx-mode branch therefore always posted unsigned -- silently,
+// for every journal composed with a caller's own writes via RunInTx,
+// including the deposit-confirmation journal P5 exists to protect
+// (service/onchain.go's postDepositConfirmedJournal).
+//
+// The fix: split signing into two calls the caller sequences itself.
+// Authorize (LedgerStore.Authorize / ledger.Service.Authorize) runs BEFORE
+// opening any transaction -- it may call the Attestor. PostAuthorized
+// (LedgerStore.PostAuthorized) runs the actual write, from either pool mode
+// or a caller-owned transaction (RunInTx), using only the already-computed
+// AuthorizedJournal -- it never touches the Attestor, so it is always safe
+// to call from inside RunInTx.
+
+// AuthStatus records WHY a journal's auth_digest/auth_signature/auth_key_id
+// are (or are not) populated. Persisted verbatim in journals.auth_status
+// (migration 051) so "why wasn't this signed" is a queryable fact instead
+// of something a reader has to infer from three possibly-empty byte
+// columns -- indistinguishability here was exactly the bug (design doc
+// §7.5): before this column existed, "no Attestor configured" and "posted
+// via a transaction with no safe point to sign" were the same observable
+// state (all three columns empty), so a verifier could not tell "this
+// deployment never turns on signing" apart from "this specific write path
+// skipped it even though signing is on".
+type AuthStatus string
+
+const (
+	// AuthStatusSigned: an Attestor was configured and this journal carries
+	// a valid signature over its canonical digest.
+	AuthStatusSigned AuthStatus = "signed"
+	// AuthStatusUnsignedNoAttestor: no Attestor is configured for this
+	// deployment at all -- the signing feature is off system-wide. Every
+	// journal posted before P5 (migration 046) predates the column
+	// entirely and is backfilled to this value unless it already carries a
+	// signature (migration 051's up.sql).
+	AuthStatusUnsignedNoAttestor AuthStatus = "unsigned_no_attestor"
+	// AuthStatusUnsignedTxMode: this journal was posted through a write
+	// path with no safe point to call an Attestor without violating
+	// financial.md's "no external calls inside a transaction" rule --
+	// PostJournal's tx-mode branch, ExecuteTemplateBatch, or a reversal --
+	// and the caller did not go through Authorize/PostAuthorized to close
+	// that gap for this specific posting.
+	AuthStatusUnsignedTxMode AuthStatus = "unsigned_tx_mode"
+)
+
+// AuthorizedJournal is the result of pre-authorizing a JournalInput outside
+// any database transaction: the canonical uid-space digest (§7.2) and
+// whatever an Attestor produced for it, packaged so PostAuthorized can
+// persist it without calling the Attestor a second time. Obtained via
+// LedgerStore.Authorize / ledger.Service.Authorize; callers must not
+// construct one by hand outside those two functions (the zero value's
+// Status is "", which PostAuthorized rejects rather than silently treating
+// as any of the three real states -- fail-closed, same reasoning as
+// core.CheckResult.Complete's zero value).
+//
+// EventUID caveat: when Input.EventUID was not yet known at Authorize time
+// (the event that will link to this journal is minted inside the very
+// transaction this pre-authorization exists to get into -- e.g. a booking
+// transition's event uid), Digest was computed with Input.EventUID == "",
+// matching that field's own documented convention ("" means "not
+// event-driven"). A caller MAY update Input.EventUID after Authorize
+// returns (once the real event uid is known) so PostAuthorized links the
+// journal to the correct event at write time -- doing so does NOT
+// re-derive Digest/Signature, so the persisted auth_digest deliberately
+// does not cover the event link in that case. This does not weaken what
+// per-journal signing defends against (M5: a forger without Attestor
+// access cannot produce a valid signature for ANY shape, event-linked or
+// not); it only means such a journal's signature cannot itself prove which
+// event caused it -- the event/journal FK link remains a DB-structural
+// guarantee (I-10), never a cryptographic one, with or without this
+// caveat.
+type AuthorizedJournal struct {
+	Input       JournalInput
+	EffectiveAt time.Time
+	Digest      []byte
+	Signature   []byte
+	KeyID       string
+	Status      AuthStatus
+}
+
+// ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
 

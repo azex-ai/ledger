@@ -217,13 +217,17 @@ func resolveEffectiveAt(t time.Time) time.Time {
 	return t
 }
 
-// journalAuth is the (possibly empty) result of attestJournal. Empty means
-// "post this journal unsigned" -- see attestJournal's doc comment for every
-// case that leads there.
+// journalAuth is the (possibly empty) result of attestJournal, or the
+// unpacked form of a caller-supplied core.AuthorizedJournal (PostAuthorized).
+// status is never the Go zero value ("") on any path that reaches
+// postJournalWithQueries -- every constructor site sets it explicitly (see
+// core.AuthStatus's doc comment on why the zero value must never reach the
+// DB unlabeled).
 type journalAuth struct {
 	digest    []byte
 	signature []byte
 	keyID     string
+	status    core.AuthStatus
 }
 
 // bytesOrEmpty normalizes a nil slice to a non-nil empty one. auth_digest/
@@ -240,11 +244,11 @@ func bytesOrEmpty(b []byte) []byte {
 // attestJournal resolves whether and how to sign input before any
 // transaction is opened -- financial.md forbids external calls inside a
 // DB transaction, and this is the only place in the PostJournal call chain
-// that runs strictly before one. Only called from PostJournal's pool-mode
-// branch (s.pool != nil); the tx-mode branch never signs at all (see
-// PostJournal's doc comment).
+// that runs strictly before one. Called from PostJournal's pool-mode branch
+// (s.pool != nil) and from the public Authorize (design doc §7.5); the
+// tx-mode branch never calls it at all (see PostJournal's doc comment).
 //
-// Returns a zero journalAuth (no error) when:
+// Returns journalAuth{status: core.AuthStatusUnsignedNoAttestor} (no error) when:
 //   - s.attestor is nil (signing not configured at all -- design doc §12:
 //     expand-safe, behavior unchanged from before P5);
 //   - input.IdempotencyKey already has a posted journal (replay -- the
@@ -253,7 +257,9 @@ func bytesOrEmpty(b []byte) []byte {
 //     §7.3's "same key + same payload -> digest same -> reuse, don't
 //     resign". This check is a best-effort optimization only:
 //     postJournalWithQueries's own locked recheck is what actually
-//     enforces idempotency.
+//     enforces idempotency, and its result is discarded on that path (the
+//     insert never happens, so the label on this particular return value
+//     is moot -- see PostAuthorized's doc comment for the general rule).
 //
 // Every journal is signed once an Attestor is configured -- there is no
 // per-journal-type coverage decision (Team Lead's 2026-08-21
@@ -264,11 +270,11 @@ func bytesOrEmpty(b []byte) []byte {
 // unsigned journal post silently.
 func (s *LedgerStore) attestJournal(ctx context.Context, input core.JournalInput, effectiveAt time.Time) (journalAuth, error) {
 	if s.attestor == nil {
-		return journalAuth{}, nil
+		return journalAuth{status: core.AuthStatusUnsignedNoAttestor}, nil
 	}
 
 	if _, err := s.q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
-		return journalAuth{}, nil
+		return journalAuth{status: core.AuthStatusUnsignedNoAttestor}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return journalAuth{}, fmt.Errorf("postgres: post journal: check idempotency before signing: %w", err)
 	}
@@ -282,7 +288,95 @@ func (s *LedgerStore) attestJournal(ctx context.Context, input core.JournalInput
 	if err != nil {
 		return journalAuth{}, fmt.Errorf("postgres: post journal: attestor sign: %w: %w", err, core.ErrAttestorUnavailable)
 	}
-	return journalAuth{digest: digest, signature: signature, keyID: keyID}, nil
+	return journalAuth{digest: digest, signature: signature, keyID: keyID, status: core.AuthStatusSigned}, nil
+}
+
+// Authorize computes input's canonical digest and, if an Attestor is
+// configured, signs it -- entirely outside any DB transaction, so callers
+// can safely wrap the result (PostAuthorized) inside a RunInTx callback
+// (design doc §7.5). It is the ONLY safe way to get a signature onto a
+// journal that must be composed with a caller-owned transaction; calling
+// PostJournal itself from tx mode never signs (see PostJournal's doc
+// comment).
+//
+// Returns an error if called on a store already bound to a transaction
+// (s.pool == nil -- i.e. a *LedgerStore obtained via WithDB, such as the
+// clone RunInTx hands to its callback): that would mean a transaction is
+// already open, and calling out to an Attestor from inside one violates
+// financial.md exactly as PostJournal's tx-mode branch was built to avoid.
+// Authorize must run BEFORE RunInTx opens, on the top-level store/Service.
+//
+// input.EventUID may be "" if the real event uid is not yet known (e.g. it
+// will be minted by a booking transition inside the transaction this
+// pre-authorization is for) -- see AuthorizedJournal's doc comment for the
+// consequence of doing so.
+func (s *LedgerStore) Authorize(ctx context.Context, input core.JournalInput) (core.AuthorizedJournal, error) {
+	if s.pool == nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize: called on a transaction-bound store; Authorize must run before opening a transaction, not from inside RunInTx: %w", core.ErrInvalidInput)
+	}
+	if err := input.Validate(); err != nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize: %w", err)
+	}
+
+	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+	auth, err := s.attestJournal(ctx, input, effectiveAt)
+	if err != nil {
+		return core.AuthorizedJournal{}, err
+	}
+	return core.AuthorizedJournal{
+		Input:       input,
+		EffectiveAt: effectiveAt,
+		Digest:      auth.digest,
+		Signature:   auth.signature,
+		KeyID:       auth.keyID,
+		Status:      auth.status,
+	}, nil
+}
+
+// PostAuthorized posts authorized.Input using the signature Authorize
+// already computed -- it NEVER calls the Attestor, regardless of pool or
+// tx mode, which is what makes it safe to call from inside a RunInTx
+// callback (design doc §7.5). authorized.Status must not be empty (the
+// zero value of core.AuthStatus): that would mean authorized was not built
+// by Authorize, which this method treats as a caller bug, not a value to
+// paper over with a guessed status.
+func (s *LedgerStore) PostAuthorized(ctx context.Context, authorized core.AuthorizedJournal) (*core.Journal, error) {
+	if authorized.Status == "" {
+		return nil, fmt.Errorf("postgres: post authorized: AuthorizedJournal.Status is empty; it must come from Authorize, not be constructed by hand: %w", core.ErrInvalidInput)
+	}
+	if err := authorized.Input.Validate(); err != nil {
+		return nil, fmt.Errorf("postgres: post authorized: %w", err)
+	}
+	auth := journalAuth{
+		digest:    authorized.Digest,
+		signature: authorized.Signature,
+		keyID:     authorized.KeyID,
+		status:    authorized.Status,
+	}
+
+	if s.pool == nil {
+		// Tx mode: use the caller's transaction directly -- exactly the
+		// RunInTx case this method exists for.
+		return s.postJournalWithQueries(ctx, s.q, authorized.Input, authorized.EffectiveAt, auth)
+	}
+
+	// Pool mode: own the transaction lifecycle. No Attestor call happens
+	// here either -- authorized already carries whatever Authorize decided.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: post authorized: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.q.WithTx(tx)
+	journal, err := s.postJournalWithQueries(ctx, qtx, authorized.Input, authorized.EffectiveAt, auth)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: post authorized: commit: %w", err)
+	}
+	return journal, nil
 }
 
 // PostJournal posts a balanced journal within a transaction.
@@ -321,9 +415,14 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly. Never signs -- see
-		// doc comment above.
+		// doc comment above. Callers that need a signature on a journal
+		// composed via RunInTx must use Authorize + PostAuthorized instead
+		// (design doc §7.5) -- this branch has no way to tell "the caller
+		// deliberately skipped signing" apart from "the caller never
+		// thought about it", which is exactly why it is always labeled
+		// unsigned_tx_mode rather than guessing.
 		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-		j, err := s.postJournalWithQueries(ctx, s.q, input, effectiveAt, journalAuth{})
+		j, err := s.postJournalWithQueries(ctx, s.q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
 		ledgerotel.RecordError(span, err)
 		return j, err
 	}
@@ -359,6 +458,18 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	}
 
 	return journal, nil
+}
+
+// RenderTemplate loads a template by code and renders it into a
+// core.JournalInput without posting it. Read-only (template + dimension
+// lookups only, no writes), so it is safe to call in any mode -- but it
+// exists specifically so a caller can render a template-driven journal
+// BEFORE opening a transaction, then pass the result to Authorize and
+// finally PostAuthorized inside RunInTx (design doc §7.5). ExecuteTemplate
+// remains the one-call convenience path for callers that do not need to
+// sign across a RunInTx boundary.
+func (s *LedgerStore) RenderTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
+	return s.renderTemplate(ctx, s.q, templateCode, params)
 }
 
 // ExecuteTemplate loads a template by code, renders it, and posts the journal.
@@ -414,13 +525,16 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	return journals, nil
 }
 
-// executeTemplateBatchWithQueries never signs (journalAuth{} for every
-// journal): it always runs inside a transaction (either one it opened
-// itself in pool mode, or the caller's in tx mode), and there is no point
-// at which pulling every rendered input out to sign before the batch's
-// single all-or-nothing transaction opens would still preserve the
-// "all-or-nothing" property renderTemplate's own DB reads depend on. Same
-// documented limitation as PostJournal's tx-mode branch.
+// executeTemplateBatchWithQueries never signs (journalAuth{status:
+// core.AuthStatusUnsignedTxMode} for every journal): it always runs inside
+// a transaction (either one it opened itself in pool mode, or the caller's
+// in tx mode), and there is no point at which pulling every rendered input
+// out to sign before the batch's single all-or-nothing transaction opens
+// would still preserve the "all-or-nothing" property renderTemplate's own
+// DB reads depend on. Same documented limitation as PostJournal's tx-mode
+// branch (design doc §7.5's Authorize/PostAuthorized split does not cover
+// batches -- out of scope for that fix, not silently dropped: it is
+// labeled unsigned_tx_mode, not left ambiguous).
 func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sqlcgen.Queries, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	inputs := make([]core.JournalInput, len(requests))
 	for i, req := range requests {
@@ -434,7 +548,7 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 	journals := make([]*core.Journal, 0, len(inputs))
 	for i, input := range inputs {
 		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-		journal, err := s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
+		journal, err := s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
 		if err != nil {
 			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
 		}
@@ -571,7 +685,7 @@ func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.
 	// (same reasoning: this always runs inside a transaction already
 	// opened above, either self-owned or the caller's).
 	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
 }
 
 func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
@@ -602,8 +716,11 @@ func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, te
 // postJournalWithQueries writes input using the already-resolved
 // effectiveAt (see resolveEffectiveAt -- callers must not let this function
 // re-resolve "now" independently, or a signed digest and its persisted row
-// could disagree on the timestamp) and auth (the result of attestJournal,
-// or a zero journalAuth from every caller that never signs).
+// could disagree on the timestamp) and auth (the result of attestJournal or
+// an unpacked core.AuthorizedJournal from PostAuthorized). auth.status is
+// persisted verbatim as journals.auth_status and must never be the Go zero
+// value ("") on this path -- every caller sets it explicitly (see
+// journalAuth's doc comment).
 func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput, effectiveAt time.Time, auth journalAuth) (*core.Journal, error) {
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
@@ -709,6 +826,16 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 
 	debit, credit := input.Totals()
 
+	// Fail loudly on a caller bug rather than let an unlabeled row reach
+	// the DB: every call site in this package sets auth.status explicitly
+	// (journalAuth's doc comment), so an empty value here means a new
+	// caller was added without doing so. The auth_status CHECK constraint
+	// (migration 051) would also reject it, but that error is far less
+	// legible than this one.
+	if auth.status == "" {
+		return nil, fmt.Errorf("postgres: post journal: internal: journalAuth.status is empty -- every caller of postJournalWithQueries must set it: %w", core.ErrInvalidInput)
+	}
+
 	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{
 		JournalTypeID:  jt.ID,
 		IdempotencyKey: input.IdempotencyKey,
@@ -724,6 +851,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		AuthDigest:     bytesOrEmpty(auth.digest),
 		AuthSignature:  bytesOrEmpty(auth.signature),
 		AuthKeyID:      auth.keyID,
+		AuthStatus:     string(auth.status),
 	})
 	if err != nil {
 		existing, lookupErr := q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey)

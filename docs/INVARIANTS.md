@@ -835,19 +835,46 @@ concedes "app process + signing key both compromised" as out of scope
 (design doc §1 non-goal 2) for ANY key custody model, local or remote, so
 a local key satisfies the same guarantee.
 
-**Scope note (honest, not silently narrowed)**: signing only happens on
-`PostJournal`'s pool-mode, top-level call path -- `ExecuteTemplateBatch`,
-`ReverseJournal`/`ReverseJournalFraction`, and any `JournalWriter` call
-made inside `ledger.Service.RunInTx` (tx-mode, `WithDB`) never sign,
-because there is no point in those call chains that is provably outside a
-DB transaction the way `financial.md` requires for the Attestor's signing
-call. Journals posted through those paths carry empty auth columns,
-indistinguishable from "no Attestor configured" -- exactly like every
-journal predating P5. A withdrawal gate (a downstream consumer treating an
-unsigned journal as unauthorized for withdrawal purposes) is **not wired
-by this phase** -- design doc §12's P5 row is explicit that it is a
-separate, later release; `core.VerifyJournalAuth` is the primitive that
-release (or `ledger-cli verify`, P6) would call.
+**Scope note (honest, not silently narrowed; updated 2026-08-21, design doc
+§7.5, board #12/#13)**: `PostJournal`'s tx-mode branch, `ExecuteTemplateBatch`,
+and `ReverseJournal`/`ReverseJournalFraction` still never sign, because
+there is no point in those call chains that is provably outside a DB
+transaction the way `financial.md` requires for the Attestor's signing
+call. This was ALSO true, before this fix, of every `JournalWriter` call
+composed inside `ledger.Service.RunInTx` -- including
+`service/onchain.go`'s `postDepositConfirmedJournal`, P5's own headline use
+case (M5: forged deposit accounting), which is composed via `RunInTx` to
+get its atomic event/journal cross-link (I-10). That specific gap is
+closed: `Service.Authorize`/`Service.AuthorizeTemplate` (postgres:
+`LedgerStore.Authorize`) run BEFORE `RunInTx` opens (the last safe point to
+call the Attestor), and `JournalWriter.PostAuthorized` posts the result
+from inside the callback without touching the Attestor again --
+`postDepositConfirmedJournal` now uses exactly this sequence. Callers of
+the OTHER never-sign paths above still get an unsigned journal -- but no
+longer indistinguishable from "no Attestor configured": `journals.auth_status`
+(migration 051) records `unsigned_tx_mode` for all of them (and for any
+`RunInTx`-composed journal whose caller did not adopt
+Authorize/PostAuthorized), `unsigned_no_attestor` when no Attestor is
+configured at all, and `signed` otherwise. A withdrawal gate (a downstream
+consumer treating an unsigned journal as unauthorized for withdrawal
+purposes) is still **not wired by this phase** -- design doc §12's P5 row
+is explicit that it is a separate, later release; `core.VerifyJournalAuth`
+is the primitive that release (or `ledger-cli verify`, P6) would call, and
+it can now additionally branch on `auth_status` instead of only on
+"digest empty or not".
+
+**EventUID caveat (§7.5)**: when a journal's canonical digest is signed via
+Authorize before the event that will link to it exists yet (e.g.
+`postDepositConfirmedJournal`'s event uid is minted by `booker.Transition`
+inside the transaction that follows), the digest is computed with
+`EventUID == ""` and the real event uid is attached to
+`AuthorizedJournal.Input` afterward for the FK link only, without
+re-signing. This does not weaken M5's defense (a forger without Attestor
+access cannot produce a valid signature for ANY entry shape, event-linked
+or not); it means a signature obtained this way cannot itself prove which
+event caused the journal -- that link remains the DB-structural (FK)
+guarantee I-10 already provides, not a cryptographic one, exactly as it
+was before P5 existed.
 
 **Enforced by**:
 - `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
@@ -870,6 +897,21 @@ release (or `ledger-cli verify`, P6) would call.
 - `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
   key_id at construction time, in the caller's own composition root,
   never silently inside the ledger.
+- `postgres.LedgerStore.Authorize` / `PostAuthorized`
+  (`postgres/ledger_store.go`, design doc §7.5) -- `Authorize` runs
+  `attestJournal` before any transaction and refuses to run at all on a
+  transaction-bound store (`core.ErrInvalidInput`); `PostAuthorized` never
+  calls the Attestor and refuses a `core.AuthorizedJournal` whose `Status`
+  is the Go zero value. `(*ledger.Service).Authorize` /
+  `AuthorizeTemplate` expose the same pair at the library facade;
+  `service.TxComposer.AuthorizeTemplate` is what `service/onchain.go`'s
+  `postDepositConfirmedJournal` calls before opening `RunInTx`.
+- `journals.auth_status` CHECK constraint (migration 051) -- restricts the
+  column to exactly `signed` / `unsigned_no_attestor` / `unsigned_tx_mode`;
+  `postJournalWithQueries` additionally refuses to insert at all if
+  `auth.status` is empty, a stricter Go-level backstop than the DB
+  constraint (better error message, catches the bug before a query is
+  even issued).
 
 **Pinned by** (`postgres/auth_pin_test.go` unless noted):
 - `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
@@ -889,6 +931,26 @@ release (or `ledger-cli verify`, P6) would call.
 - `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
   (`core/auth_test.go`) -- pin the exact byte layout against independently
   computed values; any diff is a breaking encoding change.
+- `postgres/authorize_pin_test.go` (§7.5 fix, board #12/#13):
+  `TestAuthorize_RejectsOnTransactionBoundStore`,
+  `TestPostAuthorized_RejectsEmptyStatus`,
+  `TestPostAuthorized_SignsFromTxMode` (the fix itself: `Authorize` outside
+  a transaction + `PostAuthorized` inside a caller-owned one produces a
+  verifiable signature),
+  `TestPostJournal_TxMode_NeverSignsEvenWithAttestor` (the contrasting
+  negative: the *old* tx-mode entry point is deliberately unchanged and
+  still labeled `unsigned_tx_mode`),
+  `TestPostJournal_PoolMode_AuthStatusMatchesAttestorConfiguration`,
+  `TestAuthStatus_NewColumnRejectsUnknownValue`.
+- `service.TestOnchain_DepositConfirm_SignsViaRunInTx`
+  (`service/onchain_signing_test.go`) -- drives a real deposit through
+  `IngestDeposit` to `confirmed` with an Attestor configured and asserts
+  the persisted `deposit_confirm` journal is `auth_status = signed` with a
+  signature that verifies against the exact (EventUID-blank) input that
+  was signed. Verified failing before this fix (reverting
+  `postDepositConfirmedJournal` to its pre-§7.5 `ExecuteTemplate`-based
+  form reproduces `auth_status = unsigned_tx_mode` and an empty
+  signature).
 - `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
   `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
   of `VerifyJournalAuth`'s three guard clauses; removing any one of them

@@ -40,6 +40,16 @@ import (
 // (ledger.go) implements this by closing over (*ledger.Service).RunInTx.
 type TxComposer interface {
 	RunInTx(ctx context.Context, fn func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error) error
+	// AuthorizeTemplate renders templateCode with params into a
+	// core.JournalInput and, if a core.Attestor is configured, signs it --
+	// entirely outside any transaction (design doc §7.5). Call it BEFORE
+	// RunInTx opens, then pass the result into the RunInTx callback's
+	// core.JournalWriter.PostAuthorized instead of ExecuteTemplate. This
+	// is what closes the gap where a journal composed via RunInTx always
+	// posted unsigned, regardless of whether an Attestor was configured --
+	// P5's headline use case (M5: forged deposit accounting) is exactly a
+	// RunInTx-composed journal (postDepositConfirmedJournal below).
+	AuthorizeTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (core.AuthorizedJournal, error)
 }
 
 // DeadLetterRecorder persists a deposit sighting that IngestDeposit could
@@ -770,13 +780,46 @@ func (o *Onchain) routeToReview(ctx context.Context, booking *core.Booking, chan
 // "no actor to record" (the normal automatic path) -- in that case
 // approvedByMetaKey is left off the transition/journal metadata entirely,
 // rather than written as an empty string.
+//
+// Signing (design doc §7.5): this is P5's headline use case (M5: forged
+// deposit accounting is exactly what per-journal signing exists to
+// defeat), and it is composed via RunInTx -- so it is exactly the path
+// that always posted unsigned before this fix, regardless of whether an
+// Attestor was configured. AuthorizeTemplate runs BEFORE RunInTx opens
+// (the only safe point to call an Attestor); the result is posted via
+// PostAuthorized instead of ExecuteTemplate, which never calls the
+// Attestor and is therefore safe from inside the transaction.
+//
+// EventUID caveat: the event this journal links to is minted by
+// booker.Transition, INSIDE the transaction below -- so it cannot be known
+// at AuthorizeTemplate time. The digest is signed with EventUID == "" (see
+// AuthorizedJournal's doc comment); the real event uid is attached to
+// authorized.Input just before PostAuthorized, for the FK link only, and
+// does not change what was signed. This does not weaken per-journal
+// signing's defense against M5 (a forger without Attestor access cannot
+// produce a valid signature for ANY shape); it only means this specific
+// signature cannot itself prove which event caused it -- the event/journal
+// link remains a DB-structural (FK) guarantee, per I-10, same as before.
 func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core.Booking, channelRef, actor string) (*core.Booking, error) {
 	var transitionMeta, journalMeta map[string]string
 	if actor != "" {
 		transitionMeta = map[string]string{approvedByMetaKey: actor}
 		journalMeta = map[string]string{approvedByMetaKey: actor}
 	}
-	err := o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
+
+	authorized, err := o.deps.TxComposer.AuthorizeTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
+		HolderID:       booking.AccountHolder,
+		CurrencyUID:    booking.CurrencyUID,
+		IdempotencyKey: "deposit-confirm-" + booking.UID,
+		Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
+		Source:         onchainSource,
+		Metadata:       journalMeta,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("authorize deposit confirm journal: %w", err)
+	}
+
+	err = o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
 		evt, err := booker.Transition(ctx, core.TransitionInput{
 			BookingUID: booking.UID,
 			ToStatus:   "confirmed",
@@ -788,15 +831,8 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 		if err != nil {
 			return err
 		}
-		_, err = journals.ExecuteTemplate(ctx, depositConfirmTemplate, core.TemplateParams{
-			HolderID:       booking.AccountHolder,
-			CurrencyUID:    booking.CurrencyUID,
-			IdempotencyKey: "deposit-confirm-" + booking.UID,
-			EventUID:       evt.UID,
-			Amounts:        map[string]decimal.Decimal{"amount": booking.Amount},
-			Source:         onchainSource,
-			Metadata:       journalMeta,
-		})
+		authorized.Input.EventUID = evt.UID
+		_, err = journals.PostAuthorized(ctx, authorized)
 		return err
 	})
 	if err != nil {
