@@ -196,6 +196,9 @@ func journalFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row
 		EventUID:       eventUID,
 		EffectiveAt:    row.EffectiveAt,
 		CreatedAt:      row.CreatedAt,
+		AuthDigest:     row.AuthDigest,
+		AuthSignature:  row.AuthSignature,
+		AuthKeyID:      row.AuthKeyID,
 	}, nil
 }
 
