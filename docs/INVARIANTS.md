@@ -771,22 +771,27 @@ be sitting in the user's balance by the time a human looks at the queue.
 - `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
   transitions it to `failed` with `journal_uid` remaining empty forever)
 
-## I-26: Every journal that carries a KMS authorization signature has a valid one
+## I-26: Every journal that carries an authorization signature has a valid one
 
 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §7 / M5, P5 of the
-integrity-hardening wave.) `journals.auth_digest` / `auth_signature` /
-`auth_key_id` (migration 046) let a journal posted through
-`postgres.LedgerStore.PostJournal` (with a `core.Attestor` configured via
-`WithAuth`, in pool mode, for a journal type `core.AuthPolicy.Coverage`
-marks `SignatureRequirementRequired`) carry a signature over
-`core.CanonicalJournalDigest`'s canonical, uid-space encoding of the
+integrity-hardening wave; simplified from the original task brief by Team
+Lead on 2026-08-21 -- see `core/auth.go`'s package doc comment.)
+`journals.auth_digest` / `auth_signature` / `auth_key_id` (migration 046)
+let a journal posted through `postgres.LedgerStore.PostJournal` (with a
+`core.Attestor` configured via `WithAuth`, in pool mode) carry a signature
+over `core.CanonicalJournalDigest`'s canonical, uid-space encoding of the
 posting -- computed and signed strictly **outside** any DB transaction
 (`financial.md`: no external calls inside a DB transaction is the whole
-reason the digest is uid-space, not id-space; see design doc §7.2).
+reason the digest is uid-space, not id-space; see design doc §7.2 --
+benchmarking confirmed this ordering adds pure latency without extending
+any lock's hold time, since it runs before any advisory lock is taken).
 `core.VerifyJournalAuth` recomputes the digest from the journal's own
 fields and rejects (wrapping `core.ErrUnauthorizedJournal`) any journal
 whose stored digest is empty, does not match the recomputation, or whose
-signature/key_id the configured `core.AuthVerifier` does not accept.
+signature/key_id the configured `core.AuthVerifier` does not accept. Every
+journal is signed once an Attestor is configured -- there is no
+per-journal-type coverage decision and no KMS-failure-mode branch; a
+`Sign` error simply propagates as a plain error.
 
 **Why**: M5 is the one finding this whole wave exists to answer --
 `journals`/`journal_entries` FK integrity, per-currency balance,
@@ -796,24 +801,29 @@ inserted directly via SQL by an attacker holding DB write credentials.
 Every invariant I-1 through I-25 passes on that forgery. Per-journal
 signing is the only mechanism that still tells it apart from a genuine
 posting, because forging a valid signature additionally requires the
-Attestor's private key (held in a KMS/HSM, never in the database or app
-config -- design doc §0/§7.1) rather than a DB write credential (design
-doc §1's threat model row for "app DB 凭证").
+Attestor's private key -- which never enters the database (design doc
+§0/§7.1) -- rather than a DB write credential (design doc §1's threat
+model row for "app DB 凭证"). The default implementation
+(`authdev.LocalAttestor`, an in-process ed25519 key loaded from an
+injected seed) is production-ready for this project's actual deployment
+(a monolith, not a fleet behind a remote KMS): the threat model already
+concedes "app process + signing key both compromised" as out of scope
+(design doc §1 non-goal 2) for ANY key custody model, local or remote, so
+a local key satisfies the same guarantee.
 
 **Scope note (honest, not silently narrowed)**: signing only happens on
 `PostJournal`'s pool-mode, top-level call path -- `ExecuteTemplateBatch`,
 `ReverseJournal`/`ReverseJournalFraction`, and any `JournalWriter` call
 made inside `ledger.Service.RunInTx` (tx-mode, `WithDB`) never sign,
 because there is no point in those call chains that is provably outside a
-DB transaction the way `financial.md` requires for the Attestor's KMS
+DB transaction the way `financial.md` requires for the Attestor's signing
 call. Journals posted through those paths carry empty auth columns,
 indistinguishable from "no Attestor configured" -- exactly like every
-journal predating P5. Coverage/withdrawal-gate enforcement (a downstream
-consumer treating an unsigned, `SignatureRequirementRequired` journal as
-unauthorized for withdrawal purposes) is **not wired by this phase** --
-design doc §12's P5 row is explicit that the withdrawal gate is a separate,
-later release; `core.VerifyJournalAuth` is the primitive that release (or
-`ledger-cli verify`, P6) would call.
+journal predating P5. A withdrawal gate (a downstream consumer treating an
+unsigned journal as unauthorized for withdrawal purposes) is **not wired
+by this phase** -- design doc §12's P5 row is explicit that it is a
+separate, later release; `core.VerifyJournalAuth` is the primitive that
+release (or `ledger-cli verify`, P6) would call.
 
 **Enforced by**:
 - `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
@@ -822,15 +832,15 @@ later release; `core.VerifyJournalAuth` is the primitive that release (or
 - `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
   the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
   big-endian two's complement, domain-separated SHA-256) both `Sign` and
-  `Verify` agree on.
-- `core.AuthPolicy.ValidateFailureMode` / `RequirementFor` -- refuses an
-  unset `AttestorFailureMode` at `WithAuth` wiring time, and an
-  undecided per-journal-type `Coverage` entry at post time (no
-  "unlisted types are exempt" default), mirroring
-  `core.TokenConfig.AutoCreditCeiling`'s M3.1 secure-by-default fence.
+  `Verify` agree on. This encoding is the one part of P5 that cannot be
+  changed later without breaking every previously-signed journal -- see
+  its golden vectors below.
 - Migration 046's rebuilt `ledger_journals_block_arbitrary_update()` --
   once a journal is signed, `auth_digest`/`auth_signature`/`auth_key_id`
   are as immutable as every other journal column.
+- `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
+  key_id at construction time, in the caller's own composition root,
+  never silently inside the ledger.
 
 **Pinned by** (`postgres/auth_pin_test.go` unless noted):
 - `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
@@ -841,10 +851,8 @@ later release; `core.VerifyJournalAuth` is the primitive that release (or
 - `TestPostJournal_IdempotentReplayDoesNotResign` -- a replayed post with
   the same idempotency key triggers exactly one `Attestor.Sign` call, not
   two.
-- `TestPostJournal_MissingCoverageDecisionIsRejected` /
-  `TestPostJournal_FailOpenPostsUnsignedOnAttestorError` /
-  `TestPostJournal_FailClosedRejectsOnAttestorError` -- the three §14
-  policy knobs behave as configured, not as a guessed default.
+- `TestPostJournal_AttestorErrorRejectsPost` -- a `Sign` error rejects the
+  whole write; nothing is persisted.
 - `TestForgedDirectSQLJournalIsUnauthorized` -- the M5 scenario itself: a
   balanced journal inserted directly via SQL (bypassing `PostJournal`
   entirely) passes a live per-journal balance check and still fails
@@ -859,6 +867,11 @@ later release; `core.VerifyJournalAuth` is the primitive that release (or
   mismatch-check removal reaches a nil `AuthVerifier` and panics; the
   digest-emptiness removal is independently caught by the mismatch check,
   demonstrating defense-in-depth rather than a redundant no-op check).
+- `authdev.TestNewLocalAttestor_DeterministicFromSameSeed` /
+  `TestNewLocalVerifier_StandaloneFromPublicKey` -- the default Attestor
+  implementation itself: same seed signs identically, and a verify-only
+  process (holding only the public key) can check a signature it never
+  had the private key to produce.
 
 ---
 

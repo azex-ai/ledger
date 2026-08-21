@@ -1,21 +1,28 @@
 // Package core: auth.go
 //
 // Per-journal authorization signing (docs/plans/2026-08-21-tamper-evident-ledger-design.md
-// §7, P5 of the integrity-hardening wave). This file defines:
+// §7, P5 of the integrity-hardening wave). This file defines the canonical,
+// deterministic byte encoding a posting intent is reduced to before it is
+// handed to a core.Attestor (CanonicalJournalDigest / EncodeAmount) --
+// pure functions, no DB access, no KMS/signing call, so they are always
+// safe to run inside OR outside a transaction on their own; it is the
+// caller's job (postgres.LedgerStore.PostJournal) to make sure the
+// Attestor.Sign call this digest feeds into never happens while a DB
+// transaction is open (financial.md) -- and, per Team Lead's 2026-08-21
+// simplification pass, benchmarking confirmed that call is purely additive
+// latency (it runs before any advisory lock is taken), not lock-extending.
 //
-//   - the canonical, deterministic byte encoding a posting intent is reduced
-//     to before it is handed to a core.Attestor (CanonicalJournalDigest /
-//     EncodeAmount) -- pure functions, no DB access, no KMS call, so they are
-//     always safe to run inside OR outside a transaction on their own; it is
-//     the caller's job (postgres.LedgerStore.PostJournal) to make sure the
-//     Attestor.Sign call this digest feeds into never happens while a DB
-//     transaction is open (financial.md);
-//   - the policy knobs the design doc explicitly left unpicked (§14 items
-//     1-2; item 3 -- the withdrawal-gate threshold -- is a separate,
-//     not-yet-wired release, see WithdrawalSignatureThreshold below) as
-//     injectable configuration whose zero value is a startup/wiring error,
-//     never a silent default (M3.1 secure-by-default precedent,
-//     docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2 addendum).
+// Scope (deliberately narrow, per Team Lead's correction of the original
+// task brief): every journal is signed whenever an Attestor is configured
+// -- there is no per-journal-type coverage decision and no
+// KMS-failure-mode branch. A local in-process key already satisfies this
+// wave's threat model (design doc §1 non-goal 2: "app + KMS 同时失陷" is
+// explicitly not defended against, for ANY key custody model, local or
+// remote) -- so the extra configuration surface the original brief asked
+// for was solving a deployment problem (remote KMS latency/availability)
+// this project does not have. If a future deployment DOES put the
+// Attestor behind a flaky remote call, retry/degrade semantics belong
+// inside that Attestor implementation, not as a policy knob on this port.
 package core
 
 import (
@@ -226,149 +233,6 @@ func writeBE64(buf *bytes.Buffer, v uint64) {
 }
 
 // ---------------------------------------------------------------------------
-// Policy: the questions design doc §14 leaves explicitly unpicked
-// ---------------------------------------------------------------------------
-
-// AttestorFailureMode governs what postgres.LedgerStore.PostJournal does
-// when the configured Attestor cannot produce a signature (KMS unreachable,
-// throttled, network partition, ...) for a posting that AuthPolicy.Coverage
-// requires to be signed.
-//
-// AttestorFailureModeUnset is deliberately the zero value: it is NOT
-// "fail-open" or "fail-closed", it is "nobody decided", and
-// AuthPolicy.ValidateFailureMode refuses it -- exactly like
-// TokenConfig.AutoCreditCeiling's secure-by-default fence
-// (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2 addendum,
-// M3.1). Aaron picks a mode once the write-latency impact of a synchronous
-// KMS round trip has been measured (design doc §11 / §14 item 1); this
-// package never guesses on his behalf.
-type AttestorFailureMode int
-
-const (
-	AttestorFailureModeUnset AttestorFailureMode = iota
-	// AttestorFailureModeFailClosed rejects the posting (PostJournal returns
-	// an error wrapping ErrAttestorUnavailable) when the Attestor cannot
-	// sign a journal AuthPolicy.Coverage marks as requiring a signature.
-	// Correct on the money-path; makes the Attestor an availability
-	// dependency of the ledger's write path for covered journal types.
-	AttestorFailureModeFailClosed
-	// AttestorFailureModeFailOpen posts the journal with empty
-	// auth_digest/auth_signature/auth_key_id when the Attestor cannot sign,
-	// preserving write availability. Nothing in this phase (P5) reads that
-	// empty state to block anything -- the withdrawal gate that would is a
-	// deliberately separate, later release (see
-	// WithdrawalSignatureThreshold's doc comment) -- so choosing this mode
-	// today means unsigned journals accumulate with no consumer yet
-	// refusing them.
-	AttestorFailureModeFailOpen
-)
-
-// SignatureRequirement is AuthPolicy.Coverage's per-journal-type-code
-// decision: does a posting of this type need a valid Attestor signature at
-// all.
-type SignatureRequirement int
-
-const (
-	// SignatureRequirementUnset is the zero value ("nobody decided for this
-	// code yet"). AuthPolicy.RequirementFor refuses it -- there is no
-	// "types not listed are exempt" fallback.
-	SignatureRequirementUnset SignatureRequirement = iota
-	// SignatureRequirementRequired means PostJournal must attempt to sign
-	// postings of this journal-type code; AttestorFailureMode governs what
-	// happens if the attempt fails.
-	SignatureRequirementRequired
-	// SignatureRequirementExempt means PostJournal must NOT attempt to sign
-	// postings of this journal-type code (e.g. a reviewed, deliberately
-	// non-money-path type) -- a deliberate opt-out, not a default.
-	SignatureRequirementExempt
-)
-
-// AuthPolicy is the consumer-injected write-path policy for per-journal
-// authorization signing. It exists because design doc §14 leaves two
-// questions explicitly undecided, and this package refuses to guess either:
-//
-//   - FailureMode (item 1): validated eagerly, once, when the Attestor is
-//     wired (ledger.WithAuthPolicy) -- it does not depend on which journal
-//     types exist.
-//   - Coverage (item 2): validated lazily, per journal-type CODE, the
-//     moment a posting of that type is about to be signed. It cannot be
-//     validated eagerly at wiring time the way FailureMode can, because
-//     journal types are an open, dynamic set (core.JournalTypeStore.
-//     CreateJournalType can add one at any time) rather than a static list
-//     known up front the way ChainConfig.CreditTokens is -- RequirementFor
-//     is still fail-closed (an undecided code is refused, not treated as
-//     exempt), just checked at a different, unavoidably later, point.
-type AuthPolicy struct {
-	FailureMode AttestorFailureMode
-	// Coverage maps journal-type CODE (core.JournalType.Code, not uid --
-	// codes are stable and known at configuration time) to whether postings
-	// of that type require a signature. A code this ledger instance will
-	// actually post that is missing here, or mapped to
-	// SignatureRequirementUnset, is a RequirementFor error.
-	Coverage map[string]SignatureRequirement
-}
-
-// ValidateFailureMode checks the one AuthPolicy question that does not
-// depend on which journal types exist. Call it once, eagerly, when wiring
-// the Attestor.
-func (p AuthPolicy) ValidateFailureMode() error {
-	switch p.FailureMode {
-	case AttestorFailureModeFailClosed, AttestorFailureModeFailOpen:
-		return nil
-	default:
-		return fmt.Errorf("core: auth policy: FailureMode must be explicitly AttestorFailureModeFailClosed or AttestorFailureModeFailOpen (design doc §14 item 1), got %d: %w", p.FailureMode, ErrInvalidInput)
-	}
-}
-
-// RequirementFor returns the signature requirement for journalTypeCode, or
-// an error if AuthPolicy.Coverage has no explicit decision for it. See the
-// AuthPolicy doc comment for why this check happens here (lazily) rather
-// than at wiring time.
-func (p AuthPolicy) RequirementFor(journalTypeCode string) (SignatureRequirement, error) {
-	req, ok := p.Coverage[journalTypeCode]
-	if !ok || req == SignatureRequirementUnset {
-		return SignatureRequirementUnset, fmt.Errorf(
-			"core: auth policy: journal type %q has no signature-coverage decision (design doc §14 item 2); "+
-				"set AuthPolicy.Coverage[%q] to SignatureRequirementRequired or SignatureRequirementExempt before posting this type: %w",
-			journalTypeCode, journalTypeCode, ErrInvalidInput)
-	}
-	return req, nil
-}
-
-// WithdrawalGateDisabled is the explicit sentinel a consumer sets
-// WithdrawalSignatureThreshold.MinSignedAmount to when they deliberately
-// want no withdrawal-side signature gate at all -- distinct from the zero
-// value, which "nobody decided" and is refused, mirroring
-// core.UnboundedAutoCredit's precedent
-// (docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2 addendum).
-var WithdrawalGateDisabled = decimal.NewFromInt(-1)
-
-// WithdrawalSignatureThreshold is the configuration surface for design doc
-// §14 item 3 (the withdrawal-gate threshold) and §12's P5 row: "提现门要求签名是行为变更，单独
-// release" -- requiring a signature before letting funds leave the system
-// is a deliberate, separate, later release, not part of P5. Nothing in this
-// package or postgres.LedgerStore reads this type yet.
-//
-// It is defined now, with a startup-error zero value (mirroring
-// core.TokenConfig.AutoCreditCeiling), purely so that later release does
-// not have to invent the configuration shape from scratch under pressure,
-// and so nobody wires a "0 = no gate" default when it lands -- MinSignedAmount
-// left at zero is refused by Configured(), never silently treated as "off".
-type WithdrawalSignatureThreshold struct {
-	// MinSignedAmount is the minimum withdrawal amount, at or above which
-	// every journal contributing to the withdrawable balance must carry a
-	// valid signature. Set to WithdrawalGateDisabled to explicitly opt out.
-	MinSignedAmount decimal.Decimal
-}
-
-// Configured reports whether MinSignedAmount has been deliberately set:
-// either to a positive threshold, or to the explicit WithdrawalGateDisabled
-// sentinel.
-func (t WithdrawalSignatureThreshold) Configured() bool {
-	return t.MinSignedAmount.IsPositive() || t.MinSignedAmount.Equal(WithdrawalGateDisabled)
-}
-
-// ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
 
@@ -383,6 +247,16 @@ func (t WithdrawalSignatureThreshold) Configured() bool {
 // (the journal was never signed), does not match the recomputed digest
 // (the input/effectiveAt passed in do not match what was actually signed),
 // signature/keyID are empty, or verifier rejects them.
+//
+// Scope note: an empty storedDigest is indistinguishable, from this
+// function alone, between "signing was never enabled for this deployment"
+// and "this journal should have been signed and was not" (a forgery, or a
+// bug). Both cases return the same ErrUnauthorizedJournal. Telling them
+// apart requires deployment-level knowledge this function does not have
+// (e.g. "signing has been enabled since journal id N" or a cutover
+// timestamp) -- that is the downstream gate's job (§7.3/§7.4), not this
+// primitive's. Callers that have not enabled signing at all should not be
+// calling this function in the first place.
 func VerifyJournalAuth(ctx context.Context, verifier AuthVerifier, input JournalInput, effectiveAt time.Time, storedDigest, signature []byte, keyID string) error {
 	if len(storedDigest) == 0 {
 		return fmt.Errorf("core: verify journal auth: journal has no stored digest: %w", ErrUnauthorizedJournal)

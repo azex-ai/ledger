@@ -438,12 +438,27 @@ type Signer interface {
 	SignTx(ctx context.Context, chainID int64, unsignedTx []byte) (signedTx []byte, err error)
 }
 
-// Attestor abstracts the key that authorizes a posting (design doc §7, P5).
-// The private key lives in a KMS/HSM and never enters the database or the
-// app config: a DB compromise must not yield the ability to mint a valid
-// authorization. Deliberately distinct from Signer (EVM sweep
-// transactions) -- different key, different blast radius, never the same
-// instance (integrity contracts §4).
+// Attestor abstracts the key that authorizes a posting (design doc §7,
+// P5). The private key must never enter the database: a DB compromise
+// alone must not yield the ability to mint a valid authorization. Beyond
+// that, key custody (a local in-process key, a KMS/HSM, or anything else)
+// is an implementation detail behind this port -- the library ships
+// authdev.LocalAttestor as its default, production-ready implementation
+// (Team Lead's 2026-08-21 simplification: a remote KMS's latency/
+// availability tradeoffs were solving a deployment problem this project
+// does not have; a monolith's own threat model already concedes "app
+// process + signing key both compromised" as out of scope, design doc §1
+// non-goal 2, so a local key satisfies the same guarantee a remote one
+// would). Deliberately distinct from Signer (EVM sweep transactions) --
+// different key, different blast radius, never the same instance
+// (integrity contracts §4).
+//
+// Deployment note (not enforced in code -- a config-loading concern for
+// the composition root): the signing key must not live in the same
+// secrets store / env bundle as DATABASE_URL. A single leaked bundle
+// should not both let an attacker write to the DB AND sign a journal as
+// if it were legitimate -- that would collapse the two rows design doc §1
+// keeps separate ("app DB 凭证" vs "app + KMS 同时失陷").
 type Attestor interface {
 	Sign(ctx context.Context, digest []byte) (signature []byte, keyID string, err error)
 }

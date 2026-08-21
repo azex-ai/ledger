@@ -17,11 +17,8 @@ var (
 	// ErrPeriodClosed is returned when a journal's effective_at falls before
 	// the active accounting period close line (see docs/INVARIANTS.md I-15).
 	ErrPeriodClosed = errors.New("accounting period is closed")
-	// ErrAttestorUnavailable is returned (wrapped) by PostJournal when
-	// AuthPolicy.FailureMode is AttestorFailureModeFailClosed and the
-	// configured Attestor could not produce a signature for a journal type
-	// AuthPolicy.Coverage marks as requiring one (see docs/INVARIANTS.md
-	// I-26).
+	// ErrAttestorUnavailable is returned (wrapped) by PostJournal when a
+	// configured Attestor's Sign call errors (see docs/INVARIANTS.md I-26).
 	ErrAttestorUnavailable = errors.New("attestor unavailable")
 	// ErrUnauthorizedJournal is returned (wrapped) by VerifyJournalAuth when
 	// a journal has no stored signature, a stored digest that does not

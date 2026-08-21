@@ -8,9 +8,16 @@ package postgres_test
 // balanced, perfectly valid-looking journal that every OTHER invariant
 // (I-1 through I-25) accepts -- per-journal signing is the one mechanism
 // that still tells it apart from a genuine posting.
+//
+// Scope note (Team Lead's 2026-08-21 simplification pass): there is no
+// AuthPolicy / per-journal-type coverage / KMS-failure-mode here. Every
+// journal is signed whenever an Attestor is configured; a Sign error
+// simply propagates.
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -31,11 +38,10 @@ import (
 // no shared query files, and there is no reason to couple to another
 // task's fixture helper).
 type authFixture struct {
-	CurrencyUID     string
-	MainWalletUID   string
-	CustodialUID    string
-	JournalTypeUID  string
-	JournalTypeCode string
+	CurrencyUID    string
+	MainWalletUID  string
+	CustodialUID   string
+	JournalTypeUID string
 
 	currencyID    int64
 	mainWalletID  int64
@@ -68,7 +74,7 @@ func setupAuthFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Context) aut
 
 	f := authFixture{
 		CurrencyUID: cur.UID, MainWalletUID: mw.UID, CustodialUID: cust.UID,
-		JournalTypeUID: jt.UID, JournalTypeCode: code,
+		JournalTypeUID: jt.UID,
 	}
 	require.NoError(t, pool.QueryRow(ctx, "SELECT id FROM currencies WHERE uid=$1", cur.UID).Scan(&f.currencyID))
 	require.NoError(t, pool.QueryRow(ctx, "SELECT id FROM classifications WHERE uid=$1", mw.UID).Scan(&f.mainWalletID))
@@ -98,8 +104,22 @@ func fetchAuthColumns(t testing.TB, pool *pgxpool.Pool, ctx context.Context, jou
 	return
 }
 
+// newTestAttestor is a thin wrapper around authdev.NewLocalAttestor with a
+// fresh random seed -- test-only key material, never persisted or reused
+// across processes, which is fine for a pin test but is exactly the
+// pattern authdev.NewLocalAttestor's doc comment warns real deployments
+// away from (seed must come from injected config, not generated inline).
+func newTestAttestor(t testing.TB, keyID string) (*authdev.LocalAttestor, *authdev.LocalVerifier) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	attestor, verifier, err := authdev.NewLocalAttestor(priv.Seed(), keyID)
+	require.NoError(t, err)
+	return attestor, verifier
+}
+
 // countingAttestor wraps a real Attestor and counts Sign calls, so tests
-// can assert idempotent replay does NOT trigger a second KMS round trip
+// can assert idempotent replay does NOT trigger a second signing call
 // (design doc §7.3: "same key + same payload -> digest same -> reuse,
 // don't resign").
 type countingAttestor struct {
@@ -112,11 +132,11 @@ func (a *countingAttestor) Sign(ctx context.Context, digest []byte) ([]byte, str
 	return a.inner.Sign(ctx, digest)
 }
 
-// failingAttestor always errors, to exercise AttestorFailureMode.
+// failingAttestor always errors, to exercise the "Sign fails" path.
 type failingAttestor struct{}
 
 func (failingAttestor) Sign(ctx context.Context, digest []byte) ([]byte, string, error) {
-	return nil, "", fmt.Errorf("failingAttestor: simulated KMS outage")
+	return nil, "", fmt.Errorf("failingAttestor: simulated signing failure")
 }
 
 // TestPostJournal_SignsWithConfiguredAttestor is the positive-path pin for
@@ -127,14 +147,8 @@ func TestPostJournal_SignsWithConfiguredAttestor(t *testing.T) {
 	ctx := context.Background()
 	f := setupAuthFixture(t, pool, ctx)
 
-	attestor, verifier, err := authdev.NewInsecureLocalAttestor("dev-ed25519-pin-1")
-	require.NoError(t, err)
-
-	store, err := postgres.NewLedgerStore(pool).WithAuth(attestor, core.AuthPolicy{
-		FailureMode: core.AttestorFailureModeFailClosed,
-		Coverage:    map[string]core.SignatureRequirement{f.JournalTypeCode: core.SignatureRequirementRequired},
-	})
-	require.NoError(t, err)
+	attestor, verifier := newTestAttestor(t, "ed25519-pin-1")
+	store := postgres.NewLedgerStore(pool).WithAuth(attestor)
 
 	input := f.journalInput(8001, postgrestest.UniqueKey("auth-signed"), decimal.NewFromInt(100))
 	j, err := store.PostJournal(ctx, input)
@@ -143,7 +157,7 @@ func TestPostJournal_SignsWithConfiguredAttestor(t *testing.T) {
 	digest, signature, keyID, effectiveAt := fetchAuthColumns(t, pool, ctx, j.UID)
 	require.NotEmpty(t, digest, "auth_digest must be populated when an Attestor is configured")
 	require.NotEmpty(t, signature, "auth_signature must be populated when an Attestor is configured")
-	require.Equal(t, "dev-ed25519-pin-1", keyID)
+	require.Equal(t, "ed25519-pin-1", keyID)
 
 	err = core.VerifyJournalAuth(ctx, verifier, input, effectiveAt, digest, signature, keyID)
 	require.NoError(t, err, "a genuinely signed journal must pass VerifyJournalAuth")
@@ -178,15 +192,9 @@ func TestPostJournal_IdempotentReplayDoesNotResign(t *testing.T) {
 	ctx := context.Background()
 	f := setupAuthFixture(t, pool, ctx)
 
-	realAttestor, _, err := authdev.NewInsecureLocalAttestor("dev-ed25519-pin-2")
-	require.NoError(t, err)
+	realAttestor, _ := newTestAttestor(t, "ed25519-pin-2")
 	counting := &countingAttestor{inner: realAttestor}
-
-	store, err := postgres.NewLedgerStore(pool).WithAuth(counting, core.AuthPolicy{
-		FailureMode: core.AttestorFailureModeFailClosed,
-		Coverage:    map[string]core.SignatureRequirement{f.JournalTypeCode: core.SignatureRequirementRequired},
-	})
-	require.NoError(t, err)
+	store := postgres.NewLedgerStore(pool).WithAuth(counting)
 
 	input := f.journalInput(8003, postgrestest.UniqueKey("auth-replay"), decimal.NewFromInt(25))
 
@@ -200,78 +208,26 @@ func TestPostJournal_IdempotentReplayDoesNotResign(t *testing.T) {
 	require.EqualValues(t, 1, counting.signCalls.Load(), "replay must not trigger a second Sign call")
 }
 
-// TestPostJournal_MissingCoverageDecisionIsRejected pins AuthPolicy's
-// "no types not listed are exempt" fence (design doc §14 item 2): a
-// journal type with no explicit Coverage entry is refused, not silently
-// signed or silently skipped.
-func TestPostJournal_MissingCoverageDecisionIsRejected(t *testing.T) {
+// TestPostJournal_AttestorErrorRejectsPost pins the (only) behavior when
+// Sign fails: the write is rejected entirely (wrapping
+// core.ErrAttestorUnavailable) and nothing is persisted -- errors as data
+// (discipline.md §6), no fail-open branch.
+func TestPostJournal_AttestorErrorRejectsPost(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 	f := setupAuthFixture(t, pool, ctx)
 
-	attestor, _, err := authdev.NewInsecureLocalAttestor("dev-ed25519-pin-3")
-	require.NoError(t, err)
+	store := postgres.NewLedgerStore(pool).WithAuth(failingAttestor{})
 
-	store, err := postgres.NewLedgerStore(pool).WithAuth(attestor, core.AuthPolicy{
-		FailureMode: core.AttestorFailureModeFailClosed,
-		Coverage:    map[string]core.SignatureRequirement{}, // f.JournalTypeCode deliberately absent
-	})
-	require.NoError(t, err)
-
-	input := f.journalInput(8004, postgrestest.UniqueKey("auth-no-coverage"), decimal.NewFromInt(10))
-	_, err = store.PostJournal(ctx, input)
-	require.Error(t, err)
-	require.ErrorIs(t, err, core.ErrInvalidInput)
-}
-
-// TestPostJournal_FailOpenPostsUnsignedOnAttestorError pins
-// AttestorFailureModeFailOpen: when the Attestor errors, the journal still
-// posts, unsigned.
-func TestPostJournal_FailOpenPostsUnsignedOnAttestorError(t *testing.T) {
-	pool := postgrestest.SetupDB(t)
-	ctx := context.Background()
-	f := setupAuthFixture(t, pool, ctx)
-
-	store, err := postgres.NewLedgerStore(pool).WithAuth(failingAttestor{}, core.AuthPolicy{
-		FailureMode: core.AttestorFailureModeFailOpen,
-		Coverage:    map[string]core.SignatureRequirement{f.JournalTypeCode: core.SignatureRequirementRequired},
-	})
-	require.NoError(t, err)
-
-	input := f.journalInput(8005, postgrestest.UniqueKey("auth-fail-open"), decimal.NewFromInt(15))
-	j, err := store.PostJournal(ctx, input)
-	require.NoError(t, err, "fail-open must let the write through despite the Attestor erroring")
-
-	digest, signature, keyID, _ := fetchAuthColumns(t, pool, ctx, j.UID)
-	require.Empty(t, digest)
-	require.Empty(t, signature)
-	require.Empty(t, keyID)
-}
-
-// TestPostJournal_FailClosedRejectsOnAttestorError pins
-// AttestorFailureModeFailClosed: when the Attestor errors, the write is
-// rejected entirely (wrapping core.ErrAttestorUnavailable) -- nothing is
-// persisted.
-func TestPostJournal_FailClosedRejectsOnAttestorError(t *testing.T) {
-	pool := postgrestest.SetupDB(t)
-	ctx := context.Background()
-	f := setupAuthFixture(t, pool, ctx)
-
-	store, err := postgres.NewLedgerStore(pool).WithAuth(failingAttestor{}, core.AuthPolicy{
-		FailureMode: core.AttestorFailureModeFailClosed,
-		Coverage:    map[string]core.SignatureRequirement{f.JournalTypeCode: core.SignatureRequirementRequired},
-	})
-	require.NoError(t, err)
-
-	idemKey := postgrestest.UniqueKey("auth-fail-closed")
+	idemKey := postgrestest.UniqueKey("auth-attestor-error")
 	input := f.journalInput(8006, idemKey, decimal.NewFromInt(20))
-	_, err = store.PostJournal(ctx, input)
+	_, err := store.PostJournal(ctx, input)
 	require.Error(t, err)
 	require.ErrorIs(t, err, core.ErrAttestorUnavailable)
 
 	var count int
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM journals WHERE idempotency_key=$1", idemKey).Scan(&count))
-	require.Zero(t, count, "fail-closed must not persist anything when signing fails")
+	require.Zero(t, count, "an Attestor error must not persist anything")
 }
 
 // TestForgedDirectSQLJournalIsUnauthorized is the M5 pin (design doc §2
@@ -330,8 +286,7 @@ func TestForgedDirectSQLJournalIsUnauthorized(t *testing.T) {
 	require.Empty(t, signature)
 	require.Empty(t, keyID)
 
-	_, verifier, err := authdev.NewInsecureLocalAttestor("dev-ed25519-forged-check")
-	require.NoError(t, err)
+	_, verifier := newTestAttestor(t, "ed25519-forged-check")
 	// The exact JournalInput reconstruction is irrelevant here: VerifyJournalAuth
 	// rejects on the empty stored digest before it would even reach the
 	// verifier -- see core.VerifyJournalAuth's doc comment.
