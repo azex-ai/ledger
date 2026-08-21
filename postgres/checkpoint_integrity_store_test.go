@@ -150,7 +150,7 @@ func TestCheckpointIntegrity_RebuildCheckpoint_OvercomesMonotonicGuard(t *testin
 
 	// Now the actual fix: RebuildCheckpoint takes the dimension lock,
 	// recomputes from entry 0, and unconditionally overwrites.
-	cp, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet)
+	cp, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, 424242)
 	require.NoError(t, err)
 	assert.True(t, cp.Balance.Equal(trueBalance))
 
@@ -178,7 +178,64 @@ func TestCheckpointIntegrity_RebuildCheckpoint_RefusesWhenRollupPending(t *testi
 	require.NoError(t, rollup.EnqueueRollup(ctx, holderID, currencyID, mainWalletID))
 
 	ci := postgres.NewCheckpointIntegrityStore(pool)
-	_, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet)
+	_, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, 424242)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrRollupPending)
+}
+
+// TestCheckpointIntegrity_RebuildCheckpoint_RecordsAuditRow pins the
+// team-lead review follow-up: a manual repair has the exact same
+// evidence-destroying property automatic repair does (the drift vanishes
+// from balance_checkpoints the moment it's overwritten), so every
+// RebuildCheckpoint call must durably record the before/after values and
+// drift in checkpoint_rebuilds -- a log line alone is not durable enough to
+// survive log rotation or retention limits.
+func TestCheckpointIntegrity_RebuildCheckpoint_RecordsAuditRow(t *testing.T) {
+	deps, _, pool, holderID, trueBalance := setupPoisonedCheckpoint(t)
+	ctx := context.Background()
+
+	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
+	mainWalletID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
+
+	ci := postgres.NewCheckpointIntegrityStore(pool)
+	const actorID = int64(9001)
+	_, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, actorID)
+	require.NoError(t, err)
+
+	var (
+		previousBalance, newBalance, drift decimal.Decimal
+		gotActorID                         int64
+	)
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT previous_balance, new_balance, drift, actor_id FROM checkpoint_rebuilds
+		 WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3
+		 ORDER BY created_at DESC LIMIT 1`,
+		holderID, currencyID, mainWalletID,
+	).Scan(&previousBalance, &newBalance, &drift, &gotActorID))
+
+	// setupPoisonedCheckpoint corrupted the checkpoint by +999.
+	assert.True(t, previousBalance.Equal(trueBalance.Add(decimal.NewFromInt(999))),
+		"previous_balance must record the poisoned value, got %s", previousBalance)
+	assert.True(t, newBalance.Equal(trueBalance), "new_balance must record the repaired (true) value, got %s", newBalance)
+	assert.True(t, drift.Equal(decimal.NewFromInt(999)), "drift must be non-zero and equal to the injected poison amount, got %s", drift)
+	assert.Equal(t, actorID, gotActorID)
+}
+
+// TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly pins the other half
+// of the same follow-up: the audit trail itself must not be editable or
+// deletable, or it would be exactly as trustworthy as the checkpoint it
+// exists to hold accountable.
+func TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly(t *testing.T) {
+	deps, _, pool, holderID, _ := setupPoisonedCheckpoint(t)
+	ctx := context.Background()
+
+	ci := postgres.NewCheckpointIntegrityStore(pool)
+	_, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, 1)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, "UPDATE checkpoint_rebuilds SET drift = 0")
+	assert.Error(t, err, "checkpoint_rebuilds must reject UPDATE")
+
+	_, err = pool.Exec(ctx, "DELETE FROM checkpoint_rebuilds")
+	assert.Error(t, err, "checkpoint_rebuilds must reject DELETE")
 }

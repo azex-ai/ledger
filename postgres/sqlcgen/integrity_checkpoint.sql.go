@@ -7,6 +7,7 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -37,6 +38,119 @@ func (q *Queries) CountPendingRollupForDimension(ctx context.Context, arg CountP
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const insertCheckpointRebuildAudit = `-- name: InsertCheckpointRebuildAudit :exec
+INSERT INTO checkpoint_rebuilds (
+    uid, account_holder, currency_id, classification_id,
+    previous_balance, previous_last_entry_id,
+    new_balance, new_last_entry_id, drift, actor_id
+) VALUES (
+    gen_random_uuid(), $1::bigint, $2::bigint, $3::bigint,
+    $4::numeric, $5::bigint,
+    $6::numeric, $7::bigint,
+    $8::numeric, $9::bigint
+)
+`
+
+type InsertCheckpointRebuildAuditParams struct {
+	AccountHolder       int64          `json:"account_holder"`
+	CurrencyID          int64          `json:"currency_id"`
+	ClassificationID    int64          `json:"classification_id"`
+	PreviousBalance     pgtype.Numeric `json:"previous_balance"`
+	PreviousLastEntryID int64          `json:"previous_last_entry_id"`
+	NewBalance          pgtype.Numeric `json:"new_balance"`
+	NewLastEntryID      int64          `json:"new_last_entry_id"`
+	Drift               pgtype.Numeric `json:"drift"`
+	ActorID             int64          `json:"actor_id"`
+}
+
+// Durable, append-only record of every RebuildCheckpoint call (migration
+// 050). Written in the SAME transaction as RebuildBalanceCheckpoint's
+// overwrite, so the audit row and the repair are atomic: a repair can never
+// happen without leaving forensic evidence, and the evidence can never exist
+// without a corresponding repair. A non-zero drift row is the durable proof
+// a poisoned checkpoint existed -- logs can rotate or be lost, this table
+// cannot (checkpoint_rebuilds_no_update / _no_delete triggers).
+func (q *Queries) InsertCheckpointRebuildAudit(ctx context.Context, arg InsertCheckpointRebuildAuditParams) error {
+	_, err := q.db.Exec(ctx, insertCheckpointRebuildAudit,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.ClassificationID,
+		arg.PreviousBalance,
+		arg.PreviousLastEntryID,
+		arg.NewBalance,
+		arg.NewLastEntryID,
+		arg.Drift,
+		arg.ActorID,
+	)
+	return err
+}
+
+const listCheckpointRebuildsForDimension = `-- name: ListCheckpointRebuildsForDimension :many
+SELECT uid, account_holder, currency_id, classification_id,
+       previous_balance, previous_last_entry_id,
+       new_balance, new_last_entry_id, drift, actor_id, created_at
+FROM checkpoint_rebuilds
+WHERE account_holder = $1::bigint
+  AND currency_id = $2::bigint
+  AND classification_id = $3::bigint
+ORDER BY created_at DESC
+`
+
+type ListCheckpointRebuildsForDimensionParams struct {
+	AccountHolder    int64 `json:"account_holder"`
+	CurrencyID       int64 `json:"currency_id"`
+	ClassificationID int64 `json:"classification_id"`
+}
+
+type ListCheckpointRebuildsForDimensionRow struct {
+	Uid                 pgtype.UUID    `json:"uid"`
+	AccountHolder       int64          `json:"account_holder"`
+	CurrencyID          int64          `json:"currency_id"`
+	ClassificationID    int64          `json:"classification_id"`
+	PreviousBalance     pgtype.Numeric `json:"previous_balance"`
+	PreviousLastEntryID int64          `json:"previous_last_entry_id"`
+	NewBalance          pgtype.Numeric `json:"new_balance"`
+	NewLastEntryID      int64          `json:"new_last_entry_id"`
+	Drift               pgtype.Numeric `json:"drift"`
+	ActorID             int64          `json:"actor_id"`
+	CreatedAt           time.Time      `json:"created_at"`
+}
+
+// Forensic read: every rebuild ever recorded for one dimension, newest
+// first. Used by on-call to answer "was this checkpoint ever repaired, and
+// what did it look like before" (RUNBOOK.md).
+func (q *Queries) ListCheckpointRebuildsForDimension(ctx context.Context, arg ListCheckpointRebuildsForDimensionParams) ([]ListCheckpointRebuildsForDimensionRow, error) {
+	rows, err := q.db.Query(ctx, listCheckpointRebuildsForDimension, arg.AccountHolder, arg.CurrencyID, arg.ClassificationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCheckpointRebuildsForDimensionRow{}
+	for rows.Next() {
+		var i ListCheckpointRebuildsForDimensionRow
+		if err := rows.Scan(
+			&i.Uid,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ClassificationID,
+			&i.PreviousBalance,
+			&i.PreviousLastEntryID,
+			&i.NewBalance,
+			&i.NewLastEntryID,
+			&i.Drift,
+			&i.ActorID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listSystemRollupsRaw = `-- name: ListSystemRollupsRaw :many

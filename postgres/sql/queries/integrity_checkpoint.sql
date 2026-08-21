@@ -51,6 +51,38 @@ WHERE account_holder = sqlc.arg(account_holder)::bigint
   AND classification_id = sqlc.arg(classification_id)::bigint
   AND processed_at IS NULL;
 
+-- name: InsertCheckpointRebuildAudit :exec
+-- Durable, append-only record of every RebuildCheckpoint call (migration
+-- 050). Written in the SAME transaction as RebuildBalanceCheckpoint's
+-- overwrite, so the audit row and the repair are atomic: a repair can never
+-- happen without leaving forensic evidence, and the evidence can never exist
+-- without a corresponding repair. A non-zero drift row is the durable proof
+-- a poisoned checkpoint existed -- logs can rotate or be lost, this table
+-- cannot (checkpoint_rebuilds_no_update / _no_delete triggers).
+INSERT INTO checkpoint_rebuilds (
+    uid, account_holder, currency_id, classification_id,
+    previous_balance, previous_last_entry_id,
+    new_balance, new_last_entry_id, drift, actor_id
+) VALUES (
+    gen_random_uuid(), sqlc.arg(account_holder)::bigint, sqlc.arg(currency_id)::bigint, sqlc.arg(classification_id)::bigint,
+    sqlc.arg(previous_balance)::numeric, sqlc.arg(previous_last_entry_id)::bigint,
+    sqlc.arg(new_balance)::numeric, sqlc.arg(new_last_entry_id)::bigint,
+    sqlc.arg(drift)::numeric, sqlc.arg(actor_id)::bigint
+);
+
+-- name: ListCheckpointRebuildsForDimension :many
+-- Forensic read: every rebuild ever recorded for one dimension, newest
+-- first. Used by on-call to answer "was this checkpoint ever repaired, and
+-- what did it look like before" (RUNBOOK.md).
+SELECT uid, account_holder, currency_id, classification_id,
+       previous_balance, previous_last_entry_id,
+       new_balance, new_last_entry_id, drift, actor_id, created_at
+FROM checkpoint_rebuilds
+WHERE account_holder = sqlc.arg(account_holder)::bigint
+  AND currency_id = sqlc.arg(currency_id)::bigint
+  AND classification_id = sqlc.arg(classification_id)::bigint
+ORDER BY created_at DESC;
+
 -- name: ListSystemRollupsRaw :many
 -- Raw (internal-id) read of system_rollups, for comparing against the
 -- entries-based recompute in ReconcileAccountingEquation (M4/I-23:

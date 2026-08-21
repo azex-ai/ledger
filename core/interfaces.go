@@ -85,9 +85,19 @@ type CheckpointIntegrityStore interface {
 	// automatically, because auto-correcting while an attack may still be in
 	// progress would destroy the forensic evidence the drift represents.
 	//
+	// A manual repair has the same evidence-destroying property automatic
+	// repair does — the moment the checkpoint is overwritten, the drift is
+	// gone from balance_checkpoints. So every call durably records the
+	// before/after values and the resulting drift in the append-only
+	// checkpoint_rebuilds table (migration 050), in the same transaction as
+	// the overwrite: a repair can never happen without leaving forensic
+	// evidence. actorID identifies who/what triggered the rebuild (0 if
+	// unknown), stored alongside the record — same convention as
+	// JournalInput.ActorID.
+	//
 	// Returns core.ErrRollupPending if a rollup_queue item is still pending or
 	// claimed for the dimension — see that error's doc comment.
-	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string) (*BalanceCheckpoint, error)
+	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*BalanceCheckpoint, error)
 }
 
 // Reserver handles reserve/settle/lock flow.

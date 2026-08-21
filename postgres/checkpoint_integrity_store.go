@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -81,8 +83,9 @@ func (s *CheckpointIntegrityStore) RecomputeBalance(ctx context.Context, holder 
 
 // RebuildCheckpoint is the trusted operator entry point that repairs a
 // checkpoint already found to have drifted (reconcile's checkpoint_balance
-// check). See core.CheckpointIntegrityStore for the full contract.
-func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string) (*core.BalanceCheckpoint, error) {
+// check). See core.CheckpointIntegrityStore for the full contract, including
+// why every call durably records itself in checkpoint_rebuilds.
+func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*core.BalanceCheckpoint, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
 		return nil, err
@@ -94,7 +97,7 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 
 	if s.pool == nil {
 		// Tx mode: participate in the caller's transaction directly.
-		return s.rebuildWithQueries(ctx, s.q, holder, cur.ID, cls.ID)
+		return s.rebuildWithQueries(ctx, s.q, holder, cur.ID, cls.ID, actorID)
 	}
 
 	// Pool mode: own the transaction lifecycle.
@@ -105,7 +108,7 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	qtx := s.q.WithTx(tx)
-	cp, err := s.rebuildWithQueries(ctx, qtx, holder, cur.ID, cls.ID)
+	cp, err := s.rebuildWithQueries(ctx, qtx, holder, cur.ID, cls.ID, actorID)
 	if err != nil {
 		return nil, err
 	}
@@ -116,10 +119,13 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 	return cp, nil
 }
 
-// rebuildWithQueries runs the lock + precondition + recompute + overwrite
-// sequence against the supplied queries handle, so pool mode (own tx) and tx
-// mode (caller's tx) share one implementation.
-func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, classificationID int64) (*core.BalanceCheckpoint, error) {
+// rebuildWithQueries runs the lock + precondition + recompute + overwrite +
+// audit sequence against the supplied queries handle, so pool mode (own tx)
+// and tx mode (caller's tx) share one implementation. The audit insert
+// shares the SAME transaction as the overwrite (both go through q), so a
+// repair can never commit without its forensic record, and the record can
+// never exist without the repair having happened.
+func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, classificationID, actorID int64) (*core.BalanceCheckpoint, error) {
 	// Lock the (holder, currency_id) dimension: the same advisory-lock key
 	// space PostJournal and Reserve take before mutating balance state (see
 	// acquireBalanceLocks), so no concurrent journal post or reserve for this
@@ -145,6 +151,28 @@ func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sq
 	if pending > 0 {
 		return nil, fmt.Errorf("postgres: rebuild checkpoint: holder=%d currency_id=%d classification_id=%d: %w",
 			holder, currencyID, classificationID, core.ErrRollupPending)
+	}
+
+	// Read the current (possibly poisoned) checkpoint BEFORE overwriting it —
+	// this is the "previous" half of the audit record; a missing row (never
+	// materialized yet) is not poisoning, so it defaults to the zero value
+	// rather than erroring.
+	previous, err := q.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: classificationID,
+	})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: rebuild checkpoint: read previous: %w", err)
+	}
+	previousBalance := decimal.Zero
+	var previousLastEntryID int64
+	if err == nil {
+		previousBalance, err = numericToDecimal(previous.Balance)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: rebuild checkpoint: convert previous balance: %w", err)
+		}
+		previousLastEntryID = previous.LastEntryID
 	}
 
 	row, err := q.RecomputeCheckpointFromEntries(ctx, sqlcgen.RecomputeCheckpointFromEntriesParams{
@@ -176,6 +204,26 @@ func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sq
 		LastEntryAt:      lastEntryAt,
 	}); err != nil {
 		return nil, fmt.Errorf("postgres: rebuild checkpoint: write: %w", err)
+	}
+
+	// Durable, append-only audit record -- same transaction as the overwrite
+	// above. drift matches ReconcileAccount's Detail.Drift sign convention:
+	// actual (the checkpoint's claimed value) minus expected (the entries
+	// truth). A non-zero row IS the forensic evidence a poisoned checkpoint
+	// existed; see core.CheckpointIntegrityStore's doc comment.
+	drift := previousBalance.Sub(balance)
+	if err := q.InsertCheckpointRebuildAudit(ctx, sqlcgen.InsertCheckpointRebuildAuditParams{
+		AccountHolder:       holder,
+		CurrencyID:          currencyID,
+		ClassificationID:    classificationID,
+		PreviousBalance:     decimalToNumeric(previousBalance),
+		PreviousLastEntryID: previousLastEntryID,
+		NewBalance:          decimalToNumeric(balance),
+		NewLastEntryID:      row.LastEntryID,
+		Drift:               decimalToNumeric(drift),
+		ActorID:             actorID,
+	}); err != nil {
+		return nil, fmt.Errorf("postgres: rebuild checkpoint: write audit: %w", err)
 	}
 
 	return &core.BalanceCheckpoint{

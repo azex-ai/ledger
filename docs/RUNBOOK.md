@@ -100,7 +100,7 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
      has `ledger_app` or superuser credentials) before repairing anything.
   4. **Repair, don't just re-run**: `balance_checkpoints` drift is fixed via
      `CheckpointIntegrityStore.RebuildCheckpoint(ctx, holder, currencyUID,
-     classificationUID)` (locks the dimension, refuses with
+     classificationUID, actorID)` (locks the dimension, refuses with
      `ErrRollupPending` if a rollup item is still in flight — drain it first,
      `service/reconcile.go` check #10 / §3 of this runbook). `system_rollups`
      self-heals on the next `RefreshSystemRollups` tick once the checkpoints
@@ -109,6 +109,21 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
      **None of these run automatically** — detection (reconcile) and
      correction are deliberately separate so an active incident's evidence
      isn't destroyed by an auto-repair.
+  5. **A manual repair is not evidence-free either.** The moment
+     `RebuildCheckpoint` overwrites the checkpoint, the drift is gone from
+     `balance_checkpoints` — same evidence-destroying shape as an automatic
+     repair would have, just with a human in the loop. Every call durably
+     records itself (before/after balances + watermarks + drift + `actor_id`)
+     in the append-only `checkpoint_rebuilds` table, in the same transaction
+     as the overwrite. Pull the full history for a dimension before or after
+     repairing it:
+     ```sql
+     SELECT * FROM checkpoint_rebuilds
+     WHERE account_holder = $1 AND currency_id = $2 AND classification_id = $3
+     ORDER BY created_at DESC;
+     ```
+     A non-zero `drift` row is the durable proof a poisoned checkpoint
+     existed — attach it to the incident postmortem, not just the log line.
 
 ### Common queries (Postgres)
 
