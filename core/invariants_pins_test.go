@@ -18,6 +18,23 @@ var pinReference = regexp.MustCompile("`([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*)\\
 // package-qualified-only check silently skipped them.
 var bareReference = regexp.MustCompile("`((?:Test|Fuzz|Benchmark)[A-Za-z0-9_]+)`")
 
+// prefixReference matches a family citation ending in `_*`, e.g.
+// `core.TestCanonicalBatchDigest_*`, optionally package-qualified. Five such
+// citations existed when this check was written and NONE of them matched the
+// two regexps above -- the trailing `*` is not in their character classes, so
+// the whole token failed to match and was skipped in silence. Five invariants
+// therefore read as pinned while nothing verified their pins at all: the exact
+// failure this file exists to prevent, inside this file. Reported by
+// p5-authsig during the 2026-08-21 wave.
+//
+// Residual limitation, disclosed rather than hidden: a family citation is
+// satisfied by ONE surviving member. If a table of five vector tests loses
+// four, this stays green while the invariant is materially less pinned.
+// Requiring explicit enumeration would be stricter, but five families of
+// table-driven vectors would then go stale a different way; the bug worth
+// fixing here was the silent skip.
+var prefixReference = regexp.MustCompile("`(?:([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*)*)\\.)?((?:Test|Fuzz|Benchmark)[A-Za-z0-9_]*)_\\*`")
+
 // testFuncDecl matches a test/fuzz/benchmark function declaration.
 var testFuncDecl = regexp.MustCompile(`(?m)^func ((?:Test|Fuzz|Benchmark)[A-Za-z0-9_]+)\(`)
 
@@ -126,6 +143,40 @@ func TestInvariantsDocPinsAllExist(t *testing.T) {
 		seen[fn] = true
 		if _, ok := declared[fn]; !ok {
 			missing = append(missing, fn+" (cited without a package)")
+		}
+	}
+
+	// Family citations (`Prefix_*`): require at least one declared test whose
+	// name starts with the prefix, in the cited package when one is given.
+	for _, m := range prefixReference.FindAllStringSubmatch(string(raw), -1) {
+		pkg, prefix := m[1], m[2]+"_"
+		key := prefix + "*"
+		if pkg != "" {
+			key = pkg + "." + key
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		found := 0
+		for fn, dirs := range declared {
+			if !strings.HasPrefix(fn, prefix) {
+				continue
+			}
+			if pkg == "" {
+				found++
+				continue
+			}
+			for dir := range dirs {
+				if dir == pkg || strings.HasSuffix(dir, "/"+pkg) || filepath.Base(dir) == filepath.Base(pkg) {
+					found++
+					break
+				}
+			}
+		}
+		if found == 0 {
+			missing = append(missing, key+" (family citation matched no test)")
 		}
 	}
 
