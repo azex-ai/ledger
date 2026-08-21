@@ -163,15 +163,29 @@ func TestMigration042_LedgerAppIsLeastPrivilege(t *testing.T) {
 		currencyID := postgrestest.InternalID(t, adminPool, "currencies", currencyUID)
 		classID := postgrestest.InternalID(t, adminPool, "classifications", classUID)
 
-		_, err := appPool.Exec(ctx, `
+		// Both legs, one transaction. Migration 044's deferred constraint
+		// trigger evaluates per-journal balance at commit, so a lone debit
+		// on its own autocommit connection is correctly refused as
+		// unbalanced -- which would look like a permission failure here and
+		// silently invert what this subtest claims to prove.
+		tx, err := appPool.Begin(ctx)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(ctx) }()
+		_, err = tx.Exec(ctx, `
 			INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
 			VALUES ($1, 999001, $2, $3, 'debit', 10)
 		`, journalID, currencyID, classID)
 		require.NoError(t, err, "ledger_app must be able to INSERT into journal_entries")
+		_, err = tx.Exec(ctx, `
+			INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+			VALUES ($1, -999001, $2, $3, 'credit', 10)
+		`, journalID, currencyID, classID)
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
 
 		var amount string
 		require.NoError(t, appPool.QueryRow(ctx, `
-			SELECT amount::text FROM journal_entries WHERE journal_id = $1
+			SELECT amount::text FROM journal_entries WHERE journal_id = $1 AND entry_type = 'debit'
 		`, journalID).Scan(&amount))
 		assert.Equal(t, "10.000000000000000000", amount)
 	})
@@ -391,15 +405,28 @@ func TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.
 	currencyID := postgrestest.InternalID(t, pool, "currencies", currencyUID)
 	classID := postgrestest.InternalID(t, pool, "classifications", classUID)
 
-	_, err = appPool.Exec(ctx, `
+	// Both legs in one transaction -- see the note in
+	// TestMigration042_LedgerAppIsLeastPrivilege: 044's deferred balance
+	// trigger would reject a lone debit at commit, which here would read as
+	// "ledger_app cannot write the new partition" and invert the finding.
+	tx, err := appPool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
 		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
 		VALUES ($1, 999002, $2, $3, 'debit', 5, $4)
 	`, journalID, currencyID, classID, future)
 	require.NoError(t, err, "ledger_app must be able to insert into a partition ledger_owner created after migration 042's GRANT ran")
+	_, err = tx.Exec(ctx, `
+		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at)
+		VALUES ($1, -999002, $2, $3, 'credit', 5, $4)
+	`, journalID, currencyID, classID, future)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 
 	var count int
 	require.NoError(t, pool.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM %s", created[0])).Scan(&count))
-	assert.Equal(t, 1, count, "the row must have physically routed into the new partition, not the default")
+	assert.Equal(t, 2, count, "both rows must have physically routed into the new partition, not the default")
 }
 
 // roleURLFromPool derives a connection string from an already-connected
