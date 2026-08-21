@@ -64,7 +64,7 @@ Starting points for a production money path — adjust to product reality and
 | Journal post latency | p99 < 50 ms (service-local) | `ledger_journal_post_seconds` histogram |
 | Balance read latency | p99 < 25 ms | HTTP-level probe on `GET /balances/*` |
 | Checkpoint freshness | age < 1 h for all classes | `ledger_checkpoint_age_seconds` (alert at 3600s) |
-| Reconciliation | full 10-check pass every hour; failures page immediately | `ledger_reconciliations_completed_total` / `ledger_reconcile_check_results_total` |
+| Reconciliation | full reconciliation suite pass every hour; failures page immediately | `ledger_reconciliations_completed_total` / `ledger_reconcile_check_results_total` |
 | Event delivery | 99% of events delivered < 5 min; dead-letters page within 30 min | `ledger_events_delivered_total` / `ledger_events_dead_total` |
 | Durability | RPO ≤ 5 min, RTO ≤ 60 min | [`DR.md`](./DR.md) targets + quarterly drill |
 

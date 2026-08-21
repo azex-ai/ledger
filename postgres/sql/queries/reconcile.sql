@@ -1,4 +1,5 @@
--- Reconciliation queries for the full 10-check suite.
+-- Reconciliation queries for the full reconciliation suite
+-- (service.FullReconciliationService).
 -- All queries are read-only (no mutations).
 
 -- name: ReconcileOrphanEntriesCount :one

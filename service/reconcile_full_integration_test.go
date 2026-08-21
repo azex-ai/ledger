@@ -19,8 +19,8 @@ import (
 )
 
 // findCheck locates a named CheckResult in a full reconciliation report,
-// failing the test if it's missing (every one of the 11 checks must always
-// be present, so a missing check is itself a bug).
+// failing the test if it's missing (every check in the suite must always be
+// present, so a missing check is itself a bug).
 func findCheck(t *testing.T, report *core.ReconcileReport, name string) core.CheckResult {
 	t.Helper()
 	for _, c := range report.Checks {

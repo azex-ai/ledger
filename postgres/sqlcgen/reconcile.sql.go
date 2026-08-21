@@ -254,7 +254,8 @@ LEFT JOIN journals j ON je.journal_id = j.id
 WHERE j.id IS NULL
 `
 
-// Reconciliation queries for the full 10-check suite.
+// Reconciliation queries for the full reconciliation suite
+// (service.FullReconciliationService).
 // All queries are read-only (no mutations).
 // Check #3: count entries whose journal_id does not match any journal row.
 func (q *Queries) ReconcileOrphanEntriesCount(ctx context.Context) (int64, error) {

@@ -249,7 +249,7 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 // It compares total user-side liability against the custodial system balance.
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
-// FullReconciler returns a core.FullReconciler that runs the complete 10-check
+// FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
