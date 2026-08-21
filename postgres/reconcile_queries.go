@@ -203,6 +203,37 @@ func (a *ReconcileAdapter) ListCheckpointAccountsPage(ctx context.Context, after
 	return result, nil
 }
 
+// UnbalancedJournalsCount returns the number of (journal_id, currency_id)
+// pairs whose entries do not net to zero -- a genuine per-journal balance
+// violation (M1 fix; distinct from the global debit==credit equality check).
+// See queries/integrity_balance.sql.
+func (a *ReconcileAdapter) UnbalancedJournalsCount(ctx context.Context) (int64, error) {
+	n, err := a.q.IntegrityUnbalancedJournalsCount(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: reconcile: unbalanced journals count: %w", err)
+	}
+	return n, nil
+}
+
+// UnbalancedJournalsSample returns up to 20 (journal_id, currency_id, drift)
+// rows for the journals found by UnbalancedJournalsCount, for Finding
+// descriptions.
+func (a *ReconcileAdapter) UnbalancedJournalsSample(ctx context.Context) ([]service.UnbalancedJournal, error) {
+	rows, err := a.q.IntegrityUnbalancedJournalsSample(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: unbalanced journals sample: %w", err)
+	}
+	result := make([]service.UnbalancedJournal, len(rows))
+	for i, r := range rows {
+		drift, err := numericToDecimal(r.Drift)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: unbalanced journals sample: drift convert: %w", err)
+		}
+		result[i] = service.UnbalancedJournal{JournalID: r.JournalID, CurrencyID: r.CurrencyID, Drift: drift}
+	}
+	return result, nil
+}
+
 // DuplicateIdempotencyKeys returns journals that share an idempotency_key with
 // at least one other journal (should be empty given the UNIQUE index).
 func (a *ReconcileAdapter) DuplicateIdempotencyKeys(ctx context.Context) ([]service.DuplicateIdempotencyKey, error) {

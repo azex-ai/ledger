@@ -27,9 +27,22 @@ total credits.
 is meaningless — debits and credits in different currencies are not comparable.
 
 **Enforced by**:
-- `core.JournalInput.Validate` (Go side, `core/journal.go:93`).
-- `chk_journal_currency_balance` deferred constraint trigger
-  (`postgres/sql/migrations/004_ledger.up.sql:33`).
+- `core.JournalInput.Validate` (Go side, `core/journal.go:93`) — rejects
+  malformed input before any DB call.
+- `postgres.LedgerStore.postJournalWithQueries`'s `VerifyJournalBalanced`
+  query (`postgres/sql/queries/journals.sql`) — one query per posted
+  journal, in the same transaction as the entry inserts, before commit.
+- `check_journal_currency_balance()` deferred constraint trigger
+  (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`) — the
+  DB-layer backstop for direct SQL / a compromised app credential that
+  bypasses everything above. Migration 004 first shipped this as a per-row
+  trigger that re-scanned every entry of the journal on every row (O(N^2));
+  018 dropped it for exactly that reason, leaving the DB layer unenforced
+  until 044 restored it with a transaction-scoped per-journal dedup (O(N)
+  overall — see the migration file for the mechanism). **044 is not
+  retroactive**: rows written between 018 and 044 are not covered by the
+  trigger, which is why the fleet-wide "journal_dr_cr" reconcile check
+  (I-24) exists as an independent, bulk-scanning complement.
 - `chk_journal_balance` table-level CHECK on `journals.total_debit = total_credit`
   (covers global totals as a defense-in-depth check).
 
@@ -38,6 +51,11 @@ is meaningless — debits and credits in different currencies are not comparable
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
 - `core.FuzzJournalValidate` (Go fuzz target)
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates to
+  schema v41 (pre-044), proves a direct SQL insert that unbalances an
+  existing journal by currency succeeds with nothing to stop it, then
+  migrates up through 044 and proves the identical attack on a fresh journal
+  now fails at commit.
 
 ## I-2: Append-only journals; corrections via reversal only
 
@@ -772,6 +790,68 @@ be sitting in the user's balance by the time a human looks at the queue.
   transitions it to `failed` with `journal_uid` remaining empty forever)
 
 ---
+
+> Numbering note: I-22/I-23 (P1 DB roles, P2 checkpoint trust) are allocated
+> in the Phase 0 contract (`docs/plans/2026-08-21-integrity-hardening-contracts.md`
+> §5) to parallel tasks landing separately; this branch was cut before either
+> merged, so this document does not yet contain them. Whoever merges last
+> reorders I-22/I-23/I-24 into that sequence — the numbers are a contract,
+> not a reflection of merge order.
+
+## I-24: Per-journal balance is enforced at the DB layer, independent of the application
+
+Every journal's per-currency balance (I-1) is enforced by **two independent
+mechanisms that do not trust each other**: the application layer
+(`core.JournalInput.Validate` + `VerifyJournalBalanced`, both bypassable by
+direct SQL against the database) and the DB layer (a deferred constraint
+trigger on `journal_entries`, restored by migration 044 after migration 018
+dropped its predecessor). Additionally, a fleet-wide reconcile check
+("journal_dr_cr") scans every journal individually in bulk, independent of
+the DB trigger's write-time enforcement.
+
+**Why**: C1 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §2) —
+an attacker with a leaked app DB credential, or a bug that bypasses
+`postJournalWithQueries`, can issue a direct SQL `INSERT` into
+`journal_entries`. Before this invariant, nothing in the database itself
+would stop an unbalanced insert; the only enforcement lived in application
+code the attacker had already bypassed. Separately, M1 (design doc §2) —
+the pre-existing "journal_dr_cr" reconcile check computed a GLOBAL
+debit==credit equality, which cannot see two journals that are each
+individually unbalanced but net to zero in aggregate.
+
+**Enforced by**:
+- `check_journal_currency_balance()` deferred constraint trigger,
+  `AFTER INSERT OR UPDATE OR DELETE ON journal_entries FOR EACH ROW`,
+  `DEFERRABLE INITIALLY DEFERRED` (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`).
+  Dedupes by `journal_id` within the transaction via a `pg_temp` table
+  (`ON COMMIT DELETE ROWS`) so the actual aggregate check runs once per
+  journal touched by the transaction, not once per row — O(N) overall, not
+  004's O(N^2).
+- `service.FullReconciliationService.runCheck11JournalBalance`
+  ("journal_dr_cr" — `service/reconcile.go`), backed by
+  `IntegrityUnbalancedJournalsCount`/`Sample`
+  (`postgres/sql/queries/integrity_balance.sql`): a bulk, fleet-wide scan
+  independent of the trigger, catching what the trigger cannot (rows
+  written before 044 existed, or any future bypass of it).
+- The pre-existing "journal_dr_cr" global-equality behavior is kept as an
+  independent check, renamed `global_dr_cr_equality`
+  (`service.FullReconciliationService.runCheck1JournalBalance`) — the two
+  checks catch different failure modes and neither substitutes for the
+  other.
+
+**Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates
+  to schema v41, proves a direct-SQL unbalancing insert succeeds with no DB
+  guard; migrates up through 044 and proves the identical attack now fails.
+- `postgres.TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses` —
+  crafts two journals (pre-044, via direct SQL) that are each individually
+  unbalanced by currency but net to zero globally; proves the global
+  equality query reports "balanced" while `IntegrityUnbalancedJournalsCount`
+  reports both violations.
+- `service.TestFullReconciliation_JournalBalance_DetectsPerJournalDrift` —
+  mock-level pin that `runCheck11JournalBalance` reports `Passed: false`,
+  logs (not leaks into the report) the offending internal ids, and that a
+  clean querier reports `Passed: true, Complete: true`.
 
 ## How to add a new invariant
 

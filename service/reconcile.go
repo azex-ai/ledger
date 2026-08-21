@@ -87,6 +87,19 @@ type CheckpointAccountKey struct {
 	CurrencyID    int64
 }
 
+// UnbalancedJournal is a (journal_id, currency_id) pair whose entries do not
+// net to zero -- a genuine per-journal balance violation. Drives check #11
+// (M1 fix): the check historically named "journal_dr_cr" only verified a
+// GLOBAL debit==credit equality (see runCheckGlobalDebitCreditEquality),
+// which cannot see two journals that are each individually unbalanced but
+// happen to net to zero in aggregate. journal_id/currency_id are internal
+// ids and must never reach a public Finding string verbatim (I-18).
+type UnbalancedJournal struct {
+	JournalID  int64
+	CurrencyID int64
+	Drift      decimal.Decimal
+}
+
 // ---------------------------------------------------------------------------
 // ReconcileQuerier — the port consumed by FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -114,6 +127,10 @@ type ReconcileQuerier interface {
 	// with at least one checkpoint row. Pass (0, 0) for the first page;
 	// subsequent pages pass the last row's (AccountHolder, CurrencyID).
 	ListCheckpointAccountsPage(ctx context.Context, afterHolder, afterCurrency int64, pageLimit int) ([]CheckpointAccountKey, error)
+	// Check #11 (M1 fix) — genuine per-journal, per-currency balance scan;
+	// see queries/integrity_balance.sql.
+	UnbalancedJournalsCount(ctx context.Context) (int64, error)
+	UnbalancedJournalsSample(ctx context.Context) ([]UnbalancedJournal, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +203,8 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 // FullReconciliationService — implements core.FullReconciler
 // ---------------------------------------------------------------------------
 
-// FullReconciliationService runs the complete 10-check reconciliation suite.
-// Checks #1-#2 reuse the existing ReconciliationService logic. Checks #3-#10
+// FullReconciliationService runs the complete 11-check reconciliation suite.
+// Checks #1-#2 reuse the existing ReconciliationService logic. Checks #3-#11
 // are new and use the ReconcileQuerier port.
 type FullReconciliationService struct {
 	basic   *ReconciliationService
@@ -254,21 +271,20 @@ func NewFullReconciliationService(
 	}
 }
 
-// RunFullReconciliation executes all 10 checks. Each check runs independently;
+// RunFullReconciliation executes all 11 checks. Each check runs independently;
 // an error in one is recorded as a Finding, not a hard failure that aborts the
 // rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 10)
+	checks := make([]core.CheckResult, 0, 11)
 
-	// --- Check #1: Journal DR = CR ---
+	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
 
 	// --- Check #2: Checkpoint balance vs entry sum ---
-	// We run a broad accounting-equation check here (global debit == credit)
-	// as the #1 check already is per-journal. The ReconciliationService.CheckAccountingEquation
-	// covers global balance; ReconcileAccount is per-account and too expensive
-	// to enumerate for a full-fleet scan — so we surface it separately.
+	// ReconcileAccount is per-account and too expensive to enumerate for a
+	// full-fleet scan on every run, so it is paginated separately here rather
+	// than folded into check #1.
 	checks = append(checks, s.runCheck2GlobalBalance(ctx))
 
 	// --- Check #3: Orphan entries ---
@@ -294,6 +310,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- Check #10: Stale rollup queue ---
 	checks = append(checks, s.runCheck10StaleRollup(ctx))
+
+	// --- Check #11: genuine per-journal balance (M1 fix) ---
+	checks = append(checks, s.runCheck11JournalBalance(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -333,17 +352,24 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 }
 
 // runCheck1JournalBalance wraps the existing GlobalSummer DR=CR logic.
-// We reuse ReconciliationService.CheckAccountingEquation which already does the
-// global debit==credit check across all entries; per-journal balance is
-// enforced by DB constraints and the post-insert SQL verification.
+// We reuse ReconciliationService.CheckAccountingEquation, which sums debits
+// and credits GLOBALLY across all entries. This is deliberately named
+// "global_dr_cr_equality", not "journal_dr_cr": it does NOT verify any
+// individual journal balances, only that the fleet-wide totals match. Two
+// journals that are each individually unbalanced by currency but net to
+// zero in aggregate pass this check undetected -- that gap is M1
+// (docs/plans/2026-08-21-tamper-evident-ledger-design.md §2), closed by the
+// genuine per-journal check below (runCheck11JournalBalance, which now owns
+// the "journal_dr_cr" name). The two checks catch different failure modes
+// and are kept independent; neither substitutes for the other.
 func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "global_dr_cr_equality", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	r, err := s.basic.CheckAccountingEquation(ctx)
 	if err != nil {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: "journal DR=CR check failed to execute",
+			Description: "global DR=CR equality check failed to execute",
 			Detail:      err.Error(),
 		})
 		return result
@@ -359,6 +385,61 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 			})
 		}
 	}
+	return result
+}
+
+// runCheck11JournalBalance is the genuine per-journal, per-currency balance
+// check (M1 fix). It owns the "journal_dr_cr" name that runCheck1JournalBalance
+// (now "global_dr_cr_equality") used to hold under a global-equality
+// implementation that could not see this class of violation -- see
+// docs/plans/2026-08-21-tamper-evident-ledger-design.md §2 M1 and §5.
+//
+// This scan is a bulk defense-in-depth complement to the DB-layer deferred
+// constraint trigger added in migration 044: the trigger only validates rows
+// written after it existed (constraint triggers are not retroactive), so
+// this check is what would catch a violation written during the 018→044 gap
+// window, or via any future bypass of the trigger.
+func (s *FullReconciliationService) runCheck11JournalBalance(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	count, err := s.querier.UnbalancedJournalsCount(ctx)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "per-journal balance query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+	if count == 0 {
+		return result
+	}
+
+	result.Passed = false
+	result.Findings = append(result.Findings, core.Finding{
+		Description: fmt.Sprintf("%d journal/currency pair(s) fail per-journal balance", count),
+	})
+
+	samples, err := s.querier.UnbalancedJournalsSample(ctx)
+	if err != nil {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "could not fetch unbalanced journal samples",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+	// Per-sample forensics carry internal row ids — ops-log material, not
+	// report material (I-18: the report is an API response body).
+	for _, u := range samples {
+		s.logger.Warn("service: reconcile: unbalanced journal sample",
+			"journal_id", u.JournalID,
+			"currency_id", u.CurrencyID,
+			"drift", u.Drift.String(),
+		)
+	}
+	result.Findings = append(result.Findings, core.Finding{
+		Description: fmt.Sprintf("%d unbalanced journal sample(s) recorded in server logs", len(samples)),
+	})
 	return result
 }
 
