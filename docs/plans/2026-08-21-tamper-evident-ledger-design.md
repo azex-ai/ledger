@@ -267,6 +267,39 @@ per-journal 签名防的是**拿到 DB 写权限**的攻击者。拿到 **app �
 可以铸造合法签名（§1 non-goal 2）。这不削弱本机制 —— 它把攻击门槛从「一条 SQL」
 抬到「拿下应用运行时」，并留下 KMS audit log。
 
+### 7.5 `RunInTx` 缺口 —— 本节的 Critical 修正（2026-08-21）
+
+⚠️ **§7.2 只规定了「digest 在 uid-space、签名在事务外」，从没处理它怎么和 `RunInTx` 组合。**
+而 `RunInTx` 是这个库的旗舰特性，也是 CLAUDE.md 为 Event-Journal 原子性（I-10）推荐的唯一模式。
+
+首版实现在 tx 模式（`s.pool == nil`，即调用方已开事务）下**故意跳过签名** —— 理由正确：
+事务已经被别人开了，没有安全点可以调外部签名而不违反 `financial.md`。但后果致命：
+
+```
+service/onchain.go:779  postDepositConfirmedJournal → TxComposer.RunInTx
+```
+
+那是**入账过账路径** —— 正是 P5 存在的理由（§2 的 M5：伪造入账 = 凭空铸币）。
+所以 P5 首版形态**恰好不保护它被设计来保护的那条路**。
+
+更糟：未签名状态与「Attestor 未配置」**不可区分**。验证时无法分辨
+「签名上线前的历史 journal」/「走 `RunInTx` 所以没签」/「攻击者直接 INSERT 的行」——
+整个验证故事在这一类上塌掉（`working-agreements` §3：不可区分就是静默失败）。
+
+**修法（两件，Lead 拍板，board #12）**：
+
+1. **预授权 API**：`svc.Authorize(ctx, input) (AuthorizedJournal, error)` 在**事务外**算 digest
+   并签名；`JournalWriter` 加 `PostAuthorized(ctx, AuthorizedJournal)`。
+   `postDepositConfirmedJournal` 在开 `RunInTx` **之前**调 `Authorize` ——
+   它本来就在那之前算 `journalMeta`，输入是已知的。红线不破，洞关掉。
+2. **`auth_status` 枚举列**（migration `051`）：`signed` / `unsigned_no_attestor` /
+   `unsigned_tx_mode` 三态，让「为什么没签」可区分。
+   该列由 045 的通用 `to_jsonb` 比较自动保护（不在 mutable 白名单内），无需再碰那个函数。
+
+**范围红线**：**不新增任何配置旋钮** —— 无 policy、无 threshold、无 mode。
+只有两个方法 + 一个枚举列。这一条是刻意的：本设计已经因为围绕部署变量建配置而返工过一次
+（§14 开头那段）。
+
 ## 8. P6 — 签名 batch digest + 外部锚（同一个 phase）
 
 覆盖 P5 管不到的两件事：**行是否被删除**、**历史是否被改写**。
