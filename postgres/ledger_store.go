@@ -718,7 +718,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		ActorID:        input.ActorID,
 		Source:         input.Source,
 		ReversalOf:     int64ToInt8(zeroInt64ToNil(reversalOfID)),
-		EventID:        eventID,
+		EventID:        int64ToInt8(zeroInt64ToNil(eventID)),
 		EffectiveAt:    effectiveAt,
 		Uid:            newUID(),
 		AuthDigest:     bytesOrEmpty(auth.digest),
@@ -771,10 +771,13 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		}
 	}
 
-	// Per-currency balance check (replaces the dropped per-row CONSTRAINT
-	// TRIGGER from migration 004). One query per posted journal — O(1) per
-	// journal versus the trigger's O(N^2). Runs in the same transaction so a
-	// failure rolls back the journal and entries together.
+	// Per-currency balance check: one query per posted journal, in the same
+	// transaction, so a failure rolls back the journal and entries together
+	// and the caller gets a precise "which currency" error. This is the
+	// application-layer half of the defense; the DB-layer deferred
+	// constraint trigger restored in migration 044 is the backstop for
+	// direct SQL / a compromised app credential that bypasses this call
+	// entirely (see docs/plans/2026-08-21-tamper-evident-ledger-design.md C1).
 	badCurrency, err := q.VerifyJournalBalanced(ctx, row.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, wrapStoreError("postgres: post journal: verify balanced", err)

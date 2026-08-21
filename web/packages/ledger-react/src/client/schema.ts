@@ -3072,7 +3072,7 @@ export interface components {
             full_coverage?: boolean;
             run_at?: components["schemas"]["Timestamp"];
             checks?: {
-                /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation */
+                /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity */
                 name?: string;
                 /** @description False if any finding was detected. Reports only on what the check actually examined — read together with `complete`. */
                 passed?: boolean;

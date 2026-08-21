@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -199,6 +202,121 @@ func (a *ReconcileAdapter) ListCheckpointAccountsPage(ctx context.Context, after
 	result := make([]service.CheckpointAccountKey, len(rows))
 	for i, r := range rows {
 		result[i] = service.CheckpointAccountKey{AccountHolder: r.AccountHolder, CurrencyID: r.CurrencyID}
+	}
+	return result, nil
+}
+
+// UnbalancedJournalsCount returns the number of (journal_id, currency_id)
+// pairs whose entries do not net to zero -- a genuine per-journal balance
+// violation (M1 fix; distinct from the global debit==credit equality check).
+// See queries/integrity_balance.sql.
+func (a *ReconcileAdapter) UnbalancedJournalsCount(ctx context.Context) (int64, error) {
+	n, err := a.q.IntegrityUnbalancedJournalsCount(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: reconcile: unbalanced journals count: %w", err)
+	}
+	return n, nil
+}
+
+// UnbalancedJournalsSample returns up to 20 (journal_id, currency_id, drift)
+// rows for the journals found by UnbalancedJournalsCount, for Finding
+// descriptions.
+func (a *ReconcileAdapter) UnbalancedJournalsSample(ctx context.Context) ([]service.UnbalancedJournal, error) {
+	rows, err := a.q.IntegrityUnbalancedJournalsSample(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: unbalanced journals sample: %w", err)
+	}
+	result := make([]service.UnbalancedJournal, len(rows))
+	for i, r := range rows {
+		drift, err := numericToDecimal(r.Drift)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: unbalanced journals sample: drift convert: %w", err)
+		}
+		result[i] = service.UnbalancedJournal{JournalID: r.JournalID, CurrencyID: r.CurrencyID, Drift: drift}
+	}
+	return result, nil
+}
+
+// GetScanCursor returns the persisted resume cursor for the named check
+// (C4b). Zero rows (no cursor persisted yet) is a normal "first run" state:
+// it maps to (cursorStartHolder-equivalent MinInt64, MinInt64, lapDirty=false),
+// matching the in-memory default check #2 always used before this table
+// existed -- NOT (0, 0), which would exclude every negative (system) holder
+// from the very first page (docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md, B1).
+func (a *ReconcileAdapter) GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, err error) {
+	row, err := a.q.GetReconcileScanCursor(ctx, checkName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return math.MinInt64, math.MinInt64, false, nil
+		}
+		return 0, 0, false, fmt.Errorf("postgres: reconcile: get scan cursor: %w", err)
+	}
+	return row.AfterHolder, row.AfterCurrency, row.LapDirty, nil
+}
+
+// SetScanCursor persists the resume cursor and lap_dirty flag for the named
+// check.
+func (a *ReconcileAdapter) SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool) error {
+	if err := a.q.UpsertReconcileScanCursor(ctx, sqlcgen.UpsertReconcileScanCursorParams{
+		CheckName:     checkName,
+		AfterHolder:   afterHolder,
+		AfterCurrency: afterCurrency,
+		LapDirty:      lapDirty,
+	}); err != nil {
+		return fmt.Errorf("postgres: reconcile: set scan cursor: %w", err)
+	}
+	return nil
+}
+
+// ListSystemRollupsRaw returns every system_rollups row in internal-id space,
+// for the system_rollup_integrity check's entries-based comparison (M4/I-23).
+func (a *ReconcileAdapter) ListSystemRollupsRaw(ctx context.Context) ([]service.SystemRollupRow, error) {
+	rows, err := a.q.ListSystemRollupsRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: list system rollups: %w", err)
+	}
+	result := make([]service.SystemRollupRow, len(rows))
+	for i, r := range rows {
+		total, err := numericToDecimal(r.TotalBalance)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: list system rollups: convert: %w", err)
+		}
+		result[i] = service.SystemRollupRow{
+			CurrencyID:       r.CurrencyID,
+			ClassificationID: r.ClassificationID,
+			TotalBalance:     total,
+		}
+	}
+	return result, nil
+}
+
+// LatestSnapshotDrift returns balance_snapshots rows for the most recent
+// snapshot_date whose stored balance disagrees with a fresh entries-based
+// recompute as of that date, up to pageLimit rows (the snapshot_integrity
+// check, M4/I-23).
+func (a *ReconcileAdapter) LatestSnapshotDrift(ctx context.Context, pageLimit int) ([]service.SnapshotDriftRow, error) {
+	rows, err := a.q.ReconcileLatestSnapshotDrift(ctx, int32(pageLimit)) //nolint:gosec // page limits are small, bounded internally
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: latest snapshot drift: %w", err)
+	}
+	result := make([]service.SnapshotDriftRow, len(rows))
+	for i, r := range rows {
+		stored, err := numericToDecimal(r.StoredBalance)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: latest snapshot drift: convert stored: %w", err)
+		}
+		recomputed, err := numericToDecimal(r.RecomputedBalance)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: latest snapshot drift: convert recomputed: %w", err)
+		}
+		result[i] = service.SnapshotDriftRow{
+			AccountHolder:     r.AccountHolder,
+			CurrencyID:        r.CurrencyID,
+			ClassificationID:  r.ClassificationID,
+			SnapshotDate:      r.SnapshotDate.Time,
+			StoredBalance:     stored,
+			RecomputedBalance: recomputed,
+		}
 	}
 	return result, nil
 }

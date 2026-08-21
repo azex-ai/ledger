@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -37,16 +38,41 @@ type mockReconcileQuerier struct {
 	checkpointAccounts  []CheckpointAccountKey
 	checkpointPageCalls int
 
+	// unbalancedJournals drives the journal_dr_cr check (M1 fix): genuine
+	// per-journal balance violations, as opposed to global_dr_cr_equality's
+	// global equality.
+	unbalancedJournals []UnbalancedJournal
+
+	// cursor* fields back GetScanCursor/SetScanCursor. cursorSet mirrors "a
+	// row exists in reconcile_scan_cursors" — false means GetScanCursor must
+	// return the (cursorStartHolder, cursorStartCurrency, false) default, the
+	// same behavior the real adapter gives on zero rows.
+	cursorSet           bool
+	cursorAfterHolder   int64
+	cursorAfterCurrency int64
+	cursorLapDirty      bool
+	getScanCursorCalls  int
+	setScanCursorCalls  int
+
+	systemRollups  []SystemRollupRow
+	snapshotDrifts []SnapshotDriftRow
+
 	// force errors
-	errOrphanCount    error
-	errOrphanSample   error
-	errEquation       error
-	errSettlement     error
-	errNegBal         error
-	errOrphanReservs  error
-	errDupeKeys       error
-	errStaleItems     error
-	errCheckpointPage error
+	errOrphanCount      error
+	errOrphanSample     error
+	errEquation         error
+	errSettlement       error
+	errNegBal           error
+	errOrphanReservs    error
+	errDupeKeys         error
+	errStaleItems       error
+	errCheckpointPage   error
+	errUnbalancedCount  error
+	errUnbalancedSample error
+	errGetScanCursor    error
+	errSetScanCursor    error
+	errSystemRollups    error
+	errSnapshotDrifts   error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -89,6 +115,53 @@ func (m *mockReconcileQuerier) ListCheckpointAccountsPage(_ context.Context, aft
 	}
 	return page, nil
 }
+func (m *mockReconcileQuerier) UnbalancedJournalsCount(_ context.Context) (int64, error) {
+	if m.errUnbalancedCount != nil {
+		return 0, m.errUnbalancedCount
+	}
+	return int64(len(m.unbalancedJournals)), nil
+}
+func (m *mockReconcileQuerier) UnbalancedJournalsSample(_ context.Context) ([]UnbalancedJournal, error) {
+	return m.unbalancedJournals, m.errUnbalancedSample
+}
+
+func (m *mockReconcileQuerier) GetScanCursor(_ context.Context, _ string) (int64, int64, bool, error) {
+	m.getScanCursorCalls++
+	if m.errGetScanCursor != nil {
+		return 0, 0, false, m.errGetScanCursor
+	}
+	if !m.cursorSet {
+		// Mirrors the real adapter's zero-rows default.
+		return math.MinInt64, math.MinInt64, false, nil
+	}
+	return m.cursorAfterHolder, m.cursorAfterCurrency, m.cursorLapDirty, nil
+}
+
+func (m *mockReconcileQuerier) SetScanCursor(_ context.Context, _ string, afterHolder, afterCurrency int64, lapDirty bool) error {
+	m.setScanCursorCalls++
+	if m.errSetScanCursor != nil {
+		return m.errSetScanCursor
+	}
+	m.cursorSet = true
+	m.cursorAfterHolder = afterHolder
+	m.cursorAfterCurrency = afterCurrency
+	m.cursorLapDirty = lapDirty
+	return nil
+}
+
+func (m *mockReconcileQuerier) ListSystemRollupsRaw(_ context.Context) ([]SystemRollupRow, error) {
+	return m.systemRollups, m.errSystemRollups
+}
+
+func (m *mockReconcileQuerier) LatestSnapshotDrift(_ context.Context, pageLimit int) ([]SnapshotDriftRow, error) {
+	if m.errSnapshotDrifts != nil {
+		return nil, m.errSnapshotDrifts
+	}
+	if len(m.snapshotDrifts) > pageLimit {
+		return m.snapshotDrifts[:pageLimit], nil
+	}
+	return m.snapshotDrifts, nil
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,7 +197,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 10, "should run exactly 10 checks")
+	assert.Len(t, report.Checks, 13, "should run exactly 13 checks")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. Check #8 is skipped outright (journals.status not in the
@@ -497,6 +570,7 @@ func TestFullReconciliationConfig_Defaults(t *testing.T) {
 	assert.False(t, out.EquationTolerance.IsZero())
 	assert.Equal(t, 5000, out.Check2ScanLimit)
 	assert.Equal(t, 2*time.Minute, out.Check2Timeout)
+	assert.Equal(t, 200, out.SnapshotIntegrityPageLimit)
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +804,277 @@ func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
 		}
 	}
 	assert.True(t, partialFound, "capped scan must report itself as incomplete; got: %+v", result.Findings)
+}
+
+// ---------------------------------------------------------------------------
+// Check #2 — persisted resume cursor + lap_dirty (C4b)
+// ---------------------------------------------------------------------------
+
+// TestCheck2GlobalBalance_ResumesFromPersistedCursor pins C4b: the scan must
+// start from whatever GetScanCursor returns, not always from the true
+// beginning. Before this fix, Check2ScanLimit capped every run at the same
+// prefix forever on a fleet larger than the limit — the tail was never
+// scanned (docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md, "未解决").
+func TestCheck2GlobalBalance_ResumesFromPersistedCursor(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 3, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 2, CurrencyID: 1},
+		{AccountHolder: 3, CurrencyID: 1},
+	}
+	// Pretend a previous (partial) run already advanced past holder 2.
+	q.cursorSet = true
+	q.cursorAfterHolder = 2
+	q.cursorAfterCurrency = 1
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+	require.Len(t, result.Findings, 1)
+	// Only holder 3 lies past the persisted cursor -- holders 1 and 2 must
+	// NOT be re-scanned.
+	assert.Contains(t, result.Findings[0].Description, "checkpoint scan complete: 1 account/currency pairs verified this run")
+}
+
+// TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns pins the cross-run drift
+// signal: a violation found in an earlier (partial) run of the same lap must
+// still surface as Passed=false on the LATER run that happens to complete
+// the lap, even though that later run's own slice is clean. Without folding
+// in lapDirtyAtStart, the completing run would report Passed=true purely
+// because its own slice had nothing new -- silently burying the earlier
+// finding (the same "looks green when it isn't" shape P0 fixed for the
+// single-run case).
+func TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 6, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	q := cleanQuerier()
+	// Simulates: an earlier run in this lap already found a violation and
+	// persisted lap_dirty=true, then stopped (capped) at holder 5.
+	q.cursorSet = true
+	q.cursorAfterHolder = 5
+	q.cursorAfterCurrency = 1
+	q.cursorLapDirty = true
+	// The remaining pairs in this run's slice are clean.
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 6, CurrencyID: 1},
+	}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.False(t, result.Passed, "an earlier segment's violation must not be buried by a clean final segment")
+	assert.True(t, result.Complete, "the lap did complete -- coverage is a separate axis from cleanliness")
+	var carriedFound bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "earlier segment of this lap already found a violation") {
+			carriedFound = true
+		}
+	}
+	assert.True(t, carriedFound, "got: %+v", result.Findings)
+
+	// The lap completed, so both the cursor and lap_dirty must reset for the
+	// next lap -- otherwise every future run would report Passed=false
+	// forever off a single stale finding.
+	assert.Equal(t, 1, q.setScanCursorCalls)
+	assert.False(t, q.cursorLapDirty, "lap_dirty must reset once the lap completes")
+}
+
+// TestCheck2GlobalBalance_PartialRunPersistsLapDirty pins the other half of
+// the same mechanism: a run that itself finds a violation but does NOT
+// complete the lap (capped) must persist lap_dirty=true for the next run to
+// pick up, not just report Passed=false locally and forget.
+func TestCheck2GlobalBalance_PartialRunPersistsLapDirty(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+	// entries say 100, checkpoint says 500 -> drift.
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 2, CurrencyID: 1},
+	}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{
+		Check2ScanLimit: 1, // capped before reaching holder 2 -- lap incomplete
+	})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.False(t, result.Passed)
+	assert.False(t, result.Complete)
+	require.Equal(t, 1, q.setScanCursorCalls)
+	assert.True(t, q.cursorSet)
+	assert.True(t, q.cursorLapDirty, "the violation found this run must survive into the persisted cursor")
+	assert.Equal(t, int64(1), q.cursorAfterHolder)
+}
+
+// ---------------------------------------------------------------------------
+// Check #11 — system_rollups vs entries (M4/I-23)
+// ---------------------------------------------------------------------------
+
+func TestCheckSystemRollupIntegrity_Clean(t *testing.T) {
+	q := cleanQuerier()
+	q.systemRollups = []SystemRollupRow{
+		{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(1000)},
+	}
+	q.equationRows = []AccountingEquationRow{
+		{CurrencyID: 1, ClassificationID: 10, NormalSide: "debit", TotalDebit: decimal.NewFromInt(1000), TotalCredit: decimal.Zero},
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSystemRollupIntegrity(context.Background())
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+}
+
+// TestCheckSystemRollupIntegrity_DetectsDrift pins M4/I-23: system_rollups
+// must be checked directly against journal_entries. RefreshSystemRollups
+// derives this table from balance_checkpoints
+// (AggregateCheckpointsByClassification), so a system_rollups row that no
+// longer matches the entries-based recompute is exactly the class of drift
+// this check exists to catch -- including the case where checkpoints were
+// tampered and system_rollups inherited the poison wholesale.
+func TestCheckSystemRollupIntegrity_DetectsDrift(t *testing.T) {
+	q := cleanQuerier()
+	q.systemRollups = []SystemRollupRow{
+		{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(1999)}, // poisoned +999
+	}
+	q.equationRows = []AccountingEquationRow{
+		{CurrencyID: 1, ClassificationID: 10, NormalSide: "debit", TotalDebit: decimal.NewFromInt(1000), TotalCredit: decimal.Zero},
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSystemRollupIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Detail, "999")
+}
+
+// TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries pins the M5
+// fabrication scenario: a system_rollups row with no backing entries at all
+// (a rollup entry manufactured out of nothing) must be flagged, not treated
+// as "unknown, skip".
+func TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries(t *testing.T) {
+	q := cleanQuerier()
+	q.systemRollups = []SystemRollupRow{
+		{CurrencyID: 1, ClassificationID: 99, TotalBalance: decimal.NewFromInt(5000)},
+	}
+	// No matching AccountingEquationRow for (currency=1, classification=99):
+	// zero entries exist for that pair.
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSystemRollupIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Detail, "5000")
+}
+
+func TestCheckSystemRollupIntegrity_QueryError(t *testing.T) {
+	q := cleanQuerier()
+	q.errSystemRollups = errors.New("db unavailable")
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSystemRollupIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	assert.Contains(t, result.Findings[0].Detail, "db unavailable")
+}
+
+// ---------------------------------------------------------------------------
+// Check #12 — balance_snapshots vs entries (M4/I-23)
+// ---------------------------------------------------------------------------
+
+func TestCheckSnapshotIntegrity_Clean(t *testing.T) {
+	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
+	result := svc.runCheckSnapshotIntegrity(context.Background())
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+}
+
+func TestCheckSnapshotIntegrity_DetectsDrift(t *testing.T) {
+	q := cleanQuerier()
+	q.snapshotDrifts = []SnapshotDriftRow{
+		{AccountHolder: 42, CurrencyID: 1, ClassificationID: 10,
+			SnapshotDate:  time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+			StoredBalance: decimal.NewFromInt(500), RecomputedBalance: decimal.NewFromInt(100)},
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSnapshotIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Description, "holder 42")
+	assert.Contains(t, result.Findings[0].Detail, "stored=500")
+}
+
+// TestCheckSnapshotIntegrity_PageLimitReportsIncomplete pins the
+// fail-closed-by-construction requirement for this check's page cap: hitting
+// the limit must mark Complete=false, not silently truncate the finding list
+// (the same shape check #2's Complete field already enforces).
+func TestCheckSnapshotIntegrity_PageLimitReportsIncomplete(t *testing.T) {
+	q := cleanQuerier()
+	for i := 0; i < 3; i++ {
+		q.snapshotDrifts = append(q.snapshotDrifts, SnapshotDriftRow{
+			AccountHolder: int64(i + 1), CurrencyID: 1, ClassificationID: 10,
+			SnapshotDate:  time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+			StoredBalance: decimal.NewFromInt(1), RecomputedBalance: decimal.Zero,
+		})
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{SnapshotIntegrityPageLimit: 3})
+	result := svc.runCheckSnapshotIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	assert.False(t, result.Complete, "hitting the page limit must not claim full coverage")
+}
+
+func TestCheckSnapshotIntegrity_QueryError(t *testing.T) {
+	q := cleanQuerier()
+	q.errSnapshotDrifts = errors.New("timeout")
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckSnapshotIntegrity(context.Background())
+	assert.False(t, result.Passed)
+	assert.Contains(t, result.Findings[0].Detail, "timeout")
 }
 
 // Mechanical I-18 pin for the reconcile report surface: no format string in

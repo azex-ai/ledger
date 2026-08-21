@@ -389,7 +389,7 @@ func TestExecuteDepositTolerancePlan_BatchRollbackOnFailure(t *testing.T) {
 }
 
 // Pins the expand-safe balance_role upgrade: a classification created before
-// balance_role existed (role '') is retagged in place by preset install; a
+// balance_role existed (role ”) is retagged in place by preset install; a
 // conflicting non-empty role is rejected instead of silently re-bucketed.
 func TestInstallPresets_BalanceRoleUpgradeAndConflict(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
@@ -425,9 +425,30 @@ func TestInstallPresets_BalanceRoleUpgradeAndConflict(t *testing.T) {
 
 	// Re-install is a no-op (roles already match).
 	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+}
 
-	// A conflicting non-empty role must be rejected, not silently retagged.
-	require.NoError(t, classStore.SetBalanceRole(ctx, upgraded.UID, core.BalanceRoleLocked))
+// A pre-existing classification whose balance_role is already non-empty and
+// DIFFERENT from what the preset wants must be rejected, not silently
+// re-bucketed. Constructed via CreateClassification (INSERT), not via
+// SetBalanceRole on an already-upgraded row: migration 045's mutation guard
+// (I-25) now makes SetBalanceRole itself refuse a non-empty -> non-empty
+// transition, so the only way a real deployment reaches this conflict is a
+// row that was tagged with a non-” role from the start (e.g. a different,
+// earlier preset install choosing a different role for the same code).
+func TestInstallPresets_BalanceRoleConflictAtCreation(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+
+	preexisting, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleLocked, // preset wants 'available'
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.BalanceRoleLocked, preexisting.BalanceRole)
+
 	err = presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)

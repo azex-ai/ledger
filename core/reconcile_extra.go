@@ -54,7 +54,7 @@ type ReconcileReport struct {
 	RunAt time.Time `json:"run_at"`
 }
 
-// FullReconciler runs the complete 10-check reconciliation suite and returns a
+// FullReconciler runs the full reconciliation suite and returns a
 // structured report. Checks are independent — a failure in one does not prevent
 // the others from running.
 //

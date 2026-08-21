@@ -86,6 +86,14 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 // timestamp and returns the journal's internal ID. Dimension arguments are
 // the uid strings returned by the postgrestest Seed helpers; the raw SQL
 // resolves them to internal ids the storage rows are keyed on.
+//
+// All three inserts run in one explicit transaction: migration 044's
+// deferred per-journal balance trigger defers to the END OF THE CURRENT
+// TRANSACTION, so if the debit and credit legs were each their own
+// autocommitted statement (as this helper used to do), the debit leg would
+// commit alone -- unbalanced on its own -- and the trigger would correctly
+// reject it. Real journal posts (postgres.LedgerStore.PostJournal) already
+// write every entry inside one transaction; this helper now matches that.
 func seedJournal(
 	t *testing.T,
 	pgpool *pgxpool.Pool,
@@ -98,30 +106,41 @@ func seedJournal(
 ) int64 {
 	t.Helper()
 	ctx := context.Background()
+
+	tx, err := pgpool.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after a successful Commit below
+
 	var jID int64
 	// effective_at is set to `at` alongside created_at: this helper models a
 	// journal whose business date is `at`, which is what the as-of queries
 	// under test (ListBalancesAt et al.) key off since migration 025.
-	err := pgpool.QueryRow(ctx,
-		`INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id, created_at, effective_at)
-		 VALUES (gen_random_uuid(), (SELECT id FROM journal_types WHERE uid=$1::uuid), $2, $3, $3, 0, 'test', 0, $4, $4) RETURNING id`,
+	//
+	// event_id is omitted (defaults to NULL, migration 045): this helper
+	// models a journal with no event link, and the column's FK to events(id)
+	// rejects any non-NULL sentinel that doesn't reference a real row.
+	err = tx.QueryRow(ctx,
+		`INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, created_at, effective_at)
+		 VALUES (gen_random_uuid(), (SELECT id FROM journal_types WHERE uid=$1::uuid), $2, $3, $3, 0, 'test', $4, $4) RETURNING id`,
 		jtUID, ikey, amount.String(), at,
 	).Scan(&jID)
 	require.NoError(t, err)
 
-	_, err = pgpool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
 		 VALUES ($1,$2,(SELECT id FROM currencies WHERE uid=$3::uuid),(SELECT id FROM classifications WHERE uid=$4::uuid),'debit',$5,$6,$6)`,
 		jID, holderID, currencyUID, classUID, amount.String(), at,
 	)
 	require.NoError(t, err)
 
-	_, err = pgpool.Exec(ctx,
+	_, err = tx.Exec(ctx,
 		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
 		 VALUES ($1,$2,(SELECT id FROM currencies WHERE uid=$3::uuid),(SELECT id FROM classifications WHERE uid=$4::uuid),'credit',$5,$6,$6)`,
 		jID, -holderID, currencyUID, sysClassUID, amount.String(), at,
 	)
 	require.NoError(t, err)
+
+	require.NoError(t, tx.Commit(ctx))
 
 	return jID
 }

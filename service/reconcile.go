@@ -17,6 +17,22 @@ import (
 // checkpoint-vs-entries scan.
 const checkpointScanPageSize = 200
 
+// checkpointBalanceCheckName identifies check #2 both in CheckResult.Name and
+// as the persisted resume-cursor key (reconcile_scan_cursors.check_name), so
+// the two never drift apart.
+const checkpointBalanceCheckName = "checkpoint_balance"
+
+// cursorStartHolder and cursorStartCurrency are the keyset start used for
+// both check #2's scan and its persisted resume cursor. They must be
+// math.MinInt64, not zero: system holders are the negation of user holders
+// (core.SystemHolder), so a zero start would permanently exclude every
+// negative holder from the very first page (see
+// docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md, B1).
+const (
+	cursorStartHolder   int64 = math.MinInt64
+	cursorStartCurrency int64 = math.MinInt64
+)
+
 // ---------------------------------------------------------------------------
 // Shared data-transfer types used by ReconcileQuerier and FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -87,12 +103,49 @@ type CheckpointAccountKey struct {
 	CurrencyID    int64
 }
 
+// UnbalancedJournal is a (journal_id, currency_id) pair whose entries do not
+// net to zero -- a genuine per-journal balance violation. Drives the
+// journal_dr_cr check (M1 fix): the check historically named "journal_dr_cr"
+// only verified a GLOBAL debit==credit equality (now "global_dr_cr_equality",
+// see runCheck1JournalBalance), which cannot see two journals that are each
+// individually unbalanced but happen to net to zero in aggregate.
+// journal_id/currency_id are internal ids and must never reach a public
+// Finding string verbatim (I-18).
+type UnbalancedJournal struct {
+	JournalID  int64
+	CurrencyID int64
+	Drift      decimal.Decimal
+}
+
+// SystemRollupRow is one (currency_id, classification_id) row from
+// system_rollups, in internal-id space (see ListSystemRollupsRaw). Used by
+// the system_rollup_integrity check to compare the stored rollup against a
+// fresh entries-based recompute (M4/I-23) — balance_checkpoints never enters
+// this comparison.
+type SystemRollupRow struct {
+	CurrencyID       int64
+	ClassificationID int64
+	TotalBalance     decimal.Decimal
+}
+
+// SnapshotDriftRow is a balance_snapshots row (for the most recent
+// snapshot_date) whose stored balance disagrees with a fresh entries-based
+// recompute as of that date. Used by the snapshot_integrity check (M4/I-23).
+type SnapshotDriftRow struct {
+	AccountHolder     int64
+	CurrencyID        int64
+	ClassificationID  int64
+	SnapshotDate      time.Time
+	StoredBalance     decimal.Decimal
+	RecomputedBalance decimal.Decimal
+}
+
 // ---------------------------------------------------------------------------
 // ReconcileQuerier — the port consumed by FullReconciliationService
 // ---------------------------------------------------------------------------
 
 // ReconcileQuerier is the database-facing interface for the extended
-// reconciliation checks (#3-#10). Defined on the consumer side (service/)
+// reconciliation checks beyond #1-#2. Defined on the consumer side (service/)
 // following hexagonal convention. Implemented by postgres.ReconcileAdapter.
 type ReconcileQuerier interface {
 	// Check #3
@@ -114,6 +167,31 @@ type ReconcileQuerier interface {
 	// with at least one checkpoint row. Pass (0, 0) for the first page;
 	// subsequent pages pass the last row's (AccountHolder, CurrencyID).
 	ListCheckpointAccountsPage(ctx context.Context, afterHolder, afterCurrency int64, pageLimit int) ([]CheckpointAccountKey, error)
+	// journal_dr_cr (M1 fix) — genuine per-journal, per-currency balance
+	// scan; see queries/integrity_balance.sql.
+	UnbalancedJournalsCount(ctx context.Context) (int64, error)
+	UnbalancedJournalsSample(ctx context.Context) ([]UnbalancedJournal, error)
+	// GetScanCursor returns the persisted resume cursor for the named check
+	// (C4b), plus lapDirty: whether an earlier segment of the current lap
+	// already found a violation (so the run that completes the lap can still
+	// report Passed=false). Implementations must return (cursorStartHolder,
+	// cursorStartCurrency, false, nil) when no cursor has been persisted yet
+	// — that is a normal "first run" state, not an error.
+	GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, err error)
+	// SetScanCursor persists the resume cursor and lapDirty flag for the
+	// named check.
+	SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool) error
+	// system_rollup_integrity — raw (internal-id) read of system_rollups,
+	// compared against AccountingEquationRows (the same entries-based
+	// recompute the accounting_equation check uses) so system_rollups is
+	// validated directly against journal_entries, never through
+	// balance_checkpoints (M4/I-23).
+	ListSystemRollupsRaw(ctx context.Context) ([]SystemRollupRow, error)
+	// snapshot_integrity — balance_snapshots rows for the most recent
+	// snapshot_date whose stored balance disagrees with a fresh
+	// entries-based recompute as of that date, up to pageLimit rows
+	// (M4/I-23).
+	LatestSnapshotDrift(ctx context.Context, pageLimit int) ([]SnapshotDriftRow, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +232,12 @@ type FullReconciliationConfig struct {
 	// (default 2 minutes). Whichever limit — count or time — is hit first
 	// stops the scan for this run; the check reports the partial coverage.
 	Check2Timeout time.Duration
+
+	// SnapshotIntegrityPageLimit caps the number of drifting balance_snapshots
+	// rows fetched per run for check #12 (default 200, mirroring
+	// NegativeBalancePageLimit). Reaching the cap marks the check incomplete
+	// rather than silently truncating the finding list.
+	SnapshotIntegrityPageLimit int
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -179,6 +263,9 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	if out.Check2Timeout == 0 {
 		out.Check2Timeout = 2 * time.Minute
 	}
+	if out.SnapshotIntegrityPageLimit == 0 {
+		out.SnapshotIntegrityPageLimit = 200
+	}
 	return out
 }
 
@@ -186,9 +273,11 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 // FullReconciliationService — implements core.FullReconciler
 // ---------------------------------------------------------------------------
 
-// FullReconciliationService runs the complete 10-check reconciliation suite.
-// Checks #1-#2 reuse the existing ReconciliationService logic. Checks #3-#10
-// are new and use the ReconcileQuerier port.
+// FullReconciliationService runs the full reconciliation suite. Checks #1-#2
+// reuse the existing ReconciliationService logic; the rest use the
+// ReconcileQuerier port. The exact check count is a fact of
+// RunFullReconciliation's body, not of this comment -- see the
+// TestFullReconciliation_AllPass assertion for the machine-checked count.
 type FullReconciliationService struct {
 	basic   *ReconciliationService
 	querier ReconcileQuerier
@@ -254,21 +343,20 @@ func NewFullReconciliationService(
 	}
 }
 
-// RunFullReconciliation executes all 10 checks. Each check runs independently;
-// an error in one is recorded as a Finding, not a hard failure that aborts the
-// rest.
+// RunFullReconciliation executes every check in the suite. Each check runs
+// independently; an error in one is recorded as a Finding, not a hard
+// failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 10)
+	checks := make([]core.CheckResult, 0, 13)
 
-	// --- Check #1: Journal DR = CR ---
+	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
 
 	// --- Check #2: Checkpoint balance vs entry sum ---
-	// We run a broad accounting-equation check here (global debit == credit)
-	// as the #1 check already is per-journal. The ReconciliationService.CheckAccountingEquation
-	// covers global balance; ReconcileAccount is per-account and too expensive
-	// to enumerate for a full-fleet scan — so we surface it separately.
+	// ReconcileAccount is per-account and too expensive to enumerate for a
+	// full-fleet scan on every run, so it is paginated separately here rather
+	// than folded into check #1.
 	checks = append(checks, s.runCheck2GlobalBalance(ctx))
 
 	// --- Check #3: Orphan entries ---
@@ -294,6 +382,15 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- Check #10: Stale rollup queue ---
 	checks = append(checks, s.runCheck10StaleRollup(ctx))
+
+	// --- journal_dr_cr: genuine per-journal balance (M1 fix) ---
+	checks = append(checks, s.runCheck11JournalBalance(ctx))
+
+	// --- system_rollup_integrity: system_rollups vs entries (M4/I-23) ---
+	checks = append(checks, s.runCheckSystemRollupIntegrity(ctx))
+
+	// --- snapshot_integrity: balance_snapshots vs entries (M4/I-23) ---
+	checks = append(checks, s.runCheckSnapshotIntegrity(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -333,17 +430,24 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 }
 
 // runCheck1JournalBalance wraps the existing GlobalSummer DR=CR logic.
-// We reuse ReconciliationService.CheckAccountingEquation which already does the
-// global debit==credit check across all entries; per-journal balance is
-// enforced by DB constraints and the post-insert SQL verification.
+// We reuse ReconciliationService.CheckAccountingEquation, which sums debits
+// and credits GLOBALLY across all entries. This is deliberately named
+// "global_dr_cr_equality", not "journal_dr_cr": it does NOT verify any
+// individual journal balances, only that the fleet-wide totals match. Two
+// journals that are each individually unbalanced by currency but net to
+// zero in aggregate pass this check undetected -- that gap is M1
+// (docs/plans/2026-08-21-tamper-evident-ledger-design.md §2), closed by the
+// genuine per-journal check below (runCheck11JournalBalance, which now owns
+// the "journal_dr_cr" name). The two checks catch different failure modes
+// and are kept independent; neither substitutes for the other.
 func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "global_dr_cr_equality", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	r, err := s.basic.CheckAccountingEquation(ctx)
 	if err != nil {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: "journal DR=CR check failed to execute",
+			Description: "global DR=CR equality check failed to execute",
 			Detail:      err.Error(),
 		})
 		return result
@@ -362,6 +466,61 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 	return result
 }
 
+// runCheck11JournalBalance is the genuine per-journal, per-currency balance
+// check (M1 fix). It owns the "journal_dr_cr" name that runCheck1JournalBalance
+// (now "global_dr_cr_equality") used to hold under a global-equality
+// implementation that could not see this class of violation -- see
+// docs/plans/2026-08-21-tamper-evident-ledger-design.md §2 M1 and §5.
+//
+// This scan is a bulk defense-in-depth complement to the DB-layer deferred
+// constraint trigger added in migration 044: the trigger only validates rows
+// written after it existed (constraint triggers are not retroactive), so
+// this check is what would catch a violation written during the 018→044 gap
+// window, or via any future bypass of the trigger.
+func (s *FullReconciliationService) runCheck11JournalBalance(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	count, err := s.querier.UnbalancedJournalsCount(ctx)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "per-journal balance query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+	if count == 0 {
+		return result
+	}
+
+	result.Passed = false
+	result.Findings = append(result.Findings, core.Finding{
+		Description: fmt.Sprintf("%d journal/currency pair(s) fail per-journal balance", count),
+	})
+
+	samples, err := s.querier.UnbalancedJournalsSample(ctx)
+	if err != nil {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "could not fetch unbalanced journal samples",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+	// Per-sample forensics carry internal row ids — ops-log material, not
+	// report material (I-18: the report is an API response body).
+	for _, u := range samples {
+		s.logger.Warn("service: reconcile: unbalanced journal sample",
+			"journal_id", u.JournalID,
+			"currency_id", u.CurrencyID,
+			"drift", u.Drift.String(),
+		)
+	}
+	result.Findings = append(result.Findings, core.Finding{
+		Description: fmt.Sprintf("%d unbalanced journal sample(s) recorded in server logs", len(samples)),
+	})
+	return result
+}
+
 // runCheck2GlobalBalance verifies that each account's checkpointed balance
 // matches a full recomputation from journal_entries (ReconcileAccount), for
 // every distinct (holder, currency) pair that has a checkpoint. Pairs are
@@ -374,17 +533,33 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 // "incomplete" Finding with the resume cursor instead of silently reporting
 // success as if full coverage had been verified.
 func (s *FullReconciliationService) runCheck2GlobalBalance(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "checkpoint_balance", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: checkpointBalanceCheckName, Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.Check2Timeout)
 	defer cancel()
 
-	// The cursor must start below every possible holder, not at zero: system
-	// holders are the negation of user holders (core.SystemHolder), so a (0,0)
-	// start makes the `account_holder > after_holder` keyset predicate exclude
-	// every negative holder on the first page -- permanently. That left the
-	// entire custodial/system side of the ledger unscanned by this check.
-	afterHolder, afterCurrency := int64(math.MinInt64), int64(math.MinInt64)
+	// C4b: resume from the persisted cursor instead of always restarting at
+	// the top. Without this, any fleet larger than Check2ScanLimit had its
+	// tail permanently unscanned -- every run re-verified the same prefix and
+	// never reached the rest (docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md,
+	// "未解决" section). GetScanCursor returns (cursorStartHolder,
+	// cursorStartCurrency) on a fresh install (no row persisted yet) -- NOT
+	// (0, 0): system holders are the negation of user holders
+	// (core.SystemHolder), so a zero start would exclude every negative
+	// holder on the first page, permanently (B1 in the same bug report).
+	// Cursor reads/writes use ctx, not scanCtx: they must still succeed after
+	// scanCtx's own deadline has been reached (that deadline bounds the scan
+	// loop below, not bookkeeping around it).
+	afterHolder, afterCurrency, lapDirtyAtStart, err := s.querier.GetScanCursor(ctx, checkpointBalanceCheckName)
+	if err != nil {
+		result.Passed = false
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "checkpoint scan cursor read failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
 	scanned := 0
 	partialReason := ""
 
@@ -461,19 +636,55 @@ pageLoop:
 		partialReason = fmt.Sprintf("scan limit reached (%d account pairs)", s.cfg.Check2ScanLimit)
 	}
 
+	// sliceDirty is this run's own outcome, before folding in whatever an
+	// earlier segment of the same (possibly multi-run) lap already found.
+	sliceDirty := !result.Passed
+	lapDirty := lapDirtyAtStart || sliceDirty
+	if lapDirtyAtStart && !sliceDirty {
+		// This slice was itself clean, but an earlier segment of this lap
+		// already found a violation -- the lap as a whole is not clean, and
+		// the check must say so even though nothing new turned up just now.
+		// Without this, the run that happens to complete a multi-run lap
+		// could report Passed=true purely because ITS OWN slice was clean,
+		// silently burying an earlier run's finding -- the same "looks green
+		// when it isn't" shape P0 fixed for the single-run case.
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "checkpoint scan: an earlier segment of this lap already found a violation",
+		})
+	}
+
 	if partialReason != "" {
 		// Coverage was not achieved. Passed may still be true (nothing was
-		// wrong in the subset we examined) but the check must not testify
-		// about the pairs it never reached.
+		// wrong in the subset we examined, and no prior segment of this lap
+		// was dirty either) but the check must not testify about the pairs
+		// it never reached.
 		result.Complete = false
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
-			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next scheduled run rescans from the top", scanned),
+			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next run resumes from the persisted cursor (holder %d)", scanned, afterHolder),
 		})
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty); setErr != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint scan cursor persist failed",
+				Detail:      setErr.Error(),
+			})
+		}
 	} else {
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified", scanned),
+			Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified this run", scanned),
 		})
+		// A full lap just completed: reset the cursor and lap_dirty flag so
+		// the next run starts a fresh lap instead of replaying this resume
+		// point (or a stale dirty flag) forever.
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false); setErr != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint scan cursor reset failed",
+				Detail:      setErr.Error(),
+			})
+		}
 	}
 
 	return result
@@ -745,6 +956,129 @@ func (s *FullReconciliationService) runCheck10StaleRollup(ctx context.Context) c
 				item.ClaimedUntil, item.FailedAttempts),
 		})
 	}
+	return result
+}
+
+// runCheckSystemRollupIntegrity verifies system_rollups.total_balance
+// against a fresh recompute straight from journal_entries (M4/I-23).
+// RefreshSystemRollups populates this table via
+// AggregateCheckpointsByClassification, which sums balance_checkpoints — so
+// system_rollups inherits any checkpoint tampering wholesale if compared only
+// against itself or against the checkpoints it was built from. This check
+// never references balance_checkpoints: the "ground truth" it compares
+// against is AccountingEquationRows, the same entries-only recompute check #4
+// already performs.
+func (s *FullReconciliationService) runCheckSystemRollupIntegrity(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "system_rollup_integrity", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rollups, err := s.querier.ListSystemRollupsRaw(ctx)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "system rollup list query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	equationRows, err := s.querier.AccountingEquationRows(ctx)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "system rollup integrity: accounting equation query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	type dimKey struct {
+		currencyID       int64
+		classificationID int64
+	}
+	expected := make(map[dimKey]decimal.Decimal, len(equationRows))
+	for _, r := range equationRows {
+		var balance decimal.Decimal
+		if r.NormalSide == string(core.NormalSideDebit) {
+			balance = r.TotalDebit.Sub(r.TotalCredit)
+		} else {
+			balance = r.TotalCredit.Sub(r.TotalDebit)
+		}
+		expected[dimKey{r.CurrencyID, r.ClassificationID}] = balance
+	}
+
+	for _, roll := range rollups {
+		// No matching AccountingEquationRow means journal_entries has zero
+		// rows for this (currency, classification) pair — the true balance
+		// is 0, not "unknown"; a non-zero system_rollups here is exactly the
+		// M5 fabrication scenario (a rollup entry with no backing entries at
+		// all).
+		exp := expected[dimKey{roll.CurrencyID, roll.ClassificationID}]
+		drift := roll.TotalBalance.Sub(exp)
+		if drift.Abs().GreaterThan(s.cfg.EquationTolerance) {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("currency %s classification %s: system_rollups drift from entries",
+					s.externalCurrencyRef(ctx, roll.CurrencyID), s.externalClassificationRef(ctx, roll.ClassificationID)),
+				Detail: fmt.Sprintf("system_rollups=%s entries_recompute=%s drift=%s", roll.TotalBalance, exp, drift),
+			})
+		}
+	}
+
+	if len(result.Findings) == 0 {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("system rollup integrity: %d rows verified against entries", len(rollups)),
+		})
+	}
+
+	return result
+}
+
+// runCheckSnapshotIntegrity verifies the most recent balance_snapshots date
+// against a fresh recompute straight from journal_entries (M4/I-23),
+// bypassing balance_checkpoints entirely. Scoped to the latest snapshot_date
+// (not full history) to bound cost — see
+// docs/plans/2026-08-21-tamper-evident-ledger-design.md M4. Historical dates
+// can be re-verified and repaired on demand via
+// SnapshotBackfillService.BackfillSnapshots, which already recomputes from
+// entries for an explicit date range; this check adds the missing
+// *detection* half for the date most likely to still be actively read.
+func (s *FullReconciliationService) runCheckSnapshotIntegrity(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "snapshot_integrity", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rows, err := s.querier.LatestSnapshotDrift(ctx, s.cfg.SnapshotIntegrityPageLimit)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "snapshot integrity query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	for _, r := range rows {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("holder %d currency %s classification %s: balance_snapshots drift from entries on %s",
+				r.AccountHolder, s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID),
+				r.SnapshotDate.Format("2006-01-02")),
+			Detail: fmt.Sprintf("stored=%s entries_recompute=%s drift=%s", r.StoredBalance, r.RecomputedBalance, r.StoredBalance.Sub(r.RecomputedBalance)),
+		})
+	}
+
+	if len(rows) >= s.cfg.SnapshotIntegrityPageLimit {
+		// The page limit was hit: there may be more drifting rows for this
+		// date than we fetched, so this check cannot claim full coverage —
+		// same fail-closed-by-construction shape as check #2's Complete field.
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("snapshot integrity scan incomplete: hit page limit (%d rows)", s.cfg.SnapshotIntegrityPageLimit),
+		})
+	} else if len(result.Findings) == 0 {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "snapshot integrity: no drift found for the most recent snapshot date",
+		})
+	}
+
 	return result
 }
 
