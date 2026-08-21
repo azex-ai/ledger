@@ -273,7 +273,17 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
 5. 修 bug 时**一并修掉指向它的过期注释**。P0 已发现三处同形状的
    「注释把 bug 固化成文档」（`reconcile.sql` 的 `pass (0,0)`、check#8 的意图注释、
    `journal_dr_cr` 声称 DB constraint 仍在 enforce）。不要再制造第四处。
-6. `bus done <id> <agent>`；有新 failure mode 就 `bus learn <agent> "<经验>"`。
+6. **`bus done` 之前必须已 commit，汇报里必须带 commit hash。** 工作区里的改动不算交付 ——
+   任何 `wt remove` / `git checkout` 都会销毁它。若刚做过 `git merge main`，先确认
+   `git status --short` 无 `UU`（冲突文本解完还要 `git add` 才算解决）。
+7. **合并 main 之后必须重跑 `make test`。** 合并前的绿是过期证据 ——
+   2026-08-21 P3 合入 main 带来了 `journal_entries` 的 per-journal 平衡 trigger（044），
+   任何在此之前跑绿的分支都可能撞上它（P3 自己就因此暴露出 `seedJournal` 的非原子性）。
+8. `bus done <id> <agent>`；有新 failure mode 就 `bus learn <agent> "<经验>"`。
+
+> **Lead 侧对应义务**（2026-08-21 补，源：P4 实例）：收到 done 后**先**
+> `git log --oneline <base>..HEAD` + `git status --short` 验证，**再**读文件内容评审。
+> 没有 commit hash 就不要开始 review —— 否则评审的是一堆随时会消失的工作区改动。
 
 ## 10. 禁止事项（跨任务共同）
 
