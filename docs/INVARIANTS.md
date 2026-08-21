@@ -795,121 +795,93 @@ be sitting in the user's balance by the time a human looks at the queue.
 - `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
   transitions it to `failed` with `journal_uid` remaining empty forever)
 
-## I-26: Every journal that carries an authorization signature has a valid one
+## I-22: `ledger_app` has no DDL
 
-(docs/plans/2026-08-21-tamper-evident-ledger-design.md §7 / M5, P5 of the
-integrity-hardening wave; simplified from the original task brief by Team
-Lead on 2026-08-21 -- see `core/auth.go`'s package doc comment.)
-`journals.auth_digest` / `auth_signature` / `auth_key_id` (migration 046)
-let a journal posted through `postgres.LedgerStore.PostJournal` (with a
-`core.Attestor` configured via `WithAuth`, in pool mode) carry a signature
-over `core.CanonicalJournalDigest`'s canonical, uid-space encoding of the
-posting -- computed and signed strictly **outside** any DB transaction
-(`financial.md`: no external calls inside a DB transaction is the whole
-reason the digest is uid-space, not id-space; see design doc §7.2 --
-benchmarking confirmed this ordering adds pure latency without extending
-any lock's hold time, since it runs before any advisory lock is taken).
-`core.VerifyJournalAuth` recomputes the digest from the journal's own
-fields and rejects (wrapping `core.ErrUnauthorizedJournal`) any journal
-whose stored digest is empty, does not match the recomputation, or whose
-signature/key_id the configured `core.AuthVerifier` does not accept. Every
-journal is signed once an Attestor is configured -- there is no
-per-journal-type coverage decision and no KMS-failure-mode branch; a
-`Sign` error simply propagates as a plain error.
+The application-facing database role, `ledger_app`, can `SELECT`/`INSERT`/
+`UPDATE` ordinary tables and `SELECT`/`INSERT` (never `UPDATE`/`DELETE`) on
+`journal_entries` — but it cannot `DROP`, `TRUNCATE`, `ALTER`, manage
+triggers, or create any object, anywhere in the schema. This is true as
+soon as migration 042 applies, independent of who currently owns the
+tables: `ledger_app` was never granted anything beyond
+`SELECT`/`INSERT`/`UPDATE` and will never own anything.
 
-**Why**: M5 is the one finding this whole wave exists to answer --
-`journals`/`journal_entries` FK integrity, per-currency balance,
-append-only triggers, and the account-holder sign convention are all
-satisfied by a perfectly balanced, perfectly plausible **forged** journal
-inserted directly via SQL by an attacker holding DB write credentials.
-Every invariant I-1 through I-25 passes on that forgery. Per-journal
-signing is the only mechanism that still tells it apart from a genuine
-posting, because forging a valid signature additionally requires the
-Attestor's private key -- which never enters the database (design doc
-§0/§7.1) -- rather than a DB write credential (design doc §1's threat
-model row for "app DB 凭证"). The default implementation
-(`authdev.LocalAttestor`, an in-process ed25519 key loaded from an
-injected seed) is production-ready for this project's actual deployment
-(a monolith, not a fleet behind a remote KMS): the threat model already
-concedes "app process + signing key both compromised" as out of scope
-(design doc §1 non-goal 2) for ANY key custody model, local or remote, so
-a local key satisfies the same guarantee.
+**Why**: GRANT-based privileges alone are not a defense against a
+compromised application credential — before migration 042, every
+environment ran with a single connection that had unrestricted DDL, so a
+leaked `DATABASE_URL` (or a SQL-injection foothold) could `DROP TRIGGER` the
+append-only guards, `TRUNCATE` `journal_entries`, or silently detach a
+partition (attack path A6,
+docs/plans/2026-08-21-tamper-evident-ledger-design.md §2). Postgres cannot
+confer `ALTER`/`DROP`/`TRUNCATE`/trigger-management rights through `GRANT` —
+only object ownership (or superuser) grants them — so this invariant is only
+true because `ledger_app` never owns anything.
 
-**Scope note (honest, not silently narrowed)**: signing only happens on
-`PostJournal`'s pool-mode, top-level call path -- `ExecuteTemplateBatch`,
-`ReverseJournal`/`ReverseJournalFraction`, and any `JournalWriter` call
-made inside `ledger.Service.RunInTx` (tx-mode, `WithDB`) never sign,
-because there is no point in those call chains that is provably outside a
-DB transaction the way `financial.md` requires for the Attestor's signing
-call. Journals posted through those paths carry empty auth columns,
-indistinguishable from "no Attestor configured" -- exactly like every
-journal predating P5. A withdrawal gate (a downstream consumer treating an
-unsigned journal as unauthorized for withdrawal purposes) is **not wired
-by this phase** -- design doc §12's P5 row is explicit that it is a
-separate, later release; `core.VerifyJournalAuth` is the primitive that
-release (or `ledger-cli verify`, P6) would call.
+**Note on scope**: this invariant governs what the `ledger_app` *role* can
+do once an environment's `DATABASE_URL` is cut over to it. Migration 042
+itself performs a **pure expand** step (`deployment.md`) — creating the
+roles and issuing every grant additively, with no `REVOKE` and no ownership
+transfer — and does not switch any environment's connection yet. The
+counterpart `ledger_owner` role does not yet own any table after 042 alone;
+migration 049, a separate, later "migrate" migration (see `docs/RUNBOOK.md`
+§9), performs `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
+transfer, and must ship in the same release as the `DATABASE_URL` cutover —
+an earlier combined version of 042 that did both in one file passed every
+test connecting as the new roles while actually locking the (non-superuser,
+in a real managed-Postgres deployment) migration-running connection out of
+its own database the instant it
+committed; see `docs/RUNBOOK.md` §9 for the failure this caused and the
+test that catches it.
 
 **Enforced by**:
-- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
-  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
-  three columns inside the transaction that also writes the journal row.
-- `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
-  the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
-  big-endian two's complement, domain-separated SHA-256) both `Sign` and
-  `Verify` agree on. This encoding is the one part of P5 that cannot be
-  changed later without breaking every previously-signed journal -- see
-  its golden vectors below.
-- Immutability of `auth_digest`/`auth_signature`/`auth_key_id` after a
-  journal is signed: enforced by `ledger_journals_block_arbitrary_update()`,
-  but **owned by migration 045 (P4)**, not this migration. Contracts §2
-  (2026-08-21 rewrite) replaced that function's hardcoded per-migration
-  column list with a generic `to_jsonb(OLD)`/`to_jsonb(NEW)` comparison
-  against an explicit mutable-column whitelist, so these three columns are
-  protected automatically once 045 installs it -- migration 046 does not
-  (and must not) touch that function itself.
-- `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
-  key_id at construction time, in the caller's own composition root,
-  never silently inside the ledger.
+- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
+  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
+  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
+  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
+  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
+  this migration (see "Note on scope" above) — they live in
+  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
+  instead, which must ship in the same release as the `DATABASE_URL`
+  cutover (`docs/RUNBOOK.md` §9).
 
-**Pinned by** (`postgres/auth_pin_test.go` unless noted):
-- `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
-  digest/signature/key_id round-trip through `core.VerifyJournalAuth`
-  successfully.
-- `TestPostJournal_UnsignedWithoutAttestor` -- `Attestor == nil` leaves
-  `PostJournal` byte-for-byte unchanged from before P5 (expand-safe).
-- `TestPostJournal_IdempotentReplayDoesNotResign` -- a replayed post with
-  the same idempotency key triggers exactly one `Attestor.Sign` call, not
-  two.
-- `TestPostJournal_AttestorErrorRejectsPost` -- a `Sign` error rejects the
-  whole write; nothing is persisted.
-- `TestForgedDirectSQLJournalIsUnauthorized` -- the M5 scenario itself: a
-  balanced journal inserted directly via SQL (bypassing `PostJournal`
-  entirely) passes a live per-journal balance check and still fails
-  `core.VerifyJournalAuth`.
-- `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
-  (`core/auth_test.go`) -- pin the exact byte layout against independently
-  computed values; any diff is a breaking encoding change.
-- `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
-  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
-  of `VerifyJournalAuth`'s three guard clauses; removing any one of them
-  was verified, by hand, to make its corresponding test fail (the
-  mismatch-check removal reaches a nil `AuthVerifier` and panics; the
-  digest-emptiness removal is independently caught by the mismatch check,
-  demonstrating defense-in-depth rather than a redundant no-op check).
-- `authdev.TestNewLocalAttestor_DeterministicFromSameSeed` /
-  `TestNewLocalVerifier_StandaloneFromPublicKey` -- the default Attestor
-  implementation itself: same seed signs identically, and a verify-only
-  process (holding only the public key) can check a signature it never
-  had the private key to produce.
-
----
-
-> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
-> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
-> task that has not merged yet, so this document does not yet contain it.
-> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
-> not a reflection of merge order.
-
+**Pinned by**:
+- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
+  first and confirms the single connection has *unrestricted* DDL there
+  (proving the restrictions below are not vacuous), then migrates the rest
+  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
+  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
+  journal_entries`/touch `schema_migrations`, while it can still
+  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
+  `journal_entries`.
+- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
+  exactly to 042 through a non-superuser role that owns the database
+  (simulating a managed-Postgres master user) and confirms that role can
+  still write afterward. This is the regression pin for the combined-
+  migration bug described above: it fails with `permission denied for
+  table schema_migrations` against the old (pre-split) combined 042 and
+  passes against the current (pure-expand) 042.
+- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
+  counterpart pin for 049: the same non-superuser role can still write
+  after 042 alone, but loses access to business tables once 049 runs
+  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
+  §9). Also proves 049 itself can apply cleanly under a non-superuser
+  connection -- an earlier revision without its narrow
+  schema-USAGE/schema_migrations re-grants could never successfully apply
+  at all, on any non-superuser connection, regardless of `DATABASE_URL`
+  cutover timing.
+- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  — after manually granting `ledger_owner` ownership of `journal_entries`
+  (mirroring what 049 does, scoped to just this one table so the test does
+  not depend on 049's exact implementation), a partition it creates *after*
+  042's grant ran is still writable by `ledger_app` through the parent
+  table name.
+- `postgres.TestMigration042_RoleAttributes` — pins role attributes
+  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
+  role holds (`information_schema.role_table_grants`) on an ordinary table,
+  `journal_entries`, and `schema_migrations`.
+- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
+  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
+  for 042 and 049 each roll back cleanly and leave the original connection
+  able to operate normally.
 ## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
 
 `balance_checkpoints` is an unreliable cache, not a source of truth — an
@@ -1170,6 +1142,121 @@ trigger/function manually removed before this migration existed):
 - `TestJournalsGuard_FutureColumnsProtectedByDefault`
 
 ---
+
+## I-26: Every journal that carries an authorization signature has a valid one
+
+(docs/plans/2026-08-21-tamper-evident-ledger-design.md §7 / M5, P5 of the
+integrity-hardening wave; simplified from the original task brief by Team
+Lead on 2026-08-21 -- see `core/auth.go`'s package doc comment.)
+`journals.auth_digest` / `auth_signature` / `auth_key_id` (migration 046)
+let a journal posted through `postgres.LedgerStore.PostJournal` (with a
+`core.Attestor` configured via `WithAuth`, in pool mode) carry a signature
+over `core.CanonicalJournalDigest`'s canonical, uid-space encoding of the
+posting -- computed and signed strictly **outside** any DB transaction
+(`financial.md`: no external calls inside a DB transaction is the whole
+reason the digest is uid-space, not id-space; see design doc §7.2 --
+benchmarking confirmed this ordering adds pure latency without extending
+any lock's hold time, since it runs before any advisory lock is taken).
+`core.VerifyJournalAuth` recomputes the digest from the journal's own
+fields and rejects (wrapping `core.ErrUnauthorizedJournal`) any journal
+whose stored digest is empty, does not match the recomputation, or whose
+signature/key_id the configured `core.AuthVerifier` does not accept. Every
+journal is signed once an Attestor is configured -- there is no
+per-journal-type coverage decision and no KMS-failure-mode branch; a
+`Sign` error simply propagates as a plain error.
+
+**Why**: M5 is the one finding this whole wave exists to answer --
+`journals`/`journal_entries` FK integrity, per-currency balance,
+append-only triggers, and the account-holder sign convention are all
+satisfied by a perfectly balanced, perfectly plausible **forged** journal
+inserted directly via SQL by an attacker holding DB write credentials.
+Every invariant I-1 through I-25 passes on that forgery. Per-journal
+signing is the only mechanism that still tells it apart from a genuine
+posting, because forging a valid signature additionally requires the
+Attestor's private key -- which never enters the database (design doc
+§0/§7.1) -- rather than a DB write credential (design doc §1's threat
+model row for "app DB 凭证"). The default implementation
+(`authdev.LocalAttestor`, an in-process ed25519 key loaded from an
+injected seed) is production-ready for this project's actual deployment
+(a monolith, not a fleet behind a remote KMS): the threat model already
+concedes "app process + signing key both compromised" as out of scope
+(design doc §1 non-goal 2) for ANY key custody model, local or remote, so
+a local key satisfies the same guarantee.
+
+**Scope note (honest, not silently narrowed)**: signing only happens on
+`PostJournal`'s pool-mode, top-level call path -- `ExecuteTemplateBatch`,
+`ReverseJournal`/`ReverseJournalFraction`, and any `JournalWriter` call
+made inside `ledger.Service.RunInTx` (tx-mode, `WithDB`) never sign,
+because there is no point in those call chains that is provably outside a
+DB transaction the way `financial.md` requires for the Attestor's signing
+call. Journals posted through those paths carry empty auth columns,
+indistinguishable from "no Attestor configured" -- exactly like every
+journal predating P5. A withdrawal gate (a downstream consumer treating an
+unsigned journal as unauthorized for withdrawal purposes) is **not wired
+by this phase** -- design doc §12's P5 row is explicit that it is a
+separate, later release; `core.VerifyJournalAuth` is the primitive that
+release (or `ledger-cli verify`, P6) would call.
+
+**Enforced by**:
+- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
+  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
+  three columns inside the transaction that also writes the journal row.
+- `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
+  the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
+  big-endian two's complement, domain-separated SHA-256) both `Sign` and
+  `Verify` agree on. This encoding is the one part of P5 that cannot be
+  changed later without breaking every previously-signed journal -- see
+  its golden vectors below.
+- Immutability of `auth_digest`/`auth_signature`/`auth_key_id` after a
+  journal is signed: enforced by `ledger_journals_block_arbitrary_update()`,
+  but **owned by migration 045 (P4)**, not this migration. Contracts §2
+  (2026-08-21 rewrite) replaced that function's hardcoded per-migration
+  column list with a generic `to_jsonb(OLD)`/`to_jsonb(NEW)` comparison
+  against an explicit mutable-column whitelist, so these three columns are
+  protected automatically once 045 installs it -- migration 046 does not
+  (and must not) touch that function itself.
+- `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
+  key_id at construction time, in the caller's own composition root,
+  never silently inside the ledger.
+
+**Pinned by** (`postgres/auth_pin_test.go` unless noted):
+- `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
+  digest/signature/key_id round-trip through `core.VerifyJournalAuth`
+  successfully.
+- `TestPostJournal_UnsignedWithoutAttestor` -- `Attestor == nil` leaves
+  `PostJournal` byte-for-byte unchanged from before P5 (expand-safe).
+- `TestPostJournal_IdempotentReplayDoesNotResign` -- a replayed post with
+  the same idempotency key triggers exactly one `Attestor.Sign` call, not
+  two.
+- `TestPostJournal_AttestorErrorRejectsPost` -- a `Sign` error rejects the
+  whole write; nothing is persisted.
+- `TestForgedDirectSQLJournalIsUnauthorized` -- the M5 scenario itself: a
+  balanced journal inserted directly via SQL (bypassing `PostJournal`
+  entirely) passes a live per-journal balance check and still fails
+  `core.VerifyJournalAuth`.
+- `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
+  (`core/auth_test.go`) -- pin the exact byte layout against independently
+  computed values; any diff is a breaking encoding change.
+- `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
+  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
+  of `VerifyJournalAuth`'s three guard clauses; removing any one of them
+  was verified, by hand, to make its corresponding test fail (the
+  mismatch-check removal reaches a nil `AuthVerifier` and panics; the
+  digest-emptiness removal is independently caught by the mismatch check,
+  demonstrating defense-in-depth rather than a redundant no-op check).
+- `authdev.TestNewLocalAttestor_DeterministicFromSameSeed` /
+  `TestNewLocalVerifier_StandaloneFromPublicKey` -- the default Attestor
+  implementation itself: same seed signs identically, and a verify-only
+  process (holding only the public key) can check a signature it never
+  had the private key to produce.
+
+---
+
+> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
+> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
+> task that has not merged yet, so this document does not yet contain it.
+> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
+> not a reflection of merge order.
 
 ## How to add a new invariant
 
