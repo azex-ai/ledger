@@ -131,7 +131,14 @@ func TestCanonicalJournalDigest_GoldenVector(t *testing.T) {
 	// on CanonicalJournalDigest (see /tmp/golden.py used to derive this --
 	// reproduced in the plan report). Any diff here is a breaking encoding
 	// change requiring a new domain separator, not a silent fix.
-	const want = "94fb4ab57aee5ace05e4c78752a28d98267d2ddccdddc821568d67ed6aa098c9"
+	//
+	// Recomputed 2026-08-21 (board #12/#13, Team Lead ruling): domain
+	// separator bumped to 0x10 (0x01 retired; 0x02/0x03 belong to
+	// core/attestation.go's batch digest, P6 -- contracts §2.6) and
+	// EventUID removed from the layout entirely -- see authDigestDomain's
+	// doc comment for why. This value is NOT the same as any pre-ruling
+	// one; that is expected.
+	const want = "730f2859875f3aa10d3f1dbf639ee2505c0b847cbeb36a8f393199b9225c27cb"
 
 	got, err := CanonicalJournalDigest(input, effectiveAt)
 	if err != nil {
@@ -142,15 +149,50 @@ func TestCanonicalJournalDigest_GoldenVector(t *testing.T) {
 	}
 }
 
+// TestCanonicalJournalDigest_IgnoresEventUID pins the 2026-08-21 Team Lead
+// ruling (board #12/#13): EventUID must NOT influence the digest at all.
+// It was in the original (retired) V1 layout, and had to be removed --
+// EventUID is provenance metadata, and the event a journal links to is
+// not always known before Authorize must run (booker.Transition mints it
+// inside the very transaction Authorize exists to run ahead of; see
+// authDigestDomain's doc comment and AuthorizedJournal's). Asserting
+// equality here, rather than only pinning a fixed hash, is deliberate:
+// it fails loudly if anyone re-adds EventUID (or any other event-linkage
+// field) to the digest later without thinking through this exact
+// consequence again.
+func TestCanonicalJournalDigest_IgnoresEventUID(t *testing.T) {
+	entries := []EntryInput{
+		{AccountHolder: 1001, CurrencyUID: "cur-usd-uid", ClassificationUID: "class-mainwallet-uid", EntryType: EntryTypeDebit, Amount: decimal.RequireFromString("100.5")},
+		{AccountHolder: 2001, CurrencyUID: "cur-usd-uid", ClassificationUID: "class-fees-uid", EntryType: EntryTypeCredit, Amount: decimal.RequireFromString("0.5")},
+	}
+	effectiveAt := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+
+	withoutEvent := JournalInput{JournalTypeUID: "jt-deposit-uid", IdempotencyKey: "idem-key-002", ActorID: 42, Source: "test-source", Entries: entries}
+	withEvent := withoutEvent
+	withEvent.EventUID = "evt-abc-123"
+
+	got1, err := CanonicalJournalDigest(withoutEvent, effectiveAt)
+	if err != nil {
+		t.Fatalf("CanonicalJournalDigest(without EventUID): unexpected error: %v", err)
+	}
+	got2, err := CanonicalJournalDigest(withEvent, effectiveAt)
+	if err != nil {
+		t.Fatalf("CanonicalJournalDigest(with EventUID): unexpected error: %v", err)
+	}
+	if hex.EncodeToString(got1) != hex.EncodeToString(got2) {
+		t.Errorf("EventUID must not change the digest: without=%s with=%s", hex.EncodeToString(got1), hex.EncodeToString(got2))
+	}
+}
+
 // TestCanonicalJournalDigest_GoldenVectors_ExtraFields covers the fields
-// the base golden vector above leaves at their zero value: EventUID,
-// ReversalOfUID, more than one currency in a single journal, a negative
-// ActorID, and an amount at the 18-decimal precision boundary. Each
-// expected hex value was computed independently in Python from the exact
-// byte layout documented on CanonicalJournalDigest (Team Lead's
-// 2026-08-21 direction: this encoding is the one thing in P5 that must
-// not be under-invested in -- it can never change without breaking every
-// previously-signed journal).
+// the base golden vector above leaves at their zero value: ReversalOfUID,
+// more than one currency in a single journal, a negative ActorID, and an
+// amount at the 18-decimal precision boundary. Each expected hex value
+// was computed independently in Python from the exact byte layout
+// documented on CanonicalJournalDigest (Team Lead's 2026-08-21 direction:
+// this encoding is the one thing in P5 that must not be under-invested in
+// -- it can never change without breaking every previously-signed
+// journal).
 func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 	entries := []EntryInput{
 		{AccountHolder: 1001, CurrencyUID: "cur-usd-uid", ClassificationUID: "class-mainwallet-uid", EntryType: EntryTypeDebit, Amount: decimal.RequireFromString("100.5")},
@@ -165,22 +207,13 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 		want        string
 	}{
 		{
-			name: "event_uid set",
-			input: JournalInput{
-				JournalTypeUID: "jt-deposit-uid", IdempotencyKey: "idem-key-002", ActorID: 42,
-				Source: "test-source", EventUID: "evt-abc-123", Entries: entries,
-			},
-			effectiveAt: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC),
-			want:        "136e6875d56e4343dec75a5cdffd74079d8c46f04955f100052c7d7cb40aabab",
-		},
-		{
 			name: "reversal_of_uid set",
 			input: JournalInput{
 				JournalTypeUID: "jt-deposit-uid", IdempotencyKey: "idem-key-003", ActorID: 42,
 				Source: "reversal", ReversalOfUID: "journal-orig-uid-999", Entries: entries,
 			},
 			effectiveAt: time.Date(2026, 8, 21, 13, 30, 0, 0, time.UTC),
-			want:        "92586cbfa74e93295397a1b935839c7e33da6d2cee3ed4f9426041c9a5d0f265",
+			want:        "b94fe61c56f1ea4467b25cb9f19104128779abb108ed94a6f79cbafb05330e24",
 		},
 		{
 			name: "multi-currency journal",
@@ -194,7 +227,7 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 				},
 			},
 			effectiveAt: time.Date(2026, 8, 21, 14, 0, 0, 0, time.UTC),
-			want:        "c5919fa74a867d8eb72c3e6d001ba474aa95e4addda0148c29293075660c22d1",
+			want:        "d720ceeb4b496a6e6bb79d4a520d5fe8f7cffe0b49af837002e536efeb221064",
 		},
 		{
 			name: "negative actor_id + smallest representable amount",
@@ -206,7 +239,7 @@ func TestCanonicalJournalDigest_GoldenVectors_ExtraFields(t *testing.T) {
 				},
 			},
 			effectiveAt: time.Date(2026, 8, 21, 15, 0, 0, 0, time.UTC),
-			want:        "3f597d9f61c1eccdd0c5e84690b05c4a87ab2ced74d9764c3d15bda0b0b576ff",
+			want:        "464bfd031c852212a8c92f0e3055f380accad3adf3a4e554292f59b5059d5b36",
 		},
 	}
 

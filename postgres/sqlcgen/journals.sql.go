@@ -71,7 +71,7 @@ func (q *Queries) DistinctClassificationsForAccount(ctx context.Context, arg Dis
 }
 
 const getJournal = `-- name: GetJournal :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE id = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE id = $1
 `
 
 func (q *Queries) GetJournal(ctx context.Context, id int64) (Journal, error) {
@@ -94,12 +94,13 @@ func (q *Queries) GetJournal(ctx context.Context, id int64) (Journal, error) {
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
 
 const getJournalByIdempotencyKey = `-- name: GetJournalByIdempotencyKey :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE idempotency_key = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE idempotency_key = $1
 `
 
 func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey string) (Journal, error) {
@@ -122,12 +123,13 @@ func (q *Queries) GetJournalByIdempotencyKey(ctx context.Context, idempotencyKey
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
 
 const getJournalByUID = `-- name: GetJournalByUID :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE uid = $1
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE uid = $1
 `
 
 func (q *Queries) GetJournalByUID(ctx context.Context, uid pgtype.UUID) (Journal, error) {
@@ -150,12 +152,13 @@ func (q *Queries) GetJournalByUID(ctx context.Context, uid pgtype.UUID) (Journal
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
 
 const getJournalForUpdate = `-- name: GetJournalForUpdate :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE id = $1 FOR UPDATE
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE id = $1 FOR UPDATE
 `
 
 // Row-locks the original journal for the duration of the caller's
@@ -181,12 +184,13 @@ func (q *Queries) GetJournalForUpdate(ctx context.Context, id int64) (Journal, e
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
 
 const getJournalForUpdateByUID = `-- name: GetJournalForUpdateByUID :one
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE uid = $1 FOR UPDATE
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE uid = $1 FOR UPDATE
 `
 
 func (q *Queries) GetJournalForUpdateByUID(ctx context.Context, uid pgtype.UUID) (Journal, error) {
@@ -209,6 +213,7 @@ func (q *Queries) GetJournalForUpdateByUID(ctx context.Context, uid pgtype.UUID)
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
@@ -225,9 +230,9 @@ func (q *Queries) GetJournalUIDByID(ctx context.Context, id int64) (pgtype.UUID,
 }
 
 const insertJournal = `-- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-RETURNING id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+RETURNING id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status
 `
 
 type InsertJournalParams struct {
@@ -245,11 +250,13 @@ type InsertJournalParams struct {
 	AuthDigest     []byte         `json:"auth_digest"`
 	AuthSignature  []byte         `json:"auth_signature"`
 	AuthKeyID      string         `json:"auth_key_id"`
+	AuthStatus     string         `json:"auth_status"`
 }
 
 // auth_digest/auth_signature/auth_key_id (migration 046, P5) are empty when
-// the caller did not sign this posting (no core.Attestor configured, or a
-// tx-bound store -- see postgres.LedgerStore.PostJournal).
+// the caller did not sign this posting. auth_status (migration 051, design
+// doc §7.5) always records WHY: 'signed' / 'unsigned_no_attestor' /
+// 'unsigned_tx_mode' -- see core.AuthStatus.
 func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (Journal, error) {
 	row := q.db.QueryRow(ctx, insertJournal,
 		arg.JournalTypeID,
@@ -266,6 +273,7 @@ func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (J
 		arg.AuthDigest,
 		arg.AuthSignature,
 		arg.AuthKeyID,
+		arg.AuthStatus,
 	)
 	var i Journal
 	err := row.Scan(
@@ -285,6 +293,7 @@ func (q *Queries) InsertJournal(ctx context.Context, arg InsertJournalParams) (J
 		&i.AuthDigest,
 		&i.AuthSignature,
 		&i.AuthKeyID,
+		&i.AuthStatus,
 	)
 	return i, err
 }
@@ -456,7 +465,7 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Li
 }
 
 const listJournalsCursor = `-- name: ListJournalsCursor :many
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals
 WHERE id > $1::bigint
 ORDER BY id ASC
 LIMIT $2::int
@@ -493,6 +502,7 @@ func (q *Queries) ListJournalsCursor(ctx context.Context, arg ListJournalsCursor
 			&i.AuthDigest,
 			&i.AuthSignature,
 			&i.AuthKeyID,
+			&i.AuthStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -557,7 +567,7 @@ func (q *Queries) ListReversalEntriesByOriginal(ctx context.Context, reversalOf 
 }
 
 const listReversalsByOriginalJournalID = `-- name: ListReversalsByOriginalJournalID :many
-SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id FROM journals WHERE reversal_of = $1 ORDER BY id
+SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals WHERE reversal_of = $1 ORDER BY id
 `
 
 // A journal may now have more than one reversal (partial reversals), so this
@@ -590,6 +600,7 @@ func (q *Queries) ListReversalsByOriginalJournalID(ctx context.Context, reversal
 			&i.AuthDigest,
 			&i.AuthSignature,
 			&i.AuthKeyID,
+			&i.AuthStatus,
 		); err != nil {
 			return nil, err
 		}

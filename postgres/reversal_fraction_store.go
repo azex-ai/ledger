@@ -183,8 +183,13 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 			ReversalOfUID:  journalUID,
 			Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 		}
+		// Never signs -- same reasoning as executeTemplateBatchWithQueries:
+		// this always runs inside a transaction already opened above, either
+		// self-owned or the caller's (out of scope for design doc §7.5's
+		// Authorize/PostAuthorized split; labeled unsigned_tx_mode, not left
+		// ambiguous).
 		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-		return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
+		return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
 	}
 
 	// Group original entries by (currency, entry_type) so each group's total
@@ -294,8 +299,9 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 	}
 
+	// Never signs -- same reasoning as above.
 	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
 }
 
 // cumulativeReversedByDimension sums, per account dimension and *original*

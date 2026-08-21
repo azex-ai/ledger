@@ -32,13 +32,15 @@ type Journal struct {
 	// AuthDigest/AuthSignature/AuthKeyID persist the per-journal KMS
 	// authorization signature (design doc §7, P5). Empty AuthKeyID means
 	// this journal was never signed -- either no core.Attestor was
-	// configured, or the store was tx-bound when it posted (see
-	// postgres.LedgerStore.PostJournal's doc comment). Callers that need to
-	// gate on "is this journal signed" must check AuthKeyID == "", never
-	// infer it from AuthSignature's length alone.
-	AuthDigest    []byte `json:"auth_digest,omitempty"`
-	AuthSignature []byte `json:"auth_signature,omitempty"`
-	AuthKeyID     string `json:"auth_key_id,omitempty"`
+	// configured, or the write path had no safe point to sign (see
+	// AuthStatus for which). Callers that need to gate on "is this journal
+	// signed" must check AuthStatus == AuthStatusSigned, never infer it
+	// from AuthSignature's length alone -- that ambiguity (AuthStatus
+	// didn't exist yet) is exactly the bug design doc §7.5 fixes.
+	AuthDigest    []byte     `json:"auth_digest,omitempty"`
+	AuthSignature []byte     `json:"auth_signature,omitempty"`
+	AuthKeyID     string     `json:"auth_key_id,omitempty"`
+	AuthStatus    AuthStatus `json:"auth_status"`
 }
 
 // Entry is a single debit or credit line in a journal. Entries carry no

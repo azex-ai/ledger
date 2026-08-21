@@ -161,6 +161,10 @@ func (f *fakeToleranceJournalWriter) PostJournal(context.Context, core.JournalIn
 	return nil, nil
 }
 
+func (f *fakeToleranceJournalWriter) PostAuthorized(context.Context, core.AuthorizedJournal) (*core.Journal, error) {
+	return nil, nil
+}
+
 func (f *fakeToleranceJournalWriter) ReverseJournal(context.Context, string, string) (*core.Journal, error) {
 	return nil, nil
 }
@@ -196,6 +200,10 @@ func (f *fakeBatchToleranceJournalWriter) ExecuteTemplate(_ context.Context, cod
 }
 
 func (f *fakeBatchToleranceJournalWriter) PostJournal(context.Context, core.JournalInput) (*core.Journal, error) {
+	return nil, nil
+}
+
+func (f *fakeBatchToleranceJournalWriter) PostAuthorized(context.Context, core.AuthorizedJournal) (*core.Journal, error) {
 	return nil, nil
 }
 
