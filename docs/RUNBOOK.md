@@ -43,7 +43,7 @@ document: [`DR.md`](./DR.md).
 # Run the full reconcile suite once more to make sure it's not a flake
 curl -X POST http://ledger/api/v1/reconcile | jq .
 
-# Or run all 12 checks at once via the service:
+# Or run the full check suite at once via the service:
 ledger-cli reconcile --full
 ```
 
@@ -53,23 +53,27 @@ sub-cent drift; check the `drift` magnitude first.
 
 ### Investigate
 
-The 12 reconcile checks (`service.FullReconciliationService`, in
-`service/reconcile.go`; report field is `checks[].name`):
+The reconcile checks (`service.FullReconciliationService`, in
+`service/reconcile.go`; report field is `checks[].name`; the exact count
+lives only in `TestFullReconciliation_AllPass`, not in this table — add a
+row here when you add a check, but don't expect this table to be exhaustive
+proof of the count):
 
-| # | Check name | Means |
-|---|------------|-------|
-| 1 | `journal_dr_cr` | Σ(debits) = Σ(credits) globally, per currency |
-| 2 | `checkpoint_balance` | fleet-wide, resumable scan: each (holder, currency) checkpoint vs. a full recompute from entries (I-23; C4b persisted cursor + `lap_dirty` in `reconcile_scan_cursors`) |
-| 3 | `orphan_entries` | journal_entries with no matching journal |
-| 4 | `accounting_equation` | Σ(debit-normal net) = Σ(credit-normal net) per currency |
-| 5 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
-| 6 | `non_negative_balances` | no holder > 0 has balance < 0 |
-| 7 | `orphan_reservations` | reservations with no matching journal |
-| 8 | `pending_journal_timeout` | skipped — `journals.status` not yet in the schema |
-| 9 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
-| 10 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
-| 11 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
-| 12 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
+| Check name | Means |
+|------------|-------|
+| `global_dr_cr_equality` | Σ(debits) = Σ(credits) globally, per currency — does NOT verify any individual journal (see `journal_dr_cr` below for that) |
+| `checkpoint_balance` | fleet-wide, resumable scan: each (holder, currency) checkpoint vs. a full recompute from entries (I-23; C4b persisted cursor + `lap_dirty` in `reconcile_scan_cursors`) |
+| `orphan_entries` | journal_entries with no matching journal |
+| `accounting_equation` | Σ(debit-normal net) = Σ(credit-normal net) per currency |
+| `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
+| `non_negative_balances` | no holder > 0 has balance < 0 |
+| `orphan_reservations` | reservations with no matching journal |
+| `pending_journal_timeout` | skipped — `journals.status` not yet in the schema |
+| `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
+| `stale_rollup_queue` | rollup queue items unclaimed for too long |
+| `journal_dr_cr` | genuine per-journal, per-currency balance (M1/I-24) — catches two journals that are each individually unbalanced but net to zero in aggregate, which `global_dr_cr_equality` structurally cannot see |
+| `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
+| `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -78,6 +82,16 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
 - **`accounting_equation`** — the headline disaster. Stop accepting
   new writes (see §9), bisect the journal_id range to find the broken
   journal, post a reversal once identified.
+- **`global_dr_cr_equality`** — same class of disaster as `accounting_equation`,
+  at fleet-wide granularity. Stop new writes, bisect by date (see "Common
+  queries" below), post a reversal once identified.
+- **`journal_dr_cr`** — a SPECIFIC journal is unbalanced by currency (I-1/I-24).
+  The finding logs the offending `journal_id`/`currency_id` internally (never
+  in the report itself, I-18) — check server logs for
+  `"service: reconcile: unbalanced journal sample"`. Post a reversal for that
+  journal; do not touch `journal_entries` directly. If this fires at all on a
+  journal newer than migration `044`, treat it as a security incident: the
+  DB-layer trigger should have rejected the insert outright.
 - **`settlement_netting`** — usually a stuck FX or transfer leg
   (one side posted, the other didn't). Check `journals` table for orphan
   half-pair on the `settlement` classification.
