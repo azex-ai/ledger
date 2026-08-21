@@ -835,9 +835,14 @@ release (or `ledger-cli verify`, P6) would call.
   `Verify` agree on. This encoding is the one part of P5 that cannot be
   changed later without breaking every previously-signed journal -- see
   its golden vectors below.
-- Migration 046's rebuilt `ledger_journals_block_arbitrary_update()` --
-  once a journal is signed, `auth_digest`/`auth_signature`/`auth_key_id`
-  are as immutable as every other journal column.
+- Immutability of `auth_digest`/`auth_signature`/`auth_key_id` after a
+  journal is signed: enforced by `ledger_journals_block_arbitrary_update()`,
+  but **owned by migration 045 (P4)**, not this migration. Contracts §2
+  (2026-08-21 rewrite) replaced that function's hardcoded per-migration
+  column list with a generic `to_jsonb(OLD)`/`to_jsonb(NEW)` comparison
+  against an explicit mutable-column whitelist, so these three columns are
+  protected automatically once 045 installs it -- migration 046 does not
+  (and must not) touch that function itself.
 - `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
   key_id at construction time, in the caller's own composition root,
   never silently inside the ledger.
