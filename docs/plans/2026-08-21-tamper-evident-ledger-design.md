@@ -267,6 +267,39 @@ per-journal 签名防的是**拿到 DB 写权限**的攻击者。拿到 **app �
 可以铸造合法签名（§1 non-goal 2）。这不削弱本机制 —— 它把攻击门槛从「一条 SQL」
 抬到「拿下应用运行时」，并留下 KMS audit log。
 
+### 7.5 `RunInTx` 缺口 —— 本节的 Critical 修正（2026-08-21）
+
+⚠️ **§7.2 只规定了「digest 在 uid-space、签名在事务外」，从没处理它怎么和 `RunInTx` 组合。**
+而 `RunInTx` 是这个库的旗舰特性，也是 CLAUDE.md 为 Event-Journal 原子性（I-10）推荐的唯一模式。
+
+首版实现在 tx 模式（`s.pool == nil`，即调用方已开事务）下**故意跳过签名** —— 理由正确：
+事务已经被别人开了，没有安全点可以调外部签名而不违反 `financial.md`。但后果致命：
+
+```
+service/onchain.go:779  postDepositConfirmedJournal → TxComposer.RunInTx
+```
+
+那是**入账过账路径** —— 正是 P5 存在的理由（§2 的 M5：伪造入账 = 凭空铸币）。
+所以 P5 首版形态**恰好不保护它被设计来保护的那条路**。
+
+更糟：未签名状态与「Attestor 未配置」**不可区分**。验证时无法分辨
+「签名上线前的历史 journal」/「走 `RunInTx` 所以没签」/「攻击者直接 INSERT 的行」——
+整个验证故事在这一类上塌掉（`working-agreements` §3：不可区分就是静默失败）。
+
+**修法（两件，Lead 拍板，board #12）**：
+
+1. **预授权 API**：`svc.Authorize(ctx, input) (AuthorizedJournal, error)` 在**事务外**算 digest
+   并签名；`JournalWriter` 加 `PostAuthorized(ctx, AuthorizedJournal)`。
+   `postDepositConfirmedJournal` 在开 `RunInTx` **之前**调 `Authorize` ——
+   它本来就在那之前算 `journalMeta`，输入是已知的。红线不破，洞关掉。
+2. **`auth_status` 枚举列**（migration `051`）：`signed` / `unsigned_no_attestor` /
+   `unsigned_tx_mode` 三态，让「为什么没签」可区分。
+   该列由 045 的通用 `to_jsonb` 比较自动保护（不在 mutable 白名单内），无需再碰那个函数。
+
+**范围红线**：**不新增任何配置旋钮** —— 无 policy、无 threshold、无 mode。
+只有两个方法 + 一个枚举列。这一条是刻意的：本设计已经因为围绕部署变量建配置而返工过一次
+（§14 开头那段）。
+
 ## 8. P6 — 签名 batch digest + 外部锚（同一个 phase）
 
 覆盖 P5 管不到的两件事：**行是否被删除**、**历史是否被改写**。
@@ -341,15 +374,43 @@ CREATE TABLE entry_attestations (
 **红线**：`NOT_RUN ≠ VERIFIED`。KMS 不可达 / 公钥缺失 / 外部锚拉不到 / 超时 ⟹ 一律 `NOT_RUN`，
 **fail-closed**。这与 P0 刚修的 `Complete`/`FullCoverage` 语义是同一条纪律的两处落地。
 
-## 9. P7 — Merkle tree（可选）
+## 9. P7 — Merkle tree（**在范围内**，Aaron 2026-08-21 拍板）
 
-**只在需要 inclusion proof 或定位时才做。** 签名 batch digest（P6）已能回答
-「这批有没有被改」；Merkle 多出来的能力是「被改的是哪 37 条」以及「向第三方证明某笔在账本内」。
+> 原稿把这一节列为「仅当需要 inclusion proof 或定位时才做」。**两样都需要**，所以 P7 转正。
 
-若做：采纳 **RFC 6962**（Certificate Transparency）规范，不自创 ——
-`leaf = SHA256(0x00 || payload)`、`node = SHA256(0x01 || l || r)`，
-奇数叶子**不复制末节点**（防 CVE-2012-2459 类二义性）。`batch_digest` 列直接换成 `merkle_root`，
-其余结构不变（这是 P6 结构留的接口位）。
+签名 batch digest（P6）已能回答「这批有没有被改」。P7 要交付的是它答不了的两件事，
+**它们是两个独立能力，各有各的工作量，不要当成 Merkle 的免费副产品**：
+
+### 9.1 定位（localization）—— 给 on-call 用
+
+P6 只能告诉你「seq 137 这批对不上」。一批可能有几千条 entry。
+Merkle 让你沿树下降，把不一致收敛到具体叶子：
+
+- 从根开始比对左右子树 hash，只沿不匹配的分支下降 —— O(k log n)，k = 被改条数。
+- 输出必须是**具体 entry id 列表**，不是「某个区间里有问题」。
+- 接进 `ledger-cli verify`：`TAMPERED` 判定要附上被改的 entry 清单。
+
+### 9.2 Inclusion proof —— 给第三方用
+
+证明「某笔 journal 确实在账本里」而**不暴露其余账目**，且验证方**不需要访问数据库**：
+
+- 生成：给定 entry id → 返回 audit path（兄弟 hash 序列 + 叶子索引 + 所属 seq 的 root）。
+- 验证：`VerifyInclusion(leaf, path, index, root) bool` —— **纯函数，零依赖**，
+  第三方可以只拿这个函数 + 外部锚上的 root 独立验证。这是「不需要访问数据库」的兑现。
+- 红线：audit path **不得泄露其他 entry 的内容**（兄弟节点只给 hash，不给 payload）。
+
+### 9.3 实现约束
+
+- 采纳 **RFC 6962**（Certificate Transparency）规范，不自创：
+  `leaf = SHA256(0x00 || payload)`、`node = SHA256(0x01 || l || r)`，
+  奇数叶子**不复制末节点**（防 CVE-2012-2459 类二义性）。
+- `ledger_attestations.batch_digest` 换成 `merkle_root`，其余结构不变 ——
+  P6 刻意留了这个接口位。migration `048`。
+- **编码换 domain separator**：P6 的 batch digest 与 Merkle root 不是同一个东西，
+  不要复用同一个 separator（`0x02`），否则历史 attestation 与新的无法区分。
+- 叶子的 payload 复用 P5 的 `EncodeAmount` 与字段顺序纪律（同一套 golden vectors 约束），
+  **不要另起一套编码**。
+- 必须对拍 **RFC 6962 的公开测试向量**，不只测自洽。
 
 ## 10. 新增不变量（按 `INVARIANTS.md` §How to add 流程）
 

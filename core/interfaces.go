@@ -61,6 +61,45 @@ type BalanceReader interface {
 	GetBalanceBreakdown(ctx context.Context, holder int64, currencyUID string) (*BalanceBreakdown, error)
 }
 
+// CheckpointIntegrityStore provides trusted, entries-only balance operations
+// that never consult balance_checkpoints, so checkpoint tampering has zero
+// influence on either method (docs/INVARIANTS.md I-23).
+type CheckpointIntegrityStore interface {
+	// RecomputeBalance ignores the checkpoint entirely and sums every
+	// journal_entries row for the dimension from entry 0. It is slow relative
+	// to BalanceReader.GetBalance (checkpoint + delta) because it rescans full
+	// history — callers on the withdrawal / large-amount path MUST use this
+	// instead of GetBalance for exactly that reason: checkpoint tampering
+	// cannot affect a value that never reads the checkpoint.
+	RecomputeBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
+	// RebuildCheckpoint is the trusted operator entry point that repairs a
+	// checkpoint already found to have drifted by reconcile's
+	// checkpoint_balance check. It locks the dimension, recomputes balance and
+	// watermark from entry 0, and unconditionally overwrites the existing
+	// checkpoint row — unlike the rollup worker's monotonic upsert, which can
+	// never repair a checkpoint whose last_entry_id was tampered to look
+	// "ahead" of the true watermark.
+	//
+	// Detection (reconcile) and correction (this method) are deliberately
+	// separate calls: nothing in this library invokes RebuildCheckpoint
+	// automatically, because auto-correcting while an attack may still be in
+	// progress would destroy the forensic evidence the drift represents.
+	//
+	// A manual repair has the same evidence-destroying property automatic
+	// repair does — the moment the checkpoint is overwritten, the drift is
+	// gone from balance_checkpoints. So every call durably records the
+	// before/after values and the resulting drift in the append-only
+	// checkpoint_rebuilds table (migration 050), in the same transaction as
+	// the overwrite: a repair can never happen without leaving forensic
+	// evidence. actorID identifies who/what triggered the rebuild (0 if
+	// unknown), stored alongside the record — same convention as
+	// JournalInput.ActorID.
+	//
+	// Returns core.ErrRollupPending if a rollup_queue item is still pending or
+	// claimed for the dimension — see that error's doc comment.
+	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*BalanceCheckpoint, error)
+}
+
 // Reserver handles reserve/settle/lock flow.
 type Reserver interface {
 	Reserve(ctx context.Context, input ReserveInput) (*Reservation, error)
@@ -436,4 +475,36 @@ type DepositConfirmer interface {
 // §5.5) -- it only signs sweep transactions.
 type Signer interface {
 	SignTx(ctx context.Context, chainID int64, unsignedTx []byte) (signedTx []byte, err error)
+}
+
+// Attestor abstracts the key that authorizes a posting (design doc §7,
+// P5). The private key must never enter the database: a DB compromise
+// alone must not yield the ability to mint a valid authorization. Beyond
+// that, key custody (a local in-process key, a KMS/HSM, or anything else)
+// is an implementation detail behind this port -- the library ships
+// authdev.LocalAttestor as its default, production-ready implementation
+// (Team Lead's 2026-08-21 simplification: a remote KMS's latency/
+// availability tradeoffs were solving a deployment problem this project
+// does not have; a monolith's own threat model already concedes "app
+// process + signing key both compromised" as out of scope, design doc §1
+// non-goal 2, so a local key satisfies the same guarantee a remote one
+// would). Deliberately distinct from Signer (EVM sweep transactions) --
+// different key, different blast radius, never the same instance
+// (integrity contracts §4).
+//
+// Deployment note (not enforced in code -- a config-loading concern for
+// the composition root): the signing key must not live in the same
+// secrets store / env bundle as DATABASE_URL. A single leaked bundle
+// should not both let an attacker write to the DB AND sign a journal as
+// if it were legitimate -- that would collapse the two rows design doc §1
+// keeps separate ("app DB 凭证" vs "app + KMS 同时失陷").
+type Attestor interface {
+	Sign(ctx context.Context, digest []byte) (signature []byte, keyID string, err error)
+}
+
+// AuthVerifier needs only the public key, so verification can run entirely
+// outside the database host -- that independence is the whole point
+// (design doc §7, P5).
+type AuthVerifier interface {
+	Verify(ctx context.Context, digest, signature []byte, keyID string) error
 }

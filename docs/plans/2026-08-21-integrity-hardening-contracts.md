@@ -18,7 +18,8 @@
 | `045` | P4 | mutation guards（classifications / reservations / period_closes / journals.event_id） |
 | `046` | P5 | `journals` 的 auth 三列 |
 | `047` | P6 | `ledger_attestations` + `entry_attestations` |
-| `048` | 预留 | P7（Merkle 换列语义，若需要） |
+| `048` | P7（**已确认要做**，Aaron 2026-08-21 拍板：定位与 inclusion proof 两样能力都需要） | Merkle 换列语义：`batch_digest` → `merkle_root`，其余结构不变（P6 已留该接口位） |
+| `050` | P2-补 | `checkpoint_rebuilds` append-only 审计表（挂 018 的 `ledger_block_mutation()`）。理由：`RebuildCheckpoint` 与自动修复有**相同的证据销毁性质**，只是多了一个人类决定；drift 非零的那一行就是入侵证据，必须活得比日志长 |
 | `049` | P1-**migrate 阶段** | `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转给 `ledger_owner`。**必须与 `DATABASE_URL` 切换同一次发布上线** —— 它会让在座连接角色失去全部权限（2026-08-21 review 发现 042 原稿把这两步混进 expand，等于破坏性 cutover 伪装成 expand）。042 保持纯增量：只建 role + GRANT，不 REVOKE 任何东西、不动 ownership |
 
 - 每个 migration **必须**有 `.up.sql` + `.down.sql`；不可回滚需显式注明理由（`deployment.md`）。
@@ -89,6 +90,42 @@ $$;
 `018:137-140` 的 trigger 是无条件 `BEFORE UPDATE FOR EACH ROW`，**那个 WHEN 子句不存在**。
 set-once 语义要在**函数体内**实现（如上），不要依赖一个不存在的 WHEN 子句，
 也不要再留一句描述不存在机制的注释。
+
+## 2.5 reconcile check 名 / 号分配（2026-08-21 补，起因：P2×P3 真冲突）
+
+> **这是我漏掉的一类共享写盘点。** 我分配了 migration 号和 `.sql` 文件，却没分配
+> `service/reconcile.go` 里的 check 名与序号 —— 而它是同一类资源。后果：P2 与 P3 各自
+> 新增 check、各自改 `RunFullReconciliation`，并且 **`journal_dr_cr` 这个名字在两个分支里
+> 含义不同**（P2 保留它作全局等式；P3 把全局那个改名 `global_dr_cr_equality` 并让新的
+> 逐-journal check 接管此名）。5 个文件真冲突：`service/reconcile.go`、
+> `postgres/reconcile_queries.go`、两个 reconcile 测试、`docs/INVARIANTS.md`。
+
+### 裁决：P3 的命名胜出（已合入 main）
+
+| check 名 | 语义 | 归属 |
+|---|---|---|
+| `global_dr_cr_equality` | 全局 Σdebit = Σcredit（原 `journal_dr_cr` 的真实行为） | P3 ✅ 已合 |
+| `journal_dr_cr` | **真正逐 journal / 逐 currency** 校验 | P3 ✅ 已合 |
+| `checkpoint_balance` | checkpoint vs entries 重算（P0 修过覆盖盲区） | 既有 |
+| `system_rollup_integrity` | system_rollups 直接对 entries 重算 | P2（待 rebase） |
+| `snapshot_integrity` | balance_snapshots 对 entries 重算 | P2（待 rebase） |
+
+理由：`journal_dr_cr` 这个名字原本就在说谎（它跑的是全局等式），P3 的改名是 M1 修复的
+组成部分，不是风格偏好。P2 的两个新名无冲突。
+
+### 规则（后续所有任务）
+
+1. **新增 check 必须先在本表登记名字**，`bus send team-lead` 要一行，不要自己挑。
+2. **不要用序号命名函数**（`runCheck11X`）—— 序号会因别人插队而失真。用语义名
+   （`runCheckSystemRollupIntegrity`）。既有的 `runCheck1..10` 不动，新增的一律语义名。
+3. **check 总数只出现在测试断言里**，不进任何 prose（见 §10 的对应禁令）。
+4. `postgres/reconcile_queries.go` 是共享 adapter：加方法可以，**不要重排既有方法**，
+   减少 diff 冲突面。
+
+### 合并顺序（Lead 执行）
+
+`main ← P3`（✅ 已合，`044` + 命名修正）→ `main ← P2`（rebase 后重贴它的两个 check）
+→ 其余按完成顺序。**P2 需要 rebase 到含 P3 的 main**，并把自己的两个 check 接在 P3 的命名之后。
 
 ## 3. `.sql` 查询文件分配（避免 sqlcgen 生成物冲突）
 
@@ -236,7 +273,26 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
 5. 修 bug 时**一并修掉指向它的过期注释**。P0 已发现三处同形状的
    「注释把 bug 固化成文档」（`reconcile.sql` 的 `pass (0,0)`、check#8 的意图注释、
    `journal_dr_cr` 声称 DB constraint 仍在 enforce）。不要再制造第四处。
-6. `bus done <id> <agent>`；有新 failure mode 就 `bus learn <agent> "<经验>"`。
+6. **`bus done` 之前必须已 commit，汇报里必须带 commit hash。** 工作区里的改动不算交付 ——
+   任何 `wt remove` / `git checkout` 都会销毁它。若刚做过 `git merge main`，先确认
+   `git status --short` 无 `UU`（冲突文本解完还要 `git add` 才算解决）。
+7. **合并 main 之后必须重跑 `make test`。** 合并前的绿是过期证据 ——
+   2026-08-21 P3 合入 main 带来了 `journal_entries` 的 per-journal 平衡 trigger（044），
+   任何在此之前跑绿的分支都可能撞上它（P3 自己就因此暴露出 `seedJournal` 的非原子性）。
+8. `bus done <id> <agent>`；有新 failure mode 就 `bus learn <agent> "<经验>"`。
+
+> **Lead 侧对应义务**（2026-08-21 补，源：P4 实例）：收到 done 后**先**
+> `git log --oneline <base>..HEAD` 验证有 commit，**再**读文件内容评审。
+>
+> ⚠️ **但不要用 `git status --short` 做这个判断**（2026-08-21 我自己踩的坑）：
+> `--short` **隐藏** "interactive rebase in progress" 那行 banner。`rebase` replay 期间
+> 分支 ref 指向 onto 目标，`git log main..HEAD` 为空、冲突文件显示 `UU` ——
+> 看起来和「工作从未提交」完全一样，实际上原 commit 一直安全躺在 reflog 里。
+> 正确姿势：`git status` **长格式**，或查 `.git/rebase-merge` / `.git/rebase-apply` 是否存在，
+> 或直接 `git reflog <branch>`。
+>
+> 更普适的一条：**快照式观察一个正在动的工作树，歧义信号要按「可能正在变化」解释，
+> 不要按最坏情况下断言** —— 尤其不要据此向上汇报。
 
 ## 10. 禁止事项（跨任务共同）
 
@@ -248,3 +304,10 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
   这是设计稿 §7.2 把 digest 放在 uid-space 的唯一理由，不要"优化"回 id-space。
 - 不用 `_ = someVar` 压编译错误；不丢弃 error（`golang.md`）。
 - 不写「未来可能要支持 X」进当前结构（YAGNI），但保留接口位。
+- **不要把可变数量硬编码进人读措辞**（2026-08-21 P2 实例）：suite 从 10 个 check 扩到 12 个后，
+  「10-check」在 10 处成了过期事实，含 `core/reconcile_extra.go` 里 `FullReconciler`
+  **port 自己的 doc comment** 与 `ledger.go` 的库门面注释。措辞里去掉数字
+  （「the full reconciliation suite」），数量只保留在**机器可校验**的那一处
+  （测试断言）—— 那一处不改就会失败。这与 §2 把列清单从函数体里拿掉是同一个道理：
+  **能结构强制的不靠人全局搜索替换**（`working-agreements` §5）。
+  ⚠️ 历史条目（`CHANGELOG.md`）不要改 —— 它记录的是当时的事实。

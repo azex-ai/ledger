@@ -183,7 +183,8 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 			ReversalOfUID:  journalUID,
 			Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 		}
-		return s.postJournalWithQueries(ctx, q, input)
+		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+		return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
 	}
 
 	// Group original entries by (currency, entry_type) so each group's total
@@ -293,7 +294,8 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
 	}
 
-	return s.postJournalWithQueries(ctx, q, input)
+	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{})
 }
 
 // cumulativeReversedByDimension sums, per account dimension and *original*

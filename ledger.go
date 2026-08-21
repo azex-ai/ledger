@@ -75,6 +75,7 @@ type Service struct {
 	accountPolicyStore   *postgres.AccountPolicyStore
 	periodCloseStore     *postgres.PeriodCloseStore
 	trialBalanceStore    *postgres.TrialBalanceStore
+	checkpointIntegrity  *postgres.CheckpointIntegrityStore
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
@@ -83,6 +84,12 @@ type Service struct {
 	// opt into the crypto deposit + sweep bundle see no difference (design
 	// doc 2026-07-11-crypto-deposit-sweep-design.md: "不配 ChainSet 的消费方零感知").
 	onchain *service.Onchain
+
+	// attestor/authVerifier back WithAttestor (design doc §7, P5).
+	// attestor == nil (never calling WithAttestor) is the default: every
+	// journal posts unsigned, exactly as before P5 existed.
+	attestor     core.Attestor
+	authVerifier core.AuthVerifier
 }
 
 // Option mutates a Service during construction.
@@ -103,6 +110,25 @@ func WithMetrics(m core.Metrics) Option {
 		if m != nil {
 			s.metrics = m
 		}
+	}
+}
+
+// WithAttestor configures the per-journal authorization signing subsystem
+// (docs/plans/2026-08-21-tamper-evident-ledger-design.md §7, P5). attestor
+// signs every journal PostJournal posts (in pool mode -- see
+// postgres.LedgerStore.PostJournal's doc comment for the tx-mode
+// exception); authVerifier is stored only for consumers (see
+// (*Service).AuthVerifier) -- LedgerStore itself never verifies.
+//
+// Never calling this option (the default) leaves every journal unsigned,
+// exactly as before P5 existed (expand-safe). attestor must already be a
+// working implementation by the time it is passed here -- e.g.
+// authdev.NewLocalAttestor's own error return is where a bad key/seed
+// fails, at the caller's composition root, not inside this library.
+func WithAttestor(attestor core.Attestor, authVerifier core.AuthVerifier) Option {
+	return func(s *Service) {
+		s.attestor = attestor
+		s.authVerifier = authVerifier
 	}
 }
 
@@ -127,6 +153,9 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	}
 
 	s.ledgerStore = postgres.NewLedgerStore(pool)
+	if s.attestor != nil {
+		s.ledgerStore = s.ledgerStore.WithAuth(s.attestor)
+	}
 	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore)
 	s.bookingStore = postgres.NewBookingStore(pool)
 	s.eventStore = postgres.NewEventStore(pool)
@@ -143,6 +172,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.accountPolicyStore = postgres.NewAccountPolicyStore(pool)
 	s.periodCloseStore = postgres.NewPeriodCloseStore(pool)
 	s.trialBalanceStore = postgres.NewTrialBalanceStore(pool)
+	s.checkpointIntegrity = postgres.NewCheckpointIntegrityStore(pool)
 
 	return s, nil
 }
@@ -247,7 +277,7 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 // It compares total user-side liability against the custodial system balance.
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
-// FullReconciler returns a core.FullReconciler that runs the complete 10-check
+// FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
@@ -327,6 +357,21 @@ func (s *Service) PeriodCloser() core.PeriodCloser { return s.periodCloseStore }
 // TrialBalanceReader computes a trial balance report.
 func (s *Service) TrialBalanceReader() core.TrialBalanceReader { return s.trialBalanceStore }
 
+// AuthVerifier returns the core.AuthVerifier passed to WithAttestor, or
+// nil if it was never called. LedgerStore itself never calls this --
+// signature verification is a downstream concern (a withdrawal gate,
+// reconcile check, or ledger-cli verify -- none wired by P5, design doc
+// §7.3/§7.4/§12); this accessor exists so those future consumers, and pin
+// tests today, can reach the same verifier the composition root wired in.
+func (s *Service) AuthVerifier() core.AuthVerifier { return s.authVerifier }
+
+// CheckpointIntegrity returns the trusted, entries-only balance API
+// (RecomputeBalance / RebuildCheckpoint) that never consults
+// balance_checkpoints. See core.CheckpointIntegrityStore: withdrawal /
+// large-amount paths must call RecomputeBalance instead of
+// BalanceReader.GetBalance.
+func (s *Service) CheckpointIntegrity() core.CheckpointIntegrityStore { return s.checkpointIntegrity }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -359,6 +404,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		accountPolicyStore:   s.accountPolicyStore.WithDB(tx),
 		periodCloseStore:     s.periodCloseStore.WithDB(tx),
 		trialBalanceStore:    s.trialBalanceStore.WithDB(tx),
+		checkpointIntegrity:  s.checkpointIntegrity.WithDB(tx),
 		channels:             channels,
 	}
 }

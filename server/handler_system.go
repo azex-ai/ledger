@@ -156,7 +156,7 @@ func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleReconcileFull runs the complete 10-check reconciliation suite
+// handleReconcileFull runs the full reconciliation suite
 // on-demand and returns the full report. This is the heavier, fleet-wide
 // counterpart to POST /reconcile (which only runs the global DR=CR check) —
 // expect it to take longer on a large ledger since check #2 scans checkpoints.

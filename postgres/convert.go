@@ -176,8 +176,8 @@ func journalFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row
 		reversalOfUID = pgToUID(u)
 	}
 	eventUID := ""
-	if row.EventID != 0 {
-		u, err := q.GetEventUIDByID(ctx, row.EventID)
+	if row.EventID.Valid {
+		u, err := q.GetEventUIDByID(ctx, row.EventID.Int64)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: resolve event uid: %w", err)
 		}
@@ -196,6 +196,9 @@ func journalFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row
 		EventUID:       eventUID,
 		EffectiveAt:    row.EffectiveAt,
 		CreatedAt:      row.CreatedAt,
+		AuthDigest:     row.AuthDigest,
+		AuthSignature:  row.AuthSignature,
+		AuthKeyID:      row.AuthKeyID,
 	}, nil
 }
 

@@ -11,7 +11,7 @@ Five-dimensional banking coverage:
 Deposit       Pending two-phase API · EVM channel adapter · tolerance settlement
 Withdrawal    Lifecycle state machine · fund locking · fee templates
 Fee           First-class fee classification · fee_charge template
-Security      10-check reconciliation · solvency check · advisory lock leader election
+Security      Full reconciliation suite · solvency check · advisory lock leader election
 Audit         Balance trends · booking trace · reversal chain · OTEL trace propagation
 ```
 
@@ -30,7 +30,7 @@ Core engine capabilities:
 - **In-process event subscription** -- `Worker.Subscribe` for library-mode event callbacks without a webhook server
 - **Transaction composition** -- `RunInTx` lets callers combine ledger writes with their own DB writes in one atomic transaction
 - **Extended preset catalogue** -- deposit, withdrawal, transfer, fee, capital, settlement, and spread bundles ship out-of-the-box
-- **10-check reconciliation engine** -- accounting-equation verification, orphan detection, solvency check, idempotency audit, and stale-rollup detection
+- **Full reconciliation engine** -- accounting-equation verification, orphan detection, solvency check, idempotency audit, stale-rollup detection, and entries-based checkpoint/system_rollup/snapshot integrity
 - **Balance trends + audit queries** -- time-series trends, reversal chains, booking traces for customer support and compliance
 - **Platform solvency API** -- `PlatformBalanceReader` + `SolvencyChecker` read from the `system_rollups` materialised view in O(1)
 - **Sparse daily snapshots** -- historical balance snapshots; startup backfill with advisory-lock guard for multi-replica safety
@@ -565,7 +565,7 @@ All accessors return interfaces from `core/` so your application code depends on
 
 | Method | Interface | Description |
 |--------|-----------|-------------|
-| `svc.FullReconciler(cfg)` | `core.FullReconciler` | 10-check reconciliation suite |
+| `svc.FullReconciler(cfg)` | `core.FullReconciler` | Full reconciliation suite |
 | `svc.SnapshotBackfiller()` | `core.SnapshotBackfiller` | Fill historical snapshot gaps |
 | `svc.Worker(cfg)` | `*service.Worker` | Background jobs (rollup, expiry, reconcile, snapshots) |
 
@@ -626,7 +626,7 @@ ledger/
     audit_store.go       AuditQuerier
     balance_trends_store.go  BalanceTrendReader
     platform_balance_store.go  PlatformBalanceReader + SolvencyChecker
-    reconcile_adapter.go ReconcileQuerier (10-check suite queries)
+    reconcile_adapter.go ReconcileQuerier (full reconciliation suite queries)
     snapshot_extra_store.go  SparseSnapshotter + LiveBalanceMerger
 
   presets/             Out-of-the-box classification configs
@@ -643,7 +643,7 @@ ledger/
   service/             Business orchestration
     delivery/            Event delivery: callback (library) + webhook (service)
     rollup.go            Async checkpoint materialisation
-    reconcile.go         Basic + 10-check FullReconciliationService
+    reconcile.go         Basic + full-suite FullReconciliationService
     snapshot.go          Daily balance snapshots (advisory-lock guard)
     expiration.go        Booking + reservation expiry sweeper
     worker.go            Background worker loop (leader election via pg_try_advisory_lock)

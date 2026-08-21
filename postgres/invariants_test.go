@@ -289,6 +289,20 @@ func TestMoneyConservation_Network(t *testing.T) {
 
 	assert.True(t, liability.Equal(custody), "user main_wallet sum (%s) must equal custodial sum (%s)", liability, custody)
 	assert.True(t, liability.Equal(totalSeeded), "user main_wallet sum (%s) must equal total seeded (%s)", liability, totalSeeded)
+
+	// P3 pre-flight (docs/plans/2026-08-21-integrity-hardening-contracts.md
+	// §6): before trusting the per-journal balance trigger (migration 044)
+	// in a real deployment, confirm existing data has zero violations --
+	// upgrading with pre-existing corruption would mean the trigger (which
+	// only guards future writes) papers over it silently. This network of
+	// 200+ real multi-leg journals (seed deposits + 4-entry settlement
+	// transfers), all written through the normal PostJournal path with the
+	// trigger active the whole time, is the realistic-usage stand-in for
+	// that scan: it must report zero.
+	reconcileAdapter := postgres.NewReconcileAdapter(pool)
+	unbalancedCount, err := reconcileAdapter.UnbalancedJournalsCount(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, unbalancedCount, "fleet-wide per-journal scan must find zero violations after normal multi-leg usage")
 }
 
 // invariantsFixture bundles the IDs and stores reused across the postgres

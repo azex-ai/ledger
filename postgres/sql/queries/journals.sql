@@ -1,6 +1,9 @@
 -- name: InsertJournal :one
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+-- auth_digest/auth_signature/auth_key_id (migration 046, P5) are empty when
+-- the caller did not sign this posting (no core.Attestor configured, or a
+-- tx-bound store -- see postgres.LedgerStore.PostJournal).
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 RETURNING *;
 
 -- name: InsertJournalEntry :one
@@ -128,7 +131,10 @@ GROUP BY je.classification_id, je.entry_type;
 -- name: VerifyJournalBalanced :one
 -- Returns the first currency_id that does not net to zero across the journal's
 -- entries, or NULL if the journal is balanced. Run inside the same transaction
--- as the entry inserts; replaces the per-row CONSTRAINT TRIGGER dropped in 018.
+-- as the entry inserts, before commit, so a failure rolls back cleanly with a
+-- precise "which currency" error. This is the application-layer half of the
+-- check; migration 044 restores a DB-layer deferred constraint trigger as the
+-- backstop for callers that bypass this query (e.g. direct SQL).
 SELECT currency_id
 FROM journal_entries
 WHERE journal_id = $1
