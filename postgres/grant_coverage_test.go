@@ -30,12 +30,30 @@ import (
 // TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants enumerates
 // every ordinary table in `public` (excluding schema_migrations, which
 // ledger_app/ledger_ro have no legitimate reason to touch -- see 042's
-// header) and asserts the grant shape 042's policy establishes:
-// journal_entries (the append-only table) gets SELECT/INSERT only for
-// ledger_app; every other table gets SELECT/INSERT/UPDATE. ledger_ro gets
-// SELECT everywhere. Partitions of journal_entries are excluded (a separate
-// pin, TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant,
-// covers partition-inheritance behavior specifically).
+// header) and asserts the grant shape 042's policy establishes: a table
+// protected by an unconditional append-only mutation guard (any BEFORE
+// UPDATE trigger executing `ledger_block_mutation()` -- journal_entries
+// (018), period_closes (045 A5), checkpoint_rebuilds (050) as of this
+// writing) gets SELECT/INSERT only for ledger_app; every other table gets
+// SELECT/INSERT/UPDATE. ledger_ro gets SELECT everywhere. Partitions of
+// journal_entries are excluded (a separate pin,
+// TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant, covers
+// partition-inheritance behavior specifically).
+//
+// The append-only set is derived from pg_trigger/pg_proc, not a hardcoded
+// table list -- Team Lead review of #14 flagged that a fixed list (only
+// journal_entries) drifted from reality the moment checkpoint_rebuilds
+// (050) reused the same guard function but was left grantable UPDATE: ACL
+// and trigger must say the same thing, and whichever table gets a new
+// `ledger_block_mutation()` guard in the future must not require a matching
+// edit here. Tables with a *partial* (whitelist-based) guard --
+// classifications (`ledger_classifications_guard`), reservations
+// (`ledger_reservations_guard`), journals
+// (`ledger_journals_block_arbitrary_update`, which permits the event_id
+// set-once backfill) -- are deliberately NOT in this set: those tables are
+// legitimately updated through controlled paths and still need the
+// ledger_app UPDATE grant for that to work; only their trigger enforces
+// which columns may change, not the ACL layer.
 //
 // ⚠️ Expected to go red when P6 (ledger_attestations/entry_attestations,
 // migration 047) or the P5-fix auth_status column work (051) merge without
@@ -65,17 +83,59 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	rows.Close()
 	require.NotEmpty(t, tables, "sanity: expected at least the core tables to exist")
 
+	appendOnly := queryAppendOnlyGuardedTables(t, pool)
+	require.NotEmpty(t, appendOnly, "sanity: expected at least journal_entries to carry the append-only guard")
+
 	for _, table := range tables {
 		table := table
 		t.Run(table, func(t *testing.T) {
 			wantApp := []string{"SELECT", "INSERT", "UPDATE"}
-			if table == "journal_entries" {
+			if appendOnly[table] {
 				wantApp = []string{"SELECT", "INSERT"}
 			}
 			assertGrants(t, pool, "ledger_app", table, wantApp)
 			assertGrants(t, pool, "ledger_ro", table, []string{"SELECT"})
 		})
 	}
+}
+
+// queryAppendOnlyGuardedTables returns the set of `public` tables carrying
+// an unconditional append-only mutation guard: a BEFORE UPDATE trigger
+// executing the `ledger_block_mutation()` function (which always raises,
+// regardless of what changed -- see 018). Filtering specifically on the
+// UPDATE event matters: `journals` has a `ledger_block_mutation()` trigger
+// too, but only for DELETE (018) -- its UPDATE path goes through the
+// separate, partial `ledger_journals_block_arbitrary_update()` guard (033),
+// which permits the event_id set-once backfill, so journals legitimately
+// still needs the ledger_app UPDATE grant. Matching on the function name
+// without the event filter would misclassify it.
+//
+// Uses information_schema.triggers rather than pg_trigger/pg_proc directly
+// -- event_manipulation/action_timing read as plain strings instead of
+// tgtype bitmask arithmetic, and action_statement already renders the
+// function call as text.
+func queryAppendOnlyGuardedTables(t *testing.T, pool *pgxpool.Pool) map[string]bool {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT event_object_table
+		FROM information_schema.triggers
+		WHERE trigger_schema = 'public'
+		  AND event_manipulation = 'UPDATE'
+		  AND action_timing = 'BEFORE'
+		  AND action_statement = 'EXECUTE FUNCTION ledger_block_mutation()'
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	set := map[string]bool{}
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		set[name] = true
+	}
+	require.NoError(t, rows.Err())
+	return set
 }
 
 // TestGrantCoverage_EverySequenceHasExpectedGrants is the sequence-level

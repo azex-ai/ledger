@@ -844,6 +844,25 @@ below (`TestGrantCoverage_*`) makes the underlying rule self-enforcing
 going forward instead of depending on a migration author remembering it
 (`working-agreements` §5).
 
+**Note on ACL/trigger consistency**: the ACL and the append-only mutation
+guard on a table must agree — a table protected only by a trigger, with an
+ACL that still says it is updatable, is one `GRANT`-layer bypass away from
+looking updatable to the next reader and one code path away from actually
+being written to (the trigger still blocks it, but the two defenses no
+longer say the same thing, and 042's own history — see "Note on scope"
+above — is a direct example of one defense layer failing silently while a
+test only exercised the other). `checkpoint_rebuilds` (050) and
+`period_closes` (026, guard added by 045 A5) both carry the same
+unconditional `ledger_block_mutation()` guard journal_entries does, but
+were left grantable `UPDATE`; 052 corrects both. The pin derives "which
+tables carry this guard" from `information_schema.triggers` (matching on
+the exact `BEFORE UPDATE ... EXECUTE FUNCTION ledger_block_mutation()`
+shape), not a hardcoded table list, so any future table reusing this guard
+gets the matching ACL enforced automatically — and any table with only a
+*partial* guard (`classifications`, `reservations`, `journals` — see A1-A4
+under I-25) is correctly left with `UPDATE`, since those are legitimately
+mutated through controlled paths.
+
 **Enforced by**:
 - `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
   / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
@@ -855,9 +874,13 @@ going forward instead of depending on a migration author remembering it
   instead, which must ship in the same release as the `DATABASE_URL`
   cutover (`docs/RUNBOOK.md` §9).
 - `postgres/sql/migrations/052_grant_coverage_gap.up.sql` — grants
-  `ledger_app`/`ledger_ro` on `reconcile_scan_cursors`, `checkpoint_rebuilds`,
-  and `checkpoint_rebuilds_id_seq`, matching 042's own policy exactly (see
-  "Note on grant coverage" above).
+  `ledger_app`/`ledger_ro` `SELECT`/`INSERT`(+`UPDATE` for
+  `reconcile_scan_cursors`, which has no append-only guard) on
+  `reconcile_scan_cursors`, `checkpoint_rebuilds`, and
+  `checkpoint_rebuilds_id_seq` (see "Note on grant coverage" above); and
+  `REVOKE UPDATE ON period_closes FROM ledger_app` — 042 granted it (026
+  predates 042) before 045 added its append-only guard, and nothing had
+  revoked it since (see "Note on ACL/trigger consistency" above).
 
 **Pinned by**:
 - `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
@@ -901,10 +924,14 @@ going forward instead of depending on a migration author remembering it
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants`
   / `postgres.TestGrantCoverage_EverySequenceHasExpectedGrants` — enumerate
   every table/sequence in `public` (not a fixed list) and assert the exact
-  grant shape 042's policy intends, catching any future migration that adds
-  an object without granting it (see "Note on grant coverage" above).
-  Verified red against `reconcile_scan_cursors`/`checkpoint_rebuilds`/
-  `checkpoint_rebuilds_id_seq` before 052, green after.
+  grant shape 042's policy intends: `SELECT`/`INSERT` only for any table
+  carrying a `BEFORE UPDATE ... ledger_block_mutation()` guard (derived from
+  `information_schema.triggers`, not a hardcoded table list — see "Note on
+  ACL/trigger consistency" above), `SELECT`/`INSERT`/`UPDATE` for every
+  other table. Catches any future migration that adds an object without
+  granting it, or that adds/reuses the append-only guard without a matching
+  ACL. Verified red against `reconcile_scan_cursors`/`checkpoint_rebuilds`/
+  `checkpoint_rebuilds_id_seq`/`period_closes` before 052, green after.
 
 ## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
 
