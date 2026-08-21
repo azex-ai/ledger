@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -142,4 +143,75 @@ func TestFullReconciliation_Check2ReportsPartialScanOnScanLimit(t *testing.T) {
 		}
 	}
 	assert.True(t, partialFound, "capped scan must report itself as incomplete, not silently pass as if fully covered; got: %+v", check2.Findings)
+	assert.False(t, check2.Complete, "a capped scan must not claim full coverage")
+	assert.False(t, report.FullCoverage, "one incomplete check must sink the report's coverage signal")
+}
+
+// TestFullReconciliation_Check2ScansSystemHolderCheckpoints is the DB-backed pin
+// for the keyset cursor fix. Check #2 paginated with `account_holder > cursor`
+// starting from zero, so every negative holder — i.e. the entire system /
+// custodial side (core.SystemHolder is the negation of the user holder) — was
+// excluded on the first page of every run, forever. A forged custodial
+// checkpoint is exactly the kind of tampering that hides there, so this test
+// corrupts only the system side and requires the check to catch it. Unlike the
+// unit test, this exercises the real SQL predicate.
+func TestFullReconciliation_Check2ScansSystemHolderCheckpoints(t *testing.T) {
+	pgpool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	rollup := postgres.NewRollupAdapter(pgpool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pgpool)
+
+	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether")
+	classUID := postgrestest.SeedClassification(t, pgpool, "wallet_c2c", "Wallet Check2c", "debit", false)
+	sysClassUID := postgrestest.SeedClassification(t, pgpool, "custodial_c2c", "Custodial Check2c", "credit", true)
+	jtUID := postgrestest.SeedJournalType(t, pgpool, "c2c_deposit", "Check2c Deposit")
+
+	engine := core.NewEngine()
+	rollupSvc := service.NewRollupService(rollup, rollup, rollup, rollup, engine)
+
+	const holderID = int64(9300)
+	seedJournal(t, pgpool, jtUID, holderID, currencyUID, classUID, sysClassUID,
+		decimal.NewFromInt(100), time.Now(), postgrestest.UniqueKey("c2c-dep"))
+
+	currencyID := postgrestest.InternalID(t, pgpool, "currencies", currencyUID)
+	userClassID := postgrestest.InternalID(t, pgpool, "classifications", classUID)
+	sysClassID := postgrestest.InternalID(t, pgpool, "classifications", sysClassUID)
+
+	// Materialize checkpoints on BOTH sides of zero.
+	require.NoError(t, rollup.EnqueueRollup(ctx, holderID, currencyID, userClassID))
+	require.NoError(t, rollup.EnqueueRollup(ctx, -holderID, currencyID, sysClassID))
+	processed, err := rollupSvc.ProcessBatch(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 2, processed)
+
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, engine)
+
+	// Sanity: clean before tampering.
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	require.True(t, findCheck(t, report, "checkpoint_balance").Passed)
+
+	// Tamper with the SYSTEM-side checkpoint only.
+	_, err = pgpool.Exec(ctx,
+		"UPDATE balance_checkpoints SET balance = balance + 777 WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
+		-holderID, currencyID, sysClassID,
+	)
+	require.NoError(t, err)
+
+	report, err = full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check2 := findCheck(t, report, "checkpoint_balance")
+	assert.False(t, check2.Passed, "drift on a system (negative) holder must be caught")
+
+	var driftFound bool
+	for _, f := range check2.Findings {
+		if strings.Contains(f.Description, "checkpoint balance drift") &&
+			strings.Contains(f.Description, fmt.Sprintf("holder %d", -holderID)) {
+			driftFound = true
+			assert.Contains(t, f.Detail, "777")
+		}
+	}
+	assert.True(t, driftFound, "expected drift finding for the system holder, got: %+v", check2.Findings)
 }

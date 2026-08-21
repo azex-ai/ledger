@@ -1897,7 +1897,18 @@ components:
     ReconcileReport:
       type: object
       properties:
-        overall_passed: { type: boolean }
+        overall_passed:
+          type: boolean
+          description: >-
+            True when no check found a violation. Reports violations found, not
+            coverage achieved — this alone is NOT a clean bill of health.
+            Require overall_passed AND full_coverage for that.
+        full_coverage:
+          type: boolean
+          description: >-
+            True only when every check covered its full intended scope. False
+            means at least one check was capped, timed out, or skipped, so the
+            run cannot testify about what it never examined.
         run_at: { $ref: "#/components/schemas/Timestamp" }
         checks:
           type: array
@@ -1905,7 +1916,17 @@ components:
             type: object
             properties:
               name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation" }
-              passed: { type: boolean }
+              passed:
+                type: boolean
+                description: >-
+                  False if any finding was detected. Reports only on what the
+                  check actually examined — read together with `complete`.
+              complete:
+                type: boolean
+                description: >-
+                  False when the check could not cover its full scope (capped
+                  or timed-out scan, or a check skipped outright). Partial
+                  coverage never reads as a pass.
               checked_at: { $ref: "#/components/schemas/Timestamp" }
               findings:
                 type: array

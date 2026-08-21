@@ -3066,12 +3066,18 @@ export interface components {
             };
         };
         ReconcileReport: {
+            /** @description True when no check found a violation. Reports violations found, not coverage achieved — this alone is NOT a clean bill of health. Require overall_passed AND full_coverage for that. */
             overall_passed?: boolean;
+            /** @description True only when every check covered its full intended scope. False means at least one check was capped, timed out, or skipped, so the run cannot testify about what it never examined. */
+            full_coverage?: boolean;
             run_at?: components["schemas"]["Timestamp"];
             checks?: {
                 /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation */
                 name?: string;
+                /** @description False if any finding was detected. Reports only on what the check actually examined — read together with `complete`. */
                 passed?: boolean;
+                /** @description False when the check could not cover its full scope (capped or timed-out scan, or a check skipped outright). Partial coverage never reads as a pass. */
+                complete?: boolean;
                 checked_at?: components["schemas"]["Timestamp"];
                 findings?: {
                     description?: string;

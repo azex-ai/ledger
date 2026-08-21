@@ -125,6 +125,20 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
 	assert.Len(t, report.Checks, 10, "should run exactly 10 checks")
+
+	// OverallPassed reports violations found; it is NOT a clean bill of
+	// health. Check #8 is skipped outright (journals.status not in the
+	// schema), so the run must admit incomplete coverage rather than let a
+	// never-executed check count as verified.
+	assert.False(t, report.FullCoverage,
+		"check #8 is skipped, so the suite cannot claim full coverage")
+	for _, c := range report.Checks {
+		if c.Name == "pending_journal_timeout" {
+			assert.False(t, c.Complete, "a skipped check is never complete")
+		} else {
+			assert.True(t, c.Complete, "check %s ran but did not report coverage", c.Name)
+		}
+	}
 }
 
 // recordingReconcileMetrics captures ReconcileCheckResult calls for testing.
@@ -154,10 +168,18 @@ func TestFullReconciliation_EmitsMetricsPerCheck(t *testing.T) {
 
 	require.Len(t, metrics.results, len(report.Checks), "one ReconcileCheckResult call per check")
 	for _, c := range report.Checks {
-		passed, ok := metrics.results[c.Name]
+		green, ok := metrics.results[c.Name]
 		require.True(t, ok, "check %q must have emitted a metric", c.Name)
-		assert.Equal(t, c.Passed, passed)
+		// The metric reports Passed && Complete so alerting fails closed: an
+		// incomplete or skipped check must never look green on a dashboard.
+		assert.Equal(t, c.Passed && c.Complete, green,
+			"check %q metric must fold coverage into the green signal", c.Name)
 	}
+
+	// Concretely: check #8 never executes, so its metric must be false even
+	// though its CheckResult.Passed is true.
+	assert.False(t, metrics.results["pending_journal_timeout"],
+		"a skipped check must not emit a green metric")
 }
 
 func TestFullReconciliation_OneFailureFlipsOverall(t *testing.T) {
@@ -532,6 +554,7 @@ func TestCheck2GlobalBalance_NoCheckpoints(t *testing.T) {
 
 	result := svc.runCheck2GlobalBalance(context.Background())
 	assert.True(t, result.Passed)
+	assert.True(t, result.Complete, "an unrestricted scan over zero pairs is complete")
 	require.Len(t, result.Findings, 1)
 	assert.Contains(t, result.Findings[0].Description, "checkpoint scan complete: 0 account/currency pairs")
 }
@@ -580,6 +603,51 @@ func TestCheck2GlobalBalance_DetectsDrift(t *testing.T) {
 		}
 	}
 	assert.True(t, driftFound, "expected a drift finding, got: %+v", result.Findings)
+}
+
+// TestCheck2GlobalBalance_ScansNegativeSystemHolders pins the fix for a keyset
+// cursor that started at (0, 0). System holders are the negation of user
+// holders (core.SystemHolder), so `account_holder > after_holder` with a zero
+// start excluded every negative holder on the very first page — permanently,
+// on every run. The entire custodial/system side of the ledger was therefore
+// never verified against journal_entries, which is precisely where a forged
+// custodial balance would hide.
+func TestCheck2GlobalBalance_ScansNegativeSystemHolders(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []core.BalanceCheckpoint{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+	// Every pair reconciles clean; this test is about which pairs get visited.
+
+	q := cleanQuerier()
+	// Pre-sorted ascending, spanning both sides of zero.
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: -100, CurrencyID: 1}, // system counterpart of holder 100
+		{AccountHolder: -1, CurrencyID: 1},   // system counterpart of holder 1
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 100, CurrencyID: 1},
+	}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+	require.Len(t, result.Findings, 1)
+	// All four pairs — not just the two positive ones.
+	assert.Contains(t, result.Findings[0].Description,
+		"checkpoint scan complete: 4 account/currency pairs",
+		"negative (system) holders must be scanned, not skipped by the cursor")
 }
 
 func TestCheck2GlobalBalance_PaginatesAcrossMultiplePages(t *testing.T) {
@@ -647,10 +715,13 @@ func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
 	})
 	result := svc.runCheck2GlobalBalance(context.Background())
 
-	// No drift was found in the scanned subset, so Passed stays true — but
-	// the scan must explicitly flag itself as incomplete, never silently
-	// claim full coverage it didn't actually perform.
+	// No drift was found in the scanned subset, so Passed stays true — Passed
+	// only ever reports on what was examined. Coverage is a separate axis:
+	// Complete must be false so the run cannot be read as a clean bill of
+	// health for the pairs it never reached (working-agreements §3: a check
+	// that did not run is never a pass).
 	assert.True(t, result.Passed)
+	assert.False(t, result.Complete, "a capped scan must not claim full coverage")
 	var partialFound bool
 	for _, f := range result.Findings {
 		if strings.Contains(f.Description, "checkpoint scan incomplete") {

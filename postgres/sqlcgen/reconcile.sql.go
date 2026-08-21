@@ -132,7 +132,9 @@ type ReconcileListCheckpointAccountsPageRow struct {
 // pairs present in balance_checkpoints, used to drive a fleet-wide
 // checkpoint-vs-entries verification (one ReconcileAccount call per pair).
 // Ordered by (account_holder, currency_id) so pagination is stable and
-// resumable from the last-seen pair — pass (0, 0) for the first page.
+// resumable from the last-seen pair. Pass (math.MinInt64, math.MinInt64) for
+// the first page, NOT (0, 0): system holders are negative (core.SystemHolder),
+// so a zero cursor makes this predicate skip the entire system side forever.
 func (q *Queries) ReconcileListCheckpointAccountsPage(ctx context.Context, arg ReconcileListCheckpointAccountsPageParams) ([]ReconcileListCheckpointAccountsPageRow, error) {
 	rows, err := q.db.Query(ctx, reconcileListCheckpointAccountsPage, arg.AfterHolder, arg.AfterCurrency, arg.PageLimit)
 	if err != nil {

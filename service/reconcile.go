@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -294,28 +295,39 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 	// --- Check #10: Stale rollup queue ---
 	checks = append(checks, s.runCheck10StaleRollup(ctx))
 
-	// Compute overall result.
+	// Compute overall result. Violations found and coverage achieved are
+	// tracked separately: a run that examined half the fleet and found
+	// nothing is not the same as a run that verified everything.
 	overallPassed := true
+	fullCoverage := true
 	for _, c := range checks {
 		if !c.Passed {
 			overallPassed = false
-			break
+		}
+		if !c.Complete {
+			fullCoverage = false
 		}
 	}
 
-	if overallPassed {
+	switch {
+	case overallPassed && fullCoverage:
 		s.logger.Info("reconcile: full suite passed")
-	} else {
+	case overallPassed:
+		s.logger.Warn("reconcile: full suite found no violations but coverage was incomplete")
+	default:
 		s.logger.Warn("reconcile: full suite has failures")
 	}
 
 	for _, c := range checks {
-		s.metrics.ReconcileCheckResult(c.Name, c.Passed)
+		// Report Passed && Complete so anything alerting on this metric fails
+		// closed: an incomplete or skipped check must not look green.
+		s.metrics.ReconcileCheckResult(c.Name, c.Passed && c.Complete)
 	}
 
 	return &core.ReconcileReport{
 		Checks:        checks,
 		OverallPassed: overallPassed,
+		FullCoverage:  fullCoverage,
 		RunAt:         now,
 	}, nil
 }
@@ -325,7 +337,7 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 // global debit==credit check across all entries; per-journal balance is
 // enforced by DB constraints and the post-insert SQL verification.
 func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "journal_dr_cr", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	r, err := s.basic.CheckAccountingEquation(ctx)
 	if err != nil {
@@ -362,12 +374,17 @@ func (s *FullReconciliationService) runCheck1JournalBalance(ctx context.Context)
 // "incomplete" Finding with the resume cursor instead of silently reporting
 // success as if full coverage had been verified.
 func (s *FullReconciliationService) runCheck2GlobalBalance(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "checkpoint_balance", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "checkpoint_balance", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.Check2Timeout)
 	defer cancel()
 
-	var afterHolder, afterCurrency int64
+	// The cursor must start below every possible holder, not at zero: system
+	// holders are the negation of user holders (core.SystemHolder), so a (0,0)
+	// start makes the `account_holder > after_holder` keyset predicate exclude
+	// every negative holder on the first page -- permanently. That left the
+	// entire custodial/system side of the ledger unscanned by this check.
+	afterHolder, afterCurrency := int64(math.MinInt64), int64(math.MinInt64)
 	scanned := 0
 	partialReason := ""
 
@@ -445,6 +462,10 @@ pageLoop:
 	}
 
 	if partialReason != "" {
+		// Coverage was not achieved. Passed may still be true (nothing was
+		// wrong in the subset we examined) but the check must not testify
+		// about the pairs it never reached.
+		result.Complete = false
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
 			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next scheduled run rescans from the top", scanned),
@@ -460,7 +481,7 @@ pageLoop:
 
 // runCheck3OrphanEntries checks for entries whose journal_id is not in journals.
 func (s *FullReconciliationService) runCheck3OrphanEntries(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "orphan_entries", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "orphan_entries", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	count, err := s.querier.OrphanEntriesCount(ctx)
 	if err != nil {
@@ -508,7 +529,7 @@ func (s *FullReconciliationService) runCheck3OrphanEntries(ctx context.Context) 
 // Sum(debit-normal net) should equal Sum(credit-normal net) per currency
 // (the accounting equation expressed as DR totals == CR totals per currency).
 func (s *FullReconciliationService) runCheck4AccountingEquation(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "accounting_equation", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "accounting_equation", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	rows, err := s.querier.AccountingEquationRows(ctx)
 	if err != nil {
@@ -570,7 +591,7 @@ func (s *FullReconciliationService) runCheck4AccountingEquation(ctx context.Cont
 // runCheck5SettlementNetting verifies that the settlement classification nets
 // to zero per currency outside the configured grace window.
 func (s *FullReconciliationService) runCheck5SettlementNetting(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "settlement_netting", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "settlement_netting", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	windowMins := int(s.cfg.SettlementWindow.Minutes())
 	violations, err := s.querier.SettlementNettingViolations(ctx, s.cfg.SettlementClassCode, windowMins)
@@ -596,7 +617,7 @@ func (s *FullReconciliationService) runCheck5SettlementNetting(ctx context.Conte
 // runCheck6NonNegativeBalances verifies no user account (holder > 0) has a
 // negative balance for any classification.
 func (s *FullReconciliationService) runCheck6NonNegativeBalances(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "non_negative_balances", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "non_negative_balances", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	accounts, err := s.querier.NegativeBalanceAccounts(ctx, s.cfg.NegativeBalancePageLimit)
 	if err != nil {
@@ -622,7 +643,7 @@ func (s *FullReconciliationService) runCheck6NonNegativeBalances(ctx context.Con
 // runCheck7OrphanReservations checks for reservation rows whose journal_id (>0)
 // does not point to an existing journal.
 func (s *FullReconciliationService) runCheck7OrphanReservations(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "orphan_reservations", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "orphan_reservations", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	orphans, err := s.querier.OrphanReservations(ctx)
 	if err != nil {
@@ -656,6 +677,10 @@ func (s *FullReconciliationService) runCheck8PendingJournalTimeout() core.CheckR
 	return core.CheckResult{
 		Name:   "pending_journal_timeout",
 		Passed: true,
+		// This check never runs, so it cannot pass. Complete=false keeps a
+		// skipped check out of the report's clean-bill-of-health signal
+		// (ReconcileReport.FullCoverage) instead of counting as verified.
+		Complete: false,
 		Findings: []core.Finding{
 			{
 				Description: "check skipped: feature requires journals.status field",
@@ -669,7 +694,7 @@ func (s *FullReconciliationService) runCheck8PendingJournalTimeout() core.CheckR
 // runCheck9IdempotencyAudit scans for duplicate idempotency_key values in the
 // journals table. The UNIQUE index should prevent any, but we verify defensively.
 func (s *FullReconciliationService) runCheck9IdempotencyAudit(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "idempotency_uniqueness", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "idempotency_uniqueness", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	dupes, err := s.querier.DuplicateIdempotencyKeys(ctx)
 	if err != nil {
@@ -698,7 +723,7 @@ func (s *FullReconciliationService) runCheck9IdempotencyAudit(ctx context.Contex
 // runCheck10StaleRollup checks for rollup_queue items whose claimed_until lease
 // has expired, indicating a worker that crashed mid-process.
 func (s *FullReconciliationService) runCheck10StaleRollup(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "stale_rollup_queue", Passed: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+	result := core.CheckResult{Name: "stale_rollup_queue", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
 	thresholdMins := int(s.cfg.StaleRollupThreshold.Minutes())
 	items, err := s.querier.StaleRollupItems(ctx, thresholdMins)
