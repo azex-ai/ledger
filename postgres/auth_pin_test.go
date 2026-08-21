@@ -253,20 +253,29 @@ func TestForgedDirectSQLJournalIsUnauthorized(t *testing.T) {
 	var effectiveAt time.Time
 	require.NoError(t, pool.QueryRow(ctx, `
 		INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id)
-		VALUES ($1, $2, $3::numeric, $3::numeric, '{}'::jsonb, 0, 'forged-direct-sql', 0, now(), gen_random_uuid(), ''::bytea, ''::bytea, '')
+		VALUES ($1, $2, $3::numeric, $3::numeric, '{}'::jsonb, 0, 'forged-direct-sql', NULL, now(), gen_random_uuid(), ''::bytea, ''::bytea, '')
 		RETURNING id, uid, effective_at
 	`, f.journalTypeID, postgrestest.UniqueKey("forged-direct-sql"), forgedAmount).Scan(&journalID, &journalUID, &effectiveAt))
 
-	_, err := pool.Exec(ctx, `
+	// Both legs in one transaction: migration 044's per-journal balance
+	// check is a DEFERRED CONSTRAINT TRIGGER evaluated at commit against
+	// that transaction's own snapshot -- two separate pool.Exec calls would
+	// each commit with only one leg visible and be rejected as unbalanced
+	// before ever reaching the "forged but balanced" state this test needs.
+	entryTx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = entryTx.Rollback(context.Background()) })
+	_, err = entryTx.Exec(ctx, `
 		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
 		VALUES ($1, $2, $3, $4, 'debit', $5::numeric, $6, now())
 	`, journalID, forgedUserID, f.currencyID, f.mainWalletID, forgedAmount, effectiveAt)
 	require.NoError(t, err)
-	_, err = pool.Exec(ctx, `
+	_, err = entryTx.Exec(ctx, `
 		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
 		VALUES ($1, $2, $3, $4, 'credit', $5::numeric, $6, now())
 	`, journalID, core.SystemAccountHolder(forgedUserID), f.currencyID, f.custodialID, forgedAmount, effectiveAt)
 	require.NoError(t, err)
+	require.NoError(t, entryTx.Commit(ctx))
 
 	// Sanity: the forged journal really is balanced per the existing
 	// per-journal check (the mechanism M1/P3 relies on) -- this forged

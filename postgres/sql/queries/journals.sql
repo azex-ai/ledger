@@ -131,7 +131,10 @@ GROUP BY je.classification_id, je.entry_type;
 -- name: VerifyJournalBalanced :one
 -- Returns the first currency_id that does not net to zero across the journal's
 -- entries, or NULL if the journal is balanced. Run inside the same transaction
--- as the entry inserts; replaces the per-row CONSTRAINT TRIGGER dropped in 018.
+-- as the entry inserts, before commit, so a failure rolls back cleanly with a
+-- precise "which currency" error. This is the application-layer half of the
+-- check; migration 044 restores a DB-layer deferred constraint trigger as the
+-- backstop for callers that bypass this query (e.g. direct SQL).
 SELECT currency_id
 FROM journal_entries
 WHERE journal_id = $1

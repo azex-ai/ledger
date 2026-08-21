@@ -27,9 +27,22 @@ total credits.
 is meaningless — debits and credits in different currencies are not comparable.
 
 **Enforced by**:
-- `core.JournalInput.Validate` (Go side, `core/journal.go:93`).
-- `chk_journal_currency_balance` deferred constraint trigger
-  (`postgres/sql/migrations/004_ledger.up.sql:33`).
+- `core.JournalInput.Validate` (Go side, `core/journal.go:93`) — rejects
+  malformed input before any DB call.
+- `postgres.LedgerStore.postJournalWithQueries`'s `VerifyJournalBalanced`
+  query (`postgres/sql/queries/journals.sql`) — one query per posted
+  journal, in the same transaction as the entry inserts, before commit.
+- `check_journal_currency_balance()` deferred constraint trigger
+  (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`) — the
+  DB-layer backstop for direct SQL / a compromised app credential that
+  bypasses everything above. Migration 004 first shipped this as a per-row
+  trigger that re-scanned every entry of the journal on every row (O(N^2));
+  018 dropped it for exactly that reason, leaving the DB layer unenforced
+  until 044 restored it with a transaction-scoped per-journal dedup (O(N)
+  overall — see the migration file for the mechanism). **044 is not
+  retroactive**: rows written between 018 and 044 are not covered by the
+  trigger, which is why the fleet-wide "journal_dr_cr" reconcile check
+  (I-24) exists as an independent, bulk-scanning complement.
 - `chk_journal_balance` table-level CHECK on `journals.total_debit = total_credit`
   (covers global totals as a defense-in-depth check).
 
@@ -38,6 +51,11 @@ is meaningless — debits and credits in different currencies are not comparable
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
 - `core.FuzzJournalValidate` (Go fuzz target)
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates to
+  schema v41 (pre-044), proves a direct SQL insert that unbalances an
+  existing journal by currency succeeds with nothing to stop it, then
+  migrates up through 044 and proves the identical attack on a fresh journal
+  now fails at commit.
 
 ## I-2: Append-only journals; corrections via reversal only
 
@@ -214,14 +232,20 @@ because PostgreSQL needs a real `NULL` to skip referential-integrity enforcement
 - `reservations.journal_id` — null until a journal is linked (migration `035`
   restored the FK that `017` dropped and `018` forgot to restore; the `0`
   sentinel era left wrong ids silently accepted).
+- `journals.event_id` — null until the journal is linked to the event that
+  caused it (migration `045` converted the `014` sentinel column to this
+  shape and added the FK it never had; see I-25).
 
 **Why**: NOT NULL eliminates a category of "missing vs zero" ambiguities.
 Where it would conflict with FK enforcement, `NULL` is documented and the Go
-field is `*int64`.
+field is `*int64` (in Go structs that expose the column directly — the
+`postgres` adapter's `sqlcgen.Journal.EventID` is the only current holder of
+this one, as `pgtype.Int8`; `core.Journal` exposes it as `EventUID string`).
 
 **Enforced by**:
 - Migration `017_no_null_cleanup` for the bulk move.
 - Migration `018_restore_referential_integrity` for the four exceptions.
+- Migration `045_mutation_guards` for `journals.event_id`.
 
 ## I-8: Lifecycle FSM is well-formed
 
@@ -1025,6 +1049,273 @@ does not also touch the anchor is caught by comparing the two.
   `TestLocalFileAnchor_RejectsNonSequentialSeq` -- `core.Anchor.Publish`'s
   own idempotency contract ("re-publishing the same seq with identical
   bytes must succeed, with different bytes must return an error").
+
+---
+
+> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
+> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
+> task that has not merged yet, so this document does not yet contain it.
+> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
+> not a reflection of merge order.
+
+## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
+
+`balance_checkpoints` is an unreliable cache, not a source of truth — an
+attacker with DB write access can set it to any value. Three things follow:
+
+1. **A trusted, entries-only recompute path exists and is what money-leaving
+   paths must use.** `core.CheckpointIntegrityStore.RecomputeBalance` sums
+   `journal_entries` from entry 0 for a dimension; `balance_checkpoints` never
+   appears in its query (`postgres/sql/queries/integrity_checkpoint.sql`,
+   `RecomputeCheckpointFromEntries`). It is slow (full history scan) — that
+   cost is the reason `BalanceReader.GetBalance` (checkpoint + delta) stays
+   the default for ordinary reads; withdrawal / large-amount paths must call
+   `RecomputeBalance` instead, precisely because checkpoint tampering has zero
+   influence on a value that never reads the checkpoint.
+2. **A poisoned checkpoint has a trusted repair path that is NOT automatic.**
+   `CheckpointIntegrityStore.RebuildCheckpoint` takes the `(holder,
+   currency_id)` advisory lock (the same lock space `PostJournal`/`Reserve`
+   use), refuses with `core.ErrRollupPending` if a `rollup_queue` item is
+   still pending/claimed for the dimension (a worker holding a stale
+   checkpoint snapshot in memory could otherwise re-clobber the fix the
+   moment its write lands), recomputes from entry 0, and unconditionally
+   overwrites the checkpoint row (`RebuildBalanceCheckpoint`, which — unlike
+   `UpsertBalanceCheckpoint` — has no monotonic `last_entry_id` guard, because
+   that guard is exactly what makes an ordinary upsert unable to repair a
+   checkpoint whose `last_entry_id` was tampered to look "ahead" of the true
+   watermark). Detection (reconcile's `checkpoint_balance`,
+   `system_rollup_integrity`, `snapshot_integrity` checks) and correction
+   (`RebuildCheckpoint`) are deliberately separate calls: nothing in this
+   library invokes `RebuildCheckpoint` automatically, because auto-correcting
+   while an attack may still be in progress would destroy the forensic
+   evidence the drift represents. A **manual** repair has that exact same
+   evidence-destroying property — the drift vanishes from
+   `balance_checkpoints` the instant it's overwritten, and a log line is not
+   durable enough (rotation, retention limits) to stand in for it. So every
+   call, in the same transaction as the overwrite, durably records the
+   before/after balances, watermarks, and resulting drift in the append-only
+   `checkpoint_rebuilds` table (migration `050`; the same
+   `ledger_block_mutation()` no-UPDATE/no-DELETE guard 018 put on
+   `journals`/`journal_entries`) — a repair can never commit without leaving
+   forensic evidence, and the evidence can never exist without the repair
+   having happened.
+3. **`system_rollups` and `balance_snapshots` must be checked against entries
+   directly, never against checkpoints as an "independent" basis.**
+   `SystemRollupService.RefreshSystemRollups` populates `system_rollups` via
+   `AggregateCheckpointsByClassification`, which sums `balance_checkpoints` —
+   so `system_rollups` inherits any checkpoint tampering wholesale if the
+   only thing verifying it is itself or the checkpoints it was built from.
+   The `system_rollup_integrity` check instead compares it against
+   `AccountingEquationRows`, the same entries-only recompute the
+   `accounting_equation` check already performs, and flags a `system_rollups`
+   row with **no** matching entries at all (the M5 fabrication scenario: a
+   rollup entry manufactured out of nothing) rather than treating it as
+   "unknown, skip". The `snapshot_integrity` check does the entries-based
+   equivalent for `balance_snapshots`, scoped to the most recent
+   `snapshot_date` to bound cost; historical dates can be re-verified and
+   repaired on demand via `SnapshotBackfillService.BackfillSnapshots`, which
+   already recomputes from entries for an explicit date range.
+
+**Why**: a `balance_checkpoints` row is exactly as trustworthy as the
+attacker's most recent `UPDATE`. Comparing it against anything derived from
+itself (a self-check, or `system_rollups` built by summing it) can never
+detect tampering — only an independent recompute straight from
+`journal_entries` can. And once drift is *detected*, silently overwriting it
+during an active incident destroys the evidence needed to scope the breach —
+so correction is a distinct, explicit, operator-invoked action, never a side
+effect of running reconcile.
+
+**Enforced by**:
+- `postgres.CheckpointIntegrityStore` (`postgres/checkpoint_integrity_store.go`) —
+  `RecomputeBalance`/`RebuildCheckpoint`, backed by
+  `RecomputeCheckpointFromEntries` and `RebuildBalanceCheckpoint`
+  (`postgres/sql/queries/integrity_checkpoint.sql`,
+  `postgres/sql/queries/checkpoints.sql`).
+- `checkpoint_rebuilds` table (migration `050`) + `InsertCheckpointRebuildAudit`
+  (`postgres/sql/queries/integrity_checkpoint.sql`), written atomically with
+  `RebuildBalanceCheckpoint` inside the same transaction;
+  `checkpoint_rebuilds_no_update` / `checkpoint_rebuilds_no_delete` triggers
+  make the record itself tamper-evident.
+- `service.FullReconciliationService.runCheck2GlobalBalance` (checkpoint
+  vs. entries, per account) — persists its fleet-wide scan cursor and a
+  `lap_dirty` flag in `reconcile_scan_cursors` (migration `043`) so a
+  violation found partway through a multi-run scan cannot be buried by a
+  later, cleaner segment of the same lap (C4b).
+- `service.FullReconciliationService.runCheckSystemRollupIntegrity` /
+  `runCheckSnapshotIntegrity` (system_rollups / balance_snapshots vs.
+  entries).
+
+**Pinned by**:
+- `postgres.TestCheckpointIntegrity_RecomputeBalance_IgnoresCheckpointTampering`
+  (RecomputeBalance returns the true balance while GetBalance still reads a
+  poisoned checkpoint on the same dimension)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_OvercomesMonotonicGuard`
+  (poisons both balance AND `last_entry_id`; demonstrates the normal
+  monotonic-guarded upsert CANNOT repair it, then that `RebuildCheckpoint`
+  does)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_RefusesWhenRollupPending`
+  (a pending `rollup_queue` item for the dimension makes `RebuildCheckpoint`
+  return `core.ErrRollupPending`)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_RecordsAuditRow` (the
+  before/after balances and drift land in `checkpoint_rebuilds`, matching the
+  injected poison amount)
+- `postgres.TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly` (`UPDATE`
+  and `DELETE` against `checkpoint_rebuilds` are both rejected)
+- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
+  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
+  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`,
+  `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
+  3-pair fleet scanned 1 pair per run across 4 calls resumes correctly, and
+  the run that completes the lap still reports `Passed=false` for a drift
+  found two runs earlier)
+- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
+  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`,
+  `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
+  (DB-backed: poisons a checkpoint, refreshes `system_rollups` from it, and
+  requires the check to catch the drift against entries)
+- `service.TestCheckSnapshotIntegrity_DetectsDrift`,
+  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`,
+  `service.TestFullReconciliation_DetectsSnapshotDrift`
+
+---
+
+## I-24: Per-journal balance is enforced at the DB layer, independent of the application
+
+Every journal's per-currency balance (I-1) is enforced by **two independent
+mechanisms that do not trust each other**: the application layer
+(`core.JournalInput.Validate` + `VerifyJournalBalanced`, both bypassable by
+direct SQL against the database) and the DB layer (a deferred constraint
+trigger on `journal_entries`, restored by migration 044 after migration 018
+dropped its predecessor). Additionally, a fleet-wide reconcile check
+("journal_dr_cr") scans every journal individually in bulk, independent of
+the DB trigger's write-time enforcement.
+
+**Why**: C1 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §2) —
+an attacker with a leaked app DB credential, or a bug that bypasses
+`postJournalWithQueries`, can issue a direct SQL `INSERT` into
+`journal_entries`. Before this invariant, nothing in the database itself
+would stop an unbalanced insert; the only enforcement lived in application
+code the attacker had already bypassed. Separately, M1 (design doc §2) —
+the pre-existing "journal_dr_cr" reconcile check computed a GLOBAL
+debit==credit equality, which cannot see two journals that are each
+individually unbalanced but net to zero in aggregate.
+
+**Enforced by**:
+- `check_journal_currency_balance()` deferred constraint trigger,
+  `AFTER INSERT OR UPDATE OR DELETE ON journal_entries FOR EACH ROW`,
+  `DEFERRABLE INITIALLY DEFERRED` (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`).
+  Dedupes by `journal_id` within the transaction via a `pg_temp` table
+  (`ON COMMIT DELETE ROWS`) so the actual aggregate check runs once per
+  journal touched by the transaction, not once per row — O(N) overall, not
+  004's O(N^2).
+- `service.FullReconciliationService.runCheck11JournalBalance`
+  ("journal_dr_cr" — `service/reconcile.go`), backed by
+  `IntegrityUnbalancedJournalsCount`/`Sample`
+  (`postgres/sql/queries/integrity_balance.sql`): a bulk, fleet-wide scan
+  independent of the trigger, catching what the trigger cannot (rows
+  written before 044 existed, or any future bypass of it).
+- The pre-existing "journal_dr_cr" global-equality behavior is kept as an
+  independent check, renamed `global_dr_cr_equality`
+  (`service.FullReconciliationService.runCheck1JournalBalance`) — the two
+  checks catch different failure modes and neither substitutes for the
+  other.
+
+**Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates
+  to schema v41, proves a direct-SQL unbalancing insert succeeds with no DB
+  guard; migrates up through 044 and proves the identical attack now fails.
+- `postgres.TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses` —
+  crafts two journals (pre-044, via direct SQL) that are each individually
+  unbalanced by currency but net to zero globally; proves the global
+  equality query reports "balanced" while `IntegrityUnbalancedJournalsCount`
+  reports both violations.
+- `service.TestFullReconciliation_JournalBalance_DetectsPerJournalDrift` —
+  mock-level pin that `runCheck11JournalBalance` reports `Passed: false`,
+  logs (not leaks into the report) the offending internal ids, and that a
+  clean querier reports `Passed: true, Complete: true`.
+---
+
+---
+
+## I-25: Non-journal balance-computation tables cannot be mutated outside their controlled entry points
+
+Every table that participates in balance computation but is not itself
+`journals`/`journal_entries` has a DB-level guard against post-insert
+mutation, closing the five gaps in
+docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
+
+- `classifications.normal_side` is immutable — no code path updates it, and
+  changing it retroactively flips the sign of every historical rollup for
+  that classification.
+- `classifications.balance_role`'s only legal transition is the expand-style
+  `'' -> <role>` upgrade `ClassificationStore.SetBalanceRole` performs.
+  Switching between two non-empty roles, or reverting to `''`, is rejected —
+  including when attempted through `SetBalanceRole` itself a second time.
+- `reservations.account_holder`/`currency_id`/`reserved_amount`/
+  `idempotency_key`/`expires_at`/`created_at`/`uid` are immutable.
+  `settled_amount` may only increase (a decrease can only be tampering,
+  `SettlePartial`'s own precondition already guarantees monotonic growth).
+  `journal_id` is set-once (`NULL -> non-NULL` only). `status` follows the
+  whitelist state machine in `core/reserve.go` (`reservationTransitions`):
+  `active -> {settling, settled, released}`, `settling -> {settled,
+  released}` — `settled`/`released` are terminal, with no path back to
+  `active`.
+- `period_closes` is now actually append-only (previously documented as such
+  but unenforced) — no `UPDATE`, no `DELETE`.
+- `journals.event_id` is set-once (`NULL -> non-NULL` only) and now carries
+  the FK to `events(id)` it never had. Before this, the column wasn't even in
+  the anti-tamper guard's comparison list — 033's and 018's trigger comments
+  described a "set-once backfill WHEN clause" that had never actually been
+  implemented (018:137-140 was an unconditional `BEFORE UPDATE FOR EACH ROW`
+  with no `WHEN`). The guard itself changed shape in 045: instead of a
+  per-migration hardcoded column list (033's pattern, which p5-authsig's
+  ordering conflict proved fragile — two `CREATE OR REPLACE`s on the same
+  function in numeric-ordered migrations means the later one silently
+  overwrites the earlier), it now compares `to_jsonb(OLD) - mutable` against
+  `to_jsonb(NEW) - mutable` for an explicit whitelist of columns allowed to
+  change post-insert (`mutable := ARRAY['event_id']` as of 045). Any future
+  column added to `journals` is protected by default — fail-closed by
+  construction, the same reasoning P0 used for `CheckResult.Complete`'s zero
+  value.
+
+**Why**: I-1/I-24 (journal balance) and I-12 (money conservation) only cover
+`journal_entries`. A writer with app DB credentials doesn't need to touch a
+single journal row to change a holder's effective balance — flipping
+`normal_side` reverses how the rollup reads every existing entry;
+`balance_role` reclassifies `locked` funds as `available`; enlarging
+`reserved_amount` or fabricating a `reservations` row changes availability
+with zero accounting trail; rewriting `journals.event_id` breaks posting
+provenance without touching any protected journal column.
+
+**Enforced by**:
+- `ledger_classifications_guard()` / `classifications_mutation_guard`
+  trigger (`postgres/sql/migrations/045_mutation_guards.up.sql`).
+- `ledger_reservations_guard()` / `reservations_mutation_guard` trigger
+  (same migration).
+- `period_closes_no_update` / `period_closes_no_delete` triggers, reusing
+  `ledger_block_mutation()` from 018 (same migration).
+- `ledger_journals_block_arbitrary_update()` (033's per-migration column
+  list replaced by 045 with a generic `to_jsonb` comparison against a
+  mutable-column whitelist, per
+  `docs/plans/2026-08-21-integrity-hardening-contracts.md` §2; `event_id`'s
+  `NULL -> non-NULL` set-once check lives in the function body, not a
+  trigger `WHEN` clause) + `journals_event_id_fkey` FK.
+- Depends on P1 (migration 042): without role separation, the same
+  credential that would abuse these columns can `DROP TRIGGER` the guard
+  itself.
+
+**Pinned by** (`postgres/mutation_guards_test.go`, each verified to fail —
+i.e. the tamper attempt would have succeeded — with its specific guard
+trigger/function manually removed before this migration existed):
+- `TestClassificationsGuard_NormalSideImmutable`
+- `TestClassificationsGuard_BalanceRoleOnlyUpgradesFromEmpty`
+- `TestReservationsGuard_DimensionColumnsImmutable`
+- `TestReservationsGuard_SettledAmountMustNotDecrease`
+- `TestReservationsGuard_JournalIDSetOnce`
+- `TestReservationsGuard_StatusWhitelist`
+- `TestPeriodClosesGuard_NoUpdateNoDelete`
+- `TestJournalsGuard_EventIDSetOnce`
+- `TestJournalsGuard_FutureColumnsProtectedByDefault`
 
 ---
 

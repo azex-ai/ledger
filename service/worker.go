@@ -24,7 +24,7 @@ type WorkerConfig struct {
 	EventDeliveryInterval  time.Duration // default: 5s
 	EventDeliveryBatchSize int           // default: 100
 	EventClaimLease        time.Duration // default: 2m
-	// FullReconcileInterval controls how often the full 10-check
+	// FullReconcileInterval controls how often the full
 	// reconciliation suite runs. Only takes effect when a FullReconciler has
 	// been registered via SetFullReconciler — nil by default (skip job),
 	// mirroring the EventDeliverer pattern. default: 1h
@@ -84,7 +84,7 @@ type Worker struct {
 	systemRollup   *SystemRollupService
 	eventDeliverer EventBatchProcessor // nil = skip webhook delivery (library mode)
 	localDeliverer *delivery.LocalDispatcher
-	fullReconcile  core.FullReconciler // nil = skip the full 10-check suite job
+	fullReconcile  core.FullReconciler // nil = skip the full reconciliation suite job
 	partition      *PartitionService   // nil = skip partition management
 	attestation    *AttestationService // nil = skip the P6 batch attestation job
 	pool           *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
@@ -119,8 +119,8 @@ func (w *Worker) SetEventDeliverer(d EventBatchProcessor) {
 	w.eventDeliverer = d
 }
 
-// SetFullReconciler registers a core.FullReconciler to run the complete
-// 10-check reconciliation suite on FullReconcileInterval. If not set, the job
+// SetFullReconciler registers a core.FullReconciler to run the full
+// reconciliation suite on FullReconcileInterval. If not set, the job
 // is skipped entirely — the lightweight CheckAccountingEquation job (see
 // ReconcileInterval) still runs regardless. Typically built via
 // (*ledger.Service).FullReconciler and wired in by the service-mode entry

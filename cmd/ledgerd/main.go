@@ -155,7 +155,7 @@ func run() error {
 	}
 	worker := svc.Worker(workerCfg)
 
-	// Full 10-check reconciliation suite: built once here (service mode) and
+	// Full reconciliation suite: built once here (service mode) and
 	// wired into both the background worker (periodic) and the HTTP server
 	// (on-demand via POST /reconcile/full). Library-mode consumers build their
 	// own via svc.FullReconciler and are unaffected.

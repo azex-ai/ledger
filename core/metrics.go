@@ -38,7 +38,7 @@ type Metrics interface {
 	// RollupItemFailed is emitted whenever a rollup queue item's claim is
 	// released after a failed processing attempt (failed_attempts is bumped).
 	RollupItemFailed()
-	// ReconcileCheckResult is emitted once per check in the full 10-check
+	// ReconcileCheckResult is emitted once per check in the full
 	// reconciliation suite. checkName must come from the fixed set of check
 	// names (e.g. "orphan_entries") to keep cardinality bounded.
 	ReconcileCheckResult(checkName string, passed bool)
