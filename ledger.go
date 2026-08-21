@@ -277,6 +277,27 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 // It compares total user-side liability against the custodial system balance.
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
+// AttestationService returns a *service.AttestationService wired to this
+// ledger's connection pool and the Attestor configured via WithAttestor
+// (design doc §8, P6). anchor may be nil (see
+// service.AttestationService.anchor's doc comment); it is not read from
+// WithAttestor's config because P5's Attestor/AuthVerifier and P6's Anchor
+// answer genuinely different questions ("is this key wired at all" vs
+// "which external carrier"), and only the latter has no library-shipped
+// production implementation to default to.
+//
+// Returns an error if WithAttestor was never called -- RunAttestBatch has
+// nothing to sign with otherwise, and failing here (once, at construction)
+// is clearer than failing on every tick.
+func (s *Service) AttestationService(anchor core.Anchor) (*service.AttestationService, error) {
+	if s.attestor == nil {
+		return nil, fmt.Errorf("ledger: attestation service: WithAttestor was never called")
+	}
+	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
+	store := postgres.NewAttestationStore(s.pool)
+	return service.NewAttestationService(store, s.attestor, anchor, engine), nil
+}
+
 // FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
