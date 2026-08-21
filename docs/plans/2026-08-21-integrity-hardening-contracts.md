@@ -18,7 +18,7 @@
 | `045` | P4 | mutation guards（classifications / reservations / period_closes / journals.event_id） |
 | `046` | P5 | `journals` 的 auth 三列 |
 | `047` | P6 | `ledger_attestations` + `entry_attestations` |
-| `048` | 预留 | P7（Merkle 换列语义，若需要） |
+| `048` | P7（**已确认要做**，Aaron 2026-08-21 拍板：定位与 inclusion proof 两样能力都需要） | Merkle 换列语义：`batch_digest` → `merkle_root`，其余结构不变（P6 已留该接口位） |
 | `050` | P2-补 | `checkpoint_rebuilds` append-only 审计表（挂 018 的 `ledger_block_mutation()`）。理由：`RebuildCheckpoint` 与自动修复有**相同的证据销毁性质**，只是多了一个人类决定；drift 非零的那一行就是入侵证据，必须活得比日志长 |
 | `049` | P1-**migrate 阶段** | `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转给 `ledger_owner`。**必须与 `DATABASE_URL` 切换同一次发布上线** —— 它会让在座连接角色失去全部权限（2026-08-21 review 发现 042 原稿把这两步混进 expand，等于破坏性 cutover 伪装成 expand）。042 保持纯增量：只建 role + GRANT，不 REVOKE 任何东西、不动 ownership |
 

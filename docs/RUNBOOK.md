@@ -495,6 +495,97 @@ corruption):
 Reads remain available throughout. `GET /balances/*`, `GET /journals*`,
 `GET /events*` are unaffected.
 
+**Run steps 2 and 4 as `ledger_owner` (or a superuser)** — as of migration
+042, `ledger_app` cannot grant or revoke its own privileges (it has no admin
+option on anything), and `ledger_ro` cannot either. The connection your
+current `DATABASE_URL` uses for migrations already has this authority.
+
+### Database roles (`ledger_owner` / `ledger_app` / `ledger_ro`)
+
+Migration 042 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §3)
+creates three least-privilege roles and grants them. This is a **pure
+expand** step (`deployment.md`): every statement in 042 is additive —
+nothing is revoked and no existing table changes owner, so whatever role
+every environment connects with today keeps 100% of its standing
+privileges. `ledger_app` and `ledger_ro` are fully usable immediately after
+042 (GRANT never requires the grantee to own anything); `ledger_owner` is
+not yet the owner of anything.
+
+| Role | Can do | Used by |
+|---|---|---|
+| `ledger_owner` | Will own every table/sequence once the ownership-transfer migration below runs — the only role with DDL (`ALTER`/`DROP`/`TRUNCATE`/trigger management/partition create). Already has schema `USAGE`+`CREATE` after 042 | Schema migrations, once `migrations.job.databaseUrlKey` (Helm) points at it |
+| `ledger_app` | `SELECT`/`INSERT`/`UPDATE` on ordinary tables; `SELECT`/`INSERT` only on `journal_entries` (never `UPDATE`/`DELETE` — append-only). No DDL of any kind. **Usable today**, independent of the ownership transfer | `ledgerd` serving pods, once the default `DATABASE_URL` secret key points at it |
+| `ledger_ro` | `SELECT` everywhere (full tables, not scoped views yet — see follow-up below). **Usable today** | Metabase / BI / reporting — this is the role the credential-leak incident that motivated this migration should have used instead of a superuser session |
+
+**Why the split**: an earlier version of 042 also did `REVOKE ALL ON SCHEMA
+public FROM PUBLIC` and transferred every table's ownership to
+`ledger_owner` in the same migration. It passed every test that connected
+as the new roles — but both this repo's `docker-compose.yml`
+(`POSTGRES_USER`) and the testcontainers fixture used in CI connect as a
+real Postgres superuser, which bypasses ownership/ACL checks entirely, so
+those tests could not see that the *migration-running connection itself*
+lost every privilege it had (via ownership or PUBLIC's default schema
+access) the instant the migration committed, with no replacement grant.
+Managed Postgres master users (RDS, Cloud SQL, Neon, ...) typically are
+**not** real superusers, so that version would have locked the very next
+write out of its own production database. Proven by
+`postgres.TestMigration042_DoesNotStrandTheMigrationRunner`, which
+simulates a non-superuser owning role and fails against that version with
+`permission denied for table schema_migrations` — golang-migrate's own
+version-bookkeeping write, ordered by Postgres after the migration's
+ownership transfer already committed.
+
+**Migration 049 — "migrate" phase**: `REVOKE ALL ON SCHEMA public FROM
+PUBLIC` and `ALTER TABLE/SEQUENCE ... OWNER TO ledger_owner` for every
+existing object. This migration **must ship in the same release** as the
+`DATABASE_URL` cutover (`migrations.job.databaseUrlKey` → `ledger_owner`,
+serving pods → `ledger_app`) — running it against a connection nobody has
+switched off of yet reproduces exactly the lockout above, on purpose (pinned
+by `postgres.TestMigration049_StrandsTheOldConnectionByDesign`).
+
+049 leaves the connecting role two narrow, deliberate exceptions so it can
+keep running migrations afterward without superuser: schema-level `USAGE`
+and `SELECT`/`INSERT`/`TRUNCATE` on `schema_migrations` only (golang-migrate
+records a migration's success as a **separate** transaction after the
+migration's own content commits — without this, 049 could never
+successfully apply under any non-superuser connection, on any managed
+Postgres, regardless of cutover timing; see 049's migration file header for
+the exact mechanism and the two deadlocks it closes). Every business table
+remains fully locked out. The one thing 049 cannot revoke from the old
+identity is the `ADMIN OPTION` on `ledger_owner`/`ledger_app`/`ledger_ro`
+that PostgreSQL unconditionally grants to whichever role created them
+(042) — that credential could theoretically re-grant itself temporary
+access to `ledger_owner`'s privileges again. Closing that is exactly what
+the future "contract" phase (rotate or fully retire the old credential) is
+for.
+
+Operational notes:
+
+- **No passwords are set by any of these migrations.** Set them out-of-band
+  (`ALTER ROLE ledger_app WITH PASSWORD '...'`) through whatever secrets
+  pipeline you already use for `DATABASE_URL` — never commit one to a
+  migration file or to git (`infra.md`).
+- **Partition creation runs as `ledger_owner`.** `CREATE TABLE ... PARTITION
+  OF` is DDL; once the "migrate" phase moves `ledgerd`'s serving connection
+  to `ledger_app`, whatever process runs `PartitionService.EnsureUpcoming`
+  (today: the same in-process worker as everything else) needs a
+  `ledger_owner`-backed connection, not the app pool. This is a wiring
+  decision for that later release, not something migration 042 changes.
+- `ledger_app`'s grant on `journal_entries` covers the parent table and
+  every partition that exists at migration time. Partitions created *after*
+  the grant inherit access through the parent table name — Postgres checks
+  privileges against the partitioned table you name in a query, not the
+  partition it physically routes to. Pinned by
+  `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  rather than assumed.
+- **TODO (tracked, not yet scheduled): scope `ledger_ro` down to aggregate
+  views instead of full-table `SELECT`.** Design doc §3 prefers this; 042
+  ships full-schema `SELECT` because no reporting views exist yet. Full
+  `SELECT` is still strictly less than the superuser session the 2026-05
+  credential-leak incident actually used, but it is not the end state —
+  `ledger_ro` can currently read every journal/booking/holder row in the
+  system.
+
 ---
 
 ## 10. Deployment security boundary
