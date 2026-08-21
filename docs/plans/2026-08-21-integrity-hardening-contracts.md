@@ -127,6 +127,38 @@ set-once 语义要在**函数体内**实现（如上），不要依赖一个不�
 `main ← P3`（✅ 已合，`044` + 命名修正）→ `main ← P2`（rebase 后重贴它的两个 check）
 → 其余按完成顺序。**P2 需要 rebase 到含 P3 的 main**，并把自己的两个 check 接在 P3 的命名之后。
 
+## 2.6 hash domain separator 分配（2026-08-21 补，第四次同类失误）
+
+> **又一个我漏掉的跨任务共享资源。** 我分配了 migration 号（§1）、`.sql` 文件（§3）、
+> reconcile check 名（§2.5），却没分配 **hash domain separator 的字节值** —— 它同样是
+> 全局命名空间。后果：P5-fix 把 auth digest 的 separator 改成 `0x02`，而 P6 已合入的
+> `core/attestation.go:67` 的 `batchDigestDomain` **也是 `0x02`** —— 同一个包里两个不同的
+> hash 构造用同一个 separator。
+
+domain separation 的意义正是**不依赖「两边字节布局刚好不同」**。真撞上需要跨布局的
+preimage collision（不可行），但一旦有人日后重构任一布局，这个保证就静默变弱了。
+而编码是本设计里**唯一改不掉**的东西。
+
+### 分配表（`core` 包内全局唯一）
+
+| 值 | 归属 | 备注 |
+|---|---|---|
+| `0x00` | **RFC 6962 leaf 前缀** | ⚠️ **外部规范强制**，为互操作性而定，**不得挪用、不得改** |
+| `0x01` | **RFC 6962 node 前缀** | 同上。（历史：auth digest V1 曾用 `0x01`，已退役，不得复用） |
+| `0x02` | attestation batch digest（`core/attestation.go`，P6，已合入） | 不动 |
+| `0x03` | attestation root hash（同上） | 不动 |
+| `0x10` | **journal auth digest**（`core/auth.go`） | 从 `0x02` 改为此值 —— P5-fix 正在重算 golden vectors，此时改代价最低 |
+| `0x11`+ | 未分配 | 新增 hash 构造先 `bus send team-lead` 要号 |
+
+### 规则
+
+1. **新增任何 hash 构造前，先在本表登记 separator 值。**
+2. `0x00` / `0x01` **永久保留给 RFC 6962**。P7 的 Merkle 叶子/内部节点必须用这两个值
+   （规范要求），所以其他构造永不使用它们。
+3. 退役的 separator 值（auth V1 的 `0x01`）**不得复用** —— 与「字段语义永不复用」
+   （`deployment.md`）同理。
+4. 改 separator = 破坏性编码变更，必须重算全部 golden vectors。
+
 ## 3. `.sql` 查询文件分配（避免 sqlcgen 生成物冲突）
 
 `sqlc` 按 `.sql` 文件名分文件生成。**新查询一律进本任务独占的新文件**，不要往共享文件里塞：
