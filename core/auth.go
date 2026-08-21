@@ -53,7 +53,7 @@ const amountScale = 18
 // NUMERIC(30,18)'s maximum magnitude (10^30 scaled by 10^18 needs ~100 bits)
 // with headroom; the width itself is part of the wire contract -- changing
 // it is a breaking encoding change exactly like bumping the domain
-// separator (see authDigestDomainV1).
+// separator (see authDigestDomainV2).
 const authAmountEncodedLen = 16
 
 // EncodeAmount deterministically encodes amt as a fixed-point integer scaled
@@ -122,12 +122,26 @@ func bigIntToFixedTwosComplement(v *big.Int, size int) ([]byte, error) {
 // Canonical journal digest
 // ---------------------------------------------------------------------------
 
-// authDigestDomainV1 domain-separates CanonicalJournalDigest's output from
+// authDigestDomainV2 domain-separates CanonicalJournalDigest's output from
 // any other hash this library might ever compute over similarly-shaped
 // data. A breaking encoding change (field added/removed/reordered, width
 // changed) MUST introduce a new domain separator -- never reuse this byte
 // for an incompatible layout (design doc §7.2 / §12).
-const authDigestDomainV1 = byte(0x01)
+//
+// V1 (0x01) is retired: it included input.EventUID in the digest, which
+// board #12/#13's RunInTx signing-gap fix discovered cannot be known at
+// Authorize time for an event-linked journal composed via
+// booker.Transition (the event uid is minted inside the transaction that
+// follows). Signing with EventUID="" and later attaching the real event
+// uid for the FK link, without re-signing, would have made every such
+// journal fail VerifyJournalAuth's recomputation the moment a verifier
+// reconstructed input from the persisted (real-EventUID) row -- a false
+// positive indistinguishable from an actual forgery. Team Lead's ruling
+// (2026-08-21): remove EventUID from the digest entirely rather than
+// carry two digest shapes plus a discriminator. No journal was ever
+// signed under V1 in a real deployment (no external users yet), so
+// bumping the domain separator was the cheapest possible time to do this.
+const authDigestDomainV2 = byte(0x02)
 
 // CanonicalJournalDigest computes the deterministic, domain-separated
 // SHA-256 digest of a posting intent, using only input's uid-space fields
@@ -135,15 +149,24 @@ const authDigestDomainV1 = byte(0x01)
 // caller intends to persist. It is a pure function: no DB access, no KMS
 // call -- see the package doc comment for why that matters.
 //
+// input.EventUID is deliberately NOT part of this digest. It is
+// provenance metadata (which event caused this posting), not posting
+// intent (who/when/which accounts/how much/idempotency key/reversal) --
+// and the event a journal links to is not always known at Authorize time
+// (see authDigestDomainV2's doc comment on why V1 included it and had to
+// be retired). The event/journal link remains a DB-structural guarantee
+// (I-10: same-transaction write, plus 045's set-once FK on
+// journals.event_id), never a cryptographic one -- signing could not add
+// atomicity to that link anyway.
+//
 // Byte layout (all integers big-endian, unsigned unless noted):
 //
 //	SHA-256(
-//	  0x01                                        -- domain separator
+//	  0x02                                        -- domain separator
 //	  LP(input.JournalTypeUID)
 //	  LP(input.IdempotencyKey)
 //	  BE64(input.ActorID)                         -- bit pattern of the int64
 //	  LP(input.Source)
-//	  LP(input.EventUID)                           -- "" if not event-driven
 //	  LP(effectiveAt.UTC().Format(RFC3339Nano))
 //	  LP(input.ReversalOfUID)                      -- "" for original journals
 //	  BE64(len(entries))
@@ -167,13 +190,12 @@ const authDigestDomainV1 = byte(0x01)
 // separator, not a silent fix.
 func CanonicalJournalDigest(input JournalInput, effectiveAt time.Time) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.WriteByte(authDigestDomainV1)
+	buf.WriteByte(authDigestDomainV2)
 
 	writeLenPrefixed(&buf, input.JournalTypeUID)
 	writeLenPrefixed(&buf, input.IdempotencyKey)
 	writeBE64(&buf, uint64(input.ActorID))
 	writeLenPrefixed(&buf, input.Source)
-	writeLenPrefixed(&buf, input.EventUID)
 	writeLenPrefixed(&buf, effectiveAt.UTC().Format(time.RFC3339Nano))
 	writeLenPrefixed(&buf, input.ReversalOfUID)
 
@@ -294,22 +316,16 @@ const (
 // as any of the three real states -- fail-closed, same reasoning as
 // core.CheckResult.Complete's zero value).
 //
-// EventUID caveat: when Input.EventUID was not yet known at Authorize time
-// (the event that will link to this journal is minted inside the very
-// transaction this pre-authorization exists to get into -- e.g. a booking
-// transition's event uid), Digest was computed with Input.EventUID == "",
-// matching that field's own documented convention ("" means "not
-// event-driven"). A caller MAY update Input.EventUID after Authorize
-// returns (once the real event uid is known) so PostAuthorized links the
-// journal to the correct event at write time -- doing so does NOT
-// re-derive Digest/Signature, so the persisted auth_digest deliberately
-// does not cover the event link in that case. This does not weaken what
-// per-journal signing defends against (M5: a forger without Attestor
-// access cannot produce a valid signature for ANY shape, event-linked or
-// not); it only means such a journal's signature cannot itself prove which
-// event caused it -- the event/journal FK link remains a DB-structural
-// guarantee (I-10), never a cryptographic one, with or without this
-// caveat.
+// EventUID: CanonicalJournalDigest never covers it (see that function's
+// doc comment and authDigestDomainV2's), so a caller MAY freely set or
+// change Input.EventUID after Authorize returns -- e.g. once
+// booker.Transition mints the real event uid inside the transaction this
+// pre-authorization exists to get into -- without invalidating Digest or
+// needing to re-sign. The event/journal link is a DB-structural guarantee
+// (I-10: same-transaction write + 045's set-once FK), never a
+// cryptographic one; per-journal signing's defense against M5 (a forger
+// without Attestor access cannot produce a valid signature for ANY
+// shape) does not depend on which event a signed journal links to.
 type AuthorizedJournal struct {
 	Input       JournalInput
 	EffectiveAt time.Time

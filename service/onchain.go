@@ -790,16 +790,17 @@ func (o *Onchain) routeToReview(ctx context.Context, booking *core.Booking, chan
 // PostAuthorized instead of ExecuteTemplate, which never calls the
 // Attestor and is therefore safe from inside the transaction.
 //
-// EventUID caveat: the event this journal links to is minted by
-// booker.Transition, INSIDE the transaction below -- so it cannot be known
-// at AuthorizeTemplate time. The digest is signed with EventUID == "" (see
-// AuthorizedJournal's doc comment); the real event uid is attached to
-// authorized.Input just before PostAuthorized, for the FK link only, and
-// does not change what was signed. This does not weaken per-journal
-// signing's defense against M5 (a forger without Attestor access cannot
-// produce a valid signature for ANY shape); it only means this specific
-// signature cannot itself prove which event caused it -- the event/journal
-// link remains a DB-structural (FK) guarantee, per I-10, same as before.
+// EventUID: the event this journal links to is minted by booker.Transition
+// INSIDE the transaction below, so it cannot be known at AuthorizeTemplate
+// time -- but CanonicalJournalDigest never covers EventUID (Team Lead's
+// 2026-08-21 ruling, board #12/#13: it is provenance metadata, not posting
+// intent, and an earlier draft of this fix that signed with EventUID=""
+// would have made VerifyJournalAuth spuriously reject every legitimately
+// signed, event-linked journal). authorized.Input.EventUID is set to the
+// real event uid just before PostAuthorized purely for the FK link; doing
+// so never invalidates authorized.Digest/Signature. The event/journal
+// link remains a DB-structural guarantee (I-10 + 045's set-once FK), never
+// a cryptographic one -- signing could not add atomicity to it anyway.
 func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core.Booking, channelRef, actor string) (*core.Booking, error) {
 	var transitionMeta, journalMeta map[string]string
 	if actor != "" {

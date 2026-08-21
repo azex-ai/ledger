@@ -306,10 +306,11 @@ func (s *LedgerStore) attestJournal(ctx context.Context, input core.JournalInput
 // financial.md exactly as PostJournal's tx-mode branch was built to avoid.
 // Authorize must run BEFORE RunInTx opens, on the top-level store/Service.
 //
-// input.EventUID may be "" if the real event uid is not yet known (e.g. it
-// will be minted by a booking transition inside the transaction this
-// pre-authorization is for) -- see AuthorizedJournal's doc comment for the
-// consequence of doing so.
+// input.EventUID does not need to be known yet (e.g. it will be minted by
+// a booking transition inside the transaction this pre-authorization is
+// for): CanonicalJournalDigest never covers it, so setting it later on
+// AuthorizedJournal.Input does not invalidate the signature -- see
+// AuthorizedJournal's doc comment.
 func (s *LedgerStore) Authorize(ctx context.Context, input core.JournalInput) (core.AuthorizedJournal, error) {
 	if s.pool == nil {
 		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize: called on a transaction-bound store; Authorize must run before opening a transaction, not from inside RunInTx: %w", core.ErrInvalidInput)

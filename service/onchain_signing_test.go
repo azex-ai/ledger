@@ -113,10 +113,10 @@ func TestOnchain_DepositConfirm_SignsViaRunInTx(t *testing.T) {
 	require.Equal(t, "onchain-sign-pin", keyID)
 
 	// Reconstruct exactly what was signed: RenderTemplate with the same
-	// params postDepositConfirmedJournal used. EventUID is intentionally
-	// left "" -- the digest predates the event uid, which is minted by
-	// booker.Transition inside the transaction (see AuthorizedJournal's
-	// doc comment on the EventUID caveat).
+	// params postDepositConfirmedJournal used. EventUID is left "" here --
+	// harmlessly, since CanonicalJournalDigest never covers it (Team
+	// Lead's 2026-08-21 ruling, board #12/#13) -- so this reconstruction
+	// would verify identically even if the real event uid were filled in.
 	rendered, err := ledgerStore.RenderTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID:       da.AccountHolder,
 		CurrencyUID:    cur.UID,
@@ -127,4 +127,14 @@ func TestOnchain_DepositConfirm_SignsViaRunInTx(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, core.VerifyJournalAuth(ctx, verifier, *rendered, effectiveAt, digest, signature, keyID),
 		"the stored signature must verify against the exact input that was signed")
+
+	// The real event uid (now linked via journals.event_id) must ALSO
+	// verify -- proving the fix for the false-positive Team Lead caught:
+	// a verifier that reconstructs input with the journal's real,
+	// persisted EventUID must not spuriously fail just because it differs
+	// from whatever (if anything) was present at Authorize time.
+	withRealEvent := *rendered
+	withRealEvent.EventUID = confirmed.JournalUID // any non-empty value pins "EventUID is ignored", not a specific real event uid
+	require.NoError(t, core.VerifyJournalAuth(ctx, verifier, withRealEvent, effectiveAt, digest, signature, keyID),
+		"verification must not depend on which EventUID (if any) the reconstructed input carries")
 }

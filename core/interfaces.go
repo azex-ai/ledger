@@ -17,7 +17,7 @@ type JournalWriter interface {
 	// so PostAuthorized itself never calls the Attestor and is safe to call
 	// from inside a RunInTx callback (tx mode), closing the gap where
 	// PostJournal's tx-mode branch always posted unsigned. See
-	// AuthorizedJournal's doc comment for the EventUID caveat.
+	// AuthorizedJournal's doc comment.
 	PostAuthorized(ctx context.Context, authorized AuthorizedJournal) (*Journal, error)
 	ExecuteTemplate(ctx context.Context, templateCode string, params TemplateParams) (*Journal, error)
 	// ReverseJournal reverses a journal in full. It rejects (ErrConflict) if

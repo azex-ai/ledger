@@ -863,18 +863,35 @@ is the primitive that release (or `ledger-cli verify`, P6) would call, and
 it can now additionally branch on `auth_status` instead of only on
 "digest empty or not".
 
-**EventUID caveat (§7.5)**: when a journal's canonical digest is signed via
-Authorize before the event that will link to it exists yet (e.g.
-`postDepositConfirmedJournal`'s event uid is minted by `booker.Transition`
-inside the transaction that follows), the digest is computed with
-`EventUID == ""` and the real event uid is attached to
-`AuthorizedJournal.Input` afterward for the FK link only, without
-re-signing. This does not weaken M5's defense (a forger without Attestor
-access cannot produce a valid signature for ANY entry shape, event-linked
-or not); it means a signature obtained this way cannot itself prove which
-event caused the journal -- that link remains the DB-structural (FK)
-guarantee I-10 already provides, not a cryptographic one, exactly as it
-was before P5 existed.
+**EventUID is not part of the digest, by design (§7.2/§7.5, revised
+2026-08-21)**: an earlier draft of this fix signed with `EventUID == ""`
+when the real event uid was not yet known at Authorize time (exactly
+`postDepositConfirmedJournal`'s situation -- its event uid is minted by
+`booker.Transition` inside the transaction that follows), then attached
+the real event uid to `AuthorizedJournal.Input` afterward for the FK link
+without re-signing. **That draft was wrong**: `core.VerifyJournalAuth`
+recomputes the digest from a caller-supplied `JournalInput`, and any
+verifier that reconstructs `EventUID` from the journal's actual, persisted
+`event_id` (the natural thing to do) would recompute a digest that never
+matches the one signed with `EventUID == ""` -- a spurious
+`ErrUnauthorizedJournal` on every legitimately signed, event-linked
+journal, worse than the gap it was fixing. Team Lead's ruling: remove
+`EventUID` from `CanonicalJournalDigest` entirely (domain separator
+bumped `0x01` -> `0x02`; no journal was ever signed under `0x01` in a real
+deployment, so this was the cheapest possible time). `AuthorizedJournal.Input.EventUID`
+may now be set or changed freely, before or after `Authorize` returns,
+without affecting `Digest`/`Signature` at all.
+
+**Disclosed residual limitation**: an attacker with DB write credentials
+can set `event_id` on a journal that originally had none (045 allows the
+`NULL -> non-NULL` set-once transition on that column) -- forging which
+event a genuine journal appears to have originated from. This **cannot
+move any funds**: the amounts, accounts, currencies, and idempotency key
+are all covered by the signature and cannot be forged this way. The
+event/journal link was never a cryptographic guarantee -- it is I-10's
+same-transaction write plus 045's set-once FK, both DB-structural, exactly
+as before P5 existed. Signing cannot add atomicity to a link it does not
+cover.
 
 **Enforced by**:
 - `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
@@ -931,6 +948,9 @@ was before P5 existed.
 - `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
   (`core/auth_test.go`) -- pin the exact byte layout against independently
   computed values; any diff is a breaking encoding change.
+- `core.TestCanonicalJournalDigest_IgnoresEventUID` (`core/auth_test.go`,
+  board #12/#13) -- pins that EventUID does not affect the digest at all;
+  fails loudly if it is ever re-added.
 - `postgres/authorize_pin_test.go` (§7.5 fix, board #12/#13):
   `TestAuthorize_RejectsOnTransactionBoundStore`,
   `TestPostAuthorized_RejectsEmptyStatus`,
@@ -946,11 +966,13 @@ was before P5 existed.
   (`service/onchain_signing_test.go`) -- drives a real deposit through
   `IngestDeposit` to `confirmed` with an Attestor configured and asserts
   the persisted `deposit_confirm` journal is `auth_status = signed` with a
-  signature that verifies against the exact (EventUID-blank) input that
-  was signed. Verified failing before this fix (reverting
-  `postDepositConfirmedJournal` to its pre-§7.5 `ExecuteTemplate`-based
-  form reproduces `auth_status = unsigned_tx_mode` and an empty
-  signature).
+  signature that verifies both against a reconstruction with EventUID
+  blank AND against one carrying the journal's real, persisted EventUID
+  (pinning that verification does not depend on which EventUID a
+  reconstruction happens to carry). Verified failing before this fix
+  (reverting `postDepositConfirmedJournal` to its pre-§7.5
+  `ExecuteTemplate`-based form reproduces `auth_status = unsigned_tx_mode`
+  and an empty signature).
 - `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
   `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
   of `VerifyJournalAuth`'s three guard clauses; removing any one of them
