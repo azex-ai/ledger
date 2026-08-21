@@ -43,7 +43,7 @@ document: [`DR.md`](./DR.md).
 # Run the full reconcile suite once more to make sure it's not a flake
 curl -X POST http://ledger/api/v1/reconcile | jq .
 
-# Or run all 10 checks at once via the service:
+# Or run all 12 checks at once via the service:
 ledger-cli reconcile --full
 ```
 
@@ -53,35 +53,62 @@ sub-cent drift; check the `drift` magnitude first.
 
 ### Investigate
 
-The 10 reconcile checks (in `service/reconcile_full.go`):
+The 12 reconcile checks (`service.FullReconciliationService`, in
+`service/reconcile.go`; report field is `checks[].name`):
 
-| # | Check | Means |
-|---|-------|-------|
-| 1 | balanced system | Σ(debits) = Σ(credits) globally |
-| 2 | per-currency balance | (1) but per currency |
-| 3 | orphan entries | journal_entries with no matching journal |
-| 4 | accounting equation | Σ(asset balances) = Σ(liability + equity) per currency |
-| 5 | settlement netting | settlement classification cleanly nets to zero |
-| 6 | non-negative user balances | no holder > 0 has balance < 0 |
-| 7 | orphan reservations | reservations with no matching journal at settle time |
-| 8 | pending journal timeout | journals stuck > N seconds in `pending` state |
-| 9 | idempotency audit | duplicate keys (should be 0; UNIQUE prevents) |
-| 10 | stale rollup | rollup queue items unclaimed for too long |
+| # | Check name | Means |
+|---|------------|-------|
+| 1 | `journal_dr_cr` | Σ(debits) = Σ(credits) globally, per currency |
+| 2 | `checkpoint_balance` | fleet-wide, resumable scan: each (holder, currency) checkpoint vs. a full recompute from entries (I-23; C4b persisted cursor + `lap_dirty` in `reconcile_scan_cursors`) |
+| 3 | `orphan_entries` | journal_entries with no matching journal |
+| 4 | `accounting_equation` | Σ(debit-normal net) = Σ(credit-normal net) per currency |
+| 5 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
+| 6 | `non_negative_balances` | no holder > 0 has balance < 0 |
+| 7 | `orphan_reservations` | reservations with no matching journal |
+| 8 | `pending_journal_timeout` | skipped — `journals.status` not yet in the schema |
+| 9 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
+| 10 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
+| 11 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
+| 12 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 
-Match the failing check to the column in the error detail. Then:
+Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
-- **Check 3 (orphan entries)** — almost always a manual `DELETE FROM journals`
+- **`orphan_entries`** — almost always a manual `DELETE FROM journals`
   that didn't cascade. Restore from backup or post a correcting reversal.
-- **Check 4 (accounting equation)** — the headline disaster. Stop accepting
+- **`accounting_equation`** — the headline disaster. Stop accepting
   new writes (see §9), bisect the journal_id range to find the broken
   journal, post a reversal once identified.
-- **Check 5 (settlement netting)** — usually a stuck FX or transfer leg
+- **`settlement_netting`** — usually a stuck FX or transfer leg
   (one side posted, the other didn't). Check `journals` table for orphan
   half-pair on the `settlement` classification.
-- **Check 6 (negative user balance)** — a user got debited beyond their balance.
+- **`non_negative_balances`** — a user got debited beyond their balance.
   Usually a missing `Reserve` step. Find the journal that drove the balance
   negative; reverse it; investigate the calling service.
-- **Check 8 (pending journal timeout)** — the worker is stuck. See §3.
+- **`pending_journal_timeout`** — the worker is stuck. See §3.
+- **`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity`
+  (checkpoint / system_rollups / balance_snapshots drift, I-23)** —
+  **do not** just re-run reconcile and move on: these three all mean a
+  materialized cache disagrees with `journal_entries`, which is exactly the
+  class of drift a leaked DB credential (direct `UPDATE`) would produce.
+  1. Read the finding's `detail` for the affected dimension and drift amount.
+  2. Confirm it's real: `journal_entries` is the ground truth. Recompute by
+     hand with the query in §8 ("Compute live balance for an account") and
+     compare against the checkpoint/rollup/snapshot value the finding cites.
+  3. If real, treat it as a security incident, not routine drift — determine
+     whether it is isolated arithmetic error (rollup worker bug) or a sign of
+     unauthorized DB writes (audit `pg_stat_activity` / connection logs / who
+     has `ledger_app` or superuser credentials) before repairing anything.
+  4. **Repair, don't just re-run**: `balance_checkpoints` drift is fixed via
+     `CheckpointIntegrityStore.RebuildCheckpoint(ctx, holder, currencyUID,
+     classificationUID)` (locks the dimension, refuses with
+     `ErrRollupPending` if a rollup item is still in flight — drain it first,
+     `service/reconcile.go` check #10 / §3 of this runbook). `system_rollups`
+     self-heals on the next `RefreshSystemRollups` tick once the checkpoints
+     it sums are correct. `balance_snapshots` drift for a historical date is
+     fixed via `SnapshotBackfillService.BackfillSnapshots(fromDate, toDate)`.
+     **None of these run automatically** — detection (reconcile) and
+     correction are deliberately separate so an active incident's evidence
+     isn't destroyed by an auto-repair.
 
 ### Common queries (Postgres)
 
@@ -105,7 +132,7 @@ Reconciliation drift is *symptom*, not cause. Always:
 2. Find the originating journal(s).
 3. Post a reversal journal (never `UPDATE`/`DELETE`).
 4. Re-run reconcile to confirm clean.
-5. Write a postmortem; add a check to `service/reconcile_full.go` if the
+5. Write a postmortem; add a check to `service/reconcile.go` (FullReconciliationService) if the
    pattern can be detected automatically next time.
 
 ---
@@ -747,6 +774,6 @@ For any P0/P1 incident:
 - [ ] Did this invariant exist in [`INVARIANTS.md`](./INVARIANTS.md)? If yes,
       why didn't the test pin catch it? If no, add it.
 - [ ] Add a regression test referencing the failing scenario.
-- [ ] Add a reconcile check in `service/reconcile_full.go` if the failure
+- [ ] Add a reconcile check in `service/reconcile.go` (FullReconciliationService) if the failure
       pattern can be detected automatically.
 - [ ] Update this runbook if the symptom or fix was not previously documented.
