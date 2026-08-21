@@ -49,6 +49,17 @@ type VerifyReport struct {
 	ChainSeqsChecked int64    `json:"chain_seqs_checked"`
 	EntriesRechecked int64    `json:"entries_rechecked"`
 	JournalsSampled  int64    `json:"journals_sampled"`
+	// MismatchedEntryIDs maps seq -> the specific entry ids
+	// core.LocateMismatches found within that batch (design doc §9.1/§9.4),
+	// present only for seqs where a content mismatch was found and could be
+	// localized -- preferring the self-contained path (migration 048's
+	// entry_attestations.leaf_hash, no operator input required) and
+	// falling back to VerifyConfig.ReferenceEntries when self-contained
+	// data is unavailable (e.g. a row that predates the leaf_hash column).
+	// A TAMPERED seq with no entry here means localization was not
+	// attempted or found nothing usable, not that nothing was found --
+	// see Reasons for that seq's text.
+	MismatchedEntryIDs map[int64][]int64 `json:"mismatched_entry_ids,omitempty"`
 }
 
 // VerifyConfig tunes VerifyLedger. Zero value uses sensible defaults via
@@ -60,6 +71,20 @@ type VerifyConfig struct {
 	// ChainPageSize is the page size for walking the attestation chain in
 	// step 2. default: 500
 	ChainPageSize int32
+	// ReferenceEntries is the FALLBACK localization path, used only when
+	// the self-contained one (migration 048's entry_attestations.leaf_hash,
+	// tried first) is unavailable for a seq -- e.g. a row that predates the
+	// leaf_hash column. When non-nil, it supplies an externally-trusted set
+	// of entries for a given seq (e.g. loaded from a pre-incident backup, a
+	// second independent replica, or a WAL-based point-in-time recovery) so
+	// a content mismatch at that seq can still be localized to specific
+	// entry ids (design doc §9.1) instead of only naming the seq. ok=false
+	// (or nil ReferenceEntries) means no reference is available -- and
+	// self-contained localization was also unavailable -- so VerifyLedger
+	// reports the seq as TAMPERED without an entry list, never a
+	// fabricated one. ledger-cli verify's --reference-dir flag is the
+	// reference implementation of this hook, not the only possible one.
+	ReferenceEntries func(seq int64) (entries []core.AttestedEntry, ok bool)
 }
 
 // DefaultVerifyConfig returns VerifyConfig's defaults.
@@ -132,18 +157,137 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 				return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("recheck entries for seq %d: %v", a.Seq, err)}}
 			}
 			report.EntriesRechecked += int64(len(entries))
+			contentMismatch := false
 			if int64(len(entries)) != a.EntryCount {
 				tampered("seq %d: entry_count=%d but only %d entries still exist (deleted row?)", a.Seq, a.EntryCount, len(entries))
+				contentMismatch = true
 			}
-			recomputedDigest, err := core.CanonicalBatchDigest(entries)
-			if err != nil {
+
+			if recomputedDigest, err := core.CanonicalBatchDigest(entries); err != nil {
 				tampered("seq %d: recompute batch digest: %v", a.Seq, err)
+				contentMismatch = true
 			} else if !bytes.Equal(recomputedDigest, a.BatchDigest) {
 				tampered("seq %d: batch_digest mismatch (entry content changed after attestation)", a.Seq)
-			} else {
-				recomputedRoot, err := core.AttestationRootHash(a.Seq, prevRoot, recomputedDigest, a.EntryCount)
-				if err != nil || !bytes.Equal(recomputedRoot, a.RootHash) {
-					tampered("seq %d: root_hash does not match its own stored batch_digest/prev_root", a.Seq)
+				contentMismatch = true
+			}
+
+			// isV2: empty a.MerkleRoot means this row predates merkle_root
+			// being computed (migration 048's never-computed sentinel,
+			// distinct from core.EmptyMerkleRoot -- an EMPTY BATCH's real
+			// tree root) and kept its original v1 root_hash semantics
+			// forever (design doc §9.4 -- see migration 048's header for
+			// why a v1 row is never retroactively upgraded).
+			isV2 := len(a.MerkleRoot) > 0
+			// storedLeafEntryIDs/storedLeafHashes are populated only once
+			// the stored entry_attestations.leaf_hash values have been
+			// confirmed self-consistent with a.MerkleRoot below -- an
+			// unconfirmed set must never be used for localization, or a
+			// tampered leaf_hash could mislead an on-call responder about
+			// which entry actually changed.
+			var storedLeafEntryIDs []int64
+			var storedLeafHashes [][]byte
+
+			if isV2 {
+				if merkleTree, err := core.BuildMerkleTree(entries); err != nil {
+					tampered("seq %d: recompute merkle root: %v", a.Seq, err)
+					contentMismatch = true
+				} else if !bytes.Equal(merkleTree.Root(), a.MerkleRoot) {
+					tampered("seq %d: merkle_root mismatch (entry content or order changed after attestation)", a.Seq)
+					contentMismatch = true
+				}
+
+				// design doc §9.4: entry_attestations.leaf_hash's own
+				// tamper-evidence -- a DIFFERENT failure mode than the
+				// check above. That one catches live journal_entries
+				// content diverging from the signed merkle_root; this one
+				// catches a stored leaf_hash edited directly (entries and
+				// merkle_root both left alone), which the live-entries
+				// recompute above cannot see at all.
+				if storedLeaves, err := store.LeafHashesForAttestation(ctx, a.Seq); err != nil {
+					tampered("seq %d: fetch stored leaf hashes: %v", a.Seq, err)
+				} else if len(storedLeaves) > 0 {
+					hashes := make([][]byte, len(storedLeaves))
+					allPresent := true
+					for i, l := range storedLeaves {
+						if len(l.LeafHash) == 0 {
+							allPresent = false
+							break
+						}
+						hashes[i] = l.LeafHash
+					}
+					if allPresent {
+						if storedTree, err := core.BuildMerkleTreeFromLeafHashes(hashes); err != nil {
+							tampered("seq %d: rebuild tree from stored leaf hashes: %v", a.Seq, err)
+						} else if !bytes.Equal(storedTree.Root(), a.MerkleRoot) {
+							tampered("seq %d: entry_attestations.leaf_hash inconsistent with attested merkle_root (leaf-level tamper)", a.Seq)
+							contentMismatch = true
+						} else {
+							// Confirmed self-consistent -- safe to use for
+							// self-contained localization below.
+							storedLeafHashes = hashes
+							storedLeafEntryIDs = make([]int64, len(storedLeaves))
+							for i, l := range storedLeaves {
+								storedLeafEntryIDs[i] = l.EntryID
+							}
+						}
+					}
+				}
+			}
+
+			// P7 localization (design doc §9.1/§9.4): a content mismatch
+			// only names the seq so far. Prefer the self-contained path
+			// (stored, verified-consistent leaf hashes -- no operator
+			// input needed); fall back to an operator-supplied external
+			// reference only when self-contained data was unavailable
+			// (e.g. a row that predates the leaf_hash column). Silently
+			// skip (no fabricated entry list) if neither path produces a
+			// usable localization.
+			if contentMismatch {
+				var localized []int64
+				if len(storedLeafHashes) > 0 && len(storedLeafHashes) == len(entries) {
+					localized = localizeUsingStoredLeafHashes(storedLeafEntryIDs, storedLeafHashes, entries)
+				}
+				if len(localized) == 0 && cfg.ReferenceEntries != nil {
+					if refEntries, ok := cfg.ReferenceEntries(a.Seq); ok {
+						localized = locateMismatchedEntryIDs(refEntries, entries)
+					}
+				}
+				if len(localized) > 0 {
+					if report.MismatchedEntryIDs == nil {
+						report.MismatchedEntryIDs = make(map[int64][]int64)
+					}
+					report.MismatchedEntryIDs[a.Seq] = localized
+					tampered("seq %d: localized to entry id(s) %v", a.Seq, localized)
+				}
+			}
+
+			// root_hash self-consistency: recompute from the STORED fields
+			// (a.BatchDigest / a.MerkleRoot -- NOT the live-entries
+			// recompute above, a separate concern) under whichever
+			// formula this row's version uses, and confirm it still
+			// equals the stored, signed root_hash. Deliberately
+			// unconditional -- NOT gated on whether those stored fields
+			// also matched live data above: this is what catches a.
+			// MerkleRoot (or a.BatchDigest) being edited to a value that
+			// no longer matches live entries EITHER, root_hash's own
+			// bytes staying whatever they were signed for. Gating this on
+			// "stored fields already verified against live" would make
+			// exactly that edit invisible to this check (it would just
+			// silently re-derive a root_hash from the tampered value and
+			// never notice root_hash itself no longer agrees) --
+			// confirmed by temporarily reintroducing that gate and
+			// observing TestVerifyLedger_TamperedMerkleRootAlone lose its
+			// root_hash finding.
+			{
+				var recomputedRootHash []byte
+				var err error
+				if isV2 {
+					recomputedRootHash, err = core.AttestationRootHashV2(a.Seq, prevRoot, a.BatchDigest, a.MerkleRoot, a.EntryCount)
+				} else {
+					recomputedRootHash, err = core.AttestationRootHash(a.Seq, prevRoot, a.BatchDigest, a.EntryCount)
+				}
+				if err != nil || !bytes.Equal(recomputedRootHash, a.RootHash) {
+					tampered("seq %d: root_hash does not match its own stored fields", a.Seq)
 				}
 			}
 
@@ -209,4 +353,71 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 		report.Status = VerifyStatusVerified
 	}
 	return report
+}
+
+// localizeUsingStoredLeafHashes is the self-contained localization path
+// (design doc §9.4): storedHashes are a batch's persisted
+// entry_attestations.leaf_hash values (already confirmed, by the caller,
+// to rebuild to the batch's own stored merkle_root -- this function does
+// not re-verify that), storedEntryIDs is the parallel entry_id for each
+// (same order), and live is the same seq's current journal_entries
+// content. Returns the actual-side entry ids core.LocateMismatches finds
+// diverging, or nil if the two sets are not the same size (a count
+// mismatch is a different, already-reported finding) or nothing diverges
+// at the leaf level (e.g. only the row's own root_hash/signature was
+// tampered, which the caller's other checks already catch).
+func localizeUsingStoredLeafHashes(storedEntryIDs []int64, storedHashes [][]byte, live []core.AttestedEntry) []int64 {
+	if len(storedHashes) != len(live) {
+		return nil
+	}
+	refTree, err := core.BuildMerkleTreeFromLeafHashes(storedHashes)
+	if err != nil {
+		return nil
+	}
+	actualTree, err := core.BuildMerkleTree(live)
+	if err != nil {
+		return nil
+	}
+	indices, err := core.LocateMismatches(refTree, actualTree)
+	if err != nil || len(indices) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(indices))
+	for i, idx := range indices {
+		ids[i] = storedEntryIDs[idx]
+	}
+	return ids
+}
+
+// locateMismatchedEntryIDs builds an RFC 6962 tree over each of reference
+// and actual (both must already be in the same canonical order --
+// ascending EntryID, the order every AttestationStore read path in this
+// package produces) and returns the actual-side entry ids
+// core.LocateMismatches finds diverging. Returns nil (not an error) when
+// the two sets have different leaf counts -- localization requires equal
+// leaf counts (core.LocateMismatches's own contract); an entry-count
+// mismatch is a different finding (already reported by this file's
+// "entry_count=%d but only %d entries still exist" check) that a leaf-count
+// mismatch here would not add anything to.
+func locateMismatchedEntryIDs(reference, actual []core.AttestedEntry) []int64 {
+	if len(reference) != len(actual) {
+		return nil
+	}
+	refTree, err := core.BuildMerkleTree(reference)
+	if err != nil {
+		return nil
+	}
+	actualTree, err := core.BuildMerkleTree(actual)
+	if err != nil {
+		return nil
+	}
+	indices, err := core.LocateMismatches(refTree, actualTree)
+	if err != nil || len(indices) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(indices))
+	for i, idx := range indices {
+		ids[i] = actual[idx].EntryID
+	}
+	return ids
 }

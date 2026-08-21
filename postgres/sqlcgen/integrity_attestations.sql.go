@@ -14,7 +14,7 @@ import (
 
 const getLatestLedgerAttestation = `-- name: GetLatestLedgerAttestation :one
 
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations ORDER BY seq DESC LIMIT 1
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations ORDER BY seq DESC LIMIT 1
 `
 
 // P6 (batch attestation chain) reads/writes. See
@@ -36,12 +36,13 @@ func (q *Queries) GetLatestLedgerAttestation(ctx context.Context) (LedgerAttesta
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
 
 const getLedgerAttestationBySeq = `-- name: GetLedgerAttestationBySeq :one
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations WHERE seq = $1
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations WHERE seq = $1
 `
 
 func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (LedgerAttestation, error) {
@@ -58,30 +59,48 @@ func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (Led
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
 
 const insertEntryAttestations = `-- name: InsertEntryAttestations :exec
-INSERT INTO entry_attestations (entry_id, seq)
-SELECT e, $1::bigint FROM unnest($2::bigint[]) AS e
+INSERT INTO entry_attestations (entry_id, seq, leaf_hash)
+SELECT e.entry_id, $1::bigint, h.leaf_hash
+FROM unnest($2::bigint[]) WITH ORDINALITY AS e(entry_id, ord)
+JOIN unnest($3::bytea[]) WITH ORDINALITY AS h(leaf_hash, ord) ON e.ord = h.ord
 `
 
 type InsertEntryAttestationsParams struct {
-	Seq      int64   `json:"seq"`
-	EntryIds []int64 `json:"entry_ids"`
+	Seq        int64    `json:"seq"`
+	EntryIds   []int64  `json:"entry_ids"`
+	LeafHashes [][]byte `json:"leaf_hashes"`
 }
 
 // Bulk-covers every id in entry_ids under the same seq, in one round trip.
+// entry_ids and leaf_hashes are parallel arrays (design doc §9.4 -- leaf_hash
+// is entry_ids[i]'s exact RFC 6962 leaf hash as it went into this batch's
+// merkle_root). leaf_hashes MAY be all-empty (”) for callers that predate
+// the leaf_hash feature or never computed a MerkleRoot (P6-only usage) --
+// entry_ids alone is still a valid, complete call, matching this query's
+// pre-048 contract.
+//
+// Two separate single-argument unnest() calls joined by WITH ORDINALITY,
+// not PostgreSQL's multi-argument unnest(a, b) -- sqlc's own catalog does
+// not model that special-cased executor form ("function unnest(unknown,
+// unknown) does not exist" at generate time, even though real PostgreSQL
+// accepts it) -- this form uses only the single-argument signature sqlc
+// already recognizes elsewhere in this file, and produces the identical
+// element-wise pairing.
 func (q *Queries) InsertEntryAttestations(ctx context.Context, arg InsertEntryAttestationsParams) error {
-	_, err := q.db.Exec(ctx, insertEntryAttestations, arg.Seq, arg.EntryIds)
+	_, err := q.db.Exec(ctx, insertEntryAttestations, arg.Seq, arg.EntryIds, arg.LeafHashes)
 	return err
 }
 
 const insertLedgerAttestation = `-- name: InsertLedgerAttestation :one
-INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at
+INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, merkle_root, prev_root, root_hash, signature, key_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root
 `
 
 type InsertLedgerAttestationParams struct {
@@ -89,6 +108,7 @@ type InsertLedgerAttestationParams struct {
 	Seq         int64       `json:"seq"`
 	EntryCount  int64       `json:"entry_count"`
 	BatchDigest []byte      `json:"batch_digest"`
+	MerkleRoot  []byte      `json:"merkle_root"`
 	PrevRoot    []byte      `json:"prev_root"`
 	RootHash    []byte      `json:"root_hash"`
 	Signature   []byte      `json:"signature"`
@@ -101,6 +121,7 @@ func (q *Queries) InsertLedgerAttestation(ctx context.Context, arg InsertLedgerA
 		arg.Seq,
 		arg.EntryCount,
 		arg.BatchDigest,
+		arg.MerkleRoot,
 		arg.PrevRoot,
 		arg.RootHash,
 		arg.Signature,
@@ -118,6 +139,7 @@ func (q *Queries) InsertLedgerAttestation(ctx context.Context, arg InsertLedgerA
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
@@ -174,8 +196,47 @@ func (q *Queries) ListEntriesForAttestation(ctx context.Context, seq int64) ([]L
 	return items, nil
 }
 
+const listLeafHashesForAttestation = `-- name: ListLeafHashesForAttestation :many
+SELECT entry_id, leaf_hash
+FROM entry_attestations
+WHERE seq = $1
+ORDER BY entry_id ASC
+`
+
+type ListLeafHashesForAttestationRow struct {
+	EntryID  int64  `json:"entry_id"`
+	LeafHash []byte `json:"leaf_hash"`
+}
+
+// The stored counterpart to ListEntriesForAttestation: the persisted
+// AttestedLeaf.LeafHash values a given seq covered, in the same entry_id
+// order (so index i in both result sets refers to the same entry) --
+// design doc §9.4's self-contained localization. service.VerifyLedger
+// rebuilds a tree from these (core.BuildMerkleTreeFromLeafHashes) and
+// checks it against the batch's stored merkle_root before trusting them
+// for a localization diff against live entries.
+func (q *Queries) ListLeafHashesForAttestation(ctx context.Context, seq int64) ([]ListLeafHashesForAttestationRow, error) {
+	rows, err := q.db.Query(ctx, listLeafHashesForAttestation, seq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLeafHashesForAttestationRow{}
+	for rows.Next() {
+		var i ListLeafHashesForAttestationRow
+		if err := rows.Scan(&i.EntryID, &i.LeafHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLedgerAttestationsFrom = `-- name: ListLedgerAttestationsFrom :many
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations
 WHERE seq >= $1::bigint
 ORDER BY seq ASC
 LIMIT $2::int
@@ -209,6 +270,7 @@ func (q *Queries) ListLedgerAttestationsFrom(ctx context.Context, arg ListLedger
 			&i.Signature,
 			&i.KeyID,
 			&i.CreatedAt,
+			&i.MerkleRoot,
 		); err != nil {
 			return nil, err
 		}

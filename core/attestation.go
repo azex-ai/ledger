@@ -39,15 +39,27 @@ import (
 // against), so it is not hidden the way internal storage ids normally
 // are.
 type Attestation struct {
-	UID         string    `json:"uid"`
-	Seq         int64     `json:"seq"`
-	EntryCount  int64     `json:"entry_count"`
-	BatchDigest []byte    `json:"batch_digest"`
-	PrevRoot    []byte    `json:"prev_root"`
-	RootHash    []byte    `json:"root_hash"`
-	Signature   []byte    `json:"signature"`
-	KeyID       string    `json:"key_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	UID         string `json:"uid"`
+	Seq         int64  `json:"seq"`
+	EntryCount  int64  `json:"entry_count"`
+	BatchDigest []byte `json:"batch_digest"`
+	// MerkleRoot is the RFC 6962 tree root over the same batch's entries
+	// (P7, migration 048) -- see that migration's header for the "new
+	// column, not a rename of BatchDigest" reasoning. Non-empty means this
+	// row is v2 (AttestationRootHashV2, separator 0x11): RootHash binds
+	// MerkleRoot, so Signature covers it too -- design doc §9.4's fix for
+	// the gap the first cut of this field shipped with (a merkle_root not
+	// attested by anything outside the database is not a root a third
+	// party should trust for an inclusion proof). Empty means this row
+	// predates merkle_root being computed and is v1 (AttestationRootHash,
+	// separator 0x03, unchanged) -- callers must treat that as "not
+	// available", not as a mismatch.
+	MerkleRoot []byte    `json:"merkle_root"`
+	PrevRoot   []byte    `json:"prev_root"`
+	RootHash   []byte    `json:"root_hash"`
+	Signature  []byte    `json:"signature"`
+	KeyID      string    `json:"key_id"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // GenesisRootHashLen is the fixed width, in bytes, of every root_hash /
@@ -59,13 +71,29 @@ const GenesisRootHashLen = sha256.Size
 // design doc §8.1: "创世为 32 字节 0".
 var GenesisRoot = make([]byte, GenesisRootHashLen)
 
-// batchDigestDomain / rootHashDomain domain-separate this file's two hashes
-// from each other and from core.CanonicalJournalDigest's authDigestDomainV1
-// (0x01). A breaking encoding change to either MUST introduce a new
-// separator, never reuse an existing one.
+// batchDigestDomain / rootHashDomain / rootHashDomainV2 domain-separate this
+// file's hashes from each other and from core/auth.go's authDigestDomain
+// (allocation table: contracts §2.6). A breaking encoding change to any of
+// them MUST introduce a new separator, never reuse an existing one.
+//
+//   - batchDigestDomain (0x02) / rootHashDomain (0x03): P6, unchanged since
+//     migration 047. rootHashDomain is v1's root-hash formula -- every
+//     attestation row created before migration 048 wired merkle_root in
+//     was signed under it, and verification must keep accepting those
+//     rows exactly as signed (deployment.md: an already-signed value
+//     cannot be silently re-derived).
+//   - rootHashDomainV2 (0x11): P7, design doc §9.4. AttestationRootHashV2
+//     binds MerkleRoot into the signed hash -- the fix for the gap the
+//     first cut of migration 048 shipped with (a merkle_root not attested
+//     by anything outside the database is not a root a third party
+//     verifying an inclusion proof should trust). Every attestation
+//     migration 048 onward is created under v2; v1 rows are never
+//     retroactively upgraded (same reasoning as batch_digest not being
+//     renamed -- see 048's header).
 const (
 	batchDigestDomain = byte(0x02)
 	rootHashDomain    = byte(0x03)
+	rootHashDomainV2  = byte(0x11)
 )
 
 // AttestedEntry is the subset of a journal_entries row CanonicalBatchDigest
@@ -117,22 +145,37 @@ func CanonicalBatchDigest(entries []AttestedEntry) ([]byte, error) {
 	writeBE64(&buf, uint64(len(entries)))
 
 	for i, e := range entries {
-		writeBE64(&buf, uint64(e.EntryID))
-		writeBE64(&buf, uint64(e.JournalID))
-		writeBE64(&buf, uint64(e.AccountHolder))
-		writeBE64(&buf, uint64(e.CurrencyID))
-		writeBE64(&buf, uint64(e.ClassificationID))
-		writeLenPrefixed(&buf, string(e.EntryType))
-		amtBytes, err := EncodeAmount(e.Amount)
+		payload, err := encodeAttestedEntry(e)
 		if err != nil {
 			return nil, fmt.Errorf("core: canonical batch digest: entry[%d] (id=%d): %w", i, e.EntryID, err)
 		}
-		buf.Write(amtBytes)
-		writeLenPrefixed(&buf, e.EffectiveAt.UTC().Format(time.RFC3339Nano))
+		buf.Write(payload)
 	}
 
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:], nil
+}
+
+// encodeAttestedEntry encodes a single entry's fields, in the exact order
+// CanonicalBatchDigest lays them out inline for each entry. Extracted so
+// core/merkle.go's leaf hashing (P7) reuses this byte-for-byte instead of
+// inventing a second encoding of the same fields (design doc §9.3: "叶子的
+// payload 复用 P5 的 EncodeAmount 与字段顺序纪律，不要另起一套编码").
+func encodeAttestedEntry(e AttestedEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	writeBE64(&buf, uint64(e.EntryID))
+	writeBE64(&buf, uint64(e.JournalID))
+	writeBE64(&buf, uint64(e.AccountHolder))
+	writeBE64(&buf, uint64(e.CurrencyID))
+	writeBE64(&buf, uint64(e.ClassificationID))
+	writeLenPrefixed(&buf, string(e.EntryType))
+	amtBytes, err := EncodeAmount(e.Amount)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(amtBytes)
+	writeLenPrefixed(&buf, e.EffectiveAt.UTC().Format(time.RFC3339Nano))
+	return buf.Bytes(), nil
 }
 
 // AttestationRootHash computes the hash-chain link for attestation seq,
@@ -169,4 +212,57 @@ func AttestationRootHash(seq int64, prevRoot, batchDigest []byte, entryCount int
 
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:], nil
+}
+
+// AttestationRootHashV2 is AttestationRootHash with merkleRoot bound into
+// the signed hash (design doc §9.4, P7). Every attestation created from
+// migration 048 onward uses this -- see rootHashDomainV2's doc comment for
+// why v1 (AttestationRootHash) still exists and is not retroactively
+// upgraded.
+//
+// Byte layout:
+//
+//	SHA-256(0x11 || BE64(seq) || prevRoot (32 bytes) || batchDigest (32 bytes) || merkleRoot (32 bytes) || BE64(entryCount))
+//
+// Returns core.ErrInvalidInput if prevRoot, batchDigest, or merkleRoot is
+// not exactly GenesisRootHashLen (32) bytes.
+func AttestationRootHashV2(seq int64, prevRoot, batchDigest, merkleRoot []byte, entryCount int64) ([]byte, error) {
+	if len(prevRoot) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v2: prevRoot must be %d bytes, got %d: %w", GenesisRootHashLen, len(prevRoot), ErrInvalidInput)
+	}
+	if len(batchDigest) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v2: batchDigest must be %d bytes, got %d: %w", GenesisRootHashLen, len(batchDigest), ErrInvalidInput)
+	}
+	if len(merkleRoot) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v2: merkleRoot must be %d bytes, got %d: %w", GenesisRootHashLen, len(merkleRoot), ErrInvalidInput)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte(rootHashDomainV2)
+	writeBE64(&buf, uint64(seq))
+	buf.Write(prevRoot)
+	buf.Write(batchDigest)
+	buf.Write(merkleRoot)
+	writeBE64(&buf, uint64(entryCount))
+
+	sum := sha256.Sum256(buf.Bytes())
+	return sum[:], nil
+}
+
+// AttestedLeaf is one persisted entry_attestations row's leaf hash (design
+// doc §9.4's self-contained-localization fix, migration 048): the exact
+// RFC 6962 leaf hash (core.merkleLeafHash(encodeAttestedEntry(entry))) that
+// went into computing the batch's MerkleRoot at attestation time, stored
+// alongside the entry_id it covers so it survives independently of
+// re-deriving it from journal_entries. Its own tamper-evidence comes from
+// MerkleRoot: rebuilding a tree from every AttestedLeaf in a batch and
+// comparing the result against the batch's stored, signed MerkleRoot
+// detects any edit to a stored leaf hash, exactly the same way editing a
+// journal_entries row is detected by recomputing from the live row --
+// except this check does not need to touch journal_entries at all, which
+// is what makes on-call localization self-contained (no operator-supplied
+// external reference required).
+type AttestedLeaf struct {
+	EntryID  int64
+	LeafHash []byte
 }

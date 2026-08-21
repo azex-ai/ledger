@@ -144,8 +144,9 @@ type DepositAddress struct {
 }
 
 type EntryAttestation struct {
-	EntryID int64 `json:"entry_id"`
-	Seq     int64 `json:"seq"`
+	EntryID  int64  `json:"entry_id"`
+	Seq      int64  `json:"seq"`
+	LeafHash []byte `json:"leaf_hash"`
 }
 
 type EntryTemplate struct {
@@ -268,6 +269,7 @@ type LedgerAttestation struct {
 	Signature   []byte      `json:"signature"`
 	KeyID       string      `json:"key_id"`
 	CreatedAt   time.Time   `json:"created_at"`
+	MerkleRoot  []byte      `json:"merkle_root"`
 }
 
 type PeriodClose struct {
