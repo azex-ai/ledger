@@ -450,6 +450,19 @@ err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
 Use `tx.DBTX()` (not `Pool()`) inside the callback — `Pool` ignores the
 surrounding transaction and would commit out-of-band.
 
+If you've configured `WithAttestor` (per-journal authorization signing),
+note that `JournalWriter` calls made *inside* this callback never sign —
+there is no point inside an already-open transaction where calling out to
+the Attestor wouldn't violate the "no external calls inside a DB
+transaction" rule the whole signing feature depends on. To get a signed
+journal out of a `RunInTx` composition, call `svc.Authorize` (or
+`svc.AuthorizeTemplate` for a template-driven journal) *before* opening
+`RunInTx`, then post the result via `tx.JournalWriter().PostAuthorized(...)`
+instead of `PostJournal`/`ExecuteTemplate` inside the callback. Every
+journal's `auth_status` column records which of the two paths was taken
+(`signed`, or `unsigned_tx_mode` if you skip this step), so this is
+observable after the fact rather than a silent gap.
+
 ### What changes when you add what
 
 | Want to add… | Change |

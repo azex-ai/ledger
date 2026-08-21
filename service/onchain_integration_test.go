@@ -39,6 +39,20 @@ type testTxComposer struct {
 	ledgerStore  *postgres.LedgerStore
 }
 
+// AuthorizeTemplate mirrors (*ledger.Service).AuthorizeTemplate against the
+// same *postgres.LedgerStore under test -- these tests use no Attestor, so
+// this always returns an AuthorizedJournal with
+// core.AuthStatusUnsignedNoAttestor, exercising exactly the path
+// postDepositConfirmedJournal takes in every deployment that has not
+// configured signing (design doc §7.5's expand-safe default).
+func (c *testTxComposer) AuthorizeTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (core.AuthorizedJournal, error) {
+	input, err := c.ledgerStore.RenderTemplate(ctx, templateCode, params)
+	if err != nil {
+		return core.AuthorizedJournal{}, err
+	}
+	return c.ledgerStore.Authorize(ctx, *input)
+}
+
 func (c *testTxComposer) RunInTx(ctx context.Context, fn func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error) error {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {

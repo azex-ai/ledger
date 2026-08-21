@@ -1,9 +1,10 @@
 -- name: InsertJournal :one
 -- auth_digest/auth_signature/auth_key_id (migration 046, P5) are empty when
--- the caller did not sign this posting (no core.Attestor configured, or a
--- tx-bound store -- see postgres.LedgerStore.PostJournal).
-INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+-- the caller did not sign this posting. auth_status (migration 051, design
+-- doc §7.5) always records WHY: 'signed' / 'unsigned_no_attestor' /
+-- 'unsigned_tx_mode' -- see core.AuthStatus.
+INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING *;
 
 -- name: InsertJournalEntry :one

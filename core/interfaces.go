@@ -11,6 +11,14 @@ import (
 // JournalWriter handles journal posting.
 type JournalWriter interface {
 	PostJournal(ctx context.Context, input JournalInput) (*Journal, error)
+	// PostAuthorized posts a journal from an AuthorizedJournal obtained via
+	// Authorize (design doc §7.5): the caller already ran Authorize -- and
+	// any Attestor call it needed -- strictly before opening a transaction,
+	// so PostAuthorized itself never calls the Attestor and is safe to call
+	// from inside a RunInTx callback (tx mode), closing the gap where
+	// PostJournal's tx-mode branch always posted unsigned. See
+	// AuthorizedJournal's doc comment.
+	PostAuthorized(ctx context.Context, authorized AuthorizedJournal) (*Journal, error)
 	ExecuteTemplate(ctx context.Context, templateCode string, params TemplateParams) (*Journal, error)
 	// ReverseJournal reverses a journal in full. It rejects (ErrConflict) if
 	// journalID already has any reversal recorded against it — full or

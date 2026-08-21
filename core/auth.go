@@ -53,7 +53,7 @@ const amountScale = 18
 // NUMERIC(30,18)'s maximum magnitude (10^30 scaled by 10^18 needs ~100 bits)
 // with headroom; the width itself is part of the wire contract -- changing
 // it is a breaking encoding change exactly like bumping the domain
-// separator (see authDigestDomainV1).
+// separator (see authDigestDomain).
 const authAmountEncodedLen = 16
 
 // EncodeAmount deterministically encodes amt as a fixed-point integer scaled
@@ -122,12 +122,36 @@ func bigIntToFixedTwosComplement(v *big.Int, size int) ([]byte, error) {
 // Canonical journal digest
 // ---------------------------------------------------------------------------
 
-// authDigestDomainV1 domain-separates CanonicalJournalDigest's output from
+// authDigestDomain domain-separates CanonicalJournalDigest's output from
 // any other hash this library might ever compute over similarly-shaped
 // data. A breaking encoding change (field added/removed/reordered, width
 // changed) MUST introduce a new domain separator -- never reuse this byte
 // for an incompatible layout (design doc §7.2 / §12).
-const authDigestDomainV1 = byte(0x01)
+//
+// Domain separator allocation across the package (contracts §2.6, Team
+// Lead, 2026-08-21 -- a cross-task shared resource, same class as
+// migration numbers / .sql files / reconcile check names):
+//   - 0x00 / 0x01: reserved by RFC 6962 (leaf / internal node), external
+//     spec, permanent. This also means the retired auth digest V1 (below)
+//     can never be reused -- it already burned 0x01.
+//   - 0x02 / 0x03: core/attestation.go's batchDigestDomain / root hash
+//     (P6, merged). Do not touch.
+//   - 0x10: this constant (journal auth digest).
+//
+// V1 (0x01, retired) included input.EventUID in the digest, which board
+// #12/#13's RunInTx signing-gap fix discovered cannot be known at
+// Authorize time for an event-linked journal composed via
+// booker.Transition (the event uid is minted inside the transaction that
+// follows). Signing with EventUID="" and later attaching the real event
+// uid for the FK link, without re-signing, would have made every such
+// journal fail VerifyJournalAuth's recomputation the moment a verifier
+// reconstructed input from the persisted (real-EventUID) row -- a false
+// positive indistinguishable from an actual forgery. Team Lead's ruling
+// (2026-08-21): remove EventUID from the digest entirely rather than
+// carry two digest shapes plus a discriminator. No journal was ever
+// signed under V1 in a real deployment (no external users yet), so
+// bumping the domain separator was the cheapest possible time to do this.
+const authDigestDomain = byte(0x10)
 
 // CanonicalJournalDigest computes the deterministic, domain-separated
 // SHA-256 digest of a posting intent, using only input's uid-space fields
@@ -135,15 +159,24 @@ const authDigestDomainV1 = byte(0x01)
 // caller intends to persist. It is a pure function: no DB access, no KMS
 // call -- see the package doc comment for why that matters.
 //
+// input.EventUID is deliberately NOT part of this digest. It is
+// provenance metadata (which event caused this posting), not posting
+// intent (who/when/which accounts/how much/idempotency key/reversal) --
+// and the event a journal links to is not always known at Authorize time
+// (see authDigestDomain's doc comment on why V1 included it and had to
+// be retired). The event/journal link remains a DB-structural guarantee
+// (I-10: same-transaction write, plus 045's set-once FK on
+// journals.event_id), never a cryptographic one -- signing could not add
+// atomicity to that link anyway.
+//
 // Byte layout (all integers big-endian, unsigned unless noted):
 //
 //	SHA-256(
-//	  0x01                                        -- domain separator
+//	  0x10                                        -- domain separator
 //	  LP(input.JournalTypeUID)
 //	  LP(input.IdempotencyKey)
 //	  BE64(input.ActorID)                         -- bit pattern of the int64
 //	  LP(input.Source)
-//	  LP(input.EventUID)                           -- "" if not event-driven
 //	  LP(effectiveAt.UTC().Format(RFC3339Nano))
 //	  LP(input.ReversalOfUID)                      -- "" for original journals
 //	  BE64(len(entries))
@@ -167,13 +200,12 @@ const authDigestDomainV1 = byte(0x01)
 // separator, not a silent fix.
 func CanonicalJournalDigest(input JournalInput, effectiveAt time.Time) ([]byte, error) {
 	var buf bytes.Buffer
-	buf.WriteByte(authDigestDomainV1)
+	buf.WriteByte(authDigestDomain)
 
 	writeLenPrefixed(&buf, input.JournalTypeUID)
 	writeLenPrefixed(&buf, input.IdempotencyKey)
 	writeBE64(&buf, uint64(input.ActorID))
 	writeLenPrefixed(&buf, input.Source)
-	writeLenPrefixed(&buf, input.EventUID)
 	writeLenPrefixed(&buf, effectiveAt.UTC().Format(time.RFC3339Nano))
 	writeLenPrefixed(&buf, input.ReversalOfUID)
 
@@ -230,6 +262,87 @@ func writeBE64(buf *bytes.Buffer, v uint64) {
 	var tmp [8]byte
 	binary.BigEndian.PutUint64(tmp[:], v)
 	buf.Write(tmp[:])
+}
+
+// ---------------------------------------------------------------------------
+// RunInTx gap fix (design doc §7.5) -- pre-authorization
+// ---------------------------------------------------------------------------
+//
+// §7.2 put the Attestor call outside any DB transaction, but never said how
+// that composes with RunInTx: the caller-owned transaction it wraps has
+// already begun by the time a RunInTx callback runs, so there is no safe
+// point left inside it to call an Attestor without violating financial.md.
+// PostJournal's tx-mode branch therefore always posted unsigned -- silently,
+// for every journal composed with a caller's own writes via RunInTx,
+// including the deposit-confirmation journal P5 exists to protect
+// (service/onchain.go's postDepositConfirmedJournal).
+//
+// The fix: split signing into two calls the caller sequences itself.
+// Authorize (LedgerStore.Authorize / ledger.Service.Authorize) runs BEFORE
+// opening any transaction -- it may call the Attestor. PostAuthorized
+// (LedgerStore.PostAuthorized) runs the actual write, from either pool mode
+// or a caller-owned transaction (RunInTx), using only the already-computed
+// AuthorizedJournal -- it never touches the Attestor, so it is always safe
+// to call from inside RunInTx.
+
+// AuthStatus records WHY a journal's auth_digest/auth_signature/auth_key_id
+// are (or are not) populated. Persisted verbatim in journals.auth_status
+// (migration 051) so "why wasn't this signed" is a queryable fact instead
+// of something a reader has to infer from three possibly-empty byte
+// columns -- indistinguishability here was exactly the bug (design doc
+// §7.5): before this column existed, "no Attestor configured" and "posted
+// via a transaction with no safe point to sign" were the same observable
+// state (all three columns empty), so a verifier could not tell "this
+// deployment never turns on signing" apart from "this specific write path
+// skipped it even though signing is on".
+type AuthStatus string
+
+const (
+	// AuthStatusSigned: an Attestor was configured and this journal carries
+	// a valid signature over its canonical digest.
+	AuthStatusSigned AuthStatus = "signed"
+	// AuthStatusUnsignedNoAttestor: no Attestor is configured for this
+	// deployment at all -- the signing feature is off system-wide. Every
+	// journal posted before P5 (migration 046) predates the column
+	// entirely and is backfilled to this value unless it already carries a
+	// signature (migration 051's up.sql).
+	AuthStatusUnsignedNoAttestor AuthStatus = "unsigned_no_attestor"
+	// AuthStatusUnsignedTxMode: this journal was posted through a write
+	// path with no safe point to call an Attestor without violating
+	// financial.md's "no external calls inside a transaction" rule --
+	// PostJournal's tx-mode branch, ExecuteTemplateBatch, or a reversal --
+	// and the caller did not go through Authorize/PostAuthorized to close
+	// that gap for this specific posting.
+	AuthStatusUnsignedTxMode AuthStatus = "unsigned_tx_mode"
+)
+
+// AuthorizedJournal is the result of pre-authorizing a JournalInput outside
+// any database transaction: the canonical uid-space digest (§7.2) and
+// whatever an Attestor produced for it, packaged so PostAuthorized can
+// persist it without calling the Attestor a second time. Obtained via
+// LedgerStore.Authorize / ledger.Service.Authorize; callers must not
+// construct one by hand outside those two functions (the zero value's
+// Status is "", which PostAuthorized rejects rather than silently treating
+// as any of the three real states -- fail-closed, same reasoning as
+// core.CheckResult.Complete's zero value).
+//
+// EventUID: CanonicalJournalDigest never covers it (see that function's
+// doc comment and authDigestDomain's), so a caller MAY freely set or
+// change Input.EventUID after Authorize returns -- e.g. once
+// booker.Transition mints the real event uid inside the transaction this
+// pre-authorization exists to get into -- without invalidating Digest or
+// needing to re-sign. The event/journal link is a DB-structural guarantee
+// (I-10: same-transaction write + 045's set-once FK), never a
+// cryptographic one; per-journal signing's defense against M5 (a forger
+// without Attestor access cannot produce a valid signature for ANY
+// shape) does not depend on which event a signed journal links to.
+type AuthorizedJournal struct {
+	Input       JournalInput
+	EffectiveAt time.Time
+	Digest      []byte
+	Signature   []byte
+	KeyID       string
+	Status      AuthStatus
 }
 
 // ---------------------------------------------------------------------------
