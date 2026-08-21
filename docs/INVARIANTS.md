@@ -832,6 +832,18 @@ its own database the instant it
 committed; see `docs/RUNBOOK.md` §9 for the failure this caused and the
 test that catches it.
 
+**Note on grant coverage**: 042's GRANT loop only enumerates tables that
+existed when 042 ran, and its `ALTER DEFAULT PRIVILEGES` deliberately
+benefits only `ledger_owner` — every later migration that adds a table is
+required to GRANT `ledger_app`/`ledger_ro` on it explicitly
+(contracts.md §9 point 3). That rule was violated twice before it had a
+structural check: `reconcile_scan_cursors` (043) and `checkpoint_rebuilds`
+(050) were both written and merged before 042 landed and neither carried
+that grant. Migration 052 closes the gap for those two tables; the pin
+below (`TestGrantCoverage_*`) makes the underlying rule self-enforcing
+going forward instead of depending on a migration author remembering it
+(`working-agreements` §5).
+
 **Enforced by**:
 - `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
   / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
@@ -842,6 +854,10 @@ test that catches it.
   `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
   instead, which must ship in the same release as the `DATABASE_URL`
   cutover (`docs/RUNBOOK.md` §9).
+- `postgres/sql/migrations/052_grant_coverage_gap.up.sql` — grants
+  `ledger_app`/`ledger_ro` on `reconcile_scan_cursors`, `checkpoint_rebuilds`,
+  and `checkpoint_rebuilds_id_seq`, matching 042's own policy exactly (see
+  "Note on grant coverage" above).
 
 **Pinned by**:
 - `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
@@ -882,6 +898,14 @@ test that catches it.
   `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
   for 042 and 049 each roll back cleanly and leave the original connection
   able to operate normally.
+- `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants`
+  / `postgres.TestGrantCoverage_EverySequenceHasExpectedGrants` — enumerate
+  every table/sequence in `public` (not a fixed list) and assert the exact
+  grant shape 042's policy intends, catching any future migration that adds
+  an object without granting it (see "Note on grant coverage" above).
+  Verified red against `reconcile_scan_cursors`/`checkpoint_rebuilds`/
+  `checkpoint_rebuilds_id_seq` before 052, green after.
+
 ## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
 
 `balance_checkpoints` is an unreliable cache, not a source of truth — an
