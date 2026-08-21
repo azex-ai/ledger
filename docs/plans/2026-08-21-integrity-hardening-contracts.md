@@ -148,7 +148,8 @@ preimage collision（不可行），但一旦有人日后重构任一布局，�
 | `0x02` | attestation batch digest（`core/attestation.go`，P6，已合入） | 不动 |
 | `0x03` | attestation root hash（同上） | 不动 |
 | `0x10` | **journal auth digest**（`core/auth.go`） | 从 `0x02` 改为此值 —— P5-fix 正在重算 golden vectors，此时改代价最低 |
-| `0x11`+ | 未分配 | 新增 hash 构造先 `bus send team-lead` 要号 |
+| `0x11` | attestation root hash **v2**（含 `merkle_root`，P7） | 见设计稿 §9.4。P6 的 `0x03` 是 v1 的验证规则，语义不动 |
+| `0x12`+ | 未分配 | 新增 hash 构造先 `bus send team-lead` 要号 |
 
 ### 规则
 
