@@ -61,6 +61,35 @@ type BalanceReader interface {
 	GetBalanceBreakdown(ctx context.Context, holder int64, currencyUID string) (*BalanceBreakdown, error)
 }
 
+// CheckpointIntegrityStore provides trusted, entries-only balance operations
+// that never consult balance_checkpoints, so checkpoint tampering has zero
+// influence on either method (docs/INVARIANTS.md I-23).
+type CheckpointIntegrityStore interface {
+	// RecomputeBalance ignores the checkpoint entirely and sums every
+	// journal_entries row for the dimension from entry 0. It is slow relative
+	// to BalanceReader.GetBalance (checkpoint + delta) because it rescans full
+	// history — callers on the withdrawal / large-amount path MUST use this
+	// instead of GetBalance for exactly that reason: checkpoint tampering
+	// cannot affect a value that never reads the checkpoint.
+	RecomputeBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
+	// RebuildCheckpoint is the trusted operator entry point that repairs a
+	// checkpoint already found to have drifted by reconcile's
+	// checkpoint_balance check. It locks the dimension, recomputes balance and
+	// watermark from entry 0, and unconditionally overwrites the existing
+	// checkpoint row — unlike the rollup worker's monotonic upsert, which can
+	// never repair a checkpoint whose last_entry_id was tampered to look
+	// "ahead" of the true watermark.
+	//
+	// Detection (reconcile) and correction (this method) are deliberately
+	// separate calls: nothing in this library invokes RebuildCheckpoint
+	// automatically, because auto-correcting while an attack may still be in
+	// progress would destroy the forensic evidence the drift represents.
+	//
+	// Returns core.ErrRollupPending if a rollup_queue item is still pending or
+	// claimed for the dimension — see that error's doc comment.
+	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string) (*BalanceCheckpoint, error)
+}
+
 // Reserver handles reserve/settle/lock flow.
 type Reserver interface {
 	Reserve(ctx context.Context, input ReserveInput) (*Reservation, error)

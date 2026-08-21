@@ -137,3 +137,28 @@ WHERE account_holder > sqlc.arg(after_holder)::bigint
    OR (account_holder = sqlc.arg(after_holder)::bigint AND currency_id > sqlc.arg(after_currency)::bigint)
 ORDER BY account_holder, currency_id
 LIMIT sqlc.arg(page_limit)::int;
+
+-- name: GetReconcileScanCursor :one
+-- Persisted resume cursor for check #2's fleet-wide scan (C4b). Zero rows
+-- (no cursor persisted yet, e.g. first run ever) is a normal state, not an
+-- error — the adapter maps it to the same (MinInt64, MinInt64, false) start
+-- the in-memory cursor always used, NOT (0, 0): system holders are negative
+-- (core.SystemHolder), so a zero start would reintroduce the bug fixed in
+-- docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md (B1). lap_dirty
+-- carries "did an earlier segment of this lap already find a violation" so
+-- the check that completes the lap can still report Passed=false.
+SELECT after_holder, after_currency, lap_dirty
+FROM reconcile_scan_cursors
+WHERE check_name = sqlc.arg(check_name)::text;
+
+-- name: UpsertReconcileScanCursor :exec
+-- Called at the end of every check #2 run: persists the resume point and
+-- lap_dirty flag when the scan was capped or timed out (partial coverage),
+-- or resets both to their start values ((MinInt64, MinInt64), false) when a
+-- full lap completed, so the next run begins a fresh lap rather than
+-- replaying the same resume point (or a stale dirty flag) forever.
+INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, updated_at)
+VALUES (sqlc.arg(check_name)::text, sqlc.arg(after_holder)::bigint, sqlc.arg(after_currency)::bigint, sqlc.arg(lap_dirty)::boolean, now())
+ON CONFLICT (check_name)
+DO UPDATE SET after_holder = EXCLUDED.after_holder, after_currency = EXCLUDED.after_currency,
+              lap_dirty = EXCLUDED.lap_dirty, updated_at = now();

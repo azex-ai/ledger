@@ -455,6 +455,43 @@ func (q *Queries) MarkRollupProcessed(ctx context.Context, arg MarkRollupProcess
 	return result.RowsAffected(), nil
 }
 
+const rebuildBalanceCheckpoint = `-- name: RebuildBalanceCheckpoint :exec
+INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (account_holder, currency_id, classification_id)
+DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now()
+`
+
+type RebuildBalanceCheckpointParams struct {
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	ClassificationID int64          `json:"classification_id"`
+	Balance          pgtype.Numeric `json:"balance"`
+	LastEntryID      int64          `json:"last_entry_id"`
+	LastEntryAt      time.Time      `json:"last_entry_at"`
+}
+
+// Trusted-operator overwrite: unlike UpsertBalanceCheckpoint's monotonic
+// guard (last_entry_id can only advance), this unconditionally replaces the
+// row. A poisoned checkpoint can have an arbitrary last_entry_id — including
+// one higher than the true watermark — so the monotonic guard that protects
+// the rollup worker's normal path would refuse the very fix meant to correct
+// it. Only CheckpointIntegrityStore.RebuildCheckpoint calls this, and only
+// after taking the (holder, currency_id) advisory lock and confirming no
+// rollup_queue item is pending for the dimension (CountPendingRollupForDimension) —
+// see docs/plans/2026-08-21-tamper-evident-ledger-design.md §4.
+func (q *Queries) RebuildBalanceCheckpoint(ctx context.Context, arg RebuildBalanceCheckpointParams) error {
+	_, err := q.db.Exec(ctx, rebuildBalanceCheckpoint,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.ClassificationID,
+		arg.Balance,
+		arg.LastEntryID,
+		arg.LastEntryAt,
+	)
+	return err
+}
+
 const releaseRollupClaim = `-- name: ReleaseRollupClaim :exec
 UPDATE rollup_queue
 SET claimed_until = NULL,

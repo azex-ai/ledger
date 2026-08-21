@@ -242,6 +242,14 @@ type PeriodClose struct {
 	Uid         pgtype.UUID `json:"uid"`
 }
 
+type ReconcileScanCursor struct {
+	CheckName     string    `json:"check_name"`
+	AfterHolder   int64     `json:"after_holder"`
+	AfterCurrency int64     `json:"after_currency"`
+	LapDirty      bool      `json:"lap_dirty"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type RegistrationRescan struct {
 	ID           int64              `json:"id"`
 	Uid          pgtype.UUID        `json:"uid"`
