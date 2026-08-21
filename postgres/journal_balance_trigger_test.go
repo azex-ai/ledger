@@ -60,19 +60,15 @@ func TestJournalBalanceTrigger_RejectsDirectSQLImbalance(t *testing.T) {
 
 	store, deps := setupInvariantsFixture(t, pool, ctx)
 
-	// A legitimate, balanced journal, posted through the normal app path.
-	journalA, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeUID: deps.JournalType,
-		IdempotencyKey: postgrestest.UniqueKey("bal-trig-pre"),
-		Source:         "trigger-test",
-		Entries: []core.EntryInput{
-			{AccountHolder: 4201, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
-			{AccountHolder: -4201, CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
-		},
-	})
-	require.NoError(t, err)
+	// A legitimate, balanced journal, inserted directly against the
+	// schema-v41 shape rather than through store.PostJournal: the current
+	// binary's InsertJournal sends event_id as NULL (migration 045 made the
+	// column a nullable FK-target-exception), which schema v41's
+	// NOT-NULL-DEFAULT-0 event_id column rejects. This test's subject is the
+	// journal_entries balance trigger, not journal creation, so a direct
+	// insert matching the historical schema is the correct fixture here.
+	journalAID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4201, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(100), postgrestest.UniqueKey("bal-trig-pre"))
 
-	journalAID := postgrestest.InternalID(t, pool, "journals", journalA.UID)
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
 	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
 
@@ -137,42 +133,19 @@ func TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses(t *testing.
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	store, deps := setupInvariantsFixture(t, pool, ctx)
+	_, deps := setupInvariantsFixture(t, pool, ctx)
 
-	// Journal A: legitimate 2-leg post (150 debit / 150 credit), then a
-	// direct-SQL extra debit leg of 50 with no matching credit -- A is now
-	// short by +50 (debit exceeds credit).
-	journalA, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeUID: deps.JournalType,
-		IdempotencyKey: postgrestest.UniqueKey("fleet-a"),
-		Source:         "fleet-test",
-		Entries: []core.EntryInput{
-			{AccountHolder: 4301, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(150)},
-			{AccountHolder: -4301, CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(150)},
-		},
-	})
-	require.NoError(t, err)
-
-	// Journal B: legitimate 2-leg post (150 debit / 150 credit), then a
-	// direct-SQL extra credit leg of 50 with no matching debit -- B is now
-	// short by -50 (credit exceeds debit). A's +50 and B's -50 cancel out
-	// globally: SUM(debit) == SUM(credit) across both journals combined.
-	journalB, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeUID: deps.JournalType,
-		IdempotencyKey: postgrestest.UniqueKey("fleet-b"),
-		Source:         "fleet-test",
-		Entries: []core.EntryInput{
-			{AccountHolder: 4302, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(150)},
-			{AccountHolder: -4302, CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(150)},
-		},
-	})
-	require.NoError(t, err)
+	// Journal A and B: legitimate 2-leg posts (150 debit / 150 credit each),
+	// inserted directly against the schema-v41 shape rather than through
+	// store.PostJournal -- see TestJournalBalanceTrigger_RejectsDirectSQLImbalance's
+	// comment on insertLegacyBalancedJournal for why. A direct-SQL extra
+	// debit/credit leg is added to each below to unbalance them individually.
+	journalAID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4301, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(150), postgrestest.UniqueKey("fleet-a"))
+	journalBID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4302, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(150), postgrestest.UniqueKey("fleet-b"))
 
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
 	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
 	sysClassID := postgrestest.InternalID(t, pool, "classifications", deps.Custodial)
-	journalAID := postgrestest.InternalID(t, pool, "journals", journalA.UID)
-	journalBID := postgrestest.InternalID(t, pool, "journals", journalB.UID)
 
 	_, err = pool.Exec(ctx,
 		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
@@ -227,4 +200,52 @@ func TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses(t *testing.
 	}
 	assert.True(t, sawA, "expected journal A in the sample")
 	assert.True(t, sawB, "expected journal B in the sample")
+}
+
+// insertLegacyBalancedJournal inserts a balanced 2-leg journal directly,
+// matching the journals/journal_entries shape as of schema v41 (event_id
+// still NOT NULL DEFAULT 0, no FK) rather than going through
+// postgres.LedgerStore.PostJournal. The current binary's InsertJournal
+// always sends event_id as NULL when unset (migration 045 converted the
+// column to a nullable FK-target exception with a real FK to events(id)),
+// which a NOT-NULL event_id column rejects -- so the current binary's
+// PostJournal cannot run against a database still at v41. Both callers in
+// this file need a legitimate journal fixture at exactly that pre-044
+// schema state, which is what this helper is for.
+func insertLegacyBalancedJournal(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	journalTypeUID string,
+	holder int64,
+	currencyUID, walletUID, custodialUID string,
+	amount decimal.Decimal,
+	idempotencyKey string,
+) int64 {
+	t.Helper()
+
+	var journalID int64
+	err := pool.QueryRow(ctx,
+		`INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id)
+		 VALUES (gen_random_uuid(), (SELECT id FROM journal_types WHERE uid=$1::uuid), $2, $3, $3, 0, 'test', 0)
+		 RETURNING id`,
+		journalTypeUID, idempotencyKey, amount.String(),
+	).Scan(&journalID)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+		 VALUES ($1, $2, (SELECT id FROM currencies WHERE uid=$3::uuid), (SELECT id FROM classifications WHERE uid=$4::uuid), 'debit', $5)`,
+		journalID, holder, currencyUID, walletUID, amount.String(),
+	)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx,
+		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+		 VALUES ($1, $2, (SELECT id FROM currencies WHERE uid=$3::uuid), (SELECT id FROM classifications WHERE uid=$4::uuid), 'credit', $5)`,
+		journalID, -holder, currencyUID, custodialUID, amount.String(),
+	)
+	require.NoError(t, err)
+
+	return journalID
 }

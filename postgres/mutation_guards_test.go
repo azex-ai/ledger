@@ -269,6 +269,28 @@ func TestJournalsGuard_EventIDSetOnce(t *testing.T) {
 	require.Error(t, err, "journals.event_id must not be unset once set")
 }
 
+// This is the core assertion behind migration 045's redesign (contract §2):
+// the journals guard compares to_jsonb(OLD)/to_jsonb(NEW) minus an explicit
+// mutable-column whitelist, instead of a hardcoded protected-column list a
+// human has to remember to update. A column nobody has taught the guard
+// about yet must still be protected by default -- fail-closed by
+// construction, not by someone remembering to add it to a list.
+func TestJournalsGuard_FutureColumnsProtectedByDefault(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, "ALTER TABLE journals ADD COLUMN zz_guard_probe TEXT NOT NULL DEFAULT ''")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "ALTER TABLE journals DROP COLUMN IF EXISTS zz_guard_probe")
+	})
+
+	jID := seedBareJournal(t, pool, ctx)
+
+	_, err = pool.Exec(ctx, "UPDATE journals SET zz_guard_probe = 'tampered' WHERE id = $1", jID)
+	require.Error(t, err, "a column the guard's whitelist has never heard of must be protected by default")
+}
+
 type seededReservation struct {
 	id  int64
 	uid string
