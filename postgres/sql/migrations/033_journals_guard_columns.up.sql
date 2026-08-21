@@ -6,10 +6,22 @@
 -- closed accounting period (I-15 only checks at post time) or rewrite the
 -- external uid, with zero database-level defense.
 --
--- Rule going forward: any migration that adds a column to journals MUST also
--- recreate this function with the column included (unless the column is
--- genuinely meant to be mutable post-insert, like event_id's set-once
--- backfill — which the WHEN clause below still permits).
+-- Rule going forward (as of this migration): any migration that adds a
+-- column to journals MUST also recreate this function with the column
+-- included, unless the column is genuinely meant to be mutable post-insert
+-- (like event_id's set-once backfill) -- there is no WHEN clause here or
+-- anywhere in this function; that mutability, if wanted, has to be
+-- implemented in the function body.
+--
+-- UPDATE (migration 045, docs/plans/2026-08-21-integrity-hardening-contracts.md
+-- §2): this per-migration hardcoded column list turned out to be exactly
+-- the kind of rule that gets silently broken -- p5-authsig found that two
+-- migrations each issuing their own CREATE OR REPLACE with their own
+-- hardcoded list means the later one drops the earlier one's column
+-- protection. 045 replaces this function with a generic to_jsonb(OLD)
+-- vs to_jsonb(NEW) comparison against an explicit mutable-column whitelist,
+-- so this comment's "rule going forward" no longer applies: any future
+-- column is protected by default, and only 045 needs to be touched again.
 CREATE OR REPLACE FUNCTION ledger_journals_block_arbitrary_update() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN

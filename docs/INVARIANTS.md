@@ -232,14 +232,20 @@ because PostgreSQL needs a real `NULL` to skip referential-integrity enforcement
 - `reservations.journal_id` — null until a journal is linked (migration `035`
   restored the FK that `017` dropped and `018` forgot to restore; the `0`
   sentinel era left wrong ids silently accepted).
+- `journals.event_id` — null until the journal is linked to the event that
+  caused it (migration `045` converted the `014` sentinel column to this
+  shape and added the FK it never had; see I-25).
 
 **Why**: NOT NULL eliminates a category of "missing vs zero" ambiguities.
 Where it would conflict with FK enforcement, `NULL` is documented and the Go
-field is `*int64`.
+field is `*int64` (in Go structs that expose the column directly — the
+`postgres` adapter's `sqlcgen.Journal.EventID` is the only current holder of
+this one, as `pgtype.Int8`; `core.Journal` exposes it as `EventUID string`).
 
 **Enforced by**:
 - Migration `017_no_null_cleanup` for the bulk move.
 - Migration `018_restore_referential_integrity` for the four exceptions.
+- Migration `045_mutation_guards` for `journals.event_id`.
 
 ## I-8: Lifecycle FSM is well-formed
 
@@ -852,6 +858,90 @@ individually unbalanced but net to zero in aggregate.
   mock-level pin that `runCheck11JournalBalance` reports `Passed: false`,
   logs (not leaks into the report) the offending internal ids, and that a
   clean querier reports `Passed: true, Complete: true`.
+
+---
+
+## I-25: Non-journal balance-computation tables cannot be mutated outside their controlled entry points
+
+Every table that participates in balance computation but is not itself
+`journals`/`journal_entries` has a DB-level guard against post-insert
+mutation, closing the five gaps in
+docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
+
+- `classifications.normal_side` is immutable — no code path updates it, and
+  changing it retroactively flips the sign of every historical rollup for
+  that classification.
+- `classifications.balance_role`'s only legal transition is the expand-style
+  `'' -> <role>` upgrade `ClassificationStore.SetBalanceRole` performs.
+  Switching between two non-empty roles, or reverting to `''`, is rejected —
+  including when attempted through `SetBalanceRole` itself a second time.
+- `reservations.account_holder`/`currency_id`/`reserved_amount`/
+  `idempotency_key`/`expires_at`/`created_at`/`uid` are immutable.
+  `settled_amount` may only increase (a decrease can only be tampering,
+  `SettlePartial`'s own precondition already guarantees monotonic growth).
+  `journal_id` is set-once (`NULL -> non-NULL` only). `status` follows the
+  whitelist state machine in `core/reserve.go` (`reservationTransitions`):
+  `active -> {settling, settled, released}`, `settling -> {settled,
+  released}` — `settled`/`released` are terminal, with no path back to
+  `active`.
+- `period_closes` is now actually append-only (previously documented as such
+  but unenforced) — no `UPDATE`, no `DELETE`.
+- `journals.event_id` is set-once (`NULL -> non-NULL` only) and now carries
+  the FK to `events(id)` it never had. Before this, the column wasn't even in
+  the anti-tamper guard's comparison list — 033's and 018's trigger comments
+  described a "set-once backfill WHEN clause" that had never actually been
+  implemented (018:137-140 was an unconditional `BEFORE UPDATE FOR EACH ROW`
+  with no `WHEN`). The guard itself changed shape in 045: instead of a
+  per-migration hardcoded column list (033's pattern, which p5-authsig's
+  ordering conflict proved fragile — two `CREATE OR REPLACE`s on the same
+  function in numeric-ordered migrations means the later one silently
+  overwrites the earlier), it now compares `to_jsonb(OLD) - mutable` against
+  `to_jsonb(NEW) - mutable` for an explicit whitelist of columns allowed to
+  change post-insert (`mutable := ARRAY['event_id']` as of 045). Any future
+  column added to `journals` is protected by default — fail-closed by
+  construction, the same reasoning P0 used for `CheckResult.Complete`'s zero
+  value.
+
+**Why**: I-1/I-24 (journal balance) and I-12 (money conservation) only cover
+`journal_entries`. A writer with app DB credentials doesn't need to touch a
+single journal row to change a holder's effective balance — flipping
+`normal_side` reverses how the rollup reads every existing entry;
+`balance_role` reclassifies `locked` funds as `available`; enlarging
+`reserved_amount` or fabricating a `reservations` row changes availability
+with zero accounting trail; rewriting `journals.event_id` breaks posting
+provenance without touching any protected journal column.
+
+**Enforced by**:
+- `ledger_classifications_guard()` / `classifications_mutation_guard`
+  trigger (`postgres/sql/migrations/045_mutation_guards.up.sql`).
+- `ledger_reservations_guard()` / `reservations_mutation_guard` trigger
+  (same migration).
+- `period_closes_no_update` / `period_closes_no_delete` triggers, reusing
+  `ledger_block_mutation()` from 018 (same migration).
+- `ledger_journals_block_arbitrary_update()` (033's per-migration column
+  list replaced by 045 with a generic `to_jsonb` comparison against a
+  mutable-column whitelist, per
+  `docs/plans/2026-08-21-integrity-hardening-contracts.md` §2; `event_id`'s
+  `NULL -> non-NULL` set-once check lives in the function body, not a
+  trigger `WHEN` clause) + `journals_event_id_fkey` FK.
+- Depends on P1 (migration 042): without role separation, the same
+  credential that would abuse these columns can `DROP TRIGGER` the guard
+  itself.
+
+**Pinned by** (`postgres/mutation_guards_test.go`, each verified to fail —
+i.e. the tamper attempt would have succeeded — with its specific guard
+trigger/function manually removed before this migration existed):
+- `TestClassificationsGuard_NormalSideImmutable`
+- `TestClassificationsGuard_BalanceRoleOnlyUpgradesFromEmpty`
+- `TestReservationsGuard_DimensionColumnsImmutable`
+- `TestReservationsGuard_SettledAmountMustNotDecrease`
+- `TestReservationsGuard_JournalIDSetOnce`
+- `TestReservationsGuard_StatusWhitelist`
+- `TestPeriodClosesGuard_NoUpdateNoDelete`
+- `TestJournalsGuard_EventIDSetOnce`
+- `TestJournalsGuard_FutureColumnsProtectedByDefault`
+
+---
 
 ## How to add a new invariant
 
