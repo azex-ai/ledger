@@ -439,6 +439,47 @@ corruption):
 Reads remain available throughout. `GET /balances/*`, `GET /journals*`,
 `GET /events*` are unaffected.
 
+**Run steps 2 and 4 as `ledger_owner` (or a superuser)** — as of migration
+042, `ledger_app` cannot grant or revoke its own privileges (it has no admin
+option on anything), and `ledger_ro` cannot either. The connection your
+current `DATABASE_URL` uses for migrations already has this authority.
+
+### Database roles (`ledger_owner` / `ledger_app` / `ledger_ro`)
+
+Migration 042 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §3)
+creates three least-privilege roles. This is the **expand** step only
+(`deployment.md`): every environment's `DATABASE_URL` keeps using whatever
+connection it uses today until a later "migrate" release explicitly cuts
+over. Nothing in this section is active by default yet — it documents what
+exists so operators stop assuming (or, before 042, being told by this very
+runbook to assume) a role that was never created.
+
+| Role | Can do | Used by |
+|---|---|---|
+| `ledger_owner` | Owns every table/sequence; the only role with DDL (`ALTER`/`DROP`/`TRUNCATE`/trigger management/partition create) | Schema migrations, once `migrations.job.databaseUrlKey` (Helm) points at it |
+| `ledger_app` | `SELECT`/`INSERT`/`UPDATE` on ordinary tables; `SELECT`/`INSERT` only on `journal_entries` (never `UPDATE`/`DELETE` — append-only). No DDL of any kind | `ledgerd` serving pods, once the default `DATABASE_URL` secret key points at it |
+| `ledger_ro` | `SELECT` everywhere | Metabase / BI / reporting — this is the role the credential-leak incident that motivated this migration should have used instead of a superuser session |
+
+Operational notes:
+
+- **No passwords are set by the migration.** Set them out-of-band
+  (`ALTER ROLE ledger_app WITH PASSWORD '...'`) through whatever secrets
+  pipeline you already use for `DATABASE_URL` — never commit one to a
+  migration file or to git (`infra.md`).
+- **Partition creation runs as `ledger_owner`.** `CREATE TABLE ... PARTITION
+  OF` is DDL; once the "migrate" phase moves `ledgerd`'s serving connection
+  to `ledger_app`, whatever process runs `PartitionService.EnsureUpcoming`
+  (today: the same in-process worker as everything else) needs a
+  `ledger_owner`-backed connection, not the app pool. This is a wiring
+  decision for that later release, not something migration 042 changes.
+- `ledger_app`'s grant on `journal_entries` covers the parent table and
+  every partition that exists at migration time. Partitions created *after*
+  the grant inherit access through the parent table name — Postgres checks
+  privileges against the partitioned table you name in a query, not the
+  partition it physically routes to. Pinned by
+  `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  rather than assumed.
+
 ---
 
 ## 10. Deployment security boundary

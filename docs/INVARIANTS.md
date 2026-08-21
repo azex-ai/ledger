@@ -771,6 +771,56 @@ be sitting in the user's balance by the time a human looks at the queue.
 - `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
   transitions it to `failed` with `journal_uid` remaining empty forever)
 
+## I-22: `ledger_app` has no DDL
+
+The application-facing database role, `ledger_app`, can `SELECT`/`INSERT`/
+`UPDATE` ordinary tables and `SELECT`/`INSERT` (never `UPDATE`/`DELETE`) on
+`journal_entries` — but it cannot `DROP`, `TRUNCATE`, `ALTER`, manage
+triggers, or create any object, anywhere in the schema. Only `ledger_owner`
+(which actually owns every table and sequence) can.
+
+**Why**: GRANT-based privileges alone are not a defense against a
+compromised application credential — before migration 042, every
+environment ran with a single connection that had unrestricted DDL, so a
+leaked `DATABASE_URL` (or a SQL-injection foothold) could `DROP TRIGGER` the
+append-only guards, `TRUNCATE` `journal_entries`, or silently detach a
+partition (attack path A6,
+docs/plans/2026-08-21-tamper-evident-ledger-design.md §2). Postgres cannot
+confer `ALTER`/`DROP`/`TRUNCATE`/trigger-management rights through `GRANT` —
+only object ownership (or superuser) grants them — so this invariant is only
+true because `ledger_app` never owns anything.
+
+**Note on scope**: this invariant governs what the `ledger_app` *role* can
+do once an environment's `DATABASE_URL` is cut over to it. Migration 042
+itself only performs the expand step (`deployment.md`) — creating the roles
+and grants — and does not switch any environment's connection yet; see
+`docs/RUNBOOK.md` §9.
+
+**Enforced by**:
+- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
+  (owns every table/sequence, the only role with DDL) and `ledger_app`
+  (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on `journal_entries`, no DDL of
+  any kind), and `REVOKE ALL ON SCHEMA public FROM PUBLIC`.
+
+**Pinned by**:
+- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
+  first and confirms the single connection has *unrestricted* DDL there
+  (proving the restrictions below are not vacuous), then migrates the rest
+  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
+  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
+  journal_entries`/touch `schema_migrations`, while it can still
+  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
+  `journal_entries`.
+- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  — a partition created by `ledger_owner` *after* migration 042's grant ran
+  is still writable by `ledger_app` through the parent table name.
+- `postgres.TestMigration042_RoleAttributes` — pins role attributes
+  (`LOGIN`, not superuser/createdb/createrole) and that `ledger_owner` owns
+  every table.
+- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` — the down
+  migration drops all three roles and leaves the original connection able
+  to operate normally.
+
 ---
 
 ## How to add a new invariant
