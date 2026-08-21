@@ -8,15 +8,24 @@
 -- specific entry ids (design doc §9.1), and so a third party can verify a
 -- single entry's membership without database access (§9.2).
 --
--- Two independent changes bundled in this one migration file (both P7's
--- exclusive number, contracts §10 "不动别人分配到的 migration 号"):
---
---   1. ADD COLUMN ledger_attestations.merkle_root.
---   2. The GRANTs 047 forgot for ledger_app / ledger_ro on both of its
---      tables (flagged by team lead review of #10; see part 2 below).
+-- This migration originally also carried the ledger_app/ledger_ro GRANTs
+-- 047 forgot on both of its tables (flagged by team lead review of #10).
+-- Team Lead landed migration 052 ("P1-follow: GRANT coverage gap") first,
+-- whose Part 3 already grants exactly SELECT/INSERT (ledger_app) /
+-- SELECT (ledger_ro) on ledger_attestations and entry_attestations, plus
+-- ledger_attestations_id_seq -- independently reaching the identical verb
+-- choice (append-only table -> no UPDATE) this migration would have made,
+-- and backed by TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants
+-- (postgres/grant_coverage_test.go), which now structurally enforces this
+-- for every table via information_schema.triggers rather than a per-migration
+-- GRANT anyone has to remember. Re-issuing the same GRANT here would be
+-- harmless (Postgres GRANT is idempotent) but stale and redundant --
+-- 052 is now that fix's sole owner. See 052's own header for the full
+-- account (it also covers 043's and 050's independent instances of the
+-- same "grant your own new table" gap, outside this migration's remit).
 --
 -- ============================================================================
--- Part 1 -- merkle_root: why ADD, not RENAME batch_digest
+-- Why ADD merkle_root, not RENAME batch_digest
 -- ============================================================================
 --
 -- Design doc §9.3 reads "ledger_attestations.batch_digest 换成 merkle_root，
@@ -59,18 +68,18 @@
 -- merkle_root is additive and NOT one of AttestationRootHash's inputs,
 -- it is NOT covered by core.Attestor's signature or by core.Anchor's
 -- externally-published head. Its only tamper-evidence is this table's own
--- append-only trigger (ledger_block_mutation(), 047) -- adequate against
--- the ledger_app-credential-leak threat model P1's role split defends
--- against (that role has no UPDATE grant here either, and no DDL to
--- disable the trigger even if it did), but weaker than root_hash's
--- guarantee against a ledger_owner/superuser-level attacker, who COULD
--- disable the trigger, edit merkle_root alone, and re-enable it without
--- invalidating any existing signature (root_hash's signed inputs never
--- touched merkle_root). Flagged to team lead for awareness in the P7
--- report -- not resolved unilaterally here (working-agreements §2/§4):
--- closing it would mean binding merkle_root into a NEW, later root_hash
--- domain for future rows, which is a P6/P7-boundary signing-scheme change
--- outside a single migration's remit.
+-- append-only trigger (ledger_block_mutation(), 047) plus the ACL 052
+-- grants matching that trigger (SELECT/INSERT only, no UPDATE) --
+-- adequate against the ledger_app-credential-leak threat model P1's role
+-- split defends against, but weaker than root_hash's guarantee against a
+-- ledger_owner/superuser-level attacker, who COULD disable the trigger,
+-- edit merkle_root alone, and re-enable it without invalidating any
+-- existing signature (root_hash's signed inputs never touched
+-- merkle_root). Flagged to team lead for awareness in the P7 report --
+-- not resolved unilaterally here (working-agreements §2/§4): closing it
+-- would mean binding merkle_root into a NEW, later root_hash domain for
+-- future rows, which is a P6/P7-boundary signing-scheme change outside a
+-- single migration's remit.
 --
 -- Empty-bytea default ('' , same sentinel 046 used for auth_key_id="never
 -- signed") means "this row predates merkle_root being computed" -- not "no
@@ -83,34 +92,3 @@
 ------------------------------------------------------------
 ALTER TABLE ledger_attestations
     ADD COLUMN IF NOT EXISTS merkle_root BYTEA NOT NULL DEFAULT ''::bytea;
-
--- ============================================================================
--- Part 2 -- missing ledger_app / ledger_ro grants on 047's two tables
--- ============================================================================
---
--- 042 §5's comment says it plainly: "ledger_app/ledger_ro get nothing
--- automatically on new objects, forcing an explicit, reviewable GRANT in
--- whichever future migration introduces them (contracts.md §9 point 3)".
--- 047 introduced ledger_attestations and entry_attestations and never did
--- that -- an oversight this migration corrects (the same gap independently
--- exists for 043's checkpoint_integrity_findings and 050's
--- checkpoint_rebuilds; P7's remit is only 047's two tables per contracts
--- §10 "不动别人分配到的 migration 号", so those are left for whoever owns
--- that follow-up).
---
--- Verb choice mirrors 042's OWN distinction, not a blanket copy of its
--- "ordinary table" grant: 042 gave journal_entries (append-only, protected
--- by the very same ledger_block_mutation() trigger 047 reuses for these two
--- tables) SELECT+INSERT only, explicitly because "the running application
--- never updates a posted entry" -- word for word true of
--- ledger_attestations and entry_attestations too (postgres/attestation_
--- store.go's InsertAttestation only ever INSERTs). Granting UPDATE here
--- would be inert (the trigger blocks every UPDATE regardless of the
--- grantee's privileges) but still a needless privilege to carry, working
--- against the least-privilege point of the P1 role split this very
--- migration is patching a gap in.
-------------------------------------------------------------
-GRANT SELECT, INSERT ON ledger_attestations TO ledger_app;
-GRANT SELECT, INSERT ON entry_attestations TO ledger_app;
-GRANT SELECT ON ledger_attestations TO ledger_ro;
-GRANT SELECT ON entry_attestations TO ledger_ro;

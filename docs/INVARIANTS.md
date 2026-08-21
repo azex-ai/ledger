@@ -1527,6 +1527,153 @@ does not also touch the anchor is caught by comparing the two.
   own idempotency contract ("re-publishing the same seq with identical
   bytes must succeed, with different bytes must return an error").
 
+## I-29: The Merkle root over each attestation batch matches its persisted value, independently of P6's signed chain
+
+(design doc §9/§9.1, P7 of the integrity-hardening wave.) Migration 048
+adds `ledger_attestations.merkle_root`: the RFC 6962 tree root
+(`core.BuildMerkleTree`) over the same entries `batch_digest` (I-27)
+covers, computed and persisted by `service.AttestationService.
+RunAttestBatch` alongside `batch_digest`. `service.VerifyLedger`
+recomputes it from live entries and compares against the stored value
+for every seq where a value was ever computed (`len(merkle_root) > 0` --
+see below).
+
+**Why**: `merkle_root` is deliberately NOT one of `core.
+AttestationRootHash`'s inputs (migration 048's header explains why: doing
+so would mean rewriting and re-signing every already-committed row to
+"rename" `batch_digest`, which is not viable -- see the migration for the
+three options weighed). That is a real, disclosed gap, not an
+implementation accident: unlike `batch_digest`/`root_hash`, an attacker
+who can bypass `ledger_attestations`'s append-only trigger (this wave's
+whole threat model) can edit `merkle_root` alone without invalidating
+`core.Attestor`'s existing signature, because the signature never covered
+it. I-29 is what this migration's ACL/trigger-based defense (SELECT/
+INSERT only, migration 052) and `VerifyLedger`'s live recompute-and-
+compare actually buy: an edit to `merkle_root` that is not *also*
+consistent with the live `journal_entries` content is still detected --
+just via a different mechanism (data-consistency, not a signature) than
+`batch_digest` gets.
+
+An attestation row with `merkle_root = ''` (migration 048's expand-safe
+default) predates P7's wiring -- `VerifyLedger` skips the recompute-and-
+compare for that row rather than treating an unset value as a mismatch,
+mirroring I-26's existing treatment of an empty `auth_key_id` ("never
+signed" is not "forged").
+
+**Enforced by**:
+- `service.AttestationService.RunAttestBatch` (`service/attestation.go`)
+  -- computes `core.BuildMerkleTree(entries).Root()` and persists it
+  alongside `batch_digest`, strictly outside any DB transaction (same
+  `financial.md` discipline as the signing call itself -- building the
+  tree is pure/local, but the write it feeds happens in the same atomic
+  insert as everything else `InsertAttestation` writes).
+- `service.VerifyLedger` (`service/attest_verify.go`) -- recomputes
+  `core.BuildMerkleTree` from the same `EntriesForAttestation` read
+  `batch_digest`'s own recheck uses, for every seq where `merkle_root` is
+  non-empty.
+- `postgres/sql/migrations/048_ledger_attestations_merkle_root.up.sql` --
+  additive column, `NOT NULL DEFAULT ''::bytea`.
+
+**Pinned by** (`service/attest_verify_merkle_test.go`):
+- `TestVerifyLedger_TamperedMerkleRootAlone` -- the isolation pin: only
+  `merkle_root` is corrupted (`batch_digest`/`root_hash`/`signature` are
+  left genuinely untouched); confirmed (by temporarily disabling the
+  check and observing the test fail with `VERIFIED` instead of
+  `TAMPERED`) that P6's existing checks alone do NOT catch this edit --
+  this test is what proves I-29 is not redundant with I-27.
+- `TestVerifyLedger_MerkleRootCheckSkippedForLegacyEmptySentinel` -- a row
+  inserted with `merkle_root` deliberately omitted (simulating a
+  pre-P7 attestation) verifies clean; an unset value is never treated as
+  tampering.
+
+## I-30: Inclusion proofs are sound and independently verifiable without database access
+
+(design doc §9.2, P7.) `core.GenerateInclusionProof` produces an RFC 6962
+audit path (sibling hashes only, ordered leaf-to-root) for one entry
+within a batch's Merkle tree; `core.VerifyInclusion(leafHash, proof,
+root) bool` recomputes the root from that path and reports whether it
+matches -- a pure function with zero dependencies (no DB, no
+`MerkleTree` instance, not even this package's other types beyond the
+three arguments), so a third party can verify "this entry is in the
+batch with this root" using only a value they already trust (e.g. from
+`core.Anchor`) and the two things the ledger operator hands them: the
+leaf hash and the path. Design doc §9.2's red line -- the path must
+reveal nothing about any other entry's content -- holds structurally:
+`InclusionProof.Path` is `[][]byte` (hashes only); nothing in
+`GenerateInclusionProof` ever touches a sibling's raw `AttestedEntry`.
+
+Complementary to inclusion proofs, `core.LocateMismatches` gives the
+*localization* half of §9's brief (§9.1): given a caller-supplied
+trusted reference tree for a seq `VerifyLedger` finds tampered, it
+narrows the verdict from "seq N is bad" to the exact entry id(s) that
+diverge, in O(k log n) (k = number of mismatches) by pruning any subtree
+whose cached hash still matches. `service.VerifyLedger`'s optional
+`VerifyConfig.ReferenceEntries` hook is the wiring: no reference
+available for a seq (the common case -- this schema deliberately does
+not persist a second full tree, only the aggregate root) means no
+fabricated entry list, only the seq-level `TAMPERED` finding I-29/I-27
+already produce.
+
+**Why**: without a documented, tested boundary between "hashes only" and
+"actual content," an inclusion-proof implementation is easy to get
+subtly wrong in a way that leaks data (RFC 6962 exists specifically so
+Certificate Transparency logs can prove membership to auditors without
+handing over the whole log) or that IS forgeable (CVE-2012-2459: a naive
+implementation that duplicates an odd trailing leaf to pad a level
+produces the same root for an `n`-leaf tree and an `n+1`-leaf tree whose
+extra leaf is a copy of the last one, breaking the "root uniquely
+identifies this exact leaf set" property every consumer of a Merkle root
+implicitly relies on).
+
+**Enforced by**:
+- `core.merkleLeafHash` / `core.merkleNodeHash` (`core/merkle.go`) --
+  RFC 6962's own fixed domain bytes (`0x00` leaf / `0x01` node -- not a
+  separator this package chose, unlike P5/P6's `0x01`/`0x02`/`0x03`).
+- `core.largestPowerOfTwoLessThan` / `core.buildMTH` -- RFC 6962's
+  recursive split (not a naive level-order pairing), which is what makes
+  an odd trailing leaf never get duplicated.
+- `core.GenerateInclusionProof` / `core.VerifyInclusion` -- proof
+  generation and the pure, dependency-free verification function.
+- `core.LocateMismatches` -- the O(k log n) prune-and-descend walk.
+- `service.VerifyLedger`'s `VerifyConfig.ReferenceEntries` hook and
+  `locateMismatchedEntryIDs` helper (`service/attest_verify.go`) --
+  operational wiring; `cmd/ledger-cli`'s `verify --reference-dir` flag is
+  the reference implementation of supplying one.
+
+**Pinned by**:
+- `core.TestMerkleRoot_GoldenVectors` (`core/merkle_test.go`) -- n=0..8
+  leaves, cross-checked against an independently written Python
+  transcription of RFC 6962's MTH algorithm (⚠️ not against externally
+  published Certificate Transparency test vectors -- this environment
+  has no internet access; see the file's own doc comment for the full
+  disclosure).
+- `core.TestMerkleTree_NoDuplicationOfOddLeaf` -- the CVE-2012-2459 pin:
+  a 3-leaf tree's root is confirmed to differ from the naive
+  duplicate-last-leaf construction's root, both by direct byte
+  comparison and against an independently computed golden value.
+- `core.TestMerkleTree_InclusionProofRoundTrip_AllSizesAndIndices` -- every
+  `(n, index)` pair for `n` = 1..32 round-trips through
+  `GenerateInclusionProof` + `VerifyInclusion`. Falsification evidence:
+  reverting `VerifyInclusion`'s sibling/direction pairing to its
+  first-draft (incorrect) form was confirmed to fail this exact test
+  before the fix landed.
+- `core.TestVerifyInclusion_RejectsTamperedLeaf` /
+  `TestVerifyInclusion_RejectsTamperedPath` /
+  `TestVerifyInclusion_RejectsOutOfRangeIndex` -- a genuine proof against
+  the wrong leaf, a tampered sibling hash, or an out-of-range index must
+  all fail verification, not silently succeed.
+- `core.TestLocateMismatches_FindsSingleTamperedLeaf` /
+  `TestLocateMismatches_FindsMultipleTamperedLeaves` /
+  `TestLocateMismatches_RejectsDifferentSizes` -- localization finds
+  exactly the diverging leaf indices, and refuses (rather than guessing)
+  when the two trees are not the same size.
+- `service.TestVerifyLedger_LocalizesTamperedEntryWithReference` /
+  `TestVerifyLedger_NoLocalizationWithoutReference`
+  (`service/attest_verify_merkle_test.go`) -- end-to-end: a supplied
+  reference narrows `TAMPERED` to the exact tampered entry id; no
+  reference means no entry list, confirmed by falsification (disabling
+  the wiring reverts the "with reference" test to reporting no entries).
+
 ---
 
 > Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
