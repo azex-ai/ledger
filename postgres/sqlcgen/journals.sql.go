@@ -760,7 +760,10 @@ LIMIT 1
 
 // Returns the first currency_id that does not net to zero across the journal's
 // entries, or NULL if the journal is balanced. Run inside the same transaction
-// as the entry inserts; replaces the per-row CONSTRAINT TRIGGER dropped in 018.
+// as the entry inserts, before commit, so a failure rolls back cleanly with a
+// precise "which currency" error. This is the application-layer half of the
+// check; migration 044 restores a DB-layer deferred constraint trigger as the
+// backstop for callers that bypass this query (e.g. direct SQL).
 func (q *Queries) VerifyJournalBalanced(ctx context.Context, journalID int64) (int64, error) {
 	row := q.db.QueryRow(ctx, verifyJournalBalanced, journalID)
 	var currency_id int64

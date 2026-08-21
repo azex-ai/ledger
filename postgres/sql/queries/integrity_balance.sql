@@ -1,0 +1,41 @@
+-- Fleet-wide per-journal, per-currency balance verification.
+--
+-- P3 / M1 fix (docs/plans/2026-08-21-tamper-evident-ledger-design.md §5,
+-- §2 M1): the reconcile check historically named "journal_dr_cr" only ran a
+-- GLOBAL debit==credit equality across all entries (service.CheckAccountingEquation).
+-- Two journals that are each individually unbalanced by currency but happen
+-- to net to zero in aggregate are completely invisible to that check --
+-- summed together debit still equals credit. These queries scan every
+-- journal individually instead.
+--
+-- Complements, does not replace, the DB-layer deferred constraint trigger
+-- (migration 044): the trigger enforces this at write time for every write
+-- that goes through a normal transaction from the moment it exists; it is
+-- NOT retroactive, so entries written before migration 044 (or written by
+-- bypassing the trigger, e.g. a disabled trigger under an elevated role) are
+-- not covered by it. This bulk scan is the defense-in-depth complement --
+-- see the reconcile "journal_dr_cr" check in service/reconcile.go.
+
+-- name: IntegrityUnbalancedJournalsCount :one
+SELECT COUNT(*)::bigint FROM (
+  SELECT journal_id
+  FROM journal_entries
+  GROUP BY journal_id, currency_id
+  HAVING SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END) <> 0
+) AS unbalanced;
+
+-- name: IntegrityUnbalancedJournalsSample :many
+-- Up to 20 offending (journal_id, currency_id) pairs with their signed
+-- drift, for reconcile Finding descriptions. journal_id/currency_id are
+-- internal ids -- callers must not put them in a public Finding string
+-- verbatim (I-18); log them server-side and resolve to uid/code first if
+-- they need to appear in a report.
+SELECT
+  journal_id,
+  currency_id,
+  SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END)::numeric AS drift
+FROM journal_entries
+GROUP BY journal_id, currency_id
+HAVING SUM(CASE WHEN entry_type = 'debit' THEN amount ELSE -amount END) <> 0
+ORDER BY journal_id
+LIMIT 20;

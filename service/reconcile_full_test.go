@@ -37,16 +37,22 @@ type mockReconcileQuerier struct {
 	checkpointAccounts  []CheckpointAccountKey
 	checkpointPageCalls int
 
+	// unbalancedJournals drives check #11 (M1 fix): genuine per-journal
+	// balance violations, as opposed to check #1's global equality.
+	unbalancedJournals []UnbalancedJournal
+
 	// force errors
-	errOrphanCount    error
-	errOrphanSample   error
-	errEquation       error
-	errSettlement     error
-	errNegBal         error
-	errOrphanReservs  error
-	errDupeKeys       error
-	errStaleItems     error
-	errCheckpointPage error
+	errOrphanCount      error
+	errOrphanSample     error
+	errEquation         error
+	errSettlement       error
+	errNegBal           error
+	errOrphanReservs    error
+	errDupeKeys         error
+	errStaleItems       error
+	errCheckpointPage   error
+	errUnbalancedCount  error
+	errUnbalancedSample error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -89,6 +95,15 @@ func (m *mockReconcileQuerier) ListCheckpointAccountsPage(_ context.Context, aft
 	}
 	return page, nil
 }
+func (m *mockReconcileQuerier) UnbalancedJournalsCount(_ context.Context) (int64, error) {
+	if m.errUnbalancedCount != nil {
+		return 0, m.errUnbalancedCount
+	}
+	return int64(len(m.unbalancedJournals)), nil
+}
+func (m *mockReconcileQuerier) UnbalancedJournalsSample(_ context.Context) ([]UnbalancedJournal, error) {
+	return m.unbalancedJournals, m.errUnbalancedSample
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,7 +139,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 10, "should run exactly 10 checks")
+	assert.Len(t, report.Checks, 11, "should run exactly 11 checks")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. Check #8 is skipped outright (journals.status not in the
