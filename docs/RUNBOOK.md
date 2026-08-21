@@ -585,6 +585,23 @@ Operational notes:
   credential-leak incident actually used, but it is not the end state —
   `ledger_ro` can currently read every journal/booking/holder row in the
   system.
+- **Every migration that adds a table/sequence must GRANT `ledger_app`/
+  `ledger_ro` on it itself** — 042's `ALTER DEFAULT PRIVILEGES` deliberately
+  does not cover them. This was violated twice before it had a structural
+  check: `reconcile_scan_cursors` (043) and `checkpoint_rebuilds` (050) were
+  both written before 042 merged and shipped without that grant, closed
+  later by 052. **And if the table carries an append-only mutation guard
+  (a `BEFORE UPDATE` trigger calling `ledger_block_mutation()`, same as
+  `journal_entries`), it must NOT get `UPDATE` in that grant** —
+  `checkpoint_rebuilds` (050) and `period_closes` (guard added by 045,
+  table predates 042) both had this exact ACL/trigger mismatch, also closed
+  by 052. `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants`
+  / `TestGrantCoverage_EverySequenceHasExpectedGrants` (`docs/INVARIANTS.md`
+  I-22) now enumerate every table/sequence, derive the append-only set from
+  `information_schema.triggers`, and catch both classes of mistake
+  automatically — a future migration landing without its own GRANT, or
+  with an ACL that disagrees with its own trigger, will fail these tests,
+  not silently ship a cutover-time outage or a defense-in-depth gap.
 
 ---
 
