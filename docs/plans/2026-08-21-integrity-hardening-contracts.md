@@ -32,21 +32,63 @@
 - 加索引用 `CREATE INDEX CONCURRENTLY`。
 - **已合入的 migration 永不修改** —— 号被占了就用下一个空号并 `bus send team-lead` 报备。
 
-## 2. `ledger_journals_block_arbitrary_update()` 的演进链
+## 2. `ledger_journals_block_arbitrary_update()` — 改成通用比较，不再逐 migration 接力
 
-033 已把规则写进注释：**任何给 `journals` 加列的 migration 必须同步重建该函数**。
-P4 与 P5 都要改它 —— 不是冲突，是**顺序接力**。每个 migration
-`CREATE OR REPLACE` 到「截至本 migration 为止的完整列表」：
+> **2026-08-21 Team Lead 裁决（推翻本节原方案）。** 起因：`p5-authsig` 指出原方案有个
+> 无法安全落地的排序冲突 —— 契约要求 046 保护「045 的列 + auth 三列」，但 045 尚未写出，
+> P5 无法知道 P4 的 `event_id` set-once 实现；而 golang-migrate 按数字顺序执行
+> （045 先于 046），两个 migration 各做一次 `CREATE OR REPLACE`，**后者会静默覆盖前者**，
+> 于是 045 刚加的 `event_id` 保护在 046 跑完后消失。它拒绝猜测而是上报，判断正确。
 
-| 阶段 | 受保护列 |
+原方案的根因不是排序，是**结构**：033 把列清单**硬编码**在函数体里，并把
+「任何给 journals 加列的 migration 必须记得重建此函数」写成一条**要人记住的规则**。
+`working-agreements` §5：能被结构强制的，就不该靠人记忆 —— 而这条规则已经被违反过一次
+（033 自己就是在修 025/031 漏加列的后果）。
+
+**新方案：函数改成通用比较**，用 `to_jsonb(OLD/NEW)` 减去一个显式的可变列白名单：
+
+```sql
+CREATE OR REPLACE FUNCTION ledger_journals_block_arbitrary_update() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    -- 唯一允许 post-insert 变化的列。加列到这个数组是一次显式、可评审的决定；
+    -- 不在数组里的列（含所有未来新增列）默认受保护 —— fail-closed。
+    mutable CONSTANT text[] := ARRAY['event_id'];
+BEGIN
+    -- event_id 的 set-once 语义：只允许 NULL -> 非NULL 的单次跃迁。
+    IF OLD.event_id IS NOT NULL AND NEW.event_id IS DISTINCT FROM OLD.event_id THEN
+        RAISE EXCEPTION 'ledger: journals.event_id is set-once and already set'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF (to_jsonb(OLD) - mutable) IS DISTINCT FROM (to_jsonb(NEW) - mutable) THEN
+        RAISE EXCEPTION 'ledger: UPDATE on journals is not allowed except the set-once event_id backfill; use a reversal journal instead'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+```
+
+为什么这是对的：
+- **新增列默认受保护**（零值语义指向最保守那一态，同 P0 给 `CheckResult.Complete` 选零值=未完成的理由）。
+- **排序冲突消失**：只有一个 migration 需要碰这个函数。
+- **033 那条"要人记住的规则"作废** —— 045 落地时要同步把 033 里那句
+  "any migration that adds a column to journals MUST also recreate this function"
+  改成「已由通用比较结构性保证，不再需要逐 migration 维护」。
+- 成本：`journals` 的 UPDATE 只发生在 `event_id` 回填，频率极低，`to_jsonb` 开销可忽略。
+
+### 归属（覆盖 §1 的分配）
+
+| migration | 对该函数做什么 |
 |---|---|
-| 现状（033） | `id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, effective_at, uid` |
-| `045`（P4） | 上列 **+ `event_id`**，但**放行 `NULL → 非NULL` 的单次跃迁**（033 注释描述过、但从未实现的那个 set-once 语义），并给该列补 FK |
-| `046`（P5） | 045 的列 **+ `auth_digest`, `auth_signature`, `auth_key_id`** |
+| `045`（P4） | **安装上面这个通用版本**（含 `event_id` set-once + 给该列补 FK）。同时改 033 的注释。 |
+| `046`（P5） | **什么都不做 —— 删掉现有的 `CREATE OR REPLACE`**。三个 auth 列由通用比较自动覆盖，无需重建函数。在 046 里留一句注释说明为什么不需要（并指向本节）。 |
 
-⚠️ **A4 的教训**：033 的注释说「WHEN clause below still permits」——
-018:137-140 的 trigger 是无条件 `BEFORE UPDATE FOR EACH ROW`，**那个 WHEN 子句不存在**。
-045 要么真的加 WHEN 子句，要么在函数体内实现 set-once 判断。**不要再留一句描述不存在机制的注释。**
+⚠️ **A4 的教训仍然适用**：033 的注释说「WHEN clause below still permits」，而
+`018:137-140` 的 trigger 是无条件 `BEFORE UPDATE FOR EACH ROW`，**那个 WHEN 子句不存在**。
+set-once 语义要在**函数体内**实现（如上），不要依赖一个不存在的 WHEN 子句，
+也不要再留一句描述不存在机制的注释。
 
 ## 3. `.sql` 查询文件分配（避免 sqlcgen 生成物冲突）
 
