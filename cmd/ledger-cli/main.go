@@ -28,6 +28,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,7 +40,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger"
+	"github.com/azex-ai/ledger/anchordev"
+	"github.com/azex-ai/ledger/authdev"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/service"
 )
 
@@ -64,6 +69,7 @@ commands:
   solvency    show solvency report for a currency
   trial-balance  show trial balance report for a currency
   health      show system health metrics
+  verify      verify the P6 batch attestation chain + a P5 journal signature sample
 
 env:
   DATABASE_URL   postgres connection string (required)
@@ -123,6 +129,8 @@ func run(args []string) error {
 		return cmdTrialBalance(ctx, svc, rest)
 	case "health":
 		return cmdHealth(ctx, svc)
+	case "verify":
+		return cmdVerify(ctx, pool, svc, rest)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
@@ -287,6 +295,50 @@ func cmdHealth(ctx context.Context, svc *ledger.Service) error {
 		return err
 	}
 	return jsonOut(hm)
+}
+
+// cmdVerify runs the P6 five-step verification (design doc §8.4):
+// external anchor head, attestation chain continuity/signatures, batch
+// digest recomputation, and a sample of P5 per-journal signatures.
+// NOT_RUN, never a partial VERIFIED, when the public key or anchor file
+// aren't supplied -- see service.VerifyLedger's doc comment.
+func cmdVerify(ctx context.Context, pool *pgxpool.Pool, svc *ledger.Service, args []string) error {
+	fs := flag.NewFlagSet("verify", flag.ExitOnError)
+	anchorFile := fs.String("anchor-file", "", "path to the local-file Anchor's state (see anchordev.LocalFileAnchor) -- required")
+	pubkeyHex := fs.String("pubkey-hex", "", "hex-encoded ed25519 public key used for both P6 attestation and P5 journal signatures -- required")
+	keyID := fs.String("key-id", "", "the key id this public key corresponds to -- required")
+	sampleSize := fs.Int("sample-size", 20, "how many of the most recent journals to sample for a valid P5 signature")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *anchorFile == "" || *pubkeyHex == "" || *keyID == "" {
+		// Fail fast here rather than let VerifyLedger report NOT_RUN for a
+		// pure CLI usage error -- these three flags are unconditionally
+		// required, not a "maybe missing" runtime condition.
+		return fmt.Errorf("--anchor-file, --pubkey-hex, and --key-id are all required")
+	}
+	pubkeyBytes, err := hex.DecodeString(*pubkeyHex)
+	if err != nil {
+		return fmt.Errorf("--pubkey-hex: %w", err)
+	}
+	if len(pubkeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("--pubkey-hex must decode to %d bytes, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
+	}
+
+	anchor := anchordev.NewLocalFileAnchor(*anchorFile)
+	verifier := authdev.NewLocalVerifier(ed25519.PublicKey(pubkeyBytes), *keyID)
+	store := postgres.NewAttestationStore(pool)
+
+	report := service.VerifyLedger(ctx, store, anchor, verifier, svc.Queries(), service.VerifyConfig{
+		JournalSampleSize: int32(*sampleSize),
+	})
+	if err := jsonOut(report); err != nil {
+		return err
+	}
+	if report.Status == service.VerifyStatusTampered || report.Status == service.VerifyStatusNotRun {
+		os.Exit(1)
+	}
+	return nil
 }
 
 func jsonOut(v any) error {

@@ -39,11 +39,23 @@ trustedProxyCIDRs: ""
 # Schema migrations run once in a pre-install/pre-upgrade Job. Serving pods
 # start with MIGRATE_MODE=off, so rollout capacity is not held behind DDL
 # locks and the runtime database role needs no DDL privileges.
+#
+# Migration 042 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §3)
+# creates the roles this split expects: `ledger_app` (SELECT/INSERT/UPDATE
+# only, for serving pods -- already usable today) and `ledger_owner`
+# (destined for DDL, for the migration Job -- but does not yet own
+# anything; migration 049 transfers ownership) -- see
+# docs/RUNBOOK.md §9 "Database roles". `databaseUrl`/`existingSecretKey`
+# above and `databaseUrlKey` below both default to the SAME connection
+# until an operator explicitly cuts over (deployment.md "migrate" phase, a
+# later release that ships together with that ownership-transfer
+# migration, not automated by this chart).
 migrations:
   job:
     enabled: true
-    # Optional: a different key in the DB secret holding a DDL-capable URL,
-    # so serving pods can use a least-privilege role.
+    # Optional: a different key in the DB secret holding a DDL-capable URL
+    # (ledger_owner), so serving pods can use a least-privilege role
+    # (ledger_app).
     databaseUrlKey: ""
 
 # Optional Prometheus scrape annotations on the Service.
