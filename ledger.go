@@ -75,6 +75,7 @@ type Service struct {
 	accountPolicyStore   *postgres.AccountPolicyStore
 	periodCloseStore     *postgres.PeriodCloseStore
 	trialBalanceStore    *postgres.TrialBalanceStore
+	checkpointIntegrity  *postgres.CheckpointIntegrityStore
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
@@ -143,6 +144,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.accountPolicyStore = postgres.NewAccountPolicyStore(pool)
 	s.periodCloseStore = postgres.NewPeriodCloseStore(pool)
 	s.trialBalanceStore = postgres.NewTrialBalanceStore(pool)
+	s.checkpointIntegrity = postgres.NewCheckpointIntegrityStore(pool)
 
 	return s, nil
 }
@@ -247,7 +249,7 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 // It compares total user-side liability against the custodial system balance.
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
-// FullReconciler returns a core.FullReconciler that runs the complete 10-check
+// FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
@@ -327,6 +329,13 @@ func (s *Service) PeriodCloser() core.PeriodCloser { return s.periodCloseStore }
 // TrialBalanceReader computes a trial balance report.
 func (s *Service) TrialBalanceReader() core.TrialBalanceReader { return s.trialBalanceStore }
 
+// CheckpointIntegrity returns the trusted, entries-only balance API
+// (RecomputeBalance / RebuildCheckpoint) that never consults
+// balance_checkpoints. See core.CheckpointIntegrityStore: withdrawal /
+// large-amount paths must call RecomputeBalance instead of
+// BalanceReader.GetBalance.
+func (s *Service) CheckpointIntegrity() core.CheckpointIntegrityStore { return s.checkpointIntegrity }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -359,6 +368,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		accountPolicyStore:   s.accountPolicyStore.WithDB(tx),
 		periodCloseStore:     s.periodCloseStore.WithDB(tx),
 		trialBalanceStore:    s.trialBalanceStore.WithDB(tx),
+		checkpointIntegrity:  s.checkpointIntegrity.WithDB(tx),
 		channels:             channels,
 	}
 }

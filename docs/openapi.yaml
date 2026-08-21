@@ -1915,7 +1915,7 @@ components:
           items:
             type: object
             properties:
-              name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation" }
+              name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity" }
               passed:
                 type: boolean
                 description: >-

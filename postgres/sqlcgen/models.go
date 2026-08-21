@@ -78,6 +78,21 @@ type ChainCursor struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type CheckpointRebuild struct {
+	ID                  int64          `json:"id"`
+	Uid                 pgtype.UUID    `json:"uid"`
+	AccountHolder       int64          `json:"account_holder"`
+	CurrencyID          int64          `json:"currency_id"`
+	ClassificationID    int64          `json:"classification_id"`
+	PreviousBalance     pgtype.Numeric `json:"previous_balance"`
+	PreviousLastEntryID int64          `json:"previous_last_entry_id"`
+	NewBalance          pgtype.Numeric `json:"new_balance"`
+	NewLastEntryID      int64          `json:"new_last_entry_id"`
+	Drift               pgtype.Numeric `json:"drift"`
+	ActorID             int64          `json:"actor_id"`
+	CreatedAt           time.Time      `json:"created_at"`
+}
+
 type Classification struct {
 	ID           int64       `json:"id"`
 	Code         string      `json:"code"`
@@ -240,6 +255,14 @@ type PeriodClose struct {
 	ActorID     int64       `json:"actor_id"`
 	CreatedAt   time.Time   `json:"created_at"`
 	Uid         pgtype.UUID `json:"uid"`
+}
+
+type ReconcileScanCursor struct {
+	CheckName     string    `json:"check_name"`
+	AfterHolder   int64     `json:"after_holder"`
+	AfterCurrency int64     `json:"after_currency"`
+	LapDirty      bool      `json:"lap_dirty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type RegistrationRescan struct {

@@ -17,6 +17,21 @@ ON CONFLICT (account_holder, currency_id, classification_id)
 DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now()
 WHERE balance_checkpoints.last_entry_id < EXCLUDED.last_entry_id;
 
+-- name: RebuildBalanceCheckpoint :exec
+-- Trusted-operator overwrite: unlike UpsertBalanceCheckpoint's monotonic
+-- guard (last_entry_id can only advance), this unconditionally replaces the
+-- row. A poisoned checkpoint can have an arbitrary last_entry_id — including
+-- one higher than the true watermark — so the monotonic guard that protects
+-- the rollup worker's normal path would refuse the very fix meant to correct
+-- it. Only CheckpointIntegrityStore.RebuildCheckpoint calls this, and only
+-- after taking the (holder, currency_id) advisory lock and confirming no
+-- rollup_queue item is pending for the dimension (CountPendingRollupForDimension) —
+-- see docs/plans/2026-08-21-tamper-evident-ledger-design.md §4.
+INSERT INTO balance_checkpoints (account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (account_holder, currency_id, classification_id)
+DO UPDATE SET balance = $4, last_entry_id = $5, last_entry_at = $6, updated_at = now();
+
 -- name: GetBalanceCheckpoints :many
 SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
 FROM balance_checkpoints

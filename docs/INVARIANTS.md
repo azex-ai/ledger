@@ -797,12 +797,132 @@ be sitting in the user's balance by the time a human looks at the queue.
 
 ---
 
-> Numbering note: I-22/I-23 (P1 DB roles, P2 checkpoint trust) are allocated
-> in the Phase 0 contract (`docs/plans/2026-08-21-integrity-hardening-contracts.md`
-> §5) to parallel tasks landing separately; this branch was cut before either
-> merged, so this document does not yet contain them. Whoever merges last
-> reorders I-22/I-23/I-24 into that sequence — the numbers are a contract,
+> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
+> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
+> task that has not merged yet, so this document does not yet contain it.
+> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
 > not a reflection of merge order.
+
+## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
+
+`balance_checkpoints` is an unreliable cache, not a source of truth — an
+attacker with DB write access can set it to any value. Three things follow:
+
+1. **A trusted, entries-only recompute path exists and is what money-leaving
+   paths must use.** `core.CheckpointIntegrityStore.RecomputeBalance` sums
+   `journal_entries` from entry 0 for a dimension; `balance_checkpoints` never
+   appears in its query (`postgres/sql/queries/integrity_checkpoint.sql`,
+   `RecomputeCheckpointFromEntries`). It is slow (full history scan) — that
+   cost is the reason `BalanceReader.GetBalance` (checkpoint + delta) stays
+   the default for ordinary reads; withdrawal / large-amount paths must call
+   `RecomputeBalance` instead, precisely because checkpoint tampering has zero
+   influence on a value that never reads the checkpoint.
+2. **A poisoned checkpoint has a trusted repair path that is NOT automatic.**
+   `CheckpointIntegrityStore.RebuildCheckpoint` takes the `(holder,
+   currency_id)` advisory lock (the same lock space `PostJournal`/`Reserve`
+   use), refuses with `core.ErrRollupPending` if a `rollup_queue` item is
+   still pending/claimed for the dimension (a worker holding a stale
+   checkpoint snapshot in memory could otherwise re-clobber the fix the
+   moment its write lands), recomputes from entry 0, and unconditionally
+   overwrites the checkpoint row (`RebuildBalanceCheckpoint`, which — unlike
+   `UpsertBalanceCheckpoint` — has no monotonic `last_entry_id` guard, because
+   that guard is exactly what makes an ordinary upsert unable to repair a
+   checkpoint whose `last_entry_id` was tampered to look "ahead" of the true
+   watermark). Detection (reconcile's `checkpoint_balance`,
+   `system_rollup_integrity`, `snapshot_integrity` checks) and correction
+   (`RebuildCheckpoint`) are deliberately separate calls: nothing in this
+   library invokes `RebuildCheckpoint` automatically, because auto-correcting
+   while an attack may still be in progress would destroy the forensic
+   evidence the drift represents. A **manual** repair has that exact same
+   evidence-destroying property — the drift vanishes from
+   `balance_checkpoints` the instant it's overwritten, and a log line is not
+   durable enough (rotation, retention limits) to stand in for it. So every
+   call, in the same transaction as the overwrite, durably records the
+   before/after balances, watermarks, and resulting drift in the append-only
+   `checkpoint_rebuilds` table (migration `050`; the same
+   `ledger_block_mutation()` no-UPDATE/no-DELETE guard 018 put on
+   `journals`/`journal_entries`) — a repair can never commit without leaving
+   forensic evidence, and the evidence can never exist without the repair
+   having happened.
+3. **`system_rollups` and `balance_snapshots` must be checked against entries
+   directly, never against checkpoints as an "independent" basis.**
+   `SystemRollupService.RefreshSystemRollups` populates `system_rollups` via
+   `AggregateCheckpointsByClassification`, which sums `balance_checkpoints` —
+   so `system_rollups` inherits any checkpoint tampering wholesale if the
+   only thing verifying it is itself or the checkpoints it was built from.
+   The `system_rollup_integrity` check instead compares it against
+   `AccountingEquationRows`, the same entries-only recompute the
+   `accounting_equation` check already performs, and flags a `system_rollups`
+   row with **no** matching entries at all (the M5 fabrication scenario: a
+   rollup entry manufactured out of nothing) rather than treating it as
+   "unknown, skip". The `snapshot_integrity` check does the entries-based
+   equivalent for `balance_snapshots`, scoped to the most recent
+   `snapshot_date` to bound cost; historical dates can be re-verified and
+   repaired on demand via `SnapshotBackfillService.BackfillSnapshots`, which
+   already recomputes from entries for an explicit date range.
+
+**Why**: a `balance_checkpoints` row is exactly as trustworthy as the
+attacker's most recent `UPDATE`. Comparing it against anything derived from
+itself (a self-check, or `system_rollups` built by summing it) can never
+detect tampering — only an independent recompute straight from
+`journal_entries` can. And once drift is *detected*, silently overwriting it
+during an active incident destroys the evidence needed to scope the breach —
+so correction is a distinct, explicit, operator-invoked action, never a side
+effect of running reconcile.
+
+**Enforced by**:
+- `postgres.CheckpointIntegrityStore` (`postgres/checkpoint_integrity_store.go`) —
+  `RecomputeBalance`/`RebuildCheckpoint`, backed by
+  `RecomputeCheckpointFromEntries` and `RebuildBalanceCheckpoint`
+  (`postgres/sql/queries/integrity_checkpoint.sql`,
+  `postgres/sql/queries/checkpoints.sql`).
+- `checkpoint_rebuilds` table (migration `050`) + `InsertCheckpointRebuildAudit`
+  (`postgres/sql/queries/integrity_checkpoint.sql`), written atomically with
+  `RebuildBalanceCheckpoint` inside the same transaction;
+  `checkpoint_rebuilds_no_update` / `checkpoint_rebuilds_no_delete` triggers
+  make the record itself tamper-evident.
+- `service.FullReconciliationService.runCheck2GlobalBalance` (checkpoint
+  vs. entries, per account) — persists its fleet-wide scan cursor and a
+  `lap_dirty` flag in `reconcile_scan_cursors` (migration `043`) so a
+  violation found partway through a multi-run scan cannot be buried by a
+  later, cleaner segment of the same lap (C4b).
+- `service.FullReconciliationService.runCheckSystemRollupIntegrity` /
+  `runCheckSnapshotIntegrity` (system_rollups / balance_snapshots vs.
+  entries).
+
+**Pinned by**:
+- `postgres.TestCheckpointIntegrity_RecomputeBalance_IgnoresCheckpointTampering`
+  (RecomputeBalance returns the true balance while GetBalance still reads a
+  poisoned checkpoint on the same dimension)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_OvercomesMonotonicGuard`
+  (poisons both balance AND `last_entry_id`; demonstrates the normal
+  monotonic-guarded upsert CANNOT repair it, then that `RebuildCheckpoint`
+  does)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_RefusesWhenRollupPending`
+  (a pending `rollup_queue` item for the dimension makes `RebuildCheckpoint`
+  return `core.ErrRollupPending`)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_RecordsAuditRow` (the
+  before/after balances and drift land in `checkpoint_rebuilds`, matching the
+  injected poison amount)
+- `postgres.TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly` (`UPDATE`
+  and `DELETE` against `checkpoint_rebuilds` are both rejected)
+- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
+  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
+  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`,
+  `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
+  3-pair fleet scanned 1 pair per run across 4 calls resumes correctly, and
+  the run that completes the lap still reports `Passed=false` for a drift
+  found two runs earlier)
+- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
+  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`,
+  `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
+  (DB-backed: poisons a checkpoint, refreshes `system_rollups` from it, and
+  requires the check to catch the drift against entries)
+- `service.TestCheckSnapshotIntegrity_DetectsDrift`,
+  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`,
+  `service.TestFullReconciliation_DetectsSnapshotDrift`
+
+---
 
 ## I-24: Per-journal balance is enforced at the DB layer, independent of the application
 
@@ -858,6 +978,7 @@ individually unbalanced but net to zero in aggregate.
   mock-level pin that `runCheck11JournalBalance` reports `Passed: false`,
   logs (not leaks into the report) the offending internal ids, and that a
   clean querier reports `Passed: true, Complete: true`.
+---
 
 ---
 

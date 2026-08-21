@@ -11,6 +11,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getReconcileScanCursor = `-- name: GetReconcileScanCursor :one
+SELECT after_holder, after_currency, lap_dirty
+FROM reconcile_scan_cursors
+WHERE check_name = $1::text
+`
+
+type GetReconcileScanCursorRow struct {
+	AfterHolder   int64 `json:"after_holder"`
+	AfterCurrency int64 `json:"after_currency"`
+	LapDirty      bool  `json:"lap_dirty"`
+}
+
+// Persisted resume cursor for check #2's fleet-wide scan (C4b). Zero rows
+// (no cursor persisted yet, e.g. first run ever) is a normal state, not an
+// error — the adapter maps it to the same (MinInt64, MinInt64, false) start
+// the in-memory cursor always used, NOT (0, 0): system holders are negative
+// (core.SystemHolder), so a zero start would reintroduce the bug fixed in
+// docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md (B1). lap_dirty
+// carries "did an earlier segment of this lap already find a violation" so
+// the check that completes the lap can still report Passed=false.
+func (q *Queries) GetReconcileScanCursor(ctx context.Context, checkName string) (GetReconcileScanCursorRow, error) {
+	row := q.db.QueryRow(ctx, getReconcileScanCursor, checkName)
+	var i GetReconcileScanCursorRow
+	err := row.Scan(&i.AfterHolder, &i.AfterCurrency, &i.LapDirty)
+	return i, err
+}
+
 const reconcileAccountingEquation = `-- name: ReconcileAccountingEquation :many
 SELECT
   je.currency_id,
@@ -227,7 +254,8 @@ LEFT JOIN journals j ON je.journal_id = j.id
 WHERE j.id IS NULL
 `
 
-// Reconciliation queries for the full 10-check suite.
+// Reconciliation queries for the full reconciliation suite
+// (service.FullReconciliationService).
 // All queries are read-only (no mutations).
 // Check #3: count entries whose journal_id does not match any journal row.
 func (q *Queries) ReconcileOrphanEntriesCount(ctx context.Context) (int64, error) {
@@ -425,4 +453,34 @@ func (q *Queries) ReconcileStaleRollupItems(ctx context.Context, thresholdMinute
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertReconcileScanCursor = `-- name: UpsertReconcileScanCursor :exec
+INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, updated_at)
+VALUES ($1::text, $2::bigint, $3::bigint, $4::boolean, now())
+ON CONFLICT (check_name)
+DO UPDATE SET after_holder = EXCLUDED.after_holder, after_currency = EXCLUDED.after_currency,
+              lap_dirty = EXCLUDED.lap_dirty, updated_at = now()
+`
+
+type UpsertReconcileScanCursorParams struct {
+	CheckName     string `json:"check_name"`
+	AfterHolder   int64  `json:"after_holder"`
+	AfterCurrency int64  `json:"after_currency"`
+	LapDirty      bool   `json:"lap_dirty"`
+}
+
+// Called at the end of every check #2 run: persists the resume point and
+// lap_dirty flag when the scan was capped or timed out (partial coverage),
+// or resets both to their start values ((MinInt64, MinInt64), false) when a
+// full lap completed, so the next run begins a fresh lap rather than
+// replaying the same resume point (or a stale dirty flag) forever.
+func (q *Queries) UpsertReconcileScanCursor(ctx context.Context, arg UpsertReconcileScanCursorParams) error {
+	_, err := q.db.Exec(ctx, upsertReconcileScanCursor,
+		arg.CheckName,
+		arg.AfterHolder,
+		arg.AfterCurrency,
+		arg.LapDirty,
+	)
+	return err
 }
