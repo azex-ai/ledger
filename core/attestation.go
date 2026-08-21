@@ -39,15 +39,25 @@ import (
 // against), so it is not hidden the way internal storage ids normally
 // are.
 type Attestation struct {
-	UID         string    `json:"uid"`
-	Seq         int64     `json:"seq"`
-	EntryCount  int64     `json:"entry_count"`
-	BatchDigest []byte    `json:"batch_digest"`
-	PrevRoot    []byte    `json:"prev_root"`
-	RootHash    []byte    `json:"root_hash"`
-	Signature   []byte    `json:"signature"`
-	KeyID       string    `json:"key_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	UID         string `json:"uid"`
+	Seq         int64  `json:"seq"`
+	EntryCount  int64  `json:"entry_count"`
+	BatchDigest []byte `json:"batch_digest"`
+	// MerkleRoot is the RFC 6962 tree root over the same batch's entries
+	// (P7, migration 048) -- see that migration's header for why it is a
+	// new column rather than a rename of BatchDigest, and for the
+	// deliberate scope limit this implies: unlike BatchDigest, MerkleRoot
+	// is NOT one of AttestationRootHash's inputs, so it is not covered by
+	// Signature or by core.Anchor's externally-published head. Empty means
+	// this row predates merkle_root being computed (migration 048's
+	// default sentinel) -- callers must treat that as "not available", not
+	// as a mismatch.
+	MerkleRoot []byte    `json:"merkle_root"`
+	PrevRoot   []byte    `json:"prev_root"`
+	RootHash   []byte    `json:"root_hash"`
+	Signature  []byte    `json:"signature"`
+	KeyID      string    `json:"key_id"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // GenesisRootHashLen is the fixed width, in bytes, of every root_hash /
@@ -117,22 +127,37 @@ func CanonicalBatchDigest(entries []AttestedEntry) ([]byte, error) {
 	writeBE64(&buf, uint64(len(entries)))
 
 	for i, e := range entries {
-		writeBE64(&buf, uint64(e.EntryID))
-		writeBE64(&buf, uint64(e.JournalID))
-		writeBE64(&buf, uint64(e.AccountHolder))
-		writeBE64(&buf, uint64(e.CurrencyID))
-		writeBE64(&buf, uint64(e.ClassificationID))
-		writeLenPrefixed(&buf, string(e.EntryType))
-		amtBytes, err := EncodeAmount(e.Amount)
+		payload, err := encodeAttestedEntry(e)
 		if err != nil {
 			return nil, fmt.Errorf("core: canonical batch digest: entry[%d] (id=%d): %w", i, e.EntryID, err)
 		}
-		buf.Write(amtBytes)
-		writeLenPrefixed(&buf, e.EffectiveAt.UTC().Format(time.RFC3339Nano))
+		buf.Write(payload)
 	}
 
 	sum := sha256.Sum256(buf.Bytes())
 	return sum[:], nil
+}
+
+// encodeAttestedEntry encodes a single entry's fields, in the exact order
+// CanonicalBatchDigest lays them out inline for each entry. Extracted so
+// core/merkle.go's leaf hashing (P7) reuses this byte-for-byte instead of
+// inventing a second encoding of the same fields (design doc §9.3: "叶子的
+// payload 复用 P5 的 EncodeAmount 与字段顺序纪律，不要另起一套编码").
+func encodeAttestedEntry(e AttestedEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	writeBE64(&buf, uint64(e.EntryID))
+	writeBE64(&buf, uint64(e.JournalID))
+	writeBE64(&buf, uint64(e.AccountHolder))
+	writeBE64(&buf, uint64(e.CurrencyID))
+	writeBE64(&buf, uint64(e.ClassificationID))
+	writeLenPrefixed(&buf, string(e.EntryType))
+	amtBytes, err := EncodeAmount(e.Amount)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(amtBytes)
+	writeLenPrefixed(&buf, e.EffectiveAt.UTC().Format(time.RFC3339Nano))
+	return buf.Bytes(), nil
 }
 
 // AttestationRootHash computes the hash-chain link for attestation seq,

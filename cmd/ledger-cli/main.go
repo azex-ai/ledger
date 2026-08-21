@@ -34,10 +34,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/anchordev"
@@ -308,6 +310,7 @@ func cmdVerify(ctx context.Context, pool *pgxpool.Pool, svc *ledger.Service, arg
 	pubkeyHex := fs.String("pubkey-hex", "", "hex-encoded ed25519 public key used for both P6 attestation and P5 journal signatures -- required")
 	keyID := fs.String("key-id", "", "the key id this public key corresponds to -- required")
 	sampleSize := fs.Int("sample-size", 20, "how many of the most recent journals to sample for a valid P5 signature")
+	referenceDir := fs.String("reference-dir", "", "optional: directory of seq-<N>.json trusted-reference entry dumps (design doc §9.1 localization) -- when a TAMPERED seq has a matching file here, the report's mismatched_entry_ids names the exact entries; without it, TAMPERED seqs are still reported, just without an entry list")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -329,9 +332,12 @@ func cmdVerify(ctx context.Context, pool *pgxpool.Pool, svc *ledger.Service, arg
 	verifier := authdev.NewLocalVerifier(ed25519.PublicKey(pubkeyBytes), *keyID)
 	store := postgres.NewAttestationStore(pool)
 
-	report := service.VerifyLedger(ctx, store, anchor, verifier, svc.Queries(), service.VerifyConfig{
-		JournalSampleSize: int32(*sampleSize),
-	})
+	cfg := service.VerifyConfig{JournalSampleSize: int32(*sampleSize)}
+	if *referenceDir != "" {
+		cfg.ReferenceEntries = referenceEntriesFromDir(*referenceDir)
+	}
+
+	report := service.VerifyLedger(ctx, store, anchor, verifier, svc.Queries(), cfg)
 	if err := jsonOut(report); err != nil {
 		return err
 	}
@@ -339,6 +345,69 @@ func cmdVerify(ctx context.Context, pool *pgxpool.Pool, svc *ledger.Service, arg
 		os.Exit(1)
 	}
 	return nil
+}
+
+// referenceEntryFile is the on-disk shape of a seq-<N>.json trusted
+// reference dump: a JSON array of entries as they existed at attestation
+// time (design doc §9.1's "pre-incident snapshot restore, a second
+// independent replica, a WAL-based point-in-time recovery" -- how the
+// operator produces one is out of this tool's scope; this only defines
+// the file format ledger-cli verify's --reference-dir reads). Fields
+// mirror core.AttestedEntry; snake_case per api-contract.md's wire
+// convention even though this is an operator-facing file, not a public
+// API, for consistency with everything else this repo serializes.
+type referenceEntryFile struct {
+	EntryID          int64  `json:"entry_id"`
+	JournalID        int64  `json:"journal_id"`
+	AccountHolder    int64  `json:"account_holder"`
+	CurrencyID       int64  `json:"currency_id"`
+	ClassificationID int64  `json:"classification_id"`
+	EntryType        string `json:"entry_type"`
+	Amount           string `json:"amount"`
+	EffectiveAt      string `json:"effective_at"`
+}
+
+// referenceEntriesFromDir returns a service.VerifyConfig.ReferenceEntries
+// closure that reads dir/seq-<N>.json on demand (only for seqs
+// VerifyLedger actually finds a content mismatch at -- not read
+// eagerly). Returns ok=false for any seq with no file, a file that fails
+// to parse, or an entry whose amount/effective_at fails to parse --
+// fail-closed: a malformed reference must never silently produce a wrong
+// localization, only no localization.
+func referenceEntriesFromDir(dir string) func(seq int64) ([]core.AttestedEntry, bool) {
+	return func(seq int64) ([]core.AttestedEntry, bool) {
+		path := filepath.Join(dir, fmt.Sprintf("seq-%d.json", seq))
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false
+		}
+		var files []referenceEntryFile
+		if err := json.Unmarshal(raw, &files); err != nil {
+			return nil, false
+		}
+		entries := make([]core.AttestedEntry, len(files))
+		for i, f := range files {
+			amount, err := decimal.NewFromString(f.Amount)
+			if err != nil {
+				return nil, false
+			}
+			effectiveAt, err := time.Parse(time.RFC3339Nano, f.EffectiveAt)
+			if err != nil {
+				return nil, false
+			}
+			entries[i] = core.AttestedEntry{
+				EntryID:          f.EntryID,
+				JournalID:        f.JournalID,
+				AccountHolder:    f.AccountHolder,
+				CurrencyID:       f.CurrencyID,
+				ClassificationID: f.ClassificationID,
+				EntryType:        core.EntryType(f.EntryType),
+				Amount:           amount,
+				EffectiveAt:      effectiveAt,
+			}
+		}
+		return entries, true
+	}
 }
 
 func jsonOut(v any) error {

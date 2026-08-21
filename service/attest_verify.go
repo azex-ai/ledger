@@ -49,6 +49,14 @@ type VerifyReport struct {
 	ChainSeqsChecked int64    `json:"chain_seqs_checked"`
 	EntriesRechecked int64    `json:"entries_rechecked"`
 	JournalsSampled  int64    `json:"journals_sampled"`
+	// MismatchedEntryIDs maps seq -> the specific entry ids
+	// core.LocateMismatches found within that batch (design doc §9.1),
+	// present only for seqs where a content mismatch was found AND
+	// VerifyConfig.ReferenceEntries supplied a trusted reference for that
+	// seq. A TAMPERED seq with no entry here means localization was not
+	// attempted (no reference available), not that nothing was found --
+	// see Reasons for that seq's text.
+	MismatchedEntryIDs map[int64][]int64 `json:"mismatched_entry_ids,omitempty"`
 }
 
 // VerifyConfig tunes VerifyLedger. Zero value uses sensible defaults via
@@ -60,6 +68,19 @@ type VerifyConfig struct {
 	// ChainPageSize is the page size for walking the attestation chain in
 	// step 2. default: 500
 	ChainPageSize int32
+	// ReferenceEntries, when non-nil, supplies an externally-trusted set
+	// of entries for a given seq (e.g. loaded from a pre-incident backup,
+	// a second independent replica, or a WAL-based point-in-time
+	// recovery) so a content mismatch at that seq can be localized to
+	// specific entry ids (design doc §9.1) instead of only naming the
+	// seq. ok=false (or nil ReferenceEntries) means no reference is
+	// available -- VerifyLedger then reports the seq as TAMPERED without
+	// an entry list, never a fabricated one. Supplying this is an
+	// operational/forensics decision this package cannot default (same
+	// reasoning as core.LocateMismatches's own doc comment) -- ledger-cli
+	// verify's --reference-dir flag is the reference implementation of
+	// this hook, not the only possible one.
+	ReferenceEntries func(seq int64) (entries []core.AttestedEntry, ok bool)
 }
 
 // DefaultVerifyConfig returns VerifyConfig's defaults.
@@ -132,18 +153,62 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 				return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("recheck entries for seq %d: %v", a.Seq, err)}}
 			}
 			report.EntriesRechecked += int64(len(entries))
+			contentMismatch := false
 			if int64(len(entries)) != a.EntryCount {
 				tampered("seq %d: entry_count=%d but only %d entries still exist (deleted row?)", a.Seq, a.EntryCount, len(entries))
+				contentMismatch = true
 			}
 			recomputedDigest, err := core.CanonicalBatchDigest(entries)
 			if err != nil {
 				tampered("seq %d: recompute batch digest: %v", a.Seq, err)
+				contentMismatch = true
 			} else if !bytes.Equal(recomputedDigest, a.BatchDigest) {
 				tampered("seq %d: batch_digest mismatch (entry content changed after attestation)", a.Seq)
+				contentMismatch = true
 			} else {
 				recomputedRoot, err := core.AttestationRootHash(a.Seq, prevRoot, recomputedDigest, a.EntryCount)
 				if err != nil || !bytes.Equal(recomputedRoot, a.RootHash) {
 					tampered("seq %d: root_hash does not match its own stored batch_digest/prev_root", a.Seq)
+				}
+			}
+
+			// P7: recompute the RFC 6962 Merkle root and compare against
+			// the stored value. Empty a.MerkleRoot means this row
+			// predates merkle_root being computed (migration 048's
+			// never-computed sentinel, distinct from core.EmptyMerkleRoot
+			// -- an EMPTY BATCH's real tree root) -- skip, don't treat
+			// absence as a mismatch (same "empty = not this check's
+			// concern" treatment step 4 already gives an unsigned
+			// journal's empty AuthKeyID).
+			if len(a.MerkleRoot) > 0 {
+				merkleTree, err := core.BuildMerkleTree(entries)
+				if err != nil {
+					tampered("seq %d: recompute merkle root: %v", a.Seq, err)
+					contentMismatch = true
+				} else if !bytes.Equal(merkleTree.Root(), a.MerkleRoot) {
+					tampered("seq %d: merkle_root mismatch (entry content or order changed after attestation)", a.Seq)
+					contentMismatch = true
+				}
+			}
+
+			// P7 localization (design doc §9.1): a content mismatch only
+			// names the seq so far -- narrow it to specific entry ids when
+			// the caller supplied a trusted reference for this seq.
+			// core.LocateMismatches requires a second FULL tree; this
+			// package has no way to produce one on its own (only the
+			// aggregate merkle_root is persisted, deliberately -- see
+			// core/merkle.go's LocateMismatches doc comment), so silently
+			// skip (no fabricated entry list) when no reference is
+			// available or its leaf count does not match.
+			if contentMismatch && cfg.ReferenceEntries != nil {
+				if refEntries, ok := cfg.ReferenceEntries(a.Seq); ok {
+					if mismatched := locateMismatchedEntryIDs(refEntries, entries); len(mismatched) > 0 {
+						if report.MismatchedEntryIDs == nil {
+							report.MismatchedEntryIDs = make(map[int64][]int64)
+						}
+						report.MismatchedEntryIDs[a.Seq] = mismatched
+						tampered("seq %d: localized to entry id(s) %v", a.Seq, mismatched)
+					}
 				}
 			}
 
@@ -209,4 +274,37 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 		report.Status = VerifyStatusVerified
 	}
 	return report
+}
+
+// locateMismatchedEntryIDs builds an RFC 6962 tree over each of reference
+// and actual (both must already be in the same canonical order --
+// ascending EntryID, the order every AttestationStore read path in this
+// package produces) and returns the actual-side entry ids
+// core.LocateMismatches finds diverging. Returns nil (not an error) when
+// the two sets have different leaf counts -- localization requires equal
+// leaf counts (core.LocateMismatches's own contract); an entry-count
+// mismatch is a different finding (already reported by this file's
+// "entry_count=%d but only %d entries still exist" check) that a leaf-count
+// mismatch here would not add anything to.
+func locateMismatchedEntryIDs(reference, actual []core.AttestedEntry) []int64 {
+	if len(reference) != len(actual) {
+		return nil
+	}
+	refTree, err := core.BuildMerkleTree(reference)
+	if err != nil {
+		return nil
+	}
+	actualTree, err := core.BuildMerkleTree(actual)
+	if err != nil {
+		return nil
+	}
+	indices, err := core.LocateMismatches(refTree, actualTree)
+	if err != nil || len(indices) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(indices))
+	for i, idx := range indices {
+		ids[i] = actual[idx].EntryID
+	}
+	return ids
 }

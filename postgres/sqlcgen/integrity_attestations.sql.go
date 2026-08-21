@@ -14,7 +14,7 @@ import (
 
 const getLatestLedgerAttestation = `-- name: GetLatestLedgerAttestation :one
 
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations ORDER BY seq DESC LIMIT 1
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations ORDER BY seq DESC LIMIT 1
 `
 
 // P6 (batch attestation chain) reads/writes. See
@@ -36,12 +36,13 @@ func (q *Queries) GetLatestLedgerAttestation(ctx context.Context) (LedgerAttesta
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
 
 const getLedgerAttestationBySeq = `-- name: GetLedgerAttestationBySeq :one
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations WHERE seq = $1
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations WHERE seq = $1
 `
 
 func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (LedgerAttestation, error) {
@@ -58,6 +59,7 @@ func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (Led
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
@@ -79,9 +81,9 @@ func (q *Queries) InsertEntryAttestations(ctx context.Context, arg InsertEntryAt
 }
 
 const insertLedgerAttestation = `-- name: InsertLedgerAttestation :one
-INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-RETURNING id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at
+INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, merkle_root, prev_root, root_hash, signature, key_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root
 `
 
 type InsertLedgerAttestationParams struct {
@@ -89,6 +91,7 @@ type InsertLedgerAttestationParams struct {
 	Seq         int64       `json:"seq"`
 	EntryCount  int64       `json:"entry_count"`
 	BatchDigest []byte      `json:"batch_digest"`
+	MerkleRoot  []byte      `json:"merkle_root"`
 	PrevRoot    []byte      `json:"prev_root"`
 	RootHash    []byte      `json:"root_hash"`
 	Signature   []byte      `json:"signature"`
@@ -101,6 +104,7 @@ func (q *Queries) InsertLedgerAttestation(ctx context.Context, arg InsertLedgerA
 		arg.Seq,
 		arg.EntryCount,
 		arg.BatchDigest,
+		arg.MerkleRoot,
 		arg.PrevRoot,
 		arg.RootHash,
 		arg.Signature,
@@ -118,6 +122,7 @@ func (q *Queries) InsertLedgerAttestation(ctx context.Context, arg InsertLedgerA
 		&i.Signature,
 		&i.KeyID,
 		&i.CreatedAt,
+		&i.MerkleRoot,
 	)
 	return i, err
 }
@@ -175,7 +180,7 @@ func (q *Queries) ListEntriesForAttestation(ctx context.Context, seq int64) ([]L
 }
 
 const listLedgerAttestationsFrom = `-- name: ListLedgerAttestationsFrom :many
-SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at FROM ledger_attestations
+SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root FROM ledger_attestations
 WHERE seq >= $1::bigint
 ORDER BY seq ASC
 LIMIT $2::int
@@ -209,6 +214,7 @@ func (q *Queries) ListLedgerAttestationsFrom(ctx context.Context, arg ListLedger
 			&i.Signature,
 			&i.KeyID,
 			&i.CreatedAt,
+			&i.MerkleRoot,
 		); err != nil {
 			return nil, err
 		}

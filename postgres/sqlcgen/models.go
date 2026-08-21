@@ -267,6 +267,7 @@ type LedgerAttestation struct {
 	Signature   []byte      `json:"signature"`
 	KeyID       string      `json:"key_id"`
 	CreatedAt   time.Time   `json:"created_at"`
+	MerkleRoot  []byte      `json:"merkle_root"`
 }
 
 type PeriodClose struct {

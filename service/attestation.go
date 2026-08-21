@@ -111,6 +111,20 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 		return 0, 0, fmt.Errorf("service: attestation: root hash: %w", err)
 	}
 
+	// P7: RFC 6962 Merkle root over the same entries, for localization
+	// (core.LocateMismatches) and inclusion proofs (core.
+	// GenerateInclusionProof/core.VerifyInclusion) -- see migration 048's
+	// header for why this is NOT one of rootHash's inputs (it is a
+	// deliberately separate, additive value, not part of what gets
+	// signed). An empty batch still produces a real 32-byte RFC 6962
+	// empty-tree root (core.EmptyMerkleRoot), not the migration's
+	// never-computed sentinel ('').
+	merkleTree, err := core.BuildMerkleTree(entries)
+	if err != nil {
+		return 0, 0, fmt.Errorf("service: attestation: merkle tree: %w", err)
+	}
+	merkleRoot := merkleTree.Root()
+
 	signature, keyID, err := s.attestor.Sign(ctx, rootHash)
 	if err != nil {
 		return 0, 0, fmt.Errorf("service: attestation: attestor sign: %w: %w", err, core.ErrAttestorUnavailable)
@@ -125,6 +139,7 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 		Seq:         nextSeq,
 		EntryCount:  int64(len(entries)),
 		BatchDigest: batchDigest,
+		MerkleRoot:  merkleRoot,
 		PrevRoot:    prevRoot,
 		RootHash:    rootHash,
 		Signature:   signature,

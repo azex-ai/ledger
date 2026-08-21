@@ -20,8 +20,8 @@ ORDER BY seq ASC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: InsertLedgerAttestation :one
-INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, merkle_root, prev_root, root_hash, signature, key_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 RETURNING *;
 
 -- name: ListUncoveredEntries :many

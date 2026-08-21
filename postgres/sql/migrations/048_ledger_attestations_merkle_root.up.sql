@@ -1,0 +1,116 @@
+-- 048_ledger_attestations_merkle_root.up.sql
+--
+-- P7 of the integrity-hardening wave
+-- (docs/plans/2026-08-21-tamper-evident-ledger-design.md §9,
+-- docs/plans/2026-08-21-integrity-hardening-contracts.md §9): adds the RFC
+-- 6962 Merkle tree root over each attestation batch's entries, so a
+-- TAMPERED verdict can eventually be narrowed from "seq N is bad" to
+-- specific entry ids (design doc §9.1), and so a third party can verify a
+-- single entry's membership without database access (§9.2).
+--
+-- Two independent changes bundled in this one migration file (both P7's
+-- exclusive number, contracts §10 "不动别人分配到的 migration 号"):
+--
+--   1. ADD COLUMN ledger_attestations.merkle_root.
+--   2. The GRANTs 047 forgot for ledger_app / ledger_ro on both of its
+--      tables (flagged by team lead review of #10; see part 2 below).
+--
+-- ============================================================================
+-- Part 1 -- merkle_root: why ADD, not RENAME batch_digest
+-- ============================================================================
+--
+-- Design doc §9.3 reads "ledger_attestations.batch_digest 换成 merkle_root，
+-- 其余结构不变" ("batch_digest becomes merkle_root, structure otherwise
+-- unchanged") -- read literally that is a rename. It is not implemented as
+-- one, for a reason specific to this schema's immutability, not a
+-- stylistic preference for expand-safety in general:
+--
+--   batch_digest is not a display value -- it is one of the four inputs
+--   AttestationRootHash hashes into root_hash (core/attestation.go), and
+--   root_hash is the value core.Attestor.Sign actually signs. Changing
+--   what batch_digest MEANS for every already-committed row (P6's own
+--   golden-vector-pinned flat digest) would change root_hash for every
+--   row, which would invalidate every existing signature -- there is no
+--   such thing as "rename in place" for a signed value; it is
+--   "re-derive and re-sign the entire chain from genesis", and this
+--   session has no path to re-invoke whatever Attestor originally signed
+--   each historical row (a KMS key it may not even still hold, per
+--   core/interfaces.go's Attestor doc comment) even if re-signing were
+--   otherwise desirable. Options actually weighed:
+--
+--     a) ADD a new merkle_root column; batch_digest / root_hash /
+--        signature keep their exact P6 meaning and byte layout, for every
+--        row, past and future. <- what this migration does.
+--     b) Rename batch_digest -> merkle_root, backfill every historical
+--        row's value by rebuilding its tree, re-sign every row. Not
+--        viable: re-signing requires the original signing key still being
+--        reachable for every historical key_id, for a value
+--        (root_hash) whose entire purpose is that nothing --including a
+--        later migration -- can silently recompute and replace it.
+--     c) Truncate ledger_attestations and rebuild the chain from
+--        genesis. Destroys the P6 chain's actual history for no gain --
+--        the entries it attested to are still exactly as correct as they
+--        were.
+--
+--   (a) is the only option that does not either fabricate signatures or
+--   discard real attestation history, so it is what ships.
+--
+-- ⚠️ Consequence worth stating plainly, not implementing around: because
+-- merkle_root is additive and NOT one of AttestationRootHash's inputs,
+-- it is NOT covered by core.Attestor's signature or by core.Anchor's
+-- externally-published head. Its only tamper-evidence is this table's own
+-- append-only trigger (ledger_block_mutation(), 047) -- adequate against
+-- the ledger_app-credential-leak threat model P1's role split defends
+-- against (that role has no UPDATE grant here either, and no DDL to
+-- disable the trigger even if it did), but weaker than root_hash's
+-- guarantee against a ledger_owner/superuser-level attacker, who COULD
+-- disable the trigger, edit merkle_root alone, and re-enable it without
+-- invalidating any existing signature (root_hash's signed inputs never
+-- touched merkle_root). Flagged to team lead for awareness in the P7
+-- report -- not resolved unilaterally here (working-agreements §2/§4):
+-- closing it would mean binding merkle_root into a NEW, later root_hash
+-- domain for future rows, which is a P6/P7-boundary signing-scheme change
+-- outside a single migration's remit.
+--
+-- Empty-bytea default ('' , same sentinel 046 used for auth_key_id="never
+-- signed") means "this row predates merkle_root being computed" -- not "no
+-- entries" (an empty BATCH still gets a real 32-byte RFC 6962 empty-tree
+-- root, core.EmptyMerkleRoot = SHA-256(""), computed by
+-- service.AttestationService going forward). Downstream consumers
+-- (service.VerifyLedger) must treat '' the same way I-26's own scope note
+-- already treats an empty auth_key_id: skip the recompute-and-compare
+-- check for that row rather than treating absence as a mismatch.
+------------------------------------------------------------
+ALTER TABLE ledger_attestations
+    ADD COLUMN IF NOT EXISTS merkle_root BYTEA NOT NULL DEFAULT ''::bytea;
+
+-- ============================================================================
+-- Part 2 -- missing ledger_app / ledger_ro grants on 047's two tables
+-- ============================================================================
+--
+-- 042 §5's comment says it plainly: "ledger_app/ledger_ro get nothing
+-- automatically on new objects, forcing an explicit, reviewable GRANT in
+-- whichever future migration introduces them (contracts.md §9 point 3)".
+-- 047 introduced ledger_attestations and entry_attestations and never did
+-- that -- an oversight this migration corrects (the same gap independently
+-- exists for 043's checkpoint_integrity_findings and 050's
+-- checkpoint_rebuilds; P7's remit is only 047's two tables per contracts
+-- §10 "不动别人分配到的 migration 号", so those are left for whoever owns
+-- that follow-up).
+--
+-- Verb choice mirrors 042's OWN distinction, not a blanket copy of its
+-- "ordinary table" grant: 042 gave journal_entries (append-only, protected
+-- by the very same ledger_block_mutation() trigger 047 reuses for these two
+-- tables) SELECT+INSERT only, explicitly because "the running application
+-- never updates a posted entry" -- word for word true of
+-- ledger_attestations and entry_attestations too (postgres/attestation_
+-- store.go's InsertAttestation only ever INSERTs). Granting UPDATE here
+-- would be inert (the trigger blocks every UPDATE regardless of the
+-- grantee's privileges) but still a needless privilege to carry, working
+-- against the least-privilege point of the P1 role split this very
+-- migration is patching a gap in.
+------------------------------------------------------------
+GRANT SELECT, INSERT ON ledger_attestations TO ledger_app;
+GRANT SELECT, INSERT ON entry_attestations TO ledger_app;
+GRANT SELECT ON ledger_attestations TO ledger_ro;
+GRANT SELECT ON entry_attestations TO ledger_ro;
