@@ -479,13 +479,29 @@ simulates a non-superuser owning role and fails against that version with
 version-bookkeeping write, ordered by Postgres after the migration's
 ownership transfer already committed.
 
-**Follow-up migration (number TBD, requested from Team Lead 2026-08-21) —
-"migrate" phase**: `REVOKE ALL ON SCHEMA public FROM PUBLIC` and
-`ALTER TABLE/SEQUENCE ... OWNER TO ledger_owner` for every existing object.
-This migration **must ship in the same release** as the `DATABASE_URL`
-cutover (`migrations.job.databaseUrlKey` → `ledger_owner`, serving pods →
-`ledger_app`) — running it against a connection nobody has switched off of
-yet reproduces exactly the lockout above.
+**Migration 049 — "migrate" phase**: `REVOKE ALL ON SCHEMA public FROM
+PUBLIC` and `ALTER TABLE/SEQUENCE ... OWNER TO ledger_owner` for every
+existing object. This migration **must ship in the same release** as the
+`DATABASE_URL` cutover (`migrations.job.databaseUrlKey` → `ledger_owner`,
+serving pods → `ledger_app`) — running it against a connection nobody has
+switched off of yet reproduces exactly the lockout above, on purpose (pinned
+by `postgres.TestMigration049_StrandsTheOldConnectionByDesign`).
+
+049 leaves the connecting role two narrow, deliberate exceptions so it can
+keep running migrations afterward without superuser: schema-level `USAGE`
+and `SELECT`/`INSERT`/`TRUNCATE` on `schema_migrations` only (golang-migrate
+records a migration's success as a **separate** transaction after the
+migration's own content commits — without this, 049 could never
+successfully apply under any non-superuser connection, on any managed
+Postgres, regardless of cutover timing; see 049's migration file header for
+the exact mechanism and the two deadlocks it closes). Every business table
+remains fully locked out. The one thing 049 cannot revoke from the old
+identity is the `ADMIN OPTION` on `ledger_owner`/`ledger_app`/`ledger_ro`
+that PostgreSQL unconditionally grants to whichever role created them
+(042) — that credential could theoretically re-grant itself temporary
+access to `ledger_owner`'s privileges again. Closing that is exactly what
+the future "contract" phase (rotate or fully retire the old credential) is
+for.
 
 Operational notes:
 

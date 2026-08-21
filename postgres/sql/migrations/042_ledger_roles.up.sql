@@ -63,12 +63,33 @@
 -- 1. Create the three roles (idempotent). No passwords are set here --
 --    secrets never enter migration files or git (infra.md); an operator
 --    sets them out-of-band when cutting over in the "migrate" phase.
+--
+--    ledger_owner is created under `createrole_self_grant = 'set'` (scoped
+--    to this transaction via SET LOCAL): since PostgreSQL 16, CREATEROLE
+--    alone no longer implies any relationship to a role you create --
+--    without this, a non-superuser connection with CREATEROLE (every
+--    realistic managed-Postgres master user) would create ledger_owner and
+--    then have NO membership in it at all, unable to even run `ALTER TABLE
+--    ... OWNER TO ledger_owner`. 049 needs exactly this ("member WITH SET
+--    OPTION", i.e. can `SET ROLE ledger_owner`) and nothing more --
+--    deliberately WITHOUT INHERIT, so the connecting role never
+--    automatically carries ledger_owner's privileges; it must explicitly
+--    `SET ROLE ledger_owner` (and 049 does, only for the one statement that
+--    needs it -- see 049's header). Reset immediately after so
+--    ledger_app/ledger_ro do not also pick up a standing self-grant they
+--    never use.
 ------------------------------------------------------------
+SET LOCAL createrole_self_grant = 'set';
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_owner') THEN
         CREATE ROLE ledger_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
     END IF;
+END $$;
+SET LOCAL createrole_self_grant = DEFAULT;
+
+DO $$
+BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_app') THEN
         CREATE ROLE ledger_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
     END IF;

@@ -201,6 +201,19 @@ func TestMigration042_DoesNotStrandTheMigrationRunner(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(adminPool.Close)
 
+	// ledger_owner/ledger_app/ledger_ro are cluster-global roles, not
+	// per-database -- postgrestest shares one Postgres server across every
+	// test in this binary (isolated only at the database level), so a
+	// PRIOR test's migration run may have already created them, and 042's
+	// `IF NOT EXISTS` guard would then skip CREATE ROLE entirely for this
+	// test's connecting role, silently skipping the createrole_self_grant
+	// dance that only fires on actual creation. Drop them first so this
+	// test's migration run is genuinely the one creating ledger_owner --
+	// matching a real, single-cluster-per-environment deployment, where
+	// there is only ever one creator.
+	_, err = adminPool.Exec(ctx, "DROP ROLE IF EXISTS ledger_owner, ledger_app, ledger_ro")
+	require.NoError(t, err)
+
 	u, err := url.Parse(connStr)
 	require.NoError(t, err)
 	dbName := strings.TrimPrefix(u.Path, "/")
@@ -215,7 +228,19 @@ func TestMigration042_DoesNotStrandTheMigrationRunner(t *testing.T) {
 	runnerURL := withRole(t, connStr, "migration_runner", runnerPassword)
 	migrateURL := strings.Replace(runnerURL, "postgres://", "pgx5://", 1)
 
-	require.NoError(t, postgres.Migrate(migrateURL), "migrating as the (non-superuser) role that owns everything must not fail")
+	// Migrate to exactly 42, not latest: 049 (P1's later "migrate" phase,
+	// pinned separately by TestMigration049_StrandsTheOldConnectionByDesign)
+	// deliberately DOES strand this role from business tables -- that must
+	// not make this pin, which is specifically about 042 being pure expand,
+	// look like it regressed.
+	source, err := postgres.NewMigrationSource()
+	require.NoError(t, err)
+	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
+	require.NoError(t, err)
+	require.NoError(t, m.Migrate(42), "migrating as the (non-superuser) role that owns everything must not fail")
+	srcErr, dbErr := m.Close()
+	require.NoError(t, srcErr)
+	require.NoError(t, dbErr)
 
 	runnerPool, err := pgxpool.New(ctx, runnerURL)
 	require.NoError(t, err)
@@ -223,6 +248,83 @@ func TestMigration042_DoesNotStrandTheMigrationRunner(t *testing.T) {
 
 	_, err = runnerPool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'MR1', 'MigrationRunnerTest')")
 	require.NoError(t, err, "the role that ran every migration must still be able to write afterward -- a migration must never strand the identity that is running it")
+}
+
+// TestMigration049_StrandsTheOldConnectionByDesign pins the intended --
+// destructive on purpose -- behavior of 049 (P1's "migrate" phase): a
+// non-superuser role that owns everything can still write after 042 (the
+// pure-expand migration), but loses access to business tables once 049
+// runs. This is not a bug; it is the exact reason 049's header says it must
+// ship in the same release as the DATABASE_URL cutover. See
+// docs/plans/2026-08-21-integrity-hardening-contracts.md §1 and
+// docs/RUNBOOK.md §9.
+//
+// This also pins that 049 can actually complete: an earlier version without
+// 049's step 3 (the narrow schema_migrations re-grant) made this migration
+// permanently inapplicable through golang-migrate under any non-superuser
+// connection, regardless of DATABASE_URL cutover timing -- golang-migrate's
+// own post-migration version bookkeeping (TRUNCATE + INSERT on
+// schema_migrations, in a transaction opened after 049's own transaction
+// already committed) would itself fail with "permission denied for table
+// schema_migrations" the moment ownership of that table moved away from the
+// connecting role. Retrying does not help -- the same role hits the same
+// wall every time. 049's step 3 exists solely to keep that one
+// bookkeeping path open while still locking the role out of every business
+// table.
+func TestMigration049_StrandsTheOldConnectionByDesign(t *testing.T) {
+	ctx := context.Background()
+	connStr := postgrestest.SetupRawDB(t)
+
+	adminPool, err := pgxpool.New(ctx, connStr)
+	require.NoError(t, err)
+	t.Cleanup(adminPool.Close)
+
+	// See the matching comment in TestMigration042_DoesNotStrandTheMigrationRunner:
+	// these roles are cluster-global, and 042's `IF NOT EXISTS` guard would
+	// otherwise silently skip the createrole_self_grant dance this test's
+	// connecting role needs if an earlier test already created them.
+	_, err = adminPool.Exec(ctx, "DROP ROLE IF EXISTS ledger_owner, ledger_app, ledger_ro")
+	require.NoError(t, err)
+
+	u, err := url.Parse(connStr)
+	require.NoError(t, err)
+	dbName := strings.TrimPrefix(u.Path, "/")
+	require.NotEmpty(t, dbName)
+
+	const runnerPassword = "roles-test-runner-049-password-not-a-real-secret" //nolint:gosec // test-only credential
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE ROLE migration_runner_049 LOGIN CREATEROLE NOSUPERUSER PASSWORD '%s'", runnerPassword))
+	require.NoError(t, err)
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("ALTER DATABASE %s OWNER TO migration_runner_049", dbName))
+	require.NoError(t, err)
+
+	runnerURL := withRole(t, connStr, "migration_runner_049", runnerPassword)
+	migrateURL := strings.Replace(runnerURL, "postgres://", "pgx5://", 1)
+
+	source, err := postgres.NewMigrationSource()
+	require.NoError(t, err)
+	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
+	require.NoError(t, err)
+
+	// --- After 042 (pure expand): the role that ran it can still write. ---
+	require.NoError(t, m.Migrate(42))
+
+	runnerPool, err := pgxpool.New(ctx, runnerURL)
+	require.NoError(t, err)
+	t.Cleanup(runnerPool.Close)
+	_, err = runnerPool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'S49', 'Stranded049Test')")
+	require.NoError(t, err, "sanity: 042 alone must not strand the role that ran it")
+
+	// --- 049 itself must still complete (step 3's whole purpose). --------
+	require.NoError(t, m.Migrate(49), "049 must apply cleanly even under a non-superuser connection -- if this fails with "+
+		"\"permission denied for table schema_migrations\", step 3's re-grant regressed")
+	srcErr, dbErr := m.Close()
+	require.NoError(t, srcErr)
+	require.NoError(t, dbErr)
+
+	// --- But the SAME role can no longer write business data. By design. --
+	_, err = runnerPool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'S49B', 'Stranded049Test2')")
+	require.Error(t, err, "049 must strand the old connection from business tables -- if this INSERT succeeds, 049 failed to do its one job")
+	assertPermissionDenied(t, err)
 }
 
 // TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant is the
@@ -393,7 +495,10 @@ func TestMigration042_DownDropsRolesAndRestoresOwnership(t *testing.T) {
 	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
 	require.NoError(t, err)
 
-	require.NoError(t, m.Up())
+	// Migrate to exactly 042 (not m.Up()/latest -- 049 exists too, and
+	// m.Up()+Steps(-1) would roll back whichever migration is newest, not
+	// necessarily 042).
+	require.NoError(t, m.Migrate(42))
 	require.NoError(t, m.Steps(-1)) // rolls back exactly 042
 	srcErr, dbErr := m.Close()
 	require.NoError(t, srcErr)
@@ -411,4 +516,51 @@ func TestMigration042_DownDropsRolesAndRestoresOwnership(t *testing.T) {
 
 	_, err = pool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'DT1', 'DownTest')")
 	require.NoError(t, err, "the original connection must still own everything (and be able to write) after rollback")
+}
+
+// TestMigration049_DownRestoresOwnership pins that 049's rollback path
+// actually works: 049 is the one migration in this wave that is genuinely
+// destructive (see its header), so unlike 042's down (a no-op-ish symmetric
+// undo of pure additions), this one has real state to put back --
+// ownership of every table/sequence, and PUBLIC's schema-level USAGE.
+func TestMigration049_DownRestoresOwnership(t *testing.T) {
+	ctx := context.Background()
+	connStr := postgrestest.SetupRawDB(t)
+	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
+
+	source, err := postgres.NewMigrationSource()
+	require.NoError(t, err)
+	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
+	require.NoError(t, err)
+
+	require.NoError(t, m.Migrate(49))
+	require.NoError(t, m.Steps(-1)) // rolls back exactly 049
+	srcErr, dbErr := m.Close()
+	require.NoError(t, srcErr)
+	require.NoError(t, dbErr)
+
+	pool, err := pgxpool.New(ctx, connStr)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	// Ownership must be back with the original (superuser, in this test)
+	// connection -- not left on ledger_owner.
+	var nonRestored int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tableowner = 'ledger_owner'
+	`).Scan(&nonRestored))
+	assert.Equal(t, 0, nonRestored, "down migration must reclaim ownership of every table from ledger_owner")
+
+	// The residual schema_migrations grant 049.up.sql's step 3 added must be
+	// cleaned up, not left dangling.
+	var residualGrants int
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.role_table_grants
+		WHERE table_schema = 'public' AND table_name = 'schema_migrations'
+		  AND grantee NOT IN ('ledger_owner', 'ledger_app', 'ledger_ro', 'PUBLIC')
+	`).Scan(&residualGrants))
+	assert.Equal(t, 0, residualGrants, "down migration must clean up the residual schema_migrations grant from 049's step 3")
+
+	_, err = pool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'DT2', 'DownTest049')")
+	require.NoError(t, err, "the original connection must be able to write again after 049 is rolled back")
 }

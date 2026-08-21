@@ -44,7 +44,7 @@ trustedProxyCIDRs: ""
 # creates the roles this split expects: `ledger_app` (SELECT/INSERT/UPDATE
 # only, for serving pods -- already usable today) and `ledger_owner`
 # (destined for DDL, for the migration Job -- but does not yet own
-# anything; a later "migrate" migration transfers ownership) -- see
+# anything; migration 049 transfers ownership) -- see
 # docs/RUNBOOK.md §9 "Database roles". `databaseUrl`/`existingSecretKey`
 # above and `databaseUrlKey` below both default to the SAME connection
 # until an operator explicitly cuts over (deployment.md "migrate" phase, a
