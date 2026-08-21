@@ -290,8 +290,15 @@ service/onchain.go:779  postDepositConfirmedJournal → TxComposer.RunInTx
 
 1. **预授权 API**：`svc.Authorize(ctx, input) (AuthorizedJournal, error)` 在**事务外**算 digest
    并签名；`JournalWriter` 加 `PostAuthorized(ctx, AuthorizedJournal)`。
-   `postDepositConfirmedJournal` 在开 `RunInTx` **之前**调 `Authorize` ——
-   它本来就在那之前算 `journalMeta`，输入是已知的。红线不破，洞关掉。
+   `postDepositConfirmedJournal` 在开 `RunInTx` **之前**调 `Authorize`。
+
+   ⚠️ **原稿这里写「输入是已知的」，错了一半**（2026-08-21 由 #13 的实现者发现并上报）：
+   对 `journalMeta`（actor / metadata）成立，对 **`EventUID` 不成立**。
+   `core.TransitionInput`（`core/booking.go:66-80`）没有 event-uid 字段，
+   event uid 由 `postgres/booking_store.go:138/327` 的 `newUID()` 在**锁住 booking 行之后、
+   事务内**才 mint —— `Authorize` 在事务外根本拿不到它。
+
+   **裁决：把 `EventUID` 从 canonical digest 里整体移除**（见 §7.6）。
 2. **`auth_status` 枚举列**（migration `051`）：`signed` / `unsigned_no_attestor` /
    `unsigned_tx_mode` 三态，让「为什么没签」可区分。
    该列由 045 的通用 `to_jsonb` 比较自动保护（不在 mutable 白名单内），无需再碰那个函数。
@@ -299,6 +306,34 @@ service/onchain.go:779  postDepositConfirmedJournal → TxComposer.RunInTx
 **范围红线**：**不新增任何配置旋钮** —— 无 policy、无 threshold、无 mode。
 只有两个方法 + 一个枚举列。这一条是刻意的：本设计已经因为围绕部署变量建配置而返工过一次
 （§14 开头那段）。
+
+### 7.6 为什么 `EventUID` 不进 digest（2026-08-21 裁决）
+
+被否决的方案是「签名时 `EventUID` 留空、事后只填 FK 不重签」。它会**破掉验证**：
+`core/auth.go:260` 的 `VerifyJournalAuth` 是拿 `JournalInput` **重算** digest 再比对存储值。
+签名覆盖的是 `EventUID=""`，而落库的行有 `event_id` ——
+验证方从行重建 input 时会带上真实 EventUID ⟹ 重算 digest ≠ 存储 digest ⟹
+**每一笔走 `RunInTx` 的入账 journal 都会被判 `ErrUnauthorizedJournal`**。
+
+假阳性比缺失签名更糟：它让所有合法入账看起来像伪造，验证结论整体不可用。
+要救它就得引入**第二种 digest 形状 + 一个区分标记**，而编码是本设计里**唯一改不掉**的东西
+（§11 golden vectors 那条），现在分叉是最贵的错误。
+
+**所以 `EventUID` 对所有 journal 一律不进 digest。** 理由不是「不得不」，而是它本来就不该在里面：
+
+- 签名认证的是 **posting intent** —— 谁、何时生效、哪些账户、多少钱、幂等键、是否冲正。
+  「哪个 event 触发了它」是 **provenance 元数据**，不是意图的一部分。
+- event↔journal 的绑定**已经有比签名更强的保证**：I-10 的同事务（两者同写或同不写）
+  + 045 的 set-once FK。签名加不了原子性。
+- 统一一种形状 ⟹ 不需要标记、不需要版本化重建逻辑、验证是确定性的。
+- 附带好处：**不需要动 `core.TransitionInput`**，P5-fix 的范围红线（两个方法 + 一个枚举列）守住。
+
+**残留代价（disclosed limitation，写进 I-26）**：拿到 DB 写权限的攻击者可以给一条原本没有
+event 的 journal 设上 `event_id`（045 允许 NULL→非NULL 一次），从而伪造 provenance 归属。
+它**无法移动任何资金** —— 金额与账户在签名覆盖范围内。
+
+**测试要求**：golden vector 不是删掉「event_uid 已设」那条，而是改成断言
+**「设了 `event_uid` 不改变 digest」** —— 把这个决定钉成测试，将来有人想加回去会先撞上它。
 
 ## 8. P6 — 签名 batch digest + 外部锚（同一个 phase）
 
