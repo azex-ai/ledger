@@ -41,8 +41,24 @@ LIMIT sqlc.arg(batch_size)::int;
 
 -- name: InsertEntryAttestations :exec
 -- Bulk-covers every id in entry_ids under the same seq, in one round trip.
-INSERT INTO entry_attestations (entry_id, seq)
-SELECT e, sqlc.arg(seq)::bigint FROM unnest(sqlc.arg(entry_ids)::bigint[]) AS e;
+-- entry_ids and leaf_hashes are parallel arrays (design doc §9.4 -- leaf_hash
+-- is entry_ids[i]'s exact RFC 6962 leaf hash as it went into this batch's
+-- merkle_root). leaf_hashes MAY be all-empty ('') for callers that predate
+-- the leaf_hash feature or never computed a MerkleRoot (P6-only usage) --
+-- entry_ids alone is still a valid, complete call, matching this query's
+-- pre-048 contract.
+--
+-- Two separate single-argument unnest() calls joined by WITH ORDINALITY,
+-- not PostgreSQL's multi-argument unnest(a, b) -- sqlc's own catalog does
+-- not model that special-cased executor form ("function unnest(unknown,
+-- unknown) does not exist" at generate time, even though real PostgreSQL
+-- accepts it) -- this form uses only the single-argument signature sqlc
+-- already recognizes elsewhere in this file, and produces the identical
+-- element-wise pairing.
+INSERT INTO entry_attestations (entry_id, seq, leaf_hash)
+SELECT e.entry_id, sqlc.arg(seq)::bigint, h.leaf_hash
+FROM unnest(sqlc.arg(entry_ids)::bigint[]) WITH ORDINALITY AS e(entry_id, ord)
+JOIN unnest(sqlc.arg(leaf_hashes)::bytea[]) WITH ORDINALITY AS h(leaf_hash, ord) ON e.ord = h.ord;
 
 -- name: ListEntriesForAttestation :many
 -- Re-fetches exactly the entries a given seq covered, in the same id order
@@ -54,3 +70,16 @@ FROM entry_attestations ea
 JOIN journal_entries je ON je.id = ea.entry_id
 WHERE ea.seq = $1
 ORDER BY je.id ASC;
+
+-- name: ListLeafHashesForAttestation :many
+-- The stored counterpart to ListEntriesForAttestation: the persisted
+-- AttestedLeaf.LeafHash values a given seq covered, in the same entry_id
+-- order (so index i in both result sets refers to the same entry) --
+-- design doc §9.4's self-contained localization. service.VerifyLedger
+-- rebuilds a tree from these (core.BuildMerkleTreeFromLeafHashes) and
+-- checks it against the batch's stored merkle_root before trusting them
+-- for a localization diff against live entries.
+SELECT entry_id, leaf_hash
+FROM entry_attestations
+WHERE seq = $1
+ORDER BY entry_id ASC;

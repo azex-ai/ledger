@@ -131,6 +131,35 @@ func BuildMerkleTree(entries []AttestedEntry) (*MerkleTree, error) {
 	return &MerkleTree{root: root, leaves: leaves}, nil
 }
 
+// BuildMerkleTreeFromLeafHashes builds an RFC 6962 tree from already-
+// computed leaf hashes, in the given order (index 0..n-1), rather than
+// from raw entries. Design doc §9.4's self-contained-localization fix:
+// service.VerifyLedger rebuilds a tree from migration 048's persisted
+// AttestedLeaf.LeafHash values (not from re-derived entry payloads) to
+// check them against the batch's stored, signed MerkleRoot -- if this
+// took raw payloads instead, it could not distinguish "the stored leaf
+// hash was tampered directly" from "the entry it was derived from
+// changed" (both would just look like a payload to re-hash); taking
+// hashes directly makes it a check purely on entry_attestations.leaf_hash
+// itself.
+//
+// Returns core.ErrInvalidInput if any leafHashes[i] is not exactly
+// sha256.Size (32) bytes -- every element is meant to already be an RFC
+// 6962 leaf hash (merkleLeafHash's output), not a payload to hash.
+func BuildMerkleTreeFromLeafHashes(leafHashes [][]byte) (*MerkleTree, error) {
+	if len(leafHashes) == 0 {
+		return &MerkleTree{root: &merkleNode{hash: EmptyMerkleRoot, leafCount: 0}}, nil
+	}
+	leaves := make([]*merkleNode, len(leafHashes))
+	for i, h := range leafHashes {
+		if len(h) != sha256.Size {
+			return nil, fmt.Errorf("core: build merkle tree from leaf hashes: leafHashes[%d] must be %d bytes, got %d: %w", i, sha256.Size, len(h), ErrInvalidInput)
+		}
+		leaves[i] = &merkleNode{hash: h, leafCount: 1}
+	}
+	return &MerkleTree{root: buildMTH(leaves), leaves: leaves}, nil
+}
+
 // buildMerkleTreeFromPayloads is BuildMerkleTree without the
 // AttestedEntry encoding step -- exported only within the package, for
 // merkle_test.go's algorithm-level golden vectors (arbitrary byte
@@ -180,6 +209,19 @@ func (t *MerkleTree) LeafHash(index int) ([]byte, error) {
 		return nil, fmt.Errorf("core: leaf hash: index %d out of range [0,%d): %w", index, len(t.leaves), ErrInvalidInput)
 	}
 	return t.leaves[index].hash, nil
+}
+
+// LeafHashes returns every leaf's RFC 6962 leaf hash, in the same order
+// entries/leafHashes were built from (index 0..LeafCount()-1) --
+// service.AttestationService.RunAttestBatch uses this to persist each
+// entry's AttestedLeaf.LeafHash alongside the batch's MerkleRoot
+// (design doc §9.4), rather than looping LeafHash(i) one at a time.
+func (t *MerkleTree) LeafHashes() [][]byte {
+	out := make([][]byte, len(t.leaves))
+	for i, l := range t.leaves {
+		out[i] = l.hash
+	}
+	return out
 }
 
 // InclusionProof is the audit path RFC 6962 §2.1.1's PATH algorithm

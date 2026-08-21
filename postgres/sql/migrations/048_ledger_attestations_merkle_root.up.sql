@@ -1,12 +1,12 @@
 -- 048_ledger_attestations_merkle_root.up.sql
 --
 -- P7 of the integrity-hardening wave
--- (docs/plans/2026-08-21-tamper-evident-ledger-design.md §9,
+-- (docs/plans/2026-08-21-tamper-evident-ledger-design.md §9/§9.4,
 -- docs/plans/2026-08-21-integrity-hardening-contracts.md §9): adds the RFC
 -- 6962 Merkle tree root over each attestation batch's entries, so a
--- TAMPERED verdict can eventually be narrowed from "seq N is bad" to
--- specific entry ids (design doc §9.1), and so a third party can verify a
--- single entry's membership without database access (§9.2).
+-- TAMPERED verdict can be narrowed from "seq N is bad" to specific entry
+-- ids (design doc §9.1), and so a third party can verify a single entry's
+-- membership without database access (§9.2).
 --
 -- This migration originally also carried the ledger_app/ledger_ro GRANTs
 -- 047 forgot on both of its tables (flagged by team lead review of #10).
@@ -64,31 +64,83 @@
 --   (a) is the only option that does not either fabricate signatures or
 --   discard real attestation history, so it is what ships.
 --
--- ⚠️ Consequence worth stating plainly, not implementing around: because
--- merkle_root is additive and NOT one of AttestationRootHash's inputs,
--- it is NOT covered by core.Attestor's signature or by core.Anchor's
--- externally-published head. Its only tamper-evidence is this table's own
--- append-only trigger (ledger_block_mutation(), 047) plus the ACL 052
--- grants matching that trigger (SELECT/INSERT only, no UPDATE) --
--- adequate against the ledger_app-credential-leak threat model P1's role
--- split defends against, but weaker than root_hash's guarantee against a
--- ledger_owner/superuser-level attacker, who COULD disable the trigger,
--- edit merkle_root alone, and re-enable it without invalidating any
--- existing signature (root_hash's signed inputs never touched
--- merkle_root). Flagged to team lead for awareness in the P7 report --
--- not resolved unilaterally here (working-agreements §2/§4): closing it
--- would mean binding merkle_root into a NEW, later root_hash domain for
--- future rows, which is a P6/P7-boundary signing-scheme change outside a
--- single migration's remit.
+-- ============================================================================
+-- Why merkle_root's own protection needed a second pass (design doc §9.4)
+-- ============================================================================
 --
--- Empty-bytea default ('' , same sentinel 046 used for auth_key_id="never
--- signed") means "this row predates merkle_root being computed" -- not "no
--- entries" (an empty BATCH still gets a real 32-byte RFC 6962 empty-tree
--- root, core.EmptyMerkleRoot = SHA-256(""), computed by
--- service.AttestationService going forward). Downstream consumers
--- (service.VerifyLedger) must treat '' the same way I-26's own scope note
--- already treats an empty auth_key_id: skip the recompute-and-compare
--- check for that row rather than treating absence as a mismatch.
+-- The first cut of this migration added merkle_root as a plain column,
+-- additive but NOT one of AttestationRootHash's inputs -- meaning it was
+-- covered only by this table's append-only trigger + ACL, never by
+-- core.Attestor's signature or core.Anchor's externally-published head.
+-- Team Lead's review (design doc §9.4(1)) judged that a real gap, not an
+-- acceptable disclosed limitation: the entire point of an inclusion proof
+-- is that a third party does not have to trust the database -- a
+-- merkle_root attested only by the database's own internal guards proves
+-- "this entry is in a tree we assert", not "in a tree that was signed and
+-- anchored off the box".
+--
+-- Fix: core.AttestationRootHashV2 (separator 0x11, contracts §2.6) binds
+-- merkleRoot into the same hash core.Attestor signs. Every attestation
+-- from this migration onward is created under v2. Attestation rows created
+-- before this migration landed (if any -- e.g. in a long-running dev/test
+-- environment) have merkle_root = '' and keep their original v1
+-- (AttestationRootHash, separator 0x03) semantics forever, for the exact
+-- same "cannot re-sign history" reason batch_digest was not renamed
+-- above. service.VerifyLedger discriminates by the same signal it always
+-- has -- len(merkle_root) > 0 -- and verifies each row under whichever
+-- formula actually produced its root_hash.
+--
+-- ============================================================================
+-- entry_attestations.leaf_hash -- self-contained localization (§9.4(2))
+-- ============================================================================
+--
+-- §9.1 required a TAMPERED verdict to carry the list of altered entries.
+-- The first cut of this feature could not deliver that from the DB alone
+-- -- only the aggregate merkle_root was stored, and localizing a mismatch
+-- to specific entries requires a second full tree to diff against
+-- (core.LocateMismatches's own contract), which an operator-supplied
+-- external reference can provide but which is not something the schema
+-- guaranteed existed. That gap was disclosed rather than papered over
+-- (VerifyLedger reported "no entry list" honestly when no reference was
+-- supplied), and Team Lead's review (§9.4(2)) judged the underlying
+-- schema gap, not the disclosure, needed fixing: on-call is this
+-- capability's actual consumer, and requiring them to already hold a
+-- trusted external snapshot at the moment tampering is discovered is
+-- exactly when they are least likely to have one.
+--
+-- Fix: entry_attestations gains leaf_hash, the exact RFC 6962 leaf hash
+-- (core.merkleLeafHash over core/attestation.go's encodeAttestedEntry
+-- output) that went into that batch's MerkleRoot for this entry, stored
+-- at attestation time. Localizing a mismatch no longer requires an
+-- operator-supplied reference: rebuild a tree from the batch's stored
+-- leaf_hash values (core.BuildMerkleTreeFromLeafHashes) and diff it
+-- against a tree rebuilt from live journal_entries content
+-- (core.BuildMerkleTree) via core.LocateMismatches.
+--
+-- The stored leaf_hash values are themselves tamper-evident without any
+-- new signing: rebuilding a tree from them and comparing the result
+-- against the batch's own (v2-signed) merkle_root detects any edit to a
+-- stored leaf_hash the same way editing a journal_entries row is detected
+-- by recomputing from the live row -- an attacker would have to edit the
+-- leaf_hash AND merkle_root AND re-sign root_hash consistently, and the
+-- signing key is exactly what an append-only-trigger bypass does not
+-- grant. This is the same design Certificate Transparency logs use (they
+-- persist the whole log, not just the root) -- here scoped to one column
+-- per entry rather than a second copy of journal_entries.
+--
+-- core.VerifyLedger's service/attest_verify.go's optional ReferenceEntries
+-- hook (an operator-supplied external snapshot, e.g. for diffing against
+-- a separate replica) is kept as a second, independent path -- not
+-- replaced -- per design doc §9.4(2)'s explicit instruction.
+--
+-- Empty-bytea default (same '' sentinel pattern as merkle_root and 046's
+-- auth_key_id) means "this row predates leaf_hash being computed" --
+-- self-contained localization is unavailable for that row (VerifyLedger
+-- falls back to the ReferenceEntries hook, or reports no entry list), not
+-- a mismatch.
 ------------------------------------------------------------
 ALTER TABLE ledger_attestations
     ADD COLUMN IF NOT EXISTS merkle_root BYTEA NOT NULL DEFAULT ''::bytea;
+
+ALTER TABLE entry_attestations
+    ADD COLUMN IF NOT EXISTS leaf_hash BYTEA NOT NULL DEFAULT ''::bytea;

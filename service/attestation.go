@@ -27,11 +27,17 @@ type AttestationStore interface {
 	UncoveredEntries(ctx context.Context, limit int32) ([]core.AttestedEntry, error)
 	// InsertAttestation atomically inserts the attestation row and its
 	// entry_attestations coverage rows. entryIDs empty is valid -- an
-	// empty batch still gets a row (design doc §8.1).
-	InsertAttestation(ctx context.Context, input core.Attestation, entryIDs []int64) (core.Attestation, error)
+	// empty batch still gets a row (design doc §8.1). leafHashes, if
+	// non-nil, must be the same length as entryIDs (design doc §9.4 --
+	// entryIDs[i]'s stored core.AttestedLeaf.LeafHash).
+	InsertAttestation(ctx context.Context, input core.Attestation, entryIDs []int64, leafHashes [][]byte) (core.Attestation, error)
 	// EntriesForAttestation re-fetches exactly the entries seq covered, in
 	// the same order UncoveredEntries would have produced them in.
 	EntriesForAttestation(ctx context.Context, seq int64) ([]core.AttestedEntry, error)
+	// LeafHashesForAttestation returns the stored core.AttestedLeaf rows
+	// seq covered, in the same entry_id order EntriesForAttestation uses
+	// (design doc §9.4's self-contained localization).
+	LeafHashesForAttestation(ctx context.Context, seq int64) ([]core.AttestedLeaf, error)
 	// ListAttestationsFrom is a paginated ascending chain walk starting at
 	// fromSeq (inclusive).
 	ListAttestationsFrom(ctx context.Context, fromSeq int64, limit int32) ([]core.Attestation, error)
@@ -106,24 +112,29 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 	if err != nil {
 		return 0, 0, fmt.Errorf("service: attestation: batch digest: %w", err)
 	}
-	rootHash, err := core.AttestationRootHash(nextSeq, prevRoot, batchDigest, int64(len(entries)))
-	if err != nil {
-		return 0, 0, fmt.Errorf("service: attestation: root hash: %w", err)
-	}
 
 	// P7: RFC 6962 Merkle root over the same entries, for localization
 	// (core.LocateMismatches) and inclusion proofs (core.
-	// GenerateInclusionProof/core.VerifyInclusion) -- see migration 048's
-	// header for why this is NOT one of rootHash's inputs (it is a
-	// deliberately separate, additive value, not part of what gets
-	// signed). An empty batch still produces a real 32-byte RFC 6962
-	// empty-tree root (core.EmptyMerkleRoot), not the migration's
-	// never-computed sentinel ('').
+	// GenerateInclusionProof/core.VerifyInclusion). Every attestation
+	// created from migration 048 onward binds merkleRoot into rootHash
+	// itself (AttestationRootHashV2, design doc §9.4) -- unlike the first
+	// cut of this feature, merkle_root is NOT a separate, unsigned value
+	// here: an inclusion proof's root is only trustworthy to a third
+	// party if core.Attestor's signature (and, once published,
+	// core.Anchor's head) actually covers it. An empty batch still
+	// produces a real 32-byte RFC 6962 empty-tree root
+	// (core.EmptyMerkleRoot), not the migration's never-computed
+	// sentinel ('').
 	merkleTree, err := core.BuildMerkleTree(entries)
 	if err != nil {
 		return 0, 0, fmt.Errorf("service: attestation: merkle tree: %w", err)
 	}
 	merkleRoot := merkleTree.Root()
+
+	rootHash, err := core.AttestationRootHashV2(nextSeq, prevRoot, batchDigest, merkleRoot, int64(len(entries)))
+	if err != nil {
+		return 0, 0, fmt.Errorf("service: attestation: root hash: %w", err)
+	}
 
 	signature, keyID, err := s.attestor.Sign(ctx, rootHash)
 	if err != nil {
@@ -134,6 +145,13 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 	for i, e := range entries {
 		entryIDs[i] = e.EntryID
 	}
+	// design doc §9.4: persist each entry's own leaf hash alongside the
+	// batch's merkleRoot, so a later TAMPERED verdict can localize to
+	// specific entry ids without requiring an operator-supplied external
+	// reference (core.BuildMerkleTreeFromLeafHashes / core.LocateMismatches
+	// in service.VerifyLedger). Same order as entryIDs -- both derive from
+	// entries via the same index i.
+	leafHashes := merkleTree.LeafHashes()
 
 	result, err := s.store.InsertAttestation(ctx, core.Attestation{
 		Seq:         nextSeq,
@@ -144,7 +162,7 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 		RootHash:    rootHash,
 		Signature:   signature,
 		KeyID:       keyID,
-	}, entryIDs)
+	}, entryIDs, leafHashes)
 	if err != nil {
 		return 0, 0, fmt.Errorf("service: attestation: insert: %w", err)
 	}

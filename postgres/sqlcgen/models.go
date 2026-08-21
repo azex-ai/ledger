@@ -144,8 +144,9 @@ type DepositAddress struct {
 }
 
 type EntryAttestation struct {
-	EntryID int64 `json:"entry_id"`
-	Seq     int64 `json:"seq"`
+	EntryID  int64  `json:"entry_id"`
+	Seq      int64  `json:"seq"`
+	LeafHash []byte `json:"leaf_hash"`
 }
 
 type EntryTemplate struct {

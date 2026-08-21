@@ -193,6 +193,104 @@ func TestAttestationRootHash_DifferentSeqDifferentHash(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Golden vectors for AttestationRootHashV2 (design doc §9.4, P7). Computed
+// independently in Python (same buffer-layout replication as the v1
+// vectors above), using the ALREADY-PINNED v1 empty-batch digest
+// ("4322fd2b...") as a cross-check that the Python encoder for this
+// session matches the one that produced the pre-existing v1 pins above --
+// not just self-consistent with this file's own Go implementation.
+// ---------------------------------------------------------------------------
+
+func TestAttestationRootHashV2_GenesisGoldenVector(t *testing.T) {
+	emptyDigest, err := CanonicalBatchDigest(nil)
+	if err != nil {
+		t.Fatalf("CanonicalBatchDigest(nil): %v", err)
+	}
+	const want = "bdb2acc07e7e373f7b0039c83441ab041324341f319b75d7be6a55d3c863ade5"
+	got, err := AttestationRootHashV2(1, GenesisRoot, emptyDigest, EmptyMerkleRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2: unexpected error: %v", err)
+	}
+	if hex.EncodeToString(got) != want {
+		t.Errorf("AttestationRootHashV2(seq=1, genesis, empty digest, empty merkle root, 0) = %s, want %s", hex.EncodeToString(got), want)
+	}
+}
+
+func TestAttestationRootHashV2_ChainedGoldenVector(t *testing.T) {
+	rh1, err := AttestationRootHashV2(1, GenesisRoot, mustDigest(t, nil), EmptyMerkleRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2(seq=1): %v", err)
+	}
+
+	arbitraryMerkleRoot, err := hex.DecodeString("2d6e943e85ac09dd6af182bf9fc9041abe70609149a3d2d55717e09e37507e6d")
+	if err != nil {
+		t.Fatalf("decode test merkle root: %v", err)
+	}
+	const want = "90aa6e40fd9bb0760bb122d6111f4c782796ec45152e7a2ab53becb8122d9273"
+	rh2, err := AttestationRootHashV2(2, rh1, mustDigest(t, twoEntryBatch()), arbitraryMerkleRoot, 2)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2(seq=2): %v", err)
+	}
+	if hex.EncodeToString(rh2) != want {
+		t.Errorf("AttestationRootHashV2(seq=2, chained) = %s, want %s", hex.EncodeToString(rh2), want)
+	}
+}
+
+func mustDigest(t *testing.T, entries []AttestedEntry) []byte {
+	t.Helper()
+	d, err := CanonicalBatchDigest(entries)
+	if err != nil {
+		t.Fatalf("CanonicalBatchDigest: %v", err)
+	}
+	return d
+}
+
+func TestAttestationRootHashV2_DiffersFromV1ForTheSameInputs(t *testing.T) {
+	// The whole point of a separate domain separator (0x11 vs 0x03): the
+	// same seq/prevRoot/batchDigest/entryCount must never collide between
+	// v1 and what v2 would produce if merkleRoot happened to equal
+	// GenesisRoot's all-zero bytes (an adversarial edge case worth pinning
+	// explicitly, not just trusting the domain byte in the abstract).
+	digest := mustDigest(t, nil)
+	v1, err := AttestationRootHash(1, GenesisRoot, digest, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHash: %v", err)
+	}
+	zeroMerkleRoot := make([]byte, GenesisRootHashLen)
+	v2, err := AttestationRootHashV2(1, GenesisRoot, digest, zeroMerkleRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2: %v", err)
+	}
+	if hex.EncodeToString(v1) == hex.EncodeToString(v2) {
+		t.Error("v1 and v2 produced the same root hash for the same seq/prevRoot/batchDigest/entryCount -- domain separation is broken")
+	}
+}
+
+func TestAttestationRootHashV2_DifferentMerkleRootDifferentHash(t *testing.T) {
+	digest := mustDigest(t, nil)
+	a, err := AttestationRootHashV2(1, GenesisRoot, digest, EmptyMerkleRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2: %v", err)
+	}
+	otherRoot := make([]byte, GenesisRootHashLen)
+	otherRoot[0] = 0xff
+	b, err := AttestationRootHashV2(1, GenesisRoot, digest, otherRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2: %v", err)
+	}
+	if hex.EncodeToString(a) == hex.EncodeToString(b) {
+		t.Error("changing merkleRoot did not change AttestationRootHashV2's output -- it is not actually bound into the hash")
+	}
+}
+
+func TestAttestationRootHashV2_RejectsWrongLengthMerkleRoot(t *testing.T) {
+	digest := mustDigest(t, nil)
+	if _, err := AttestationRootHashV2(1, GenesisRoot, digest, []byte("too-short"), 0); err == nil {
+		t.Error("expected error for wrong-length merkleRoot, got nil")
+	}
+}
+
 func TestGenesisRoot_IsThirtyTwoZeroBytes(t *testing.T) {
 	if len(GenesisRoot) != GenesisRootHashLen {
 		t.Fatalf("len(GenesisRoot) = %d, want %d", len(GenesisRoot), GenesisRootHashLen)
