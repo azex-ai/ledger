@@ -469,3 +469,21 @@ type Attestor interface {
 type AuthVerifier interface {
 	Verify(ctx context.Context, digest, signature []byte, keyID string) error
 }
+
+// Anchor publishes an attestation head to storage the ledger's own database
+// credentials cannot reach (design doc §8.3, P6). Implementations live in
+// the consumer's composition root (object-lock bucket in a separate cloud
+// account; optionally a public chain). The library ships only a
+// local-filesystem implementation for dev (integrity contracts §7: the
+// anchor's carrier is a real, unresolved deployment choice -- unlike the
+// signing key, the whole point of an anchor is living somewhere the
+// ledger's own DB credentials cannot reach, so "just use a local key" is
+// not an equivalent simplification here).
+type Anchor interface {
+	// Publish is idempotent per seq: re-publishing the same seq with identical
+	// bytes must succeed, with different bytes must return an error.
+	Publish(ctx context.Context, seq int64, head []byte) error
+	// Head returns the highest seq the anchor knows about, or 0 if empty.
+	// It must read from the anchor, never from the ledger database.
+	Head(ctx context.Context) (seq int64, head []byte, err error)
+}

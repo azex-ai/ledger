@@ -37,6 +37,14 @@ type WorkerConfig struct {
 	// PartitionMonthsAhead is how many future months of partitions to keep
 	// pre-created. default: 3
 	PartitionMonthsAhead int
+	// AttestInterval controls how often the P6 batch attestation job runs.
+	// Only takes effect when an AttestationService has been registered via
+	// SetAttestor -- nil by default (skip job), mirroring the
+	// FullReconciler pattern. default: 60s
+	AttestInterval time.Duration
+	// AttestBatchSize is the max entries one attestation batch covers.
+	// default: 1000
+	AttestBatchSize int32
 }
 
 // DefaultWorkerConfig returns the default WorkerConfig.
@@ -56,6 +64,8 @@ func DefaultWorkerConfig() WorkerConfig {
 		FullReconcileInterval:  time.Hour,
 		PartitionInterval:      12 * time.Hour,
 		PartitionMonthsAhead:   3,
+		AttestInterval:         60 * time.Second,
+		AttestBatchSize:        1000,
 	}
 }
 
@@ -76,6 +86,7 @@ type Worker struct {
 	localDeliverer *delivery.LocalDispatcher
 	fullReconcile  core.FullReconciler // nil = skip the full 10-check suite job
 	partition      *PartitionService   // nil = skip partition management
+	attestation    *AttestationService // nil = skip the P6 batch attestation job
 	pool           *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
 	config         WorkerConfig
 	logger         core.Logger
@@ -125,6 +136,15 @@ func (w *Worker) SetFullReconciler(fr core.FullReconciler) {
 // externally.
 func (w *Worker) SetPartitionService(p *PartitionService) {
 	w.partition = p
+}
+
+// SetAttestor registers the P6 batch attestation service to run on
+// AttestInterval. If not set, the job is skipped entirely -- mirroring
+// SetFullReconciler; unlike PostJournal's per-call nil-Attestor tolerance,
+// there is no partial mode here because the whole job either runs or
+// doesn't.
+func (w *Worker) SetAttestor(a *AttestationService) {
+	w.attestation = a
 }
 
 // SetPool attaches a *pgxpool.Pool used for pg_try_advisory_lock-based leader
@@ -245,6 +265,23 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.runLoop(ctx, "partition", w.config.PartitionInterval, func(ctx context.Context) {
 				if err := partitionJob.Run(ctx); err != nil {
 					w.logger.Error("worker: partition job failed", "error", err)
+				}
+			})
+		})
+	}
+
+	if w.attestation != nil {
+		// Advisory-locked so only one replica extends the attestation
+		// chain per tick -- concurrent runs would race on "what is the
+		// next seq" (see AttestationService.RunAttestBatch's doc comment).
+		attestJob := NewLockedJob("attestation", func(ctx context.Context) error {
+			_, _, err := w.attestation.RunAttestBatch(ctx, w.config.AttestBatchSize)
+			return err
+		}, w.pool, w.logger)
+		g.Go(func() error {
+			return w.runLoop(ctx, "attestation", w.config.AttestInterval, func(ctx context.Context) {
+				if err := attestJob.Run(ctx); err != nil {
+					w.logger.Error("worker: attestation job failed", "error", err)
 				}
 			})
 		})

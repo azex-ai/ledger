@@ -128,6 +128,11 @@ type DepositAddress struct {
 	CreatedAt     time.Time   `json:"created_at"`
 }
 
+type EntryAttestation struct {
+	EntryID int64 `json:"entry_id"`
+	Seq     int64 `json:"seq"`
+}
+
 type EntryTemplate struct {
 	ID            int64       `json:"id"`
 	Code          string      `json:"code"`
@@ -234,6 +239,19 @@ type JournalType struct {
 	CreatedAt    time.Time   `json:"created_at"`
 	Uid          pgtype.UUID `json:"uid"`
 	DisplayLabel string      `json:"display_label"`
+}
+
+type LedgerAttestation struct {
+	ID          int64       `json:"id"`
+	Uid         pgtype.UUID `json:"uid"`
+	Seq         int64       `json:"seq"`
+	EntryCount  int64       `json:"entry_count"`
+	BatchDigest []byte      `json:"batch_digest"`
+	PrevRoot    []byte      `json:"prev_root"`
+	RootHash    []byte      `json:"root_hash"`
+	Signature   []byte      `json:"signature"`
+	KeyID       string      `json:"key_id"`
+	CreatedAt   time.Time   `json:"created_at"`
 }
 
 type PeriodClose struct {
