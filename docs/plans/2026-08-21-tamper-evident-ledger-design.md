@@ -374,15 +374,43 @@ CREATE TABLE entry_attestations (
 **红线**：`NOT_RUN ≠ VERIFIED`。KMS 不可达 / 公钥缺失 / 外部锚拉不到 / 超时 ⟹ 一律 `NOT_RUN`，
 **fail-closed**。这与 P0 刚修的 `Complete`/`FullCoverage` 语义是同一条纪律的两处落地。
 
-## 9. P7 — Merkle tree（可选）
+## 9. P7 — Merkle tree（**在范围内**，Aaron 2026-08-21 拍板）
 
-**只在需要 inclusion proof 或定位时才做。** 签名 batch digest（P6）已能回答
-「这批有没有被改」；Merkle 多出来的能力是「被改的是哪 37 条」以及「向第三方证明某笔在账本内」。
+> 原稿把这一节列为「仅当需要 inclusion proof 或定位时才做」。**两样都需要**，所以 P7 转正。
 
-若做：采纳 **RFC 6962**（Certificate Transparency）规范，不自创 ——
-`leaf = SHA256(0x00 || payload)`、`node = SHA256(0x01 || l || r)`，
-奇数叶子**不复制末节点**（防 CVE-2012-2459 类二义性）。`batch_digest` 列直接换成 `merkle_root`，
-其余结构不变（这是 P6 结构留的接口位）。
+签名 batch digest（P6）已能回答「这批有没有被改」。P7 要交付的是它答不了的两件事，
+**它们是两个独立能力，各有各的工作量，不要当成 Merkle 的免费副产品**：
+
+### 9.1 定位（localization）—— 给 on-call 用
+
+P6 只能告诉你「seq 137 这批对不上」。一批可能有几千条 entry。
+Merkle 让你沿树下降，把不一致收敛到具体叶子：
+
+- 从根开始比对左右子树 hash，只沿不匹配的分支下降 —— O(k log n)，k = 被改条数。
+- 输出必须是**具体 entry id 列表**，不是「某个区间里有问题」。
+- 接进 `ledger-cli verify`：`TAMPERED` 判定要附上被改的 entry 清单。
+
+### 9.2 Inclusion proof —— 给第三方用
+
+证明「某笔 journal 确实在账本里」而**不暴露其余账目**，且验证方**不需要访问数据库**：
+
+- 生成：给定 entry id → 返回 audit path（兄弟 hash 序列 + 叶子索引 + 所属 seq 的 root）。
+- 验证：`VerifyInclusion(leaf, path, index, root) bool` —— **纯函数，零依赖**，
+  第三方可以只拿这个函数 + 外部锚上的 root 独立验证。这是「不需要访问数据库」的兑现。
+- 红线：audit path **不得泄露其他 entry 的内容**（兄弟节点只给 hash，不给 payload）。
+
+### 9.3 实现约束
+
+- 采纳 **RFC 6962**（Certificate Transparency）规范，不自创：
+  `leaf = SHA256(0x00 || payload)`、`node = SHA256(0x01 || l || r)`，
+  奇数叶子**不复制末节点**（防 CVE-2012-2459 类二义性）。
+- `ledger_attestations.batch_digest` 换成 `merkle_root`，其余结构不变 ——
+  P6 刻意留了这个接口位。migration `048`。
+- **编码换 domain separator**：P6 的 batch digest 与 Merkle root 不是同一个东西，
+  不要复用同一个 separator（`0x02`），否则历史 attestation 与新的无法区分。
+- 叶子的 payload 复用 P5 的 `EncodeAmount` 与字段顺序纪律（同一套 golden vectors 约束），
+  **不要另起一套编码**。
+- 必须对拍 **RFC 6962 的公开测试向量**，不只测自洽。
 
 ## 10. 新增不变量（按 `INVARIANTS.md` §How to add 流程）
 
