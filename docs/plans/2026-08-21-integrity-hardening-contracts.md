@@ -19,8 +19,15 @@
 | `046` | P5 | `journals` 的 auth 三列 |
 | `047` | P6 | `ledger_attestations` + `entry_attestations` |
 | `048` | 预留 | P7（Merkle 换列语义，若需要） |
+| `049` | P1-**migrate 阶段** | `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转给 `ledger_owner`。**必须与 `DATABASE_URL` 切换同一次发布上线** —— 它会让在座连接角色失去全部权限（2026-08-21 review 发现 042 原稿把这两步混进 expand，等于破坏性 cutover 伪装成 expand）。042 保持纯增量：只建 role + GRANT，不 REVOKE 任何东西、不动 ownership |
 
 - 每个 migration **必须**有 `.up.sql` + `.down.sql`；不可回滚需显式注明理由（`deployment.md`）。
+- ⚠️ **权限类改动的测试陷阱**（2026-08-21 实例）：testcontainers 用 `test`
+  （`internal/postgrestest/postgrestest.go:61`）、docker-compose 用 `ledger`
+  （`POSTGRES_USER`）—— **两者都是容器初始用户 = 真 superuser，绕过一切权限检查**。
+  任何 REVOKE / ownership / GRANT 类改动，pin test 若不显式建一个**非-superuser 角色**
+  来扮演在座连接身份，就测不出「旧角色被踢掉」这一类回归。托管 Postgres 上 master user
+  **不是**真 superuser（RDS 的 `rds_superuser` 不绕过权限检查），所以这类 bug 只在生产暴露。
 - 必须可重入（`IF NOT EXISTS` / `ON CONFLICT DO NOTHING`）。
 - 加索引用 `CREATE INDEX CONCURRENTLY`。
 - **已合入的 migration 永不修改** —— 号被占了就用下一个空号并 `bus send team-lead` 报备。
