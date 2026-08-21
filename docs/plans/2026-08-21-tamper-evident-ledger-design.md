@@ -11,12 +11,12 @@
 | 决策点 | 结论 |
 |---|---|
 | 问题定义 | 防**伪造记录 / 改余额**（完整性 integrity）。**不是**防泄露（保密性 confidentiality）—— 两者的防御工具几乎无交集，见 §1 |
-| 主线机制 | **per-journal 授权签名**：KMS 对 canonical posting intent 签名，与 journal 同事务落库。这是唯一能在**写入时**确立真实性的机制 |
+| 主线机制 | **per-journal 授权签名**：对 canonical posting intent 签名，签名与 journal 同事务落库。这是唯一能在**写入时**确立真实性的机制 |
 | Merkle 定位 | **降为可选末位（P7）**。对 canonical batch 做签名 hash 已足以检测「整批是否被改」；Merkle 的增量价值只是 inclusion proof 与**定位**（是哪几条被改了） |
 | batch digest 与外部锚 | **同一 phase 交付（P6）**，不可拆。尾部截断**不产生 seq gap**（删掉最后 3 条，seq 1..97 依然连续），只有外部锚能钉住 head |
 | 余额真相 | checkpoint 是**不可信缓存**。提现路径全量重算，不读 checkpoint |
 | 平衡检查 | **回到 DB 层**（deferred constraint trigger，per-journal 一次聚合，不是 004 那个 per-row O(N²) 实现） |
-| 签名密钥位置 | KMS/HSM。永不进 DB、永不进 app config（`custody.md`：凭证不落可失陷面） |
+| 签名密钥位置 | **要求只有一条：不与 DB 凭证同处一个失效域**——永不进 DB，且不与 `DATABASE_URL` 同一个 secrets bundle（`custody.md`：凭证不落可失陷面）。具体载体（本地密钥 / sidecar / HSM / 云 KMS）是 **deployment 选择**，已在 `Attestor` port 之后，不是设计决策。单体部署下进程内本地 ed25519 即满足 |
 | 签名 port 命名 | 新 `core.Attestor`。**不复用 `core.Signer`**（`core/interfaces.go:437`，那是 EVM sweep tx 签名，另一把密钥、另一个爆炸半径） |
 | canonical digest 的空间 | **uid-space**（`JournalInput` 原始形态），不是内部 id-space。理由见 §7.2 —— 这同时解决了「事务内禁外部调用」的红线冲突 |
 | 前提条件 | DB role least-privilege 是**一切 DB 层强制的前提**。没有它，trigger 可被 `DROP`，I-2 在「app 凭证泄漏」这一档就已失效 |
@@ -253,14 +253,17 @@ big-endian **固定 16 字节**（`NUMERIC(30,18)` 值域装得下）。**禁止
 - **幂等重放**：same key + same payload ⟹ digest 相同 ⟹ **签名可直接复用**，不重签。
   这与三态幂等（`feedback_idempotency_tristate`）天然吻合：payload 不同 ⟹ digest 不同 ⟹
   本就该 `ErrConflict`。
-- **KMS 不可用**：⚠️ 待拍板（§14）。fail-closed（拒绝过账）在 money-path 上正确，
-  但会让 KMS 成为账本**可用性**单点；fail-open（过账并标记未签名）保住可用性，
-  但留下一个「未签名 journal」类别，必须在提现门被当作不可提现。
+- **签名失败**：**不做 fail-open/fail-closed 配置**（2026-08-21 Aaron 拍板：过度设计）。
+  单体部署下签名是进程内本地操作，失败就是 error 往上抛（`discipline.md` §6）。
+  将来若换远程签名 adapter，重试/降级是**那个 adapter 内部的事**，不进 port 语义。
+  但**必须**避免"以为在签其实没签"（`working-agreements` §3）：`Attestor` 为 nil ⟹
+  特性整体关闭且三列留空（验证侧判为"特性未启用"，不是"验签失败"）；配了密钥就必须
+  加载成功，否则启动报错。二者取其一，实现里写清楚。
 - **验证点**：提现门、对账新增 check、`ledger-cli verify`。伪造 journal 无签名或验不过 ⟹ 拒绝。
 
 ### 7.4 边界（诚实说明）
 
-per-journal 签名防的是**拿到 DB 写权限**的攻击者。拿到 **app 进程 + KMS 调用权限**的攻击者
+per-journal 签名防的是**拿到 DB 写权限**的攻击者。拿到 **app 进程 + 签名能力**的攻击者
 可以铸造合法签名（§1 non-goal 2）。这不削弱本机制 —— 它把攻击门槛从「一条 SQL」
 抬到「拿下应用运行时」，并留下 KMS audit log。
 
@@ -356,7 +359,7 @@ CREATE TABLE entry_attestations (
 | I-23 | checkpoint / system_rollups / balance_snapshots 可由 entries 精确重算，drift = 0；检测不自动修复 | P2 |
 | I-24 | 每个 journal 在 DB 层 per-currency 借贷平衡（不依赖应用层） | P3 |
 | I-25 | 参与余额计算的非-journal 表（classifications 的 normal_side/balance_role、reservations、period_closes）insert 后不可任意改 | P4 |
-| I-26 | 每个 journal 携带有效的 KMS 授权签名；无签名或验签失败的 journal 不可提现 | P5 |
+| I-26 | 签名特性启用时，每个 journal 携带有效授权签名；验签失败的 journal 不可提现 | P5 |
 | I-27 | attestation 链完整：seq 连续、prev_root 链接、签名有效、**每条 entry 恰好被一个 attestation 覆盖** | P6 |
 | I-28 | 最新外部锚 head 与 DB attestation 链一致 | P6 |
 
@@ -372,10 +375,13 @@ CREATE TABLE entry_attestations (
 - **迟到 entry 测试**（§8.2 的失效模式，**必须有**）：并发两个不同 `(holder,currency)` 的 journal，
   人为让小 id 后 commit，断言其最终被覆盖且不重复覆盖。
 - **两笔抵消的不平衡 journal**（M1）：断言新 per-journal check 抓到，旧全局等式抓不到。
-- **`NOT_RUN` 测试**：KMS / 外部锚不可达时 `verify` 返回 `NOT_RUN` **且提现被拒**，不是放行。
+- **`NOT_RUN` 测试**：公钥缺失 / 外部锚不可达时 `verify` 返回 `NOT_RUN` **且提现被拒**，不是放行。
 - **性能回归**：`postgres/benchmarks_test.go` 的 `PostJournal` bench。
-  ⚠️ P5 在热路径引入一次 KMS 调用 —— 这是本设计**唯一**会显著影响写延迟的部分，
-  必须量化后再定 fail-open/fail-closed（§14）。
+  已实测（2026-08-21，M3 Max + testcontainers loopback）：`PostJournal` 2.55–2.62 ms、
+  `ReserveSettle` 2.24 ms、`GetBalance` 0.74 ms；`postJournalWithQueries` 对一个 2-entry
+  journal 已做 **16 次串行 DB 往返**（`9 + D + D' + 2N`，典型 deposit/withdrawal 15–20 次）。
+  单体部署下一次本地签名是微秒级，**不在这个噪声之上** —— 延迟不是本设计的门槛。
+  仍需回归确认没有意外退化。
 
 ## 12. 分阶段与回滚（`deployment.md`）
 
@@ -386,7 +392,7 @@ CREATE TABLE entry_attestations (
 | P2 | 新增 check + 受信任 rebuild 入口（只报告不自动改） | 关 job |
 | P3 | DB trigger 恢复 = 行为变更（此前能写入的不平衡数据会被拒）。**上线前必须先跑一次全量 per-journal 检查并清理存量违规** | 删 trigger |
 | P4 | trigger 新增；若存量数据依赖某列可改，先盘点 | 删 trigger |
-| P5 | 三列 expand-safe（default ''）；Attestor 为 nil ⟹ 行为与今天一致。**提现门要求签名是行为变更**，单独 release，缺省不得是「关闭」（M3.1 secure-by-default 先例） | 配哨兵值 |
+| P5 | 三列 expand-safe（default ''）；Attestor 为 nil ⟹ 行为与今天一致。**提现门要求签名是行为变更**，单独 release | 关掉提现门 |
 | P6 | 旁路，失败不阻塞写入 | 停 job |
 | P7 | 换列语义，走新 domain separator | 停 job |
 
@@ -400,15 +406,28 @@ CREATE TABLE entry_attestations (
 - 公链锚定（port 留口，先只做 object-lock）。
 - 第三方自助验证 endpoint。
 - `bookings` / `events` 进 attestation（先只覆盖 journals + entries）。
-- KMS 密钥轮换自动化（`key_id` 列已留，轮换走 runbook）。
+- 签名密钥轮换自动化（`auth_key_id` 列已留，轮换走 runbook）。
 - `SECURITY DEFINER` posting function + 撤销 app role 的直接 INSERT（P3 记录为长期方向）。
 
 ## 14. 待拍板
 
-1. **P5 的 KMS 不可用策略**：fail-closed（拒绝过账，KMS 成可用性单点）vs
-   fail-open（过账标记未签名，提现门拦住）。**建议先量化 §11 的写延迟影响再定。**
-2. **P5 是否覆盖全部 journal 还是仅 money-path**（入账/提现/结算）。全覆盖更干净，
-   但每笔都吃一次 KMS 延迟。
-3. **提现门阈值**：大额门限 + 「未签名 journal 支撑的余额」是否一律不可提现。
-4. **外部锚载体**：S3 / R2 / 双写，以及用哪个独立云账号（`infra.md`：不落个人账号）。
-5. **P3 上线前的存量清理**：是否已存在借贷不平衡的 journal（需要先跑一次全量扫描才知道）。
+> 2026-08-21 更新（Aaron 拍板）：**部署前提 = 单体服务 + 同区域云**。原先列在此处的
+> 「KMS 不可用策略」「签名覆盖范围」「KMS 载体/区域」三项**全部出局** —— 它们是
+> deployment 变量，不是设计决策，而且都已在 `Attestor` port 之后。围绕它们建配置旋钮
+> 属于过度设计（`discipline.md` §2）。实测也支持这个判断：`PostJournal` 已是 ~2.6ms /
+> 16 次串行 DB 往返，单体下一次本地签名是微秒级，不在噪声之上。
+
+1. **P3 上线前的存量清理**：现在是否已存在借贷不平衡的 journal？
+   恢复 DB trigger 前必须先跑一次全量 per-journal 扫描并清理存量，否则上线即拒写。
+   **只能在真实数据上回答**，已作为 P3 的任务内前置。
+2. **P6 外部锚的载体**：object-lock 桶（哪个独立云账号，`infra.md`：不落个人账号）/ 是否加公链。
+   这一项与密钥载体**不同类** —— 锚定的全部意义就在于「放在 DB 凭证触不到的地方」，
+   载体选择有实质差别，不能推给 deployment。本波只交付 `Anchor` port + 本地文件实现。
+3. **P7 是否要做**：签名 batch digest 已能回答「这批有没有被改」；Merkle 只多给
+   「被改的是哪几条」与「向第三方证明某笔在账本内」。需要这两个能力才做。
+
+### 一条不需要拍板但要写进部署文档的约束
+
+签名密钥**不应与 `DATABASE_URL` 存放在同一个 secrets store / env bundle** ——
+否则泄漏 DB 凭证的同一次事故会连密钥一起带走，签名机制失效。这是本设计对部署方的
+唯一硬约束（代码里不强制，`Attestor` 的 doc comment 记一句）。

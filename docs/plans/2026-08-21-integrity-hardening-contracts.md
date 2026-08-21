@@ -19,27 +19,76 @@
 | `046` | P5 | `journals` 的 auth 三列 |
 | `047` | P6 | `ledger_attestations` + `entry_attestations` |
 | `048` | 预留 | P7（Merkle 换列语义，若需要） |
+| `049` | P1-**migrate 阶段** | `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转给 `ledger_owner`。**必须与 `DATABASE_URL` 切换同一次发布上线** —— 它会让在座连接角色失去全部权限（2026-08-21 review 发现 042 原稿把这两步混进 expand，等于破坏性 cutover 伪装成 expand）。042 保持纯增量：只建 role + GRANT，不 REVOKE 任何东西、不动 ownership |
 
 - 每个 migration **必须**有 `.up.sql` + `.down.sql`；不可回滚需显式注明理由（`deployment.md`）。
+- ⚠️ **权限类改动的测试陷阱**（2026-08-21 实例）：testcontainers 用 `test`
+  （`internal/postgrestest/postgrestest.go:61`）、docker-compose 用 `ledger`
+  （`POSTGRES_USER`）—— **两者都是容器初始用户 = 真 superuser，绕过一切权限检查**。
+  任何 REVOKE / ownership / GRANT 类改动，pin test 若不显式建一个**非-superuser 角色**
+  来扮演在座连接身份，就测不出「旧角色被踢掉」这一类回归。托管 Postgres 上 master user
+  **不是**真 superuser（RDS 的 `rds_superuser` 不绕过权限检查），所以这类 bug 只在生产暴露。
 - 必须可重入（`IF NOT EXISTS` / `ON CONFLICT DO NOTHING`）。
 - 加索引用 `CREATE INDEX CONCURRENTLY`。
 - **已合入的 migration 永不修改** —— 号被占了就用下一个空号并 `bus send team-lead` 报备。
 
-## 2. `ledger_journals_block_arbitrary_update()` 的演进链
+## 2. `ledger_journals_block_arbitrary_update()` — 改成通用比较，不再逐 migration 接力
 
-033 已把规则写进注释：**任何给 `journals` 加列的 migration 必须同步重建该函数**。
-P4 与 P5 都要改它 —— 不是冲突，是**顺序接力**。每个 migration
-`CREATE OR REPLACE` 到「截至本 migration 为止的完整列表」：
+> **2026-08-21 Team Lead 裁决（推翻本节原方案）。** 起因：`p5-authsig` 指出原方案有个
+> 无法安全落地的排序冲突 —— 契约要求 046 保护「045 的列 + auth 三列」，但 045 尚未写出，
+> P5 无法知道 P4 的 `event_id` set-once 实现；而 golang-migrate 按数字顺序执行
+> （045 先于 046），两个 migration 各做一次 `CREATE OR REPLACE`，**后者会静默覆盖前者**，
+> 于是 045 刚加的 `event_id` 保护在 046 跑完后消失。它拒绝猜测而是上报，判断正确。
 
-| 阶段 | 受保护列 |
+原方案的根因不是排序，是**结构**：033 把列清单**硬编码**在函数体里，并把
+「任何给 journals 加列的 migration 必须记得重建此函数」写成一条**要人记住的规则**。
+`working-agreements` §5：能被结构强制的，就不该靠人记忆 —— 而这条规则已经被违反过一次
+（033 自己就是在修 025/031 漏加列的后果）。
+
+**新方案：函数改成通用比较**，用 `to_jsonb(OLD/NEW)` 减去一个显式的可变列白名单：
+
+```sql
+CREATE OR REPLACE FUNCTION ledger_journals_block_arbitrary_update() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    -- 唯一允许 post-insert 变化的列。加列到这个数组是一次显式、可评审的决定；
+    -- 不在数组里的列（含所有未来新增列）默认受保护 —— fail-closed。
+    mutable CONSTANT text[] := ARRAY['event_id'];
+BEGIN
+    -- event_id 的 set-once 语义：只允许 NULL -> 非NULL 的单次跃迁。
+    IF OLD.event_id IS NOT NULL AND NEW.event_id IS DISTINCT FROM OLD.event_id THEN
+        RAISE EXCEPTION 'ledger: journals.event_id is set-once and already set'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF (to_jsonb(OLD) - mutable) IS DISTINCT FROM (to_jsonb(NEW) - mutable) THEN
+        RAISE EXCEPTION 'ledger: UPDATE on journals is not allowed except the set-once event_id backfill; use a reversal journal instead'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+```
+
+为什么这是对的：
+- **新增列默认受保护**（零值语义指向最保守那一态，同 P0 给 `CheckResult.Complete` 选零值=未完成的理由）。
+- **排序冲突消失**：只有一个 migration 需要碰这个函数。
+- **033 那条"要人记住的规则"作废** —— 045 落地时要同步把 033 里那句
+  "any migration that adds a column to journals MUST also recreate this function"
+  改成「已由通用比较结构性保证，不再需要逐 migration 维护」。
+- 成本：`journals` 的 UPDATE 只发生在 `event_id` 回填，频率极低，`to_jsonb` 开销可忽略。
+
+### 归属（覆盖 §1 的分配）
+
+| migration | 对该函数做什么 |
 |---|---|
-| 现状（033） | `id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, effective_at, uid` |
-| `045`（P4） | 上列 **+ `event_id`**，但**放行 `NULL → 非NULL` 的单次跃迁**（033 注释描述过、但从未实现的那个 set-once 语义），并给该列补 FK |
-| `046`（P5） | 045 的列 **+ `auth_digest`, `auth_signature`, `auth_key_id`** |
+| `045`（P4） | **安装上面这个通用版本**（含 `event_id` set-once + 给该列补 FK）。同时改 033 的注释。 |
+| `046`（P5） | **什么都不做 —— 删掉现有的 `CREATE OR REPLACE`**。三个 auth 列由通用比较自动覆盖，无需重建函数。在 046 里留一句注释说明为什么不需要（并指向本节）。 |
 
-⚠️ **A4 的教训**：033 的注释说「WHEN clause below still permits」——
-018:137-140 的 trigger 是无条件 `BEFORE UPDATE FOR EACH ROW`，**那个 WHEN 子句不存在**。
-045 要么真的加 WHEN 子句，要么在函数体内实现 set-once 判断。**不要再留一句描述不存在机制的注释。**
+⚠️ **A4 的教训仍然适用**：033 的注释说「WHEN clause below still permits」，而
+`018:137-140` 的 trigger 是无条件 `BEFORE UPDATE FOR EACH ROW`，**那个 WHEN 子句不存在**。
+set-once 语义要在**函数体内**实现（如上），不要依赖一个不存在的 WHEN 子句，
+也不要再留一句描述不存在机制的注释。
 
 ## 3. `.sql` 查询文件分配（避免 sqlcgen 生成物冲突）
 
@@ -128,15 +177,41 @@ P5 (per-journal 签名) ──> P6 (batch digest + 外部锚) ──> P7 (Merkle
 ## 7. 未拍板项 → 做成接口位，不要替 Aaron 选默认值
 
 `abstractions.md`：能不决定就不决定，结构里留接口、不留具体选型。
+**但也不要为一个不会发生的选型建配置** —— 那是另一种过度设计（`discipline.md` §2 YAGNI）。
 
-| 未拍板项 | dev 的正确做法 |
+**部署前提（2026-08-21 Aaron 拍板）**：单体服务 + 同区域云。据此：
+
+| 事项 | dev 的正确做法 |
 |---|---|
-| P5：KMS 不可用时 fail-closed / fail-open | 做成注入配置 `AttestorFailureMode`（枚举）。**缺省值 = `Run()` 启动报错**，不是任一档。沿用 M3.1 secure-by-default 先例（crypto-deposit 设计 §9.2 addendum）。等 `bench-postjournal` 的延迟数字回来后 Aaron 配一个值，代码不改 |
-| P5：覆盖全部 journal 还是仅 money-path | 做成 per-journal-type 的注入配置，缺省同上：启动报错 |
-| P5：提现门阈值 | 注入配置，缺省报错（不得是 0 = 关闭） |
-| P6：外部锚载体（S3 / R2 / 双写 / 哪个云账号） | 只实现 `Anchor` port + 本地文件系统 adapter（dev only，必须显式构造）。生产 adapter **不做** |
+| P5 签名密钥载体 | **不做选型，也不做配置旋钮**。`Attestor` port 保留（保证载体可换、领域层不见实现），默认实现 = **本地 ed25519**，密钥从注入配置读。对单体部署它就是生产实现，**不标 "dev only"** |
+| P5 签名失败处理 | **不做 `AttestorFailureMode`**。本地进程内签名基本不会失败；真失败就 error 往上抛（`discipline.md` §6）。将来若换远程 adapter，重试/降级是**那个 adapter 内部的事**，不进 port 语义、不进领域层配置 |
+| P5 覆盖范围 | **默认对所有 journal 签名**，不做 per-journal-type 旋钮。本地签名是微秒级，在一个已跑 16 次串行 DB 往返、~2.6ms 的操作上不构成开销（实测见 §7.1） |
+| P5 提现门阈值 | **移出 P5**，归 P2（余额/策略域），不要混进签名任务 |
+| P6 外部锚载体 | 只实现 `Anchor` port + 本地文件 adapter。生产 adapter 不做 —— 这一项**仍然**是真的未选型（跟密钥载体不同：锚定的意义就在于「在 DB 触不到的地方」，载体选择有实质差别） |
 
-**禁止**：自己挑一个"合理默认值"然后在 PR 里说"可配置"。这一项的默认值直接等于信任边界敞开。
+**仍然必须显式的一条**（`working-agreements` §3，防"以为在签其实没签"）：
+没配密钥时不得静默跳过签名。二选一并在实现里写清楚 ——
+① `Attestor` 为 nil ⟹ 特性整体关闭，三列保持空，验证侧把「无签名」判为「特性未启用」而非「验签失败」；
+② 配了就必须加载成功，否则启动报错。
+
+### 7.1 为什么延迟不是门槛（实测，2026-08-21）
+
+`postgres/benchmarks_test.go`，M3 Max + testcontainers loopback：
+
+| | 实测 |
+|---|---|
+| `PostJournal`（single / fanout） | **2.55 / 2.62 ms**，统计上无差异 |
+| `ReserveSettle` | 2.24 ms |
+| `GetBalance_ColdCheckpoint` | 0.74 ms |
+
+`postJournalWithQueries` 对一个 2-entry journal 已经做 **16 次串行 DB 往返**
+（缩放式 `9 + D + D' + 2N`；典型 deposit/withdrawal 是 15–20 次）。
+单体部署下一次本地签名是**微秒级**，不在这个噪声之上。
+
+⚠️ 但有一条**结构性**结论必须保留：因为签名发生在**取 advisory lock 之前**（设计稿 §7.2 的
+uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁的持有时间** ——
+慢签名不会演变成热账户上的锁堆积。**这是不许把 digest 挪回 id-space 的第二个理由**
+（第一个是 `financial.md` 禁止事务内外部调用）。
 
 ## 8. 写盘隔离与分支
 
