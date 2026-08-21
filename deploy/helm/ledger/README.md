@@ -37,7 +37,7 @@ See `values.yaml` for the full list with comments.
 | `apiKeys` | `""` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). **Required in production**. |
 | `corsAllowedOrigin` | `""` | Required when `env != "dev"`. |
 | `migrations.job.enabled` | `true` | Runs migrations from a pre-install/pre-upgrade hook Job (`MIGRATE_MODE=only`); serving pods start with `MIGRATE_MODE=off` and need no DDL privileges. |
-| `migrations.job.databaseUrlKey` | `""` | Secret key holding a DDL-capable URL (`ledger_owner`, migration 042) for the migration Job, distinct from the serving pods' `ledger_app` URL. Empty = both use the same connection (today's default; see `docs/RUNBOOK.md` §9). |
+| `migrations.job.databaseUrlKey` | `""` | Secret key holding a DDL-capable URL (`ledger_owner`, once a later migration transfers it ownership) for the migration Job, distinct from the serving pods' `ledger_app` URL. Empty = both use the same connection (today's default; see `docs/RUNBOOK.md` §9). |
 | `metrics.enabled` | `true` | Adds Prometheus scrape annotations. |
 | `metrics.serviceMonitor.enabled` | `false` | Creates a Prometheus Operator `ServiceMonitor` (requires the monitoring.coreos.com CRDs). |
 | `metrics.prometheusRules.enabled` | `false` | Creates a `PrometheusRule` with alerts mapped to `docs/RUNBOOK.md` scenarios (thresholds tunable under `metrics.prometheusRules.thresholds`). |

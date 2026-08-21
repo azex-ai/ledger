@@ -177,6 +177,54 @@ func TestMigration042_LedgerAppIsLeastPrivilege(t *testing.T) {
 	})
 }
 
+// TestMigration042_DoesNotStrandTheMigrationRunner is the pin
+// code-reviewer flagged: testcontainers' bootstrap user and the
+// docker-compose POSTGRES_USER are both real Postgres superusers, so a
+// prior version of this migration (transferring table/sequence ownership to
+// ledger_owner and REVOKE ALL ON SCHEMA public FROM PUBLIC) silently passed
+// every other test in this file while actually locking a non-superuser
+// migration runner out of its own database the moment the migration
+// committed -- exactly the shape of a managed-Postgres master user (RDS's
+// master user is not a real superuser; Cloud SQL/Neon are similar).
+//
+// This simulates that: a NOSUPERUSER role owns the database (and,
+// transitively via pg_database_owner in PG15+, the public schema and
+// everything it creates in it -- precisely how today's single-connection
+// deployments end up owning the ledger's tables), runs every migration
+// through its own connection, and then must still be able to do the same
+// write it could do before migrating.
+func TestMigration042_DoesNotStrandTheMigrationRunner(t *testing.T) {
+	ctx := context.Background()
+	connStr := postgrestest.SetupRawDB(t)
+
+	adminPool, err := pgxpool.New(ctx, connStr)
+	require.NoError(t, err)
+	t.Cleanup(adminPool.Close)
+
+	u, err := url.Parse(connStr)
+	require.NoError(t, err)
+	dbName := strings.TrimPrefix(u.Path, "/")
+	require.NotEmpty(t, dbName)
+
+	const runnerPassword = "roles-test-runner-password-not-a-real-secret" //nolint:gosec // test-only credential
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE ROLE migration_runner LOGIN CREATEROLE NOSUPERUSER PASSWORD '%s'", runnerPassword))
+	require.NoError(t, err)
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("ALTER DATABASE %s OWNER TO migration_runner", dbName))
+	require.NoError(t, err, "sanity: migration_runner must actually own the database (and therefore the public schema) before migrating, or this test would not be simulating anything")
+
+	runnerURL := withRole(t, connStr, "migration_runner", runnerPassword)
+	migrateURL := strings.Replace(runnerURL, "postgres://", "pgx5://", 1)
+
+	require.NoError(t, postgres.Migrate(migrateURL), "migrating as the (non-superuser) role that owns everything must not fail")
+
+	runnerPool, err := pgxpool.New(ctx, runnerURL)
+	require.NoError(t, err)
+	t.Cleanup(runnerPool.Close)
+
+	_, err = runnerPool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'MR1', 'MigrationRunnerTest')")
+	require.NoError(t, err, "the role that ran every migration must still be able to write afterward -- a migration must never strand the identity that is running it")
+}
+
 // TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant is the
 // partition-inheritance pin the task explicitly calls out: migration 042's
 // GRANT on journal_entries only covers the parent and whatever partitions
@@ -184,6 +232,13 @@ func TestMigration042_LedgerAppIsLeastPrivilege(t *testing.T) {
 // PartitionService (running as ledger_owner, the role split the "migrate"
 // phase intends) is still writable by ledger_app through the parent table
 // name, without any additional GRANT ever being issued on that partition.
+//
+// Migration 042 (expand phase, see its header) does not transfer table
+// ownership -- that happens in the later "migrate" migration, alongside the
+// DATABASE_URL cutover. This test manually applies that expected end state
+// to journal_entries only, so the partition-inheritance behavior can be
+// pinned on its own without coupling this test to a migration that does not
+// exist yet.
 func TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
@@ -193,6 +248,11 @@ func TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_owner WITH PASSWORD '%s'", ownerPassword))
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	require.NoError(t, err)
+	// Simulate the future "migrate" migration's ownership transfer, scoped
+	// to just the one table this test needs -- CREATE TABLE ... PARTITION OF
+	// requires owning the parent.
+	_, err = pool.Exec(ctx, "ALTER TABLE journal_entries OWNER TO ledger_owner")
 	require.NoError(t, err)
 
 	baseURL := roleURLFromPool(pool)
@@ -250,7 +310,10 @@ func roleURLFromPool(pool *pgxpool.Pool) string {
 }
 
 // TestMigration042_RoleAttributes pins the static catalog shape (role
-// attributes + table ownership) that the behavioral tests above build on.
+// attributes + grants) that the behavioral tests above build on. Migration
+// 042 is expand-only (see its header): it does not transfer table
+// ownership, so this test does not assert any -- that assertion belongs to
+// whichever future "migrate" migration actually performs the transfer.
 func TestMigration042_RoleAttributes(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
@@ -282,18 +345,44 @@ func TestMigration042_RoleAttributes(t *testing.T) {
 		assert.False(t, a.createRole, "%s must not be able to create roles", name)
 	}
 
-	var nonOwned int
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT count(*) FROM pg_tables
-		WHERE schemaname = 'public' AND tableowner <> 'ledger_owner'
-	`).Scan(&nonOwned))
-	assert.Equal(t, 0, nonOwned, "every table in public, including schema_migrations, must be owned by ledger_owner -- GRANT alone cannot confer DDL rights in Postgres")
+	// ledger_app: SELECT/INSERT/UPDATE on an ordinary table, SELECT/INSERT
+	// only (no UPDATE) on journal_entries, nothing on schema_migrations.
+	assertGrants(t, pool, "ledger_app", "currencies", []string{"SELECT", "INSERT", "UPDATE"})
+	assertGrants(t, pool, "ledger_app", "journal_entries", []string{"SELECT", "INSERT"})
+	assertGrants(t, pool, "ledger_app", "schema_migrations", nil)
+
+	// ledger_ro: SELECT everywhere, including journal_entries.
+	assertGrants(t, pool, "ledger_ro", "currencies", []string{"SELECT"})
+	assertGrants(t, pool, "ledger_ro", "journal_entries", []string{"SELECT"})
+}
+
+// assertGrants queries information_schema.role_table_grants for exactly the
+// privilege types (grantee, table) holds on table -- nil/empty means "no
+// grants at all".
+func assertGrants(t *testing.T, pool *pgxpool.Pool, grantee, table string, want []string) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT privilege_type FROM information_schema.role_table_grants
+		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2
+	`, grantee, table)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var got []string
+	for rows.Next() {
+		var p string
+		require.NoError(t, rows.Scan(&p))
+		got = append(got, p)
+	}
+	require.NoError(t, rows.Err())
+	assert.ElementsMatch(t, want, got, "%s privileges on %s", grantee, table)
 }
 
 // TestMigration042_DownDropsRolesAndRestoresOwnership pins that the rollback
 // path is safe to actually run: the three roles are gone afterward, and the
-// original connection (which reclaims ownership in down.sql) can still
-// operate normally -- ownership must not be left dangling on a dropped role.
+// original connection -- which never lost anything, since 042 is
+// additive-only (see its header) -- can still operate normally.
 func TestMigration042_DownDropsRolesAndRestoresOwnership(t *testing.T) {
 	ctx := context.Background()
 	connStr := postgrestest.SetupRawDB(t)

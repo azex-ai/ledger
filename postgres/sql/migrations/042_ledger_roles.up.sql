@@ -5,34 +5,59 @@
 --   model §1, attack path A6).
 -- Contract: docs/plans/2026-08-21-integrity-hardening-contracts.md §1/§5/§8/§9.
 --
--- Expand phase only (deployment.md): creates three roles and grants
--- least-privilege access. Does NOT switch DATABASE_URL -- whatever role
--- every environment connects with today keeps working exactly as before,
--- because it either IS the bootstrap/superuser identity or remains the
--- owner of everything until the explicit ownership transfer at the very end
--- of this file (and GRANT never removes a role's own standing privileges).
--- A later release ("migrate") points the serving DATABASE_URL at ledger_app
--- and the migration-job URL at ledger_owner; "contract" retires the
--- bootstrap credential from daily use. See docs/RUNBOOK.md §9 and
--- deploy/helm/ledger/README.md.
+-- Pure expand phase (deployment.md): creates three roles and grants them
+-- least-privilege access. Every statement below is ADDITIVE ONLY -- nothing
+-- is revoked, and no existing table or sequence changes owner. Whatever
+-- role every environment connects with today keeps ALL of its standing
+-- privileges, byte for byte, after this migration commits.
+--
+-- That is a deliberate, hard boundary, not an incidental one: an earlier
+-- version of this migration also ran `REVOKE ALL ON SCHEMA public FROM
+-- PUBLIC` and transferred every table/sequence's ownership to
+-- `ledger_owner` in the same file. It passed every test that connected as
+-- the new roles, because testcontainers' bootstrap user and this repo's
+-- docker-compose POSTGRES_USER are both real Postgres superusers, which
+-- bypass ownership/ACL checks entirely -- so those tests couldn't see that
+-- the *migration-running connection itself* had just lost every privilege
+-- it had via ownership or PUBLIC's default schema access, with no
+-- replacement grant, the moment the migration committed. Managed Postgres
+-- master users (RDS, Cloud SQL, Neon, ...) typically are NOT real
+-- superusers, so on a real production database that version would have
+-- locked the very next write out of its own database -- proven by
+-- postgres.TestMigration042_DoesNotStrandTheMigrationRunner failing against
+-- that version with `permission denied for table schema_migrations`
+-- (golang-migrate's own version-bookkeeping write, ordered by Postgres
+-- after the migration's ownership transfer already committed).
+--
+-- The REVOKE + ownership-transfer half of the original design belongs to a
+-- separate, later "migrate" migration that MUST ship in the same release as
+-- the DATABASE_URL cutover (deployment.md's migrate phase; see
+-- docs/RUNBOOK.md §9). This file only ever reaches the "migrate" phase's
+-- prerequisite: the roles exist and hold the grants they will need, but
+-- nothing is locked down and nothing changes owner yet.
 --
 -- Also closes A6: docs/RUNBOOK.md's emergency-stop section has referenced
 -- `ledger_app` since it was written, but no migration ever created it --
 -- the runbook was instructing operators to use a role that didn't exist.
 --
--- Role shape:
---   ledger_owner -- owns every table/sequence; the only role with DDL
+-- Role shape (target end-state, reached over expand -> migrate -> contract,
+-- NOT by this migration alone):
+--   ledger_owner -- will own every table/sequence once the "migrate"
+--                   migration runs; the only role with DDL
 --                   (ALTER/DROP/TRUNCATE/trigger management). Postgres does
 --                   not let GRANT confer those rights -- only ownership (or
---                   superuser) does, so "ledger_owner has DDL" is only true
---                   because it actually owns the objects (step 6 below).
+--                   superuser) does.
 --   ledger_app   -- SELECT/INSERT/UPDATE on ordinary tables; SELECT/INSERT
 --                   ONLY on journal_entries (parent + every partition) --
 --                   the running application never updates a posted entry.
---                   No DELETE anywhere. No DDL of any kind.
+--                   No DELETE anywhere. No DDL of any kind. These grants
+--                   are already live after THIS migration -- ledger_app is
+--                   fully usable today, independent of the ownership
+--                   transfer.
 --   ledger_ro    -- SELECT everywhere (Metabase/BI/reporting). This is the
 --                   role the 2026-05 credential-leak incident should have
---                   used instead of a superuser session.
+--                   used instead of a superuser session. Also already live
+--                   after this migration.
 
 ------------------------------------------------------------
 -- 1. Create the three roles (idempotent). No passwords are set here --
@@ -53,26 +78,28 @@ BEGIN
 END $$;
 
 ------------------------------------------------------------
--- 2. Schema-level lockdown: PUBLIC gets nothing implicit. ledger_owner
---    additionally gets CREATE -- it is the only role future migrations will
---    ever run DDL as.
+-- 2. Schema-level grants -- additive only. PUBLIC's existing access (if
+--    any) is untouched; whoever the migration-running role turns out to be
+--    keeps whatever schema access it already had. ledger_owner additionally
+--    gets CREATE -- it will be the only role future migrations run DDL as,
+--    once the "migrate" migration hands it real ownership.
 ------------------------------------------------------------
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO ledger_owner, ledger_app, ledger_ro;
 GRANT CREATE ON SCHEMA public TO ledger_owner;
 
 ------------------------------------------------------------
--- 3. ledger_app grants. Issued BEFORE the ownership transfer in step 6 --
---    GRANT requires the executing role to currently own the object (or be
---    superuser); once ownership moves to ledger_owner that would no longer
---    hold for a non-superuser migration runner.
+-- 3. ledger_app grants. These work regardless of who currently owns the
+--    tables (GRANT never requires the grantee to own anything, and issuing
+--    it never revokes the grantor's own standing privileges) -- so
+--    ledger_app is fully functional the moment this migration commits, with
+--    zero dependency on the future ownership transfer.
 --
 --    journal_entries is partitioned (migration 037): grant the parent AND
 --    every partition that exists right now explicitly. Do not assume a
 --    GRANT on the parent alone reaches partitions Postgres hasn't attached
 --    yet at grant time -- postgres/roles_test.go pins the actual behavior
---    (a partition PartitionService creates AFTER this migration runs) by
---    connecting as ledger_app and inserting into it.
+--    (a partition created AFTER this migration runs) by connecting as
+--    ledger_app and inserting into it.
 --
 --    schema_migrations (created by golang-migrate itself, not by any file
 --    here) is deliberately excluded: ledger_app has no legitimate reason to
@@ -111,21 +138,24 @@ END $$;
 
 ------------------------------------------------------------
 -- 4. ledger_ro: read-only everywhere. No aggregate/reporting views exist yet
---    to scope this down to further (tracked as a RUNBOOK follow-up) --
---    full-schema SELECT is still strictly less than the superuser session a
---    BI tool has no business holding.
+--    to scope this down to further -- docs/RUNBOOK.md §9 tracks that as an
+--    explicit follow-up (design doc §3 prefers views over full-table
+--    SELECT); full-schema SELECT is still strictly less than the superuser
+--    session a BI tool has no business holding.
 ------------------------------------------------------------
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO ledger_ro;
 GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ledger_ro;
 
 ------------------------------------------------------------
 -- 5. Any table/sequence created from here on by whoever runs this migration
---    (today's bootstrap role; ledger_owner itself after cutover) also grants
---    full rights to ledger_owner automatically, so future migrations never
---    have to remember this step. Deliberately the ONLY default-privilege
---    entry this migration adds -- ledger_app/ledger_ro get nothing
---    automatically on new objects, forcing an explicit, reviewable GRANT in
---    whichever future migration introduces them (contracts.md §9 point 3).
+--    also grants full rights to ledger_owner automatically, so future
+--    migrations never have to remember this step once ledger_owner starts
+--    running them. Purely additive -- it changes what happens to FUTURE
+--    objects, and does not touch the running role's own privileges.
+--    Deliberately the ONLY default-privilege entry this migration adds --
+--    ledger_app/ledger_ro get nothing automatically on new objects, forcing
+--    an explicit, reviewable GRANT in whichever future migration introduces
+--    them (contracts.md §9 point 3).
 ------------------------------------------------------------
 DO $$
 DECLARE runner text := current_user;
@@ -134,27 +164,8 @@ BEGIN
     EXECUTE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public GRANT ALL ON SEQUENCES TO ledger_owner', runner);
 END $$;
 
-------------------------------------------------------------
--- 6. ledger_owner becomes the real owner of every existing table and
---    sequence. `GRANT role TO runner` first: transferring ownership
---    requires the executing role to be able to SET ROLE to the new owner,
---    which plain membership provides without needing ADMIN OPTION or
---    superuser. The role is only ever a member of ledger_owner for the
---    duration of this block.
-------------------------------------------------------------
-DO $$
-DECLARE
-    runner text := current_user;
-    r RECORD;
-BEGIN
-    EXECUTE format('GRANT ledger_owner TO %I', runner);
-
-    FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-        EXECUTE format('ALTER TABLE public.%I OWNER TO ledger_owner', r.tablename);
-    END LOOP;
-    FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' LOOP
-        EXECUTE format('ALTER SEQUENCE public.%I OWNER TO ledger_owner', r.sequencename);
-    END LOOP;
-
-    EXECUTE format('REVOKE ledger_owner FROM %I', runner);
-END $$;
+-- Deliberately NOT in this migration: REVOKE ALL ON SCHEMA public FROM
+-- PUBLIC, and ALTER TABLE/SEQUENCE ... OWNER TO ledger_owner. Both are
+-- destructive to whatever role runs migrations today and belong in the
+-- "migrate" migration that ships alongside the DATABASE_URL cutover (see
+-- this file's header and docs/RUNBOOK.md §9).

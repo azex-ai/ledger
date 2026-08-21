@@ -776,8 +776,10 @@ be sitting in the user's balance by the time a human looks at the queue.
 The application-facing database role, `ledger_app`, can `SELECT`/`INSERT`/
 `UPDATE` ordinary tables and `SELECT`/`INSERT` (never `UPDATE`/`DELETE`) on
 `journal_entries` — but it cannot `DROP`, `TRUNCATE`, `ALTER`, manage
-triggers, or create any object, anywhere in the schema. Only `ledger_owner`
-(which actually owns every table and sequence) can.
+triggers, or create any object, anywhere in the schema. This is true as
+soon as migration 042 applies, independent of who currently owns the
+tables: `ledger_app` was never granted anything beyond
+`SELECT`/`INSERT`/`UPDATE` and will never own anything.
 
 **Why**: GRANT-based privileges alone are not a defense against a
 compromised application credential — before migration 042, every
@@ -792,15 +794,27 @@ true because `ledger_app` never owns anything.
 
 **Note on scope**: this invariant governs what the `ledger_app` *role* can
 do once an environment's `DATABASE_URL` is cut over to it. Migration 042
-itself only performs the expand step (`deployment.md`) — creating the roles
-and grants — and does not switch any environment's connection yet; see
-`docs/RUNBOOK.md` §9.
+itself performs a **pure expand** step (`deployment.md`) — creating the
+roles and issuing every grant additively, with no `REVOKE` and no ownership
+transfer — and does not switch any environment's connection yet. The
+counterpart `ledger_owner` role does not yet own any table after 042 alone;
+a separate, later "migrate" migration (number requested from Team Lead,
+2026-08-21; see `docs/RUNBOOK.md` §9) performs `REVOKE ALL ON SCHEMA public
+FROM PUBLIC` and the ownership transfer, and must ship in the same release
+as the `DATABASE_URL` cutover — an earlier combined version of 042 that did
+both in one file passed every test connecting as the new roles while
+actually locking the (non-superuser, in a real managed-Postgres deployment)
+migration-running connection out of its own database the instant it
+committed; see `docs/RUNBOOK.md` §9 for the failure this caused and the
+test that catches it.
 
 **Enforced by**:
 - `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
-  (owns every table/sequence, the only role with DDL) and `ledger_app`
-  (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on `journal_entries`, no DDL of
-  any kind), and `REVOKE ALL ON SCHEMA public FROM PUBLIC`.
+  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
+  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
+  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
+  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
+  this migration (see "Note on scope" above).
 
 **Pinned by**:
 - `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
@@ -811,12 +825,23 @@ and grants — and does not switch any environment's connection yet; see
   journal_entries`/touch `schema_migrations`, while it can still
   `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
   `journal_entries`.
+- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — runs every
+  migration through a non-superuser role that owns the database (simulating
+  a managed-Postgres master user) and confirms that role can still write
+  afterward. This is the regression pin for the combined-migration bug
+  described above: it fails with `permission denied for table
+  schema_migrations` against that version and passes against the current
+  (split) 042.
 - `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — a partition created by `ledger_owner` *after* migration 042's grant ran
-  is still writable by `ledger_app` through the parent table name.
+  — after manually granting `ledger_owner` ownership of `journal_entries`
+  (standing in for the future "migrate" migration, scoped to just this one
+  table so the test does not depend on a migration that does not exist
+  yet), a partition it creates *after* 042's grant ran is still writable by
+  `ledger_app` through the parent table name.
 - `postgres.TestMigration042_RoleAttributes` — pins role attributes
-  (`LOGIN`, not superuser/createdb/createrole) and that `ledger_owner` owns
-  every table.
+  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
+  role holds (`information_schema.role_table_grants`) on an ordinary table,
+  `journal_entries`, and `schema_migrations`.
 - `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` — the down
   migration drops all three roles and leaves the original connection able
   to operate normally.
