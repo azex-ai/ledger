@@ -224,7 +224,7 @@ type InsertJournalParams struct {
 	ActorID        int64          `json:"actor_id"`
 	Source         string         `json:"source"`
 	ReversalOf     pgtype.Int8    `json:"reversal_of"`
-	EventID        int64          `json:"event_id"`
+	EventID        pgtype.Int8    `json:"event_id"`
 	EffectiveAt    time.Time      `json:"effective_at"`
 	Uid            pgtype.UUID    `json:"uid"`
 }

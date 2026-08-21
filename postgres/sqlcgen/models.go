@@ -195,7 +195,7 @@ type Journal struct {
 	Source         string         `json:"source"`
 	ReversalOf     pgtype.Int8    `json:"reversal_of"`
 	CreatedAt      time.Time      `json:"created_at"`
-	EventID        int64          `json:"event_id"`
+	EventID        pgtype.Int8    `json:"event_id"`
 	EffectiveAt    time.Time      `json:"effective_at"`
 	Uid            pgtype.UUID    `json:"uid"`
 }

@@ -555,7 +555,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		ActorID:        input.ActorID,
 		Source:         input.Source,
 		ReversalOf:     int64ToInt8(zeroInt64ToNil(reversalOfID)),
-		EventID:        eventID,
+		EventID:        int64ToInt8(zeroInt64ToNil(eventID)),
 		EffectiveAt:    effectiveAt,
 		Uid:            newUID(),
 	})
