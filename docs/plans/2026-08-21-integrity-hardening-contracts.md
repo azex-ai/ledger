@@ -19,6 +19,7 @@
 | `046` | P5 | `journals` 的 auth 三列 |
 | `047` | P6 | `ledger_attestations` + `entry_attestations` |
 | `048` | 预留 | P7（Merkle 换列语义，若需要） |
+| `050` | P2-补 | `checkpoint_rebuilds` append-only 审计表（挂 018 的 `ledger_block_mutation()`）。理由：`RebuildCheckpoint` 与自动修复有**相同的证据销毁性质**，只是多了一个人类决定；drift 非零的那一行就是入侵证据，必须活得比日志长 |
 | `049` | P1-**migrate 阶段** | `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转给 `ledger_owner`。**必须与 `DATABASE_URL` 切换同一次发布上线** —— 它会让在座连接角色失去全部权限（2026-08-21 review 发现 042 原稿把这两步混进 expand，等于破坏性 cutover 伪装成 expand）。042 保持纯增量：只建 role + GRANT，不 REVOKE 任何东西、不动 ownership |
 
 - 每个 migration **必须**有 `.up.sql` + `.down.sql`；不可回滚需显式注明理由（`deployment.md`）。
@@ -248,3 +249,10 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
   这是设计稿 §7.2 把 digest 放在 uid-space 的唯一理由，不要"优化"回 id-space。
 - 不用 `_ = someVar` 压编译错误；不丢弃 error（`golang.md`）。
 - 不写「未来可能要支持 X」进当前结构（YAGNI），但保留接口位。
+- **不要把可变数量硬编码进人读措辞**（2026-08-21 P2 实例）：suite 从 10 个 check 扩到 12 个后，
+  「10-check」在 10 处成了过期事实，含 `core/reconcile_extra.go` 里 `FullReconciler`
+  **port 自己的 doc comment** 与 `ledger.go` 的库门面注释。措辞里去掉数字
+  （「the full reconciliation suite」），数量只保留在**机器可校验**的那一处
+  （测试断言）—— 那一处不改就会失败。这与 §2 把列清单从函数体里拿掉是同一个道理：
+  **能结构强制的不靠人全局搜索替换**（`working-agreements` §5）。
+  ⚠️ 历史条目（`CHANGELOG.md`）不要改 —— 它记录的是当时的事实。
