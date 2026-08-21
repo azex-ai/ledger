@@ -282,8 +282,17 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
 8. `bus done <id> <agent>`；有新 failure mode 就 `bus learn <agent> "<经验>"`。
 
 > **Lead 侧对应义务**（2026-08-21 补，源：P4 实例）：收到 done 后**先**
-> `git log --oneline <base>..HEAD` + `git status --short` 验证，**再**读文件内容评审。
-> 没有 commit hash 就不要开始 review —— 否则评审的是一堆随时会消失的工作区改动。
+> `git log --oneline <base>..HEAD` 验证有 commit，**再**读文件内容评审。
+>
+> ⚠️ **但不要用 `git status --short` 做这个判断**（2026-08-21 我自己踩的坑）：
+> `--short` **隐藏** "interactive rebase in progress" 那行 banner。`rebase` replay 期间
+> 分支 ref 指向 onto 目标，`git log main..HEAD` 为空、冲突文件显示 `UU` ——
+> 看起来和「工作从未提交」完全一样，实际上原 commit 一直安全躺在 reflog 里。
+> 正确姿势：`git status` **长格式**，或查 `.git/rebase-merge` / `.git/rebase-apply` 是否存在，
+> 或直接 `git reflog <branch>`。
+>
+> 更普适的一条：**快照式观察一个正在动的工作树，歧义信号要按「可能正在变化」解释，
+> 不要按最坏情况下断言** —— 尤其不要据此向上汇报。
 
 ## 10. 禁止事项（跨任务共同）
 
