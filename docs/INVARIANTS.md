@@ -478,8 +478,26 @@ this method) and rejects with `core.ErrPeriodClosed` when
   (correction-via-reversal lands in the open period)
 
 **Pinned by**:
-- `postgres.TestPartitionBoundary_DefaultCatches`
-- `postgres.TestPartitionBoundary_GetBalanceUnionsPartitions`
+- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` — a posting whose
+  effective date falls before the active close line is refused
+- `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
+  enforce before the first close
+- `postgres.TestPeriodCloseStore_Reopen_LatestRowWins` — reopening is an append,
+  latest row wins
+- `postgres.TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod`
+  — correction-via-reversal lands in the open period
+- `postgres.TestPeriodClosesGuard_NoUpdateNoDelete` — the close log itself is
+  append-only (migration 045, attack path A5)
+- `core.TestClosePeriodInput_Validate_RequiresCloseBefore`
+
+> Corrected 2026-08-21: this section previously cited two
+> PartitionBoundary tests (names deliberately unquoted here so the pin checker
+> does not read this note as a citation) — partition-coverage tests belonging to
+> I-13's subject matter, one of which never existed under that name at all. I-15 was in fact pinned the whole time, by the tests above; the
+> citation was wrong, so the invariant *read* as verified by tests that could not
+> possibly verify it. Found by `core.TestInvariantsDocPinsAllExist`, added the
+> same day precisely because this document's own "the Pinned by section is the
+> contract" rule had nothing enforcing it.
 
 ## I-16: Amount precision is bounded by currency exponent
 
