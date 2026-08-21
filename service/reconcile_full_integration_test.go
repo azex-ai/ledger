@@ -334,14 +334,14 @@ func TestFullReconciliation_Check2ResumesAcrossRuns(t *testing.T) {
 	assert.False(t, lapDirty, "lap_dirty must reset once the lap completes")
 }
 
-// TestFullReconciliation_Check11DetectsSystemRollupDriftFromPoisonedCheckpoint
+// TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint
 // is the DB-backed pin for M4/I-23's headline claim: system_rollups is
 // derived FROM balance_checkpoints (RefreshSystemRollups ->
 // AggregateCheckpointsByClassification), so it inherits checkpoint tampering
 // wholesale. Comparing system_rollups only against itself (or against the
 // checkpoints it was built from) would never catch this. Check #11 compares
 // it against journal_entries directly and must catch it.
-func TestFullReconciliation_Check11DetectsSystemRollupDriftFromPoisonedCheckpoint(t *testing.T) {
+func TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint(t *testing.T) {
 	pgpool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -401,11 +401,11 @@ func TestFullReconciliation_Check11DetectsSystemRollupDriftFromPoisonedCheckpoin
 	assert.True(t, driftFound, "got: %+v", check11.Findings)
 }
 
-// TestFullReconciliation_Check12DetectsSnapshotDrift is the DB-backed pin for
+// TestFullReconciliation_DetectsSnapshotDrift is the DB-backed pin for
 // M4/I-23's balance_snapshots half: a snapshot row tampered independently of
 // journal_entries must be caught by an entries-based recompute, not by
 // comparing the snapshot only against itself.
-func TestFullReconciliation_Check12DetectsSnapshotDrift(t *testing.T) {
+func TestFullReconciliation_DetectsSnapshotDrift(t *testing.T) {
 	pgpool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 

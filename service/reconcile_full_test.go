@@ -953,7 +953,7 @@ func TestCheck2GlobalBalance_PartialRunPersistsLapDirty(t *testing.T) {
 // Check #11 — system_rollups vs entries (M4/I-23)
 // ---------------------------------------------------------------------------
 
-func TestCheck11SystemRollupIntegrity_Clean(t *testing.T) {
+func TestCheckSystemRollupIntegrity_Clean(t *testing.T) {
 	q := cleanQuerier()
 	q.systemRollups = []SystemRollupRow{
 		{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(1000)},
@@ -968,14 +968,14 @@ func TestCheck11SystemRollupIntegrity_Clean(t *testing.T) {
 	assert.True(t, result.Complete)
 }
 
-// TestCheck11SystemRollupIntegrity_DetectsDrift pins M4/I-23: system_rollups
+// TestCheckSystemRollupIntegrity_DetectsDrift pins M4/I-23: system_rollups
 // must be checked directly against journal_entries. RefreshSystemRollups
 // derives this table from balance_checkpoints
 // (AggregateCheckpointsByClassification), so a system_rollups row that no
 // longer matches the entries-based recompute is exactly the class of drift
 // this check exists to catch -- including the case where checkpoints were
 // tampered and system_rollups inherited the poison wholesale.
-func TestCheck11SystemRollupIntegrity_DetectsDrift(t *testing.T) {
+func TestCheckSystemRollupIntegrity_DetectsDrift(t *testing.T) {
 	q := cleanQuerier()
 	q.systemRollups = []SystemRollupRow{
 		{CurrencyID: 1, ClassificationID: 10, TotalBalance: decimal.NewFromInt(1999)}, // poisoned +999
@@ -991,11 +991,11 @@ func TestCheck11SystemRollupIntegrity_DetectsDrift(t *testing.T) {
 	assert.Contains(t, result.Findings[0].Detail, "999")
 }
 
-// TestCheck11SystemRollupIntegrity_FabricatedRowWithNoEntries pins the M5
+// TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries pins the M5
 // fabrication scenario: a system_rollups row with no backing entries at all
 // (a rollup entry manufactured out of nothing) must be flagged, not treated
 // as "unknown, skip".
-func TestCheck11SystemRollupIntegrity_FabricatedRowWithNoEntries(t *testing.T) {
+func TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries(t *testing.T) {
 	q := cleanQuerier()
 	q.systemRollups = []SystemRollupRow{
 		{CurrencyID: 1, ClassificationID: 99, TotalBalance: decimal.NewFromInt(5000)},
@@ -1010,7 +1010,7 @@ func TestCheck11SystemRollupIntegrity_FabricatedRowWithNoEntries(t *testing.T) {
 	assert.Contains(t, result.Findings[0].Detail, "5000")
 }
 
-func TestCheck11SystemRollupIntegrity_QueryError(t *testing.T) {
+func TestCheckSystemRollupIntegrity_QueryError(t *testing.T) {
 	q := cleanQuerier()
 	q.errSystemRollups = errors.New("db unavailable")
 
@@ -1024,14 +1024,14 @@ func TestCheck11SystemRollupIntegrity_QueryError(t *testing.T) {
 // Check #12 — balance_snapshots vs entries (M4/I-23)
 // ---------------------------------------------------------------------------
 
-func TestCheck12SnapshotIntegrity_Clean(t *testing.T) {
+func TestCheckSnapshotIntegrity_Clean(t *testing.T) {
 	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
 	result := svc.runCheckSnapshotIntegrity(context.Background())
 	assert.True(t, result.Passed)
 	assert.True(t, result.Complete)
 }
 
-func TestCheck12SnapshotIntegrity_DetectsDrift(t *testing.T) {
+func TestCheckSnapshotIntegrity_DetectsDrift(t *testing.T) {
 	q := cleanQuerier()
 	q.snapshotDrifts = []SnapshotDriftRow{
 		{AccountHolder: 42, CurrencyID: 1, ClassificationID: 10,
@@ -1047,11 +1047,11 @@ func TestCheck12SnapshotIntegrity_DetectsDrift(t *testing.T) {
 	assert.Contains(t, result.Findings[0].Detail, "stored=500")
 }
 
-// TestCheck12SnapshotIntegrity_PageLimitReportsIncomplete pins the
+// TestCheckSnapshotIntegrity_PageLimitReportsIncomplete pins the
 // fail-closed-by-construction requirement for this check's page cap: hitting
 // the limit must mark Complete=false, not silently truncate the finding list
 // (the same shape check #2's Complete field already enforces).
-func TestCheck12SnapshotIntegrity_PageLimitReportsIncomplete(t *testing.T) {
+func TestCheckSnapshotIntegrity_PageLimitReportsIncomplete(t *testing.T) {
 	q := cleanQuerier()
 	for i := 0; i < 3; i++ {
 		q.snapshotDrifts = append(q.snapshotDrifts, SnapshotDriftRow{
@@ -1067,7 +1067,7 @@ func TestCheck12SnapshotIntegrity_PageLimitReportsIncomplete(t *testing.T) {
 	assert.False(t, result.Complete, "hitting the page limit must not claim full coverage")
 }
 
-func TestCheck12SnapshotIntegrity_QueryError(t *testing.T) {
+func TestCheckSnapshotIntegrity_QueryError(t *testing.T) {
 	q := cleanQuerier()
 	q.errSnapshotDrifts = errors.New("timeout")
 
