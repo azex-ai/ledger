@@ -91,6 +91,42 @@ $$;
 set-once 语义要在**函数体内**实现（如上），不要依赖一个不存在的 WHEN 子句，
 也不要再留一句描述不存在机制的注释。
 
+## 2.5 reconcile check 名 / 号分配（2026-08-21 补，起因：P2×P3 真冲突）
+
+> **这是我漏掉的一类共享写盘点。** 我分配了 migration 号和 `.sql` 文件，却没分配
+> `service/reconcile.go` 里的 check 名与序号 —— 而它是同一类资源。后果：P2 与 P3 各自
+> 新增 check、各自改 `RunFullReconciliation`，并且 **`journal_dr_cr` 这个名字在两个分支里
+> 含义不同**（P2 保留它作全局等式；P3 把全局那个改名 `global_dr_cr_equality` 并让新的
+> 逐-journal check 接管此名）。5 个文件真冲突：`service/reconcile.go`、
+> `postgres/reconcile_queries.go`、两个 reconcile 测试、`docs/INVARIANTS.md`。
+
+### 裁决：P3 的命名胜出（已合入 main）
+
+| check 名 | 语义 | 归属 |
+|---|---|---|
+| `global_dr_cr_equality` | 全局 Σdebit = Σcredit（原 `journal_dr_cr` 的真实行为） | P3 ✅ 已合 |
+| `journal_dr_cr` | **真正逐 journal / 逐 currency** 校验 | P3 ✅ 已合 |
+| `checkpoint_balance` | checkpoint vs entries 重算（P0 修过覆盖盲区） | 既有 |
+| `system_rollup_integrity` | system_rollups 直接对 entries 重算 | P2（待 rebase） |
+| `snapshot_integrity` | balance_snapshots 对 entries 重算 | P2（待 rebase） |
+
+理由：`journal_dr_cr` 这个名字原本就在说谎（它跑的是全局等式），P3 的改名是 M1 修复的
+组成部分，不是风格偏好。P2 的两个新名无冲突。
+
+### 规则（后续所有任务）
+
+1. **新增 check 必须先在本表登记名字**，`bus send team-lead` 要一行，不要自己挑。
+2. **不要用序号命名函数**（`runCheck11X`）—— 序号会因别人插队而失真。用语义名
+   （`runCheckSystemRollupIntegrity`）。既有的 `runCheck1..10` 不动，新增的一律语义名。
+3. **check 总数只出现在测试断言里**，不进任何 prose（见 §10 的对应禁令）。
+4. `postgres/reconcile_queries.go` 是共享 adapter：加方法可以，**不要重排既有方法**，
+   减少 diff 冲突面。
+
+### 合并顺序（Lead 执行）
+
+`main ← P3`（✅ 已合，`044` + 命名修正）→ `main ← P2`（rebase 后重贴它的两个 check）
+→ 其余按完成顺序。**P2 需要 rebase 到含 P3 的 main**，并把自己的两个 check 接在 P3 的命名之后。
+
 ## 3. `.sql` 查询文件分配（避免 sqlcgen 生成物冲突）
 
 `sqlc` 按 `.sql` 文件名分文件生成。**新查询一律进本任务独占的新文件**，不要往共享文件里塞：
