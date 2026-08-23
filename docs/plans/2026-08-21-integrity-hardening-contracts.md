@@ -344,3 +344,74 @@ uid-space digest 决定），它的延迟是**纯加性的，不延长任何锁�
   （测试断言）—— 那一处不改就会失败。这与 §2 把列清单从函数体里拿掉是同一个道理：
   **能结构强制的不靠人全局搜索替换**（`working-agreements` §5）。
   ⚠️ 历史条目（`CHANGELOG.md`）不要改 —— 它记录的是当时的事实。
+
+
+---
+
+# Wave 2 契约层 — 提现时验证（2026-08-23）
+
+> 起因：Aaron 指出「提现时应该有一层 verify」，并给出载重理由 ——
+> **DB 不可信、app 可信、私钥只在 app 够得到的地方 ⟹ app 是唯一能做这个判断的位置，
+> 而它手上的材料（签名）已经齐了。** Wave 1 造了材料，没让 app 在要紧时刻去看它。
+>
+> **本节先于任何实现写完**（Phase 0）。Wave 1 我四次因为没提前分配全局命名空间而返工，
+> 这次按下面的清单**逐类枚举**，不等撞上。
+
+## W2-0 全局命名空间盘点（新增任务前先过一遍这张表）
+
+| 命名空间 | 本波分配 |
+|---|---|
+| migration 号 | `053` = T2（若需 schema 支撑）；`054` = 预留给 T4 |
+| invariant ID | `I-31` = T1；`I-32` = T2。（`INVARIANTS.md` 现到 I-30） |
+| hash domain separator | 本波预期不新增；`0x12` **预留给 T4**（attested 内容含授权结论 ⟹ root hash v3） |
+| reconcile check 名 | `unauthorized_journals` = T2 |
+| `.sql` 查询文件 | T2 独占 `queries/integrity_verified_balance.sql`；T1 无新查询文件 |
+| `core/interfaces.go` | T1 追加 `AuthorizeReversal`；T2 追加 `VerifiedBalanceReader`。**只追加不重排** |
+| `core.AuthStatus` 枚举值 | **不得自行新增** —— 要加先 `bus send team-lead` |
+| worker 配置字段 | 本波不新增 job |
+
+## W2-1 语义裁决：验证余额是账户级 fail-closed
+
+朴素定义「排除未授权 journal 后求和」**是错的且危险**：
+
+`ReverseJournal` / `ReverseJournalFraction` / `ExecuteTemplateBatch` / tx-mode `PostJournal`
+目前都产出 `unsigned_tx_mode`。冲正 journal **减少**余额 —— 把它排除掉，验证余额会
+**高于**真实余额。攻击者什么都不用做，系统自己多报可用资金。**排除必须永不抬高余额，
+而按 journal 排除做不到这一点**（一笔 journal 对某账户的净额可正可负）。
+
+**裁决**：任一贡献 journal 未授权 ⟹ 该账户的验证余额 **UNDEFINED**，调用方**拒绝**放款。
+不是「算一个小一点的数」。这与 `working-agreements` §3 同源：**验不了 ≠ 通过**。
+
+推论：验证余额可用的前提是 money path 上**所有** journal 都能被签名 —— 因此 T1 存在。
+
+## W2-2 三个并行任务与接缝
+
+```
+T1 扩大签名覆盖（冲正 + 模板批量）   ── 独立，可立即开工
+T2 VerifiedBalanceReader + Reserve 接线 ── 定义接缝；实现可先用朴素路径
+T3 验签成本实测                      ── 只读，只写报告，完全独立
+                                        ↓ 数字决定是否需要
+T4 attestation 分摊（把授权结论绑进被签名内容）── 本波不启动，触发条件见下
+```
+
+**接缝（`abstractions.md`：定义边界，实现延后）**：T2 定义
+`VerifiedBalanceReader` port 的**语义与返回形状**（含 UNDEFINED 这一态怎么表达）；
+T4 只是**换掉它背后怎么算出答案**。两者不冲突，T4 落地时 T2 的调用方零改动。
+
+**T4 的启动条件**：T3 测出朴素路径在真实 entry 规模下不可接受。**不提前建**
+（`discipline.md` §2）—— 但 T2 必须把 port 定成 T4 能无痛替换的形状。
+
+## W2-3 策略归属（不重复 Wave 1 的错）
+
+**机制在库，策略在消费方。** 库提供 `VerifiedBalanceReader` 与 UNDEFINED 语义；
+**「用不用验证余额」「什么金额以上用」由消费方决定** —— 库不设默认阈值、不替消费方选。
+唯一的库侧硬约束：**UNDEFINED 不得被静默当成 0 或当成通过**。
+
+## W2-4 Wave 1 的教训在本波仍适用（不重复列）
+
+§9 的 Done 标准、§10 的禁止事项、以及这几条踩过的坑全部继承：
+044 的平衡 trigger（直写 `journal_entries` 的测试必须单事务）、
+045 的 `event_id` 是 nullable FK（不要写 `0`）、
+`git status --short` 会隐藏 rebase 中断、
+done 汇报必须带 commit hash、合并 main 后必须重跑、
+`INVARIANTS.md` 的顺序与 pin 引用有机器门禁（含族引用 `Foo_*` 的已知局限）。
