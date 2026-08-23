@@ -397,3 +397,31 @@ func VerifyJournalAuth(ctx context.Context, verifier AuthVerifier, input Journal
 	}
 	return nil
 }
+
+// JournalInputFromRecord reassembles the uid-space JournalInput
+// CanonicalJournalDigest/VerifyJournalAuth need from a persisted Journal
+// and its Entries -- the shape any caller that fetched a journal via a
+// QueryProvider (or an equivalent store) already has on hand. EventUID is
+// deliberately left unset: it is not part of the canonical digest (see
+// authDigestDomain's doc comment), so including it here would do nothing
+// but invite a future caller to assume otherwise.
+func JournalInputFromRecord(j Journal, entries []Entry) JournalInput {
+	input := JournalInput{
+		JournalTypeUID: j.JournalTypeUID,
+		IdempotencyKey: j.IdempotencyKey,
+		ActorID:        j.ActorID,
+		Source:         j.Source,
+		ReversalOfUID:  j.ReversalOfUID,
+		Entries:        make([]EntryInput, len(entries)),
+	}
+	for i, e := range entries {
+		input.Entries[i] = EntryInput{
+			AccountHolder:     e.AccountHolder,
+			CurrencyUID:       e.CurrencyUID,
+			ClassificationUID: e.ClassificationUID,
+			EntryType:         e.EntryType,
+			Amount:            e.Amount,
+		}
+	}
+	return input
+}

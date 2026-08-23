@@ -32,29 +32,43 @@ type ReserverStore struct {
 	q      *sqlcgen.Queries
 	ledger *LedgerStore
 	dims   *dimCache
+	// verifiedBalance backs ReserveInput.RequireVerifiedBalance (contracts
+	// §W2-2). Never nil -- ledger.go always wires a VerifiedBalanceStore,
+	// even when no core.AuthVerifier was configured (in which case any
+	// dimension with contributing journals simply comes back
+	// ErrUnauthorizedJournal, per VerifiedBalanceStore's own doc comment) --
+	// so this field being unusable is exactly the caller-opted-in-without-
+	// signing-enabled case, not a nil-pointer bug.
+	verifiedBalance *VerifiedBalanceStore
 }
 
 // NewReserverStore creates a new ReserverStore backed by a connection pool.
-func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore) *ReserverStore {
+func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore, verifiedBalance *VerifiedBalanceStore) *ReserverStore {
 	return &ReserverStore{
-		pool:   pool,
-		db:     pool,
-		q:      sqlcgen.New(pool),
-		ledger: ledger,
-		dims:   dimCacheFor(pool),
+		pool:            pool,
+		db:              pool,
+		q:               sqlcgen.New(pool),
+		ledger:          ledger,
+		dims:            dimCacheFor(pool),
+		verifiedBalance: verifiedBalance,
 	}
 }
 
-// WithDB returns a clone of the ReserverStore bound to an existing transaction.
-// ledger must be a LedgerStore already bound to the same transaction so that
-// balance checks and advisory locks share the same connection.
+// WithDB returns a clone of the ReserverStore bound to an existing
+// transaction. ledger must be a LedgerStore already bound to the same
+// transaction so that balance checks and advisory locks share the same
+// connection. verifiedBalance is intentionally NOT re-bound to db: it is
+// only ever consulted from Reserve's top level, strictly before any
+// transaction is opened (mirroring Authorize's own "outside the
+// transaction" placement rule) -- see Reserve's doc comment.
 func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 	return &ReserverStore{
-		dims:   s.dims,
-		pool:   nil, // tx mode
-		db:     db,
-		q:      sqlcgen.New(db),
-		ledger: ledger,
+		dims:            s.dims,
+		pool:            nil, // tx mode
+		db:              db,
+		q:               sqlcgen.New(db),
+		ledger:          ledger,
+		verifiedBalance: s.verifiedBalance,
 	}
 }
 
@@ -87,6 +101,20 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	if err := checkAmountPrecision(input.Amount, cur); err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
+	}
+
+	// Opt-in authorization gate (contracts §W2-2/§W2-3): only runs when the
+	// caller set RequireVerifiedBalance. Deliberately BEFORE any transaction
+	// is opened, on the same placement rule Authorize follows -- an
+	// AuthVerifier implementation is permitted to be a remote call (see
+	// core.AuthVerifier's doc comment), so financial.md's "no external
+	// calls inside a transaction" applies here exactly as it does to
+	// Attestor.Sign.
+	if input.RequireVerifiedBalance {
+		if err := s.requireVerifiedAvailableBalance(ctx, input.AccountHolder, input.CurrencyUID, cur.ID); err != nil {
+			ledgerotel.RecordError(span, err)
+			return nil, err
+		}
 	}
 
 	// Check idempotency first (outside tx / on the current db handle).
@@ -127,6 +155,44 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	}
 
 	return res, nil
+}
+
+// requireVerifiedAvailableBalance is Reserve's ReserveInput.RequireVerifiedBalance
+// gate (contracts §W2-2): available balance is the sum of every
+// balance_role='available' classification the holder has touched in this
+// currency (the same basis reserveWithQueries' availableBase computes, via
+// sumBalancesByRoleWithQueries) -- so this refuses the reservation unless
+// EVERY one of those classifications individually passes
+// VerifiedBalanceReader's authorization check. A single unauthorized
+// classification is enough to refuse the whole reservation: this is a
+// binary gate ("is the money behind this account's available balance
+// trustworthy"), not a partial-amount computation -- ReserveInput.Amount
+// never enters into it.
+//
+// core.ListComputedBalancesForHolders-style role classification is
+// re-derived here (not read from the dims cache) for the same reason
+// sumBalancesByRoleWithQueries does: SetBalanceRole can retag a
+// classification after creation, and the dims cache only holds immutable
+// fields.
+func (s *ReserverStore) requireVerifiedAvailableBalance(ctx context.Context, holder int64, currencyUID string, currencyID int64) error {
+	rows, err := s.q.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
+		CurrencyID: currencyID,
+		HolderIds:  []int64{holder},
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: reserve: verified balance: list classifications: %w", err)
+	}
+
+	for _, row := range rows {
+		if core.BalanceRole(row.BalanceRole) != core.BalanceRoleAvailable {
+			continue
+		}
+		classUID := pgToUID(row.ClassificationUid)
+		if _, err := s.verifiedBalance.VerifiedBalance(ctx, holder, currencyUID, classUID); err != nil {
+			return fmt.Errorf("postgres: reserve: verified balance check failed for classification %s: %w", classUID, err)
+		}
+	}
+	return nil
 }
 
 func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64) (*core.Reservation, error) {

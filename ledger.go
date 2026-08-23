@@ -76,6 +76,7 @@ type Service struct {
 	periodCloseStore     *postgres.PeriodCloseStore
 	trialBalanceStore    *postgres.TrialBalanceStore
 	checkpointIntegrity  *postgres.CheckpointIntegrityStore
+	verifiedBalanceStore *postgres.VerifiedBalanceStore
 
 	channelsMu sync.RWMutex
 	channels   map[string]channel.Adapter
@@ -156,7 +157,14 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	if s.attestor != nil {
 		s.ledgerStore = s.ledgerStore.WithAuth(s.attestor)
 	}
-	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore)
+	// s.authVerifier may still be nil here (WithAttestor never called) --
+	// VerifiedBalanceStore treats that the same way (*Service).AuthVerifier
+	// does: every dimension with at least one contributing journal comes
+	// back UNDEFINED, never a fabricated "verified" zero. Built before
+	// reserverStore because Reserve's optional RequireVerifiedBalance gate
+	// (contracts §W2-2) depends on it.
+	s.verifiedBalanceStore = postgres.NewVerifiedBalanceStore(pool, s.authVerifier)
+	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore, s.verifiedBalanceStore)
 	s.bookingStore = postgres.NewBookingStore(pool)
 	s.eventStore = postgres.NewEventStore(pool)
 	s.classStore = postgres.NewClassificationStore(pool)
@@ -335,7 +343,13 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 		reconcileAdapter = reconcileAdapter.WithDB(s.tx)
 	}
 	basic := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
-	return service.NewFullReconciliationService(basic, reconcileAdapter, cfg, engine)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, cfg, engine)
+	// unauthorized_journals (contracts §W2-2, I-32): wired unconditionally,
+	// even when s.authVerifier is nil -- SetAuthCheck's own contract is to
+	// skip the check (Complete=false) rather than run with a nil verifier,
+	// so there is no default policy decision being made here.
+	full.SetAuthCheck(s.queryStore, s.authVerifier)
+	return full
 }
 
 // RunInTx begins a new PostgreSQL transaction, builds a short-lived Service
@@ -419,6 +433,16 @@ func (s *Service) AuthVerifier() core.AuthVerifier { return s.authVerifier }
 // BalanceReader.GetBalance.
 func (s *Service) CheckpointIntegrity() core.CheckpointIntegrityStore { return s.checkpointIntegrity }
 
+// VerifiedBalanceReader returns the withdrawal-time authorization-gated
+// balance reader (docs/plans/2026-08-21-integrity-hardening-contracts.md
+// §W2-1). See core.VerifiedBalanceReader for the full contract, in
+// particular the UNDEFINED case: calling code MUST check the returned
+// error before trusting the amount. This is a mechanism the library
+// offers, not a policy it imposes -- nothing in this library calls it
+// automatically (e.g. Reserve does not), so a consumer that never calls
+// this accessor sees no behavior change at all (contracts §W2-3).
+func (s *Service) VerifiedBalanceReader() core.VerifiedBalanceReader { return s.verifiedBalanceStore }
+
 // withTx returns a short-lived Service clone with every store rebound to tx.
 // The clone shares pool and options with the original; only the store handles
 // change. The caller (RunInTx) owns the transaction lifecycle.
@@ -452,6 +476,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		periodCloseStore:     s.periodCloseStore.WithDB(tx),
 		trialBalanceStore:    s.trialBalanceStore.WithDB(tx),
 		checkpointIntegrity:  s.checkpointIntegrity.WithDB(tx),
+		verifiedBalanceStore: s.verifiedBalanceStore.WithDB(tx),
 		channels:             channels,
 	}
 }

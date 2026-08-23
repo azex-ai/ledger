@@ -143,7 +143,7 @@ func TestLedgerStore_AccountPolicy_StatusMatrix(t *testing.T) {
 	ctx := context.Background()
 
 	ls := postgres.NewLedgerStore(p)
-	reserver := postgres.NewReserverStore(p, ls)
+	reserver := postgres.NewReserverStore(p, ls, postgres.NewVerifiedBalanceStore(p, nil))
 	policies := postgres.NewAccountPolicyStore(p)
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-MATRIX", "Test USDT")

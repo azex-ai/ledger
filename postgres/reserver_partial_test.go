@@ -19,7 +19,7 @@ func seedFundedReservation(t *testing.T, reserveAmt decimal.Decimal) (*postgres.
 	t.Helper()
 	pool := postgrestest.SetupDB(t)
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledgerStore)
+	reserver := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")

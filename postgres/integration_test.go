@@ -20,7 +20,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 
 	// Create stores
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
+	reserverStore := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 	classStore := postgres.NewClassificationStore(pool)
 	currencyStore := postgres.NewCurrencyStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)

@@ -32,7 +32,7 @@ func seedBreakdownFixture(t *testing.T) (breakdownFixture, context.Context) {
 	t.Helper()
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledger)
+	reserver := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curUID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -140,7 +140,7 @@ func TestReserve_AvailableBasisExcludesPendingLockedAndRoleless(t *testing.T) {
 func TestReserve_PendingOnlyBalanceNotReservable(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledger)
+	reserver := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curUID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")

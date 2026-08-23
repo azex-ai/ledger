@@ -118,7 +118,7 @@ func BenchmarkGetBalance_ColdCheckpoint(b *testing.B) {
 func BenchmarkReserveSettle(b *testing.B) {
 	pool := setupBenchPool(b)
 	store, deps := setupBenchFixture(b, pool)
-	reserver := postgres.NewReserverStore(pool, store)
+	reserver := postgres.NewReserverStore(pool, store, postgres.NewVerifiedBalanceStore(pool, nil))
 
 	// Reserve only counts classifications tagged role=available (the shared
 	// fixture's main_wallet is role-less on purpose), so seed a dedicated
