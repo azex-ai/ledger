@@ -327,6 +327,19 @@ type Onchain struct {
 	sweepMu   sync.Mutex
 	sweepTx   map[string]string // booking uid -> latest broadcast tx hash
 	sweepBump map[string]int    // booking uid -> gas-bump attempts
+
+	// reconcileFailures tracks, per booking uid, consecutive
+	// DepositConfirmer.ConfirmDeposit errors since the booking last entered
+	// "confirming" (mi5 fix, docs/bugs/2026-07-11-m3-security-review.md):
+	// reviewGate escalates to review once a booking's count reaches its
+	// TokenConfig.ReconcileFailureLimit, instead of retrying the
+	// second-source RPC forever. In-memory only -- a process restart resets
+	// the count, which only delays escalation (the count restarts from
+	// zero on the next failure), it never causes a silent stuck deposit to
+	// go unnoticed forever, and it never affects fund safety: reviewGate's
+	// fail-closed behavior below the threshold is unchanged.
+	reconcileMu       sync.Mutex
+	reconcileFailures map[string]int32
 }
 
 // NewOnchain builds an Onchain from deps and chains. Options override the
@@ -356,6 +369,7 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		classes:                    newClassResolver(),
 		sweepTx:                    make(map[string]string),
 		sweepBump:                  make(map[string]int),
+		reconcileFailures:          make(map[string]int32),
 	}
 	for _, opt := range opts {
 		opt(o)
@@ -433,6 +447,52 @@ func (o *Onchain) validateAutoCreditCeilings() error {
 // call Run() at all.
 func (o *Onchain) ValidateAutoCreditCeilings() error {
 	return o.validateAutoCreditCeilings()
+}
+
+// validateReconcileFailureLimits enforces the mi5 fix (docs/bugs/2026-07-11-m3-security-review.md
+// mi5): whenever the reconciliation gate is actually active for a token
+// (OnchainDeps.DepositConfirmer configured and TokenConfig.ReconcileCeiling
+// positive), TokenConfig.ReconcileFailureLimit must be a deliberate positive
+// integer -- the number of consecutive ConfirmDeposit errors that escalate a
+// stuck confirming deposit to review instead of retrying it forever. Left at
+// zero, a long-lived second-source outage leaves a legitimate deposit's
+// confirming status indistinguishable from "nobody is working on it"
+// (working-agreements §3).
+//
+// Unlike validateAutoCreditCeilings there is no "explicitly unbounded"
+// sentinel to accept here: this is an availability fence, not a
+// mint-safety one, so a consumer that does not want it simply does not
+// activate the reconciliation gate in the first place (leaves
+// DepositConfirmer nil or ReconcileCeiling at zero -- design doc §9.3),
+// which already makes this field irrelevant.
+//
+// Called from both ValidateReconcileFailureLimits (the exported form
+// composition roots call right after NewOnchain, alongside
+// ValidateAutoCreditCeilings) and Run(), same two call sites and same
+// rationale as validateAutoCreditCeilings.
+func (o *Onchain) validateReconcileFailureLimits() error {
+	if o.deps.DepositConfirmer == nil {
+		return nil
+	}
+	for chainID, cfg := range o.chains {
+		for token, tc := range cfg.CreditTokens {
+			if tc.ReconcileCeiling.IsPositive() && tc.ReconcileFailureLimit <= 0 {
+				return fmt.Errorf("service: onchain: chain %d token %q has ReconcileCeiling set but no ReconcileFailureLimit configured -- set a positive limit so a persistent second-source outage escalates a stuck confirming deposit to review instead of retrying forever (mi5, docs/bugs/2026-07-11-m3-security-review.md): %w", chainID, token, core.ErrInvalidInput)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateReconcileFailureLimits is the exported form of the mi5 fix's
+// startup check (see validateReconcileFailureLimits). Composition roots
+// that wire Onchain via NewOnchain directly (e.g. ledger.go's EnableOnchain)
+// must call this right after construction, alongside
+// ValidateAutoCreditCeilings, and refuse to hand back the instance on
+// error -- Run() alone is not enough, for the same push-only/webhook-only
+// reason documented on ValidateAutoCreditCeilings.
+func (o *Onchain) ValidateReconcileFailureLimits() error {
+	return o.validateReconcileFailureLimits()
 }
 
 // EnsureDepositAddress derives holder's CREATE2 deposit address from the
@@ -692,8 +752,17 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 const (
 	reviewReasonOverCeiling       = "over_ceiling"
 	reviewReasonReconcileMismatch = "reconcile_mismatch"
+	// reviewReasonReconcileUnavailable is recorded when the second-source
+	// reconciliation RPC (OnchainDeps.DepositConfirmer) has failed
+	// TokenConfig.ReconcileFailureLimit consecutive times for this booking
+	// (mi5 fix, docs/bugs/2026-07-11-m3-security-review.md): rather than
+	// retrying forever and leaving a legitimate deposit silently stuck in
+	// "confirming" (working-agreements §3), it is parked for human review,
+	// same as the other review reasons.
+	reviewReasonReconcileUnavailable = "reconcile_unavailable"
 	// reviewReasonMetaKey is the TransitionInput.Metadata key routeToReview
-	// records reviewReasonOverCeiling/reviewReasonReconcileMismatch under.
+	// records reviewReasonOverCeiling/reviewReasonReconcileMismatch/
+	// reviewReasonReconcileUnavailable under.
 	reviewReasonMetaKey = "review_reason"
 	// rejectReasonMetaKey is the TransitionInput.Metadata key RejectReview
 	// records its caller-supplied reason under.
@@ -714,12 +783,21 @@ const (
 // routed to human review first (design doc §9: RPC is the deposit path's
 // single trusted oracle, and threshold-gate + reconciliation are its only
 // compensating controls). Returns "" when the booking may proceed, or one of
-// reviewReasonOverCeiling / reviewReasonReconcileMismatch when it must not.
+// reviewReasonOverCeiling / reviewReasonReconcileMismatch /
+// reviewReasonReconcileUnavailable when it must not.
 //
 // The reconciliation RPC call (DepositConfirmer.ConfirmDeposit) happens
 // here, deliberately outside any DB transaction -- golang.md forbids
 // external calls inside a tx, and this always runs before
 // postDepositConfirmedJournal ever opens TxComposer.RunInTx.
+//
+// mi5 fix: a ConfirmDeposit error below tc.ReconcileFailureLimit still
+// returns (reason="", err!=nil), same as before -- advanceConfirmation
+// surfaces it, the caller logs it, and the next recheck tick retries
+// (fail-closed, no journal posted). Only once the booking's consecutive
+// failure count reaches the limit does this method return
+// (reviewReasonReconcileUnavailable, nil) instead, so the booking is routed
+// to review rather than retried forever.
 func (o *Onchain) reviewGate(ctx context.Context, booking *core.Booking, tc core.TokenConfig) (reason string, err error) {
 	if tc.AutoCreditCeiling.IsPositive() && booking.Amount.GreaterThan(tc.AutoCreditCeiling) {
 		return reviewReasonOverCeiling, nil
@@ -734,12 +812,53 @@ func (o *Onchain) reviewGate(ctx context.Context, booking *core.Booking, tc core
 	}
 	amount, included, err := o.deps.DepositConfirmer.ConfirmDeposit(ctx, chainID, txHash, txLogSeq)
 	if err != nil {
+		if o.recordReconcileFailure(booking.UID, tc.ReconcileFailureLimit) {
+			return reviewReasonReconcileUnavailable, nil
+		}
 		return "", fmt.Errorf("reconcile: %w", err)
 	}
+	o.clearReconcileFailure(booking.UID)
 	if !included || !amount.Equal(booking.Amount) {
 		return reviewReasonReconcileMismatch, nil
 	}
 	return "", nil
+}
+
+// recordReconcileFailure increments booking uid's consecutive
+// ConfirmDeposit-error count and reports whether it has now reached limit
+// (mi5 fix). validateReconcileFailureLimits requires limit to be positive
+// whenever this is reachable through a validated composition root
+// (DepositConfirmer configured and ReconcileCeiling positive for this
+// token) -- see that method's doc comment. limit<=0 here means a caller
+// invoked IngestDeposit/the recheck loop directly without going through
+// that gate (e.g. a test, or a push-only consumer that skips Run()): treat
+// it the same as "escalation not configured" and never escalate, rather
+// than tripping on the very first failure -- the unconfigured case is a
+// startup-time error, not a runtime one. Reaching the limit clears the
+// count, since the booking is about to leave "confirming" for "review" and
+// reviewGate will never be called for it again (advanceConfirmation no-ops
+// on "review").
+func (o *Onchain) recordReconcileFailure(bookingUID string, limit int32) bool {
+	if limit <= 0 {
+		return false
+	}
+	o.reconcileMu.Lock()
+	defer o.reconcileMu.Unlock()
+	o.reconcileFailures[bookingUID]++
+	if o.reconcileFailures[bookingUID] >= limit {
+		delete(o.reconcileFailures, bookingUID)
+		return true
+	}
+	return false
+}
+
+// clearReconcileFailure resets booking uid's consecutive-failure count
+// (mi5 fix) -- called on every successful ConfirmDeposit call, since the
+// escalation threshold counts *consecutive* failures, not failures overall.
+func (o *Onchain) clearReconcileFailure(bookingUID string) {
+	o.reconcileMu.Lock()
+	defer o.reconcileMu.Unlock()
+	delete(o.reconcileFailures, bookingUID)
 }
 
 // routeToReview transitions a confirming deposit to review instead of
@@ -1689,6 +1808,9 @@ func (o *Onchain) Run(ctx context.Context) error {
 		return fmt.Errorf("service: onchain: run: %w", err)
 	}
 	if err := o.validateAutoCreditCeilings(); err != nil {
+		return fmt.Errorf("service: onchain: run: %w", err)
+	}
+	if err := o.validateReconcileFailureLimits(); err != nil {
 		return fmt.Errorf("service: onchain: run: %w", err)
 	}
 

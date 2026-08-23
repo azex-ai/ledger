@@ -614,12 +614,32 @@ webhook surface (channel-adapter HMAC) are exempt. Keys carry a scope
 `API_KEYS`; see [`api.md`](./api.md)) and the key name is attached to every
 access log line for audit.
 
+Keys may also carry independent **capabilities** — privilege bits no Scope
+implies, not even `admin` — via a `+`-joined suffix on the scope field
+(`name:scope+capability:secret`). Today there is one: `deposit_review`
+(`server.CapabilityDepositReview`), required by
+`POST /deposits/{uid}/review/approve` and `/reject`. This exists so the key
+that ingests/creates deposit bookings (`write` scope: `POST /bookings`,
+`POST /bookings/{uid}/transition`) does not automatically get to approve
+its own review — a `write` key with no `+deposit_review` suffix cannot
+resolve reviews at all, regardless of scope (W3-A, mi2:
+`docs/bugs/2026-07-11-m3-security-review.md`). Grant it on a dedicated
+reviewer key (e.g. `reviewer:read+deposit_review:secret`), or on the same
+operational key if a single-operator deployment deliberately chooses that
+policy — the library only makes the separation *possible*, it does not
+impose it.
+
 Operational guidance:
 
 - **Issue the least scope that works.** Reporting/dashboard consumers get
   `read`; the application that posts journals gets `write`; `admin` keys
   (metadata mutations, reconcile triggers, period close) belong to operators
   only and should be rare.
+- **Separate the ingester key from the reviewer key.** If your deployment
+  runs the crypto-deposit add-on with a review gate configured
+  (`AutoCreditCeiling`/`ReconcileCeiling`), do not grant `deposit_review` to
+  the same key that drives ingestion — that reintroduces the self-approve
+  path the capability exists to close.
 - **One key per consumer, never shared** — the key name is your audit trail
   ("which caller did this"). Rotate by appending a new triple, deploying
   consumers, then removing the old triple.
@@ -831,11 +851,16 @@ doc §6).
 > docs/plans/2026-07-11-crypto-deposit-sweep-design.md §9.2. `ReconcileCeiling`
 > is unaffected — leaving it at zero is a legitimate choice (no reconciliation
 > gate), since `AutoCreditCeiling` is what actually bounds mint exposure.
+> Whenever the reconciliation gate IS active (`DepositConfirmer` configured
+> and `ReconcileCeiling` positive for a token), `ReconcileFailureLimit` has
+> the same no-safe-default treatment (W3-A, mi5) — `Run()` refuses to start
+> without it, so a persistent second-source outage escalates to `review`
+> instead of leaving a legitimate deposit stuck in `confirming` forever.
 
 **Alert source**: `deposit.review_required` (emitted by the deposit path's M3
 compensating controls when a deposit clears its confirmation threshold but
 must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-design.md
-§9). Two possible reasons, recorded on the alert and on the booking's
+§9). Three possible reasons, recorded on the alert and on the booking's
 `metadata.review_reason`:
 
 - `over_ceiling` — the amount exceeds the chain/token's configured
@@ -843,14 +868,28 @@ must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-des
 - `reconcile_mismatch` — a second, independent confirmation source
   (`DepositConfirmer`) either does not see the transaction included, or sees a
   different amount than the primary sighting.
+- `reconcile_unavailable` (W3-A, mi5) — the second source has errored
+  (unreachable, timeout, 5xx — as opposed to `reconcile_mismatch`'s "reachable
+  but disagrees") on `ReconcileFailureLimit` consecutive attempts for this
+  booking. Unlike the other two reasons this is an *availability* signal, not
+  a disagreement to adjudicate: the deposit itself may well be entirely
+  legitimate, sitting here only because your second RPC provider has been
+  down. Treat it as "go check the `DepositConfirmer` backing service", then
+  resolve the same way as any other review once it is confirmed genuine.
 
 **Severity**: P2 by default — the deposit is safely parked, no ledger effect
 has happened yet (invariant I-21: a `review` booking's `journal_uid` is
 always empty). Escalate to P1 if `reconcile_mismatch` volume spikes (possible
 sign of a compromised or lagging primary RPC source, or genuinely forged
-sightings — exactly the unbounded-mint path this control exists to catch).
+sightings — exactly the unbounded-mint path this control exists to catch),
+or if `reconcile_unavailable` volume spikes (your second source is down,
+not the deposits).
 
 ### Work the queue
+
+> Approving/rejecting requires an API key holding `CapabilityDepositReview`
+> (`+deposit_review` on its scope, §10) — the key that ingests deposits does
+> not get this for free, by design (W3-A, mi2).
 
 1. **List pending reviews**:
    ```

@@ -533,7 +533,8 @@ paths:
       description: >-
         Idempotent -- a no-op returning the current booking if it is already
         confirmed (e.g. a prior call already succeeded). Any other non-review
-        status is a 409 conflict.
+        status is a 409 conflict. Requires the deposit_review capability,
+        independent of scope -- see bearerAuth's description.
       parameters:
         - in: path
           name: uid
@@ -555,7 +556,8 @@ paths:
         Idempotent -- a no-op returning the current booking if it is already
         failed. Any other non-review status is a 409 conflict. reason is
         recorded on the booking's audit trail and the emitted
-        deposit.review_rejected signal.
+        deposit.review_rejected signal. Requires the deposit_review
+        capability, independent of scope -- see bearerAuth's description.
       parameters:
         - in: path
           name: uid
@@ -1245,7 +1247,12 @@ components:
         preview), write adds journals/reversals/reservations/bookings, admin
         adds configuration mutations, account policies, reconcile triggers,
         and period close. Insufficient scope yields business code 10150
-        (HTTP 403).
+        (HTTP 403). A key may also carry independent capabilities, joined
+        onto the scope with '+' (e.g. read+deposit_review) -- these are not
+        implied by any scope, not even admin. deposit_review is required by
+        POST /deposits/{uid}/review/approve and /reject, independent of the
+        write scope that already covers deposit ingestion (self-approval
+        prevention).
 
   responses:
     NotFound:

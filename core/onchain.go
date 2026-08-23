@@ -222,6 +222,24 @@ type TokenConfig struct {
 	// choice, not a startup error: the ceiling that actually bounds mint
 	// exposure is AutoCreditCeiling.
 	ReconcileCeiling decimal.Decimal `json:"reconcile_ceiling"`
+	// ReconcileFailureLimit is the number of consecutive
+	// DepositConfirmer.ConfirmDeposit errors (not amount mismatches -- those
+	// already route straight to review) service.Onchain tolerates before
+	// escalating a stuck confirming deposit to review instead of retrying it
+	// forever (mi5, docs/bugs/2026-07-11-m3-security-review.md: a long-lived
+	// second-source outage must not leave a legitimate deposit's confirming
+	// status indistinguishable from "nobody is working on it" --
+	// working-agreements §3). MUST be a deliberate positive integer whenever
+	// the reconciliation gate is actually active for this token
+	// (OnchainDeps.DepositConfirmer configured and ReconcileCeiling
+	// positive) -- service.Onchain.Run and ValidateReconcileFailureLimits
+	// refuse to start otherwise. Unlike AutoCreditCeiling this is an
+	// availability fence, not a mint-safety one, so there is no
+	// "explicitly unbounded" sentinel: a consumer that does not want this
+	// gate simply leaves ReconcileCeiling at zero or DepositConfirmer nil,
+	// which already turns the whole reconciliation mechanism off (design
+	// doc §9.3) and makes this field irrelevant.
+	ReconcileFailureLimit int32 `json:"reconcile_failure_limit"`
 }
 
 // AutoCreditCeilingConfigured reports whether AutoCreditCeiling has been

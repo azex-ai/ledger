@@ -117,9 +117,13 @@ func TestApproveDepositReview(t *testing.T) {
 // TestApproveDepositReview_ForwardsAuthenticatedActor pins MJ2: when an API
 // key is configured and the request authenticates, the key's Name is
 // forwarded as the approving actor (audit attribution for the deposit
-// path's highest-privilege action).
+// path's highest-privilege action). The key holds CapabilityDepositReview
+// alongside ScopeWrite (W3-A, mi2): approve/reject requires the capability
+// regardless of scope, and this test's subject is actor forwarding, not
+// duty separation -- TestApproveDepositReview_RequiresCapability below pins
+// that ScopeWrite alone is no longer sufficient.
 func TestApproveDepositReview_ForwardsAuthenticatedActor(t *testing.T) {
-	srv := newScopedTestServer(server.APIKey{Name: "ops-carol", Scope: server.ScopeWrite, Secret: []byte("secret-1")})
+	srv := newScopedTestServer(server.APIKey{Name: "ops-carol", Scope: server.ScopeWrite, Capabilities: server.CapabilityDepositReview, Secret: []byte("secret-1")})
 	approved := reviewBooking("booking-1")
 	approved.Status = "confirmed"
 	approved.JournalUID = "journal-1"
@@ -187,9 +191,11 @@ func TestRejectDepositReview(t *testing.T) {
 }
 
 // TestRejectDepositReview_ForwardsAuthenticatedActor pins MJ2's reject half:
-// the authenticated API key's Name is forwarded as the rejecting actor.
+// the authenticated API key's Name is forwarded as the rejecting actor. The
+// key holds CapabilityDepositReview alongside ScopeWrite (W3-A, mi2) --
+// same rationale as TestApproveDepositReview_ForwardsAuthenticatedActor.
 func TestRejectDepositReview_ForwardsAuthenticatedActor(t *testing.T) {
-	srv := newScopedTestServer(server.APIKey{Name: "ops-dave", Scope: server.ScopeWrite, Secret: []byte("secret-2")})
+	srv := newScopedTestServer(server.APIKey{Name: "ops-dave", Scope: server.ScopeWrite, Capabilities: server.CapabilityDepositReview, Secret: []byte("secret-2")})
 	rejected := reviewBooking("booking-1")
 	rejected.Status = "failed"
 
@@ -239,4 +245,88 @@ func TestRejectDepositReview_NotEnabled(t *testing.T) {
 	srv := newTestServer()
 	w := doRequest(srv, http.MethodPost, "/api/v1/deposits/booking-1/review/reject", map[string]string{"reason": "n/a"})
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+// TestDepositReview_SelfMintSelfApprove_MI2 pins the W3-A fix for mi2
+// (docs/bugs/2026-07-11-m3-security-review.md): before this fix, a single
+// ScopeWrite key could forge a deposit booking (POST /bookings), drive it
+// through the lifecycle (POST /bookings/{uid}/transition), and approve its
+// own review (POST /deposits/{uid}/review/approve) -- all three endpoints
+// sat in the same ScopeWrite route group, so nothing separated "the key
+// that ingests deposits" from "the key that approves them", defeating the
+// entire point of the M3 review gate (design doc §9.2/§9.4).
+//
+// This test exercises the full chain end-to-end with ONE key holding only
+// ScopeWrite: the create+transition half ("造") must still succeed --
+// ScopeWrite legitimately grants those two endpoints, and this fix does not
+// touch them -- but the approve half ("批") must now be rejected with 403,
+// because CapabilityDepositReview is independent of, and not implied by,
+// ScopeWrite (or even ScopeAdmin -- see the second sub-test).
+func TestDepositReview_SelfMintSelfApprove_MI2(t *testing.T) {
+	t.Run("scope write alone can self-mint but not self-approve", func(t *testing.T) {
+		srv := newScopedTestServer(server.APIKey{Name: "attacker", Scope: server.ScopeWrite, Secret: []byte("attacker-secret")})
+		srv.SetDepositReviewer(&mockDepositReviewer{
+			approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
+				t.Fatal("must never reach the reviewer: CapabilityDepositReview was not granted")
+				return nil, nil
+			},
+		})
+
+		// "造": create an arbitrary, self-declared over-ceiling deposit
+		// booking with the attacker's ScopeWrite key -- unaffected by this
+		// fix, ScopeWrite legitimately grants this.
+		w := doAuthedRequest(t, srv, http.MethodPost, "/api/v1/bookings", "attacker-secret", map[string]any{
+			"classification_code": "deposit",
+			"account_holder":      100,
+			"currency_uid":        "cur-1",
+			"amount":              "1000000.00",
+			"channel_name":        "onchain",
+			"idempotency_key":     "mi2-self-mint",
+		})
+		require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+		created := parseEnvelope(t, w.Body.Bytes())
+		bookingUID := created["uid"].(string)
+
+		// drive it to "review" with the same key -- also unaffected.
+		w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/bookings/"+bookingUID+"/transition", "attacker-secret", map[string]any{
+			"to_status":   "review",
+			"channel_ref": "0xselfmint#0",
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		// "批": the SAME key attempts to approve its own review -- this is
+		// the fix. Must be rejected, and the reviewer must never be called.
+		w = doAuthedRequest(t, srv, http.MethodPost, "/api/v1/deposits/"+bookingUID+"/review/approve", "attacker-secret", nil)
+		assert.Equal(t, http.StatusForbidden, w.Code, "a ScopeWrite-only key must not be able to approve its own forged review (mi2)")
+	})
+
+	t.Run("scope admin alone also cannot approve without the capability", func(t *testing.T) {
+		srv := newScopedTestServer(server.APIKey{Name: "ops", Scope: server.ScopeAdmin, Secret: []byte("admin-secret")})
+		srv.SetDepositReviewer(&mockDepositReviewer{
+			approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
+				t.Fatal("must never reach the reviewer: CapabilityDepositReview is not implied by any Scope, including admin")
+				return nil, nil
+			},
+		})
+
+		w := doAuthedRequest(t, srv, http.MethodPost, "/api/v1/deposits/booking-1/review/approve", "admin-secret", nil)
+		assert.Equal(t, http.StatusForbidden, w.Code, "ScopeAdmin must not imply CapabilityDepositReview")
+	})
+
+	t.Run("the capability, once explicitly granted, allows approval", func(t *testing.T) {
+		srv := newScopedTestServer(server.APIKey{Name: "reviewer", Scope: server.ScopeRead, Capabilities: server.CapabilityDepositReview, Secret: []byte("reviewer-secret")})
+		approved := reviewBooking("booking-1")
+		approved.Status = "confirmed"
+		called := false
+		srv.SetDepositReviewer(&mockDepositReviewer{
+			approveFn: func(ctx context.Context, bookingUID, actor string) (*core.Booking, error) {
+				called = true
+				return approved, nil
+			},
+		})
+
+		w := doAuthedRequest(t, srv, http.MethodPost, "/api/v1/deposits/booking-1/review/approve", "reviewer-secret", nil)
+		assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.True(t, called, "a key holding CapabilityDepositReview -- even with only ScopeRead, not ScopeWrite -- must be able to approve")
+	})
 }

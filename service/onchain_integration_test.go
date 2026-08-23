@@ -332,6 +332,31 @@ func chainSetWithCeilings(chainID int64, token, currencyCode string, confirmatio
 	}
 }
 
+// chainSetWithReconcileFailureLimit mirrors chainSetWithCeilings but also
+// sets TokenConfig.ReconcileFailureLimit (mi5 fix,
+// docs/bugs/2026-07-11-m3-security-review.md) -- the number of consecutive
+// DepositConfirmer.ConfirmDeposit errors reviewGate tolerates before
+// escalating a stuck confirming deposit to review.
+func chainSetWithReconcileFailureLimit(chainID int64, token, currencyCode string, confirmations int32, reconcileCeiling decimal.Decimal, reconcileFailureLimit int32) core.ChainSet {
+	return core.ChainSet{
+		chainID: {
+			ChainID:       chainID,
+			Confirmations: confirmations,
+			Factory:       itFactory,
+			InitHash:      itInitHash,
+			CreditTokens: map[string]core.TokenConfig{
+				token: {
+					TokenAddress:          token,
+					CurrencyCode:          currencyCode,
+					ReconcileCeiling:      reconcileCeiling,
+					ReconcileFailureLimit: reconcileFailureLimit,
+				},
+			},
+			SweepTokens: map[string]core.TokenConfig{token: {TokenAddress: token, CurrencyCode: currencyCode}},
+		},
+	}
+}
+
 // --- EnsureDepositAddress ---
 
 func TestOnchain_EnsureDepositAddress_Idempotent(t *testing.T) {
@@ -963,6 +988,77 @@ func TestOnchain_IngestDeposit_ReconcileError_FailsClosedStaysConfirming(t *test
 	assert.Empty(t, found.JournalUID, "no journal may be posted while fail-closed (I-21)")
 }
 
+// TestOnchain_IngestDeposit_ReconcileError_EscalatesToReviewAfterFailureLimit
+// pins the mi5 fix (docs/bugs/2026-07-11-m3-security-review.md): a
+// legitimate deposit must not be left silently stuck in "confirming"
+// forever when the second source is persistently unavailable
+// (working-agreements §3 -- "nothing happened" and "it's done" must be
+// distinguishable). Below TokenConfig.ReconcileFailureLimit consecutive
+// ConfirmDeposit errors, behavior is unchanged from mi4 (fail closed, stays
+// confirming, error returned). On the failure that reaches the limit, the
+// booking is escalated to "review" (review_reason=reconcile_unavailable)
+// instead of being retried forever -- still no journal (I-21), but now a
+// human can act on it instead of it rotting invisibly.
+func TestOnchain_IngestDeposit_ReconcileError_EscalatesToReviewAfterFailureLimit(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xreconcileescalate"
+		limit   = int32(3)
+	)
+	confirmer := &erroringDepositConfirmer{err: fmt.Errorf("second source unreachable: timeout")}
+
+	chains := chainSetWithReconcileFailureLimit(chainID, token, "USDT-reconcileescalate", 2, decimal.NewFromInt(10), limit)
+	h := setupOnchain(t, chains, []string{"USDT-reconcileescalate"}, service.WithDepositConfirmer(confirmer))
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 8011)
+	require.NoError(t, err)
+
+	sighting := core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 5, BlockNumber: 100,
+	}
+
+	depositUID := h.classificationUID(t, presets.DepositClassificationCode)
+	findBooking := func(t *testing.T) *core.Booking {
+		t.Helper()
+		bookings, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{
+			ClassificationUID: depositUID,
+			Limit:             100,
+		})
+		require.NoError(t, err)
+		for i := range bookings {
+			if bookings[i].ChannelRef == txHash+"#0" {
+				return &bookings[i]
+			}
+		}
+		t.Fatal("booking not found")
+		return nil
+	}
+
+	// Failures 1..limit-1: unchanged mi4 behavior -- fail closed, stays
+	// confirming, no journal.
+	for i := int32(1); i < limit; i++ {
+		_, err := h.svc.IngestDeposit(ctx, sighting)
+		require.Error(t, err, "failure %d/%d must still fail closed", i, limit)
+		b := findBooking(t)
+		assert.Equal(t, core.Status("confirming"), b.Status, "failure %d/%d must not yet escalate", i, limit)
+		assert.Empty(t, b.JournalUID)
+	}
+
+	// Failure #limit: escalates to review instead of erroring -- the
+	// second source has been down long enough that retrying forever is no
+	// longer the right answer.
+	_, err = h.svc.IngestDeposit(ctx, sighting)
+	require.NoError(t, err, "the escalating call must not itself return an error -- it routes to review, a legitimate non-error outcome")
+	b := findBooking(t)
+	assert.Equal(t, core.Status("review"), b.Status, "must escalate to review once the consecutive-failure limit is reached")
+	assert.Empty(t, b.JournalUID, "no journal may be posted while parked in review (I-21)")
+	assert.Equal(t, "reconcile_unavailable", b.Metadata["review_reason"])
+}
+
 // --- M3.1 secure-by-default: Run() refuses to start with an unconfigured
 // AutoCreditCeiling (design doc §9.2 addendum, MJ1) ---
 
@@ -992,6 +1088,40 @@ func TestOnchain_Run_AllowsExplicitUnboundedSentinel(t *testing.T) {
 	// their ctx.Done() case immediately, so Run() returns as soon as startup
 	// validation passes -- this test only cares that validation didn't
 	// reject the sentinel, not about the loops actually ticking.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := h.svc.Run(ctx)
+	require.NoError(t, err)
+}
+
+// --- mi5: Run() refuses to start with an active reconciliation gate and no
+// ReconcileFailureLimit (docs/bugs/2026-07-11-m3-security-review.md) ---
+
+// TestOnchain_Run_RejectsUnconfiguredReconcileFailureLimit pins the mi5
+// startup fence: a token with DepositConfirmer configured and
+// ReconcileCeiling positive (the reconciliation gate genuinely active) but
+// ReconcileFailureLimit left at zero must fail Run() outright, rather than
+// silently retrying a persistent second-source outage forever.
+func TestOnchain_Run_RejectsUnconfiguredReconcileFailureLimit(t *testing.T) {
+	confirmer := &erroringDepositConfirmer{err: fmt.Errorf("unused")}
+	chains := chainSetWithCeilings(1, "0xusdttoken", "USDT-run-reconcile-reject", 2, core.UnboundedAutoCredit, decimal.NewFromInt(10)) // ReconcileFailureLimit left at zero
+	h := setupOnchain(t, chains, []string{"USDT-run-reconcile-reject"}, service.WithDepositConfirmer(confirmer))
+
+	err := h.svc.Run(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+	assert.Contains(t, err.Error(), "ReconcileFailureLimit")
+}
+
+// TestOnchain_Run_AllowsReconcileGateDisabled pins mi5's opt-in scope: a
+// consumer that never configures DepositConfirmer at all is unaffected by
+// the ReconcileFailureLimit fence, regardless of ReconcileCeiling -- the
+// whole reconciliation mechanism, and this fence with it, stays off by
+// default (design doc §9.3).
+func TestOnchain_Run_AllowsReconcileGateDisabled(t *testing.T) {
+	chains := chainSetWithCeilings(1, "0xusdttoken", "USDT-run-reconcile-allow", 2, core.UnboundedAutoCredit, decimal.NewFromInt(10)) // ReconcileFailureLimit left at zero, no DepositConfirmer
+	h := setupOnchain(t, chains, []string{"USDT-run-reconcile-allow"})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := h.svc.Run(ctx)

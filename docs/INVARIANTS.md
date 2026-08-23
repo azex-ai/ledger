@@ -2060,6 +2060,91 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
   the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
   evidence / page-limit-honesty behavior.
+
+---
+
+## I-34: Deposit-review resolution requires a capability no Scope implies, and a persistently unreachable second source escalates instead of hanging forever
+
+(`docs/plans/2026-08-21-integrity-hardening-contracts.md`, "Wave 3 契约层"
+W3-A; `docs/bugs/2026-07-11-m3-security-review.md` mi2/mi5.)
+
+**Rule** (two independent properties, one task):
+
+1. `POST /deposits/{uid}/review/approve` and `/reject` are gated on
+   `server.CapabilityDepositReview` — a privilege bit orthogonal to the
+   `read < write < admin` Scope ladder. No Scope level, including
+   `ScopeAdmin`, implies it; a key must be deliberately configured with it
+   (`name:scope+deposit_review:secret` in `API_KEYS`, or
+   `server.APIKey.Capabilities` when constructing a `server.Config`
+   directly). The library does not decide that an ingester key and a
+   reviewer key must be different keys — it only makes that separation
+   possible and makes the default (no capability granted) the safe side.
+2. `service.Onchain.reviewGate` tracks consecutive
+   `core.DepositConfirmer.ConfirmDeposit` errors per booking and, once a
+   token's `core.TokenConfig.ReconcileFailureLimit` is reached, routes the
+   booking to `review` (reason `reconcile_unavailable`) instead of
+   returning an error forever. Whenever the reconciliation gate is active
+   for a token (`OnchainDeps.DepositConfirmer` configured and
+   `ReconcileCeiling` positive), `ReconcileFailureLimit` must be a
+   deliberate positive integer — `service.Onchain.Run` and
+   `ValidateReconcileFailureLimits` refuse to start otherwise, mirroring
+   I-26's sibling `AutoCreditCeiling` fence (MJ1) but for availability, not
+   mint-safety, so there is no "explicitly unbounded" sentinel to accept.
+
+**Why**: Before (1), `server/routes.go`'s `ScopeWrite` group contained
+`POST /bookings`, `POST /bookings/{uid}/transition`, AND
+`POST /deposits/{uid}/review/approve` together — a single ScopeWrite key
+could forge an over-ceiling deposit sighting and then approve its own
+review, making the M3 review gate (`docs/plans/2026-07-11-crypto-deposit-sweep-design.md`
+§9.2) a check in name only: the one control that exists specifically to
+require a second party never actually required one. Before (2), a
+persistently unreachable second source left a legitimate deposit silently
+stuck in `confirming` forever — safe (never auto-credited) but invisible,
+exactly the "nothing happened and it's done are indistinguishable" failure
+mode `~/.claude/rules/working-agreements.md` §3 names.
+
+**Enforced by**: `server.Capability` / `server.CapabilityDepositReview` /
+`server.requireCapability` (`server/middleware_auth.go`); the
+`deposits/{uid}/review/*` route group in `server/routes.go`, deliberately
+split out of the `ScopeWrite` group; `parseScopeAndCapabilities` (API_KEYS
+`+`-joined capability parsing). `service.Onchain.reviewGate`'s
+`recordReconcileFailure`/`clearReconcileFailure` and the
+`reviewReasonReconcileUnavailable` branch; `core.TokenConfig.ReconcileFailureLimit`;
+`service.Onchain.validateReconcileFailureLimits` /
+`ValidateReconcileFailureLimits`, called from `Run()` and
+`ledger.Service.EnableOnchain` (same two call sites as I-26's
+`AutoCreditCeiling` fence, same rationale: a push-only/webhook-only
+consumer that never calls `Run()` must not skip the check).
+
+**Pinned by**:
+- `server.TestDepositReview_SelfMintSelfApprove_MI2` — the end-to-end mi2
+  exploit chain with one ScopeWrite-only key: create a booking (`POST
+  /bookings`) and drive it to `review` (`POST /bookings/{uid}/transition`)
+  both succeed (unaffected by this fix), but approving it with the SAME key
+  is rejected with 403; a second sub-test pins that `ScopeAdmin` does not
+  imply the capability either; a third pins that a key holding only the
+  capability (no `ScopeWrite` at all) can still approve.
+- `server.TestParseAPIKeys` — its capability subtests cover the `API_KEYS`
+  wire-format parsing for the new `+capability` suffix (e.g.
+  `write+deposit_review`), an unknown capability being rejected, and the
+  safe default: no suffix grants no capability, even for `admin`.
+- `server.TestCapabilityIndependentOfScope` — `Capability.has` behaves as a
+  bitmask independent of any `Scope` value.
+- `service.TestOnchain_IngestDeposit_ReconcileError_EscalatesToReviewAfterFailureLimit` —
+  failures below `ReconcileFailureLimit` behave exactly as I-21/mi4 already
+  pin (fail closed, stays `confirming`, no error path result changed); the
+  failure that reaches the limit escalates to `review`
+  (`reconcile_unavailable`) instead, still with no journal.
+- `service.TestOnchain_IngestDeposit_ReconcileError_FailsClosedStaysConfirming` —
+  unchanged (mi4): re-run after this fix to confirm a single failure with
+  `ReconcileFailureLimit` left at its test-harness zero still fails closed
+  rather than escalating immediately (the zero-limit-means-unconfigured
+  guard in `recordReconcileFailure`).
+- `service.TestOnchain_Run_RejectsUnconfiguredReconcileFailureLimit` /
+  `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
+  reconciliation gate with no `ReconcileFailureLimit` refuses to start;
+  reconciliation gate not activated at all is unaffected.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

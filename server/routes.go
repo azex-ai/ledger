@@ -11,6 +11,13 @@ import "github.com/go-chi/chi/v5"
 //   - admin: configuration + control plane — metadata mutations, account
 //     policies, reconciliation triggers, period close
 //
+// A handful of endpoints are gated on a Capability instead of (or in
+// addition to) a Scope — an independent privilege bit no Scope implies, not
+// even admin (W3-A, mi2: see middleware_auth.go's Capability doc comment).
+// Currently just deposit-review resolution: gating it on ScopeWrite alone
+// would let the same key that forges a deposit sighting also approve its
+// own review.
+//
 // Probes and inbound webhooks carry no scope: probes are unauthenticated,
 // webhooks authenticate via the channel adapter's own signature scheme.
 func (s *Server) setupRoutes() {
@@ -116,6 +123,22 @@ func (s *Server) setupRoutes() {
 			// Crypto deposit add-on (issuance side) — idempotent, safe to
 			// call repeatedly for the same holder.
 			r.Post("/holders/{holder}/deposit-address", s.handleEnsureDepositAddress)
+		})
+
+		// ---- Capability: deposit_review (W3-A, mi2) ----
+		// Deliberately NOT in the ScopeWrite group above: ScopeWrite already
+		// grants POST /bookings + /bookings/{uid}/transition, which is
+		// enough to forge an over-ceiling deposit sighting. If approve/
+		// reject also only required ScopeWrite, that same key could approve
+		// its own forged review, defeating the review gate entirely (mi2).
+		// Gated on CapabilityDepositReview instead — independent of, and
+		// not implied by, any Scope (including admin) — so a consumer can
+		// issue a dedicated reviewer key holding nothing else, or grant the
+		// capability alongside ScopeWrite on the same key if that is their
+		// deliberate policy (single-operator deployments may choose that;
+		// the library does not decide for them).
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireCapability(CapabilityDepositReview))
 
 			// Crypto deposit add-on (human-review resolution). Idempotent —
 			// see DepositReviewer's ApproveReview/RejectReview contracts.

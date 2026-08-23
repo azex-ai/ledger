@@ -1058,7 +1058,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a review-parked deposit, posting its deposit_confirm journal.
-         * @description Idempotent -- a no-op returning the current booking if it is already confirmed (e.g. a prior call already succeeded). Any other non-review status is a 409 conflict.
+         * @description Idempotent -- a no-op returning the current booking if it is already confirmed (e.g. a prior call already succeeded). Any other non-review status is a 409 conflict. Requires the deposit_review capability, independent of scope -- see bearerAuth's description.
          */
         post: {
             parameters: {
@@ -1107,7 +1107,7 @@ export interface paths {
         put?: never;
         /**
          * Reject a review-parked deposit to failed -- no journal is ever posted.
-         * @description Idempotent -- a no-op returning the current booking if it is already failed. Any other non-review status is a 409 conflict. reason is recorded on the booking's audit trail and the emitted deposit.review_rejected signal.
+         * @description Idempotent -- a no-op returning the current booking if it is already failed. Any other non-review status is a 409 conflict. reason is recorded on the booking's audit trail and the emitted deposit.review_rejected signal. Requires the deposit_review capability, independent of scope -- see bearerAuth's description.
          */
         post: {
             parameters: {
@@ -2488,6 +2488,73 @@ export interface paths {
                     };
                 };
                 /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dev/credits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Credit a holder with no custodied asset behind it (developer mode).
+         * @description Simulates a deposit: posts the `dev_credit` template (DR main_wallet holder / CR dev_credit system counterpart), so the credited funds land in the holder's available balance and can drive real downstream flows. Disabled by default and answers FeatureNotEnabled (503) unless DEV_CREDIT_ENABLED=true, which the server only accepts when ENV=dev -- boot fails otherwise.
+         *
+         *     The resulting journal is an ordinary journal: append-only, corrected only through POST /journals/{uid}/reverse. Because its system leg is `dev_credit` rather than `custodial`, GET /platform/solvency counts the new liability with no offsetting asset and reports the shortfall -- by design. The shortfall equals the `dev_credit` account balance.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        holder_id: number;
+                        /** Format: uuid */
+                        currency_uid: string;
+                        amount: components["schemas"]["Decimal"];
+                        idempotency_key: string;
+                        /** Format: int64 */
+                        actor_id?: number;
+                        source?: string;
+                        metadata?: {
+                            [key: string]: string;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Journal created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JournalEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+                422: components["responses"]["DomainError"];
+                /** @description Developer credit not enabled on this server. */
                 503: {
                     headers: {
                         [name: string]: unknown;
