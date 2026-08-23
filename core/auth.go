@@ -309,10 +309,18 @@ const (
 	AuthStatusUnsignedNoAttestor AuthStatus = "unsigned_no_attestor"
 	// AuthStatusUnsignedTxMode: this journal was posted through a write
 	// path with no safe point to call an Attestor without violating
-	// financial.md's "no external calls inside a transaction" rule --
-	// PostJournal's tx-mode branch, ExecuteTemplateBatch, or a reversal --
-	// and the caller did not go through Authorize/PostAuthorized to close
-	// that gap for this specific posting.
+	// financial.md's "no external calls inside a transaction" rule -- a
+	// store bound via WithDB (i.e. any JournalWriter call composed inside
+	// ledger.Service.RunInTx, including PostJournal's tx-mode branch,
+	// ExecuteTemplateBatch, ReverseJournal, and ReverseJournalFraction all
+	// running that way) -- and the caller did not go through
+	// Authorize/PostAuthorized (or, for a reversal, AuthorizeReversal) to
+	// close that gap for this specific posting. Board #15 (W2-T1) closed
+	// this gap for ExecuteTemplateBatch/ReverseJournal/ReverseJournalFraction
+	// specifically in POOL mode (they self-manage their own transaction,
+	// the same structural opportunity PostJournal's pool-mode branch always
+	// had): those three now sign under a configured Attestor in pool mode
+	// and only fall back to this status in genuine tx mode.
 	AuthStatusUnsignedTxMode AuthStatus = "unsigned_tx_mode"
 )
 

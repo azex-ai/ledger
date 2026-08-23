@@ -46,6 +46,41 @@ type JournalWriter interface {
 	// amount, so e.g. two 1/3 steps of 100.01 cover 33.34+33.34 and the exact
 	// remainder 33.33 is not expressible as a fraction of the original).
 	ReverseJournalFraction(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (*Journal, error)
+
+	// AuthorizeReversal pre-authorizes the reversal ReverseJournal (num=1,
+	// den=1) or ReverseJournalFraction (any valid num/den) would post,
+	// entirely outside any database transaction, mirroring
+	// Authorize/AuthorizeTemplate's split for a plain JournalInput (design
+	// doc §7.5) -- extended to cover reversals by board #15 (W2-T1),
+	// because a reversal's entries are DERIVED from the original journal's
+	// (read from the DB) rather than caller-supplied, so they cannot be
+	// signed until that read happens.
+	//
+	// idempotencyKey must never be empty: callers reproducing
+	// ReverseJournal's auto-derived key must pass
+	// fmt.Sprintf("reversal:%s:%s", journalUID, reason) explicitly (see
+	// ReverseJournal's doc comment for why that exact format matters); this
+	// method never invents one itself.
+	//
+	// Like Authorize, this must run on a pool-mode store (not one obtained
+	// via WithDB / a RunInTx callback) and returns core.ErrInvalidInput
+	// otherwise.
+	//
+	// Callers must not treat the returned AuthorizedJournal as a stable
+	// commitment: because its Input.Entries are derived from mutable state
+	// (the original journal's prior reversal history, for the num==den
+	// "reverse everything remaining" form), a concurrent partial reversal
+	// landing between this call and the eventual post can invalidate it.
+	// That is not a signing bug -- it is why ReverseJournal /
+	// ReverseJournalFraction, not PostAuthorized, are the only supported
+	// consumers of this method's result: they re-derive the same entries
+	// fresh under the original journal's row lock and compare digests,
+	// failing the post outright (never silently re-signing or falling back
+	// to unsigned) if the two disagree. Posting this result via the
+	// generic PostAuthorized instead would skip that row-locked
+	// re-verification and the overshoot/already-fully-reversed checks
+	// ReverseJournal/ReverseJournalFraction perform -- do not do that.
+	AuthorizeReversal(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (AuthorizedJournal, error)
 }
 
 // TemplateBatchExecutor executes multiple templates as a single atomic unit:

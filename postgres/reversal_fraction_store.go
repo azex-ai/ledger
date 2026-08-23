@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,6 +44,13 @@ type entryDimKey struct {
 // transaction so the lock covers both the cumulative-amount check and the
 // write). In tx mode (store bound via WithDB) it participates in the
 // caller's transaction; commit/rollback is the caller's responsibility.
+//
+// Pool mode with an Attestor configured additionally pre-authorizes the
+// reversal via AuthorizeReversal, strictly before pool.Begin (board #15,
+// W2-T1 -- closing the same signing gap design doc §7.5 closed for
+// PostJournal, extended here to cover reversals). See
+// reverseJournalFractionWithQueries's doc comment for how the pre-computed
+// signature is validated against what the row lock actually finds.
 func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (*core.Journal, error) {
 	if err := core.ValidateReversalFraction(num, den); err != nil {
 		return nil, err
@@ -52,7 +60,17 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalUID str
 	}
 
 	if s.pool == nil {
-		return s.reverseJournalFractionWithQueries(ctx, s.q, journalUID, num, den, reason, idempotencyKey)
+		return s.reverseJournalFractionWithQueries(ctx, s.q, journalUID, num, den, reason, idempotencyKey, nil, journalAuth{status: core.AuthStatusUnsignedTxMode})
+	}
+
+	var preAuth *core.AuthorizedJournal
+	fallback := journalAuth{status: core.AuthStatusUnsignedNoAttestor}
+	if s.attestor != nil {
+		authorized, err := s.AuthorizeReversal(ctx, journalUID, num, den, reason, idempotencyKey)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal fraction: %w", err)
+		}
+		preAuth = &authorized
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -62,7 +80,7 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalUID str
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	journal, err := s.reverseJournalFractionWithQueries(ctx, qtx, journalUID, num, den, reason, idempotencyKey)
+	journal, err := s.reverseJournalFractionWithQueries(ctx, qtx, journalUID, num, den, reason, idempotencyKey, preAuth, fallback)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +91,25 @@ func (s *LedgerStore) ReverseJournalFraction(ctx context.Context, journalUID str
 	return journal, nil
 }
 
-func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, num, den int64, reason, idempotencyKey string) (*core.Journal, error) {
+// reverseJournalFractionWithQueries does the actual read-lock-write. preAuth,
+// when non-nil, is the result of a prior AuthorizeReversal call made outside
+// this transaction (ReverseJournalFraction's pool-mode branch, above): after
+// this function re-derives the reversal's entries fresh, under the original
+// journal's row lock (the only place that data can be trusted), it recomputes
+// the canonical digest and compares it to preAuth.Digest. A match means
+// nothing relevant changed between authorization and posting, so preAuth's
+// signature is used verbatim (auth_status = signed). A mismatch means a
+// concurrent partial reversal landed in between and changed what "reverse
+// num/den" actually resolves to for the num==den ("reverse everything
+// remaining") form -- the ONLY form whose entries depend on mutable state
+// (see reversalEntriesFor's doc comment) -- and the post is rejected
+// (core.ErrConflict) rather than silently using a stale signature, silently
+// falling back to unsigned, or calling the Attestor again from inside this
+// transaction (financial.md forbids that regardless). fallback is the
+// journalAuth used when preAuth is nil (no Attestor configured in pool mode,
+// or this call is running in tx mode where there was never a safe point to
+// call AuthorizeReversal at all -- see ReverseJournalFraction's doc comment).
+func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, num, den int64, reason, idempotencyKey string, preAuth *core.AuthorizedJournal, fallback journalAuth) (*core.Journal, error) {
 	expectedFraction := fmt.Sprintf("%d/%d", num, den)
 
 	pgUID, err := uidToPG(journalUID)
@@ -129,6 +165,84 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		return nil, err
 	}
 
+	// reversalEntriesFor holds the num==den ("reverse everything remaining")
+	// vs general-fraction branching (see its doc comment); this is the same
+	// derivation AuthorizeReversal ran, unlocked, before this transaction
+	// opened -- see the digest comparison below.
+	reversedEntries, err := s.reversalEntriesFor(ctx, q, entries, alreadyReversed, num, den)
+	if err != nil {
+		return nil, err
+	}
+
+	jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
+	if err != nil {
+		return nil, err
+	}
+	input := core.JournalInput{
+		JournalTypeUID: jt.UID,
+		IdempotencyKey: idempotencyKey,
+		Entries:        reversedEntries,
+		Source:         "reversal",
+		ReversalOfUID:  journalUID,
+		Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
+	}
+
+	// Default: no pre-authorization to honor (fallback, set by the caller --
+	// either unsigned_no_attestor in pool mode with no Attestor configured,
+	// or unsigned_tx_mode when this call has no safe point to have called
+	// AuthorizeReversal at all, i.e. tx mode). resolveEffectiveAt picks "now"
+	// exactly like PostJournal's tx-mode branch always has.
+	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+	auth := fallback
+	if preAuth != nil {
+		// Reuse the EXACT instant AuthorizeReversal signed, never a fresh
+		// "now" -- CanonicalJournalDigest covers effectiveAt, so resolving a
+		// second, different "now" here would make every comparison below
+		// fail even with zero concurrent state change (same reasoning as
+		// PostAuthorized reusing AuthorizedJournal.EffectiveAt instead of
+		// calling resolveEffectiveAt again).
+		effectiveAt = preAuth.EffectiveAt
+		digest, err := core.CanonicalJournalDigest(input, effectiveAt)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal fraction: recompute digest: %w", err)
+		}
+		if !bytes.Equal(digest, preAuth.Digest) {
+			return nil, fmt.Errorf(
+				"postgres: reverse journal fraction: reversal intent changed since AuthorizeReversal ran (a concurrent reversal of journal %q likely landed in between); retry: %w",
+				journalUID, core.ErrConflict,
+			)
+		}
+		auth = journalAuth{digest: preAuth.Digest, signature: preAuth.Signature, keyID: preAuth.KeyID, status: preAuth.Status}
+	}
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, auth)
+}
+
+// reversalEntriesFor derives the entries a reversal covering num/den of
+// original's entries (rows in entries) would post, given alreadyReversed
+// (cumulative amount already reversed per account dimension, from
+// cumulativeReversedByDimension). It has no DB writes and no side effects
+// beyond read-only dimension lookups, so it produces byte-identical output
+// whenever entries/alreadyReversed are byte-identical -- the property that
+// lets AuthorizeReversal (unlocked, outside any transaction) and
+// reverseJournalFractionWithQueries (under the original journal's row lock)
+// safely share it: if reversal history has not changed between the two
+// calls, they get the same []core.EntryInput and therefore the same
+// core.CanonicalJournalDigest, so a signature obtained outside the
+// transaction is still valid once the lock is taken.
+//
+// Only the num == den branch ("reverse everything remaining": each entry's
+// amount is its original minus what prior reversals already covered) reads
+// alreadyReversed at all -- the general proportional-split branch (num !=
+// den) computes each entry's share purely from the ORIGINAL journal's own
+// entries, so its output can never differ between an unlocked call and a
+// locked one; the overshoot check there rejects the whole post if
+// alreadyReversed grew too large in between, but it does not change what
+// entries would have been derived. This is why a concurrent partial
+// reversal landing between AuthorizeReversal and the eventual post can only
+// ever invalidate a num==den authorization, never a fractional one -- see
+// reverseJournalFractionWithQueries's digest-comparison guard for what
+// happens when it does.
+func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries, entries []sqlcgen.ListJournalEntriesRow, alreadyReversed map[entryDimKey]decimal.Decimal, num, den int64) ([]core.EntryInput, error) {
 	// num == den is the "reverse everything remaining" form: each entry's
 	// reversal amount is exactly its original amount minus what prior
 	// reversals already covered. This is the only way to complete a reversal
@@ -169,27 +283,9 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 			})
 		}
 		if len(reversedEntries) == 0 {
-			return nil, fmt.Errorf("postgres: reverse journal fraction: journal %d is already fully reversed: %w", journalID, core.ErrConflict)
+			return nil, fmt.Errorf("postgres: reverse journal fraction: journal is already fully reversed: %w", core.ErrConflict)
 		}
-		jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
-		if err != nil {
-			return nil, err
-		}
-		input := core.JournalInput{
-			JournalTypeUID: jt.UID,
-			IdempotencyKey: idempotencyKey,
-			Entries:        reversedEntries,
-			Source:         "reversal",
-			ReversalOfUID:  journalUID,
-			Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
-		}
-		// Never signs -- same reasoning as executeTemplateBatchWithQueries:
-		// this always runs inside a transaction already opened above, either
-		// self-owned or the caller's (out of scope for design doc §7.5's
-		// Authorize/PostAuthorized split; labeled unsigned_tx_mode, not left
-		// ambiguous).
-		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-		return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
+		return reversedEntries, nil
 	}
 
 	// Group original entries by (currency, entry_type) so each group's total
@@ -283,25 +379,92 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		})
 	}
 	if len(reversedEntries) == 0 {
-		return nil, fmt.Errorf("postgres: reverse journal fraction: fraction %d/%d of journal %s rounds to zero on every entry: %w", num, den, journalUID, core.ErrInvalidInput)
+		return nil, fmt.Errorf("postgres: reverse journal fraction: fraction %d/%d rounds to zero on every entry: %w", num, den, core.ErrInvalidInput)
+	}
+	return reversedEntries, nil
+}
+
+// AuthorizeReversal computes the canonical digest of the reversal
+// ReverseJournal (num=1, den=1) or ReverseJournalFraction (any valid
+// num/den) would post, and signs it if an Attestor is configured -- entirely
+// outside any database transaction (design doc §7.2/§7.5, extended to cover
+// reversals by board #15, W2-T1). See core.JournalWriter's doc comment for
+// the full contract and the caveats about what a caller may safely do with
+// the result.
+//
+// Unlike Authorize (which signs a caller-supplied core.JournalInput
+// verbatim), a reversal's entries are DERIVED from the original journal --
+// this method reads it, its entries, and its prior reversal history via an
+// ordinary (unlocked) query, uses exactly the same derivation
+// (reversalEntriesFor) reverseJournalFractionWithQueries uses under the row
+// lock, then hands the resulting core.JournalInput to Authorize. That is
+// what makes the digest comparison at post time meaningful: same inputs,
+// same function, same output.
+func (s *LedgerStore) AuthorizeReversal(ctx context.Context, journalUID string, num, den int64, reason string, idempotencyKey string) (core.AuthorizedJournal, error) {
+	if s.pool == nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: called on a transaction-bound store; AuthorizeReversal must run before opening a transaction, not from inside RunInTx: %w", core.ErrInvalidInput)
+	}
+	if err := core.ValidateReversalFraction(num, den); err != nil {
+		return core.AuthorizedJournal{}, err
+	}
+	if idempotencyKey == "" {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: idempotency key required: %w", core.ErrInvalidInput)
 	}
 
-	jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
+	pgUID, err := uidToPG(journalUID)
 	if err != nil {
-		return nil, err
+		return core.AuthorizedJournal{}, err
 	}
+	// Unlocked read: this runs outside any transaction, so there is no row
+	// lock to take. The row lock that actually protects against a
+	// concurrent partial reversal is taken later, inside
+	// reverseJournalFractionWithQueries -- this call only produces a
+	// best-effort intent to sign, which that lock-protected code
+	// re-validates (via the digest comparison) before trusting it.
+	original, err := s.q.GetJournalByUID(ctx, pgUID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: journal %q: %w", journalUID, core.ErrNotFound)
+		}
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: get journal: %w", err)
+	}
+	if original.ReversalOf.Valid {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: journal %q is already a reversal: %w", journalUID, core.ErrConflict)
+	}
+
+	entries, err := s.q.ListJournalEntries(ctx, original.ID)
+	if err != nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: list entries: %w", err)
+	}
+	if len(entries) == 0 {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: journal %q has no entries: %w", journalUID, core.ErrNotFound)
+	}
+
+	alreadyReversed, err := cumulativeReversedByDimension(ctx, s.q, original.ID)
+	if err != nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: %w", err)
+	}
+
+	reversedEntries, err := s.reversalEntriesFor(ctx, s.q, entries, alreadyReversed, num, den)
+	if err != nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: %w", err)
+	}
+
+	jt, err := s.dims.jtByIDOrErr(ctx, s.q, original.JournalTypeID)
+	if err != nil {
+		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: %w", err)
+	}
+
 	input := core.JournalInput{
 		JournalTypeUID: jt.UID,
 		IdempotencyKey: idempotencyKey,
 		Entries:        reversedEntries,
 		Source:         "reversal",
 		ReversalOfUID:  journalUID,
-		Metadata:       map[string]string{"reason": reason, "reversal_fraction": expectedFraction},
+		Metadata:       map[string]string{"reason": reason, "reversal_fraction": fmt.Sprintf("%d/%d", num, den)},
 	}
 
-	// Never signs -- same reasoning as above.
-	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
+	return s.Authorize(ctx, input)
 }
 
 // cumulativeReversedByDimension sums, per account dimension and *original*
