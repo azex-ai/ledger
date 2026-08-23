@@ -28,7 +28,7 @@ func TestVerifyLedger_VerifiedOnAHealthyChain(t *testing.T) {
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(seedAttestor)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
-	attestSvc := service.NewAttestationService(attestStore, seedAttestor, anchor, core.NewEngine())
+	attestSvc := service.NewAttestationService(attestStore, seedAttestor, nil, anchor, core.NewEngine())
 
 	// Post a couple of real, signed journals through the normal write
 	// path (not the forged-SQL helper) so step 4's sampling has something
@@ -116,7 +116,7 @@ func TestVerifyLedger_TamperedOnBrokenChainLink(t *testing.T) {
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
-	attestSvc := service.NewAttestationService(attestStore, attestor, anchor, core.NewEngine())
+	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	_, _, err = attestSvc.RunAttestBatch(ctx, 100) // seq 1
 	require.NoError(t, err)
@@ -151,7 +151,7 @@ func TestVerifyLedger_TamperedOnDeletedEntry(t *testing.T) {
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
-	attestSvc := service.NewAttestationService(attestStore, attestor, anchor, core.NewEngine())
+	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	// A balanced pair (P3's migration 044 deferred constraint trigger now
 	// enforces per-journal, per-currency balance at commit time even for
@@ -201,7 +201,7 @@ func TestVerifyLedger_DriftWhenAnchorIsBehind(t *testing.T) {
 	// No anchor wired into AttestationService -- RunAttestBatch below
 	// never publishes, so the anchor (used only for verify) stays empty
 	// while the DB chain advances.
-	attestSvc := service.NewAttestationService(attestStore, attestor, nil, core.NewEngine())
+	attestSvc := service.NewAttestationService(attestStore, attestor, nil, nil, core.NewEngine())
 
 	_, _, err = attestSvc.RunAttestBatch(ctx, 100)
 	require.NoError(t, err)

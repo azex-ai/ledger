@@ -177,7 +177,17 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 			// tree root) and kept its original v1 root_hash semantics
 			// forever (design doc §9.4 -- see migration 048's header for
 			// why a v1 row is never retroactively upgraded).
+			// isV3 (T4, design doc §8 extended): empty a.AuthVerdictDigest
+			// means either this row predates migration 054, or the
+			// AttestationService that built it had no AuthVerifier
+			// configured -- either way it kept its v1/v2 root_hash
+			// semantics forever, same reasoning as isV2. A v3 row is
+			// always ALSO v2 (RunAttestBatch only computes
+			// AuthVerdictDigest when it also has a real MerkleRoot -- P7
+			// shipped unconditionally before T4 existed), so isV3 implies
+			// isV2, never the reverse.
 			isV2 := len(a.MerkleRoot) > 0
+			isV3 := len(a.AuthVerdictDigest) > 0
 			// storedLeafEntryIDs/storedLeafHashes are populated only once
 			// the stored entry_attestations.leaf_hash values have been
 			// confirmed self-consistent with a.MerkleRoot below -- an
@@ -234,6 +244,43 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 				}
 			}
 
+			// T4 (design doc §8 extended): recompute AuthVerdictDigest from a
+			// LIVE core.VerifyJournalAuth pass over this batch's distinct
+			// journals (the same amortized check RunAttestBatch ran at
+			// attestation time) and compare it against the stored, signed
+			// value. This is the drift check that lets the fast,
+			// withdrawal-time path (postgres.VerifiedBalanceStore) trust a
+			// cached entry_attestations.auth_verdict without redoing this
+			// work on every call: a mismatch here (a journal's stored auth
+			// columns edited without a valid re-sign, or a fabricated
+			// entry_attestations row claiming a verdict that was never
+			// actually computed) is exactly the class of tamper P6's
+			// periodic full verify exists to catch, same as the batch_digest
+			// and merkle_root checks above.
+			if isV3 {
+				distinctJournalIDs := make([]int64, 0, len(entries))
+				seenJournal := make(map[int64]struct{}, len(entries))
+				for _, e := range entries {
+					if _, ok := seenJournal[e.JournalID]; !ok {
+						seenJournal[e.JournalID] = struct{}{}
+						distinctJournalIDs = append(distinctJournalIDs, e.JournalID)
+					}
+				}
+				if verdictByJournal, err := verdictsForJournals(ctx, store, verifier, distinctJournalIDs, nil); err != nil {
+					tampered("seq %d: recompute auth verdicts: %v", a.Seq, err)
+				} else {
+					liveVerdicts := make([]core.JournalAuthVerdict, len(entries))
+					for i, e := range entries {
+						liveVerdicts[i] = verdictByJournal[e.JournalID]
+					}
+					if recomputedVerdictDigest, err := core.AuthVerdictDigest(entries, liveVerdicts); err != nil {
+						tampered("seq %d: recompute auth verdict digest: %v", a.Seq, err)
+					} else if !bytes.Equal(recomputedVerdictDigest, a.AuthVerdictDigest) {
+						tampered("seq %d: auth_verdict_digest mismatch (a cached journal authorization verdict no longer matches a live recheck)", a.Seq)
+					}
+				}
+			}
+
 			// P7 localization (design doc §9.1/§9.4): a content mismatch
 			// only names the seq so far. Prefer the self-contained path
 			// (stored, verified-consistent leaf hashes -- no operator
@@ -281,9 +328,12 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 			{
 				var recomputedRootHash []byte
 				var err error
-				if isV2 {
+				switch {
+				case isV3:
+					recomputedRootHash, err = core.AttestationRootHashV3(a.Seq, prevRoot, a.BatchDigest, a.MerkleRoot, a.AuthVerdictDigest, a.EntryCount)
+				case isV2:
 					recomputedRootHash, err = core.AttestationRootHashV2(a.Seq, prevRoot, a.BatchDigest, a.MerkleRoot, a.EntryCount)
-				} else {
+				default:
 					recomputedRootHash, err = core.AttestationRootHash(a.Seq, prevRoot, a.BatchDigest, a.EntryCount)
 				}
 				if err != nil || !bytes.Equal(recomputedRootHash, a.RootHash) {

@@ -1,0 +1,68 @@
+-- 054_attested_auth_verdict.up.sql
+--
+-- T4 of the integrity-hardening wave
+-- (docs/plans/2026-08-21-tamper-evident-ledger-design.md §8, extended;
+-- docs/plans/2026-08-21-integrity-hardening-contracts.md §W3-B): binds
+-- each attestation batch's per-journal P5 authorization check
+-- (core.VerifyJournalAuth) into the batch's own signed content, so a
+-- withdrawal-time core.VerifiedBalanceReader call can trust an already-
+-- attested entry's cached verdict instead of paying the naive path's
+-- per-journal DB round trip + crypto verify every single time.
+--
+-- Measured motivation (.local/bench-verify-2026-08-23.md): the naive
+-- per-journal verify costs ~216-240us, of which only ~36us is the
+-- cryptographic work (core.VerifyJournalAuth itself) -- ~84% is the single
+-- `journals JOIN journal_entries` round trip needed to reconstruct a
+-- JournalInput from the database. The naive path already costs more than
+-- one full PostJournal write (2.55ms) once an account has roughly 10-12
+-- contributing journals, and grows linearly, unbounded, for the lifetime
+-- of any account. T4 amortizes that cost: the attestation worker (which
+-- already reads every entry once per batch) also verifies each distinct
+-- journal's signature once, and binds the pass/fail verdict into content
+-- an external anchor (P6/I-28) already protects. A later VerifiedBalance
+-- call for an already-attested entry needs zero DB round trips beyond
+-- fetching the verdict itself (already joined into the discovery query),
+-- and zero additional crypto verification.
+--
+-- entry_attestations.auth_verdict: core.JournalAuthVerdict as observed for
+-- this entry's journal AT ATTESTATION TIME (a cached fact, never a live
+-- re-derivation at read time). '' (core.JournalAuthVerdictUnknown) is the
+-- sentinel for "predates this migration" or "the AttestationService that
+-- built this batch had no core.AuthVerifier configured" -- callers MUST
+-- treat it exactly like an unattested (tail) entry: fall back to a live
+-- core.VerifyJournalAuth. Treating '' as a passing verdict would silently
+-- widen what counts as authorized; treating it as a failing verdict would
+-- make every pre-T4 account permanently UNDEFINED the moment T4 ships --
+-- both are wrong, so the sentinel means "no cached answer", not an answer
+-- (same reasoning as auth_status's own empty-default sentinel, 051, and
+-- merkle_root's empty-means-v1 sentinel, 048).
+--
+-- This is coverage-independent: P6's entry_attestations row still exists
+-- (and still proves the entry was not deleted) for EVERY entry the worker
+-- processes, regardless of whether its journal's cached verdict is
+-- authorized, unauthorized, or (pre-T4) unknown -- P6's DELETE-detection
+-- purpose and P5's authorization-signature purpose are orthogonal checks
+-- that happen to share one side table for storage convenience. Filtering
+-- entries OUT of coverage based on the auth check would silently regress
+-- DELETE-detection for every pre-P5, historically-unsigned entry.
+--
+-- ledger_attestations.auth_verdict_digest: the domain-separated digest
+-- (core.AuthVerdictDigest, separator 0x13) binding every covered entry's
+-- verdict into this batch's own signed root_hash -- root hash v3
+-- (core.AttestationRootHashV3, separator 0x12, contracts §2.6) additionally
+-- covers this alongside v2's existing batch_digest/merkle_root. ''
+-- (unset) means this row predates migration 054, OR was built by an
+-- AttestationService with no core.AuthVerifier configured (T4 is additive
+-- and opt-in, same as P5 itself) -- either way it keeps its original v1/v2
+-- root_hash semantics forever, for the same "never retroactively upgrade a
+-- signed row" reasoning migration 048 gives for merkle_root (see that
+-- migration's header): re-deriving and re-signing history is not
+-- something this session (or any session without the original KMS key)
+-- can do, and there is no such thing as "rename in place" for a value a
+-- signature already covers.
+ALTER TABLE entry_attestations
+    ADD COLUMN IF NOT EXISTS auth_verdict TEXT NOT NULL DEFAULT ''
+    CHECK (auth_verdict IN ('', 'authorized', 'unauthorized'));
+
+ALTER TABLE ledger_attestations
+    ADD COLUMN IF NOT EXISTS auth_verdict_digest BYTEA NOT NULL DEFAULT ''::bytea;

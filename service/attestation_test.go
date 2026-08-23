@@ -184,7 +184,7 @@ func TestAttestationService_LateArrivingEntryIsEventuallyCoveredExactlyOnce(t *t
 
 	attestor := newTestAttestor(t, "attest-key-1")
 	store := postgres.NewAttestationStore(pool)
-	svc := service.NewAttestationService(store, attestor, nil, core.NewEngine())
+	svc := service.NewAttestationService(store, attestor, nil, nil, core.NewEngine())
 
 	// Two SEPARATE journals (design doc §8.2: "两个不同 (holder,currency)
 	// 的 journal") -- each gets its own balanced debit+credit pair,
@@ -252,7 +252,7 @@ func TestAttestationService_EmptyBatchStillProducesAnAttestation(t *testing.T) {
 
 	attestor := newTestAttestor(t, "attest-key-2")
 	store := postgres.NewAttestationStore(pool)
-	svc := service.NewAttestationService(store, attestor, nil, core.NewEngine())
+	svc := service.NewAttestationService(store, attestor, nil, nil, core.NewEngine())
 
 	attested, seq, err := svc.RunAttestBatch(ctx, 100)
 	require.NoError(t, err)
@@ -273,7 +273,7 @@ func TestAttestationService_ChainLinksPrevRoot(t *testing.T) {
 
 	attestor := newTestAttestor(t, "attest-key-3")
 	store := postgres.NewAttestationStore(pool)
-	svc := service.NewAttestationService(store, attestor, nil, core.NewEngine())
+	svc := service.NewAttestationService(store, attestor, nil, nil, core.NewEngine())
 
 	// seq 1: empty.
 	_, seq1, err := svc.RunAttestBatch(ctx, 100)
@@ -303,7 +303,7 @@ func TestAttestationService_RequiresAttestor(t *testing.T) {
 	ctx := context.Background()
 
 	store := postgres.NewAttestationStore(pool)
-	svc := service.NewAttestationService(store, nil, nil, core.NewEngine())
+	svc := service.NewAttestationService(store, nil, nil, nil, core.NewEngine())
 
 	_, _, err := svc.RunAttestBatch(ctx, 100)
 	require.Error(t, err)
@@ -386,7 +386,7 @@ func TestAttestationService_PublishesToAnchor(t *testing.T) {
 	attestor := newTestAttestor(t, "attest-key-4")
 	store := postgres.NewAttestationStore(pool)
 	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
-	svc := service.NewAttestationService(store, attestor, anchor, core.NewEngine())
+	svc := service.NewAttestationService(store, attestor, nil, anchor, core.NewEngine())
 
 	_, seq, err := svc.RunAttestBatch(ctx, 100)
 	require.NoError(t, err)
@@ -412,7 +412,7 @@ func TestAttestationService_CatchesUpAnchorAfterTransientFailure(t *testing.T) {
 	store := postgres.NewAttestationStore(pool)
 	realAnchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
 	flaky := &failingAnchor{inner: realAnchor, failCount: 1}
-	svc := service.NewAttestationService(store, attestor, flaky, core.NewEngine())
+	svc := service.NewAttestationService(store, attestor, nil, flaky, core.NewEngine())
 
 	// Run 1: attestation is created in the DB, but Publish fails (the
 	// anchor never learns about seq 1).
