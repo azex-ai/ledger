@@ -415,3 +415,74 @@ T4 只是**换掉它背后怎么算出答案**。两者不冲突，T4 落地时 
 `git status --short` 会隐藏 rebase 中断、
 done 汇报必须带 commit hash、合并 main 后必须重跑、
 `INVARIANTS.md` 的顺序与 pin 引用有机器门禁（含族引用 `Foo_*` 的已知局限）。
+
+
+---
+
+# Wave 3 契约层（2026-08-23）
+
+> 起因：Aaron 拍板「T4 与 7 月 CARRY 遗留都要做」。
+> **Lead 先更正一处自己的误报**：CARRY #3（openapi 校验进 CI）此前被我报成
+> 「已被验证缺失两次」—— **错的**。`.github/workflows/ledger-react.yml` 在
+> `docs/openapi.yaml` 变动时（push 与 pull_request 都触发）跑 `codegen:check`
+> （`openapi-typescript` + `git diff --exit-code`），YAML 语法错与 schema.ts 漂移**都已覆盖**。
+> 我把「我本地没自动跑」误当成了「CI 没有 gate」。真实缺口只是**本地缺快速检查**。
+
+## W3-0 全局命名空间分配（开工前枚举，不等撞上）
+
+| 命名空间 | 分配 |
+|---|---|
+| migration 号 | `054` = T4（早已预留）；`055` = W3-A（若需记录 ingester 身份） |
+| invariant ID | `I-33` = T4；`I-34` = W3-A（职责分离）。`INVARIANTS.md` 现到 I-32 |
+| hash domain separator | `0x12` = T4 的 root hash v3（含授权结论），早已预留 |
+| reconcile check 名 | 本波预期不新增；要加先 `bus send team-lead` |
+| `.sql` 查询文件 | T4 独占 `queries/integrity_attested_auth.sql`；W3-A 无新查询文件 |
+| **`server.Scope` 枚举值** | ⚠️ **W3-A 独占** —— 这是对外契约（API key scope），**不得由其他任务新增** |
+| `core.AuthStatus` 枚举值 | 仍然：**不得自行新增** |
+| `core/interfaces.go` | 只追加不重排（T4 与 W3-A 可能同时碰） |
+
+## W3-A 职责分离（CARRY #2 的 mi2 + mi5）
+
+### mi2 —— 已确认的真洞
+
+`server/routes.go` 的 `ScopeWrite` 组同时包含
+`POST /bookings`、`POST /bookings/{uid}/transition`
+与 `POST /deposits/{uid}/review/approve`。**一把 ScopeWrite key 能自造大额充值并自批**，
+使 crypto-deposit 设计 §9.2 的 `AutoCreditCeiling` 上限闸失效
+（该闸的全部意义是防单一来源无上限铸币）。
+
+**库的义务是「让两者可分离」**，不是替消费方决定谁批准谁。当前三个 scope
+（read/write/admin）**结构上做不到分离** —— 这是库的缺陷。
+
+### mi5 —— 静默卡死
+
+第二源对账长期不可用时，合法充值**永久卡在 `confirming`**，无信号。
+这是 `working-agreements` §3 的形态：什么都没发生与做完了不可区分。
+连续失败 N 次后必须**进 review 或告警**，N 由消费方注入（**库不设默认值**，
+沿用 M3.1 secure-by-default 先例）。
+
+## W3-B T4 —— attestation 分摊验签
+
+实测依据（`.local/bench-verify-2026-08-23.md`）：朴素路径 crossover 在
+**~10–12 条贡献 journal**，成本随账户生命周期线性无界；每 journal ~216–240µs 中
+**只有 ~36µs 是密码学，~84% 是 DB 往返**。所以要打的是**往返次数**，不是签名速度。
+
+批量取数（一次取回全部 journal 的 auth 材料 + entries）能拿 **~5–6x 常数级**改善
+（报告 §4.5，**标注为估算不是实测**），**但改不了 O(N) 的形状**。
+
+**T4 = 把「每笔 journal 的授权验证结论」绑进被签名、被外部锚保护的 attestation 内容**，
+worker 每批验一次；提现时只需验 attestation 链（O(批数)）+ 未 attest 的尾巴（上限 =
+attestation 间隔）。这是 CT 的做法，也是 P5 与 P6 两件已有成果的自然组合。
+
+**接缝已就位**：`core.VerifiedBalanceReader`（W2-T2）的 port 形状不变，
+T4 只换 `postgres.VerifiedBalanceStore` 内部实现，**调用方零改动**。
+
+## W3-C CARRY 收口（#1 / #3 / #4）
+
+**以实跑为准，不以阅读为准**：
+- `#1`：`web/` 的 `npm ci && build && typecheck && test` 实跑；house-rules 门禁按
+  `nextjs.md` 逐条核（金额 `financial-display`、数据展示四态、a11y、list keys、用户表面不泄露实现）
+- `#3`：CI 已覆盖（见上）。**只需补一个本地快速检查**（`make` 目标），让人在 push 前就发现
+- `#4`：`docs/frontend.md` 已有 24 处相关命中，**先核实缺什么再补**，不要重写已有内容
+
+三条都**先给证据再动手**；确认已完成的直接 `bus done` 并附证据，不要为了「有产出」而改。
