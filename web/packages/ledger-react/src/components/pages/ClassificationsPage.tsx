@@ -110,7 +110,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
 }
 
 export function ClassificationsPage() {
-  const { data, isLoading, isError } = useClassifications();
+  const { data, isLoading, isError, refetch } = useClassifications();
   const classifications = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(classifications);
 
@@ -121,7 +121,7 @@ export function ClassificationsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load classifications" />
+        <ErrorState message="Failed to load classifications" onRetry={refetch} />
       ) : classifications.length === 0 ? (
         <EmptyState
           icon={Tags}

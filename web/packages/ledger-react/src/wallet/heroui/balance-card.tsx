@@ -123,11 +123,11 @@ export interface WalletBalanceCardProps {
 
 /** One currency's balance card: total + available / pending / on-hold rows. */
 export function WalletBalanceCard({ currencyUid, actions }: WalletBalanceCardProps) {
-  const { data, isLoading, isError } = useWalletBalance(currencyUid);
+  const { data, isLoading, isError, refetch } = useWalletBalance(currencyUid);
   const holds = useWalletHolds();
 
   if (isLoading) return <BalanceCardSkeleton />;
-  if (isError) return <ErrorState message="Couldn't load your balance. Please try again." />;
+  if (isError) return <ErrorState message="Couldn't load your balance. Please try again." onRetry={refetch} />;
   const balance = data?.[0];
   if (!balance) {
     return (
@@ -150,7 +150,7 @@ export interface WalletBalancesProps {
 
 /** All of the holder's currencies, one balance card each. */
 export function WalletBalances({ actions }: WalletBalancesProps) {
-  const { data, isLoading, isError } = useWalletBalance();
+  const { data, isLoading, isError, refetch } = useWalletBalance();
   const holds = useWalletHolds();
 
   if (isLoading) {
@@ -161,7 +161,7 @@ export function WalletBalances({ actions }: WalletBalancesProps) {
       </div>
     );
   }
-  if (isError) return <ErrorState message="Couldn't load your balances. Please try again." />;
+  if (isError) return <ErrorState message="Couldn't load your balances. Please try again." onRetry={refetch} />;
   if (!data || data.length === 0) {
     return (
       <EmptyState

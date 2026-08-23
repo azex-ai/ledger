@@ -252,7 +252,7 @@ export function WithdrawalsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useWithdrawals(params);
   const withdrawals = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -280,7 +280,7 @@ export function WithdrawalsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load withdrawals" />
+        <ErrorState message="Failed to load withdrawals" onRetry={refetch} />
       ) : withdrawals.length === 0 ? (
         <EmptyState
           icon={ArrowUpFromLine}

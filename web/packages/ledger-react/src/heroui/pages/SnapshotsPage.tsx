@@ -27,7 +27,7 @@ export function SnapshotsPage() {
   // across unrelated re-renders — no inline-object refetch storm.
   const [query, setQuery] = useState<SnapshotQuery>({});
 
-  const { data, isLoading, isError } = useSnapshots(query);
+  const { data, isLoading, isError, refetch } = useSnapshots(query);
   const snapshots = data ?? [];
   const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
   const hasSearched = Object.keys(query).length > 0;
@@ -86,7 +86,7 @@ export function SnapshotsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load snapshots" />
+        <ErrorState message="Failed to load snapshots" onRetry={refetch} />
       ) : snapshots.length === 0 ? (
         <EmptyState
           title={hasSearched ? "No snapshots found" : "Enter search criteria to view snapshots"}

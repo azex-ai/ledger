@@ -410,7 +410,7 @@ export function WithdrawalsPage() {
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
   const params = useMemo(() => ({ status: statusFilter || undefined }), [statusFilter]);
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useWithdrawals(params);
   const withdrawals = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -449,7 +449,7 @@ export function WithdrawalsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load withdrawals" />
+        <ErrorState message="Failed to load withdrawals" onRetry={refetch} />
       ) : withdrawals.length === 0 ? (
         <EmptyState
           title="No withdrawals found"

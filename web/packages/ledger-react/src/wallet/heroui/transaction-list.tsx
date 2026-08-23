@@ -81,13 +81,13 @@ export function TransactionList({
   renderItem,
   limit = 20,
 }: TransactionListProps = {}) {
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useWalletTransactions(limit);
   const transactions = data?.pages.flatMap((p) => p.list) ?? [];
 
   if (isLoading) return <ListSkeleton />;
   if (isError) {
-    return <ErrorState message="Couldn't load your transactions. Please try again." />;
+    return <ErrorState message="Couldn't load your transactions. Please try again." onRetry={refetch} />;
   }
   if (transactions.length === 0) {
     return (

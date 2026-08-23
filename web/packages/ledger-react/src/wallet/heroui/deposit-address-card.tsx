@@ -53,7 +53,7 @@ function CopyAddressButton({ address }: { address: string }) {
  * generating one is the only write in this otherwise read-only wallet surface.
  */
 export function DepositAddressCard() {
-  const { data, isLoading, isError, error } = useWalletDepositAddress();
+  const { data, isLoading, isError, error, refetch } = useWalletDepositAddress();
   const ensure = useEnsureWalletDepositAddress();
 
   if (isLoading) return <DepositAddressCardSkeleton />;
@@ -62,7 +62,7 @@ export function DepositAddressCard() {
 
   if (isError && !notFound) {
     return (
-      <ErrorState message="Couldn't load your deposit address. Please try again." />
+      <ErrorState message="Couldn't load your deposit address. Please try again." onRetry={refetch} />
     );
   }
 

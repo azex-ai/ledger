@@ -201,7 +201,7 @@ export function ReservationsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useReservations(params);
   const reservations = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -230,7 +230,7 @@ export function ReservationsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load reservations" />
+        <ErrorState message="Failed to load reservations" onRetry={refetch} />
       ) : reservations.length === 0 ? (
         <EmptyState
           icon={Lock}

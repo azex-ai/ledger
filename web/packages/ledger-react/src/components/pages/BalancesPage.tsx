@@ -19,7 +19,7 @@ import { ErrorState } from "../error-state";
 export function BalancesPage() {
   const [holderInput, setHolderInput] = useState("");
   const [holder, setHolder] = useState(0);
-  const { data, isLoading, isError } = useBalances(holder);
+  const { data, isLoading, isError, refetch } = useBalances(holder);
   const balances = data ?? [];
 
   // Memo so the dates are stable across re-renders. Without this, useSnapshots
@@ -78,7 +78,7 @@ export function BalancesPage() {
           {isLoading ? (
             <div className="h-40 animate-shimmer rounded" />
           ) : isError ? (
-            <ErrorState message="Failed to load balances" />
+            <ErrorState message="Failed to load balances" onRetry={refetch} />
           ) : balances.length === 0 ? (
             <p className="text-sm text-muted-foreground">No balances found for holder {holder}</p>
           ) : (
