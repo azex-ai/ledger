@@ -155,7 +155,7 @@ function RejectDialog({ booking }: { booking: Booking }) {
 }
 
 export function DepositReviewsPage() {
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useDepositReviews(20);
   const reviews = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -169,7 +169,7 @@ export function DepositReviewsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load deposit reviews" />
+        <ErrorState message="Failed to load deposit reviews" onRetry={refetch} />
       ) : reviews.length === 0 ? (
         <EmptyState
           icon={ShieldCheck}

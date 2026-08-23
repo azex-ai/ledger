@@ -242,7 +242,7 @@ export function DepositsPage() {
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
   const params = useMemo(() => ({ status: statusFilter || undefined }), [statusFilter]);
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useDeposits(params);
   const deposits = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -281,7 +281,7 @@ export function DepositsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load deposits" />
+        <ErrorState message="Failed to load deposits" onRetry={refetch} />
       ) : deposits.length === 0 ? (
         <EmptyState
           title="No deposits found"

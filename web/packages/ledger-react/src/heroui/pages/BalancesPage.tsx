@@ -31,7 +31,7 @@ const CHART_COLORS = [
 export function BalancesPage() {
   const [holderInput, setHolderInput] = useState("");
   const [holder, setHolder] = useState(0);
-  const { data, isLoading, isError } = useBalances(holder);
+  const { data, isLoading, isError, refetch } = useBalances(holder);
   const balances = data ?? [];
 
   const submitHolder = () => setHolder(parseInt(holderInput, 10) || 0);
@@ -96,7 +96,7 @@ export function BalancesPage() {
           {isLoading ? (
             <TableSkeleton rows={4} />
           ) : isError ? (
-            <ErrorState message="Failed to load balances" />
+            <ErrorState message="Failed to load balances" onRetry={refetch} />
           ) : balances.length === 0 ? (
             <EmptyState
               title="No balances found"

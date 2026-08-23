@@ -2,10 +2,11 @@
 
 import { useHealth } from "../../hooks/use-system";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { Activity, Clock, Lock, Scale, AlertCircle } from "lucide-react";
+import { Activity, Clock, Lock, Scale } from "lucide-react";
+import { ErrorState } from "../error-state";
 
 export function HealthCards() {
-  const { data, isLoading, isError } = useHealth();
+  const { data, isLoading, isError, refetch } = useHealth();
 
   const cards = [
     {
@@ -36,13 +37,10 @@ export function HealthCards() {
 
   if (isError) {
     return (
-      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 flex items-center gap-3">
-        <AlertCircle className="h-5 w-5 text-destructive shrink-0" />
-        <div>
-          <p className="text-sm font-medium">Unable to reach the API</p>
-          <p className="text-xs text-muted-foreground">Health check failed. Is the backend running?</p>
-        </div>
-      </div>
+      <ErrorState
+        message="Unable to reach the API. Health check failed — is the backend running?"
+        onRetry={refetch}
+      />
     );
   }
 

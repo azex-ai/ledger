@@ -315,7 +315,7 @@ function TemplateJournalDialog() {
 }
 
 export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPageProps = {}) {
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } = useJournals();
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } = useJournals();
   const journals = data?.pages.flatMap((p) => p.list) ?? [];
   // uid → human name for the Type column; falls back to the uid while the
   // (small, cached) journal-type list loads.
@@ -338,7 +338,7 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
       {isLoading ? (
         <TableSkeleton rows={8} />
       ) : isError ? (
-        <ErrorState message="Failed to load journals" />
+        <ErrorState message="Failed to load journals" onRetry={refetch} />
       ) : journals.length === 0 ? (
         <EmptyState
           icon={BookOpen}

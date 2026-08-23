@@ -2502,6 +2502,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dev/credits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Credit a holder with no custodied asset behind it (developer mode).
+         * @description Simulates a deposit: posts the `dev_credit` template (DR main_wallet holder / CR dev_credit system counterpart), so the credited funds land in the holder's available balance and can drive real downstream flows. Disabled by default and answers FeatureNotEnabled (503) unless DEV_CREDIT_ENABLED=true, which the server only accepts when ENV=dev -- boot fails otherwise.
+         *
+         *     The resulting journal is an ordinary journal: append-only, corrected only through POST /journals/{uid}/reverse. Because its system leg is `dev_credit` rather than `custodial`, GET /platform/solvency counts the new liability with no offsetting asset and reports the shortfall -- by design. The shortfall equals the `dev_credit` account balance.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        holder_id: number;
+                        /** Format: uuid */
+                        currency_uid: string;
+                        amount: components["schemas"]["Decimal"];
+                        idempotency_key: string;
+                        /** Format: int64 */
+                        actor_id?: number;
+                        source?: string;
+                        metadata?: {
+                            [key: string]: string;
+                        };
+                    };
+                };
+            };
+            responses: {
+                /** @description Journal created. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["JournalEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+                422: components["responses"]["DomainError"];
+                /** @description Developer credit not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {

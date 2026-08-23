@@ -13,9 +13,10 @@ import {
   CartesianGrid,
 } from "recharts";
 import { AlertCircle, TrendingUp } from "lucide-react";
+import { Button } from "../ui/button";
 
 export function BalanceTrend() {
-  const { data, isLoading, isError } = useSystemBalances();
+  const { data, isLoading, isError, refetch } = useSystemBalances();
   const { classCode, currencyCode } = useUidCodeLookups();
 
   const chartData = (data ?? []).map((b) => ({
@@ -36,6 +37,9 @@ export function BalanceTrend() {
           <div className="flex h-[300px] flex-col items-center justify-center gap-2 text-sm text-destructive">
             <AlertCircle className="h-5 w-5" />
             <span>Failed to load balances</span>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Retry
+            </Button>
           </div>
         ) : chartData.length === 0 ? (
           <div className="flex h-[300px] flex-col items-center justify-center gap-2">
