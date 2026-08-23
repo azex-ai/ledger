@@ -39,6 +39,23 @@ A request whose key lacks the required scope gets business code `10150`
 constant-time. If `API_KEYS` is empty in non-`dev` `ENV`, the service still
 refuses to start. Unauthenticated operation is available only with `ENV=dev`.
 
+A key may also carry one or more independent **capabilities** — privilege
+bits no scope implies, not even `admin` — by joining them onto the scope
+field with `+`:
+
+```
+API_KEYS="ingester:write:t0k3n,reviewer:read+deposit_review:r3v13w"
+```
+
+Today there is one capability, `deposit_review`
+(`server.CapabilityDepositReview`), required by
+`POST /deposits/{uid}/review/approve` and `/reject` regardless of scope
+(W3-A, mi2: `docs/bugs/2026-07-11-m3-security-review.md`). It exists so the
+key that ingests/creates deposit bookings does not automatically get to
+approve its own review — grant it on a separate reviewer key, or on the
+same key alongside `write`/`admin` if a deployment deliberately chooses
+that policy (see `docs/RUNBOOK.md` §10).
+
 ### Content type
 
 Request and response bodies are `application/json` (UTF-8). Field names are `snake_case`. Decimal amounts are transmitted as strings (e.g. `"500.00"`); never as JSON numbers (precision loss). Timestamps are RFC 3339 (e.g. `"2026-04-17T10:00:00Z"`); date-only fields use `YYYY-MM-DD`.

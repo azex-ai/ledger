@@ -1,6 +1,8 @@
 // Package server: middleware_auth.go
 // Bearer-token API key authentication for every endpoint (reads included),
-// with per-key scopes (read < write < admin) and a per-key name that is
+// with per-key scopes (read < write < admin), independent per-key
+// capabilities orthogonal to that ladder (W3-A, mi2:
+// docs/bugs/2026-07-11-m3-security-review.md), and a per-key name that is
 // attached to the request log line for auditability.
 package server
 
@@ -63,19 +65,68 @@ func (s Scope) String() string {
 // requires the given scope.
 func (s Scope) allows(required Scope) bool { return s >= required }
 
+// Capability is an independent privilege bit an API key may hold,
+// orthogonal to the read < write < admin scope ladder (W3-A, mi2:
+// docs/bugs/2026-07-11-m3-security-review.md). Unlike Scope, higher scope
+// levels do NOT imply any Capability -- an admin key has no capabilities
+// unless a key's configuration deliberately grants them. This is the
+// mechanism the library provides so a consumer CAN separate duties (e.g. a
+// key that can create/transition deposit bookings from a key that can
+// resolve deposit reviews); the library does not decide that they must be
+// separated -- a consumer that wants one key to do both grants it both.
+type Capability uint8
+
+const (
+	// CapabilityDepositReview grants POST /deposits/{uid}/review/approve
+	// and /reject (design doc §9.4) -- resolving a deposit parked for human
+	// review. Deliberately independent of ScopeWrite (which already grants
+	// creating and transitioning deposit bookings): without this
+	// separation, a single ScopeWrite key can forge an over-ceiling deposit
+	// sighting and then approve its own review, defeating the entire point
+	// of the review gate (mi2). Not implied by ScopeAdmin either -- a
+	// consumer must grant it explicitly on whichever key(s) should be able
+	// to resolve reviews, be that a dedicated reviewer key or the same key
+	// that ingests deposits (single-operator deployments may choose that;
+	// the library does not decide for them).
+	CapabilityDepositReview Capability = 1 << iota
+)
+
+// has reports whether c includes cap.
+func (c Capability) has(required Capability) bool { return c&required != 0 }
+
+// ParseCapability maps the wire form ("deposit_review") to a Capability.
+func ParseCapability(s string) (Capability, error) {
+	switch s {
+	case "deposit_review":
+		return CapabilityDepositReview, nil
+	default:
+		return 0, fmt.Errorf("server: unknown api key capability %q (want deposit_review)", s)
+	}
+}
+
+func (c Capability) String() string {
+	if c.has(CapabilityDepositReview) {
+		return "deposit_review"
+	}
+	return "none"
+}
+
 // APIKey is one configured credential: a stable name (logged for audit,
-// never secret), a scope, and the secret bearer token.
+// never secret), a scope, a set of independent capabilities, and the secret
+// bearer token.
 type APIKey struct {
-	Name   string
-	Scope  Scope
-	Secret []byte
+	Name         string
+	Scope        Scope
+	Capabilities Capability
+	Secret       []byte
 }
 
 // authIdentity is the resolved identity of an authenticated request,
 // stored in the request context by authMiddleware.
 type authIdentity struct {
-	Name  string
-	Scope Scope
+	Name         string
+	Scope        Scope
+	Capabilities Capability
 }
 
 type authIdentityCtxKey struct{}
@@ -143,7 +194,7 @@ func authMiddleware(keys []APIKey) func(http.Handler) http.Handler {
 				return
 			}
 
-			id := authIdentity{Name: key.Name, Scope: key.Scope}
+			id := authIdentity{Name: key.Name, Scope: key.Scope, Capabilities: key.Capabilities}
 			if h, hok := authLogFrom(r.Context()); hok {
 				h.name, h.scope = id.Name, id.Scope.String()
 			}
@@ -172,6 +223,31 @@ func (s *Server) requireScope(required Scope) func(http.Handler) http.Handler {
 			}
 			if !id.Scope.allows(required) {
 				httpx.Error(w, bizcode.New(10150, fmt.Sprintf("api key %q (scope %s) lacks required scope %s", id.Name, id.Scope, required)))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requireCapability gates a route group on the authenticated key holding a
+// specific Capability -- independent of, and not implied by, any Scope
+// (W3-A, mi2). When auth is disabled (no API keys configured -- dev only),
+// every capability check passes, same as requireScope.
+func (s *Server) requireCapability(required Capability) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !s.authEnabled {
+				next.ServeHTTP(w, r)
+				return
+			}
+			id, ok := identityFrom(r.Context())
+			if !ok {
+				httpx.Error(w, bizcode.New(10101, "unauthenticated"))
+				return
+			}
+			if !id.Capabilities.has(required) {
+				httpx.Error(w, bizcode.New(10150, fmt.Sprintf("api key %q lacks required capability %s", id.Name, required)))
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -215,8 +291,14 @@ func matchAnyKey(provided []byte, keys []APIKey) (APIKey, bool) {
 //
 //	API_KEYS="ops:admin:s3cr3t,app:write:t0k3n,report:read:r34d"
 //
+// The scope field may additionally carry '+'-joined capabilities (W3-A,
+// mi2), e.g. a key that can both ingest deposits and resolve their reviews:
+//
+//	API_KEYS="ingester:write:t0k3n,reviewer:read+deposit_review:r3v13w,ops:write+deposit_review:s3cr3t"
+//
 // Names must be unique (they identify the caller in audit logs); scopes are
-// read|write|admin; secrets must be non-empty and must not contain ':' or ','.
+// read|write|admin; capabilities are deposit_review; secrets must be
+// non-empty and must not contain ':' or ','.
 func parseAPIKeys(raw string) ([]APIKey, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -234,7 +316,7 @@ func parseAPIKeys(raw string) ([]APIKey, error) {
 			return nil, fmt.Errorf("server: malformed API_KEYS entry (want name:scope:secret, got %d fields)", len(fields))
 		}
 		name := strings.TrimSpace(fields[0])
-		scope, err := ParseScope(strings.TrimSpace(fields[1]))
+		scope, caps, err := parseScopeAndCapabilities(strings.TrimSpace(fields[1]))
 		if err != nil {
 			return nil, err
 		}
@@ -246,7 +328,30 @@ func parseAPIKeys(raw string) ([]APIKey, error) {
 			return nil, fmt.Errorf("server: duplicate API_KEYS name %q", name)
 		}
 		seen[name] = struct{}{}
-		out = append(out, APIKey{Name: name, Scope: scope, Secret: []byte(secret)})
+		out = append(out, APIKey{Name: name, Scope: scope, Capabilities: caps, Secret: []byte(secret)})
 	}
 	return out, nil
+}
+
+// parseScopeAndCapabilities parses one API_KEYS scope field: a base scope
+// (read|write|admin) optionally followed by one or more '+'-joined
+// capabilities (e.g. "write+deposit_review"). The base scope is always
+// required and always comes first; capabilities are independent bits, not
+// additional scope levels -- granting none is the default and safe side
+// (W3-A, mi2: a key's scope alone never implies any capability).
+func parseScopeAndCapabilities(field string) (Scope, Capability, error) {
+	tokens := strings.Split(field, "+")
+	scope, err := ParseScope(strings.TrimSpace(tokens[0]))
+	if err != nil {
+		return 0, 0, err
+	}
+	var caps Capability
+	for _, t := range tokens[1:] {
+		parsed, err := ParseCapability(strings.TrimSpace(t))
+		if err != nil {
+			return 0, 0, err
+		}
+		caps |= parsed
+	}
+	return scope, caps, nil
 }

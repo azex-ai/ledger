@@ -57,6 +57,44 @@ func TestParseAPIKeys(t *testing.T) {
 			t.Fatal("want error for empty secret")
 		}
 	})
+
+	// W3-A (mi2): the scope field may carry '+'-joined capabilities,
+	// independent of and not implied by the base scope.
+	t.Run("scope with capability", func(t *testing.T) {
+		keys, err := parseAPIKeys("reviewer:read+deposit_review:r3v13w")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keys) != 1 || keys[0].Scope != ScopeRead || keys[0].Capabilities != CapabilityDepositReview {
+			t.Errorf("keys[0] = %+v", keys[0])
+		}
+	})
+
+	t.Run("scope with capability alongside write", func(t *testing.T) {
+		keys, err := parseAPIKeys("ops:write+deposit_review:s3cr3t")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keys) != 1 || keys[0].Scope != ScopeWrite || keys[0].Capabilities != CapabilityDepositReview {
+			t.Errorf("keys[0] = %+v", keys[0])
+		}
+	})
+
+	t.Run("scope without capability suffix grants none", func(t *testing.T) {
+		keys, err := parseAPIKeys("app:admin:s3cr3t")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(keys) != 1 || keys[0].Capabilities != 0 {
+			t.Errorf("admin scope must not imply any capability by default: keys[0] = %+v", keys[0])
+		}
+	})
+
+	t.Run("unknown capability rejected", func(t *testing.T) {
+		if _, err := parseAPIKeys("ops:write+super_approve:x"); err == nil {
+			t.Fatal("want error for unknown capability")
+		}
+	})
 }
 
 func TestScopeAllows(t *testing.T) {
@@ -78,5 +116,21 @@ func TestScopeAllows(t *testing.T) {
 		if got := c.key.allows(c.required); got != c.want {
 			t.Errorf("%s.allows(%s) = %v, want %v", c.key, c.required, got, c.want)
 		}
+	}
+}
+
+// TestCapabilityIndependentOfScope pins W3-A's core structural property
+// (mi2): Capability is a separate bit space from Scope. No Scope level --
+// not even ScopeAdmin -- implies any Capability; a Capability must be
+// deliberately granted.
+func TestCapabilityIndependentOfScope(t *testing.T) {
+	var none Capability
+	if none.has(CapabilityDepositReview) {
+		t.Error("zero-value Capability must not have CapabilityDepositReview")
+	}
+
+	granted := CapabilityDepositReview
+	if !granted.has(CapabilityDepositReview) {
+		t.Error("CapabilityDepositReview must have itself")
 	}
 }

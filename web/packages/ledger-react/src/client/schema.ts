@@ -1058,7 +1058,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a review-parked deposit, posting its deposit_confirm journal.
-         * @description Idempotent -- a no-op returning the current booking if it is already confirmed (e.g. a prior call already succeeded). Any other non-review status is a 409 conflict.
+         * @description Idempotent -- a no-op returning the current booking if it is already confirmed (e.g. a prior call already succeeded). Any other non-review status is a 409 conflict. Requires the deposit_review capability, independent of scope -- see bearerAuth's description.
          */
         post: {
             parameters: {
@@ -1107,7 +1107,7 @@ export interface paths {
         put?: never;
         /**
          * Reject a review-parked deposit to failed -- no journal is ever posted.
-         * @description Idempotent -- a no-op returning the current booking if it is already failed. Any other non-review status is a 409 conflict. reason is recorded on the booking's audit trail and the emitted deposit.review_rejected signal.
+         * @description Idempotent -- a no-op returning the current booking if it is already failed. Any other non-review status is a 409 conflict. reason is recorded on the booking's audit trail and the emitted deposit.review_rejected signal. Requires the deposit_review capability, independent of scope -- see bearerAuth's description.
          */
         post: {
             parameters: {

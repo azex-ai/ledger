@@ -617,7 +617,8 @@ onchain := service.NewOnchain(deps, chainSet,
 CreditTokens: map[string]core.TokenConfig{
     "0xusdt...": {
         TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
-        ReconcileCeiling: decimal.NewFromInt(1_000), // > 1k USDT -> double-check
+        ReconcileCeiling:      decimal.NewFromInt(1_000), // > 1k USDT -> double-check
+        ReconcileFailureLimit: 3,                         // 3 consecutive second-source errors -> review
     },
 },
 ```
@@ -632,6 +633,17 @@ part of M3 is genuinely opt-in. `AutoCreditCeiling` is NOT: it has no zero
 default (see the warning at the top of this section) — every `CreditTokens`
 entry must set it to either a positive cap or `core.UnboundedAutoCredit`,
 or `Run(ctx)` fails to start.
+
+`ReconcileFailureLimit` (W3-A, mi5) follows `AutoCreditCeiling`'s pattern,
+not `ReconcileCeiling`'s: whenever `ReconcileCeiling` IS positive AND
+`WithDepositConfirmer` IS wired (the gate is actually active for that
+token), `ReconcileFailureLimit` must be a positive integer too, or `Run(ctx)`
+fails to start. It counts consecutive `ConfirmDeposit` *errors* (unreachable,
+timeout, 5xx) — not amount mismatches, which already route to `review`
+immediately — and escalates to `review` (reason `reconcile_unavailable`)
+once the limit is hit, instead of retrying a persistently down second
+source forever. If your token never activates the reconciliation gate at
+all, this field is irrelevant and can be left at zero.
 
 **Human review surface** — a deposit parked in `review` has zero ledger
 effect (I-21: `journal_uid` stays empty) until a human resolves it. Wire the
@@ -651,6 +663,15 @@ POST /api/v1/deposits/{uid}/review/reject
 See `docs/RUNBOOK.md` §13 for the on-call triage process. Both resolution
 endpoints are idempotent (repeat calls on an already-resolved booking are a
 no-op) and return a 409 conflict on any booking not currently in `review`.
+
+Both resolution endpoints require an API key holding
+`server.CapabilityDepositReview` (W3-A, mi2) — grant it via a `+`-joined
+suffix on the key's scope (`reviewer:read+deposit_review:secret` in
+`API_KEYS`). This is deliberately independent of scope: the key your
+ingestion path uses (`write` scope, to call `POST /bookings` and
+`POST /bookings/{uid}/transition`) does not get it automatically, so that
+key alone cannot forge a deposit and then approve its own review. See
+`docs/api.md`'s Authentication section for the full `API_KEYS` format.
 
 ---
 
