@@ -2060,6 +2060,117 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
   the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
   evidence / page-limit-honesty behavior.
+
+## I-33: A cached attestation-time authorization verdict may only ever be TRUSTED, never RE-DERIVED, at read time — and it must be at least as strict as a live check
+
+**Rule**: T4 (design doc §8 extended, contracts §W3-B) lets
+`service.AttestationService.RunAttestBatch` run `core.VerifyJournalAuth`
+once per distinct journal contributing to a batch (instead of once per
+`VerifiedBalance` call, per contributing journal, forever — I-32's naive
+reference implementation), and persist the result as a
+`core.JournalAuthVerdict` on `entry_attestations.auth_verdict`, bound into
+the batch's own signed content (`core.AuthVerdictDigest` →
+`core.AttestationRootHashV3`, separator `0x12`). `postgres.VerifiedBalanceStore`
+then reads that cached verdict instead of re-deriving it:
+
+- `core.JournalAuthVerdictAuthorized` → trusted; no DB round trip to
+  reconstruct the journal, no live `core.VerifyJournalAuth` call.
+- `core.JournalAuthVerdictUnauthorized` → the whole balance is UNDEFINED
+  immediately (I-32's rule still applies — this is I-32's mechanism
+  amortized, not weakened).
+- `core.JournalAuthVerdictUnknown` (the sentinel — an uncovered/tail entry,
+  or an `entry_attestations` row that predates migration 054, or an
+  `AttestationService` with no `core.AuthVerifier` configured) → MUST fall
+  back to a live `core.VerifyJournalAuth`, exactly the pre-T4 behavior. It
+  is never treated as a passing verdict (would silently widen what counts
+  as authorized) nor as a failing one (would make every pre-T4 account
+  permanently UNDEFINED the moment T4 ships).
+
+A journal that contributes some cached-`Authorized` entries and some
+cached-`Unknown` entries (its entries straddled an attestation batch
+boundary, the same ordering hazard design doc §8.2 documents for P6) is
+trusted on the strength of the `Authorized` verdict alone — safe because
+`core.VerifyJournalAuth` at attestation time reconstructs the journal's
+**complete** entry set (`postgres.AttestationStore.JournalAuthMaterial`
+batch-fetches ALL of a journal's entries, not just the ones in the current
+attestation batch), so the verdict is already a statement about the whole
+journal, not just the entries that happened to be covered first.
+
+A cached verdict is not a standing trust anchor with no expiry: P6's
+periodic full verify (`service.VerifyLedger`) re-derives `AuthVerdictDigest`
+from a **live** `core.VerifyJournalAuth` pass and compares it against the
+stored, signed value — the same class of drift detection I-27/I-28 already
+provide for `batch_digest`/`merkle_root`. A journal's stored auth columns
+being edited without a valid re-sign (an owner-role bypass of the
+no-arbitrary-update trigger — this wave's standing threat model) surfaces
+as `TAMPERED`, not a silently-stale `VERIFIED`.
+
+**Why**: I-32 established that a withdrawal-time balance check must be
+fail-closed on any unauthorized contributing journal. `.local/bench-verify-2026-08-23.md`
+measured what enforcing that literally costs: ~216–240µs per contributing
+journal, ~84% of which is a single `journals JOIN journal_entries` round
+trip (only ~36µs is the actual cryptographic work) — a naive account with
+just 10–12 contributing journals already costs more than one full
+`PostJournal` write, and the cost grows **linearly and unbounded** for the
+lifetime of any account that keeps transacting. Re-deriving the same
+answer on every call is not a correctness requirement — I-32 only requires
+that an unauthorized journal is never silently excluded from the sum, not
+that the check be redone from scratch every time. Caching the verdict in
+content an external anchor already protects (I-28) turns an O(number of
+historical contributing journals) cost, paid on every withdrawal, into an
+O(number of NOT-yet-attested journals) cost — bounded by the attestation
+interval, not by the account's lifetime.
+
+**Enforced by**: `service.AttestationService.RunAttestBatch` /
+`computeAuthVerdicts` / `verdictsForJournals` (verdict computation at
+attestation time, batched via `postgres.AttestationStore.JournalAuthMaterial`
+— one round trip for journal metadata, one for entries, regardless of how
+many distinct journals are in the batch); `postgres.VerifiedBalanceStore.VerifiedBalance`
+(the fast read path: partitions contributing entries by cached verdict,
+falls back to the pre-T4 naive per-journal check — `verifyJournalsNaively`
+— only for the `Unknown` set); `service.VerifyLedger`'s `isV3` branch (live
+drift recompute of `AuthVerdictDigest`, and `core.AttestationRootHashV3`
+self-consistency, alongside the existing v1/v2 checks — never gating on
+whether a row happens to be v3, so a v1/v2 row's original semantics are
+never touched, per `deployment.md`'s "an already-signed value cannot be
+silently re-derived").
+
+**Pinned by**:
+- `postgres.TestVerifiedBalance_TrustsCachedAuthorizedVerdictEvenIfLiveRecheckWouldFail` —
+  the headline pin: after a journal's verdict is cached `Authorized`, its
+  stored signature is corrupted directly via SQL so a LIVE re-check would
+  now fail (confirmed directly, as falsification evidence) — `VerifiedBalance`
+  must still succeed, proving it trusted the cached, pre-corruption verdict
+  instead of re-deriving it.
+- `postgres.TestVerifiedBalance_CachedUnauthorizedVerdictIsUndefinedWithoutLiveVerifier` —
+  a cached `Unauthorized` verdict rejects the balance even when the reading
+  `VerifiedBalanceStore` has no `core.AuthVerifier` at all, proving the
+  rejection came from the cache, not the separate nil-verifier bailout.
+- `postgres.TestVerifiedBalance_UnattestedForgedTailJournalStillCaughtAlongsideCachedAuthorized` —
+  a cached-`Authorized` verdict for one journal must never mask an
+  unattested, unauthorized journal contributing to the same dimension.
+- `service.TestAttestationService_ComputesAndCachesAuthorizedVerdict` —
+  the write side: a genuinely-signed journal's entries are cached
+  `Authorized`, and the resulting attestation row is v3 (non-empty
+  `auth_verdict_digest`, signed under `core.AttestationRootHashV3`).
+- `service.TestAttestationService_CachesUnauthorizedVerdictForForgedJournal` —
+  a forged journal is cached `Unauthorized`, not silently coverage-only;
+  P6's DELETE-detection coverage still happens regardless (orthogonal
+  check).
+- `service.TestAttestationService_NoVerifierConfiguredStaysV2` — T4 is
+  additive/opt-in: an `AttestationService` with no `core.AuthVerifier`
+  produces the exact v2 shape it would have before T4 existed.
+- `service.TestVerifyLedger_DetectsAuthVerdictDrift` — the periodic-verify
+  drift check: a journal's stored signature corrupted after attestation
+  (leaving every `journal_entries` row and `batch_digest`/`merkle_root`
+  untouched, isolating this specific check) surfaces as `TAMPERED` via an
+  `auth_verdict_digest` mismatch finding.
+- `core.TestAuthVerdictDigest_*` / `core.TestAttestationRootHashV3_*` —
+  golden vectors (independently computed, cross-checked against this
+  file's pre-existing v1 `CanonicalBatchDigest`/`AttestationRootHash`
+  pins) and structural properties (length validation, domain separation
+  from v2, sensitivity to a changed verdict).
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

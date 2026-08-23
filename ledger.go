@@ -312,13 +312,20 @@ func (s *Service) PlatformBalanceReader() core.PlatformBalanceReader {
 func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBalanceStore }
 
 // AttestationService returns a *service.AttestationService wired to this
-// ledger's connection pool and the Attestor configured via WithAttestor
-// (design doc §8, P6). anchor may be nil (see
-// service.AttestationService.anchor's doc comment); it is not read from
-// WithAttestor's config because P5's Attestor/AuthVerifier and P6's Anchor
-// answer genuinely different questions ("is this key wired at all" vs
-// "which external carrier"), and only the latter has no library-shipped
-// production implementation to default to.
+// ledger's connection pool and the Attestor/AuthVerifier configured via
+// WithAttestor (design doc §8, P6; T4, design doc §8 extended). anchor may
+// be nil (see service.AttestationService.anchor's doc comment); it is not
+// read from WithAttestor's config because P5's Attestor/AuthVerifier and
+// P6's Anchor answer genuinely different questions ("is this key wired at
+// all" vs "which external carrier"), and only the latter has no
+// library-shipped production implementation to default to.
+//
+// s.authVerifier may be nil here (WithAttestor was called with a nil
+// verifier, or never called with attestor set to a non-nil value via some
+// other path) -- that is T4's own opt-in switch (see
+// service.AttestationService.verifier's doc comment), not an error: the
+// returned service still attests P6's batch chain, it just never computes
+// auth verdicts.
 //
 // Returns an error if WithAttestor was never called -- RunAttestBatch has
 // nothing to sign with otherwise, and failing here (once, at construction)
@@ -329,7 +336,7 @@ func (s *Service) AttestationService(anchor core.Anchor) (*service.AttestationSe
 	}
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 	store := postgres.NewAttestationStore(s.pool)
-	return service.NewAttestationService(store, s.attestor, anchor, engine), nil
+	return service.NewAttestationService(store, s.attestor, s.authVerifier, anchor, engine), nil
 }
 
 // FullReconciler returns a core.FullReconciler that runs the full

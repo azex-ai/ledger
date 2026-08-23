@@ -301,3 +301,159 @@ func TestGenesisRoot_IsThirtyTwoZeroBytes(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Golden vectors for AuthVerdictDigest / AttestationRootHashV3 (T4, design
+// doc §8 extended, contracts §W3-B). Computed independently in Python (same
+// buffer-layout replication technique as the v1/v2 vectors above) --
+// empty_batch_digest and the two-entry batch_digest were cross-checked
+// against this file's ALREADY-PINNED v1 vectors ("4322fd2b..." and
+// "f927af85...") to confirm the Python encoder for this session matches the
+// one that produced them, not just self-consistency with this package's own
+// Go implementation.
+// ---------------------------------------------------------------------------
+
+func TestAuthVerdictDigest_EmptyGoldenVector(t *testing.T) {
+	const want = "3f758c9fc6dd6706a977aa4ed473eb32b5ef19af7093518d2c1099dbf15868e5"
+	got, err := AuthVerdictDigest(nil, nil)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest(nil, nil): unexpected error: %v", err)
+	}
+	if hex.EncodeToString(got) != want {
+		t.Errorf("AuthVerdictDigest(nil, nil) = %s, want %s", hex.EncodeToString(got), want)
+	}
+}
+
+func TestAuthVerdictDigest_TwoEntriesAuthorizedGoldenVector(t *testing.T) {
+	const want = "0c092b2f31ac227c907f5a9ec0aac086605de89d136b09c287d17bb9b5bd2231"
+	entries := twoEntryBatch()
+	verdicts := []JournalAuthVerdict{JournalAuthVerdictAuthorized, JournalAuthVerdictAuthorized}
+	got, err := AuthVerdictDigest(entries, verdicts)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: unexpected error: %v", err)
+	}
+	if hex.EncodeToString(got) != want {
+		t.Errorf("AuthVerdictDigest(2 entries, authorized) = %s, want %s", hex.EncodeToString(got), want)
+	}
+}
+
+func TestAuthVerdictDigest_RejectsLengthMismatch(t *testing.T) {
+	if _, err := AuthVerdictDigest(twoEntryBatch(), []JournalAuthVerdict{JournalAuthVerdictAuthorized}); err == nil {
+		t.Error("expected error for entries/verdicts length mismatch, got nil")
+	}
+}
+
+func TestAuthVerdictDigest_DifferentVerdictDifferentDigest(t *testing.T) {
+	entries := twoEntryBatch()
+	a, err := AuthVerdictDigest(entries, []JournalAuthVerdict{JournalAuthVerdictAuthorized, JournalAuthVerdictAuthorized})
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: %v", err)
+	}
+	b, err := AuthVerdictDigest(entries, []JournalAuthVerdict{JournalAuthVerdictAuthorized, JournalAuthVerdictUnauthorized})
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: %v", err)
+	}
+	if hex.EncodeToString(a) == hex.EncodeToString(b) {
+		t.Error("changing one entry's verdict did not change AuthVerdictDigest's output")
+	}
+}
+
+func TestAttestationRootHashV3_GenesisGoldenVector(t *testing.T) {
+	emptyDigest := mustDigest(t, nil)
+	emptyVerdictDigest, err := AuthVerdictDigest(nil, nil)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest(nil, nil): %v", err)
+	}
+	const want = "5892a3ea8eb049d2a57671575e7147c7fc843763dd2dc0026273069eb4a6697e"
+	got, err := AttestationRootHashV3(1, GenesisRoot, emptyDigest, EmptyMerkleRoot, emptyVerdictDigest, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3: unexpected error: %v", err)
+	}
+	if hex.EncodeToString(got) != want {
+		t.Errorf("AttestationRootHashV3(seq=1, genesis, empty digest, empty merkle root, empty verdict digest, 0) = %s, want %s", hex.EncodeToString(got), want)
+	}
+}
+
+func TestAttestationRootHashV3_ChainedGoldenVector(t *testing.T) {
+	emptyDigest := mustDigest(t, nil)
+	emptyVerdictDigest, err := AuthVerdictDigest(nil, nil)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest(nil, nil): %v", err)
+	}
+	rh1, err := AttestationRootHashV3(1, GenesisRoot, emptyDigest, EmptyMerkleRoot, emptyVerdictDigest, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3(seq=1): %v", err)
+	}
+
+	arbitraryMerkleRoot, err := hex.DecodeString("2d6e943e85ac09dd6af182bf9fc9041abe70609149a3d2d55717e09e37507e6d")
+	if err != nil {
+		t.Fatalf("decode test merkle root: %v", err)
+	}
+	twoEntryVerdictDigest, err := AuthVerdictDigest(twoEntryBatch(), []JournalAuthVerdict{JournalAuthVerdictAuthorized, JournalAuthVerdictAuthorized})
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: %v", err)
+	}
+	const want = "36d2ef97ec0021394c96ea227f8aed4ebfe677faf1a6bb81b92b5d959b7731d0"
+	rh2, err := AttestationRootHashV3(2, rh1, mustDigest(t, twoEntryBatch()), arbitraryMerkleRoot, twoEntryVerdictDigest, 2)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3(seq=2): %v", err)
+	}
+	if hex.EncodeToString(rh2) != want {
+		t.Errorf("AttestationRootHashV3(seq=2, chained) = %s, want %s", hex.EncodeToString(rh2), want)
+	}
+}
+
+func TestAttestationRootHashV3_DiffersFromV2ForTheSameOtherInputs(t *testing.T) {
+	// The whole point of a separate domain separator (0x12 vs 0x11): binding
+	// AuthVerdictDigest in must actually change the hash, not just append a
+	// field a collision-prone formula ignores.
+	digest := mustDigest(t, nil)
+	verdictDigest, err := AuthVerdictDigest(nil, nil)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: %v", err)
+	}
+	v2, err := AttestationRootHashV2(1, GenesisRoot, digest, EmptyMerkleRoot, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV2: %v", err)
+	}
+	v3, err := AttestationRootHashV3(1, GenesisRoot, digest, EmptyMerkleRoot, verdictDigest, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3: %v", err)
+	}
+	if hex.EncodeToString(v2) == hex.EncodeToString(v3) {
+		t.Error("v2 and v3 produced the same root hash for the same seq/prevRoot/batchDigest/merkleRoot/entryCount -- domain separation is broken")
+	}
+}
+
+func TestAttestationRootHashV3_DifferentAuthVerdictDigestDifferentHash(t *testing.T) {
+	digest := mustDigest(t, nil)
+	a, err := AttestationRootHashV3(1, GenesisRoot, digest, EmptyMerkleRoot, mustAuthVerdictDigest(t, nil, nil), 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3: %v", err)
+	}
+	otherVerdictDigest := make([]byte, GenesisRootHashLen)
+	otherVerdictDigest[0] = 0xff
+	b, err := AttestationRootHashV3(1, GenesisRoot, digest, EmptyMerkleRoot, otherVerdictDigest, 0)
+	if err != nil {
+		t.Fatalf("AttestationRootHashV3: %v", err)
+	}
+	if hex.EncodeToString(a) == hex.EncodeToString(b) {
+		t.Error("changing authVerdictDigest did not change AttestationRootHashV3's output -- it is not actually bound into the hash")
+	}
+}
+
+func TestAttestationRootHashV3_RejectsWrongLengthAuthVerdictDigest(t *testing.T) {
+	digest := mustDigest(t, nil)
+	if _, err := AttestationRootHashV3(1, GenesisRoot, digest, EmptyMerkleRoot, []byte("too-short"), 0); err == nil {
+		t.Error("expected error for wrong-length authVerdictDigest, got nil")
+	}
+}
+
+func mustAuthVerdictDigest(t *testing.T, entries []AttestedEntry, verdicts []JournalAuthVerdict) []byte {
+	t.Helper()
+	d, err := AuthVerdictDigest(entries, verdicts)
+	if err != nil {
+		t.Fatalf("AuthVerdictDigest: %v", err)
+	}
+	return d
+}

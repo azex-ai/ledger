@@ -20,8 +20,15 @@ ORDER BY seq ASC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: InsertLedgerAttestation :one
-INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, merkle_root, prev_root, root_hash, signature, key_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+-- auth_verdict_digest (10th column): T4 (migration 054, design doc §8
+-- extended, contracts §W3-B) -- added in place the same way migration 048
+-- (P7) added merkle_root to this same query rather than creating a
+-- parallel insert. '' means the AttestationService that built this row had
+-- no core.AuthVerifier configured (T4 disabled for this run, root_hash
+-- stays V2); non-empty means root_hash was signed under
+-- core.AttestationRootHashV3.
+INSERT INTO ledger_attestations (uid, seq, entry_count, batch_digest, merkle_root, prev_root, root_hash, signature, key_id, auth_verdict_digest)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: ListUncoveredEntries :many
@@ -41,24 +48,28 @@ LIMIT sqlc.arg(batch_size)::int;
 
 -- name: InsertEntryAttestations :exec
 -- Bulk-covers every id in entry_ids under the same seq, in one round trip.
--- entry_ids and leaf_hashes are parallel arrays (design doc §9.4 -- leaf_hash
--- is entry_ids[i]'s exact RFC 6962 leaf hash as it went into this batch's
--- merkle_root). leaf_hashes MAY be all-empty ('') for callers that predate
--- the leaf_hash feature or never computed a MerkleRoot (P6-only usage) --
--- entry_ids alone is still a valid, complete call, matching this query's
--- pre-048 contract.
+-- entry_ids, leaf_hashes, and auth_verdicts are parallel arrays (design doc
+-- §9.4 -- leaf_hash is entry_ids[i]'s exact RFC 6962 leaf hash as it went
+-- into this batch's merkle_root; auth_verdicts (T4, migration 054, design
+-- doc §8 extended) is entry_ids[i]'s cached core.JournalAuthVerdict --
+-- added in place the same way P7 added leaf_hashes to this same query
+-- rather than creating a parallel insert). Either array MAY be all-empty
+-- ('') for callers that predate the corresponding feature or never
+-- computed it -- entry_ids alone is still a valid, complete call, matching
+-- this query's pre-048/pre-054 contract.
 --
--- Two separate single-argument unnest() calls joined by WITH ORDINALITY,
--- not PostgreSQL's multi-argument unnest(a, b) -- sqlc's own catalog does
+-- Three separate single-argument unnest() calls joined by WITH ORDINALITY,
+-- not PostgreSQL's multi-argument unnest(a, b, c) -- sqlc's own catalog does
 -- not model that special-cased executor form ("function unnest(unknown,
 -- unknown) does not exist" at generate time, even though real PostgreSQL
 -- accepts it) -- this form uses only the single-argument signature sqlc
 -- already recognizes elsewhere in this file, and produces the identical
 -- element-wise pairing.
-INSERT INTO entry_attestations (entry_id, seq, leaf_hash)
-SELECT e.entry_id, sqlc.arg(seq)::bigint, h.leaf_hash
+INSERT INTO entry_attestations (entry_id, seq, leaf_hash, auth_verdict)
+SELECT e.entry_id, sqlc.arg(seq)::bigint, h.leaf_hash, v.auth_verdict
 FROM unnest(sqlc.arg(entry_ids)::bigint[]) WITH ORDINALITY AS e(entry_id, ord)
-JOIN unnest(sqlc.arg(leaf_hashes)::bytea[]) WITH ORDINALITY AS h(leaf_hash, ord) ON e.ord = h.ord;
+JOIN unnest(sqlc.arg(leaf_hashes)::bytea[]) WITH ORDINALITY AS h(leaf_hash, ord) ON e.ord = h.ord
+JOIN unnest(sqlc.arg(auth_verdicts)::text[]) WITH ORDINALITY AS v(auth_verdict, ord) ON e.ord = v.ord;
 
 -- name: ListEntriesForAttestation :many
 -- Re-fetches exactly the entries a given seq covered, in the same id order
