@@ -238,6 +238,15 @@ type FullReconciliationConfig struct {
 	// NegativeBalancePageLimit). Reaching the cap marks the check incomplete
 	// rather than silently truncating the finding list.
 	SnapshotIntegrityPageLimit int
+
+	// UnauthorizedJournalsPageLimit caps how many of the oldest journals the
+	// unauthorized_journals check (contracts §W2-2, I-32) scans per run
+	// (default 2000). The check has no persisted resume cursor yet (unlike
+	// checkpoint_balance's C4b) -- reaching the cap marks Complete=false
+	// honestly rather than silently claiming full coverage; it does not
+	// silently rescan the same oldest slice forever without SAYING that is
+	// what happened.
+	UnauthorizedJournalsPageLimit int
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -266,6 +275,9 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	if out.SnapshotIntegrityPageLimit == 0 {
 		out.SnapshotIntegrityPageLimit = 200
 	}
+	if out.UnauthorizedJournalsPageLimit == 0 {
+		out.UnauthorizedJournalsPageLimit = 2000
+	}
 	return out
 }
 
@@ -284,6 +296,26 @@ type FullReconciliationService struct {
 	cfg     FullReconciliationConfig
 	logger  core.Logger
 	metrics core.Metrics
+
+	// journals/verifier back the unauthorized_journals check (contracts
+	// §W2-2, I-32). Both nil (the default -- SetAuthCheck was never called)
+	// means the check is skipped outright (Complete=false), same posture as
+	// check #8's "feature not available" skip: a deployment that never
+	// configured signing has nothing for this check to verify, and every
+	// unsigned journal in that state is expected, not evidence of
+	// tampering.
+	journals core.QueryProvider
+	verifier core.AuthVerifier
+}
+
+// SetAuthCheck wires the unauthorized_journals check (contracts §W2-2,
+// I-32) to a journal reader and the core.AuthVerifier configured via
+// ledger.WithAttestor. Call once after NewFullReconciliationService;
+// omitting this call leaves the check skipped (Complete=false), never
+// silently "passed" (working-agreements §3).
+func (s *FullReconciliationService) SetAuthCheck(journals core.QueryProvider, verifier core.AuthVerifier) {
+	s.journals = journals
+	s.verifier = verifier
 }
 
 // Compile-time assertion.
@@ -348,7 +380,7 @@ func NewFullReconciliationService(
 // failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 13)
+	checks := make([]core.CheckResult, 0, 14)
 
 	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
@@ -391,6 +423,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- snapshot_integrity: balance_snapshots vs entries (M4/I-23) ---
 	checks = append(checks, s.runCheckSnapshotIntegrity(ctx))
+
+	// --- unauthorized_journals: per-journal P5 signature validity (contracts §W2-2, I-32) ---
+	checks = append(checks, s.runCheckUnauthorizedJournals(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -1076,6 +1111,95 @@ func (s *FullReconciliationService) runCheckSnapshotIntegrity(ctx context.Contex
 	} else if len(result.Findings) == 0 {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: "snapshot integrity: no drift found for the most recent snapshot date",
+		})
+	}
+
+	return result
+}
+
+// runCheckUnauthorizedJournals is the unauthorized_journals check
+// (contracts §W2-2, docs/INVARIANTS.md I-32): it samples up to
+// cfg.UnauthorizedJournalsPageLimit journals (oldest first -- there is no
+// persisted resume cursor yet, unlike checkpoint_balance's C4b) and, for
+// every one that CLAIMS to be signed (auth_key_id non-empty), recomputes
+// its canonical digest and confirms the stored signature still verifies.
+//
+// Deliberately scoped like ledger-cli verify's step 4
+// (service/attest_verify.go), not like VerifiedBalanceReader: a journal
+// with an EMPTY auth_key_id is a coverage gap (never signed -- pre-P5
+// history, or a write path that still posts unsigned), not tamper
+// evidence, and is skipped rather than flagged. Flagging every unsigned
+// journal here would make this check permanently red on any fleet with
+// pre-P5 history, drowning out the signal this check exists to surface:
+// a journal that CLAIMS a signature but no longer verifies means either
+// its stored fields were corrupted/edited after the fact, or it was
+// forged with a mismatched key -- both real tamper evidence.
+//
+// If SetAuthCheck was never called (journals or verifier nil), the check
+// is skipped outright (Complete=false) -- there is nothing to verify
+// against, and reporting Passed=true would be indistinguishable from
+// "everything was checked and found clean" (working-agreements §3).
+func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "unauthorized_journals", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	if s.journals == nil || s.verifier == nil {
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "check skipped: no AuthVerifier configured (ledger.WithAttestor was never called, or SetAuthCheck was never wired)",
+		})
+		return result
+	}
+
+	journalList, _, err := s.journals.ListJournals(ctx, "", int32(s.cfg.UnauthorizedJournalsPageLimit))
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "unauthorized journals scan failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	checked := 0
+	for _, j := range journalList {
+		if j.AuthKeyID == "" {
+			continue
+		}
+		checked++
+
+		_, entries, err := s.journals.GetJournal(ctx, j.UID)
+		if err != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "unauthorized journals scan: refetch for authorization check failed",
+				Detail:      err.Error(),
+			})
+			continue
+		}
+
+		input := core.JournalInputFromRecord(j, entries)
+		if err := core.VerifyJournalAuth(ctx, s.verifier, input, j.EffectiveAt, j.AuthDigest, j.AuthSignature, j.AuthKeyID); err != nil {
+			result.Passed = false
+			s.logger.Warn("service: reconcile: unauthorized journal", "journal_uid", j.UID, "error", err)
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("journal %s: claims a signature but fails authorization verification", j.UID),
+			})
+		}
+	}
+
+	if len(journalList) >= s.cfg.UnauthorizedJournalsPageLimit {
+		// No resume cursor exists yet, so this is not "partial progress
+		// through the fleet" like checkpoint_balance's C4b -- it is the
+		// SAME oldest slice every run. Complete=false says so honestly
+		// instead of implying broader coverage than this check can
+		// currently provide.
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("unauthorized journals scan incomplete: hit page limit (%d journals, oldest-first, no resume cursor yet)", s.cfg.UnauthorizedJournalsPageLimit),
+		})
+	} else if result.Passed {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("unauthorized journals scan: %d signed journal(s) verified out of %d scanned", checked, len(journalList)),
 		})
 	}
 

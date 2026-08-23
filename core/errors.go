@@ -23,7 +23,12 @@ var (
 	// ErrUnauthorizedJournal is returned (wrapped) by VerifyJournalAuth when
 	// a journal has no stored signature, a stored digest that does not
 	// match its own recomputed canonical digest, or a signature/key_id the
-	// configured AuthVerifier rejects (see docs/INVARIANTS.md I-26).
+	// configured AuthVerifier rejects (see docs/INVARIANTS.md I-26). Also
+	// returned (wrapped) by VerifiedBalanceReader.VerifiedBalance when ANY
+	// journal contributing an entry to the dimension fails that same check
+	// -- the balance is UNDEFINED in that case, never a number computed by
+	// excluding the failing journal (contracts §W2-1; see
+	// docs/INVARIANTS.md I-32).
 	ErrUnauthorizedJournal = errors.New("journal missing or has invalid authorization signature")
 	// ErrRollupPending is returned by CheckpointIntegrityStore.RebuildCheckpoint
 	// when a rollup_queue item is still pending or claimed for the dimension

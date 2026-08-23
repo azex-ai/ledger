@@ -517,6 +517,45 @@ type AuthVerifier interface {
 	Verify(ctx context.Context, digest, signature []byte, keyID string) error
 }
 
+// VerifiedBalanceReader computes a dimension's balance while additionally
+// requiring every journal that contributed an entry to that dimension to
+// carry a valid P5 per-journal authorization (design doc §7,
+// contracts §W2-1/W2-2). Same signature shape as
+// CheckpointIntegrityStore.RecomputeBalance deliberately -- both are
+// entries-only, checkpoint-independent recomputes; this one adds an
+// authorization gate on top.
+//
+// Unlike RecomputeBalance, this can come back UNDEFINED. If even one
+// contributing journal fails core.VerifyJournalAuth, the result is NOT "the
+// balance computed while skipping that journal": a reversal journal's net
+// contribution to a dimension can be negative, so silently excluding an
+// unauthorized journal could report a balance HIGHER than the true one --
+// worse than refusing to answer (contracts §W2-1). UNDEFINED is signaled by
+// a non-nil error wrapping core.ErrUnauthorizedJournal; the returned
+// decimal.Decimal is the zero value in that case and MUST NOT be read as a
+// real balance. Callers must check the error before using the amount --
+// same discipline as every other error-returning balance method in this
+// package (GetBalance, RecomputeBalance), not a new pattern.
+//
+// A dimension with zero contributing journals returns (decimal.Zero, nil):
+// "every journal that touched this account is authorized" is vacuously
+// true when no journal ever touched it.
+//
+// This is a mechanism, not a policy: the library does not decide whether
+// any given call site (Reserve, a withdrawal handler, ...) should call
+// this at all, nor at what amount threshold -- that is entirely the
+// consumer's choice (contracts §W2-3). This interface's shape is also the
+// seam a future batch-attestation-backed implementation (T4, not started
+// this wave) would replace behind, without changing any caller
+// (contracts §W2-2) -- the naive reference implementation
+// (postgres.VerifiedBalanceStore) verifies every contributing journal
+// individually; a T4 implementation could instead consult a signed batch
+// digest covering many journals at once, but the signature (this
+// interface) stays the same either way.
+type VerifiedBalanceReader interface {
+	VerifiedBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
+}
+
 // Anchor publishes an attestation head to storage the ledger's own database
 // credentials cannot reach (design doc §8.3, P6). Implementations live in
 // the consumer's composition root (object-lock bucket in a separate cloud

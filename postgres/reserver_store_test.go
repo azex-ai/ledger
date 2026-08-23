@@ -19,7 +19,7 @@ import (
 func TestReserverStore_Reserve_Settle(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -44,7 +44,7 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 func TestReserverStore_Reserve_Release(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -71,7 +71,7 @@ func TestReserverStore_Reserve_Release(t *testing.T) {
 func TestReserverStore_Reserve_Idempotent(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -97,7 +97,7 @@ func TestReserverStore_Reserve_Idempotent(t *testing.T) {
 func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT-RES-IDEM", "Tether USD")
@@ -127,7 +127,7 @@ func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
 func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -169,7 +169,7 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -197,7 +197,7 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 func TestReserverStore_HeldAmount(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -259,7 +259,7 @@ func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.L
 func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -282,7 +282,7 @@ func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
 func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -311,7 +311,7 @@ func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
 func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
@@ -343,7 +343,7 @@ func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
 func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
-	store := postgres.NewReserverStore(pool, ledger)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
 	ctx := context.Background()
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")

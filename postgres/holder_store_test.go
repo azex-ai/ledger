@@ -240,7 +240,7 @@ func TestHolderKindLabelFallback(t *testing.T) {
 
 func TestHolderBalancesAndHolds(t *testing.T) {
 	f, ctx := seedHolderFixture(t)
-	reserver := postgres.NewReserverStore(f.pool, f.ledger)
+	reserver := postgres.NewReserverStore(f.pool, f.ledger, postgres.NewVerifiedBalanceStore(f.pool, nil))
 
 	f.deposit(t, ctx, "ht-b-1", 100)
 	// EUR deposit so two currencies exist.

@@ -115,7 +115,7 @@ func TestPrecision_Reserve_RejectsOverPrecisionAmount(t *testing.T) {
 	ctx := context.Background()
 
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledgerStore)
+	reserver := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 
 	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-RSV", "Japanese Yen Reserve", 0)
 
@@ -137,7 +137,7 @@ func TestPrecision_Reserve_AcceptsWholeYen(t *testing.T) {
 	ctx := context.Background()
 
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledgerStore)
+	reserver := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 
 	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-RSV-OK", "Japanese Yen Reserve OK", 0)
 	mainWallet := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet_jpy_rsv_ok", "Main Wallet", "debit", false, "available")
@@ -235,7 +235,7 @@ func TestPrecision_SettlePartial_RejectsOverPrecisionAmount(t *testing.T) {
 	ctx := context.Background()
 
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserver := postgres.NewReserverStore(pool, ledgerStore)
+	reserver := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 
 	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-PSET", "Japanese Yen PSettle", 0)
 	mainWallet := postgrestest.SeedClassificationWithRole(t, pool, "main_wallet_jpy_pset", "Main Wallet", "debit", false, "available")

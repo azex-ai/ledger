@@ -197,16 +197,19 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 13, "should run exactly 13 checks")
+	assert.Len(t, report.Checks, 14, "should run exactly 14 checks")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. Check #8 is skipped outright (journals.status not in the
-	// schema), so the run must admit incomplete coverage rather than let a
-	// never-executed check count as verified.
+	// schema), and unauthorized_journals is skipped too (buildFullSvc never
+	// calls SetAuthCheck, contracts §W2-2's own "skip rather than run with
+	// no verifier" contract) -- so the run must admit incomplete coverage
+	// rather than let a never-executed check count as verified.
 	assert.False(t, report.FullCoverage,
-		"check #8 is skipped, so the suite cannot claim full coverage")
+		"check #8 and unauthorized_journals are both skipped, so the suite cannot claim full coverage")
+	skippedChecks := map[string]bool{"pending_journal_timeout": true, "unauthorized_journals": true}
 	for _, c := range report.Checks {
-		if c.Name == "pending_journal_timeout" {
+		if skippedChecks[c.Name] {
 			assert.False(t, c.Complete, "a skipped check is never complete")
 		} else {
 			assert.True(t, c.Complete, "check %s ran but did not report coverage", c.Name)

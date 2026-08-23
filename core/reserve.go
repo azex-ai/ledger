@@ -58,6 +58,19 @@ type ReserveInput struct {
 	Amount         decimal.Decimal `json:"amount"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	ExpiresIn      time.Duration   `json:"expires_in"`
+	// RequireVerifiedBalance, when true, makes Reserve additionally refuse
+	// (wrapping ErrUnauthorizedJournal) unless every balance_role=available
+	// classification this holder has touched in CurrencyUID passes
+	// VerifiedBalanceReader's authorization check (contracts
+	// §W2-1/§W2-2/§W2-3) -- on top of, not instead of, the normal
+	// available-balance-covers-Amount check this method always runs.
+	//
+	// Off by default: this library does not pick a threshold or a default
+	// policy for when the extra check is warranted -- that decision, and
+	// which calls it applies to, belongs entirely to the caller, made once
+	// per Reserve call (contracts §W2-3: "机制在库，策略在消费方"). A
+	// consumer that never sets this field sees no behavior change at all.
+	RequireVerifiedBalance bool `json:"require_verified_balance,omitempty"`
 }
 
 func (i ReserveInput) Validate() error {

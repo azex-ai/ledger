@@ -1862,6 +1862,100 @@ every consumer of a Merkle root implicitly relies on).
   `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
   for 042 and 049 each roll back cleanly and leave the original connection
   able to operate normally.
+
+---
+
+> Numbering note: I-31 (W2-T1, expanded per-journal signature coverage —
+> reversals and template batches) is allocated in
+> `docs/plans/2026-08-21-integrity-hardening-contracts.md` §W2-0 to a
+> parallel task that has not merged yet, so this document does not yet
+> contain an `I-31` heading. I-32 (W2-T2, this task) is fully drafted
+> immediately below, but is DELIBERATELY not written as a real `## I-32:`
+> heading yet — `core.TestInvariantsDocIsOrderedAndGapless` requires
+> ascending, gapless `I-N` headings, and I-31 does not exist in this
+> branch's base. Whoever merges both Wave 2 tasks promotes the draft below
+> to a real `## I-32:` heading, in the correct slot after I-31 (same
+> precedent as the I-22 note above, and the reason this file's own gate
+> exists: docs/plans/2026-08-21-integrity-hardening-contracts.md §2.6's
+> "distinct branch, wherever the diff context matched" failure mode).
+
+### DRAFT — I-32 (not yet a numbered heading; see note above): Withdrawal-time verified balance is fail-closed on any unauthorized contributing journal
+
+**Rule**: `core.VerifiedBalanceReader.VerifiedBalance(holder, currency, classification)`
+recomputes the dimension's balance directly from `journal_entries` (like
+`CheckpointIntegrityStore.RecomputeBalance`) and additionally requires
+*every* journal that contributed an entry to that dimension to carry a
+valid P5 authorization (I-26). If even one contributing journal fails
+`core.VerifyJournalAuth`, the result is UNDEFINED — surfaced as a non-nil
+error wrapping `core.ErrUnauthorizedJournal`, never a number computed by
+excluding the failing journal. A dimension with zero contributing journals
+returns a DEFINED zero (vacuously: no journal touched it, so none can be
+unauthorized).
+
+This is a library-provided mechanism, not an imposed policy: nothing in
+this library calls `VerifiedBalance` automatically. `core.Reserver`'s
+`ReserveInput.RequireVerifiedBalance` is an opt-in gate a caller sets per
+call — off by default, no threshold, no consumer-side choice made on the
+library's behalf (`docs/plans/2026-08-21-integrity-hardening-contracts.md`
+§W2-3).
+
+**Why**: The naive alternative — exclude unauthorized journals and sum the
+rest — is wrong and dangerous. A journal's net contribution to a dimension
+can be negative (a reversal), so excluding an unauthorized one can report
+a balance *higher* than the true one: an attacker who forges an unsigned
+reversal of a genuine deposit would, under the naive definition, see the
+reversal silently dropped and the original deposit's full amount still
+counted as available — the opposite of what the check is supposed to
+catch. Refusing to answer (UNDEFINED) is the only definition that can
+never overstate what is safe to pay out.
+
+**Enforced by**: `postgres.VerifiedBalanceStore.VerifiedBalance` (naive
+reference implementation: individually verifies every contributing
+journal via `core.VerifyJournalAuth`, then trusts
+`CheckpointIntegrityStore.RecomputeBalance`'s entries-only sum once all
+pass); `postgres.ReserverStore.requireVerifiedAvailableBalance` (the
+opt-in `Reserve` gate, run strictly before any transaction is opened —
+same placement rule as `Authorize`, since an `AuthVerifier` is permitted
+to be a remote call); `service.FullReconciliationService`'s
+`unauthorized_journals` check (fleet-wide, samples journals that claim a
+signature and confirms it still verifies; skips journals that were never
+signed at all — that is a coverage gap, not tamper evidence — and is
+itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
+`SetAuthCheck`).
+
+**Pinned by**:
+- `postgres.TestVerifiedBalance_ZeroContributingJournalsIsDefinedZero` —
+  the vacuous-truth case: no journal ever touched the dimension, so the
+  result is a defined zero even with no `core.AuthVerifier` configured at
+  all.
+- `postgres.TestVerifiedBalance_AllAuthorizedMatchesRecompute` — the
+  positive path: when every contributing journal is genuinely signed,
+  `VerifiedBalance` matches `CheckpointIntegrityStore.RecomputeBalance`
+  exactly.
+- `postgres.TestVerifiedBalance_UnauthorizedContributingJournalIsUndefined` —
+  a single forged, unsigned contributing journal makes the whole balance
+  UNDEFINED (a non-nil error, `balance.IsZero()`), not a smaller-but-real
+  number.
+- `postgres.TestVerifiedBalance_UnauthorizedReversalNeverInflatesBalance` —
+  the exact scenario the Why section names: a genuine signed deposit
+  reversed by a forged, unsigned reversal must never surface as the
+  deposit's full un-reversed amount.
+- `postgres.TestReserve_RequireVerifiedBalance_RejectsWhenUnauthorizedJournalExists` —
+  the `Reserve` gate: refuses a reservation backed by a forged deposit
+  even though the ordinary checkpoint-based available-balance check alone
+  (a baseline `Reserve` call in the same test, `RequireVerifiedBalance`
+  unset) would approve it.
+- `postgres.TestReserve_RequireVerifiedBalance_AllowsWhenEverythingSigned` —
+  the gate does not reject a perfectly ordinary, fully signed account; it
+  is an authorization check, not a stricter amount check.
+- `service.TestFullReconciliation_UnauthorizedJournals_SkippedWithoutSetAuthCheck` /
+  `TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid` /
+  `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature` /
+  `TestFullReconciliation_UnauthorizedJournals_SkipsNeverSignedJournal` /
+  `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
+  the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
+  evidence / page-limit-honesty behavior.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

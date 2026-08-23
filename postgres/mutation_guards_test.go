@@ -304,7 +304,7 @@ func seedActiveReservation(t *testing.T, pool *pgxpool.Pool, ctx context.Context
 	t.Helper()
 
 	ledgerStore := postgres.NewLedgerStore(pool)
-	reserverStore := postgres.NewReserverStore(pool, ledgerStore)
+	reserverStore := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
 	curID := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("USDT"), "Tether USD")
 
 	const holder int64 = 9002
