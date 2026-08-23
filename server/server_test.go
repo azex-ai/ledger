@@ -64,6 +64,12 @@ func (m *mockJournalWriter) ReverseJournalFraction(ctx context.Context, journalU
 	return &core.Journal{UID: "uid-4", JournalTypeUID: "jt-1", IdempotencyKey: idempotencyKey, ReversalOfUID: journalUID, TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()}, nil
 }
 
+// AuthorizeReversal is unused by these handler tests (none of them drive a
+// signing-aware path) -- a no-op is sufficient to satisfy core.JournalWriter.
+func (m *mockJournalWriter) AuthorizeReversal(ctx context.Context, journalUID string, num, den int64, reason, idempotencyKey string) (core.AuthorizedJournal, error) {
+	return core.AuthorizedJournal{}, nil
+}
+
 type mockBalanceReader struct{}
 
 func (m *mockBalanceReader) GetBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error) {

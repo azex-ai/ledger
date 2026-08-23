@@ -1865,21 +1865,126 @@ every consumer of a Merkle root implicitly relies on).
 
 ---
 
-> Numbering note: I-31 (W2-T1, expanded per-journal signature coverage —
-> reversals and template batches) is allocated in
-> `docs/plans/2026-08-21-integrity-hardening-contracts.md` §W2-0 to a
-> parallel task that has not merged yet, so this document does not yet
-> contain an `I-31` heading. I-32 (W2-T2, this task) is fully drafted
-> immediately below, but is DELIBERATELY not written as a real `## I-32:`
-> heading yet — `core.TestInvariantsDocIsOrderedAndGapless` requires
-> ascending, gapless `I-N` headings, and I-31 does not exist in this
-> branch's base. Whoever merges both Wave 2 tasks promotes the draft below
-> to a real `## I-32:` heading, in the correct slot after I-31 (same
-> precedent as the I-22 note above, and the reason this file's own gate
-> exists: docs/plans/2026-08-21-integrity-hardening-contracts.md §2.6's
-> "distinct branch, wherever the diff context matched" failure mode).
+## I-31: Reversals and template batches sign under a configured Attestor in pool mode, not just plain journals
 
-### DRAFT — I-32 (not yet a numbered heading; see note above): Withdrawal-time verified balance is fail-closed on any unauthorized contributing journal
+(docs/plans/2026-08-21-integrity-hardening-contracts.md, "Wave 2 契约层"
+§W2-1/W2-2, board #15, W2-T1.) Before this fix, `ReverseJournal`,
+`ReverseJournalFraction`, and `ExecuteTemplateBatch` ALWAYS posted
+`journals.auth_status = unsigned_tx_mode`, in EVERY mode, even pool mode --
+unconditionally, regardless of whether a `core.Attestor` was configured via
+`WithAuth`. That mislabeled the reason: `unsigned_tx_mode` means "no safe
+point to call the Attestor without violating `financial.md`", which is true
+of a `WithDB`-bound store (a genuine caller-owned transaction), but was never
+true of these three in pool mode -- they self-manage their own transaction
+lifecycle exactly like `PostJournal`'s pool-mode branch, which has been able
+to sign since P5 (I-26) existed. The three call chains simply never tried.
+
+**Why this matters for W2-1's ruling**: the Wave 2 contract's verified-balance
+semantics (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §W2-1)
+are account-level fail-closed -- any contributing journal that is not
+`auth_status = signed` makes that account's verified balance UNDEFINED, not
+"a smaller number." Reversals and batch-posted journals sit squarely on the
+money path (a reversal, in particular, is exactly as capable of moving funds
+as a forward posting -- M5's forgery scenario applies to it unchanged). As
+long as these three call chains could never produce `signed` in pool mode --
+the deployment's default and, before this fix, ONLY mode that could ever
+sign anything -- every account with a reversal or batch-posted journal in its
+history had a permanently UNDEFINED verified balance, regardless of how a
+downstream consumer wired the withdrawal gate. Closing this gap is what
+makes `VerifiedBalanceReader` (W2-T2) reachable for any account with a real
+transaction history.
+
+**Fix**: `core.JournalWriter.AuthorizeReversal(ctx, journalUID, num, den,
+reason, idempotencyKey)` mirrors `Authorize`/`AuthorizeTemplate`'s
+outside-any-transaction signing split (§7.5, I-26), extended to cover a
+reversal's entries -- which are DERIVED from the original journal (read from
+the DB) rather than caller-supplied, so they cannot be signed until that
+read happens. `ReverseJournal` (num=1, den=1) and `ReverseJournalFraction`
+(any valid num/den), in pool mode with an Attestor configured, call
+`AuthorizeReversal` strictly before `pool.Begin`, then re-derive the same
+entries (`reversalEntriesFor`, shared verbatim with the pre-authorization
+path) fresh under the original journal's row lock and compare
+`core.CanonicalJournalDigest` byte-for-byte against what was signed. A match
+uses the signature verbatim (`auth_status = signed`); a mismatch --
+possible only for the num==den ("reverse everything remaining") form, whose
+entries subtract cumulative prior-reversal history, if a concurrent partial
+reversal commits in the gap between `AuthorizeReversal` and the row lock --
+rejects the post outright (`core.ErrConflict`) rather than silently posting
+unsigned, silently re-signing inside the transaction (forbidden by
+`financial.md` regardless), or using the now-stale signature. This is NOT a
+weakening of the pre-existing conservation checks (I-2): the row lock, the
+already-fully-reversed check, and the overshoot check all still run
+unchanged; the digest comparison is an ADDITIONAL guard specific to signing,
+layered on top. `ExecuteTemplateBatch`'s pool-mode branch renders every
+template and signs every resulting input before `pool.Begin` (no new port
+method needed -- it fully owns both the render and the write internally).
+
+Pool mode with NO Attestor configured now reports `unsigned_no_attestor`
+for all three (matching `PostJournal`'s own pool-mode-no-attestor label,
+I-26) rather than `unsigned_tx_mode` -- "no attestor" and "no safe point
+because of genuine tx mode" are different reasons, and conflating them was
+part of the same mislabeling this invariant fixes (see
+`core.AuthStatusUnsignedTxMode`'s updated doc comment). A store bound via
+`WithDB` (participating in a caller-owned transaction, e.g. a `RunInTx`
+callback) is UNCHANGED: all three still always post `unsigned_tx_mode`
+there, because there genuinely is no safe point to call the Attestor inside
+a transaction this code did not open -- board #15 does not add a
+`PostAuthorized`-equivalent entrypoint for reversals or batches; a caller
+needing that composition would have to close the gap itself the way
+`postDepositConfirmedJournal` did for a plain journal (§7.5).
+
+**Enforced by**:
+- `core.JournalWriter.AuthorizeReversal` (`core/interfaces.go`) -- the port,
+  with the digest-comparison contract spelled out in its doc comment.
+- `postgres.LedgerStore.AuthorizeReversal` / `reversalEntriesFor`
+  (`postgres/reversal_fraction_store.go`) -- the implementation and the
+  shared, DB-access-free entry derivation both the unlocked
+  pre-authorization call and the locked post-time call use, which is what
+  makes the digest comparison meaningful (byte-identical inputs whenever
+  reversal history has not changed in between).
+- `postgres.LedgerStore.ReverseJournal` / `reverseJournalWithQueries`
+  (`postgres/ledger_store.go`) and `ReverseJournalFraction` /
+  `reverseJournalFractionWithQueries` (`postgres/reversal_fraction_store.go`)
+  -- the pre-authorize-before-`Begin` sequencing and the post-time digest
+  comparison / fallback-status selection.
+- `postgres.LedgerStore.ExecuteTemplateBatch`
+  (`postgres/ledger_store.go`) -- the pool-mode render-then-sign-then-post
+  sequencing; `executeTemplateBatchWithQueries` remains the tx-mode-only
+  path, unconditionally `unsigned_tx_mode`.
+- `core.AuthStatusUnsignedTxMode`'s doc comment (`core/auth.go`) -- records
+  the narrowed scope this invariant introduces.
+
+**Pinned by** (`postgres/reversal_signing_pin_test.go` unless noted):
+- `TestReverseJournal_SignsWithConfiguredAttestor` /
+  `TestReverseJournalFraction_SignsWithConfiguredAttestor` (both the
+  num!=den proportional-split branch and the num==den "reverse everything
+  remaining" branch) / `TestExecuteTemplateBatch_SignsWithConfiguredAttestor`
+  -- pool mode with an Attestor configured produces `auth_status = signed`
+  with a signature that round-trips through `core.VerifyJournalAuth`.
+  Verified failing before this fix (reverting the implementation reproduces
+  `auth_status = unsigned_tx_mode` for all three).
+- `TestReverseJournal_UnsignedNoAttestorInPoolMode` /
+  `TestReverseJournalFraction_UnsignedNoAttestorInPoolMode` /
+  `TestExecuteTemplateBatch_UnsignedNoAttestorInPoolMode` -- pool mode with
+  no Attestor configured reports `unsigned_no_attestor`, not
+  `unsigned_tx_mode`. Verified failing before this fix (old code reports
+  `unsigned_tx_mode` unconditionally).
+- `TestReverseJournal_TxMode_NeverSignsEvenWithAttestor` /
+  `TestReverseJournalFraction_TxMode_NeverSignsEvenWithAttestor` /
+  `TestExecuteTemplateBatch_TxMode_NeverSignsEvenWithAttestor` -- the
+  negative contrast: a `WithDB`-bound store still never signs any of the
+  three, even with an Attestor configured. Unchanged behavior, non-regression.
+- `TestReverseJournalFraction_ConcurrentPartialReversalInvalidatesPreAuthorization`
+  -- the race the num==den branch's digest comparison exists to catch: a
+  `blockingAttestor` deterministically lands a real concurrent partial
+  reversal inside the window between `AuthorizeReversal` computing its
+  digest and `ReverseJournalFraction` opening its transaction; the stale
+  pre-authorization is rejected (`core.ErrConflict`) and leaves no row
+  behind. Verified failing (hanging, in fact: the pre-fix code path never
+  calls the Attestor for a reversal at all, so the test's synchronization
+  point is never reached) before this fix.
+
+## I-32: Withdrawal-time verified balance is fail-closed on any unauthorized contributing journal
 
 **Rule**: `core.VerifiedBalanceReader.VerifiedBalance(holder, currency, classification)`
 recomputes the dimension's balance directly from `journal_entries` (like
@@ -1955,7 +2060,6 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
   the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
   evidence / page-limit-honesty behavior.
-
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

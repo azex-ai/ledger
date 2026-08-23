@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -496,17 +497,52 @@ func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, 
 // In pool mode a new transaction is started and committed here (all-or-nothing).
 // In tx mode (store bound via withDB) all journals are written directly into
 // the caller's transaction; commit/rollback is the caller's responsibility.
+//
+// Pool mode with an Attestor configured renders every template AND signs
+// every resulting input strictly BEFORE pool.Begin (board #15, W2-T1,
+// extending design doc §7.2/§7.5's "sign outside any transaction" rule to
+// batches -- previously out of scope, see the retired doc comment on
+// executeTemplateBatchWithQueries this replaces). Rendering earlier does not
+// weaken the "all-or-nothing" write guarantee: every INSERT still happens
+// inside the one transaction opened below, unchanged; only the read-only
+// template lookup moves earlier, and postJournalWithQueries persists
+// whatever `core.JournalInput` it is given regardless of when that value was
+// produced -- the same principle Authorize/PostAuthorized already rely on
+// for a single journal.
 func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	if len(requests) == 0 {
 		return nil, nil
 	}
 
 	if s.pool == nil {
-		// Tx mode: write directly into caller's transaction.
+		// Tx mode: write directly into caller's transaction. Never signs --
+		// there is no point in this call chain provably outside a
+		// transaction someone else opened (financial.md forbids calling the
+		// Attestor from inside one).
 		return s.executeTemplateBatchWithQueries(ctx, s.q, requests)
 	}
 
-	// Pool mode: own the transaction lifecycle.
+	// Pool mode: render + sign every input before opening the transaction.
+	inputs := make([]core.JournalInput, len(requests))
+	effectiveAts := make([]time.Time, len(requests))
+	auths := make([]journalAuth, len(requests))
+	for i, req := range requests {
+		input, err := s.renderTemplate(ctx, s.q, req.TemplateCode, req.Params)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
+		}
+		effectiveAt := resolveEffectiveAt(input.EffectiveAt)
+		auth, err := s.attestJournal(ctx, *input, effectiveAt)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
+		}
+		inputs[i] = *input
+		effectiveAts[i] = effectiveAt
+		auths[i] = auth
+	}
+
+	// Own the transaction lifecycle. No Attestor call happens from here on --
+	// every auths[i] was already decided above.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: execute template batch: begin tx: %w", err)
@@ -514,9 +550,13 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	journals, err := s.executeTemplateBatchWithQueries(ctx, qtx, requests)
-	if err != nil {
-		return nil, err
+	journals := make([]*core.Journal, 0, len(inputs))
+	for i, input := range inputs {
+		journal, err := s.postJournalWithQueries(ctx, qtx, input, effectiveAts[i], auths[i])
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
+		}
+		journals = append(journals, journal)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -526,16 +566,14 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	return journals, nil
 }
 
-// executeTemplateBatchWithQueries never signs (journalAuth{status:
-// core.AuthStatusUnsignedTxMode} for every journal): it always runs inside
-// a transaction (either one it opened itself in pool mode, or the caller's
-// in tx mode), and there is no point at which pulling every rendered input
-// out to sign before the batch's single all-or-nothing transaction opens
-// would still preserve the "all-or-nothing" property renderTemplate's own
-// DB reads depend on. Same documented limitation as PostJournal's tx-mode
-// branch (design doc §7.5's Authorize/PostAuthorized split does not cover
-// batches -- out of scope for that fix, not silently dropped: it is
-// labeled unsigned_tx_mode, not left ambiguous).
+// executeTemplateBatchWithQueries is the tx-mode-only path: q is always the
+// caller's own transaction (ExecuteTemplateBatch's s.pool == nil branch), so
+// this always runs inside a transaction this code did not open and has no
+// safe point to call the Attestor from without violating financial.md --
+// every journal is unconditionally journalAuth{status:
+// core.AuthStatusUnsignedTxMode}. Pool mode no longer calls this function
+// (see ExecuteTemplateBatch's doc comment for why it was able to stop
+// sharing this code path once signing needed to move before pool.Begin).
 func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sqlcgen.Queries, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	inputs := make([]core.JournalInput, len(requests))
 	for i, req := range requests {
@@ -571,9 +609,33 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 // thing standing between two concurrent full reversals (with different
 // reasons, hence different idempotency keys) and a 200% reversal. In tx
 // mode (store bound via WithDB) it participates in the caller's transaction.
+//
+// Pool mode with an Attestor configured additionally pre-authorizes the
+// reversal via AuthorizeReversal(num=1, den=1), strictly before pool.Begin
+// (board #15, W2-T1). AuthorizeReversal's own idempotencyKey parameter is
+// fed exactly this method's derived expectedKey (below) so the signed
+// intent and the eventual post agree on which journal row an idempotent
+// replay would find.
 func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, reason string) (*core.Journal, error) {
+	// The derived idempotency key stays keyed on the journal's uid so it is
+	// stable across replays and never mentions the internal id. Computed
+	// here (not inside reverseJournalWithQueries) so the pool-mode branch
+	// below can pass the identical string into AuthorizeReversal before any
+	// transaction opens.
+	expectedKey := fmt.Sprintf("reversal:%s:%s", journalUID, reason)
+
 	if s.pool == nil {
-		return s.reverseJournalWithQueries(ctx, s.q, journalUID, reason)
+		return s.reverseJournalWithQueries(ctx, s.q, journalUID, reason, expectedKey, nil, journalAuth{status: core.AuthStatusUnsignedTxMode})
+	}
+
+	var preAuth *core.AuthorizedJournal
+	fallback := journalAuth{status: core.AuthStatusUnsignedNoAttestor}
+	if s.attestor != nil {
+		authorized, err := s.AuthorizeReversal(ctx, journalUID, 1, 1, reason, expectedKey)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
+		}
+		preAuth = &authorized
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -583,7 +645,7 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	journal, err := s.reverseJournalWithQueries(ctx, qtx, journalUID, reason)
+	journal, err := s.reverseJournalWithQueries(ctx, qtx, journalUID, reason, expectedKey, preAuth, fallback)
 	if err != nil {
 		return nil, err
 	}
@@ -594,7 +656,15 @@ func (s *LedgerStore) ReverseJournal(ctx context.Context, journalUID string, rea
 	return journal, nil
 }
 
-func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, reason string) (*core.Journal, error) {
+// reverseJournalWithQueries does the actual read-lock-write. preAuth and
+// fallback carry the same meaning as reverseJournalFractionWithQueries's
+// parameters of the same name (see that function's doc comment): preAuth,
+// when non-nil, is compared by digest against the freshly-derived entries
+// below (under the row lock ListReversalsByOriginalJournalID and
+// GetJournalForUpdateByUID together provide) and used verbatim on a match,
+// or rejected outright on a mismatch (a concurrent reversal landed in
+// between); fallback is used whenever preAuth is nil.
+func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, journalUID string, reason string, expectedKey string, preAuth *core.AuthorizedJournal, fallback journalAuth) (*core.Journal, error) {
 	pgUID, err := uidToPG(journalUID)
 	if err != nil {
 		return nil, err
@@ -615,9 +685,6 @@ func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.
 		return nil, fmt.Errorf("postgres: reverse journal: journal %q is already a reversal: %w", journalUID, core.ErrConflict)
 	}
 
-	// The derived idempotency key stays keyed on the journal's uid so it is
-	// stable across replays and never mentions the internal id.
-	expectedKey := fmt.Sprintf("reversal:%s:%s", journalUID, reason)
 	existingReversals, err := q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal: lookup reversals: %w", err)
@@ -644,29 +711,15 @@ func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.
 		return nil, fmt.Errorf("postgres: reverse journal: list entries: %w", err)
 	}
 
-	// Build reversed entries (swap debit/credit), mapping internal dimension
-	// ids back to the uid space PostJournal consumes.
-	reversedEntries := make([]core.EntryInput, len(entries))
-	for i, e := range entries {
-		entryType := core.EntryTypeDebit
-		if core.EntryType(e.EntryType) == core.EntryTypeDebit {
-			entryType = core.EntryTypeCredit
-		}
-		cur, err := s.dims.currencyByIDOrErr(ctx, q, e.CurrencyID)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
-		}
-		cls, err := s.dims.classByIDOrErr(ctx, q, e.ClassificationID)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: reverse journal: %w", err)
-		}
-		reversedEntries[i] = core.EntryInput{
-			AccountHolder:     e.AccountHolder,
-			CurrencyUID:       cur.UID,
-			ClassificationUID: cls.UID,
-			EntryType:         entryType,
-			Amount:            mustNumericToDecimal(e.Amount),
-		}
+	// The existingReversals check above already guarantees zero prior
+	// reversals reach this point, so reversalEntriesFor's num==den branch
+	// with an empty alreadyReversed map reduces to exactly "flip every
+	// original entry at its full original amount" — the same computation
+	// AuthorizeReversal ran, unlocked, before this transaction opened (see
+	// its doc comment).
+	reversedEntries, err := s.reversalEntriesFor(ctx, q, entries, map[entryDimKey]decimal.Decimal{}, 1, 1)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reverse journal: %w", err)
 	}
 
 	jt, err := s.dims.jtByIDOrErr(ctx, q, original.JournalTypeID)
@@ -682,11 +735,32 @@ func (s *LedgerStore) reverseJournalWithQueries(ctx context.Context, q *sqlcgen.
 		Metadata:       map[string]string{"reason": reason},
 	}
 
-	// Never signs -- see executeTemplateBatchWithQueries's doc comment
-	// (same reasoning: this always runs inside a transaction already
-	// opened above, either self-owned or the caller's).
 	effectiveAt := resolveEffectiveAt(input.EffectiveAt)
-	return s.postJournalWithQueries(ctx, q, input, effectiveAt, journalAuth{status: core.AuthStatusUnsignedTxMode})
+	auth := fallback
+	if preAuth != nil {
+		// Reuse the exact instant AuthorizeReversal signed -- see
+		// reverseJournalFractionWithQueries's identical comment for why a
+		// fresh resolveEffectiveAt here would break the comparison even
+		// with zero concurrent state change.
+		effectiveAt = preAuth.EffectiveAt
+		digest, err := core.CanonicalJournalDigest(input, effectiveAt)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal: recompute digest: %w", err)
+		}
+		if !bytes.Equal(digest, preAuth.Digest) {
+			// existingReversals == 0 was just proven above under this row's
+			// lock, and the general (non-num==den) overshoot path does not
+			// apply to a full reversal, so this branch is not expected to
+			// be reachable in practice -- kept as a fail-closed backstop
+			// rather than a panic, consistent with working-agreements §3.
+			return nil, fmt.Errorf(
+				"postgres: reverse journal: reversal intent changed since AuthorizeReversal ran for journal %q; retry: %w",
+				journalUID, core.ErrConflict,
+			)
+		}
+		auth = journalAuth{digest: preAuth.Digest, signature: preAuth.Signature, keyID: preAuth.KeyID, status: preAuth.Status}
+	}
+	return s.postJournalWithQueries(ctx, q, input, effectiveAt, auth)
 }
 
 func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, templateCode string, params core.TemplateParams) (*core.JournalInput, error) {
