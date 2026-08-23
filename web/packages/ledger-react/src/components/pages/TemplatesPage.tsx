@@ -286,7 +286,7 @@ function PreviewSection({ code }: { code: string }) {
 }
 
 export function TemplatesPage() {
-  const { data, isLoading, isError } = useTemplates();
+  const { data, isLoading, isError, refetch } = useTemplates();
   const templates = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(templates);
   // uid → human code for template lines — raw uids are unreadable in review.
@@ -300,7 +300,7 @@ export function TemplatesPage() {
       {isLoading ? (
         <TableSkeleton rows={3} />
       ) : isError ? (
-        <ErrorState message="Failed to load templates" />
+        <ErrorState message="Failed to load templates" onRetry={refetch} />
       ) : templates.length === 0 ? (
         <EmptyState
           icon={FileCode2}

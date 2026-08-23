@@ -144,9 +144,10 @@ type DepositAddress struct {
 }
 
 type EntryAttestation struct {
-	EntryID  int64  `json:"entry_id"`
-	Seq      int64  `json:"seq"`
-	LeafHash []byte `json:"leaf_hash"`
+	EntryID     int64  `json:"entry_id"`
+	Seq         int64  `json:"seq"`
+	LeafHash    []byte `json:"leaf_hash"`
+	AuthVerdict string `json:"auth_verdict"`
 }
 
 type EntryTemplate struct {
@@ -259,17 +260,18 @@ type JournalType struct {
 }
 
 type LedgerAttestation struct {
-	ID          int64       `json:"id"`
-	Uid         pgtype.UUID `json:"uid"`
-	Seq         int64       `json:"seq"`
-	EntryCount  int64       `json:"entry_count"`
-	BatchDigest []byte      `json:"batch_digest"`
-	PrevRoot    []byte      `json:"prev_root"`
-	RootHash    []byte      `json:"root_hash"`
-	Signature   []byte      `json:"signature"`
-	KeyID       string      `json:"key_id"`
-	CreatedAt   time.Time   `json:"created_at"`
-	MerkleRoot  []byte      `json:"merkle_root"`
+	ID                int64       `json:"id"`
+	Uid               pgtype.UUID `json:"uid"`
+	Seq               int64       `json:"seq"`
+	EntryCount        int64       `json:"entry_count"`
+	BatchDigest       []byte      `json:"batch_digest"`
+	PrevRoot          []byte      `json:"prev_root"`
+	RootHash          []byte      `json:"root_hash"`
+	Signature         []byte      `json:"signature"`
+	KeyID             string      `json:"key_id"`
+	CreatedAt         time.Time   `json:"created_at"`
+	MerkleRoot        []byte      `json:"merkle_root"`
+	AuthVerdictDigest []byte      `json:"auth_verdict_digest"`
 }
 
 type PeriodClose struct {

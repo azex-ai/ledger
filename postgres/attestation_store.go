@@ -22,12 +22,13 @@ import (
 type AttestationStore struct {
 	pool *pgxpool.Pool
 	q    *sqlcgen.Queries
+	dims *dimCache
 }
 
 // NewAttestationStore creates a new AttestationStore backed by a
 // connection pool. InsertAttestation opens its own transaction.
 func NewAttestationStore(pool *pgxpool.Pool) *AttestationStore {
-	return &AttestationStore{pool: pool, q: sqlcgen.New(pool)}
+	return &AttestationStore{pool: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool)}
 }
 
 // LatestAttestation returns the highest-seq attestation, or a zero
@@ -117,23 +118,32 @@ func (s *AttestationStore) ListAttestationsFrom(ctx context.Context, fromSeq int
 // insert.
 //
 // leafHashes, if non-nil, MUST be the same length as entryIDs -- it is
-// entryIDs[i]'s stored core.AttestedLeaf.LeafHash (design doc §9.4). nil
-// or wrong-length is normalized to a same-length slice of empty (”)
-// placeholders rather than passed through mismatched: the underlying SQL
-// query zips the two arrays by position via WITH ORDINALITY (see
+// entryIDs[i]'s stored core.AttestedLeaf.LeafHash (design doc §9.4).
+// verdicts, if non-nil, MUST also be the same length -- it is entryIDs[i]'s
+// cached core.JournalAuthVerdict (T4, design doc §8 extended). nil or
+// wrong-length either array is normalized to a same-length slice of empty
+// (”) placeholders rather than passed through mismatched: the underlying
+// SQL query zips the arrays by position via WITH ORDINALITY (see
 // InsertEntryAttestations's comment) -- an actual length mismatch would
-// silently truncate to the shorter array's length via the INNER JOIN,
-// which for a nil/empty leafHashes would mean an INSERT of entry_ids that
+// silently truncate to the shortest array's length via the INNER JOINs,
+// which for a nil/empty array would mean an INSERT of entry_ids that
 // silently inserts ZERO rows instead of entryIDs' full count. Normalizing
 // in Go, before the query ever runs, makes that failure mode
 // structurally unreachable rather than a runtime footgun callers must
 // remember to avoid.
-func (s *AttestationStore) InsertAttestation(ctx context.Context, input core.Attestation, entryIDs []int64, leafHashes [][]byte) (core.Attestation, error) {
+func (s *AttestationStore) InsertAttestation(ctx context.Context, input core.Attestation, entryIDs []int64, leafHashes [][]byte, verdicts []core.JournalAuthVerdict) (core.Attestation, error) {
 	if len(leafHashes) != len(entryIDs) {
 		leafHashes = make([][]byte, len(entryIDs))
 		for i := range leafHashes {
 			leafHashes[i] = []byte{}
 		}
+	}
+	if len(verdicts) != len(entryIDs) {
+		verdicts = make([]core.JournalAuthVerdict, len(entryIDs))
+	}
+	verdictStrings := make([]string, len(verdicts))
+	for i, v := range verdicts {
+		verdictStrings[i] = string(v)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -145,15 +155,16 @@ func (s *AttestationStore) InsertAttestation(ctx context.Context, input core.Att
 	qtx := s.q.WithTx(tx)
 
 	row, err := qtx.InsertLedgerAttestation(ctx, sqlcgen.InsertLedgerAttestationParams{
-		Uid:         newUID(),
-		Seq:         input.Seq,
-		EntryCount:  input.EntryCount,
-		BatchDigest: bytesOrEmpty(input.BatchDigest),
-		MerkleRoot:  bytesOrEmpty(input.MerkleRoot),
-		PrevRoot:    bytesOrEmpty(input.PrevRoot),
-		RootHash:    bytesOrEmpty(input.RootHash),
-		Signature:   bytesOrEmpty(input.Signature),
-		KeyID:       input.KeyID,
+		Uid:               newUID(),
+		Seq:               input.Seq,
+		EntryCount:        input.EntryCount,
+		BatchDigest:       bytesOrEmpty(input.BatchDigest),
+		MerkleRoot:        bytesOrEmpty(input.MerkleRoot),
+		AuthVerdictDigest: bytesOrEmpty(input.AuthVerdictDigest),
+		PrevRoot:          bytesOrEmpty(input.PrevRoot),
+		RootHash:          bytesOrEmpty(input.RootHash),
+		Signature:         bytesOrEmpty(input.Signature),
+		KeyID:             input.KeyID,
 	})
 	if err != nil {
 		return core.Attestation{}, wrapStoreError("postgres: insert attestation: insert ledger_attestations", err)
@@ -161,7 +172,7 @@ func (s *AttestationStore) InsertAttestation(ctx context.Context, input core.Att
 
 	if len(entryIDs) > 0 {
 		if err := qtx.InsertEntryAttestations(ctx, sqlcgen.InsertEntryAttestationsParams{
-			Seq: input.Seq, EntryIds: entryIDs, LeafHashes: leafHashes,
+			Seq: input.Seq, EntryIds: entryIDs, LeafHashes: leafHashes, AuthVerdicts: verdictStrings,
 		}); err != nil {
 			return core.Attestation{}, wrapStoreError("postgres: insert attestation: insert entry_attestations", err)
 		}
@@ -191,15 +202,26 @@ func (s *AttestationStore) LeafHashesForAttestation(ctx context.Context, seq int
 
 func attestationFromRow(row sqlcgen.LedgerAttestation) core.Attestation {
 	return core.Attestation{
-		UID:         pgToUID(row.Uid),
-		Seq:         row.Seq,
-		EntryCount:  row.EntryCount,
-		BatchDigest: row.BatchDigest,
-		MerkleRoot:  row.MerkleRoot,
-		PrevRoot:    row.PrevRoot,
-		RootHash:    row.RootHash,
-		Signature:   row.Signature,
-		KeyID:       row.KeyID,
-		CreatedAt:   row.CreatedAt,
+		UID:               pgToUID(row.Uid),
+		Seq:               row.Seq,
+		EntryCount:        row.EntryCount,
+		BatchDigest:       row.BatchDigest,
+		MerkleRoot:        row.MerkleRoot,
+		AuthVerdictDigest: row.AuthVerdictDigest,
+		PrevRoot:          row.PrevRoot,
+		RootHash:          row.RootHash,
+		Signature:         row.Signature,
+		KeyID:             row.KeyID,
+		CreatedAt:         row.CreatedAt,
 	}
+}
+
+// JournalAuthMaterial implements service.AttestationStore.JournalAuthMaterial
+// (T4, design doc §4.5's batched-fetch recommendation) by delegating to
+// fetchJournalAuthMaterial (postgres/auth_material.go) -- the same batched
+// fetch postgres.VerifiedBalanceStore.verifyJournalsNaively uses for its
+// own, different caller (the withdrawal-time naive fallback for entries
+// with no cached T4 verdict yet).
+func (s *AttestationStore) JournalAuthMaterial(ctx context.Context, journalIDs []int64) (map[int64]core.JournalAuthMaterial, error) {
+	return fetchJournalAuthMaterial(ctx, s.q, s.dims, journalIDs)
 }

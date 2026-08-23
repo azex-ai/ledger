@@ -353,6 +353,24 @@ type AuthorizedJournal struct {
 	Status      AuthStatus
 }
 
+// JournalAuthMaterial is everything core.VerifyJournalAuth needs for one
+// journal: its reconstructed uid-space JournalInput (Entries populated),
+// the effective-at timestamp it was signed under, and the stored
+// digest/signature/keyID to check against. Batch-fetched by
+// postgres.AttestationStore.JournalAuthMaterial (design doc §4.5's
+// batched-fetch recommendation, T4) for two callers that both need the
+// identical per-journal answer: service.AttestationService.RunAttestBatch
+// (computing a fresh JournalAuthVerdict at attestation time) and
+// service.VerifyLedger (recomputing AuthVerdictDigest from live data to
+// detect drift) -- defined once here rather than twice.
+type JournalAuthMaterial struct {
+	Input         JournalInput
+	EffectiveAt   time.Time
+	AuthDigest    []byte
+	AuthSignature []byte
+	AuthKeyID     string
+}
+
 // ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------

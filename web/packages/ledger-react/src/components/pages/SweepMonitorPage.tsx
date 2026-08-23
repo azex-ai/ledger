@@ -37,7 +37,7 @@ export function SweepMonitorPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useSweeps(params);
   const sweeps = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -65,7 +65,7 @@ export function SweepMonitorPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load sweeps" />
+        <ErrorState message="Failed to load sweeps" onRetry={refetch} />
       ) : sweeps.length === 0 ? (
         <EmptyState
           icon={Combine}

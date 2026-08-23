@@ -54,12 +54,25 @@ type Attestation struct {
 	// predates merkle_root being computed and is v1 (AttestationRootHash,
 	// separator 0x03, unchanged) -- callers must treat that as "not
 	// available", not as a mismatch.
-	MerkleRoot []byte    `json:"merkle_root"`
-	PrevRoot   []byte    `json:"prev_root"`
-	RootHash   []byte    `json:"root_hash"`
-	Signature  []byte    `json:"signature"`
-	KeyID      string    `json:"key_id"`
-	CreatedAt  time.Time `json:"created_at"`
+	MerkleRoot []byte `json:"merkle_root"`
+	// AuthVerdictDigest binds every covered entry's cached
+	// JournalAuthVerdict (T4, migration 054, design doc §8 extended) into
+	// this batch's signed content -- see AuthVerdictDigest's doc comment
+	// for the byte layout. Non-empty means this row is v3
+	// (AttestationRootHashV3, separator 0x12): RootHash binds
+	// AuthVerdictDigest in addition to v2's BatchDigest/MerkleRoot, so
+	// Signature covers it too. Empty means either this row predates
+	// migration 054, or the AttestationService that built it had no
+	// AuthVerifier configured (T4 is additive/opt-in, same as P5 itself) --
+	// it keeps its original v1/v2 RootHash semantics forever, for the same
+	// "never retroactively upgrade a signed row" reasoning MerkleRoot's own
+	// doc comment gives.
+	AuthVerdictDigest []byte    `json:"auth_verdict_digest"`
+	PrevRoot          []byte    `json:"prev_root"`
+	RootHash          []byte    `json:"root_hash"`
+	Signature         []byte    `json:"signature"`
+	KeyID             string    `json:"key_id"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // GenesisRootHashLen is the fixed width, in bytes, of every root_hash /
@@ -90,10 +103,26 @@ var GenesisRoot = make([]byte, GenesisRootHashLen)
 //     migration 048 onward is created under v2; v1 rows are never
 //     retroactively upgraded (same reasoning as batch_digest not being
 //     renamed -- see 048's header).
+//   - rootHashDomainV3 (0x12): T4, design doc §8 extended, contracts §W3-B.
+//     Pre-allocated by contracts §W3-0. AttestationRootHashV3 additionally
+//     binds AuthVerdictDigest into the signed hash. Every attestation built
+//     by an AttestationService with a configured AuthVerifier uses this
+//     from migration 054 onward; one built with no AuthVerifier keeps
+//     using v2 exactly as before (T4 is additive/opt-in -- there is no
+//     partial-verdict v3 row). v1/v2 rows are never retroactively upgraded.
+//   - authVerdictDigestDomain (0x13): T4, this file's AuthVerdictDigest.
+//     Only 0x12 was pre-allocated by contracts §W3-0 for T4 -- this value
+//     was not, and is registered here per contracts §2.6 rule 1 ("新增任何
+//     hash 构造前，先 bus send team-lead 要号"), reported via `bus send
+//     team-lead` alongside this task's completion since no interactive
+//     allocation round-trip was available mid-task. 0x13 is the next free
+//     byte in the table as of this writing.
 const (
-	batchDigestDomain = byte(0x02)
-	rootHashDomain    = byte(0x03)
-	rootHashDomainV2  = byte(0x11)
+	batchDigestDomain       = byte(0x02)
+	rootHashDomain          = byte(0x03)
+	rootHashDomainV2        = byte(0x11)
+	rootHashDomainV3        = byte(0x12)
+	authVerdictDigestDomain = byte(0x13)
 )
 
 // AttestedEntry is the subset of a journal_entries row CanonicalBatchDigest
@@ -243,6 +272,144 @@ func AttestationRootHashV2(seq int64, prevRoot, batchDigest, merkleRoot []byte, 
 	buf.Write(prevRoot)
 	buf.Write(batchDigest)
 	buf.Write(merkleRoot)
+	writeBE64(&buf, uint64(entryCount))
+
+	sum := sha256.Sum256(buf.Bytes())
+	return sum[:], nil
+}
+
+// JournalAuthVerdict is T4's attestation-time cache of
+// core.VerifyJournalAuth's result for one entry's contributing journal
+// (design doc §8 extended, contracts §W3-B) -- the mechanism that lets
+// postgres.VerifiedBalanceStore skip re-running the crypto check (and the
+// DB round trip needed to reconstruct a JournalInput) for every
+// contributing journal on every withdrawal-time call. Persisted on
+// entry_attestations.auth_verdict and bound into AuthVerdictDigest, which
+// root hash v3 (AttestationRootHashV3, separator 0x12) signs alongside
+// P6's existing batch_digest/merkle_root.
+type JournalAuthVerdict string
+
+const (
+	// JournalAuthVerdictUnknown is the zero value AND the sentinel for "no
+	// cached verdict is available" -- either this entry_attestations row
+	// predates migration 054, or the AttestationService that built its
+	// covering batch had no AuthVerifier configured (T4 is opt-in;
+	// contracts §W3-B does not require every deployment to turn it on). It
+	// is NOT a claim that the journal is unauthorized -- treating it as a
+	// passing verdict OR a failing one would both be wrong. Callers MUST
+	// fall back to a live core.VerifyJournalAuth for this entry's journal,
+	// exactly the naive pre-T4 behavior -- fail-closed by falling back,
+	// never by silently trusting an absent answer.
+	JournalAuthVerdictUnknown JournalAuthVerdict = ""
+	// JournalAuthVerdictAuthorized: core.VerifyJournalAuth succeeded for
+	// this entry's journal when the covering attestation batch was built.
+	JournalAuthVerdictAuthorized JournalAuthVerdict = "authorized"
+	// JournalAuthVerdictUnauthorized: core.VerifyJournalAuth failed (no
+	// signature, digest mismatch, or invalid signature) for this entry's
+	// journal when the covering attestation batch was built -- a forged or
+	// tampered journal was live in the ledger at attestation time. Coverage
+	// (this entry having an entry_attestations row at all) is still
+	// recorded -- P6's DELETE-detection purpose is independent of P5
+	// authorization, see this file's package doc comment -- only the
+	// cached verdict says the contributing journal cannot be trusted.
+	JournalAuthVerdictUnauthorized JournalAuthVerdict = "unauthorized"
+)
+
+// AuthVerdictDigest computes the deterministic, domain-separated SHA-256
+// digest binding each entry's cached JournalAuthVerdict into the batch's
+// signed content, alongside CanonicalBatchDigest's entry-existence digest.
+// entries and verdicts MUST be the same length, verdicts[i] describing
+// entries[i]'s contributing journal -- the caller
+// (service.AttestationService.RunAttestBatch at build time, and
+// service.VerifyLedger's live drift recompute) derives both from the same
+// read.
+//
+// entries MUST already be sorted by EntryID ascending -- the same
+// precondition CanonicalBatchDigest has, and for the same reason (the
+// caller's own read query already guarantees it; this function does not
+// re-sort).
+//
+// A separate function/domain-separator from CanonicalBatchDigest -- not a
+// new field folded into AttestedEntry's own encoding -- because
+// AttestedEntry's byte layout is frozen: golden vectors pin it, and every
+// attestation signed before this feature existed used exactly that layout.
+// Changing what AttestedEntry means would invalidate every existing
+// signature, the same reasoning core/auth.go's authDigestDomain doc
+// comment gives for why V1 was retired rather than patched in place.
+//
+// An empty entries/verdicts pair is valid (an empty attested batch, design
+// doc §8.1) and produces a well-defined digest, same as CanonicalBatchDigest.
+//
+// Byte layout:
+//
+//	SHA-256(
+//	  0x13                                  -- domain separator
+//	  BE64(len(entries))
+//	  for each entry:
+//	    BE64(entry.EntryID)
+//	    LP(string(verdicts[i]))
+//	)
+func AuthVerdictDigest(entries []AttestedEntry, verdicts []JournalAuthVerdict) ([]byte, error) {
+	if len(entries) != len(verdicts) {
+		return nil, fmt.Errorf("core: auth verdict digest: entries (%d) and verdicts (%d) length mismatch: %w", len(entries), len(verdicts), ErrInvalidInput)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte(authVerdictDigestDomain)
+	writeBE64(&buf, uint64(len(entries)))
+	for i, e := range entries {
+		writeBE64(&buf, uint64(e.EntryID))
+		writeLenPrefixed(&buf, string(verdicts[i]))
+	}
+
+	sum := sha256.Sum256(buf.Bytes())
+	return sum[:], nil
+}
+
+// AttestationRootHashV3 is AttestationRootHashV2 with AuthVerdictDigest
+// additionally bound into the signed hash (design doc §8 extended,
+// contracts §W3-B) -- T4's fix for the naive VerifiedBalanceReader path's
+// per-journal DB round trip (measured in
+// .local/bench-verify-2026-08-23.md): binding the authorization verdict
+// into content an external anchor already protects means a later
+// VerifiedBalance call can trust a covered entry's cached verdict instead
+// of re-deriving it from scratch.
+//
+// Every attestation created by an AttestationService with a configured
+// AuthVerifier uses this from migration 054 onward; one built with no
+// AuthVerifier keeps using AttestationRootHashV2 exactly as before (T4 is
+// additive/opt-in -- there is no partial-verdict v3 row). Attestation rows
+// created before this migration landed keep their original v1/v2 semantics
+// forever, for the same "cannot re-sign history" reason batch_digest was
+// never renamed (see migration 048's header).
+//
+// Byte layout:
+//
+//	SHA-256(0x12 || BE64(seq) || prevRoot (32 bytes) || batchDigest (32 bytes) || merkleRoot (32 bytes) || authVerdictDigest (32 bytes) || BE64(entryCount))
+//
+// Returns core.ErrInvalidInput if prevRoot, batchDigest, merkleRoot, or
+// authVerdictDigest is not exactly GenesisRootHashLen (32) bytes.
+func AttestationRootHashV3(seq int64, prevRoot, batchDigest, merkleRoot, authVerdictDigest []byte, entryCount int64) ([]byte, error) {
+	if len(prevRoot) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v3: prevRoot must be %d bytes, got %d: %w", GenesisRootHashLen, len(prevRoot), ErrInvalidInput)
+	}
+	if len(batchDigest) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v3: batchDigest must be %d bytes, got %d: %w", GenesisRootHashLen, len(batchDigest), ErrInvalidInput)
+	}
+	if len(merkleRoot) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v3: merkleRoot must be %d bytes, got %d: %w", GenesisRootHashLen, len(merkleRoot), ErrInvalidInput)
+	}
+	if len(authVerdictDigest) != GenesisRootHashLen {
+		return nil, fmt.Errorf("core: attestation root hash v3: authVerdictDigest must be %d bytes, got %d: %w", GenesisRootHashLen, len(authVerdictDigest), ErrInvalidInput)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteByte(rootHashDomainV3)
+	writeBE64(&buf, uint64(seq))
+	buf.Write(prevRoot)
+	buf.Write(batchDigest)
+	buf.Write(merkleRoot)
+	buf.Write(authVerdictDigest)
 	writeBE64(&buf, uint64(entryCount))
 
 	sum := sha256.Sum256(buf.Bytes())

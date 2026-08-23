@@ -8,7 +8,7 @@
  */
 
 import type { ReactNode } from "react";
-import { Alert, Chip, Skeleton } from "@heroui/react";
+import { Alert, Button, Chip, Skeleton } from "@heroui/react";
 
 export function PageHeader({
   title,
@@ -32,13 +32,25 @@ export function PageHeader({
   );
 }
 
-export function ErrorState({ message }: { message: string }) {
+export function ErrorState({
+  message,
+  onRetry,
+}: {
+  message: string;
+  /** Re-triggers the failed fetch (typically a query's `refetch`). Omit only when there is genuinely nothing to retry. */
+  onRetry?: () => void;
+}) {
   return (
     <Alert status="danger">
       <Alert.Indicator />
       <Alert.Content>
         <Alert.Title>{message}</Alert.Title>
       </Alert.Content>
+      {onRetry && (
+        <Button size="sm" variant="outline" onPress={onRetry}>
+          Retry
+        </Button>
+      )}
     </Alert>
   );
 }

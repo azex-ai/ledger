@@ -118,7 +118,7 @@ function DeactivateJournalTypeDialog({ id, name }: { id: string; name: string })
 }
 
 export function JournalTypesPage() {
-  const { data, isLoading, isError } = useJournalTypes();
+  const { data, isLoading, isError, refetch } = useJournalTypes();
   const types = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(types);
 
@@ -129,7 +129,7 @@ export function JournalTypesPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load journal types" />
+        <ErrorState message="Failed to load journal types" onRetry={refetch} />
       ) : types.length === 0 ? (
         <EmptyState
           icon={<FileType2 className="size-8 text-muted" aria-hidden />}

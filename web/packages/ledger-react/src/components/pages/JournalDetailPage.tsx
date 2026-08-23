@@ -47,7 +47,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Debit</p>
             {debits.map((e) => (
-              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
+              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
                   <span className="tabular-nums text-sm text-emerald-400">{formatAmount(e.amount)}</span>
@@ -64,7 +64,7 @@ function EntryFlow({ entries }: { entries: Entry[] }) {
           <div className="flex-1 space-y-2">
             <p className="text-xs font-medium text-muted-foreground uppercase">Credit</p>
             {credits.map((e) => (
-              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
+              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
                 <div className="flex justify-between">
                   <span className="text-sm">Holder {e.account_holder}</span>
                   <span className="tabular-nums text-sm text-rose-400">{formatAmount(e.amount)}</span>
@@ -119,7 +119,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
 }
 
 export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: JournalDetailPageProps) {
-  const { data, isLoading, isError } = useJournal(id);
+  const { data, isLoading, isError, refetch } = useJournal(id);
   const { data: journalTypes } = useJournalTypes();
 
   if (isLoading) {
@@ -132,7 +132,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
   }
 
   if (isError) {
-    return <ErrorState message="Failed to load journal" />;
+    return <ErrorState message="Failed to load journal" onRetry={refetch} />;
   }
 
   if (!data) {
@@ -237,7 +237,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
             </TableHeader>
             <TableBody>
               {entries.map((e) => (
-                <TableRow key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}`}>
+                <TableRow key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`}>
                   <TableCell>{e.entry_type}</TableCell>
                   <TableCell>{e.account_holder}</TableCell>
                   <TableCell>{e.currency_uid}</TableCell>

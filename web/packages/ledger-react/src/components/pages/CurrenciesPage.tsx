@@ -103,7 +103,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
 }
 
 export function CurrenciesPage() {
-  const { data, isLoading, isError } = useCurrencies();
+  const { data, isLoading, isError, refetch } = useCurrencies();
   const currencies = Array.isArray(data) ? data : [];
   const { pageItems, page, pageCount, setPage } = useClientPage(currencies);
 
@@ -114,7 +114,7 @@ export function CurrenciesPage() {
       {isLoading ? (
         <TableSkeleton rows={3} />
       ) : isError ? (
-        <ErrorState message="Failed to load currencies" />
+        <ErrorState message="Failed to load currencies" onRetry={refetch} />
       ) : currencies.length === 0 ? (
         <EmptyState
           icon={Coins}

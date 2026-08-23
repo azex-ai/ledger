@@ -53,11 +53,14 @@ interface HealthCard {
 }
 
 function HealthCards() {
-  const { data, isLoading, isError } = useHealth();
+  const { data, isLoading, isError, refetch } = useHealth();
 
   if (isError) {
     return (
-      <ErrorState message="Unable to reach the API. Health check failed — is the backend running?" />
+      <ErrorState
+        message="Unable to reach the API. Health check failed — is the backend running?"
+        onRetry={refetch}
+      />
     );
   }
 
@@ -143,7 +146,7 @@ function HealthCards() {
 // ─── System balances chart ──────────────────────────────────────────
 
 function SystemBalancesCard() {
-  const { data, isLoading, isError } = useSystemBalances();
+  const { data, isLoading, isError, refetch } = useSystemBalances();
   const { classCode, currencyCode } = useUidCodeLookups();
 
   const chartData = (data ?? []).map((b) => ({
@@ -161,7 +164,7 @@ function SystemBalancesCard() {
         {isLoading ? (
           <Skeleton className="h-[300px] w-full rounded-lg" />
         ) : isError ? (
-          <ErrorState message="Failed to load balances" />
+          <ErrorState message="Failed to load balances" onRetry={refetch} />
         ) : chartData.length === 0 ? (
           <EmptyState
             icon={<TrendingUp aria-hidden className="size-8 text-muted" />}
@@ -206,7 +209,7 @@ function SystemBalancesCard() {
 // ─── Recent journals ─────────────────────────────────────────────────
 
 function RecentJournalsCard({ linkComponent: Link = DefaultLink }: { linkComponent?: LinkComponent }) {
-  const { data, isLoading, isError } = useJournals(10);
+  const { data, isLoading, isError, refetch } = useJournals(10);
   const journals = data?.pages[0]?.list ?? [];
 
   return (
@@ -224,7 +227,7 @@ function RecentJournalsCard({ linkComponent: Link = DefaultLink }: { linkCompone
         {isLoading ? (
           <TableSkeleton rows={3} />
         ) : isError ? (
-          <ErrorState message="Failed to load journals" />
+          <ErrorState message="Failed to load journals" onRetry={refetch} />
         ) : journals.length === 0 ? (
           <EmptyState icon={<BookOpen aria-hidden className="size-8 text-muted" />} title="No journals yet" />
         ) : (
