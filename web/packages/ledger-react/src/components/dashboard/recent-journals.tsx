@@ -13,6 +13,7 @@ import {
 } from "../ui/table";
 import { AlertCircle, BookOpen } from "lucide-react";
 import { DefaultLink, type LinkComponent } from "../nav";
+import { Button } from "../ui/button";
 
 export interface RecentJournalsProps {
   /**
@@ -25,7 +26,7 @@ export interface RecentJournalsProps {
 export function RecentJournals({
   linkComponent: Link = DefaultLink,
 }: RecentJournalsProps = {}) {
-  const { data, isLoading, isError } = useJournals(10);
+  const { data, isLoading, isError, refetch } = useJournals(10);
   const journals = data?.pages[0]?.list ?? [];
 
   return (
@@ -50,6 +51,9 @@ export function RecentJournals({
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-sm text-destructive">
             <AlertCircle className="h-5 w-5" />
             <span>Failed to load journals</span>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              Retry
+            </Button>
           </div>
         ) : journals.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-2 py-8">

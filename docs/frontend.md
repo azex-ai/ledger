@@ -16,17 +16,20 @@ The repo's [`web/`](../web/) app is the working reference integration.
 
 ## Overview
 
-The package exposes **three entry points**, each with a deliberate isolation
-boundary:
+The package exposes **four entry points** (plus the `./wallet*` entries — see
+the [End-user wallet](#end-user-wallet) section below), each with a deliberate
+isolation boundary:
 
 | Entry | Import path | Contains | Why separate |
 |-------|-------------|----------|--------------|
-| Root | `@azex/ledger-react` | Client factory, provider, all hooks, sidebar/widgets, 11 non-chart page components, `LedgerAdmin`, `Toaster` | The default surface |
+| Root | `@azex/ledger-react` | Client factory, provider, all hooks, sidebar/widgets, 13 non-chart page components, `LedgerAdmin`, `Toaster` | The default surface — shadcn-style skin |
 | Charts | `@azex/ledger-react/charts` | `DashboardPage`, `BalancesPage`, `BalanceTrend` | These statically import `recharts` (~275 KB); keeping them off the root barrel keeps recharts out of consumers' main bundle |
+| HeroUI | `@azex/ledger-react/heroui` | Same admin surface as the root barrel (all 15 pages, including the two chart pages — no separate `/charts` split here), rendered with HeroUI v3 components instead of shadcn. Shares the headless core | Alternative skin for hosts already on HeroUI v3 — see [HeroUI skin](#heroui-skin) |
 | Server | `@azex/ledger-react/server` | `createServerLedgerClient`, `prefetch*` helpers, `ledgerKeys` | Server-only (no `"use client"`); takes the **server API key**, which must never enter the client bundle |
 
-Plus `@azex/ledger-react/styles.css` — the bundled stylesheet, scoped under
-`.ledger-root` (see [Theming](#theming)).
+Plus `@azex/ledger-react/styles.css` (shadcn skin) and
+`@azex/ledger-react/heroui.css` (HeroUI skin) — the bundled stylesheets, scoped
+under `.ledger-root` (see [Theming](#theming)).
 
 **Peer dependencies**: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`.
 The package is framework-agnostic — no Next.js coupling; routing is injected
@@ -143,8 +146,10 @@ Chart-bearing pages import from the `/charts` subpath instead:
 import { DashboardPage, BalancesPage } from "@azex/ledger-react/charts";
 ```
 
-The repo's `web/` app wires all 13 pages this way — one route file per page
-(see [`web/src/app/`](../web/src/app/)).
+The repo's `web/` app wires 13 of the package's pages this way — one route
+file per page (see [`web/src/app/`](../web/src/app/)). `DepositReviewsPage`
+and `SweepMonitorPage` (added after the app was last wired) are not yet
+mounted there; wire them the same way if you need a reference route.
 
 ### Mode 3 — headless (hooks only)
 
@@ -244,6 +249,53 @@ inline style on the `.ledger-root` div):
 <LedgerProvider config={{ baseUrl, theme: { "--primary": "oklch(0.6 0.2 250)" } }}>
 ```
 
+## HeroUI skin
+
+`@azex/ledger-react/heroui` renders the same admin surface as the package
+root — all 15 pages, including the two chart pages (there is no separate
+`/charts` split on this entry) — with HeroUI v3 components instead of shadcn.
+It shares the exact same headless core (client, provider, hooks, `ledgerKeys`)
+as every other skin, so switching skins never touches your data layer.
+
+Host contract:
+
+- `@heroui/react` (optional peer dependency) is installed, and the host runs
+  Tailwind v4 with `@import "@heroui/styles"` — the premise of choosing this
+  skin over the shadcn default.
+- Import `@azex/ledger-react/heroui.css` once instead of `styles.css` — it
+  carries the skin's structural layout classes (not a duplicate design-token
+  set; theming still flows through `.ledger-root`, see [Theming](#theming)).
+- Wrap the app in `<LedgerProvider>`, re-exported from this entry for
+  convenience (same `LedgerProviderConfig` as the root).
+
+```tsx
+import { LedgerProvider, LedgerAdmin } from "@azex/ledger-react/heroui";
+import "@azex/ledger-react/heroui.css";
+
+export default function Admin() {
+  return (
+    <LedgerProvider config={{ baseUrl: "https://ledger.example.com" }}>
+      <LedgerAdmin />
+    </LedgerProvider>
+  );
+}
+```
+
+Or wire individual pages the same way as Mode 2 above — every `*Page` name and
+prop shape is identical to the root barrel, just imported from
+`@azex/ledger-react/heroui` instead:
+
+```tsx
+import { JournalsPage } from "@azex/ledger-react/heroui";
+```
+
+Shared presentational primitives (`PageHeader`, `EmptyState`, `ErrorState`,
+`StatusChip`, `TableSkeleton`) are also re-exported from this entry for hosts
+composing their own HeroUI-skinned pages around the hooks.
+
+The end-user wallet has the same skin split — see
+[`./wallet/heroui`](#end-user-wallet).
+
 ---
 
 # API Reference
@@ -288,9 +340,11 @@ dedicated hook (call these via `useLedgerClient()`):
 | System | `getHealth()`, `getSystemBalances()` |
 | Journals | `listJournals({cursor?, limit?})`, `getJournal(id)`, `postJournal(body)`, `postTemplateJournal(body)`, `reverseJournal(id, reason)` |
 | Entries | `listEntries({holder?, currency_uid?, cursor?, limit?})` |
-| Balances | `getBalances(holder)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyId)` |
-| Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount)`, `releaseReservation(id)` |
+| Balances | `getBalances(holder)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyId)` |
+| Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount)`, `settlePartialReservation(id, amount, idempotencyKey)`, `finalizeReservationSettlement(id)`, `releaseReservation(id)` |
 | Bookings | `createBooking(CreateBookingBody)`, `transitionBooking(id, TransitionBookingBody)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
+| Deposit address (admin) | `getDepositAddress(holder)`, `ensureDepositAddress(holder)` |
+| Deposit reviews | `listDepositReviews({cursor?, limit?})`, `approveDepositReview(uid)`, `rejectDepositReview(uid, reason)` |
 | Events | `getEvent(id)`, `listEvents({classification_code?, booking_id?, to_status?, cursor?, limit?})` |
 | Classifications | `listClassifications(activeOnly?)`, `createClassification(body)`, `deactivateClassification(id)` |
 | Journal types | `listJournalTypes(activeOnly?)`, `createJournalType(body)`, `deactivateJournalType(id)` |
@@ -361,6 +415,7 @@ const mutation = useLedgerMutation((body) => client.postJournal(body), ["journal
 | Hook | Signature | Returns / Endpoint | Notes |
 |------|-----------|--------------------|-------|
 | `useBalances` | `(holder: number)` | Query → `GET /api/v1/balances/{holder}` (`Balance[]`) | `enabled: holder !== 0`; **polls every 15 s** |
+| `useBalanceBreakdown` | `(holder, currency)` | Query → `GET /api/v1/balances/{holder}/{currency}/breakdown` | `enabled: holder !== 0 && currency !== ""`; polls every 15 s |
 | `useBalancesByCurrency` | `(holder, currency)` | Query → `GET /api/v1/balances/{holder}/{currency}` | `enabled: holder !== 0 && currency > 0`; polls every 15 s |
 
 ### Deposits — `src/hooks/use-deposits.ts`
@@ -380,6 +435,30 @@ classification id is resolved at runtime from a shared, long-cached
 All transitions hit `POST /api/v1/bookings/{uid}/transition` and invalidate
 the `bookings` namespace.
 
+### Deposit address (admin) — `src/hooks/use-deposit-address.ts`
+
+Looks up / issues a holder's CREATE2 crypto deposit address by numeric
+`holder` id — the admin/operator counterpart to the holder-token-scoped
+`useWalletDepositAddress` in the [end-user wallet](#end-user-wallet).
+
+| Hook | Signature | Returns / Endpoint | Notes |
+|------|-----------|--------------------|-------|
+| `useDepositAddress` | `(holder: number)` | Query → `GET /api/v1/holders/{holder}/deposit-address` | `enabled: holder !== 0`; `retry: false` — a 404 (no address yet) is an expected terminal state, not transient. Drive `useEnsureDepositAddress` from the error |
+| `useEnsureDepositAddress` | `()` | Mutation → `POST /api/v1/holders/{holder}/deposit-address` | Variables: `holder: number`. Idempotent — repeated calls return the same address. Invalidates `deposit-address` |
+
+### Deposit reviews — `src/hooks/use-deposit-reviews.ts`
+
+Cursor-paginated queue of deposits parked in human review (M3 compensating
+controls) — the `review` booking status IS the queue, with zero ledger effect
+until approved. Same paging contract as `useJournals`: flatten
+`data?.pages.flatMap((p) => p.list)`, page via `fetchNextPage`.
+
+| Hook | Signature | Returns / Endpoint | Notes |
+|------|-----------|--------------------|-------|
+| `useDepositReviews` | `(limit = 20)` | Infinite query → `GET /api/v1/deposits/reviews` | |
+| `useApproveDepositReview` | `()` | Mutation → `POST /api/v1/deposits/{uid}/review/approve` | Variables: `uid: string`. Posts a confirmed journal. Idempotent (no-op if already confirmed). Optimistically drops `uid` from every cached review-queue page, rolled back on error; settles by invalidating deposit reviews + bookings + balances |
+| `useRejectDepositReview` | `()` | Mutation → `POST /api/v1/deposits/{uid}/review/reject` | Variables: `{uid, reason}`. Never posts a journal (booking → `failed`). Same optimistic-removal/rollback/invalidation behavior as approve |
+
 ### Withdrawals — `src/hooks/use-withdrawals.ts`
 
 Withdrawals are bookings under classification code `"withdraw"`. Note the
@@ -396,6 +475,20 @@ not terminal.
 | `useConfirmWithdraw` | `()` | `→ confirmed` | Variables: `id: number` |
 | `useFailWithdraw` | `()` | `→ failed` | Variables: `{id, reason}` |
 | `useRetryWithdraw` | `()` | `failed → reserved` | Variables: `id: number` |
+
+### Sweeps — `src/hooks/use-sweeps.ts`
+
+Sweeps are bookings under classification code `"sweep"` — the on-chain
+custody-collection audit trail. Every sweep booking is keyed against a
+per-chain sentinel system holder rather than a real user, so unlike
+`useDeposits`/`useWithdrawals` there is no per-holder filter. Same paging
+contract as `useJournals`: flatten `data?.pages.flatMap((p) => p.list)`, page
+via `fetchNextPage`.
+
+| Hook | Signature | Returns / Endpoint | Notes |
+|------|-----------|--------------------|-------|
+| `useSweepClassificationId` | `()` | `string` | Classification uid for code `"sweep"`; empty string until classifications load |
+| `useSweeps` | `(params: {status?} = {}, limit = 20)` | Infinite query → `GET /api/v1/bookings?classification_uid=…` (`Booking[]`) | `enabled: classificationUid !== ""` |
 
 ### Metadata — `src/hooks/use-metadata.ts`
 
@@ -424,6 +517,8 @@ invalidates its own namespace only (metadata changes don't move balances).
 |------|-----------|----------|-------|
 | `useReservations` | `(params: {holder?, status?})` | `GET /api/v1/reservations` | |
 | `useSettleReservation` | `()` — variables `{id, actualAmount: string}` | `POST /api/v1/reservations/{uid}/settle` | Invalidates `reservations` (+ balances) |
+| `useSettlePartialReservation` | `()` — variables `{id, amount, idempotencyKey}` | `POST /api/v1/reservations/{uid}/settle-partial` | Invalidates `reservations` (+ balances) |
+| `useFinalizeReservationSettlement` | `()` — variables `id: string` | `POST /api/v1/reservations/{uid}/finalize` | Closes out a reservation after one or more partial settlements. Invalidates `reservations` (+ balances) |
 | `useReleaseReservation` | `()` — variables `id: string` | `POST /api/v1/reservations/{uid}/release` | Invalidates `reservations` (+ balances) |
 
 ### System — `src/hooks/use-system.ts`
@@ -443,7 +538,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | Export | Kind | Details |
 |--------|------|---------|
 | `Sidebar` | Component | Props `SidebarProps { pathname: string; linkComponent?: LinkComponent }`. Responsive: desktop rail + mobile drawer. Active state: exact match for `/`, prefix match otherwise |
-| `LEDGER_NAV_ITEMS` | Const | `readonly LedgerNavItem[]` — the 13 sections + 2 separators (Metadata, Operations), each with href, label, lucide icon |
+| `LEDGER_NAV_ITEMS` | Const | `readonly LedgerNavItem[]` — 14 sections + 2 separators (Metadata, Operations), each with href, label, lucide icon |
 | `DefaultLink` | Component | Plain `<a>` renderer — the default when no `linkComponent` is injected |
 | `LinkComponent` | Type | `ComponentType<{ href: string; className?: string; children: ReactNode }>` — the router-injection contract |
 | `LedgerNavItem` | Type | `{ href, label, icon } \| { type: "separator", label }` |
@@ -459,9 +554,11 @@ invalidates its own namespace only (metadata changes don't move balances).
 
 ### Page components
 
-Eleven non-chart pages on the root barrel, two chart pages on `/charts`. All
-are `"use client"` components that fetch their own data through the hooks —
-mount inside `<LedgerProvider>` and they work.
+Thirteen non-chart pages on the root barrel, two chart pages on `/charts`
+(the same 15 are all on the single `/heroui` entry — see
+[HeroUI skin](#heroui-skin)). All are `"use client"`
+components that fetch their own data through the hooks — mount inside
+`<LedgerProvider>` and they work.
 
 | Component | Entry | Props |
 |-----------|-------|-------|
@@ -469,6 +566,7 @@ mount inside `<LedgerProvider>` and they work.
 | `JournalDetailPage` | root | `{ id: number; linkComponent?: LinkComponent }` — host extracts `id` from its route param |
 | `ReservationsPage` | root | none |
 | `DepositsPage` | root | none |
+| `DepositReviewsPage` | root | none — approve/reject queue for bookings held in `review` status (M3 compensating control); optimistic list removal on approve/reject, rolled back on error |
 | `WithdrawalsPage` | root | none |
 | `ClassificationsPage` | root | none |
 | `JournalTypesPage` | root | none |
@@ -476,6 +574,7 @@ mount inside `<LedgerProvider>` and they work.
 | `CurrenciesPage` | root | none |
 | `ReconciliationPage` | root | none |
 | `SnapshotsPage` | root | none |
+| `SweepMonitorPage` | root | none — on-chain custody-collection audit trail; bookings under the `sweep` classification, keyed to per-chain sentinel system holders (no per-holder filter) |
 | `DashboardPage` | `/charts` | `{ linkComponent?: LinkComponent }` — composes `HealthCards` + `BalanceTrend` + `RecentJournals` |
 | `BalancesPage` | `/charts` | none — balance lookup by holder + 30-day trend chart |
 
@@ -490,11 +589,11 @@ mount inside `<LedgerProvider>` and they work.
 Re-export of sonner's `Toaster` so consumers don't need a direct sonner
 dependency. Mount once at the app root (unless using `LedgerAdmin`).
 
-## End-user wallet — `@azex/ledger-react/wallet`
+## End-user wallet
 
-The holder-scoped wallet surface for your product's END USERS (the admin
-surfaces above are for operators). Three subpaths, mirroring the package's
-skin split:
+`@azex/ledger-react/wallet` — the holder-scoped wallet surface for your
+product's END USERS (the admin surfaces above are for operators). Three
+subpaths, mirroring the package's skin split:
 
 | Subpath | Contents |
 |---|---|
@@ -542,6 +641,8 @@ key, so holder A's cached balances can never be served to holder B.
 | `useWalletBalance(currencyUid?)` | `WalletBalance[]` | one row per currency; `total = available + pending + locked` |
 | `useWalletTransactions(limit = 20)` | infinite query | `{list, next_cursor}` pages; flatten with `data?.pages.flatMap((p) => p.list)` |
 | `useWalletHolds()` | `WalletHold[]` | outstanding holds (locked amounts + expiry) |
+| `useWalletDepositAddress()` | `WalletDepositAddress` (`{uid, address, created_at}`) | The token-bound holder's CREATE2 crypto deposit address. `retry: false` — a 404 (`ApiRequestError`) means none exists yet; show a "Generate address" CTA and drive `useEnsureWalletDepositAddress` from it |
+| `useEnsureWalletDepositAddress()` | mutation | Idempotently issues the token-bound holder's deposit address — safe to call even if one already exists. Invalidates the deposit-address query on success |
 
 ### Components
 
@@ -551,6 +652,7 @@ key, so holder A's cached balances can never be served to holder B.
 | `<WalletBalances/>` | `actions?` | per-currency grid of balance cards |
 | `<WalletBalanceCard/>` | `currencyUid?`, `actions?` | one currency: total + available/pending/on-hold rows, expandable holds detail |
 | `<TransactionList/>` | `kindLabels?`, `renderItem?`, `limit?` | activity list: labels, refund markers, signed colored amounts, Load More |
+| `<DepositAddressCard/>` | none | shows the holder's crypto deposit address (QR + copy-to-clipboard) or a "Generate address" CTA on first use — the only write in this otherwise read-only wallet surface |
 
 - `actions` is the slot for YOUR top-up / cash-out buttons — the wallet
   surface is read-only by design; write flows belong to the host product.
@@ -602,6 +704,7 @@ ledgerKeys.journals(limit)                       // ["ledger","journals",limit]
 ledgerKeys.journal(id)                           // ["ledger","journal",id]
 ledgerKeys.entries(params)                       // ["ledger","entries",params]
 ledgerKeys.balances(holder)                      // ["ledger","balances",holder]
+ledgerKeys.balanceBreakdown(holder, currency)    // ["ledger","balances",holder,currency,"breakdown"]
 ledgerKeys.balancesByCurrency(holder, currency)  // ["ledger","balances",holder,currency]
 ledgerKeys.reservations(params)                  // ["ledger","reservations",params]
 ledgerKeys.snapshots(params)                     // ["ledger","snapshots",params]
@@ -609,7 +712,9 @@ ledgerKeys.classifications(activeOnly)           // ["ledger","classifications",
 ledgerKeys.journalTypes(activeOnly)              // ["ledger","journal-types",activeOnly]
 ledgerKeys.templates(activeOnly)                 // ["ledger","templates",activeOnly]
 ledgerKeys.currencies(activeOnly)                // ["ledger","currencies",activeOnly]
-ledgerKeys.bookings(code, params)                // ["ledger","bookings",code,params]
+ledgerKeys.bookings(code, params)                // ["ledger","bookings",code,params] -- also used by useSweeps (code="sweep")
+ledgerKeys.depositAddress(holder)                // ["ledger","deposit-address",holder]
+ledgerKeys.depositReviews(limit)                 // ["ledger","deposit-reviews",limit]
 ```
 
 ## Domain types

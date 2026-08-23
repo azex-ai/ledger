@@ -197,7 +197,7 @@ export function DepositsPage() {
     () => ({ status: statusFilter || undefined }),
     [statusFilter],
   );
-  const { data, isLoading, isError, hasNextPage, fetchNextPage, isFetchingNextPage } =
+  const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useDeposits(params);
   const deposits = data?.pages.flatMap((p) => p.list) ?? [];
 
@@ -225,7 +225,7 @@ export function DepositsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load deposits" />
+        <ErrorState message="Failed to load deposits" onRetry={refetch} />
       ) : deposits.length === 0 ? (
         <EmptyState
           icon={ArrowDownToLine}
