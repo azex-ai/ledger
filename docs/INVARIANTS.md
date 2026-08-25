@@ -818,127 +818,64 @@ be sitting in the user's balance by the time a human looks at the queue.
 The application-facing database role, `ledger_app`, can `SELECT`/`INSERT`/
 `UPDATE` ordinary tables and `SELECT`/`INSERT` (never `UPDATE`/`DELETE`) on
 `journal_entries` — but it cannot `DROP`, `TRUNCATE`, `ALTER`, manage
-triggers, or create any object, anywhere in the schema. This is true as
-soon as migration 042 applies, independent of who currently owns the
+triggers, or create any object, anywhere in the schema. This is true from
+the moment the schema exists, independent of who currently owns the
 tables: `ledger_app` was never granted anything beyond
 `SELECT`/`INSERT`/`UPDATE` and will never own anything.
 
 **Why**: GRANT-based privileges alone are not a defense against a
-compromised application credential — before migration 042, every
-environment ran with a single connection that had unrestricted DDL, so a
-leaked `DATABASE_URL` (or a SQL-injection foothold) could `DROP TRIGGER` the
-append-only guards, `TRUNCATE` `journal_entries`, or silently detach a
-partition (attack path A6,
-docs/plans/2026-08-21-tamper-evident-ledger-design.md §2). Postgres cannot
-confer `ALTER`/`DROP`/`TRUNCATE`/trigger-management rights through `GRANT` —
-only object ownership (or superuser) grants them — so this invariant is only
-true because `ledger_app` never owns anything.
+compromised application credential — a connection that owns its own tables
+(or is superuser) can `DROP TRIGGER` the append-only guards, `TRUNCATE`
+`journal_entries`, or silently detach a partition (attack path A6,
+docs/plans/2026-08-21-tamper-evident-ledger-design.md §2), regardless of
+what GRANT says. Postgres cannot confer `ALTER`/`DROP`/`TRUNCATE`/
+trigger-management rights through `GRANT` — only object ownership (or
+superuser) grants them — so this invariant is only true because `ledger_app`
+never owns anything.
 
-**Note on scope**: this invariant governs what the `ledger_app` *role* can
-do once an environment's `DATABASE_URL` is cut over to it. Migration 042
-itself performs a **pure expand** step (`deployment.md`) — creating the
-roles and issuing every grant additively, with no `REVOKE` and no ownership
-transfer — and does not switch any environment's connection yet. The
-counterpart `ledger_owner` role does not yet own any table after 042 alone;
-migration 049, a separate, later "migrate" migration (see `docs/RUNBOOK.md`
-§9), performs `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
-transfer, and must ship in the same release as the `DATABASE_URL` cutover —
-an earlier combined version of 042 that did both in one file passed every
-test connecting as the new roles while actually locking the (non-superuser,
-in a real managed-Postgres deployment) migration-running connection out of
-its own database the instant it
-committed; see `docs/RUNBOOK.md` §9 for the failure this caused and the
-test that catches it.
-
-**Note on grant coverage**: 042's GRANT loop only enumerates tables that
-existed when 042 ran, and its `ALTER DEFAULT PRIVILEGES` deliberately
-benefits only `ledger_owner` — every later migration that adds a table is
-required to GRANT `ledger_app`/`ledger_ro` on it explicitly
-(contracts.md §9 point 3). That rule was violated twice before it had a
-structural check: `reconcile_scan_cursors` (043) and `checkpoint_rebuilds`
-(050) were both written and merged before 042 landed and neither carried
-that grant. Migration 052 closes the gap for those two tables; the pin
-below (`TestGrantCoverage_*`) makes the underlying rule self-enforcing
-going forward instead of depending on a migration author remembering it
-(`working-agreements` §5).
+**Note on grant coverage**: the baseline's GRANT statements only enumerate
+tables that exist at install time, and its `ALTER DEFAULT PRIVILEGES`
+deliberately benefits only `ledger_owner` — every later migration that adds
+a table is required to GRANT `ledger_app`/`ledger_ro` on it explicitly
+(contracts.md §9 point 3). The pin below (`TestGrantCoverage_*`) makes that
+rule self-enforcing going forward instead of depending on a migration
+author remembering it (`working-agreements` §5).
 
 **Note on ACL/trigger consistency**: the ACL and the append-only mutation
 guard on a table must agree — a table protected only by a trigger, with an
 ACL that still says it is updatable, is one `GRANT`-layer bypass away from
 looking updatable to the next reader and one code path away from actually
 being written to (the trigger still blocks it, but the two defenses no
-longer say the same thing, and 042's own history — see "Note on scope"
-above — is a direct example of one defense layer failing silently while a
-test only exercised the other). `checkpoint_rebuilds` (050) and
-`period_closes` (026, guard added by 045 A5) both carry the same
-unconditional `ledger_block_mutation()` guard journal_entries does, but
-were left grantable `UPDATE`; 052 corrects both. The pin derives "which
-tables carry this guard" from `information_schema.triggers` (matching on
-the exact `BEFORE UPDATE ... EXECUTE FUNCTION ledger_block_mutation()`
-shape), not a hardcoded table list, so any future table reusing this guard
-gets the matching ACL enforced automatically — and any table with only a
-*partial* guard (`classifications`, `reservations`, `journals` — see A1-A4
-under I-25) is correctly left with `UPDATE`, since those are legitimately
-mutated through controlled paths.
+longer say the same thing). The pin derives "which tables carry this guard"
+from `information_schema.triggers` (matching on the exact `BEFORE UPDATE
+... EXECUTE FUNCTION ledger_block_mutation()` shape), not a hardcoded table
+list, so any future table reusing this guard gets the matching ACL enforced
+automatically — and any table with only a *partial* guard (`classifications`,
+`reservations`, `journals` — see A1-A4 under I-25) is correctly left with
+`UPDATE`, since those are legitimately mutated through controlled paths.
 
 **Enforced by**:
-- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
-  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
-  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
-  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
-  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
-  this migration (see "Note on scope" above) — they live in
-  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
-  instead, which must ship in the same release as the `DATABASE_URL`
-  cutover (`docs/RUNBOOK.md` §9).
-- `postgres/sql/migrations/052_grant_coverage_gap.up.sql` — grants
-  `ledger_app`/`ledger_ro` `SELECT`/`INSERT`(+`UPDATE` for
-  `reconcile_scan_cursors`, which has no append-only guard) on
-  `reconcile_scan_cursors`, `checkpoint_rebuilds`, and
-  `checkpoint_rebuilds_id_seq` (see "Note on grant coverage" above); and
-  `REVOKE UPDATE ON period_closes FROM ledger_app` — 042 granted it (026
-  predates 042) before 045 added its append-only guard, and nothing had
-  revoked it since (see "Note on ACL/trigger consistency" above).
+- `postgres/sql/migrations/001_baseline.up.sql` — creates `ledger_owner` /
+  `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
+  `journal_entries`, no DDL of any kind) / `ledger_ro`, grants each,
+  `REVOKE ALL ON SCHEMA public FROM PUBLIC`, and transfers every
+  table/sequence to `ledger_owner` — all in the same migration that first
+  creates the schema (Wave 4, `2026-08-21-integrity-hardening-contracts.md`).
 
 **Pinned by**:
-- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
-  first and confirms the single connection has *unrestricted* DDL there
-  (proving the restrictions below are not vacuous), then migrates the rest
-  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
-  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
-  journal_entries`/touch `schema_migrations`, while it can still
-  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
-  `journal_entries`.
-- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
-  exactly to 042 through a non-superuser role that owns the database
-  (simulating a managed-Postgres master user) and confirms that role can
-  still write afterward. This is the regression pin for the combined-
-  migration bug described above: it fails with `permission denied for
-  table schema_migrations` against the old (pre-split) combined 042 and
-  passes against the current (pure-expand) 042.
-- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
-  counterpart pin for 049: the same non-superuser role can still write
-  after 042 alone, but loses access to business tables once 049 runs
-  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
-  §9). Also proves 049 itself can apply cleanly under a non-superuser
-  connection -- an earlier revision without its narrow
-  schema-USAGE/schema_migrations re-grants could never successfully apply
-  at all, on any non-superuser connection, regardless of `DATABASE_URL`
-  cutover timing.
+- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — confirms
+  `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/`ALTER TABLE`/
+  `CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM journal_entries`/
+  touch `schema_migrations`, while it can still `SELECT`/`INSERT`/`UPDATE`
+  an ordinary table and `SELECT`/`INSERT` `journal_entries`.
 - `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — after manually granting `ledger_owner` ownership of `journal_entries`
-  (mirroring what 049 does, scoped to just this one table so the test does
-  not depend on 049's exact implementation), a partition it creates *after*
-  042's grant ran is still writable by `ledger_app` through the parent
+  — a partition created after `ledger_owner`'s ownership of `journal_entries`
+  is established is still writable by `ledger_app` through the parent
   table name.
 - `postgres.TestMigration042_RoleAttributes` — pins role attributes
   (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
   role holds (`information_schema.role_table_grants`) on an ordinary table,
   `journal_entries`, and `schema_migrations`.
-- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
-  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
-  for 042 and 049 each roll back cleanly and leave the original connection
-  able to operate normally.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants`
   / `postgres.TestGrantCoverage_EverySequenceHasExpectedGrants` — enumerate
   every table/sequence in `public` (not a fixed list) and assert the exact
@@ -1245,9 +1182,9 @@ provenance without touching any protected journal column.
   `docs/plans/2026-08-21-integrity-hardening-contracts.md` §2; `event_id`'s
   `NULL -> non-NULL` set-once check lives in the function body, not a
   trigger `WHEN` clause) + `journals_event_id_fkey` FK.
-- Depends on P1 (migration 042): without role separation, the same
-  credential that would abuse these columns can `DROP TRIGGER` the guard
-  itself.
+- Depends on P1 (the `ledger_app`/`ledger_owner` role separation, I-22):
+  without role separation, the same credential that would abuse these
+  columns can `DROP TRIGGER` the guard itself.
 
 **Pinned by** (`postgres/mutation_guards_test.go`, each verified to fail —
 i.e. the tamper attempt would have succeeded — with its specific guard
@@ -1805,63 +1742,6 @@ every consumer of a Merkle root implicitly relies on).
   `insertAttestationWithoutLeafHashes`): a supplied reference still
   narrows `TAMPERED` to the exact entry id; no reference and no
   self-contained data means no entry list, never a fabricated one.
-
----
-
-> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
-> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
-> task that has not merged yet, so this document does not yet contain it.
-> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
-> not a reflection of merge order.
-- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
-  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
-  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
-  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
-  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
-  this migration (see "Note on scope" above) — they live in
-  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
-  instead, which must ship in the same release as the `DATABASE_URL`
-  cutover (`docs/RUNBOOK.md` §9).
-
-**Pinned by**:
-- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
-  first and confirms the single connection has *unrestricted* DDL there
-  (proving the restrictions below are not vacuous), then migrates the rest
-  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
-  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
-  journal_entries`/touch `schema_migrations`, while it can still
-  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
-  `journal_entries`.
-- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
-  exactly to 042 through a non-superuser role that owns the database
-  (simulating a managed-Postgres master user) and confirms that role can
-  still write afterward. This is the regression pin for the combined-
-  migration bug described above: it fails with `permission denied for
-  table schema_migrations` against the old (pre-split) combined 042 and
-  passes against the current (pure-expand) 042.
-- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
-  counterpart pin for 049: the same non-superuser role can still write
-  after 042 alone, but loses access to business tables once 049 runs
-  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
-  §9). Also proves 049 itself can apply cleanly under a non-superuser
-  connection -- an earlier revision without its narrow
-  schema-USAGE/schema_migrations re-grants could never successfully apply
-  at all, on any non-superuser connection, regardless of `DATABASE_URL`
-  cutover timing.
-- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — after manually granting `ledger_owner` ownership of `journal_entries`
-  (mirroring what 049 does, scoped to just this one table so the test does
-  not depend on 049's exact implementation), a partition it creates *after*
-  042's grant ran is still writable by `ledger_app` through the parent
-  table name.
-- `postgres.TestMigration042_RoleAttributes` — pins role attributes
-  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
-  role holds (`information_schema.role_table_grants`) on an ordinary table,
-  `journal_entries`, and `schema_migrations`.
-- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
-  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
-  for 042 and 049 each roll back cleanly and leave the original connection
-  able to operate normally.
 
 ---
 
