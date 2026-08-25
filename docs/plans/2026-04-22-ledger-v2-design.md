@@ -3,7 +3,13 @@
 > 从硬编码业务类型到科目驱动的通用账本引擎。
 
 **Created**: 2026-04-22
-**Status**: Design
+**Status**: Implemented (architecture still current). **Terminology note**: this
+doc and its companion implementation plan call the unified per-classification
+operation instance "Operation" throughout. It was renamed to **"Booking"**
+shortly after implementation (`refactor: rename operation to booking across
+codebase`) and every current reference — `core/booking.go`, `Booker`,
+`bookings` table, `CLAUDE.md` — uses that name. Read "Operation" below as
+"Booking"; nothing else about the design changed.
 **Supersedes**: `2026-04-17-design.md`（v1 基础架构）
 
 ---

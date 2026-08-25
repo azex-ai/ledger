@@ -1,5 +1,7 @@
 # Phase 2: Postgres Adapter — Store Implementation
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md`. See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Implement all core interfaces in the PostgreSQL adapter using pgx+sqlc. This is the data layer that makes journals, balances, reservations, deposits, and withdrawals work against a real database.

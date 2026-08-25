@@ -1,5 +1,7 @@
 # Phase 1: Core Domain + Schema + Postgres Adapter
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md`. See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build the foundational core package (zero-dependency domain types + interfaces) and PostgreSQL schema + adapter. This is the base everything else depends on.

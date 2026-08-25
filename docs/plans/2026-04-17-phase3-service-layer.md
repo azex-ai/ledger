@@ -1,5 +1,7 @@
 # Phase 3: Service Layer — Rollup, Reconciliation, Snapshots
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md`. See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build the business orchestration layer that runs background jobs (rollup, expiration cleanup) and provides reconciliation + snapshot services.

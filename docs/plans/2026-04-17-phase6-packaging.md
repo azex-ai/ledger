@@ -1,5 +1,7 @@
 # Phase 6: Example, Docker, Documentation
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md`. See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Complete the project with a crypto deposit example, Docker Compose deployment, CI pipeline, and documentation. Make it ready for public release.

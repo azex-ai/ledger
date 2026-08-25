@@ -14,6 +14,173 @@ tags both at the same X.Y.Z (npm 0.4.0 / 0.5.0 were never published; the
 npm line jumps 0.3.0 → 0.5.1 to converge with the Go module). Entries
 below note which artifact a change affects.
 
+## [Unreleased]
+
+Two release-sized bodies of work landed this cycle. **Tamper-evident ledger**
+(2026-08-21, `docs/plans/2026-08-21-tamper-evident-ledger-design.md`) answers
+a question raised by a real database-credential leak: if an attacker gets DB
+write access, what stops them from crediting themselves with a perfectly
+balanced, forged journal? The answer is now "checkpoints are an untrusted
+cache, per-journal writes are cryptographically signed, and withdrawals only
+pay out against a verified balance" — P0 through P7 below, plus two follow-on
+waves. **Crypto deposit + sweep**
+(`docs/plans/2026-07-11-crypto-deposit-sweep-design.md`) turns the
+CREATE2-derived shared-address deposit flow into an optional, library-shipped
+default, with M3 compensating controls (threshold gate + dual-provider
+reconciliation → human review) and a full wallet-side frontend.
+
+### Go module — Security (tamper-evident ledger, P0–P7 + Waves 2–3)
+
+- **P0 — Reconciliation coverage fixed**: the negative (system) holder range
+  was never scanned by check #2 (its keyset cursor started at `(0,0)`, and
+  `account_holder > cursor` permanently excludes negatives); a scan that hit
+  `Check2ScanLimit`, timed out, or covered a check the schema didn't support
+  yet was still reported `Passed=true`. `CheckResult` now carries a
+  `Complete` flag (zero value = not completed, fail-closed) and
+  `ReconcileReport` a `FullCoverage` flag; the `ReconcileCheckResult` metric
+  only reports green when a check both ran and finished.
+- **P1 — DB role least privilege** (migrations 042, 049): `ledger_owner`
+  (DDL-capable, owns every object), `ledger_app` (read/write, no DDL), and
+  `ledger_ro` roles; schema ownership transferred to `ledger_owner` and
+  `PUBLIC` access revoked. This is the prerequisite every later DB-layer
+  guard below depends on — without it, any of those triggers could simply
+  be dropped by the credential they exist to constrain. A follow-up
+  (migration 052) closes a gap where two functions and one audit table
+  weren't included in the ownership sweep — now CI-enforced so it can't
+  regress silently.
+- **P2 — Checkpoints are an untrusted cache** (migrations 043, 050):
+  balances can now be recomputed entirely from `journal_entries`
+  (`RebuildCheckpoint`), with a resumable scan cursor and an append-only
+  `checkpoint_rebuilds` audit trail. `system_rollups`/`balance_snapshots`
+  drift detection no longer inherits checkpoint corruption.
+- **P3 — Per-journal balance enforced at the DB layer again** (migration
+  044): a deferred constraint trigger rejects any journal whose entries
+  don't balance per-currency, independent of the application. This closes a
+  real regression — the equivalent 004 trigger was dropped in migration 018
+  and never replaced, so pure-SQL access could insert unbalanced entries for
+  several months of migration history.
+- **P4 — Mutation guards on non-journal balance tables** (migration 045):
+  `classifications.normal_side`/`balance_role`, `reservations`, and
+  `period_closes` can no longer be mutated outside their one legitimate
+  entry point. `journals.event_id` gets the same set-once protection —
+  see the breaking schema/type change under Changed below.
+- **P5 — Per-journal authorization signing** (migration 046, plus a
+  follow-up fix): a new `core.Attestor` port (distinct from the on-chain
+  `core.Signer` — different key, different blast radius) signs every
+  journal, reversal, and template batch at write time, including writes
+  composed through `RunInTx` (a gap in the initial cut where those weren't
+  being signed is now closed).
+- **P6 — Batch attestation chain + external anchor** (migration 047):
+  journals are chained into signed, gapless batches with an externally
+  anchorable head, so a compromised DB owner can't silently truncate the
+  tail without `verify` noticing.
+- **P7 — RFC 6962 Merkle tree** (migration 048): batch digests gained a
+  Merkle root plus inclusion proofs, so `verify` can localize *which*
+  entries were tampered with, not just detect that a batch changed.
+- **Withdrawal-time verified balance** (Wave 2): `ReserveInput.RequireVerifiedBalance`
+  gates a reservation on a balance computed only from signed/authorized
+  journals — an unsigned or forged journal can no longer fund a withdrawal
+  even if it's balanced and passes every other check.
+- **Attestation-batched authorization verdicts** (Wave 3): signature
+  verification cost is amortized across a batch at attestation time instead
+  of being re-derived on every read. A cached verdict may only ever be
+  trusted, never re-derived, and is contractually at least as strict as a
+  live check.
+- **Deposit-review separation of duties** (Wave 3): resolving a deposit
+  stuck in `review` now requires a capability that no existing API-key
+  scope implies on its own (an `admin` key alone can no longer both create
+  the anomaly and clear it); a persistently unreachable second confirmation
+  source escalates through alerting instead of leaving the review queue
+  stuck indefinitely.
+- New invariants **I-19 through I-34** in `docs/INVARIANTS.md` pin all of the
+  above; `examples/tamper-evident` is a runnable end-to-end demonstration —
+  it forges a row and shows exactly what stops the money from leaving.
+
+### Go module — Added (crypto deposit + sweep)
+
+- CREATE2-derived shared deposit addresses
+  (`svc.Onchain().EnsureDepositAddress`), a pull-based EVM watcher + sweeper
+  (`chains/evm`, a separate Go module so consumers who don't need on-chain
+  support never pull in go-ethereum), and a push-based webhook ingestion
+  path — both converge on `svc.Onchain().IngestDeposit`.
+- Address registration performs a full historical rescan before returning
+  and tracks a durable per-chain scan cursor (`registration_rescans`) that
+  survives process restarts and resumes in bounded block windows — no
+  fire-and-forget scanning, no unbounded genesis-to-tip replays.
+- **M3 compensating controls**: an `AutoCreditCeiling` threshold gate plus
+  dual-provider (`DepositConfirmer`) reconciliation routes anomalous or
+  unconfirmed deposits into a `review` state with zero ledger effect (I-21)
+  instead of auto-crediting; human approve/reject endpoints post the
+  compensating journal. Secure by default — an unconfigured ceiling fails
+  startup instead of silently defaulting to unlimited auto-credit.
+- Ops hardening: stuck sweeps are automatically revived and sweeps are
+  serialized per chain to avoid double-submission.
+- Developer-mode credit preset (`dev_credit`): credits a holder against no
+  custodied asset, gated by `ENV=dev` + `DEV_CREDIT_ENABLED=true`. For local
+  development and demos only — not installed by `InstallExtendedPresets`.
+
+### Go module — Changed
+
+- **Breaking**: `NewReserverStore(pool, ledger, verifiedBalance)` gained a
+  third parameter (`*postgres.VerifiedBalanceStore`), needed for the
+  withdrawal-time verified-balance gate above. Callers constructing a
+  `ReserverStore` directly must update the call site.
+- **Breaking**: `journals.event_id` is now nullable with a real foreign key
+  to `events(id)` (migration 045) — previously `NOT NULL DEFAULT 0`, using
+  `0` as an unenforced sentinel for "no event". The generated
+  `postgres/sqlcgen.Journal.EventID` field changes from `int64` to
+  `pgtype.Int8` accordingly. The public library surface
+  (`core.Journal.EventUID string`) is unaffected; only code reading the
+  generated struct or the raw column directly needs to switch from
+  `== 0` to `.Valid`.
+- **In progress**: the 53 migrations accumulated since the project's first
+  commit are being squashed into a single `001_baseline` migration (Wave 4).
+  New installs will run one migration instead of fifty-three; schema
+  equivalence between the old chain and the baseline is verified by
+  diffing `pg_dump --schema-only` output between the two. This lands via a
+  coordinated merge from a parallel integration branch and had not yet
+  reached this branch's migration directory as of this entry — expect it in
+  the same release or the one after.
+
+### Go module — Fixed
+
+- A forged-but-unsigned journal could report as `VERIFIED` under some code
+  paths — closed.
+- `PendingStore` dropped an unread cached set of classification IDs.
+- Assorted ledger-correctness and event-delivery hardening fixes surfaced
+  during the integrity-hardening review pass.
+
+### @azex/ledger-react — Added
+
+- End-user wallet: `WalletDepositAddressCard` (shadcn + heroui), backed by a
+  holder-token-scoped `GET /api/v1/holder/deposit-address` endpoint — no
+  admin key ever reaches the browser.
+- M3 deposit review queue page (shadcn + heroui).
+- Sweep collection monitor page (shadcn + heroui).
+- Headless contract for crypto deposit (client + hooks + types), for hosts
+  building their own UI on top of the deposit/sweep feature instead of the
+  shipped components.
+
+### @azex/ledger-react — Fixed
+
+- `ErrorState` gained a Retry action across both skins (previously a dead
+  end once an error rendered).
+- `schema.ts` (OpenAPI-generated types) regenerated to match the current
+  contract, plus a local `openapi-check` script so this can't drift
+  silently again.
+- Gaps between `docs/frontend.md` and the package's actual exports closed.
+- `qrcode.react` dependency pinned.
+
+### Docs
+
+- `docs/plans/2026-08-21-tamper-evident-ledger-design.md` (design) and
+  `docs/plans/2026-08-21-integrity-hardening-contracts.md` (the cross-task
+  migration-number and resource-allocation contract for P1–P7 and the
+  in-flight migration-baseline squash) carry the full rationale behind the
+  Security entries above.
+- `docs/RUNBOOK.md`, `docs/DR.md`, and `docs/openapi.yaml` updated for the
+  new roles, reconcile checks, and endpoints.
+
 ## [0.5.1] - 2026-07-09
 
 Holder-scoped wallet surface (2026-07-08,
