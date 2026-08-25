@@ -1,5 +1,7 @@
 # Phase 5: Next.js Frontend
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md` (and later, `web/` was itself extracted into `@azex/ledger-react` — see `docs/plans/2026-05-31-ledger-react-package-design.md`). See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build the Next.js management dashboard for the ledger. 12 pages covering all ledger operations, with dark theme (crypto-native).

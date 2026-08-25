@@ -1,5 +1,9 @@
 # Ledger v2 Implementation Plan
 
+> **Status**: Implemented. **Terminology note**: "operation"/`operations` table
+> below was renamed to **"Booking"**/`bookings` shortly after implementation —
+> see the note at the top of `docs/plans/2026-04-22-ledger-v2-design.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Refactor the ledger from hardcoded deposit/withdrawal entities to a classification-driven architecture with unified operations, atomic event-journal model, and pluggable webhook delivery.

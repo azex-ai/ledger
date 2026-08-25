@@ -1,6 +1,10 @@
 # azex-ai/ledger — Master Implementation Plan
 
 **Created:** 2026-04-17
+**Status**: HISTORICAL — the phases below were executed, then the resulting
+v1 architecture was superseded by `docs/plans/2026-04-22-ledger-v2-design.md`
+(classification-driven `Booking`, replacing the hardcoded `Deposit`/
+`Withdrawal` types this plan builds). Kept for historical rationale only.
 **Design Doc:** `docs/plans/2026-04-17-design.md`
 
 ## Phase Overview

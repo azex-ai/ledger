@@ -1,5 +1,7 @@
 # Phase 4: HTTP API Server
 
+> **Status**: HISTORICAL — v1 plan, superseded by `docs/plans/2026-04-22-ledger-v2-design.md`. See `docs/plans/2026-04-17-master-plan.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Build the chi v5 HTTP API that exposes all ledger functionality as a REST service. Cursor-based pagination everywhere.
