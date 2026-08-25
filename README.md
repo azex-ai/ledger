@@ -69,6 +69,15 @@ and delete the workspace.
 
 ## Quick Start -- As a Library
 
+**Prerequisite**: the connection you pass to `ledger.Migrate` must be able to
+`CREATE ROLE` (superuser, or a role with the `CREATEROLE` attribute) the
+first time it runs against a fresh database — the baseline schema creates
+`ledger_owner`/`ledger_app`/`ledger_ro` and locks down `PUBLIC` as part of
+installing the schema (`docs/RUNBOOK.md` §9 "Database roles"). Every
+migration after that runs as `ledger_owner` and needs no elevated privilege.
+A local Postgres superuser, or the default user in a fresh managed-Postgres
+instance, satisfies this.
+
 Two tiers: pick where you want to start.
 
 ### Tier 1 — Hello Ledger (raw entries, no presets)
@@ -150,6 +159,10 @@ go worker.Run(ctx)
 Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
 
 ## Quick Start -- As a Service
+
+`docker-compose.yml`'s `POSTGRES_USER` is the Postgres image's initial
+superuser, which already satisfies the `CREATE ROLE` prerequisite above —
+no extra setup needed for local/dev use.
 
 ```bash
 git clone https://github.com/azex-ai/ledger.git

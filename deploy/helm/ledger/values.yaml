@@ -40,16 +40,16 @@ trustedProxyCIDRs: ""
 # start with MIGRATE_MODE=off, so rollout capacity is not held behind DDL
 # locks and the runtime database role needs no DDL privileges.
 #
-# Migration 042 (docs/plans/2026-08-21-tamper-evident-ledger-design.md §3)
-# creates the roles this split expects: `ledger_app` (SELECT/INSERT/UPDATE
-# only, for serving pods -- already usable today) and `ledger_owner`
-# (destined for DDL, for the migration Job -- but does not yet own
-# anything; migration 049 transfers ownership) -- see
-# docs/RUNBOOK.md §9 "Database roles". `databaseUrl`/`existingSecretKey`
-# above and `databaseUrlKey` below both default to the SAME connection
-# until an operator explicitly cuts over (deployment.md "migrate" phase, a
-# later release that ships together with that ownership-transfer
-# migration, not automated by this chart).
+# The baseline schema (docs/RUNBOOK.md §9 "Database roles") creates
+# `ledger_owner` (DDL-capable, owns every table, for the migration Job) and
+# `ledger_app` (SELECT/INSERT/UPDATE only, for serving pods) up front --
+# there is no separate ownership-transfer step. `databaseUrl`/
+# `existingSecretKey` above and `databaseUrlKey` below both default to the
+# SAME connection; that connection must be able to `CREATE ROLE` (superuser
+# or CREATEROLE) the first time it runs against a fresh database. Point
+# `databaseUrlKey` at a `ledger_owner` credential and
+# `databaseUrl`/`existingSecretKey` at a `ledger_app` credential to run
+# serving pods least-privilege from day one.
 migrations:
   job:
     enabled: true

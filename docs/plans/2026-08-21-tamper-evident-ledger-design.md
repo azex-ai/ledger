@@ -118,7 +118,7 @@
 
 ## 3. P1 — DB role least-privilege
 
-一切 DB 层强制的前提。三个 role，migration `042`：
+一切 DB 层强制的前提。三个 role，落在 `001_baseline`：
 
 | Role | 权限 | 用途 |
 |---|---|---|
@@ -130,7 +130,10 @@
 - `REVOKE ALL ON SCHEMA public FROM PUBLIC`，逐表显式 GRANT；`ALTER DEFAULT PRIVILEGES` 只给 owner。
 - 分区表：GRANT 需覆盖父表 + 既有分区，并验证 `PartitionService` 新建分区继承权限。
 - **同时修 A6 的文档债**：`RUNBOOK.md` 假定的 role 由本 migration 真正创建。
-- **分阶段**（`deployment.md`）：expand（建 role + GRANT）→ migrate（切 `DATABASE_URL`，helm values + secrets 同步）→ contract（回收 owner 的日常用途）。三步各一个 release。
+- **一步到位，不分阶段**（W4 拍板，见 `2026-08-21-integrity-hardening-contracts.md` Wave 4）：
+  这个库没有历史用户，全新安装没有在座连接需要保护，所以 role 创建 + GRANT + `REVOKE ALL ON
+  SCHEMA public FROM PUBLIC` + ownership 转移全部落在 `001_baseline` 一个 migration 里，不需要
+  `deployment.md` 的 expand → migrate → contract 三个 release。
 
 ## 4. P2 — checkpoint 不可信化 + 提现门 + 外部资产对账
 
@@ -536,7 +539,7 @@ CT 就是这么做的（它存整棵 log）。
 | Phase | 变更性质 | 回滚 |
 |---|---|---|
 | P0 | 已完成。加字段（expand-safe）+ 修游标 | 回退 commit |
-| P1 role | expand → migrate → contract，三个 release | 切回旧凭证 |
+| P1 role | 落在 `001_baseline`，一步到位（W4 拍板，全新安装无在座连接需要保护） | 回退 `001_baseline` 的 down 脚本 |
 | P2 | 新增 check + 受信任 rebuild 入口（只报告不自动改） | 关 job |
 | P3 | DB trigger 恢复 = 行为变更（此前能写入的不平衡数据会被拒）。**上线前必须先跑一次全量 per-journal 检查并清理存量违规** | 删 trigger |
 | P4 | trigger 新增；若存量数据依赖某列可改，先盘点 | 删 trigger |
@@ -576,8 +579,8 @@ CT 就是这么做的（它存整棵 log）。
 | `core.AuthVerifier`（公钥侧） | 只需公钥，可在 DB 之外独立运行 | 缺失 ⟹ `verify` 返回 `NOT_RUN`，**不折算成通过** |
 | `core.Anchor` 实现 | port 已定；库附本地文件实现（dev）。载体须满足 §5 的三条性质 | nil ⟹ attestation 只存在于 DB 内，尾部截断无法检出；`verify` 报 `NOT_RUN` |
 | 提现门阈值等策略值 | 注入配置；缺省即启动报错，不默认放行 | 启动失败（刻意的：这类默认值等于信任边界敞开） |
-| 接入 044 前跑一次全量 per-journal 扫描 | 库提供该扫描（`journal_dr_cr` check + `integrity_balance.sql`） | 存量若有不平衡 journal，044 的 trigger 会让上线即拒写 |
-| `DATABASE_URL` 切到 `ledger_app` 的时机，与 049 同发布 | 042 是 expand（不改现状）、049 是 migrate（会 strand 旧连接）；两者的分工与 pin 见 §3 | 049 单独上线会断掉在座连接 —— 这是设计如此，不是 bug |
+| 接入前跑一次全量 per-journal 扫描 | 库提供该扫描（`journal_dr_cr` check + `integrity_balance.sql`） | 存量若有不平衡 journal，balance trigger 会让上线即拒写 |
+| 跑 `001_baseline` 的连接能 `CREATE ROLE`（superuser 或 `CREATEROLE`） | baseline 一步创建 role + GRANT + `REVOKE ALL ON SCHEMA public FROM PUBLIC` + ownership 转移，无需消费方协调发布节奏；`ledgerd` serving pods 用 `ledger_app` 凭证 | 用不能 `CREATE ROLE` 的连接跑 baseline 会在建 role 那步直接报错，不存在「部分应用」的中间态 |
 
 ### 一条库对部署方的硬约束（不是选项）
 
