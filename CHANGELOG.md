@@ -153,6 +153,15 @@ reconciliation → human review) and a full wallet-side frontend.
 
 ### Go module — Fixed
 
+- **`Worker.Subscribe` never delivered anything.** It built its dispatcher
+  with no event poller and required a separate `SetLocalPoller` call before
+  `Run` that nothing outside the test suite made — so an in-process
+  subscription silently received no events, forever, while logging a failure
+  on every poll tick. `ledger.Service.Worker` now wires the poller, so
+  subscribing is all a consumer has to do. If you were calling
+  `SetLocalPoller` yourself, keep doing so; it still works and is still
+  required when you build a `service.Worker` directly rather than through the
+  facade.
 - A forged-but-unsigned journal could report as `VERIFIED` under some code
   paths — closed.
 - `PendingStore` dropped an unread cached set of classification IDs.
@@ -179,6 +188,16 @@ reconciliation → human review) and a full wallet-side frontend.
   silently again.
 - Gaps between `docs/frontend.md` and the package's actual exports closed.
 - `qrcode.react` dependency pinned.
+
+### Examples
+
+- Every example that needs only a database was run end to end against a fresh
+  one. Two could not complete before: `crypto-deposit` was missing a lifecycle
+  on the seeded label-only `deposit` classification (the accounting bundles
+  install templates, not lifecycles) and then skipped the `confirming` state
+  that `DepositLifecycle` requires; `event-subscribe` was demonstrating the
+  broken `Subscribe` path above, and printed a note and exited 0 when no event
+  arrived rather than failing.
 
 ### Docs
 
