@@ -150,6 +150,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `docs/CAPACITY.md` | Benchmark baseline, sizing guide, suggested SLOs, scaling signals |
 | `docs/openapi.yaml` | Machine-readable OpenAPI 3.1 spec |
 | `docs/frontend.md` | @azex/ledger-react usage guide + full API reference |
+| `docs/audits/2026-08-25-financial-engineering/` | Eight-territory financial-engineering audit. Snapshot of what it found; its README carries the disposition. Read it before re-litigating a design choice it already examined |
 | `docs/COOKBOOK.md` | Business recipes: buy credits (FX rate), discounts, multi-currency, reserve→settle, cash-out, expiry/insufficient edges |
 
 ## HTTP API Quick Reference
