@@ -74,6 +74,7 @@ proof of the count):
 | `journal_dr_cr` | genuine per-journal, per-currency balance (M1/I-24) — catches two journals that are each individually unbalanced but net to zero in aggregate, which `global_dr_cr_equality` structurally cannot see |
 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
+| `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32); skipped (`Complete=false`) unless a `core.AuthVerifier` is wired via `SetAuthCheck`; never-signed journals are a coverage gap, not tamper evidence, so they're skipped rather than flagged |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -138,6 +139,17 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
      ```
      A non-zero `drift` row is the durable proof a poisoned checkpoint
      existed — attach it to the incident postmortem, not just the log line.
+- **`unauthorized_journals`** (I-32) — a sampled journal claims a P5
+  signature (`auth_status = signed`) but fails `core.VerifyJournalAuth` on
+  re-check: treat this as a confirmed forgery, not drift. It means an
+  attacker (or a bug) produced a journal that looks signed without holding
+  the `core.Attestor`'s private key. Stop new writes for the affected
+  dimension, identify every entry the forged journal touched, and check
+  `postgres.VerifiedBalanceStore.VerifiedBalance` / the `RequireVerifiedBalance`
+  `Reserve` gate (I-32) before paying anything out of that dimension. If this
+  check reports `Complete=false` instead, it means no `core.AuthVerifier` was
+  wired via `SetAuthCheck` for this run — that is a coverage gap in the
+  reconcile job's own configuration, not a finding about the ledger.
 
 ### Common queries (Postgres)
 
@@ -544,8 +556,8 @@ Operational notes:
   that inherit access through the parent table name — Postgres checks
   privileges against the partitioned table you name in a query, not the
   partition it physically routes to. Pinned by
-  `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  rather than assumed.
+  `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` rather than
+  assumed.
 - **TODO (tracked, not yet scheduled): scope `ledger_ro` down to aggregate
   views instead of full-table `SELECT`.** Design doc §3 prefers this;
   baseline ships full-schema `SELECT` because no reporting views exist yet.

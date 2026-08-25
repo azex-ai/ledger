@@ -469,21 +469,12 @@ this method) and rejects with `core.ErrPeriodClosed` when
 
 **Pinned by**:
 - `postgres.TestPeriodClosesTableExists` (schema pin)
-- `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed`
-- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` (rejects before
-  the line, accepts at/after it)
-- `postgres.TestPeriodCloseStore_Reopen_LatestRowWins` (reopen restores
-  postability; full close-line history is retained)
-- `postgres.TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod`
-  (correction-via-reversal lands in the open period)
-
-**Pinned by**:
-- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` — a posting whose
-  effective date falls before the active close line is refused
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
   enforce before the first close
+- `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` — a posting whose
+  effective date falls before the active close line is refused
 - `postgres.TestPeriodCloseStore_Reopen_LatestRowWins` — reopening is an append,
-  latest row wins
+  latest row wins (full close-line history is retained)
 - `postgres.TestLedgerStore_ReverseJournal_AfterPeriodClose_PostsAtCurrentPeriod`
   — correction-via-reversal lands in the open period
 - `postgres.TestPeriodClosesGuard_NoUpdateNoDelete` — the close log itself is
@@ -891,58 +882,6 @@ automatically — and any table with only a *partial* guard (`classifications`,
   granting it, or that adds/reuses the append-only guard without a matching
   ACL. Verified red against `reconcile_scan_cursors`/`checkpoint_rebuilds`/
   `checkpoint_rebuilds_id_seq`/`period_closes` before 052, green after.
-
-- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
-  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
-  three columns inside the transaction that also writes the journal row.
-- `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
-  the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
-  big-endian two's complement, domain-separated SHA-256) both `Sign` and
-  `Verify` agree on. This encoding is the one part of P5 that cannot be
-  changed later without breaking every previously-signed journal -- see
-  its golden vectors below.
-- Immutability of `auth_digest`/`auth_signature`/`auth_key_id` after a
-  journal is signed: enforced by `ledger_journals_block_arbitrary_update()`,
-  but **owned by migration 045 (P4)**, not this migration. Contracts §2
-  (2026-08-21 rewrite) replaced that function's hardcoded per-migration
-  column list with a generic `to_jsonb(OLD)`/`to_jsonb(NEW)` comparison
-  against an explicit mutable-column whitelist, so these three columns are
-  protected automatically once 045 installs it -- migration 046 does not
-  (and must not) touch that function itself.
-- `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
-  key_id at construction time, in the caller's own composition root,
-  never silently inside the ledger.
-
-**Pinned by** (`postgres/auth_pin_test.go` unless noted):
-- `TestPostJournal_SignsWithConfiguredAttestor` -- a signed journal's stored
-  digest/signature/key_id round-trip through `core.VerifyJournalAuth`
-  successfully.
-- `TestPostJournal_UnsignedWithoutAttestor` -- `Attestor == nil` leaves
-  `PostJournal` byte-for-byte unchanged from before P5 (expand-safe).
-- `TestPostJournal_IdempotentReplayDoesNotResign` -- a replayed post with
-  the same idempotency key triggers exactly one `Attestor.Sign` call, not
-  two.
-- `TestPostJournal_AttestorErrorRejectsPost` -- a `Sign` error rejects the
-  whole write; nothing is persisted.
-- `TestForgedDirectSQLJournalIsUnauthorized` -- the M5 scenario itself: a
-  balanced journal inserted directly via SQL (bypassing `PostJournal`
-  entirely) passes a live per-journal balance check and still fails
-  `core.VerifyJournalAuth`.
-- `core.TestCanonicalJournalDigest_GoldenVector` / `TestEncodeAmount_GoldenVectors`
-  (`core/auth_test.go`) -- pin the exact byte layout against independently
-  computed values; any diff is a breaking encoding change.
-- `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
-  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
-  of `VerifyJournalAuth`'s three guard clauses; removing any one of them
-  was verified, by hand, to make its corresponding test fail (the
-  mismatch-check removal reaches a nil `AuthVerifier` and panics; the
-  digest-emptiness removal is independently caught by the mismatch check,
-  demonstrating defense-in-depth rather than a redundant no-op check).
-- `authdev.TestNewLocalAttestor_DeterministicFromSameSeed` /
-  `TestNewLocalVerifier_StandaloneFromPublicKey` -- the default Attestor
-  implementation itself: same seed signs identically, and a verify-only
-  process (holding only the public key) can check a signature it never
-  had the private key to produce.
 
 ## I-23: checkpoint / system_rollups / balance_snapshots are exactly recomputable from entries; detection never auto-repairs
 
