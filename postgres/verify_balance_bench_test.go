@@ -75,8 +75,8 @@ func discoverJournalUIDsForAccount(t testing.TB, pool *pgxpool.Pool, ctx context
 			break
 		}
 		for _, r := range rows {
-			if r.ID.Valid && r.ID.Int64 > cursor {
-				cursor = r.ID.Int64
+			if r.ID > cursor {
+				cursor = r.ID
 			}
 			juid := uuid.UUID(r.JournalUid.Bytes).String()
 			if _, ok := seen[juid]; !ok {
