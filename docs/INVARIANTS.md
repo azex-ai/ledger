@@ -814,6 +814,15 @@ the moment the schema exists, independent of who currently owns the
 tables: `ledger_app` was never granted anything beyond
 `SELECT`/`INSERT`/`UPDATE` and will never own anything.
 
+**The one exception, and what it is not**: migration 002 grants `DELETE` on
+`webhook_nonces`. That table is a replay cache holding no financial data, and
+its prune is a `DELETE` -- without the privilege the prune failed, its error
+was returned, and every inbound webhook failed on it in exactly the
+deployments that connect as `ledger_app`. The exception is one privilege on
+one non-financial table. It does not weaken anything this invariant claims:
+`ledger_app` still holds no `DELETE` on any table that records money, still
+owns nothing, and still cannot perform DDL of any kind.
+
 **Why**: GRANT-based privileges alone are not a defense against a
 compromised application credential — a connection that owns its own tables
 (or is superuser) can `DROP TRIGGER` the append-only guards, `TRUNCATE`

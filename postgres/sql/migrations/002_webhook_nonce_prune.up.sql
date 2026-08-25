@@ -1,0 +1,46 @@
+-- Grant ledger_app the DELETE the replay cache needs to stay bounded.
+--
+-- 001_baseline's §14 issues grants derived from each table's mutation guard,
+-- under a blanket rule stated in its own comment: "Nobody gets DELETE,
+-- anywhere." That rule is right for every table it covers, and it left one
+-- table unable to do its job.
+--
+-- webhook_nonces is the inbound replay cache. Signature verification's
+-- timestamp window rejects only STALE replays, so an identical request
+-- replayed inside the window still verifies; recording each seen signature is
+-- what closes that at the HTTP boundary. Rows older than the window can never
+-- match again, so they are pruned on the way past -- and the prune is a
+-- DELETE, which ledger_app did not have.
+--
+-- The consequence was not a slow cache. postgres.WebhookSubscriberStore's
+-- TryRecordNonce ran the prune first and returned its error, and
+-- server.handleWebhookCallback turns that error into an HTTP failure. So in
+-- any deployment that actually connected as ledger_app -- which is the entire
+-- point of the role separation 001_baseline installs -- every inbound webhook
+-- failed on a permission error before its nonce was ever checked. The security
+-- feature and the ingestion feature were mutually exclusive, and nothing
+-- noticed because dev and test connect as a superuser.
+--
+-- 001_baseline already carves out this exception in prose, in the comment
+-- above webhook_nonces itself: "This is a cache, not ledger data ... It is the
+-- one sanctioned DELETE in this schema, and nothing financial lives here."
+-- The prose declared the exception; the grant loop never implemented it. This
+-- migration implements it, and nothing more: one table, one privilege.
+--
+-- What it costs, stated plainly. An attacker holding ledger_app can now clear
+-- the replay cache and re-play a captured webhook inside its signature window.
+-- That is one layer of defence-in-depth, not the only one: a replayed deposit
+-- still lands on the same derived idempotency key
+-- (deposit-{chain_id}-{tx_hash}-{txlog_seq}, api-contract.md §9) and is
+-- refused downstream. The cache exists because relying on that alone was
+-- judged too thin, and it stays valuable against everything except an
+-- attacker who already holds the application credential -- who, by then, has
+-- better options than replaying a webhook.
+--
+-- The alternative -- keep the privilege and make the prune best-effort -- was
+-- rejected as the whole fix. It converts a loud failure into an unbounded
+-- table, which is the same fail-open trade in a quieter costume. The
+-- best-effort change ships alongside this grant, so a database that somehow
+-- lacks it degrades to growth instead of breaking, but the grant is what keeps
+-- the cache bounded.
+GRANT DELETE ON public.webhook_nonces TO ledger_app;

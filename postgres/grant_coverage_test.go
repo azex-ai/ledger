@@ -86,12 +86,29 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	appendOnly := queryAppendOnlyGuardedTables(t, pool)
 	require.NotEmpty(t, appendOnly, "sanity: expected at least journal_entries to carry the append-only guard")
 
+	// The single table allowed to hold a DELETE, and the reason it is allowed.
+	//
+	// webhook_nonces is a replay cache holding no financial data, and its prune
+	// is a DELETE. 001_baseline's grant loop issued none, which did not merely
+	// let the cache grow: TryRecordNonce ran the prune first and returned its
+	// error, so every inbound webhook failed on a permission error in exactly
+	// the deployments that connect as ledger_app. Migration 002 grants it.
+	//
+	// Naming it here rather than loosening the assertion is the point. Any
+	// other table that acquires a DELETE fails this test, and a second entry
+	// in this map is a deliberate, reviewable act -- the same shape as the
+	// journals guard's mutable-column whitelist.
+	deleteAllowed := map[string]bool{"webhook_nonces": true}
+
 	for _, table := range tables {
 		table := table
 		t.Run(table, func(t *testing.T) {
 			wantApp := []string{"SELECT", "INSERT", "UPDATE"}
 			if appendOnly[table] {
 				wantApp = []string{"SELECT", "INSERT"}
+			}
+			if deleteAllowed[table] {
+				wantApp = append(wantApp, "DELETE")
 			}
 			assertGrants(t, pool, "ledger_app", table, wantApp)
 			assertGrants(t, pool, "ledger_ro", table, []string{"SELECT"})

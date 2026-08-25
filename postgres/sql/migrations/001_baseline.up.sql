@@ -1441,6 +1441,13 @@ ON CONFLICT (code) DO NOTHING;
 -- trigger gets SELECT/INSERT, everything else gets SELECT/INSERT/UPDATE.
 -- Nobody gets DELETE, anywhere.
 --
+-- ⚠️ Amended by migration 002, which grants DELETE on webhook_nonces alone.
+-- That table is the replay cache described in section 10, and the comment
+-- there already called it "the one sanctioned DELETE in this schema" -- the
+-- prose carved out the exception and this loop never implemented it, so the
+-- cache's prune failed under ledger_app and took every inbound webhook down
+-- with it. Read 002 before treating this line as the live state.
+--
 -- Saying the same thing in the ACL that the trigger already says is
 -- deliberate, not belt-and-braces for its own sake: dropping a trigger
 -- requires ownership, whereas UPDATE only requires a grant. They are defences

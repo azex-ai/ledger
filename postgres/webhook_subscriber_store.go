@@ -2,8 +2,10 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
@@ -66,8 +68,21 @@ func (s *WebhookSubscriberStore) RecordDeliveryStatus(ctx context.Context, subsc
 // rejected. Expired nonces (older than 2x the signature timestamp window,
 // which can never verify again) are pruned opportunistically on each call —
 // this table is a replay cache, not ledger data.
+//
+// A prune refused for lack of privilege does not fail the call. Bounding a
+// cache and rejecting a replay are different jobs, and only the second one is
+// this request's. Before migration 002 granted ledger_app the DELETE, they
+// were fused: the prune ran first and its error was returned, so every inbound
+// webhook failed on a permission error in exactly the deployments that connect
+// as ledger_app — which is the entire point of the role separation. Tolerating
+// that one error keeps a database without the grant serving webhooks, at the
+// cost of a cache that stops shrinking.
+//
+// Only insufficient_privilege is tolerated. A prune that fails for any other
+// reason — deadlock, disk, a corrupted index — still fails the call, because
+// those are not conditions this code knows how to survive.
 func (s *WebhookSubscriberStore) TryRecordNonce(ctx context.Context, nonce string) (bool, error) {
-	if err := s.q.DeleteExpiredWebhookNonces(ctx); err != nil {
+	if err := s.q.DeleteExpiredWebhookNonces(ctx); err != nil && !isInsufficientPrivilege(err) {
 		return false, fmt.Errorf("postgres: prune webhook nonces: %w", err)
 	}
 	rows, err := s.q.TryRecordWebhookNonce(ctx, nonce)
@@ -75,4 +90,12 @@ func (s *WebhookSubscriberStore) TryRecordNonce(ctx context.Context, nonce strin
 		return false, fmt.Errorf("postgres: record webhook nonce: %w", err)
 	}
 	return rows > 0, nil
+}
+
+// isInsufficientPrivilege reports whether err is Postgres's SQLSTATE 42501,
+// the code it raises uniformly for a refused privilege regardless of which
+// privilege or object was involved.
+func isInsufficientPrivilege(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42501"
 }
