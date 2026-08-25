@@ -49,6 +49,11 @@ type VerifyReport struct {
 	ChainSeqsChecked int64    `json:"chain_seqs_checked"`
 	EntriesRechecked int64    `json:"entries_rechecked"`
 	JournalsSampled  int64    `json:"journals_sampled"`
+	// JournalsUnsignedTxMode counts sampled journals posted inside a
+	// caller's transaction, where no safe point to sign exists. Reported
+	// rather than flagged -- legitimate, but a consumer relying on
+	// verification should know how much of the ledger it cannot speak for.
+	JournalsUnsignedTxMode int64 `json:"journals_unsigned_tx_mode"`
 	// MismatchedEntryIDs maps seq -> the specific entry ids
 	// core.LocateMismatches found within that batch (design doc §9.1/§9.4),
 	// present only for seqs where a content mismatch was found and could be
@@ -278,6 +283,39 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 					} else if !bytes.Equal(recomputedVerdictDigest, a.AuthVerdictDigest) {
 						tampered("seq %d: auth_verdict_digest mismatch (a cached journal authorization verdict no longer matches a live recheck)", a.Seq)
 					}
+
+					// A negative verdict is a finding in its own right, not
+					// merely something to keep consistent.
+					//
+					// The check above only asks whether the verdicts still
+					// say what they said when this batch was signed. A forged
+					// journal answers "unauthorized" both times, so the digest
+					// matched and verification reported VERIFIED with a forged
+					// credit sitting in the ledger -- while
+					// JournalAuthVerdictUnauthorized's own definition is "a
+					// forged or tampered journal was live in the ledger at
+					// attestation time". The evidence was recorded, signed and
+					// anchored, and then never read.
+					//
+					// Consistency is not health. Anything an operator would
+					// act on has to be reported, not just kept stable.
+					unauthorized := make([]int64, 0)
+					seenBad := make(map[int64]struct{})
+					for _, id := range distinctJournalIDs {
+						if verdictByJournal[id] != core.JournalAuthVerdictUnauthorized {
+							continue
+						}
+						if _, dup := seenBad[id]; dup {
+							continue
+						}
+						seenBad[id] = struct{}{}
+						unauthorized = append(unauthorized, id)
+					}
+					if len(unauthorized) > 0 {
+						tampered("seq %d: %d attested journal(s) carry an UNAUTHORIZED authorization verdict "+
+							"(internal journal ids %v) -- a journal live in this batch has no valid signature",
+							a.Seq, len(unauthorized), unauthorized)
+					}
 				}
 			}
 
@@ -363,9 +401,31 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	if err != nil {
 		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("list journals for sampling: %v", err)}}
 	}
+	// Journals in the sample that were never signed. Silence here was the
+	// original behaviour and it was wrong: a forged row inserted by direct
+	// SQL takes auth_status's column default, so it is exactly the shape
+	// this branch used to skip -- verification could report VERIFIED with a
+	// forged credit live in the ledger.
+	//
+	// unsigned_tx_mode is genuinely legitimate: those journals were posted
+	// inside a caller's transaction, where there is no safe point left to
+	// call out to a signer. They are counted, not flagged.
+	//
+	// unsigned_no_attestor is not legitimate here. VerifyLedger has already
+	// returned NOT_RUN if no verifier is configured, so reaching this line
+	// means signing is wired -- and a journal claiming no attestor existed
+	// is either a forgery or predates the key. Both need an operator to look;
+	// neither should read as verified.
+	var unsignedTxMode, unsignedNoAttestor int64
 	for _, j := range journalList {
-		if j.AuthKeyID == "" {
-			continue // never signed (Attestor not configured at post time) -- not this check's concern, I-26's own scope note covers it
+		if j.AuthStatus != core.AuthStatusSigned {
+			switch j.AuthStatus {
+			case core.AuthStatusUnsignedTxMode:
+				unsignedTxMode++
+			default:
+				unsignedNoAttestor++
+			}
+			continue
 		}
 		report.JournalsSampled++
 		_, entries, err := journals.GetJournal(ctx, j.UID)
@@ -391,6 +451,12 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 			tampered("journal %s: signature verification failed: %v", j.UID, err)
 		}
 	}
+	if unsignedNoAttestor > 0 {
+		tampered("%d of the %d most recent journal(s) carry no signature (auth_status=%s) while signing is configured -- "+
+			"either forged, or posted before the key was wired; an operator has to tell which",
+			unsignedNoAttestor, len(journalList), core.AuthStatusUnsignedNoAttestor)
+	}
+	report.JournalsUnsignedTxMode = unsignedTxMode
 
 	switch {
 	case len(reasons) > 0:

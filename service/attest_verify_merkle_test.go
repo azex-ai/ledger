@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -163,8 +164,27 @@ func TestVerifyLedger_TamperedLeafHashAlone(t *testing.T) {
 	queries := postgres.NewQueryStore(pool)
 	report := service.VerifyLedger(ctx, attestStore, anchor, verifier, queries, service.VerifyConfig{})
 	require.Equal(t, service.VerifyStatusTampered, report.Status)
-	require.Len(t, report.Reasons, 1, "journal_entries/merkle_root/root_hash/signature must all still verify -- only the stored-leaf-hash check should fire: %v", report.Reasons)
-	require.Contains(t, report.Reasons[0], "leaf_hash inconsistent with attested merkle_root")
+
+	// Two findings, and both are accounted for. The fixture plants a forged
+	// (unsigned) journal by construction -- insertForgedJournal -- so
+	// verification reporting it is correct, not noise; it used to be silently
+	// skipped, which is the bug that let a forged credit read as VERIFIED.
+	// The assertion still carries its original weight: nothing OTHER than
+	// these two may fire, so journal_entries/merkle_root/root_hash/signature
+	// are all confirmed to still verify.
+	var leafFinding, forgedFinding int
+	for _, r := range report.Reasons {
+		switch {
+		case strings.Contains(r, "leaf_hash inconsistent with attested merkle_root"):
+			leafFinding++
+		case strings.Contains(r, "carry no signature"), strings.Contains(r, "UNAUTHORIZED authorization verdict"):
+			forgedFinding++
+		default:
+			t.Errorf("unexpected finding -- only the stored-leaf-hash check and the planted forged journal should fire: %s", r)
+		}
+	}
+	require.Equal(t, 1, leafFinding, "the stored-leaf-hash check must fire exactly once: %v", report.Reasons)
+	require.NotZero(t, forgedFinding, "the planted forged journal must be reported: %v", report.Reasons)
 }
 
 // TestVerifyLedger_MerkleRootCheckSkippedForLegacyEmptySentinel pins v1's

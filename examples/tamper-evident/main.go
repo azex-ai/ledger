@@ -234,18 +234,21 @@ func run() error {
 	// 8. The audit, run twice, because the answer changes and the change is
 	//    the point.
 	//
-	//    Right now the forged journal sits in the un-attested tail: the
-	//    attestation chain covers only what existed at seq 1, and nothing in
-	//    it has been altered. Verification says so.
+	//    The forged journal sits in the un-attested tail, so the chain itself
+	//    is intact -- but the journal carries no signature while signing is
+	//    configured, and that alone is a finding. Verification does not get to
+	//    report VERIFIED with a forged credit live in the ledger.
 	// ---------------------------------------------------------------------
 	report := svc.VerifyLedger(ctx, anchor, service.VerifyConfig{})
 	printVerify("8. verify (tail unattested)", report)
 
 	// ---------------------------------------------------------------------
 	// 9. Attest again. The forged journal is now inside a batch, and the
-	//    verdict recorded for it is part of the signed, anchored content --
-	//    which is what lets a withdrawal trust a cached verdict instead of
-	//    re-verifying every contributing journal on every read.
+	//    UNAUTHORIZED verdict recorded for it becomes part of the signed,
+	//    anchored content -- which is both what lets a withdrawal trust a
+	//    cached verdict instead of re-verifying every journal on every read,
+	//    and now a finding verification reports in its own right. A negative
+	//    verdict that stays negative is consistent; consistency is not health.
 	// ---------------------------------------------------------------------
 	attested, seq, err = attestSvc.RunAttestBatch(ctx, 500)
 	if err != nil {
@@ -255,30 +258,6 @@ func run() error {
 
 	report = svc.VerifyLedger(ctx, anchor, service.VerifyConfig{})
 	printVerify("10. verify (tail covered) ", report)
-
-	// ---------------------------------------------------------------------
-	// Read that VERIFIED carefully -- it is narrower than it looks.
-	//
-	// Verification answers "has attested history been rewritten, and do the
-	// signatures it sampled check out". A journal carrying no signature at
-	// all is skipped rather than flagged, deliberately: on a ledger that
-	// turned signing on partway through, every journal older than that would
-	// otherwise be reported as a finding forever, and a check that always
-	// fails gets ignored.
-	//
-	// So VERIFIED does not mean every journal is authorized, and an operator
-	// running this after an incident should not read it that way. The
-	// withdrawal gate is what catches an unauthorized journal; verification
-	// catches rewritten history. Two different jobs.
-	//
-	// The count verification does not print, printed here so this example
-	// does not leave a misleading impression:
-	// ---------------------------------------------------------------------
-	unsigned, err := countUnsignedJournals(ctx, pool)
-	if err != nil {
-		return fmt.Errorf("count unsigned journals: %w", err)
-	}
-	fmt.Printf("                           (%d journal(s) carry no signature at all -- skipped by step 4, not flagged)\n", unsigned)
 
 	// The gate's answer does not depend on any of this -- it refused before
 	// the forgery was ever attested, and it still refuses now. Attestation
@@ -344,14 +323,6 @@ func forgeJournal(ctx context.Context, pool *pgxpool.Pool, jtUID, currencyUID, w
 		return fmt.Errorf("insert credit leg: %w", err)
 	}
 	return tx.Commit(ctx)
-}
-
-// countUnsignedJournals reports how many journals carry no authorization key
-// id, which is exactly the set VerifyLedger's signature sampling skips.
-func countUnsignedJournals(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
-	var n int64
-	err := pool.QueryRow(ctx, `SELECT count(*) FROM journals WHERE auth_key_id = ''`).Scan(&n)
-	return n, err
 }
 
 func printVerify(label string, report service.VerifyReport) {
