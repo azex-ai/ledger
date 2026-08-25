@@ -36,6 +36,38 @@ corsAllowedOrigin: ""
 # peer is used). An invalid value fails pod startup fast.
 trustedProxyCIDRs: ""
 
+# Additional environment for the server container.
+#
+# The named values above cover what most deployments set. Several settings the
+# server reads have no value of their own here on purpose -- they either carry
+# a secret, or belong to a feature a given deployment may not run -- and this
+# is how they get wired:
+#
+#   HOLDER_TOKEN_SECRET   enables the holder wallet surface. Absent, those
+#                         endpoints are simply not served. Put it in a Secret
+#                         and reference it from extraEnv, not inline.
+#   EVM_WEBHOOK_SECRET    enables the inbound EVM channel, same treatment.
+#   OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME
+#                         trace export; no export happens without them.
+#   MAX_BODY_BYTES, FULL_RECONCILE_INTERVAL
+#                         tunables with working defaults.
+#
+# DEV_CREDIT_ENABLED is deliberately not listed: it mints balance against no
+# custodied asset and the server refuses it unless ENV=dev.
+#
+# extraEnv:
+#   - name: HOLDER_TOKEN_SECRET
+#     valueFrom:
+#       secretKeyRef: {name: ledger-holder-token, key: secret}
+#   - name: OTEL_EXPORTER_OTLP_ENDPOINT
+#     value: "http://otel-collector:4318"
+extraEnv: []
+
+# Whole ConfigMaps or Secrets to project as environment.
+# extraEnvFrom:
+#   - secretRef: {name: ledger-extra}
+extraEnvFrom: []
+
 # Schema migrations run once in a pre-install/pre-upgrade Job. Serving pods
 # start with MIGRATE_MODE=off, so rollout capacity is not held behind DDL
 # locks and the runtime database role needs no DDL privileges.
