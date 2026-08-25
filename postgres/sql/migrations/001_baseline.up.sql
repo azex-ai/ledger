@@ -613,8 +613,13 @@ ALTER TABLE journals
 -- because a schema tidy-up is exactly the change that quietly destroys data
 -- nobody remembered was there.
 --
--- Their No-NULL and holder<>0 constraints were tightened along with everyone
--- else's, so they are internally consistent even though they are inert.
+-- They picked up the holder<>0 CHECK when that rule was swept across every
+-- table, but their nullable columns -- deposits.actual_amount,
+-- {deposits,withdrawals}.channel_ref and .expires_at -- were left as they
+-- were. The No-NULL convention arrived after these tables were already dead,
+-- and rewriting columns nothing reads would have been churn. So they are
+-- deliberately NOT held to the convention the live tables follow, which is
+-- worth knowing before anyone reads them as an example of it.
 ------------------------------------------------------------------------------
 CREATE TABLE deposits (
     id              BIGSERIAL PRIMARY KEY,
@@ -1343,6 +1348,15 @@ CREATE TRIGGER entry_attestations_no_delete
 -- presets and the HTTP surface assume are present. Their lifecycle is '{}'
 -- (label-only) until a preset installs one, and balance_role is '' until a
 -- deployment opts them into the holder-facing breakdown.
+--
+-- These uids are the one exception to the rule stated at the top of this
+-- file. Everywhere else a uid is a UUIDv7 minted Go-side, and the column
+-- deliberately has no DEFAULT so a write path that forgets one fails loudly.
+-- Here there is no Go-side writer -- the rows are installed by this file --
+-- so gen_random_uuid() supplies a v4. The uid only has to be unique and
+-- opaque, which a v4 is; what it loses is v7's time ordering, which means
+-- nothing for two rows created at install. The column still has no DEFAULT,
+-- so the guarantee that matters is intact.
 ------------------------------------------------------------------------------
 INSERT INTO classifications (code, name, normal_side, is_system, uid) VALUES
     ('deposit',  'Deposit',  'debit',  true, gen_random_uuid()),
