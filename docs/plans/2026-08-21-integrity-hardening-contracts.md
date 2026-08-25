@@ -553,7 +553,7 @@ diff 非空就是没做完，不允许「差异可忽略」。
 
 ## W4-4 测试怎么处理（区分「断言」与「过渡」）
 
-14 个 `TestMigrationNNN_*` 里，要**分开对待**：
+12 个 `TestMigrationNNN_*` 里，要**分开对待**：
 
 - **断言 schema 事实的**（如「`period_closes` 表存在」「`journal_entries` 有主键」）——
   事实仍然为真，**改写成对 baseline 的断言，不要删**。删掉等于丢掉 pin。
@@ -583,3 +583,55 @@ diff 非空就是没做完，不允许「差异可忽略」。
 
 理由（Aaron 拍板）：库的默认应该是安全的那一侧。「默认不安全、指望消费方记得再跑一步」
 更糟 —— 这一波已经证明「要人记住的规则会被违反」。
+
+
+## W4-7 压平时发现的既有缺陷：ownership 归集漏了 function（Major）
+
+准备参考 dump 时实测发现，**不是压平引入的，是压平顺手暴露的**。
+
+migration 049 的 ownership 归集循环了 `pg_tables` 和 `pg_sequences`（049 up 的 99/111 行），
+**没有 `pg_proc`**。全链跑完后的实测结果：
+
+| 对象 | 应属 | 实属 |
+|---|---|---|
+| `ledger_block_mutation()` | `ledger_owner` | 迁移执行者 |
+| `ledger_journals_block_arbitrary_update()` | `ledger_owner` | 迁移执行者 |
+| `ledger_classifications_guard()` | `ledger_owner` | 迁移执行者 |
+| `ledger_reservations_guard()` | `ledger_owner` | 迁移执行者 |
+| `check_journal_currency_balance()` | `ledger_owner` | 迁移执行者 |
+| `checkpoint_rebuilds` + 序列 + 4 索引 | `ledger_owner` | 迁移执行者 |
+
+**为什么要紧**：函数所有者可以 `CREATE OR REPLACE` 它。把 `ledger_block_mutation` 的函数体
+换成 `BEGIN RETURN NEW; END`，**journals / journal_entries 的 append-only 防护就静默失效了，
+而且不产生任何形如 `DROP TRIGGER` 的 DDL** —— 审计日志里看不出防护被拆过。
+
+**严重度 Major 不是 Critical**：`ledger_app`（应用连接的身份）从来不是这些函数的所有者，
+所以既有威胁模型「DB 写权限泄露、程序端可信」没有被突破。被削弱的是 049 的**意图** ——
+把「能改动保护性对象的主体」收敛成一个已知角色。留在迁移执行者名下，等于把这个集合扩大到
+「谁跑的迁移」，而那在多数部署里是一份更广泛共享的管理凭证。
+
+**两个成因是同一个 pattern 的两次发作**（`global-namespace-allocation` 的近亲）：
+
+1. 049 归集时**枚举了对象类型**（表、序列），漏掉的类型静默不受保护 —— 没有任何机制会说
+   「你漏了 pg_proc」
+2. 050 在 049 **之后**建了 `checkpoint_rebuilds`，自动归执行者所有。052（名字就叫
+   `grant_coverage_gap`）**回头补了它的 grant，没补它的 ownership** —— 发现了同一个
+   migration 引入的第一个缺口，没发现第二个
+
+**压平如何按构造修掉它**：baseline 建完全部对象后做一次覆盖全类型的归集，不存在「某个类型
+被漏掉」或「某个对象建得太晚」的可能。**并且 gate 把它变成机器检查**：任何不归
+`ledger_owner` 的对象都会让门禁红（gate.sh 第 3 项）—— 这正是 `working-agreements` §5
+「能被结构强制的，不靠记忆和自觉」。
+
+## W4-8 门禁自身的两个现场教训
+
+写 gate 的过程本身复现了本波两条已提炼的 pattern，记下来因为它们**发作于门禁建设期**，
+而那正是最危险的时点（`gate-before-running-seals-red`）：
+
+1. **`docker exec` 未加 `-i`，heredoc 从未送达** —— 修正 ownership 的 `DO $$` 块根本没执行，
+   而命令**退出码为 0**。若不是随后对照了 dump 里 `OWNER TO` 的计数，会拿一份未修正的
+   参考物当基准，让门禁在错误的对照下永远绿。**「未运行 ≠ 通过」在这里的形态是
+   「未运行且退出码是 0」。**
+2. **pg_dump 18 的 `\restrict` / `\unrestrict` token 每次 dump 随机生成** —— 不归一化的话
+   门禁永远红，且红的理由与 schema 无关。**一个永远红的门禁会被关掉**，所以归一化不是
+   便利性处理，是门禁能存活的前提。
