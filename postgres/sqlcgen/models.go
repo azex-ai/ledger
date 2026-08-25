@@ -227,7 +227,7 @@ type Journal struct {
 }
 
 type JournalEntriesDefault struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`
@@ -235,10 +235,11 @@ type JournalEntriesDefault struct {
 	EntryType        string         `json:"entry_type"`
 	Amount           pgtype.Numeric `json:"amount"`
 	CreatedAt        time.Time      `json:"created_at"`
+	EffectiveAt      time.Time      `json:"effective_at"`
 }
 
 type JournalEntry struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`

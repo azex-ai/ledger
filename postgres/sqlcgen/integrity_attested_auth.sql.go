@@ -29,9 +29,9 @@ type ListContributingEntryVerdictsParams struct {
 }
 
 type ListContributingEntryVerdictsRow struct {
-	EntryID   pgtype.Int8 `json:"entry_id"`
-	JournalID int64       `json:"journal_id"`
-	Verdict   string      `json:"verdict"`
+	EntryID   int64  `json:"entry_id"`
+	JournalID int64  `json:"journal_id"`
+	Verdict   string `json:"verdict"`
 }
 
 // Every entry contributing to (account_holder, currency_id,
@@ -72,7 +72,7 @@ ORDER BY journal_id, id
 `
 
 type ListEntriesForJournalsRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`

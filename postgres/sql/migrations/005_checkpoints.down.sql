@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS rollup_queue CASCADE;
-DROP TABLE IF EXISTS balance_checkpoints CASCADE;

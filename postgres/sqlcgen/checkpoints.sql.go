@@ -233,9 +233,9 @@ WHERE account_holder = $1
 `
 
 type GetMaxEntryForAccountCurrencySinceParams struct {
-	AccountHolder int64       `json:"account_holder"`
-	CurrencyID    int64       `json:"currency_id"`
-	ID            pgtype.Int8 `json:"id"`
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+	ID            int64 `json:"id"`
 }
 
 type GetMaxEntryForAccountCurrencySinceRow struct {

@@ -361,7 +361,7 @@ type ListEntriesByAccountParams struct {
 }
 
 type ListEntriesByAccountRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`
@@ -419,7 +419,7 @@ ORDER BY je.id
 `
 
 type ListJournalEntriesRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`
@@ -523,7 +523,7 @@ ORDER BY je.id
 `
 
 type ListReversalEntriesByOriginalRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`

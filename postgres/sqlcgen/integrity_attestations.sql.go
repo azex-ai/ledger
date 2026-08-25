@@ -175,7 +175,7 @@ ORDER BY je.id ASC
 `
 
 type ListEntriesForAttestationRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`
@@ -315,7 +315,7 @@ LIMIT $1::int
 `
 
 type ListUncoveredEntriesRow struct {
-	ID               pgtype.Int8    `json:"id"`
+	ID               int64          `json:"id"`
 	JournalID        int64          `json:"journal_id"`
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`

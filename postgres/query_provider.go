@@ -131,7 +131,7 @@ func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder int64, cur
 	}
 	nextCursor := ""
 	if limit > 0 && int32(len(rows)) == limit {
-		nextCursor = encodeCursorString(rows[len(rows)-1].ID.Int64)
+		nextCursor = encodeCursorString(rows[len(rows)-1].ID)
 	}
 	return result, nextCursor, nil
 }
