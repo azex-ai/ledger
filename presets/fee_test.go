@@ -62,10 +62,20 @@ func TestFeeBundle_Template_Balance(t *testing.T) {
 	require.NoError(t, err)
 	assertBalanced(t, journal.Entries)
 
-	// DR entry should be user, CR entry should be system
-	assert.Equal(t, core.EntryTypeDebit, journal.Entries[0].EntryType)
+	// The holder leg credits, because main_wallet is declared NormalSideDebit
+	// and a fee is money leaving the holder. This assertion used to require a
+	// debit, which is what let the inverted template ship: the test did not
+	// miss the bug, it certified it.
+	//
+	// assertBalanced above cannot catch this and never could -- both lines
+	// draw on the same amount key, so total debits equal total credits
+	// whichever side each classification lands on. The direction is only
+	// observable in the balance the entries produce, which is pinned against
+	// real Postgres by TestPresetDirection_MovesMoneyTheRightWay in the root
+	// package.
+	assert.Equal(t, core.EntryTypeCredit, journal.Entries[0].EntryType, "the holder pays the fee, so the holder leg credits")
 	assert.Equal(t, int64(42), journal.Entries[0].AccountHolder) // user
-	assert.Equal(t, core.EntryTypeCredit, journal.Entries[1].EntryType)
+	assert.Equal(t, core.EntryTypeDebit, journal.Entries[1].EntryType)
 	assert.Equal(t, int64(-42), journal.Entries[1].AccountHolder) // system
 }
 

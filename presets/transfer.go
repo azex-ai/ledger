@@ -34,21 +34,30 @@ var transferJournalTypes = []JournalTypePreset{
 // when they need to express both legs atomically in a single journal. The
 // template here covers the simpler two-leg call (one holder at a time).
 //
+// Direction follows the polarity main_wallet is declared with
+// (NormalSideDebit, templates.go): DR increases the holder's balance, CR
+// decreases it. deposit_confirm debits it because a deposit adds money;
+// checkout_settlement credits it because the holder is paying. A transfer is
+// the same rule applied twice, in opposite directions.
+//
 // Template: transfer_out — sender side:
 //
-//	DR main_wallet (user=sender)  CR settlement (system derived from sender)
+//	CR main_wallet (user=sender)  DR settlement (system derived from sender)
 //
 // Template: transfer_in — receiver side:
 //
-//	DR settlement (system derived from receiver)  CR main_wallet (user=receiver)
+//	CR settlement (system derived from receiver)  DR main_wallet (user=receiver)
+//
+// settlement is the transit account and nets to zero once both legs land: the
+// sender's leg debits it, the receiver's credits it back.
 var transferTemplates = []TemplatePreset{
 	{
 		Code:            "transfer_out",
 		Name:            "Transfer Out",
 		JournalTypeCode: "transfer",
 		Lines: []TemplateLinePreset{
-			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
-			{ClassificationCode: "settlement", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationCode: "settlement", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	},
 	{
@@ -56,8 +65,8 @@ var transferTemplates = []TemplatePreset{
 		Name:            "Transfer In",
 		JournalTypeCode: "transfer",
 		Lines: []TemplateLinePreset{
-			{ClassificationCode: "settlement", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
-			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 2},
+			{ClassificationCode: "settlement", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
+			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 2},
 		},
 	},
 }

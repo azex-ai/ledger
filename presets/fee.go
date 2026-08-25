@@ -30,15 +30,28 @@ var feeJournalTypes = []JournalTypePreset{
 	{Code: "fee", Name: "Fee Charge", DisplayLabel: "Fee"},
 }
 
-// feeTemplates: DR main_wallet (user) CR fees (system)
+// feeTemplates: CR main_wallet (user) DR fees (system)
+//
+// The holder leg follows main_wallet's declared polarity (NormalSideDebit): a
+// fee is money leaving the holder, so it credits. It used to debit, which
+// added the fee to the payer's balance instead of taking it.
+//
+// ⚠️ The counterpart's direction is a narrower, still-open question. fees is
+// credit-normal and checkout_settlement_net credits it, so revenue there
+// accumulates positively; the debit this template now needs to stay balanced
+// accumulates it negatively. Both cannot be right. The holder leg is fixed
+// because it moves real money in the wrong direction; the counterpart's sign
+// is a presentation choice about how the fee account reads, and territory A
+// flagged the fee-account polarity separately (solvency counts a user-side
+// debit-normal fee account as a liability). Resolve them together.
 var feeTemplates = []TemplatePreset{
 	{
 		Code:            "fee_charge",
 		Name:            "Fee Charge",
 		JournalTypeCode: "fee",
 		Lines: []TemplateLinePreset{
-			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
-			{ClassificationCode: "fees", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+			{ClassificationCode: "main_wallet", EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationCode: "fees", EntryType: core.EntryTypeDebit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	},
 }
