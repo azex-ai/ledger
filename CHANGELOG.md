@@ -226,9 +226,9 @@ Two of these move real money and are worth reading before upgrading.
   has. That credential is install-time only and should be rotated or retired
   afterwards. Equivalence with the old chain is enforced by diffing
   `pg_dump --schema-only` between a database built by each, which reports no
-  difference. Migration numbers referenced anywhere in these notes are
-  historical: the released artifact contains `001_baseline` and nothing
-  else.
+  difference. Migration numbers referenced anywhere else in these notes are
+  historical: the released artifact contains `001_baseline` plus `002`
+  through `004`, the three this release adds on top of it, and nothing else.
 
 ### Go module — Fixed
 
