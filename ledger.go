@@ -339,6 +339,35 @@ func (s *Service) AttestationService(anchor core.Anchor) (*service.AttestationSe
 	return service.NewAttestationService(store, s.attestor, s.authVerifier, anchor, engine), nil
 }
 
+// VerifyLedger runs the five-step tamper-evidence verification (design doc
+// §8.4) against this ledger: pull the trusted head from anchor, walk and
+// check the attestation chain, recompute batch content from live entries,
+// sample per-journal authorization signatures, and localize any mismatch to
+// specific entry ids.
+//
+// Exists because every other capability of this library reaches the consumer
+// through this facade, and verification did not: running it meant calling
+// postgres.NewAttestationStore(pool) directly, which the package contract
+// (CLAUDE.md) tells consumers never to do. cmd/ledger-cli could get away
+// with it -- it lives in this repository and is not a consumer -- but an
+// example that did the same would teach the wrong layering.
+//
+// anchor is required: without it there is no trusted head to compare
+// against, and VerifyLedger returns NOT_RUN rather than a partial VERIFIED.
+// The same is true when WithAttestor was never given a verifier. Both are
+// fail-closed by design -- a check that could not run must never read as one
+// that passed.
+//
+// cfg's zero value is usable; see service.DefaultVerifyConfig for what the
+// defaults are.
+func (s *Service) VerifyLedger(ctx context.Context, anchor core.Anchor, cfg service.VerifyConfig) service.VerifyReport {
+	if cfg.JournalSampleSize == 0 && cfg.ChainPageSize == 0 && cfg.ReferenceEntries == nil {
+		cfg = service.DefaultVerifyConfig()
+	}
+	store := postgres.NewAttestationStore(s.pool)
+	return service.VerifyLedger(ctx, store, anchor, s.authVerifier, s.queryStore, cfg)
+}
+
 // FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {

@@ -30,8 +30,15 @@ func NewMigrationSource() (source.Driver, error) {
 }
 
 // Migrate runs all pending schema migrations against the given database URL.
-// The URL should use the pgx5 scheme, e.g. "pgx5://user:pass@host/db".
+//
+// Accepts either scheme. golang-migrate selects its driver by URL scheme and
+// only knows "pgx5", but every other entry point in this library -- pgxpool,
+// the examples, DATABASE_URL itself -- speaks "postgres", and requiring the
+// caller to hold two spellings of one connection string is a trap they hit at
+// the first line of their integration. Normalizing here costs nothing.
 func Migrate(databaseURL string) error {
+	databaseURL = toMigrateURL(databaseURL)
+
 	if err := waitForDatabase(databaseURL, 10*time.Second); err != nil {
 		return fmt.Errorf("postgres: migrate: wait for database: %w", err)
 	}
@@ -52,6 +59,20 @@ func Migrate(databaseURL string) error {
 		return fmt.Errorf("postgres: migrate: up: %w", err)
 	}
 	return nil
+}
+
+// toMigrateURL rewrites a postgres:// or postgresql:// URL to the pgx5://
+// scheme golang-migrate's driver registry is keyed on. A URL already using
+// pgx5:// is returned unchanged.
+func toMigrateURL(databaseURL string) string {
+	switch {
+	case strings.HasPrefix(databaseURL, "postgresql://"):
+		return "pgx5://" + strings.TrimPrefix(databaseURL, "postgresql://")
+	case strings.HasPrefix(databaseURL, "postgres://"):
+		return "pgx5://" + strings.TrimPrefix(databaseURL, "postgres://")
+	default:
+		return databaseURL
+	}
 }
 
 func waitForDatabase(databaseURL string, timeout time.Duration) error {

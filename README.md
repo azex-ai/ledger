@@ -736,6 +736,9 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**billing**](examples/billing/) -- SaaS-style metered billing: top-up wallet, reserve budget, deduct actual cost, release remainder.
 - [**credits-topup**](examples/credits-topup/) -- Buy / bonus / spend / cash-out credits as a second currency; runs Cookbook recipes 1, 2b, 4, 5 end-to-end.
 - [**event-subscribe**](examples/event-subscribe/) -- In-process event subscription: Worker.Subscribe, graceful shutdown.
+- [**tamper-evident**](examples/tamper-evident/) -- Per-journal signing, batch attestation to an external anchor, and the
+  `RequireVerifiedBalance` withdrawal gate. Forges a balanced journal by direct SQL -- the way a stolen `DATABASE_URL`
+  would -- and shows the gate refusing to pay it out while an ungated reserve happily does. Expects an empty database.
 - [**tx-compose**](examples/tx-compose/) -- Transactional composition: ledger journal + caller's own DB write in one PostgreSQL transaction; rollback on error.
 
 ## SemVer / Stability Policy
