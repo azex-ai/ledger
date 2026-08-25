@@ -1,24 +1,30 @@
 package postgres_test
 
-// Pins for I-1/I-24 (P3, C1 + M1 fixes):
-//   - the DB-layer deferred constraint trigger restored by migration 044
+// Pins for I-1/I-24:
+//   - the DB-layer deferred constraint trigger that refuses a per-currency
+//     imbalance written by direct SQL
 //     (docs/plans/2026-08-21-tamper-evident-ledger-design.md §2 C1, §5), and
 //   - the fleet-wide "journal_dr_cr" per-journal reconcile scan that
-//     complements it (§2 M1).
+//     complements it (§2 M1), for imbalances that predate the guard.
 //
-// Both tests drive golang-migrate directly (postgrestest.SetupRawDB +
-// postgres.NewMigrationSource, the same pattern as
-// migrate_populated_test.go's TestMigrate_PopulatedDatabase) so they can
-// demonstrate the exact "before 044 this succeeds, after 044 this fails"
-// contrast that a fixed-version SetupDB cannot show.
+// Both tests need a journal that IS unbalanced, which the guard exists to
+// make impossible. They produce one by disabling the trigger for exactly the
+// crafting statement and re-enabling it immediately, rather than by migrating
+// to a schema version that predates it: the schema is a single baseline and
+// the guard is present from its first statement, so there is no "before" to
+// travel back to.
+//
+// Disabling is a strictly better fixture than the old version travel was.
+// Version travel proved "this guard did not exist at version N"; disabling
+// proves "this guard, in the schema as shipped, is the thing doing the work"
+// -- which is what the invariant actually claims. It also lets the legitimate
+// journals be posted through store.PostJournal instead of hand-written SQL
+// imitating an older table shape.
 
 import (
 	"context"
-	"strings"
 	"testing"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -29,152 +35,147 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 )
 
-// preTriggerVersion is the last migration version before 044 restored the
-// DB-layer per-journal balance trigger. Chosen as the highest version that
-// predates this task's own migrations (041) rather than the logically
-// preceding one (043, owned by a parallel task landing separately) so this
-// test works whether run against this branch in isolation or against a
-// fully merged main -- it only cares that 044 has not run yet.
-const preTriggerVersion = 41
+// withBalanceTriggerDisabled runs fn with the per-currency balance constraint
+// trigger switched off, and switches it back on afterwards even if fn fails.
+//
+// Each statement runs on its own connection-level transaction, so the trigger
+// is genuinely off at the moment fn's writes commit -- a DEFERRABLE INITIALLY
+// DEFERRED trigger fires at COMMIT, so disabling and re-enabling inside one
+// transaction with fn would let it fire anyway.
+//
+// This requires table ownership, which the test connection has and ledger_app
+// deliberately does not (I-22). That is the point: crafting this corruption is
+// not something the application credential can do.
+func withBalanceTriggerDisabled(t *testing.T, pool *pgxpool.Pool, ctx context.Context, fn func()) {
+	t.Helper()
 
-// TestJournalBalanceTrigger_RejectsDirectSQLImbalance pins I-1/I-24: before
-// migration 044, a direct SQL INSERT that leaves an existing journal
-// unbalanced by currency succeeds with nothing in the database to stop it
-// (C1). After 044, the identical attack against a fresh journal is rejected
-// at commit.
+	_, err := pool.Exec(ctx, `ALTER TABLE journal_entries DISABLE TRIGGER trg_check_journal_currency_balance`)
+	require.NoError(t, err, "disabling the balance trigger is the only way to craft an unbalanced journal")
+
+	reEnabled := false
+	enable := func() {
+		if reEnabled {
+			return
+		}
+		reEnabled = true
+		_, err := pool.Exec(ctx, `ALTER TABLE journal_entries ENABLE TRIGGER trg_check_journal_currency_balance`)
+		require.NoError(t, err, "the trigger must come back on -- every assertion after this depends on it")
+	}
+	t.Cleanup(enable)
+
+	fn()
+	enable()
+}
+
+// postBalancedJournal posts a legitimate two-leg journal through the real
+// write path and returns its internal id.
+func postBalancedJournal(
+	t *testing.T,
+	store *postgres.LedgerStore,
+	pool *pgxpool.Pool,
+	ctx context.Context,
+	deps invariantsFixture,
+	holder int64,
+	amount decimal.Decimal,
+	key string,
+) int64 {
+	t.Helper()
+
+	j, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: deps.JournalType,
+		IdempotencyKey: postgrestest.UniqueKey(key),
+		Source:         "balance-trigger-test",
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: amount},
+			{AccountHolder: -holder, CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: amount},
+		},
+	})
+	require.NoError(t, err)
+	return postgrestest.InternalID(t, pool, "journals", j.UID)
+}
+
+// TestJournalBalanceTrigger_RejectsDirectSQLImbalance pins I-1/I-24: a direct
+// SQL INSERT that leaves a journal unbalanced by currency is refused at commit
+// by the database, not merely by application code.
+//
+// The first half -- the same INSERT succeeding with the trigger disabled -- is
+// what keeps the second half from being vacuous. Without it, an INSERT that
+// failed for any unrelated reason would look like the guard working.
 func TestJournalBalanceTrigger_RejectsDirectSQLImbalance(t *testing.T) {
 	ctx := context.Background()
-	connStr := postgrestest.SetupRawDB(t)
-	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
-
-	source, err := postgres.NewMigrationSource()
-	require.NoError(t, err)
-	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
-	require.NoError(t, err)
-
-	require.NoError(t, m.Migrate(preTriggerVersion))
-
-	pool, err := pgxpool.New(ctx, connStr)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-
+	pool := postgrestest.SetupDB(t)
 	store, deps := setupInvariantsFixture(t, pool, ctx)
-
-	// A legitimate, balanced journal, inserted directly against the
-	// schema-v41 shape rather than through store.PostJournal: the current
-	// binary's InsertJournal sends event_id as NULL (migration 045 made the
-	// column a nullable FK-target-exception), which schema v41's
-	// NOT-NULL-DEFAULT-0 event_id column rejects. This test's subject is the
-	// journal_entries balance trigger, not journal creation, so a direct
-	// insert matching the historical schema is the correct fixture here.
-	journalAID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4201, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(100), postgrestest.UniqueKey("bal-trig-pre"))
 
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
 	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
 
-	// Pre-044: a direct SQL insert that unbalances journalA (an extra debit
-	// leg with no matching credit) succeeds -- nothing in the DB stops it.
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, $3, $4, 'debit', $5)`,
-		journalAID, 4201, currencyID, classID, decimal.NewFromInt(50),
-	)
-	require.NoError(t, err, "before migration 044, a direct SQL insert could unbalance a journal with nothing in the DB to stop it (C1)")
+	unbalance := func(journalID, holder int64) error {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+			 VALUES ($1, $2, $3, $4, 'debit', $5)`,
+			journalID, holder, currencyID, classID, decimal.NewFromInt(50),
+		)
+		return err
+	}
 
-	// Bring the schema up to date -- this is what restores the trigger. It
-	// is NOT retroactive: journalA above stays corrupted (that gap is
-	// exactly why the fleet-wide check in the sibling test exists).
-	require.NoError(t, m.Up())
-
-	// Post-044: a second, independent balanced journal.
-	journalB, err := store.PostJournal(ctx, core.JournalInput{
-		JournalTypeUID: deps.JournalType,
-		IdempotencyKey: postgrestest.UniqueKey("bal-trig-post"),
-		Source:         "trigger-test",
-		Entries: []core.EntryInput{
-			{AccountHolder: 4202, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(200)},
-			{AccountHolder: -4202, CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
-		},
+	journalA := postBalancedJournal(t, store, pool, ctx, deps, 4201, decimal.NewFromInt(100), "bal-trig-off")
+	withBalanceTriggerDisabled(t, pool, ctx, func() {
+		require.NoError(t, unbalance(journalA, 4201),
+			"with the guard off, an extra debit leg with no matching credit goes in -- this is what the guard is preventing")
 	})
-	require.NoError(t, err)
-	journalBID := postgrestest.InternalID(t, pool, "journals", journalB.UID)
 
-	// The identical direct-SQL attack against journalB must now be rejected
-	// at commit by the restored deferred constraint trigger.
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, $3, $4, 'debit', $5)`,
-		journalBID, 4202, currencyID, classID, decimal.NewFromInt(50),
-	)
-	require.Error(t, err, "after migration 044, a direct SQL insert that unbalances a journal by currency must be rejected by the DB layer")
+	journalB := postBalancedJournal(t, store, pool, ctx, deps, 4202, decimal.NewFromInt(200), "bal-trig-on")
+	err := unbalance(journalB, 4202)
+	require.Error(t, err, "with the guard on, the identical direct-SQL insert must be rejected by the DB layer")
 	assert.Contains(t, err.Error(), "unbalanced entries", "the trigger's error message should name the failure")
 }
 
 // TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses pins I-24 /
-// M1: the fleet-wide "journal_dr_cr" scan (IntegrityUnbalancedJournalsCount)
-// catches two individually-unbalanced journals that a GLOBAL debit==credit
-// equality check cannot see, because summed together debit still equals
-// credit. The corrupted journals are crafted pre-044 (direct SQL, schema
-// v41) -- exactly the historical-gap scenario the fleet scan exists for,
-// since migration 044's trigger is not retroactive.
+// M1: the fleet-wide "journal_dr_cr" scan catches two individually-unbalanced
+// journals that a GLOBAL debit==credit equality check cannot see, because
+// summed together debit still equals credit.
+//
+// The guard is not retroactive -- it refuses new imbalances but says nothing
+// about rows already present -- so this scan is what covers anything that got
+// in before it, or around it.
 func TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses(t *testing.T) {
 	ctx := context.Background()
-	connStr := postgrestest.SetupRawDB(t)
-	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
-
-	source, err := postgres.NewMigrationSource()
-	require.NoError(t, err)
-	m, err := migrate.NewWithSourceInstance("iofs", source, migrateURL)
-	require.NoError(t, err)
-
-	require.NoError(t, m.Migrate(preTriggerVersion))
-
-	pool, err := pgxpool.New(ctx, connStr)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-
-	_, deps := setupInvariantsFixture(t, pool, ctx)
-
-	// Journal A and B: legitimate 2-leg posts (150 debit / 150 credit each),
-	// inserted directly against the schema-v41 shape rather than through
-	// store.PostJournal -- see TestJournalBalanceTrigger_RejectsDirectSQLImbalance's
-	// comment on insertLegacyBalancedJournal for why. A direct-SQL extra
-	// debit/credit leg is added to each below to unbalance them individually.
-	journalAID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4301, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(150), postgrestest.UniqueKey("fleet-a"))
-	journalBID := insertLegacyBalancedJournal(t, pool, ctx, deps.JournalType, 4302, deps.Currency, deps.MainWallet, deps.Custodial, decimal.NewFromInt(150), postgrestest.UniqueKey("fleet-b"))
+	pool := postgrestest.SetupDB(t)
+	store, deps := setupInvariantsFixture(t, pool, ctx)
 
 	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
 	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
 	sysClassID := postgrestest.InternalID(t, pool, "classifications", deps.Custodial)
 
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, $3, $4, 'debit', $5)`,
-		journalAID, 4301, currencyID, classID, decimal.NewFromInt(50),
-	)
-	require.NoError(t, err, "pre-044: crafting the corrupted fixture must itself succeed")
+	journalA := postBalancedJournal(t, store, pool, ctx, deps, 4301, decimal.NewFromInt(150), "fleet-a")
+	journalB := postBalancedJournal(t, store, pool, ctx, deps, 4302, decimal.NewFromInt(150), "fleet-b")
 
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, $3, $4, 'credit', $5)`,
-		journalBID, -4302, currencyID, sysClassID, decimal.NewFromInt(50),
-	)
-	require.NoError(t, err, "pre-044: crafting the corrupted fixture must itself succeed")
+	// A gains an unmatched debit, B an unmatched credit of the same size, so
+	// the two drifts cancel in any global sum.
+	withBalanceTriggerDisabled(t, pool, ctx, func() {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+			 VALUES ($1, $2, $3, $4, 'debit', $5)`,
+			journalA, 4301, currencyID, classID, decimal.NewFromInt(50))
+		require.NoError(t, err, "crafting the corrupted fixture must itself succeed")
 
-	// Bring the schema up to date. Not retroactive -- journalA/journalB stay
-	// corrupted, which is the point: this is the historical-gap scenario.
-	require.NoError(t, m.Up())
+		_, err = pool.Exec(ctx,
+			`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+			 VALUES ($1, $2, $3, $4, 'credit', $5)`,
+			journalB, -4302, currencyID, sysClassID, decimal.NewFromInt(50))
+		require.NoError(t, err, "crafting the corrupted fixture must itself succeed")
+	})
 
-	// The GLOBAL debit==credit equality check is blind to this: summed
-	// across both journals, debit == credit still holds.
+	// The GLOBAL debit==credit equality check is blind to this: summed across
+	// both journals, debit == credit still holds.
 	var totalDebit, totalCredit decimal.Decimal
-	err = pool.QueryRow(ctx, `
+	err := pool.QueryRow(ctx, `
 		SELECT
 		  COALESCE(SUM(CASE WHEN entry_type='debit' THEN amount END), 0),
 		  COALESCE(SUM(CASE WHEN entry_type='credit' THEN amount END), 0)
 		FROM journal_entries
 		WHERE journal_id IN ($1, $2)
-	`, journalAID, journalBID).Scan(&totalDebit, &totalCredit)
+	`, journalA, journalB).Scan(&totalDebit, &totalCredit)
 	require.NoError(t, err)
 	require.True(t, totalDebit.Equal(totalCredit),
 		"the crafted fixture must be globally balanced (debit=%s credit=%s) -- that's the whole point of M1", totalDebit, totalCredit)
@@ -190,62 +191,14 @@ func TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses(t *testing.
 	var sawA, sawB bool
 	for _, s := range samples {
 		switch s.JournalID {
-		case journalAID:
+		case journalA:
 			sawA = true
 			assert.True(t, s.Drift.Equal(decimal.NewFromInt(50)), "journal A should drift +50, got %s", s.Drift)
-		case journalBID:
+		case journalB:
 			sawB = true
 			assert.True(t, s.Drift.Equal(decimal.NewFromInt(-50)), "journal B should drift -50, got %s", s.Drift)
 		}
 	}
 	assert.True(t, sawA, "expected journal A in the sample")
 	assert.True(t, sawB, "expected journal B in the sample")
-}
-
-// insertLegacyBalancedJournal inserts a balanced 2-leg journal directly,
-// matching the journals/journal_entries shape as of schema v41 (event_id
-// still NOT NULL DEFAULT 0, no FK) rather than going through
-// postgres.LedgerStore.PostJournal. The current binary's InsertJournal
-// always sends event_id as NULL when unset (migration 045 converted the
-// column to a nullable FK-target exception with a real FK to events(id)),
-// which a NOT-NULL event_id column rejects -- so the current binary's
-// PostJournal cannot run against a database still at v41. Both callers in
-// this file need a legitimate journal fixture at exactly that pre-044
-// schema state, which is what this helper is for.
-func insertLegacyBalancedJournal(
-	t *testing.T,
-	pool *pgxpool.Pool,
-	ctx context.Context,
-	journalTypeUID string,
-	holder int64,
-	currencyUID, walletUID, custodialUID string,
-	amount decimal.Decimal,
-	idempotencyKey string,
-) int64 {
-	t.Helper()
-
-	var journalID int64
-	err := pool.QueryRow(ctx,
-		`INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit, actor_id, source, event_id)
-		 VALUES (gen_random_uuid(), (SELECT id FROM journal_types WHERE uid=$1::uuid), $2, $3, $3, 0, 'test', 0)
-		 RETURNING id`,
-		journalTypeUID, idempotencyKey, amount.String(),
-	).Scan(&journalID)
-	require.NoError(t, err)
-
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, (SELECT id FROM currencies WHERE uid=$3::uuid), (SELECT id FROM classifications WHERE uid=$4::uuid), 'debit', $5)`,
-		journalID, holder, currencyUID, walletUID, amount.String(),
-	)
-	require.NoError(t, err)
-
-	_, err = pool.Exec(ctx,
-		`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		 VALUES ($1, $2, (SELECT id FROM currencies WHERE uid=$3::uuid), (SELECT id FROM classifications WHERE uid=$4::uuid), 'credit', $5)`,
-		journalID, -holder, currencyUID, custodialUID, amount.String(),
-	)
-	require.NoError(t, err)
-
-	return journalID
 }
