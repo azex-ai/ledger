@@ -7,9 +7,18 @@
 // Demonstrates:
 //   - ledger.New(pool) + svc.InstallExtendedPresets(ctx)
 //   - svc.Reserver().Reserve  — budget hold (TOCTOU-safe advisory lock)
-//   - svc.Reserver().Settle   — actual cost capture + automatic remainder release
+//   - svc.Reserver().Settle   — closes the hold at the actual amount
+//   - svc.RunInTx             — settling and charging in one transaction
 //   - svc.BalanceReader().GetBalance  — balance query
 //   - ledger.NewIdempotencyKey  — collision-free idempotency keys
+//
+// One thing this example is careful about, because an earlier version of it
+// was not: Settle does not move money. It closes the hold, which releases the
+// reserved amount back into the holder's available balance -- the charge is a
+// journal the caller posts. Settling without posting it releases the hold and
+// bills nobody, and the ledger reports success, because from its side nothing
+// went wrong: it did what it was asked. The earlier version printed a final
+// balance of 100 under a line that said it expected 84.25.
 //
 // Run:
 //
@@ -114,14 +123,42 @@ func run() error {
 
 	// -----------------------------------------------------------------------
 	// Step 3: compute run finishes — actual cost was $15.75.
-	// Settle debits the actual amount and automatically releases the $4.25
-	// remainder. Both operations happen atomically inside the adapter.
+	//
+	// Two things have to happen, and they have to happen together: the hold
+	// closes at the actual amount, and the user is charged that amount.
+	//
+	// Settle only does the first. It is a state transition on the reservation
+	// -- the ledger records that the hold ended and how much of it was used --
+	// and the held amount stops counting against the holder's available
+	// balance. No entries are written, so no money moves. That split is
+	// deliberate: only the caller knows which accounts a charge belongs
+	// between, and the ledger will not guess.
+	//
+	// RunInTx puts both in one transaction. Crash between them and neither
+	// lands; without it, a crash after Settle frees the hold and bills nobody.
+	// The *ledger.Service handed to the callback is a short-lived clone bound
+	// to that transaction -- use it for everything inside, and do not keep it.
 	// -----------------------------------------------------------------------
 	actualCost := decimal.RequireFromString("15.75")
-	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actualCost}); err != nil {
-		return fmt.Errorf("settle: %w", err)
+	chargeKey := ledger.NewIdempotencyKey("charge")
+	if err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		if err := tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actualCost}); err != nil {
+			return fmt.Errorf("settle: %w", err)
+		}
+		if _, err := tx.JournalWriter().ExecuteTemplate(ctx, "fee_charge", core.TemplateParams{
+			HolderID:       userID,
+			CurrencyUID:    currencyUID,
+			IdempotencyKey: chargeKey,
+			Amounts:        map[string]decimal.Decimal{"amount": actualCost},
+			Source:         "billing-example",
+		}); err != nil {
+			return fmt.Errorf("charge: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("settle and charge: %w", err)
 	}
-	fmt.Printf("settled: actual_cost=%s (remainder released automatically)\n", actualCost)
+	fmt.Printf("settled and charged: actual_cost=%s (the unused 4.25 goes back to available)\n", actualCost)
 
 	// -----------------------------------------------------------------------
 	// Step 4: read back the user's main_wallet balance.
@@ -137,8 +174,14 @@ func run() error {
 		return fmt.Errorf("get balance: %w", err)
 	}
 
-	// Expected: 100.00 - 15.75 = 84.25 USDT
-	fmt.Printf("final balance: %s USDT (expected 84.25)\n", balance)
+	// 100.00 topped up, 15.75 charged.
+	expected := decimal.RequireFromString("84.25")
+	fmt.Printf("final balance: %s USDT (expected %s)\n", balance, expected)
+	if !balance.Equal(expected) {
+		// An example that prints a number next to the number it expected, and
+		// exits 0 when they differ, is documentation for a bug. This one fails.
+		return fmt.Errorf("balance is %s, expected %s -- the charge did not land", balance, expected)
+	}
 	return nil
 }
 
