@@ -29,6 +29,85 @@ CREATE2-derived shared-address deposit flow into an optional, library-shipped
 default, with M3 compensating controls (threshold gate + dual-provider
 reconciliation → human review) and a full wallet-side frontend.
 
+### Go module — Removed
+
+- **Breaking**: the standalone service binary is gone, along with `cmd/ledgerd`,
+  the Helm chart, the Grafana dashboard, the Dockerfile and the compose
+  services that ran them. This is a library; it now ships nothing to deploy.
+  `docker-compose.yml` starts PostgreSQL alone for local development, and
+  `make docker` is `make db`.
+
+  `server/` stays. It is not a composition root -- it takes already-assembled
+  dependencies and returns an `http.Handler` -- so a consumer that wants the
+  HTTP surface mounts it in their own binary, as
+  [`examples/fullstack`](examples/fullstack/) does. `docs/openapi.yaml` remains
+  the wire contract that surface implements and that `@azex/ledger-react`
+  generates its types from.
+
+  Why it went: the binary was a second composition root that assembled a
+  different set of capabilities than the library facade. It never enabled
+  per-journal signing, never scheduled batch attestation, and exposed no way
+  to require a verified balance -- so everything under "Security" below was
+  inert in the only deployment form this repo shipped, and no test noticed,
+  because nothing tested that binary.
+
+### Go module — Fixed (accounting correctness)
+
+Two of these move real money and are worth reading before upgrading.
+
+- **Transfers and fees ran in the wrong direction.** `transfer_out`,
+  `transfer_in` and `fee_charge` had their holder leg inverted against
+  `main_wallet`'s declared polarity, so a peer-to-peer transfer of 100 left
+  the sender 100 richer and the receiver 100 in debt, and charging a fee paid
+  the payer. `deposit_confirm` and `checkout_settlement` were always correct;
+  these three disagreed with them. **If you have posted through these
+  templates, the resulting journals are wrong and need reversing.**
+
+  The preset tests passed throughout: both legs draw on the same amount key,
+  so "total debits equal total credits" holds whichever side each
+  classification lands on.
+
+- **"Reverse everything remaining" under-reversed when a journal had two
+  entries on the same dimension.** Prior reversals are tracked per dimension
+  while the remainder was computed per entry, so each entry subtracted the
+  whole dimension's prior total. A 60 + 40 journal reversed by half and then
+  "the rest" left 40 on the books and returned success. **Check any journal
+  you reversed in fractions that carried repeated dimensions.**
+
+- Inbound webhooks failed on every request in any deployment that used the
+  role separation the schema installs: the replay-cache prune is a `DELETE`,
+  `ledger_app` had none, and the error was returned rather than tolerated.
+  Migration 002 grants that one `DELETE` -- which the schema's own comment
+  already called "the one sanctioned DELETE" -- and the prune now tolerates a
+  refused privilege without failing the request.
+
+- A cached attestation-time `Authorized` verdict no longer lets
+  `VerifiedBalance` skip the live check. The verdict answers whether a journal
+  was authorized *when attested*; the withdrawal gate needs whether it is
+  authorized *now*, and the canonical digest covers every entry's amount, so
+  an amount edited after attestation was invisible to the gate. Verification
+  cost on that path returns to its pre-optimization level, deliberately.
+
+### Go module — Security (configuration integrity)
+
+- Migration 003 puts a column whitelist on `currencies`, `classifications`,
+  `journal_types`, `entry_templates`, `entry_template_lines` and
+  `deposit_addresses`. A per-journal signature authenticates what the
+  application *read*, not what happened -- so an application credential that
+  could rewrite a deposit address's holder, or a template line's direction,
+  made the application sign a correct journal about the wrong facts, and the
+  result verified. Only `is_active`, `display_label`, `lifecycle` and
+  `balance_role`'s one-way upgrade stay mutable; `currencies.exponent`,
+  `classifications.normal_side` and `.code`, and every column of a template
+  line do not.
+
+- Migration 004 refuses promoting a classification to `balance_role`
+  `'available'` once it has journal entries. `available` is the only bucket
+  `Reserve` spends from, so promoting one that already holds balances turns
+  them into withdrawable funds in a single statement -- the shipped
+  `fee_expense` is debited on every withdrawal fee. `'pending'` and
+  `'locked'` stay unrestricted; neither is spendable.
+
 ### Go module — Security (tamper-evident ledger, P0–P7 + Waves 2–3)
 
 - **P0 — Reconciliation coverage fixed**: the negative (system) holder range
