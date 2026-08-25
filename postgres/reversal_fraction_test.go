@@ -245,3 +245,63 @@ func TestReverseJournal_ConcurrentFullReversals_OnlyOneWins(t *testing.T) {
 	assert.LessOrEqual(t, len(distinct), 1, "more than one full reversal journal was posted: %v", distinct)
 	assert.Equal(t, 1, len(distinct), "exactly one racer should have succeeded")
 }
+
+// TestReverseJournalFraction_RepeatedDimensionCompletesFully pins the case the
+// remainder form used to get wrong: a journal carrying more than one entry on
+// the same (holder, currency, classification, entry_type).
+//
+// JournalInput.Validate checks per-currency balance and does not deduplicate,
+// so such a journal is legal. Prior reversals are tracked per dimension, but
+// the remainder was computed per entry -- each entry subtracted the whole
+// dimension's prior total. On 60 + 40 reversed half then "all the rest", the
+// two entries yielded 10 and -10; the negative was skipped as non-positive and
+// the surviving 10/10 balanced, so Validate accepted it and the call returned
+// success with 40 still on the books.
+//
+// That shape is why this needs pinning at the balance level. The failure was
+// invisible to every structural check available: the reversal balanced, it
+// conserved (10 < 60), it wrote a valid journal, and it returned nil. Only the
+// holder's remaining balance shows it.
+func TestReverseJournalFraction_RepeatedDimensionCompletesFully(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "RPT", "Repeat Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(4401)
+	d := decimal.RequireFromString
+
+	// Two debits and two credits, each pair sharing one dimension.
+	j, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("repeat-dim"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("60")},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("40")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("60")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("40")},
+		},
+	})
+	require.NoError(t, err)
+
+	balance := func() decimal.Decimal {
+		t.Helper()
+		b, err := store.GetBalance(ctx, holder, curID, wallet)
+		require.NoError(t, err)
+		return b
+	}
+	require.True(t, balance().Equal(d("100")), "fixture must start at 100, got %s", balance())
+
+	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 2, "half", postgrestest.UniqueKey("rev-half"))
+	require.NoError(t, err)
+	require.True(t, balance().Equal(d("50")), "half of 100 must leave 50, got %s", balance())
+
+	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 1, "rest", postgrestest.UniqueKey("rev-rest"))
+	require.NoError(t, err)
+	require.True(t, balance().IsZero(),
+		"reversing the rest must leave nothing, got %s -- a non-zero balance here means the remainder was computed per entry against a per-dimension total again, and the caller was told the journal was fully reversed while it was not", balance())
+}

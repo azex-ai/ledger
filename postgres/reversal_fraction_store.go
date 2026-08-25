@@ -253,17 +253,47 @@ func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries
 	// journal balances per currency and every prior reversal balanced per
 	// currency, so the per-currency remainder is equal on the debit and
 	// credit sides by subtraction.
+	//
+	// The remainder is computed per DIMENSION, not per entry, because that is
+	// the granularity alreadyReversed is keyed at. A journal may carry more
+	// than one entry on the same (holder, currency, classification,
+	// entry_type) -- JournalInput.Validate checks per-currency balance and
+	// does not deduplicate -- and subtracting a dimension-wide total from each
+	// individual entry charges the same prior reversal once per entry.
+	//
+	// Concretely, on a journal of 60 + 40 debits sharing a dimension, reversed
+	// half and then "all the rest": each entry subtracted the full 50 already
+	// reversed, giving 10 and -10; the negative was skipped as non-positive
+	// and the result was a balanced 10/10 reversal that Validate accepted. 40
+	// stayed on the books and the caller was told the journal was fully
+	// reversed. Aggregating first makes the arithmetic match the bookkeeping.
 	if num == den {
-		reversedEntries := make([]core.EntryInput, 0, len(entries))
+		// Sum the original amounts per dimension, keeping first-appearance
+		// order so the emitted entries are deterministic across calls -- the
+		// digest guard in reverseJournalFractionWithQueries compares derived
+		// entries between an unlocked and a locked read, and map iteration
+		// order would make an unchanged journal look changed.
+		originalByDim := make(map[entryDimKey]decimal.Decimal, len(entries))
+		representative := make(map[entryDimKey]sqlcgen.ListJournalEntriesRow, len(entries))
+		order := make([]entryDimKey, 0, len(entries))
 		for _, e := range entries {
-			originalType := core.EntryType(e.EntryType)
-			key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: originalType}
-			remaining := mustNumericToDecimal(e.Amount).Sub(alreadyReversed[key])
+			key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: core.EntryType(e.EntryType)}
+			if _, seen := originalByDim[key]; !seen {
+				order = append(order, key)
+				representative[key] = e
+			}
+			originalByDim[key] = originalByDim[key].Add(mustNumericToDecimal(e.Amount))
+		}
+
+		reversedEntries := make([]core.EntryInput, 0, len(order))
+		for _, key := range order {
+			remaining := originalByDim[key].Sub(alreadyReversed[key])
 			if !remaining.IsPositive() {
 				continue
 			}
+			e := representative[key]
 			flipped := core.EntryTypeCredit
-			if originalType == core.EntryTypeCredit {
+			if key.entryType == core.EntryTypeCredit {
 				flipped = core.EntryTypeDebit
 			}
 			cur, err := s.dims.currencyByIDOrErr(ctx, q, e.CurrencyID)
