@@ -20,29 +20,31 @@ var _ core.VerifiedBalanceReader = (*VerifiedBalanceStore)(nil)
 // exported shape — defining the port before picking an implementation was
 // the whole point (contracts §W2-2), and it paid off exactly as intended.
 //
-// For each entry contributing to the dimension, VerifiedBalance first asks
-// whether an attestation batch already cached a core.JournalAuthVerdict for
-// its journal (entry_attestations.auth_verdict, T4's migration 054):
-//   - core.JournalAuthVerdictAuthorized -> trusted, zero extra round trips
-//     or crypto calls for that journal.
+// A cached attestation-time verdict (entry_attestations.auth_verdict, T4's
+// migration 054) is honoured in one direction only:
 //   - core.JournalAuthVerdictUnauthorized -> the whole balance is UNDEFINED
-//     immediately (I-32's fail-closed rule); no need to even look at the
-//     rest of the dimension's journals.
-//   - core.JournalAuthVerdictUnknown (uncovered tail, or an
-//     entry_attestations row that predates migration 054) -> fall back to
-//     the ORIGINAL naive per-journal check (verifyJournalsNaively below) --
-//     exactly the behavior this file had before T4 existed, bounded to
-//     however many journals have not yet been swept into an attestation
-//     batch (the attestation interval).
+//     immediately (I-32's fail-closed rule). That answer can only make the
+//     result stricter, so trusting it is safe.
+//   - anything else, Authorized included -> a live core.VerifyJournalAuth.
 //
-// This is why T4 is a real algorithmic win, not just a cache: the naive
-// path (.local/bench-verify-2026-08-23.md) pays a `journals JOIN
-// journal_entries` round trip plus a fresh core.VerifyJournalAuth call for
-// EVERY contributing journal, EVERY call. Once a journal's entries are
-// attested, every later VerifiedBalance call for that dimension pays
-// nothing extra for it -- the crypto/DB work happened once, in
-// service.AttestationService.RunAttestBatch, and its result is cached in
-// content an external anchor (P6/I-28) already protects.
+// T4 originally skipped the live check on a cached Authorized, and that was
+// the flaw. The verdict answers "was this journal authorized when it was
+// attested"; it does not answer "are its entries still what was authorized".
+// core.CanonicalJournalDigest covers every entry's Amount, so a live check
+// recomputes the digest from current content and fails once an amount has been
+// edited -- and the fast path skipped precisely that check. The batch's signed
+// content protects the verdict from alteration; it does not protect the
+// entries the verdict was about.
+//
+// entry_attestations.leaf_hash does protect those, and comparing it is what
+// the asynchronous VerifyLedger sweep does. This is the synchronous gate a
+// withdrawal passes through, so it cannot defer to a sweep.
+//
+// The cost is therefore the pre-T4 cost: a `journals JOIN journal_entries`
+// round trip plus one core.VerifyJournalAuth per contributing journal,
+// batched. That saving is given up on purpose. Worth recording: this gate was
+// the only caller of VerifiedBalance, so T4's optimization only ever served
+// the single path that cannot afford it.
 type VerifiedBalanceStore struct {
 	// pool is non-nil only in pool mode; nil signals tx mode.
 	pool      *pgxpool.Pool
@@ -111,28 +113,39 @@ func (s *VerifiedBalanceStore) VerifiedBalance(ctx context.Context, holder int64
 		return decimal.Zero, fmt.Errorf("postgres: verified balance: list contributing entries: %w", err)
 	}
 
-	// T4 (design doc §8 extended): partition contributing journals by
-	// their cached verdict. A journal with a mix of Authorized and Unknown
-	// rows (its entries straddled an attestation batch boundary, design
-	// doc §8.2) ends up in BOTH sets below -- authorizedByCachedVerdict
-	// wins (needsLiveCheck is pruned against it after this loop), since one
-	// Authorized row already proves the naive live check would reach the
-	// same answer for the whole journal; there is no need to spend the
-	// round trip this optimization exists to avoid on it.
-	authorizedByCachedVerdict := make(map[int64]struct{})
+	// A cached verdict is honoured in one direction only.
+	//
+	// Unauthorized short-circuits the whole dimension, because that answer can
+	// only ever make the result stricter -- a journal that failed verification
+	// at attestation time cannot become authorized later.
+	//
+	// Authorized does NOT skip the live check, which is what T4 originally did
+	// and where it was wrong. The cached verdict answers "was this journal
+	// authorized when it was attested". It does not answer "are its entries
+	// still what was authorized". core.CanonicalJournalDigest covers every
+	// entry's Amount, so a live core.VerifyJournalAuth recomputes the digest
+	// from current content and fails when an amount has been edited since --
+	// and skipping it on the strength of the cached verdict skipped the only
+	// check in this path that notices. The batch's signed content protects the
+	// verdict from being altered; it does not protect the entries the verdict
+	// was about. entry_attestations.leaf_hash does, and that is what the
+	// asynchronous VerifyLedger sweep compares -- but this is the synchronous
+	// gate a withdrawal passes through, and it cannot wait for a sweep.
+	//
+	// The cost is the pre-T4 cost: one journals-to-journal_entries round trip
+	// and one signature verification per contributing journal, batched. T4's
+	// saving is given up here deliberately. It is worth noting that this gate
+	// was the only caller of VerifiedBalance, so the optimization only ever
+	// served the one path that cannot afford it.
 	needsLiveCheck := make(map[int64]struct{})
 	for _, r := range rows {
 		switch core.JournalAuthVerdict(r.Verdict) {
-		case core.JournalAuthVerdictAuthorized:
-			authorizedByCachedVerdict[r.JournalID] = struct{}{}
 		case core.JournalAuthVerdictUnauthorized:
 			return decimal.Zero, fmt.Errorf("postgres: verified balance: journal id %d: cached attestation verdict is unauthorized: %w", r.JournalID, core.ErrUnauthorizedJournal)
-		default: // core.JournalAuthVerdictUnknown: uncovered tail, or predates migration 054.
+		default:
+			// Authorized and Unknown alike: verify live.
 			needsLiveCheck[r.JournalID] = struct{}{}
 		}
-	}
-	for journalID := range authorizedByCachedVerdict {
-		delete(needsLiveCheck, journalID)
 	}
 
 	if len(needsLiveCheck) > 0 {
@@ -148,9 +161,9 @@ func (s *VerifiedBalanceStore) VerifiedBalance(ctx context.Context, holder int64
 		}
 	}
 
-	// Every contributing journal (if any) is either backed by a trusted
-	// cached verdict or just passed a live check -- trust the same
-	// trusted, checkpoint-independent recompute RecomputeBalance uses.
+	// Every contributing journal (if any) just passed a live check against its
+	// current content -- trust the same checkpoint-independent recompute
+	// RecomputeBalance uses.
 	return s.recompute.RecomputeBalance(ctx, holder, currencyUID, classificationUID)
 }
 

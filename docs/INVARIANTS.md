@@ -1909,7 +1909,7 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
 
 ---
 
-## I-33: A cached attestation-time authorization verdict may only ever be TRUSTED, never RE-DERIVED, at read time — and it must be at least as strict as a live check
+## I-33: A cached attestation-time authorization verdict is trusted only in the failing direction; a passing one never excuses the live check
 
 **Rule**: T4 (design doc §8 extended, contracts §W3-B) lets
 `service.AttestationService.RunAttestBatch` run `core.VerifyJournalAuth`
@@ -1921,8 +1921,23 @@ the batch's own signed content (`core.AuthVerdictDigest` →
 `core.AttestationRootHashV3`, separator `0x12`). `postgres.VerifiedBalanceStore`
 then reads that cached verdict instead of re-deriving it:
 
-- `core.JournalAuthVerdictAuthorized` → trusted; no DB round trip to
-  reconstruct the journal, no live `core.VerifyJournalAuth` call.
+- `core.JournalAuthVerdictAuthorized` → **not** trusted as a substitute for
+  verification. It still gets a live `core.VerifyJournalAuth`.
+
+  This is the correction. T4 originally skipped the live check here, and the
+  invariant this section replaces claimed a cached verdict was "at least as
+  strict as a live check". It is not, and the gap is not subtle: the verdict
+  answers *was this journal authorized when it was attested*, while the
+  withdrawal gate needs *is it authorized now*. `core.CanonicalJournalDigest`
+  covers every entry's `Amount`, so editing an amount after attestation leaves
+  the cached verdict reading `Authorized` while a live check would fail — and
+  the fast path skipped exactly the check that would have failed. The batch's
+  signed content protects the verdict from being altered; it does not protect
+  the entries the verdict was about.
+
+  `entry_attestations.leaf_hash` does protect those, and comparing it is what
+  the asynchronous `VerifyLedger` sweep does (I-29/I-30). That is detection.
+  This gate is prevention, and it cannot defer to a sweep that runs later.
 - `core.JournalAuthVerdictUnauthorized` → the whole balance is UNDEFINED
   immediately (I-32's rule still applies — this is I-32's mechanism
   amortized, not weakened).
@@ -1984,12 +1999,20 @@ never touched, per `deployment.md`'s "an already-signed value cannot be
 silently re-derived").
 
 **Pinned by**:
-- `postgres.TestVerifiedBalance_TrustsCachedAuthorizedVerdictEvenIfLiveRecheckWouldFail` —
-  the headline pin: after a journal's verdict is cached `Authorized`, its
-  stored signature is corrupted directly via SQL so a LIVE re-check would
-  now fail (confirmed directly, as falsification evidence) — `VerifiedBalance`
-  must still succeed, proving it trusted the cached, pre-corruption verdict
-  instead of re-deriving it.
+- `postgres.TestVerifiedBalance_RefusesTamperedEntryAmount` — the headline
+  pin, and the case the gate exists for: a journal is attested, both legs of
+  an entry are then doubled directly via SQL so the journal still balances,
+  and the cached verdict is asserted to still read `Authorized` (or the test
+  is not exercising the gap at all). `VerifiedBalance` must refuse. Refusal
+  rather than a corrected number, because a corrected number is still
+  something a withdrawal could be paid against.
+- `postgres.TestVerifiedBalance_CachedAuthorizedVerdictDoesNotSkipTheLiveCheck` —
+  the same shape with a corrupted signature instead of a corrupted amount,
+  and it carries its own falsification evidence: it verifies directly that a
+  live re-check now fails before asserting `VerifiedBalance` refuses. This
+  test previously asserted the opposite and was correct about the design of
+  the time; the assertion is inverted, not deleted, so the history of what
+  changed stays legible.
 - `postgres.TestVerifiedBalance_CachedUnauthorizedVerdictIsUndefinedWithoutLiveVerifier` —
   a cached `Unauthorized` verdict rejects the balance even when the reading
   `VerifiedBalanceStore` has no `core.AuthVerifier` at all, proving the

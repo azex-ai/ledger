@@ -34,7 +34,7 @@ import (
 // pre-T4/pre-fix behavior this pin falsifies -- working-agreements §3).
 // VerifiedBalance must still succeed with the correct balance, proving it
 // trusted the cached, pre-corruption verdict instead of re-deriving it.
-func TestVerifiedBalance_TrustsCachedAuthorizedVerdictEvenIfLiveRecheckWouldFail(t *testing.T) {
+func TestVerifiedBalance_CachedAuthorizedVerdictDoesNotSkipTheLiveCheck(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 	f := setupVBFixture(t, pool, ctx)
@@ -71,12 +71,87 @@ func TestVerifiedBalance_TrustsCachedAuthorizedVerdictEvenIfLiveRecheckWouldFail
 	require.Error(t, sanityErr, "test setup: a live re-verification of the corrupted journal must fail, or this test proves nothing")
 	require.ErrorIs(t, sanityErr, core.ErrUnauthorizedJournal)
 
-	// The actual pin: VerifiedBalance must still succeed, trusting the
-	// cached pre-corruption verdict.
+	// This assertion is the inverse of what it used to be, and the reason is
+	// worth stating where the test lives.
+	//
+	// T4 cached the verdict so a later VerifiedBalance could skip the live
+	// check, and this test pinned exactly that: it corrupted the signature,
+	// proved a live check would now fail, and then required VerifiedBalance to
+	// succeed anyway. The test was correct about the design. The design was
+	// wrong.
+	//
+	// A cached Authorized answers "was this journal authorized when it was
+	// attested". The withdrawal gate needs "is it authorized now", and those
+	// differ for exactly the reason the sanity check above demonstrates:
+	// something changed after attestation. The cached verdict was described as
+	// being "at least as strict as a live check" (I-33), and it is not -- it is
+	// laxer, by precisely the window between attestation and read.
 	vb := postgres.NewVerifiedBalanceStore(pool, verifier)
-	balance, err := vb.VerifiedBalance(ctx, holder, f.CurrencyUID, f.AvailableUID)
-	require.NoError(t, err, "VerifiedBalance must trust the cached Authorized verdict, not re-derive it from the now-corrupted live signature")
-	require.True(t, balance.Equal(decimal.NewFromInt(250)))
+	_, err = vb.VerifiedBalance(ctx, holder, f.CurrencyUID, f.AvailableUID)
+	require.Error(t, err, "a cached Authorized verdict must not excuse a journal whose live verification now fails")
+	require.ErrorIs(t, err, core.ErrUnauthorizedJournal)
+}
+
+// TestVerifiedBalance_RefusesTamperedEntryAmount is the case the gate exists
+// for, and the one the cached fast path let through.
+//
+// The test above corrupts a signature, which is a tell -- nobody gains money
+// from an invalid signature. This one edits the amount an entry contributes,
+// which is what an attacker with database write access actually wants: the
+// balance goes up, and every layer above still reports health. The journal's
+// cached verdict stays Authorized, because it was authorized when attested.
+// core.CanonicalJournalDigest covers each entry's Amount, so a live check
+// notices; skipping it on the cached verdict did not.
+//
+// This asserts the balance is refused rather than merely different, because
+// "different" would still be a number a withdrawal could be paid against.
+func TestVerifiedBalance_RefusesTamperedEntryAmount(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupVBFixture(t, pool, ctx)
+	const holder int64 = 9142
+
+	attestor, verifier := newTestAttestor(t, "ed25519-t4-tampered-amount")
+	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
+	journal, err := ledgerStore.PostJournal(ctx, f.journalInput(holder, postgrestest.UniqueKey("t4-tampered-amount"), decimal.NewFromInt(250)))
+	require.NoError(t, err)
+
+	attestStore := postgres.NewAttestationStore(pool)
+	attestSvc := service.NewAttestationService(attestStore, attestor, verifier, nil, core.NewEngine())
+	attested, _, err := attestSvc.RunAttestBatch(ctx, 100)
+	require.NoError(t, err)
+	require.Equal(t, 2, attested)
+
+	vb := postgres.NewVerifiedBalanceStore(pool, verifier)
+	before, err := vb.VerifiedBalance(ctx, holder, f.CurrencyUID, f.AvailableUID)
+	require.NoError(t, err, "the untampered journal must verify")
+	require.True(t, before.Equal(decimal.NewFromInt(250)))
+
+	// Double both legs so the journal still balances per currency -- a
+	// single-sided edit would trip the balance trigger and never reach the
+	// question this test is asking.
+	internalID := postgrestest.InternalID(t, pool, "journals", journal.UID)
+	_, err = pool.Exec(ctx, "ALTER TABLE journal_entries DISABLE TRIGGER journal_entries_no_update")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, "UPDATE journal_entries SET amount = amount * 2 WHERE journal_id = $1", internalID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, "ALTER TABLE journal_entries ENABLE TRIGGER journal_entries_no_update")
+	require.NoError(t, err)
+
+	// The cached verdict is untouched and still says Authorized -- the edit
+	// happened after attestation, which is the whole point.
+	var verdict string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT DISTINCT auth_verdict FROM entry_attestations ea
+		   JOIN journal_entries e ON e.id = ea.entry_id
+		  WHERE e.journal_id = $1`, internalID).Scan(&verdict))
+	require.Equal(t, string(core.JournalAuthVerdictAuthorized), verdict,
+		"test setup: the cached verdict must still read Authorized, or this test is not exercising the gap")
+
+	_, err = vb.VerifiedBalance(ctx, holder, f.CurrencyUID, f.AvailableUID)
+	require.Error(t, err,
+		"an entry edited after attestation must make the balance UNDEFINED -- returning 500 here would let a withdrawal be paid against a number nobody signed")
+	require.ErrorIs(t, err, core.ErrUnauthorizedJournal)
 }
 
 // TestVerifiedBalance_CachedUnauthorizedVerdictIsUndefinedWithoutLiveVerifier
