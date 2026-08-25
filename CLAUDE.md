@@ -52,6 +52,7 @@ make lint       # golangci-lint run
 make sqlc       # cd postgres && sqlc generate
 make sqlc-diff  # cd postgres && sqlc diff   (CI gate: generated code must match queries)
 make docker     # docker compose up --build
+make openapi-check # cd web && npm run -w @azex/ledger-react codegen:check (docs/openapi.yaml vs. web/packages/ledger-react's generated schema.ts; needs `npm ci` in web/ once)
 
 # Unit tests only (no DB needed)
 go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1
@@ -144,7 +145,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `tamper-evident` (signing + attestation + the withdrawal gate, forges a row to show what it stops), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
 | `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag). Three consumption surfaces: root = shadcn-style skin (self-contained scoped preflight + tokens in `dist/styles.css`), `./heroui` = HeroUI v3 skin (optional peer `@heroui/react`, host owns theme, layout classes in `dist/heroui.css`), `./headless` = client + hooks + provider only. Both skins share the headless core; page logic must stay mirrored |
 | `deploy/helm/ledger/` | Kubernetes Helm chart |
-| `docs/INVARIANTS.md` | The 13 invariants the ledger guarantees (canonical contract) |
+| `docs/INVARIANTS.md` | The 34 invariants the ledger guarantees (canonical contract) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
 | `docs/DR.md` | Backup & disaster recovery: PITR, RPO/RTO, restore drill, invariant-based verification |
 | `docs/CAPACITY.md` | Benchmark baseline, sizing guide, suggested SLOs, scaling signals |
@@ -157,15 +158,15 @@ go test ./postgres/ -run TestName -race -count=1
 ```
 # Bookings (unified — replaces deposits + withdrawals)
 POST   /api/v1/bookings                    — Create booking
-POST   /api/v1/bookings/{id}/transition    — State transition
-GET    /api/v1/bookings/{id}               — Get booking
+POST   /api/v1/bookings/{uid}/transition   — State transition
+GET    /api/v1/bookings/{uid}              — Get booking
 GET    /api/v1/bookings                    — List bookings
 
 # Webhooks (inbound channel callbacks)
 POST   /api/v1/webhooks/{channel}            — Receive channel callback
 
 # Events (outbound)
-GET    /api/v1/events/{id}                   — Get event
+GET    /api/v1/events/{uid}                  — Get event
 GET    /api/v1/events                        — List events
 
 # Developer mode (off by default; ENV=dev + DEV_CREDIT_ENABLED=true only)

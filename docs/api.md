@@ -139,7 +139,7 @@ List endpoints use opaque cursor pagination: `?cursor=<base64>&limit=50`. `limit
   "code": 200,
   "message": null,
   "data": {
-    "data": [ /* items */ ],
+    "list": [ /* items */ ],
     "next_cursor": "AAAAAAAAAAI="
   }
 }
@@ -180,7 +180,7 @@ Request:
 {
   "classification_code": "deposit",
   "account_holder": 1001,
-  "currency_id": 1,
+  "currency_uid": "cur-usdt",
   "amount": "500.00",
   "idempotency_key": "deposit:user1001:0xabc",
   "channel_name": "evm",
@@ -198,10 +198,10 @@ Response `201 Created`:
   "code": 200,
   "message": null,
   "data": {
-    "id": 42,
-    "classification_id": 1,
+    "uid": "bkg-1",
+    "classification_uid": "cls-deposit",
     "account_holder": 1001,
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "amount": "500.00",
     "settled_amount": "0",
     "status": "pending",
@@ -216,11 +216,13 @@ Response `201 Created`:
 }
 ```
 
+`reservation_uid` and `journal_uid` are omitted (not empty-string) until a reservation or a settlement journal is linked.
+
 Status codes: `201`, `400`, `401`, `404` (unknown classification), `422` (`14002` duplicate), `429`, `503`.
 
 Auth: required. Idempotency: required.
 
-### POST /bookings/{id}/transition
+### POST /bookings/{uid}/transition
 
 Advance a booking to a new lifecycle state. The classification's lifecycle declares the legal transitions. Returns the emitted event.
 
@@ -245,16 +247,16 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "id": 99,
+    "uid": "evt-99",
     "classification_code": "deposit",
-    "booking_id": 42,
+    "booking_uid": "bkg-1",
     "account_holder": 1001,
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "from_status": "confirming",
     "to_status": "confirmed",
     "amount": "500.00",
     "settled_amount": "500.00",
-    "journal_id": 1234,
+    "journal_uid": "jnl-1234",
     "metadata": {"confirmations": 12},
     "occurred_at": "2026-04-17T10:05:00Z"
   }
@@ -265,9 +267,9 @@ Status codes: `200`, `400`, `401`, `404`, `422` (`14004` invalid transition; `14
 
 Auth: required.
 
-### GET /bookings/{id}
+### GET /bookings/{uid}
 
-Fetch a booking by ID. Returns the same shape as `POST /bookings` data.
+Fetch a booking by uid. Returns the same shape as `POST /bookings` data.
 
 Status codes: `200`, `400`, `404`, `503`.
 
@@ -275,7 +277,7 @@ Status codes: `200`, `400`, `404`, `503`.
 
 List bookings. Cursor-paginated.
 
-Query params: `holder` (int64), `classification_id` (int64), `status` (string), `cursor` (base64), `limit` (1-200, default 50).
+Query params: `holder` (int64), `classification_uid` (string, uuid), `status` (string), `cursor` (base64), `limit` (1-200, default 50).
 
 Response: paged envelope of booking objects.
 
@@ -301,14 +303,23 @@ EVM payload:
 ```json
 {
   "tx_hash": "0xabc123",
-  "booking_id": 42,
+  "booking_uid": "bkg-1",
   "amount": "500.00",
   "confirmations": 12,
   "status": "confirmed"
 }
 ```
 
-The handler verifies that `booking.channel_name` matches `{channel}` (defence against forged payloads pointing at a different booking) and applies the resulting transition. Responds with the emitted event (same shape as `POST /bookings/{id}/transition`).
+This is the legacy `ParseCallback` shape (transitions an existing booking by
+`booking_uid`). The `evm` adapter's current, preferred ingestion path is
+`ParseSighting` (`channel/onchain/evm.go`), a reorg-safe
+`{chain_id, tx_hash, txlog_seq, token, from, to, amount, block_number,
+confirmations}` payload that the server routes to automatically whenever the
+resolved channel adapter implements it (I-20; see
+`docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §3 and
+[COOKBOOK Recipe 9](COOKBOOK.md#recipe-9--crypto-deposit--sweep-create2-shared-address-custody)).
+
+The handler verifies that `booking.channel_name` matches `{channel}` (defence against forged payloads pointing at a different booking) and applies the resulting transition. Responds with the emitted event (same shape as `POST /bookings/{uid}/transition`).
 
 Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (channel mismatch on booking), `404` (unknown channel or booking), `422` (transition rejected), `429`, `503`.
 
@@ -322,7 +333,7 @@ Auth: bearer token enforced by the platform middleware **in addition to** HMAC; 
 
 Events are append-only records of every booking state transition. They are the "reason" for any journal posting.
 
-### GET /events/{id}
+### GET /events/{uid}
 
 Fetch a single event.
 
@@ -332,7 +343,7 @@ Status codes: `200`, `400`, `404`, `503`.
 
 List events. Cursor-paginated.
 
-Query params: `classification_code` (string), `booking_id` (int64), `to_status` (string), `cursor`, `limit`.
+Query params: `classification_code` (string), `booking_uid` (string, uuid), `to_status` (string), `cursor`, `limit`.
 
 Response: paged envelope of event objects.
 
@@ -348,11 +359,11 @@ Request:
 
 ```json
 {
-  "journal_type_id": 1,
+  "journal_type_uid": "jt-deposit_confirm",
   "idempotency_key": "deposit:user1001:1",
   "entries": [
-    {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "500.00"},
-    {"account_holder": -1001, "currency_id": 1, "classification_id": 2, "entry_type": "credit", "amount": "500.00"}
+    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "entry_type": "debit", "amount": "500.00"},
+    {"account_holder": -1001, "currency_uid": "cur-usdt", "classification_uid": "cls-custodial", "entry_type": "credit", "amount": "500.00"}
   ],
   "source": "api",
   "actor_id": 0,
@@ -366,7 +377,7 @@ to backdate a retroactive posting; rejected with `10001` if more than 5
 minutes in the future, and with `14009` if it falls before the active period
 close line (see [§14 Periods](#14-periods)).
 
-Response `201 Created`: journal object with `id`, `journal_type_id`, `idempotency_key`, `total_debit`, `total_credit`, `actor_id`, `source`, `metadata`, `effective_at`, `created_at`. `entries` is omitted on the create response; use `GET /journals/{id}` to retrieve.
+Response `201 Created`: journal object with `uid`, `journal_type_uid`, `idempotency_key`, `total_debit`, `total_credit`, `actor_id`, `source`, `metadata`, `effective_at`, `created_at`. `entries` is omitted on the create response; use `GET /journals/{uid}` to retrieve.
 
 Status codes: `201`, `400`, `401`, `422` (`14002` duplicate, `14003` unbalanced, `14001` insufficient balance, `14009` period closed), `429`, `503`.
 
@@ -382,7 +393,7 @@ Request:
 {
   "template_code": "deposit_confirm",
   "holder_id": 1001,
-  "currency_id": 1,
+  "currency_uid": "cur-usdt",
   "idempotency_key": "deposit_journal:0xabc",
   "amounts": {"amount": "500.00"},
   "actor_id": 0,
@@ -402,7 +413,7 @@ Request:
 ```json
 {
   "holder_id": 1001,
-  "currency_id": 1,
+  "currency_uid": "cur-usdt",
   "idempotency_key": "deposit_tol:0xabc",
   "expected_amount": "100.00",
   "actual_amount": "98.00",
@@ -426,16 +437,19 @@ Response `201 Created`:
     "delta": "2.00",
     "requires_manual_review": false,
     "journals": [
-      {"id": 10, "idempotency_key": "deposit_tol:0xabc:confirm-pending", "total_debit": "98.00", "total_credit": "98.00", "..." : "..."},
-      {"id": 11, "idempotency_key": "deposit_tol:0xabc:release-shortfall", "total_debit": "2.00", "total_credit": "2.00", "...": "..."}
+      {"uid": "jnl-10", "idempotency_key": "deposit_tol:0xabc:confirm-pending", "total_debit": "98.00", "total_credit": "98.00", "..." : "..."},
+      {"uid": "jnl-11", "idempotency_key": "deposit_tol:0xabc:release-shortfall", "total_debit": "2.00", "total_credit": "2.00", "...": "..."}
     ]
   }
 }
 ```
 
-### POST /journals/{id}/reverse
+### POST /journals/{uid}/reverse
 
-Create a reversal journal (debits and credits swapped). The `reason` is required and stored in metadata.
+Create a full reversal journal (debits and credits swapped). Rejected `409`
+once the journal has any reversal history, full or partial — use
+`reverse-partial` to continue a partially-reversed journal. The `reason` is
+required and stored in metadata.
 
 Request:
 
@@ -443,11 +457,29 @@ Request:
 {"reason": "duplicate deposit"}
 ```
 
-Response `201 Created`: reversal journal with `reversal_of` set to the original ID.
+Response `201 Created`: reversal journal with `reversal_of_uid` set to the original journal's uid.
 
-Status codes: `201`, `400`, `401`, `404`, `422` (`14002` already reversed), `429`, `503`.
+Status codes: `201`, `400`, `401`, `404`, `409` (already reversed), `422`, `429`, `503`.
 
-### GET /journals/{id}
+### POST /journals/{uid}/reverse-partial
+
+Reverse `num`/`den` of a journal's entries, per-currency balanced via
+largest-remainder allocation. Cumulative reversals never exceed the original
+(`409` on overshoot). `num == den` (e.g. `"1/1"`) reverses exactly the
+remaining un-reversed amount — the way to complete a reversal whose earlier
+fractional steps rounded up.
+
+Request:
+
+```json
+{"num": 1, "den": 2, "reason": "partial refund", "idempotency_key": "reverse:jnl-1:half"}
+```
+
+Response `201 Created`: partial reversal journal, same shape as a full reversal.
+
+Status codes: `201`, `400`, `401`, `404`, `409` (cumulative reversal would exceed the original), `422`, `429`, `503`.
+
+### GET /journals/{uid}
 
 Fetch a journal with its entries.
 
@@ -458,8 +490,8 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "id": 1,
-    "journal_type_id": 1,
+    "uid": "jnl-1",
+    "journal_type_uid": "jt-deposit_confirm",
     "idempotency_key": "deposit:user1001:1",
     "total_debit": "500.00",
     "total_credit": "500.00",
@@ -468,11 +500,13 @@ Response `200 OK`:
     "metadata": {},
     "created_at": "2026-04-17T10:00:00Z",
     "entries": [
-      {"id": 1, "journal_id": 1, "account_holder": 1001, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "500.00", "created_at": "2026-04-17T10:00:00Z"}
+      {"journal_uid": "jnl-1", "account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "entry_type": "debit", "amount": "500.00", "effective_at": "2026-04-17T10:00:00Z", "created_at": "2026-04-17T10:00:00Z"}
     ]
   }
 }
 ```
+
+Entries do not carry their own `uid` in this response — trace them by `journal_uid` + position, or via `GET /entries` (which is keyed by account dimension, not journal).
 
 ### GET /journals
 
@@ -480,7 +514,7 @@ Cursor-paginated list of journals. Query: `cursor`, `limit`.
 
 ### GET /entries
 
-List entries by account. **Required** query params: `holder` (int64), `currency_id` (int64). Optional: `cursor`, `limit`. Cursor-paginated.
+List entries by account. **Required** query params: `holder` (int64), `currency_uid` (string, uuid). Optional: `cursor`, `limit`. Cursor-paginated.
 
 ---
 
@@ -490,7 +524,7 @@ List entries by account. **Required** query params: `holder` (int64), `currency_
 
 All classification balances for a holder in a single currency.
 
-**Required** query param: `currency_id`.
+**Required** query param: `currency_uid`.
 
 Response `200 OK`:
 
@@ -498,15 +532,18 @@ Response `200 OK`:
 {
   "code": 200,
   "message": null,
-  "data": [
-    {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "balance": "404.50"}
-  ]
+  "data": {
+    "list": [
+      {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "balance": "404.50"}
+    ],
+    "next_cursor": ""
+  }
 }
 ```
 
 ### GET /balances/{holder}/{currency}
 
-Same as above but with `currency_id` in the path; the response also includes a precomputed `total`:
+Same as above but with the currency's uid in the path instead of a query param; the response also includes a precomputed `total` instead of the paged-list envelope:
 
 ```json
 {
@@ -515,8 +552,29 @@ Same as above but with `currency_id` in the path; the response also includes a p
   "data": {
     "total": "404.50",
     "classifications": [
-      {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "balance": "404.50"}
+      {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "balance": "404.50"}
     ]
+  }
+}
+```
+
+### GET /balances/{holder}/{currency}/breakdown
+
+Holder-facing liquidity view: `available = Σ role=available − held`, `locked = Σ role=locked + held`, `pending = Σ role=pending`, `total = available + locked + pending` (I-11).
+
+Response `200 OK`:
+
+```json
+{
+  "code": 200,
+  "message": null,
+  "data": {
+    "account_holder": 1001,
+    "currency_uid": "cur-usdt",
+    "available": "304.50",
+    "pending": "0.00",
+    "locked": "100.00",
+    "total": "404.50"
   }
 }
 ```
@@ -528,7 +586,7 @@ Fetch balances for up to **100 holders** in one currency.
 Request:
 
 ```json
-{"holder_ids": [1001, 1002], "currency_id": 1}
+{"holder_ids": [1001, 1002], "currency_uid": "cur-usdt"}
 ```
 
 Response `200 OK`:
@@ -538,7 +596,7 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": [
-    {"holder_id": 1001, "balances": [{"account_holder": 1001, "currency_id": 1, "classification_id": 1, "balance": "404.50"}]},
+    {"holder_id": 1001, "balances": [{"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "balance": "404.50"}]},
     {"holder_id": 1002, "balances": []}
   ]
 }
@@ -559,7 +617,7 @@ Request:
 ```json
 {
   "account_holder": 1001,
-  "currency_id": 1,
+  "currency_uid": "cur-usdt",
   "amount": "100.00",
   "idempotency_key": "spend:user1001:order42",
   "expires_in_sec": 900
@@ -573,9 +631,9 @@ Response `201 Created`:
   "code": 200,
   "message": null,
   "data": {
-    "id": 1,
+    "uid": "rsv-1",
     "account_holder": 1001,
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "reserved_amount": "100.00",
     "status": "active",
     "idempotency_key": "spend:user1001:order42",
@@ -586,9 +644,11 @@ Response `201 Created`:
 }
 ```
 
+`settled_amount` and `journal_uid` are omitted until the reservation has a settlement leg / a linked journal.
+
 Status codes: `201`, `400`, `401`, `422` (`14001` insufficient balance, `14002` duplicate), `429`, `503`.
 
-### POST /reservations/{id}/settle
+### POST /reservations/{uid}/settle
 
 Settle a reservation with the actual amount. Posts the settlement journal and releases any remainder.
 
@@ -596,7 +656,17 @@ Request: `{"actual_amount": "95.50"}`. Response `200 OK`: `{"status": "settled"}
 
 Status codes: `200`, `400`, `401`, `404`, `422` (`14004` invalid state, `14005` expired), `429`, `503`.
 
-### POST /reservations/{id}/release
+### POST /reservations/{uid}/settle-partial
+
+Settle part of a reservation; call repeatedly to accumulate. First call transitions `active` -> `settling`. Cumulative settled amount may never exceed `reserved_amount`. The unsettled remainder stays held against the balance until `/reservations/{uid}/finalize`.
+
+Request: `{"amount": "40.00", "idempotency_key": "spend:user1001:order42:leg1"}`. `idempotency_key` is required (I-3): `SettlePartial` accumulates, so a retried request without a key would double-apply the amount.
+
+### POST /reservations/{uid}/finalize
+
+Finalize a `settling` reservation once every partial settlement leg has landed, posting the settlement journal for the accumulated `settled_amount` and releasing any remainder. No request body. Response `200 OK`: `{"status": "settled"}`.
+
+### POST /reservations/{uid}/release
 
 Release an active or settling reservation without settlement.
 
@@ -606,7 +676,7 @@ Response `200 OK`: `{"status": "released"}`.
 
 List reservations.
 
-Query: `holder` (int64), `status` (string), `limit` (default 50, max 200). No cursor pagination on this endpoint -- limit only.
+Query: `holder` (int64), `status` (string), `cursor` (base64), `limit` (default 50, max 200). Cursor-paginated.
 
 ---
 
@@ -630,7 +700,7 @@ Query: `holder` (int64), `status` (string), `limit` (default 50, max 200). No cu
 
 Response `201 Created`: classification object.
 
-#### POST /classifications/{id}/deactivate
+#### POST /classifications/{uid}/deactivate
 
 Soft-disables the classification. Response `200 OK`: `{"status": "deactivated"}`.
 
@@ -644,7 +714,7 @@ Query: `active_only=true|false`. Returns array of classifications.
 
 `{"code": "deposit", "name": "Deposit Confirmation"}` -> 201.
 
-#### POST /journal-types/{id}/deactivate
+#### POST /journal-types/{uid}/deactivate
 
 #### GET /journal-types
 
@@ -658,10 +728,10 @@ Query: `active_only=true|false`. Returns array of classifications.
 {
   "code": "deposit_confirm",
   "name": "Confirm Deposit",
-  "journal_type_id": 1,
+  "journal_type_uid": "jt-deposit_confirm",
   "lines": [
-    {"classification_id": 1, "entry_type": "debit", "holder_role": "user", "amount_key": "amount", "sort_order": 1},
-    {"classification_id": 2, "entry_type": "credit", "holder_role": "system", "amount_key": "amount", "sort_order": 2}
+    {"classification_uid": "cls-main_wallet", "entry_type": "debit", "holder_role": "user", "amount_key": "amount", "sort_order": 1},
+    {"classification_uid": "cls-custodial", "entry_type": "credit", "holder_role": "system", "amount_key": "amount", "sort_order": 2}
   ]
 }
 ```
@@ -670,14 +740,14 @@ Query: `active_only=true|false`. Returns array of classifications.
 
 Response `201 Created`: template object including its lines.
 
-#### POST /templates/{id}/deactivate
+#### POST /templates/{uid}/deactivate
 
 #### POST /templates/{code}/preview
 
 Render a template without persisting. Body:
 
 ```json
-{"holder_id": 1001, "currency_id": 1, "amounts": {"amount": "500.00"}}
+{"holder_id": 1001, "currency_uid": "cur-usdt", "amounts": {"amount": "500.00"}}
 ```
 
 Response `200 OK`:
@@ -688,8 +758,8 @@ Response `200 OK`:
   "message": null,
   "data": {
     "entries": [
-      {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "entry_type": "debit", "amount": "500.00"},
-      {"account_holder": -1001, "currency_id": 1, "classification_id": 2, "entry_type": "credit", "amount": "500.00"}
+      {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "entry_type": "debit", "amount": "500.00"},
+      {"account_holder": -1001, "currency_uid": "cur-usdt", "classification_uid": "cls-custodial", "entry_type": "credit", "amount": "500.00"}
     ]
   }
 }
@@ -703,7 +773,11 @@ Response `200 OK`:
 
 #### POST /currencies
 
-`{"code": "USDT", "name": "Tether USD"}` -> 201.
+`{"code": "USDT", "name": "Tether USD", "exponent": 6}` -> 201. `exponent` is **required** (`0`-`18`; e.g. JPY=0, USD=2, wei=18) — I-16's business decimal precision. There is no silent default: omitting it is a `400`, precisely because `0` is itself a legal exponent (JPY) and can't double as "not set."
+
+#### POST /currencies/{uid}/deactivate
+
+Soft-disables the currency. Response `200 OK`: `{"status": "deactivated"}`.
 
 #### GET /currencies
 
@@ -736,7 +810,7 @@ Response `200 OK`:
 
 Per-account reconciliation: verifies checkpoint balance matches `SUM(entries since checkpoint)` for each `(holder, currency, classification)` tuple.
 
-Request: `{"holder": 1001, "currency_id": 1}`.
+Request: `{"holder": 1001, "currency_uid": "cur-usdt"}`.
 
 Response: same shape as global reconciliation, with `details[]` populated when drift is detected:
 
@@ -745,11 +819,17 @@ Response: same shape as global reconciliation, with `details[]` populated when d
   "balanced": false,
   "gap": "0.01",
   "details": [
-    {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "expected": "500.00", "actual": "500.01", "drift": "0.01"}
+    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "expected": "500.00", "actual": "500.01", "drift": "0.01"}
   ],
   "checked_at": "2026-04-17T12:00:00Z"
 }
 ```
+
+### POST /reconcile/full
+
+Runs the complete reconciliation suite on demand (`service.FullReconciliationService`, see `docs/RUNBOOK.md` §1 for the check-by-check meaning and incident response) — heavier than `/reconcile`, which only runs the global debit=credit check. Same schedule as the background worker; this endpoint triggers an out-of-band run. No request body.
+
+Response `200 OK`: the report shape is `overall_passed` / `full_coverage` / `run_at` / `checks[]` (each with `name`, `passed`, `complete`, `checked_at`, `findings[]`) — **not** the `{balanced, gap, details}` shape `/reconcile` and `/reconcile/account` return. `overall_passed` alone is not a clean bill of health; require it together with `full_coverage` (a check can be capped, timed out, or skipped and still report no violation).
 
 ---
 
@@ -759,14 +839,14 @@ Response: same shape as global reconciliation, with `details[]` populated when d
 
 Historical daily balance snapshots.
 
-**Required** query params: `holder`, `currency_id`, `start` (`YYYY-MM-DD`), `end` (`YYYY-MM-DD`). Returns array of snapshot rows.
+**Required** query params: `holder`, `currency_uid`, `start` (`YYYY-MM-DD`), `end` (`YYYY-MM-DD`). Returns array of snapshot rows.
 
 ```json
 {
   "code": 200,
   "message": null,
   "data": [
-    {"account_holder": 1001, "currency_id": 1, "classification_id": 1, "snapshot_date": "2026-04-16", "balance": "404.50"}
+    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "snapshot_date": "2026-04-16", "balance": "404.50"}
   ]
 }
 ```
@@ -801,7 +881,7 @@ Kubernetes-style readiness probe. Returns 200 once migrations + worker have boot
 
 ### GET /system/balances
 
-Aggregate system-wide balances by `(currency_id, classification_id)`.
+Aggregate system-wide balances by `(currency_uid, classification_uid)`.
 This endpoint is a realtime ledger snapshot: each row is computed as
 `checkpoint.balance + delta` across every contributing account, so fresh
 journals are visible immediately without waiting for the rollup worker.
@@ -812,9 +892,12 @@ the refresh time of the `system_rollups` table.
 {
   "code": 200,
   "message": null,
-  "data": [
-    {"currency_id": 1, "classification_id": 1, "total_balance": "50000.00", "updated_at": "2026-04-17T12:00:00Z"}
-  ]
+  "data": {
+    "list": [
+      {"currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "total_balance": "50000.00", "updated_at": "2026-04-17T12:00:00Z"}
+    ],
+    "next_cursor": ""
+  }
 }
 ```
 
@@ -828,16 +911,16 @@ Read-only investigation endpoints for support / audit workflows. These expose th
 
 List journals either by account dimension or by a global time range — exactly one mode, selected by which params are present:
 
-- `holder` + `currency_id` (required together; optionally narrowed by `classification_id`, `from`, `to`) — journals touching that account dimension.
+- `holder` + `currency_uid` (required together; optionally narrowed by `classification_uid`, `from`, `to`) — journals touching that account dimension.
 - `from` and/or `to` alone (no `holder`) — a global scan across every account in that time window.
 
-Providing neither, or `holder` without `currency_id`, is a `400`.
+Providing neither, or `holder` without `currency_uid`, is a `400`.
 
-Query params: `holder` (int64), `currency_id` (int64), `classification_id` (int64, `0`/omitted = all), `from` (RFC 3339), `to` (RFC 3339), `cursor`, `limit`. Cursor-paginated, same envelope shape as `GET /journals`.
+Query params: `holder` (int64), `currency_uid` (string, uuid), `classification_uid` (string, uuid, omitted = all), `from` (RFC 3339), `to` (RFC 3339), `cursor`, `limit`. Cursor-paginated, same envelope shape as `GET /journals`.
 
 Status codes: `200`, `400`.
 
-### GET /audit/bookings/{id}/trace
+### GET /audit/bookings/{uid}/trace
 
 Fetch a booking together with every event and every journal generated by those events — the standard "trace this booking end-to-end" shape for support/audit investigation.
 
@@ -848,16 +931,16 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "booking": { "id": 42, "status": "confirmed", "...": "..." },
-    "events": [ { "id": 99, "from_status": "pending", "to_status": "confirmed", "...": "..." } ],
-    "journals": [ { "id": 1234, "...": "..." } ]
+    "booking": { "uid": "bkg-1", "status": "confirmed", "...": "..." },
+    "events": [ { "uid": "evt-99", "from_status": "pending", "to_status": "confirmed", "...": "..." } ],
+    "journals": [ { "uid": "jnl-1234", "...": "..." } ]
   }
 }
 ```
 
 Status codes: `200`, `400`, `404`.
 
-### GET /audit/journals/{id}/reversals
+### GET /audit/journals/{uid}/reversals
 
 List the full reversal chain for a journal — the root journal plus any journals that transitively reverse it, oldest first.
 
@@ -873,7 +956,7 @@ Real-time, system-wide balance and solvency reads. These expose the same `core.P
 
 Per-classification breakdown of user-side (holder > 0) vs. system-side (holder < 0) balances for a currency, computed as `checkpoint.balance + delta` (no rollup-worker lag).
 
-**Required** query param: `currency_id`.
+**Required** query param: `currency_uid`.
 
 Response `200 OK`:
 
@@ -882,7 +965,7 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "user_side": { "main_wallet": "125000.00" },
     "system_side": { "custodial": "125000.00" }
   }
@@ -895,7 +978,7 @@ Status codes: `200`, `400`.
 
 Compares total user-side liability against the custodial system balance for a currency.
 
-**Required** query param: `currency_id`.
+**Required** query param: `currency_uid`.
 
 Response `200 OK`:
 
@@ -904,7 +987,7 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "liability": "125000.00",
     "custodial": "126500.00",
     "solvent": true,
@@ -927,7 +1010,7 @@ Historical daily balance series for a single account dimension. This exposes the
 
 One point per calendar day in `[from, to]`. Days with no journal activity are forward-filled from the previous known balance; the point for today is always overridden with the live checkpoint+delta balance.
 
-**Required** query params: `holder`, `currency_id`, `from` (RFC 3339), `to` (RFC 3339). Optional: `classification_id` (`0`/omitted = sum across all classifications).
+**Required** query params: `holder`, `currency_uid`, `from` (RFC 3339), `to` (RFC 3339). Optional: `classification_uid` (omitted = sum across all classifications).
 
 Response `200 OK`:
 
@@ -971,7 +1054,7 @@ Request:
 }
 ```
 
-Response `201 Created`: `{ "id", "close_before", "note", "actor_id", "created_at" }`.
+Response `201 Created`: `{ "uid", "close_before", "note", "actor_id", "created_at" }`.
 
 Status codes: `201`, `400`.
 
@@ -997,7 +1080,7 @@ Per-classification debit/credit totals for one currency as of a point in
 time, plus the global debit=credit balanced check — the standard
 close-readiness verification.
 
-Query params: `currency_id` (required), `as_of` (RFC 3339, optional — default now).
+Query params: `currency_uid` (required), `as_of` (RFC 3339, optional — default now).
 
 Response `200 OK`:
 
@@ -1006,11 +1089,11 @@ Response `200 OK`:
   "code": 200,
   "message": null,
   "data": {
-    "currency_id": 1,
+    "currency_uid": "cur-usdt",
     "as_of": "2026-04-01T00:00:00Z",
     "rows": [
-      {"classification_id": 1, "classification_code": "main_wallet", "classification_name": "Main Wallet", "normal_side": "debit", "total_debit": "500.00", "total_credit": "0.00", "net": "500.00"},
-      {"classification_id": 2, "classification_code": "custodial", "classification_name": "Custodial", "normal_side": "credit", "total_debit": "0.00", "total_credit": "500.00", "net": "500.00"}
+      {"classification_uid": "cls-main_wallet", "classification_code": "main_wallet", "classification_name": "Main Wallet", "normal_side": "debit", "total_debit": "500.00", "total_credit": "0.00", "net": "500.00"},
+      {"classification_uid": "cls-custodial", "classification_code": "custodial", "classification_name": "Custodial", "normal_side": "credit", "total_debit": "0.00", "total_credit": "500.00", "net": "500.00"}
     ],
     "total_debit": "500.00",
     "total_credit": "500.00",

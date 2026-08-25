@@ -116,7 +116,7 @@ A restored ledger must pass the same invariant checks the live system runs
 ```bash
 export DATABASE_URL=<restored instance>
 
-# 1. Full reconciliation — the complete check suite (I-1..I-13 + I-23 coverage):
+# 1. Full reconciliation — the complete check suite (I-1..I-13 + I-23/I-24/I-32 coverage):
 ledger-cli reconcile --full          # must print PASS on every check
 
 # 2. Solvency per active currency:
