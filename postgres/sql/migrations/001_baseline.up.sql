@@ -88,8 +88,8 @@
 --                 tables, SELECT/INSERT only on append-only ones, no DELETE
 --                 anywhere, no DDL.
 --   ledger_ro     SELECT everywhere, for reporting and BI. This is the role a
---                 dashboard should hold instead of the superuser session that
---                 the 2026-05 credential leak actually used.
+--                 dashboard should hold, so that a leaked reporting
+--                 credential costs a reader and not a writer.
 --
 -- `createrole_self_grant = 'set'` is scoped to this transaction and matters
 -- only for a non-superuser runner: since PostgreSQL 16, CREATEROLE alone no
