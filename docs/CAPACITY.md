@@ -33,12 +33,12 @@ Interpretation:
 
 ## 2. Sizing guide
 
-**PostgreSQL is the capacity bottleneck; ledgerd is nearly stateless.**
+**PostgreSQL is the capacity bottleneck; the ledger itself holds almost no state in process.**
 
-- **ledgerd replicas**: 2 for availability (PDB keeps 1 through drains).
-  Add replicas for HTTP fan-in, not for ledger throughput — workers
-  coordinate via SKIP LOCKED + advisory locks, so replicas don't multiply
-  write capacity, the database does.
+- **Host application replicas**: add them for request fan-in, not for ledger
+  throughput. Workers coordinate via SKIP LOCKED + advisory locks, so replicas
+  do not multiply write capacity; the database does.
+
 - **Connection pool** (`pgxpool` default: 4×CPU cores, max):
   `total connections = replicas × pool max` must stay under the DB's
   `max_connections` minus headroom for migrations/ops/psql (keep ≥ 20%
@@ -76,7 +76,7 @@ Starting points for a production money path — adjust to product reality and
    starved; raise `RollupBatchSize` / add a replica (SKIP LOCKED shares the
    queue) before touching the DB.
 3. HTTP 429s (rate limiter) without DB stress → raise per-IP limits or add
-   ledgerd replicas behind the LB.
+   host application replicas behind the load balancer.
 4. Balance read p99 degrading while post latency is flat → checkpoint age
    (see RUNBOOK §4), not traffic.
 

@@ -130,7 +130,7 @@ func (w *Worker) SetEventDeliverer(d EventBatchProcessor) {
 // is skipped entirely — the lightweight CheckAccountingEquation job (see
 // ReconcileInterval) still runs regardless. Typically built via
 // (*ledger.Service).FullReconciler and wired in by the service-mode entry
-// point (cmd/ledgerd), mirroring SetEventDeliverer.
+// point, mirroring SetEventDeliverer.
 func (w *Worker) SetFullReconciler(fr core.FullReconciler) {
 	w.fullReconcile = fr
 }

@@ -1,3 +1,9 @@
+# Local development database.
+#
+# This repository is a Go library. It ships no server to run, so this file
+# only provides the PostgreSQL a consumer's own binary — or this repo's
+# examples — can point at. The integration tests do not use it: they start
+# their own container through testcontainers.
 services:
   postgres:
     image: postgres:17.2-alpine
@@ -19,41 +25,6 @@ services:
     # Resource templates (uncomment to enforce):
     # mem_limit: 512m
     # cpus: '1.0'
-
-  ledgerd:
-    build: .
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://ledger:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/ledger?sslmode=disable
-      HTTP_PORT: "8080"
-      ENV: ${ENV:?ENV must be set (dev|production)}
-      API_KEYS: ${API_KEYS:?API_KEYS must be set (comma-separated name:scope:secret triples, scope=read|write|admin)}
-      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:?CORS_ALLOWED_ORIGIN must be set}
-      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-262144}
-      EVM_WEBHOOK_SECRET: ${EVM_WEBHOOK_SECRET:?EVM_WEBHOOK_SECRET must be set}
-    ports:
-      - "8080:8080"
-    # The runtime image is distroless/static — no shell, no wget/curl — so an
-    # in-container HTTP healthcheck is not practical. Compose relies on
-    # depends_on for ordering; external orchestrators (k8s, ECS) should probe
-    # GET /api/v1/system/health directly.
-    # Resource templates (uncomment to enforce):
-    # mem_limit: 512m
-    # cpus: '1.0'
-
-  web:
-    build:
-      context: ./web
-      args:
-        NEXT_PUBLIC_API_URL: http://localhost:8080
-    restart: unless-stopped
-    depends_on:
-      - ledgerd
-    ports:
-      - "3000:3000"
 
 volumes:
   pgdata:

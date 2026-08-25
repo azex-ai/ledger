@@ -158,38 +158,29 @@ go worker.Run(ctx)
 
 Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
 
-## Quick Start -- As a Service
+## Quick Start -- Serving the HTTP API
 
-`docker-compose.yml`'s `POSTGRES_USER` is the Postgres image's initial
-superuser, which already satisfies the `CREATE ROLE` prerequisite above —
-no extra setup needed for local/dev use.
+This repository ships **no server binary**. It is a library: the domain, the
+Postgres adapter, the background worker, and an optional HTTP layer you mount
+in your own binary. There is nothing here to deploy.
 
-```bash
-git clone https://github.com/azex-ai/ledger.git
-cd ledger
+`server.NewWithConfig` returns the full ledger API as an `http.Handler`, so a
+consumer that wants the HTTP surface wires it alongside their own routes:
 
-# API keys are name:scope:secret triples (scope: read|write|admin).
-# Generate one per consumer — the name shows up in access logs (audit):
-export API_KEYS="ops:admin:$(openssl rand -hex 32),app:write:$(openssl rand -hex 32)"
-
-export ENV=dev
-export POSTGRES_PASSWORD=$(openssl rand -hex 16)
-export CORS_ALLOWED_ORIGIN=http://localhost:3000
-export EVM_WEBHOOK_SECRET=$(openssl rand -hex 32)
-
-docker compose up --build
+```go
+srv := server.NewWithConfig(cfg, /* ... the stores and services you assembled ... */)
+http.ListenAndServe(":8080", srv.Handler())
 ```
 
-- API: <http://localhost:8080/api/v1/system/health>
-- Frontend: <http://localhost:3000>
+A complete, runnable assembly -- chi router, API-key auth, the worker, and a
+Next.js frontend against it -- is in [`examples/fullstack`](examples/fullstack/).
+[`docs/openapi.yaml`](docs/openapi.yaml) is the wire contract that surface
+implements, and what [`@azex/ledger-react`](web/packages/ledger-react/)
+generates its types from.
 
-Every endpoint except the health probes requires `Authorization: Bearer
-<secret>` — scope semantics and the full key spec live in
-[docs/api.md](docs/api.md#authentication):
-
-```bash
-curl -H "Authorization: Bearer <the-admin-secret>" http://localhost:8080/api/v1/currencies
-```
+`docker-compose.yml` here starts only PostgreSQL, for local development
+(`make db`). Its `POSTGRES_USER` is the image's initial superuser, which
+already satisfies the `CREATE ROLE` prerequisite above.
 
 ## Quick Start -- Frontend (React)
 
@@ -621,7 +612,7 @@ All accessors return interfaces from `core/` so your application code depends on
 
 ## Architecture
 
-Hexagonal: `core/` (pure domain) → `postgres/` (adapter) → `service/` (orchestration) → `server/` (HTTP) → `cmd/ledgerd/` (entry).
+Hexagonal: `core/` (pure domain) → `postgres/` (adapter) → `service/` (orchestration) → `server/` (optional HTTP layer, mounted by the consumer).
 
 ```
 ledger/
@@ -685,7 +676,6 @@ ledger/
 
   web/                 Next.js 16 management dashboard (shadcn/ui, viem-based BigInt utils)
 
-  cmd/ledgerd/         Service entry point
   cmd/ledger-cli/      Read-only investigation CLI (balance, journals, trace, reconcile, solvency)
 
   deploy/helm/ledger/  Kubernetes Helm chart (deployment + service + ingress + secrets)
@@ -781,11 +771,11 @@ The service entry point reads:
 | `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
 | `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
 | `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply, `OTEL_SERVICE_NAME` defaults to `ledgerd`) | (tracing disabled) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply) | (tracing disabled) |
 | `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` in `dev`; `off` otherwise |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated CIDR ranges of your trusted edge proxies (e.g. `10.0.0.0/8,172.16.0.0/12`). When set, the client IP is derived from `X-Forwarded-For` (walked right-to-left, skipping trusted hops) / `X-Real-IP` / `True-Client-IP` for rate limiting and logs — but **only** for requests whose socket peer is inside these ranges, so a direct caller cannot spoof its IP. Every candidate is IP-validated. Invalid value = startup error. | (empty; socket peer) |
 
-Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) are set in `cmd/ledgerd/main.go`.
+Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) live in `service.WorkerConfig` and the option functions on `ledger.New`; `examples/fullstack` shows them being set.
 
 ### Security notes
 

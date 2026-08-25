@@ -305,7 +305,7 @@ it (a JOIN + state-machine check), so an in-flight run is never force-closed.
 
 ```go
 w := svc.Worker(service.WorkerConfig{}) // sensible defaults incl. ExpirationInterval
-go w.Run(ctx)                            // ledgerd does this for you in service mode
+go w.Run(ctx)                            // your composition root owns the worker's lifetime
 ```
 
 > **Anti-pattern (do not do this in a consumer):** sweeping stale holds by

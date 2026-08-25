@@ -14,11 +14,11 @@ Production-grade double-entry ledger engine for Go. Classification-driven archit
 
 ## Architecture
 
-Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchestration) -> `server/` (HTTP) -> `cmd/ledgerd/` (entry)
+Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchestration) -> `server/` (optional HTTP layer the consumer mounts)
 
 - **Two consumption modes share one composition core:**
   - **Library mode** — root package `ledger` (`ledger.go`) is the facade. `ledger.New(pool *pgxpool.Pool)` returns a `*ledger.Service`; pull interfaces via `svc.Booker()`, `svc.BalanceReader()`, `svc.JournalWriter()`, etc. Consumers depend only on `core/*` interfaces, never on the `postgres` adapter directly.
-  - **Service mode** — `cmd/ledgerd/main.go` wires the same pieces behind chi HTTP handlers.
+  - **HTTP layer** — `server.NewWithConfig` returns the same pieces behind chi handlers as an `http.Handler`. This repository ships no binary; the consumer mounts it in theirs. `examples/fullstack` is a complete assembly.
   - `svc.RunInTx(ctx, func(tx *ledger.Service) error {...})` composes ledger writes with the caller's own DB writes in one atomic pgx transaction. The `*Service` passed in is a short-lived clone — do not retain it past the callback.
 - `core/` — zero external dependencies. No net/http, pgx, slog, chi imports allowed.
 - `pkg/` — boundary adapters kept out of `core/`: `bizcode` (error-code taxonomy), `httpx` (HTTP response envelope), `otel` (tracing), `slogadapter` (logging). Error-code mapping happens at the handler boundary, not in the domain.
@@ -81,7 +81,7 @@ go test ./postgres/ -run TestName -race -count=1
 4. Store adapter in postgres/
 5. Service orchestration in service/ (if needed)
 6. HTTP handler in server/handler_*.go + wire in server/routes.go
-7. DI wiring in cmd/ledgerd/main.go
+7. DI wiring in the consumer's composition root (`examples/fullstack/backend/main.go` shows one)
 ```
 
 ## Code Conventions
@@ -140,7 +140,6 @@ go test ./postgres/ -run TestName -race -count=1
 | `server/handler_events.go` | Event query endpoints |
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
-| `cmd/ledgerd/` | HTTP service entry point |
 | `cmd/ledger-cli/` | Read-only investigation CLI (balance, journals, trace, reconcile, solvency) |
 | `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `tamper-evident` (signing + attestation + the withdrawal gate, forges a row to show what it stops), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
 | `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag). Three consumption surfaces: root = shadcn-style skin (self-contained scoped preflight + tokens in `dist/styles.css`), `./heroui` = HeroUI v3 skin (optional peer `@heroui/react`, host owns theme, layout classes in `dist/heroui.css`), `./headless` = client + hooks + provider only. Both skins share the headless core; page logic must stay mirrored |

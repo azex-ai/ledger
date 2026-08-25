@@ -1,4 +1,4 @@
-.PHONY: build test test-short vet lint sqlc sqlc-diff docker openapi-check
+.PHONY: build test test-short vet lint sqlc sqlc-diff db openapi-check
 
 build:
 	go build ./...
@@ -21,8 +21,9 @@ sqlc:
 sqlc-diff:
 	cd postgres && sqlc diff
 
-docker:
-	docker compose up --build
+# Local development database only -- this repository ships no server.
+db:
+	docker compose up -d postgres
 
 # Local check for docs/openapi.yaml: catches YAML syntax errors and
 # schema.ts drift. Mirrors the "Contract gate" step in

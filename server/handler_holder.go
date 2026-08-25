@@ -101,7 +101,7 @@ func HolderHandler(cfg HolderConfig, holders core.HolderReader) (http.Handler, e
 }
 
 // requireMintScope gates minting on write scope for the standalone handler
-// (the ledgerd exposure reuses the server's requireScope group instead).
+// (the mounted-server exposure reuses the server's requireScope group instead).
 func (hs *holderSurface) requireMintScope(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identityFrom(r.Context())
@@ -335,7 +335,7 @@ func (s *Server) handleHolderEnsureDepositAddress(w http.ResponseWriter, r *http
 	httpx.Created(w, depositAddressToResponse(addr))
 }
 
-// ---- ledgerd (service mode) integration ----
+// ---- mounted-server integration ----
 
 // SetHolderSurface enables the holder wallet surface on a running-to-be
 // Server: GET /api/v1/holder/* (holder-token auth) and POST

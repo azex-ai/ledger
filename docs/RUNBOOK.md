@@ -249,11 +249,11 @@ entries per checkpoint cycle can monopolize a worker.
 
 ### Resolution
 
-- **Dead worker**: restart the `service.Worker` (or the `ledgerd` binary if
+- **Dead worker**: restart the `service.Worker` (or the host application if
   embedded).
 - **Hot account**: increase rollup batch size or partition the worker by
   account holder modulo.
-- **Capacity**: scale the worker count. See `cmd/ledgerd/main.go` for the
+- **Capacity**: scale the worker count. See `examples/fullstack/backend/main.go` for the
   worker loop config.
 
 The critical fact: **balance reads stay correct** — the checkpoint+delta path
@@ -524,7 +524,7 @@ table below describes.
 | Role | Can do | Used by |
 |---|---|---|
 | `ledger_owner` | Owns every table/sequence — the only role with DDL (`ALTER`/`DROP`/`TRUNCATE`/trigger management/partition create). Has schema `USAGE`+`CREATE` | Schema migrations, once `migrations.job.databaseUrlKey` (Helm) points at it |
-| `ledger_app` | `SELECT`/`INSERT`/`UPDATE` on ordinary tables; `SELECT`/`INSERT` only on `journal_entries` (never `UPDATE`/`DELETE` — append-only). No DDL of any kind | `ledgerd` serving pods, once the default `DATABASE_URL` secret key points at it |
+| `ledger_app` | `SELECT`/`INSERT`/`UPDATE` on ordinary tables; `SELECT`/`INSERT` only on `journal_entries` (never `UPDATE`/`DELETE` — append-only). No DDL of any kind | the host application's serving processes, once their `DATABASE_URL` points at it |
 | `ledger_ro` | `SELECT` everywhere (full tables, not scoped views yet — see follow-up below) | Metabase / BI / reporting — this is the role a credential leak should cost you, not a superuser session |
 
 **Why the split**: GRANT-based privileges alone are not a defense against a
@@ -646,7 +646,7 @@ holder, read-only, default 15m TTL. Your backend mints them per session via
 
 ### What this means for deployment
 
-Standalone-service mode (`cmd/ledgerd`) should still not be exposed directly
+The mounted HTTP layer (`server.NewWithConfig`) should still not be exposed directly
 to the public internet:
 
 - Run it inside a private network (VPC-only ingress) or behind a gateway —

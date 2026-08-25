@@ -259,7 +259,7 @@ func TestLedgerdHolderSurface(t *testing.T) {
 	srv.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
-	// Feature on: holder token authenticates against the ledgerd router.
+	// Feature on: holder token authenticates against the mounted router.
 	stub := &stubHolderReader{}
 	srv2 := newTestServer()
 	require.NoError(t, srv2.SetHolderSurface(server.HolderConfig{TokenSecret: []byte(testHolderSecret)}, stub))

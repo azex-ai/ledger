@@ -35,7 +35,7 @@ server-held key.
 
 | Var | Required | Description |
 |-----|----------|-------------|
-| `LEDGER_API_URL_INTERNAL` | yes (production) | Server-only base URL of ledgerd (internal/private network), e.g. `http://ledger.internal:8080`. Used by RSC prefetch and the BFF proxy. Falls back to `http://localhost:8080` in dev. |
+| `LEDGER_API_URL_INTERNAL` | yes (production) | Server-only base URL of the host application serving the ledger HTTP API (internal/private network), e.g. `http://ledger.internal:8080`. Used by RSC prefetch and the BFF proxy. Falls back to `http://localhost:8080` in dev. |
 | `LEDGER_API_KEY` | yes (production) | Server-only bearer key the BFF proxy and RSC prefetch attach to every upstream call. Issue a dedicated `name:scope:secret` key for the dashboard (see `docs/api.md`); `read` scope unless operators trigger writes from the UI. |
 | `DASHBOARD_PASSWORD` | yes (production) | Operator password for the dashboard login. Unset in dev = login disabled; unset in a production build = the dashboard refuses to serve (503). |
 | `DASHBOARD_SESSION_SECRET` | no | Explicit HMAC key for session cookies; derived from `DASHBOARD_PASSWORD` when unset. Set it when running multiple dashboard replicas so sessions survive uneven rollouts. |
@@ -43,7 +43,7 @@ server-held key.
 ## Getting Started
 
 Start the backend (from the repo root: `docker compose up --build`, or run
-`cmd/ledgerd` against a local PostgreSQL), then:
+`examples/fullstack/backend` against a local PostgreSQL), then:
 
 ```bash
 npm install

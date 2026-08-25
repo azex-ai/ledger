@@ -6,10 +6,12 @@ recovery targets (RPO/RTO), the restore procedure, and — most importantly —
 how to **prove** a restored ledger is correct using the ledger's own
 invariant machinery.
 
-Everything here is about the standalone-service deployment (`cmd/ledgerd` +
-PostgreSQL). Library-mode consumers embed the ledger schema in their own
-database; the same principles apply, but backups belong to the host
-application's DR plan.
+This repository is a library, so the database it describes is the consumer's:
+the ledger schema lives in the host application's PostgreSQL, and these
+backups belong to that application's DR plan. What is specific to the ledger
+is section 5 — proving a restored database is a correct ledger, which the
+ledger's own invariant machinery can answer and a generic restore check
+cannot.
 
 > A double-entry ledger is exactly the kind of system where an unverified
 > backup is indistinguishable from no backup. The restore drill below is not
@@ -22,11 +24,10 @@ application's DR plan.
 | Asset | Where | Why |
 |-------|-------|-----|
 | PostgreSQL cluster (all ledger tables) | your DB host / managed service | The entire ledger state: journals, entries, checkpoints, bookings, events, reservations, snapshots |
-| `API_KEYS`, `EVM_WEBHOOK_SECRET`, `DATABASE_URL` | your secrets manager | Recovery must be able to boot ledgerd, not just restore rows |
-| Deployment manifests (Helm values / compose env) | git | Rebuild the runtime |
+| `DATABASE_URL`, and any signing key configured through `ledger.WithAttestor` | your secrets manager | Recovery must be able to start the host application, not just restore rows. A lost signing key does not invalidate past journals -- their signatures stay verifiable against the recorded `auth_key_id` -- but nothing new can be signed under it |
+| The host application's own deployment manifests | git | Rebuild the runtime that embeds the ledger |
 
-Nothing else is stateful. `ledgerd` pods/containers are disposable; the
-Docker image is reproducible from a git tag.
+Nothing else in the ledger is stateful. Everything it holds is in PostgreSQL.
 
 Migrations are embedded in the binary (`postgres/sql/migrations`, embed.FS),
 so a restored database plus the matching release tag is always
@@ -80,7 +81,7 @@ replication to a standby (RPO ≈ 0) and treat PITR as the second line.
 
 ## 4. Restore procedure
 
-1. **Stop writes.** Scale ledgerd to zero (or revoke write access — see
+1. **Stop writes.** Stop the host application (or revoke write access — see
    RUNBOOK [§9 Emergency: stop the ledger](./RUNBOOK.md#9-emergency-stop-the-ledger)).
    Restoring under live writes guarantees a split-brain ledger.
 2. **Pick the recovery point.** Latest WAL position for infrastructure loss;
