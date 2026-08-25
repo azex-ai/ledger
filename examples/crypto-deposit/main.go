@@ -32,9 +32,9 @@
 //  1. Start Postgres and set DATABASE_URL.
 //  2. go run ./examples/crypto-deposit
 //
-// Assumes a "deposit" classification (with a lifecycle -- see
-// presets.DepositLifecycle) and the deposit accounting bundle
-// (presets.DepositBundle) have been installed.
+// Installs everything it needs: the deposit accounting bundle
+// (presets.DepositBundle) and presets.DepositLifecycle on the "deposit"
+// classification.
 package main
 
 import (
@@ -93,6 +93,16 @@ func run() error {
 	tmplStore := postgres.NewTemplateStore(pool)
 	if err := presets.InstallTemplateBundle(ctx, classStore, classStore, tmplStore, presets.DepositBundle()); err != nil {
 		return fmt.Errorf("install deposit bundle: %w", err)
+	}
+
+	// The accounting bundle installs templates, not lifecycles -- and the
+	// schema ships a label-only "deposit" classification, so the bundle finds
+	// one already there and leaves it alone. Without a lifecycle, no booking
+	// can be opened against it. SetLifecycleIfEmpty exists for exactly this:
+	// it seeds one only when the classification has none, so an operator's
+	// customised lifecycle is never clobbered.
+	if err := installDepositLifecycle(ctx, classStore); err != nil {
+		return err
 	}
 
 	// -- 1. Address issuance -------------------------------------------
@@ -183,8 +193,25 @@ func ingestDeposit(ctx context.Context, svc *ledger.Service, registry core.Addre
 		return nil, fmt.Errorf("create booking: %w", err)
 	}
 
+	// A sighting means the transfer is on chain, which is what "confirming"
+	// records. DepositLifecycle deliberately has no pending -> confirmed edge:
+	// a deposit is always observed before it is credited, so the two facts
+	// ("we have seen it" and "it has enough confirmations to pay out") stay
+	// separate states rather than collapsing into one.
+	if _, err := svc.Booker().Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID,
+		ToStatus:   "confirming",
+		ChannelRef: sighting.TxHash,
+		Source:     "example.crypto_deposit",
+	}); err != nil {
+		return nil, fmt.Errorf("transition confirming: %w", err)
+	}
+
 	if sighting.Confirmations < requiredConfirmations {
-		return booking, nil // still pending; caller re-checks on the next sighting
+		// Not enough confirmations yet. The booking stays in "confirming" and
+		// the caller re-checks on the next sighting; no accounting has
+		// happened, so nothing has to be undone if it never confirms.
+		return svc.BookingReader().GetBooking(ctx, booking.UID)
 	}
 
 	var confirmedEvent *core.Event
@@ -284,4 +311,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 		return "", fmt.Errorf("create currency: %w", err)
 	}
 	return created.UID, nil
+}
+
+// installDepositLifecycle attaches presets.DepositLifecycle to the "deposit"
+// classification the schema seeds as label-only.
+func installDepositLifecycle(ctx context.Context, classStore *postgres.ClassificationStore) error {
+	class, err := classStore.GetByCode(ctx, "deposit")
+	if err != nil {
+		return fmt.Errorf("get deposit classification: %w", err)
+	}
+	if err := classStore.SetLifecycleIfEmpty(ctx, class.UID, presets.DepositLifecycle); err != nil {
+		return fmt.Errorf("install deposit lifecycle: %w", err)
+	}
+	return nil
 }

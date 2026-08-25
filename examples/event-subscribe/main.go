@@ -29,6 +29,7 @@ import (
 	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/service"
 )
 
@@ -63,6 +64,19 @@ func run() error {
 	// Install the deposit preset so we can create a booking below.
 	if err := svc.InstallDefaultPresets(ctx); err != nil {
 		return fmt.Errorf("install presets: %w", err)
+	}
+
+	// The presets install accounting templates, not lifecycles -- and the
+	// schema ships a label-only "deposit" classification, so the preset finds
+	// one already there and leaves it alone. A booking needs a lifecycle, so
+	// attach one. SetLifecycleIfEmpty seeds it only when there is none, and
+	// never clobbers a lifecycle an operator has customised.
+	depositClass, err := svc.Classifications().GetByCode(ctx, "deposit")
+	if err != nil {
+		return fmt.Errorf("get deposit classification: %w", err)
+	}
+	if err := svc.Classifications().SetLifecycleIfEmpty(ctx, depositClass.UID, presets.DepositLifecycle); err != nil {
+		return fmt.Errorf("install deposit lifecycle: %w", err)
 	}
 
 	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
@@ -138,7 +152,13 @@ func run() error {
 	case evt := <-received:
 		fmt.Printf("handler received event uid=%s to_status=%s\n", evt.UID, evt.ToStatus)
 	case <-time.After(3 * time.Second):
-		fmt.Println("timeout waiting for event — check EventDeliveryInterval config")
+		// Failing here rather than printing and carrying on: the whole point
+		// of this example is that the handler receives the event, so an exit
+		// code of 0 with no delivery would report success for a run in which
+		// nothing happened.
+		cancelWorker()
+		<-workerDone
+		return fmt.Errorf("no event reached the handler within 3s (30 poll cycles at the configured 100ms interval) -- the subscription is not working")
 	}
 
 	// Graceful shutdown: cancel ctx and wait for worker to drain.

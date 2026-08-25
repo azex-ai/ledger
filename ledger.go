@@ -729,6 +729,12 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	// horizon ahead of now (advisory-locked; see service/partition.go).
 	w.SetPartitionService(service.NewPartitionService(postgres.NewPartitionStore(s.pool), engine))
 	w.SetPool(s.pool)
+	// Wire the poller that backs Worker.Subscribe. This does not start the
+	// callback loop -- only Subscribe does that -- but it means a consumer who
+	// subscribes gets a working subscription without having to know about a
+	// separate wiring call. Before this, Subscribe built a dispatcher with a
+	// nil poller, which failed on every tick, logged, and delivered nothing.
+	w.SetLocalPoller(s.eventStore)
 	return w
 }
 

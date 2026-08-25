@@ -84,6 +84,12 @@ type Worker struct {
 	systemRollup   *SystemRollupService
 	eventDeliverer EventBatchProcessor // nil = skip webhook delivery (library mode)
 	localDeliverer *delivery.LocalDispatcher
+	// localPoller is held separately from localDeliverer so that wiring a
+	// poller does not by itself start the callback loop. The loop must exist
+	// only when someone has actually subscribed: LocalDispatcher marks every
+	// event it polls as delivered, and with no handlers registered that is a
+	// silent drain of the delivery queue.
+	localPoller delivery.EventPoller
 	fullReconcile  core.FullReconciler // nil = skip the full reconciliation suite job
 	partition      *PartitionService   // nil = skip partition management
 	attestation    *AttestationService // nil = skip the P6 batch attestation job
@@ -159,25 +165,25 @@ func (w *Worker) SetPool(pool *pgxpool.Pool) {
 // handler returns an error the event is logged and still marked delivered —
 // blocking the queue on a buggy handler is worse than a missed notification.
 //
-// Subscribe wires a delivery.LocalDispatcher the first time it is called.
-// localPoller must be non-nil when Subscribe is used; pass it via
-// SetLocalPoller before calling Run.
+// Subscribe wires a delivery.LocalDispatcher the first time it is called,
+// using the poller already set by SetLocalPoller. ledger.Service.Worker sets
+// one, so a library consumer does not have to.
 func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) {
 	if w.localDeliverer == nil {
-		// Lazily create — the poller will be set when SetLocalPoller is called.
-		// If the caller never sets a poller, ProcessBatch will return an error
-		// on the first tick, which the worker will log but not crash on.
-		w.localDeliverer = delivery.NewLocalDispatcher(nil, w.logger)
+		w.localDeliverer = delivery.NewLocalDispatcher(w.localPoller, w.logger)
 	}
 	w.localDeliverer.OnEvent(handler)
 }
 
 // SetLocalPoller wires the EventPoller that backs the in-process event
-// subscription loop.  Must be called before Run() when Subscribe() is used.
+// subscription loop. It deliberately does NOT create the dispatcher: doing so
+// would start the callback loop for a worker nobody subscribed to, and that
+// loop marks every event it polls as delivered, which would silently drain
+// the queue webhook delivery reads from. The dispatcher is created by
+// Subscribe, which is the point at which a handler exists to receive events.
 func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
-	if w.localDeliverer == nil {
-		w.localDeliverer = delivery.NewLocalDispatcher(poller, w.logger)
-	} else {
+	w.localPoller = poller
+	if w.localDeliverer != nil {
 		w.localDeliverer.SetPoller(poller)
 	}
 }

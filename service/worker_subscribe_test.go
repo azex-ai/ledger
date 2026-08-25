@@ -188,3 +188,67 @@ func newMinimalWorker(engine *core.Engine) *Worker {
 
 	return NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, config, engine)
 }
+
+// TestWorker_PollerWithoutSubscribe_DoesNotDrainQueue pins the reason
+// SetLocalPoller does not create the dispatcher.
+//
+// LocalDispatcher marks every event it polls as delivered, and with no
+// handlers registered delivery trivially "succeeds" -- so a callback loop
+// running on a worker nobody subscribed to would consume the queue that
+// webhook delivery reads from and mark it done, with no handler having seen
+// anything. ledger.Service.Worker wires a poller into every worker it builds,
+// so that combination is now the default rather than an unusual one.
+func TestWorker_PollerWithoutSubscribe_DoesNotDrainQueue(t *testing.T) {
+	engine := core.NewEngine()
+
+	poller := &fakeEventPoller{
+		events: []delivery.PendingEvent{
+			{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", BookingUID: "bk-10", ToStatus: "confirmed"}},
+		},
+	}
+
+	worker := newMinimalWorker(engine)
+	worker.SetLocalPoller(poller)
+	// Deliberately no Subscribe call.
+	worker.config.EventDeliveryInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, worker.Run(ctx))
+
+	assert.Empty(t, poller.delivered,
+		"a worker with no subscribers must not mark events delivered -- those events still belong to whoever does read the queue")
+	assert.Empty(t, poller.retried, "and must not touch them at all")
+}
+
+// TestWorker_SubscribeAfterPoller_UsesTheStoredPoller pins that the poller
+// survives being set before the dispatcher exists. SetLocalPoller no longer
+// creates the dispatcher, so the poller has to be held somewhere until
+// Subscribe builds one -- and if it were not, Subscribe would build a
+// dispatcher with a nil poller that fails on every tick and delivers nothing,
+// which is exactly the bug this ordering used to have.
+func TestWorker_SubscribeAfterPoller_UsesTheStoredPoller(t *testing.T) {
+	engine := core.NewEngine()
+
+	poller := &fakeEventPoller{
+		events: []delivery.PendingEvent{
+			{InternalID: 7, Event: core.Event{UID: "evt-7", ClassificationCode: "deposit", BookingUID: "bk-70", ToStatus: "confirmed"}},
+		},
+	}
+
+	worker := newMinimalWorker(engine)
+	worker.SetLocalPoller(poller) // poller first...
+	var got atomic.Value
+	worker.Subscribe(func(_ context.Context, e core.Event) error { // ...dispatcher second
+		got.Store(e.UID)
+		return nil
+	})
+	worker.config.EventDeliveryInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, worker.Run(ctx))
+
+	assert.Equal(t, "evt-7", got.Load(), "the handler must receive the event the pre-set poller returns")
+	assert.Equal(t, []int64{7}, poller.delivered)
+}
