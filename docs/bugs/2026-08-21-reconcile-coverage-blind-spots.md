@@ -1,7 +1,7 @@
 # 复盘 — 对账 check #2 的两个覆盖盲区（系统侧永不扫描 / 不完整仍报通过）
 
-> 2026-08-21 · 发现于一次 codex 对抗式评审（起因：真实的数据库泄露事件后审计
-> 「攻击者拿到 DB 写权限能做什么」）· 设计 SoT `docs/plans/2026-08-21-tamper-evident-ledger-design.md` §0.1 / §2
+> 2026-08-21 · 发现于一次 codex 对抗式评审（起因：审计「攻击者拿到 DB 写权限
+> 能做什么」）· 设计 SoT `docs/plans/2026-08-21-tamper-evident-ledger-design.md` §0.1 / §2
 > money path: checkpoint 直接决定余额读数（I-5）。对账 check #2 是**唯一**能发现
 > checkpoint 被篡改的机制——审它是否真的在看。
 
