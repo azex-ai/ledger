@@ -841,6 +841,20 @@ a table is required to GRANT `ledger_app`/`ledger_ro` on it explicitly
 rule self-enforcing going forward instead of depending on a migration
 author remembering it (`working-agreements` §5).
 
+**Note on the configuration tables (migration 003)**: the guard set is not
+limited to the tables that record money. A per-journal authorization signature
+authenticates what the application *read*, not what happened -- `IngestDeposit`
+resolves a holder from `deposit_addresses` and `EntryTemplate.Render` reads
+`entry_template_lines` fresh on every call -- so a credential that can rewrite
+those tables makes the application sign a correct journal about the wrong
+facts, and the result is signed, chain-attested and reports `VERIFIED`.
+Migration 003 puts a column whitelist on `currencies`, `classifications`,
+`journal_types`, `entry_templates`, `entry_template_lines` and
+`deposit_addresses`, leaving mutable only what has a real mutation path
+(`is_active`, `display_label`, `lifecycle`, and `balance_role`'s one-way
+upgrade). `currencies.exponent`, `classifications.normal_side` and `.code`,
+and every column of a template line are immutable as a result.
+
 **Note on ACL/trigger consistency**: the ACL and the append-only mutation
 guard on a table must agree — a table protected only by a trigger, with an
 ACL that still says it is updatable, is one `GRANT`-layer bypass away from

@@ -103,14 +103,62 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 	})
 
 	// --- ledger_app can still do its actual job --------------------------
+	//
+	// webhook_subscribers rather than currencies: migration 003 gave
+	// currencies a column guard, so it is no longer an ordinary table and
+	// updating its name is now refused on purpose. This subtest exists to
+	// prove the refusals above are not vacuous -- a role granted nothing at
+	// all would also fail every forbidden operation -- so it has to use a
+	// table where a plain UPDATE really is allowed.
 	t.Run("can SELECT/INSERT/UPDATE an ordinary table", func(t *testing.T) {
-		_, err := appPool.Exec(ctx, "INSERT INTO currencies (uid, code, name) VALUES (gen_random_uuid(), 'RT1', 'RoleTest1')")
+		_, err := appPool.Exec(ctx, "INSERT INTO webhook_subscribers (url, name) VALUES ('https://example.test/hook', 'RoleTest1')")
 		require.NoError(t, err)
-		_, err = appPool.Exec(ctx, "UPDATE currencies SET name = 'RoleTest1x' WHERE code = 'RT1'")
+		_, err = appPool.Exec(ctx, "UPDATE webhook_subscribers SET name = 'RoleTest1x' WHERE name = 'RoleTest1'")
 		require.NoError(t, err)
 		var name string
-		require.NoError(t, appPool.QueryRow(ctx, "SELECT name FROM currencies WHERE code = 'RT1'").Scan(&name))
+		require.NoError(t, appPool.QueryRow(ctx, "SELECT name FROM webhook_subscribers WHERE url = 'https://example.test/hook'").Scan(&name))
 		assert.Equal(t, "RoleTest1x", name)
+	})
+
+	// The guard migration 003 put on the configuration tables, checked from
+	// the credential it exists to constrain. Repointing a deposit address is
+	// the attack that motivated it: the resulting journal would have been
+	// correctly signed, chain-attested and reported VERIFIED, because the
+	// signature covers what the application read and this changes what it
+	// reads.
+	t.Run("cannot repoint a deposit address at another holder", func(t *testing.T) {
+		_, err := pool.Exec(ctx,
+			"INSERT INTO deposit_addresses (uid, account_holder, address, factory, init_hash) VALUES (gen_random_uuid(), 7701, '0xRoleTestVictim', '0xfactory', '0xinit')")
+		require.NoError(t, err)
+
+		_, err = appPool.Exec(ctx, "UPDATE deposit_addresses SET account_holder = 7702 WHERE address = '0xRoleTestVictim'")
+		require.Error(t, err, "an application credential must not be able to change who a deposit address credits")
+
+		// The no-op upsert address registration relies on must still pass:
+		// its conflict branch assigns account_holder its own value so
+		// RETURNING yields the existing row, and nothing actually changes.
+		var holder int64
+		require.NoError(t, appPool.QueryRow(ctx,
+			`INSERT INTO deposit_addresses (uid, account_holder, address, factory, init_hash)
+			 VALUES (gen_random_uuid(), 7701, '0xRoleTestVictim', '0xfactory', '0xinit')
+			 ON CONFLICT (account_holder) DO UPDATE SET account_holder = EXCLUDED.account_holder
+			 RETURNING account_holder`).Scan(&holder))
+		assert.Equal(t, int64(7701), holder, "registration must stay idempotent")
+	})
+
+	t.Run("cannot change a currency's precision or a classification's sign", func(t *testing.T) {
+		// Seeded through the superuser pool so the subtest does not depend on
+		// what any other subtest left behind -- and so a zero-row UPDATE can
+		// never be mistaken for a refusal.
+		_, err := pool.Exec(ctx, "INSERT INTO currencies (uid, code, name, exponent) VALUES (gen_random_uuid(), 'RTG', 'RoleTestGuarded', 6)")
+		require.NoError(t, err)
+
+		_, err = appPool.Exec(ctx, "UPDATE currencies SET exponent = 0 WHERE code = 'RTG'")
+		require.Error(t, err, "exponent is what every amount is validated against")
+		_, err = appPool.Exec(ctx, "UPDATE classifications SET normal_side = 'credit' WHERE id = 1")
+		require.Error(t, err, "normal_side fixes the sign of every entry already recorded against this classification")
+		_, err = appPool.Exec(ctx, "UPDATE classifications SET code = 'hijacked' WHERE id = 1")
+		require.Error(t, err, "code is what presets resolve a classification by")
 	})
 
 	t.Run("can SELECT/INSERT journal_entries", func(t *testing.T) {

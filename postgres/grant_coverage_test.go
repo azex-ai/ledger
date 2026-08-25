@@ -100,11 +100,28 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// journals guard's mutable-column whitelist.
 	deleteAllowed := map[string]bool{"webhook_nonces": true}
 
+	// Tables whose UPDATE was revoked outright because they have no
+	// legitimate one. entry_template_lines is written once when a template
+	// bundle installs and never touched again -- no upsert, no deactivation
+	// -- and every column of it decides which account a journal leg hits and
+	// in which direction, so migration 003 took the privilege away as well as
+	// guarding the rows.
+	//
+	// deposit_addresses is deliberately NOT here despite also allowing no
+	// mutation: registration is an upsert whose conflict branch assigns
+	// account_holder its own value so RETURNING yields the existing row. The
+	// row never changes, so the guard passes it, but the statement is still
+	// an UPDATE and still needs the grant.
+	updateRevoked := map[string]bool{"entry_template_lines": true}
+
 	for _, table := range tables {
 		table := table
 		t.Run(table, func(t *testing.T) {
 			wantApp := []string{"SELECT", "INSERT", "UPDATE"}
 			if appendOnly[table] {
+				wantApp = []string{"SELECT", "INSERT"}
+			}
+			if updateRevoked[table] {
 				wantApp = []string{"SELECT", "INSERT"}
 			}
 			if deleteAllowed[table] {
