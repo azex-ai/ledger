@@ -1,9 +1,9 @@
 package postgres_test
 
-// Schema-level pins for migrations 022-023. These assert the physical
-// catalog objects the migrations create, independent of any store code, so a
-// future migration can't silently drop the primary key or index while still
-// leaving application code passing.
+// Schema-level structural pins. These assert the physical catalog objects
+// (columns, indexes, constraints) the schema must have, independent of any
+// store code, so a future change can't silently drop a primary key, an
+// index, or a NOT NULL constraint while application code still passes.
 
 import (
 	"context"
@@ -15,10 +15,10 @@ import (
 	"github.com/azex-ai/ledger/internal/postgrestest"
 )
 
-// Migration 022: journal_entries gets a primary key on (id, created_at). The
-// table is PARTITION BY RANGE (created_at), so the partition key must be part
-// of the primary key.
-func TestMigration022_JournalEntriesHasPrimaryKey(t *testing.T) {
+// journal_entries has a primary key on (id, created_at). The table is
+// PARTITION BY RANGE (created_at), so the partition key must be part of the
+// primary key.
+func TestJournalEntriesHasPrimaryKey(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -46,13 +46,13 @@ func TestMigration022_JournalEntriesHasPrimaryKey(t *testing.T) {
 	assert.Equal(t, []string{"id", "created_at"}, cols)
 }
 
-// Migration 023: reservations gets a non-partial index covering
-// ListReservationsByAccount's filter (account_holder) and its
-// ORDER BY created_at DESC, so listing by any status doesn't fall back to a
-// sequential scan. currency_id is deliberately NOT in the index: the query
-// does not filter on it, and placing it between account_holder and created_at
-// would prevent the index from satisfying the ORDER BY.
-func TestMigration023_ReservationsAccountCreatedIndexExists(t *testing.T) {
+// reservations has a non-partial index covering ListReservationsByAccount's
+// filter (account_holder) and its ORDER BY created_at DESC, so listing by
+// any status doesn't fall back to a sequential scan. currency_id is
+// deliberately NOT in the index: the query does not filter on it, and
+// placing it between account_holder and created_at would prevent the index
+// from satisfying the ORDER BY.
+func TestReservationsAccountCreatedIndexExists(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -68,9 +68,9 @@ func TestMigration023_ReservationsAccountCreatedIndexExists(t *testing.T) {
 	assert.NotContains(t, indexdef, "WHERE", "index must not be partial — ListReservationsByAccount queries any status")
 }
 
-// Migration 024: webhook_subscribers gets delivery-status columns, all
-// NOT NULL with meaningful defaults per the project's No-NULL policy.
-func TestMigration024_WebhookSubscribersHasDeliveryStatusColumns(t *testing.T) {
+// webhook_subscribers has delivery-status columns, all NOT NULL with
+// meaningful defaults per the project's No-NULL policy.
+func TestWebhookSubscribersHasDeliveryStatusColumns(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -108,10 +108,10 @@ func TestMigration024_WebhookSubscribersHasDeliveryStatusColumns(t *testing.T) {
 	}
 }
 
-// Migration 025: journals and journal_entries both get a NOT NULL effective_at
-// column, and journal_entries gets an index on (currency_id, effective_at) to
-// drive as-of / trial-balance queries. Pins I-14.
-func TestMigration025_EffectiveAtColumnsExist(t *testing.T) {
+// journals and journal_entries both have a NOT NULL effective_at column, and
+// journal_entries has an index on (currency_id, effective_at) to drive
+// as-of / trial-balance queries. Pins I-14.
+func TestEffectiveAtColumnsExist(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -135,10 +135,10 @@ func TestMigration025_EffectiveAtColumnsExist(t *testing.T) {
 	assert.Contains(t, indexdef, "effective_at")
 }
 
-// Migration 026: period_closes is append-only (no unique constraint on
-// close_before — latest-row-wins comes from ORDER BY created_at, not from a
-// uniqueness guarantee). Pins I-15.
-func TestMigration026_PeriodClosesTableExists(t *testing.T) {
+// period_closes is append-only (no unique constraint on close_before —
+// latest-row-wins comes from ORDER BY created_at, not from a uniqueness
+// guarantee). Pins I-15.
+func TestPeriodClosesTableExists(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 

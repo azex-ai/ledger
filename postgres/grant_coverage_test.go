@@ -1,20 +1,20 @@
 package postgres_test
 
 // Structural pin for I-22 (docs/INVARIANTS.md): every table (and sequence)
-// in the `public` schema must hold exactly the grants 042's policy intends
-// for ledger_app / ledger_ro, regardless of which migration introduced it.
+// in the `public` schema must hold exactly the grants the ledger's role
+// setup intends for ledger_app / ledger_ro, regardless of which migration
+// introduced it.
 //
-// Why this exists: 042's own GRANT loop only enumerates objects that
-// existed when 042 ran, and its header requires every later migration that
-// adds a table to GRANT ledger_app/ledger_ro on it explicitly -- a rule
-// that depends on a human remembering it. It was violated twice before this
-// pin existed: reconcile_scan_cursors (043) and checkpoint_rebuilds (050)
-// were both written and merged before 042 landed, and neither carries a
-// ledger_app/ledger_ro grant (fixed in 052). working-agreements §5: a rule
-// that can be enforced structurally should not depend on people remembering
-// it -- this test is that enforcement. It will go red the moment any future
-// migration adds a table/sequence without also granting it (by design --
-// see the P6/P5-fix note below).
+// Why this exists: the GRANT statements that establish ledger_app/ledger_ro
+// only enumerate objects that existed when they ran, and every later
+// migration that adds a table must GRANT ledger_app/ledger_ro on it
+// explicitly -- a rule that depends on a human remembering it. It was
+// violated more than once during development: tables were written and
+// merged whose migrations carried no ledger_app/ledger_ro grant at all.
+// working-agreements §5: a rule that can be enforced structurally should
+// not depend on people remembering it -- this test is that enforcement. It
+// will go red the moment any future migration adds a table/sequence
+// without also granting it (by design -- see the note below).
 
 import (
 	"context"
@@ -29,25 +29,24 @@ import (
 
 // TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants enumerates
 // every ordinary table in `public` (excluding schema_migrations, which
-// ledger_app/ledger_ro have no legitimate reason to touch -- see 042's
-// header) and asserts the grant shape 042's policy establishes: a table
-// protected by an unconditional append-only mutation guard (any BEFORE
-// UPDATE trigger executing `ledger_block_mutation()` -- journal_entries
-// (018), period_closes (045 A5), checkpoint_rebuilds (050) as of this
-// writing) gets SELECT/INSERT only for ledger_app; every other table gets
-// SELECT/INSERT/UPDATE. ledger_ro gets SELECT everywhere. Partitions of
-// journal_entries are excluded (a separate pin,
-// TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant, covers
+// ledger_app/ledger_ro have no legitimate reason to touch) and asserts the
+// grant shape the ledger's role policy establishes: a table protected by an
+// unconditional append-only mutation guard (any BEFORE UPDATE trigger
+// executing `ledger_block_mutation()` -- journal_entries, period_closes,
+// checkpoint_rebuilds as of this writing) gets SELECT/INSERT only for
+// ledger_app; every other table gets SELECT/INSERT/UPDATE. ledger_ro gets
+// SELECT everywhere. Partitions of journal_entries are excluded (a separate
+// pin, TestLedgerAppInsertsIntoPartitionCreatedAfterGrant, covers
 // partition-inheritance behavior specifically).
 //
 // The append-only set is derived from pg_trigger/pg_proc, not a hardcoded
-// table list -- Team Lead review of #14 flagged that a fixed list (only
-// journal_entries) drifted from reality the moment checkpoint_rebuilds
-// (050) reused the same guard function but was left grantable UPDATE: ACL
-// and trigger must say the same thing, and whichever table gets a new
-// `ledger_block_mutation()` guard in the future must not require a matching
-// edit here. Tables with a *partial* (whitelist-based) guard --
-// classifications (`ledger_classifications_guard`), reservations
+// table list -- a fixed list (only journal_entries) previously drifted from
+// reality the moment another table reused the same guard function but was
+// left grantable UPDATE: ACL and trigger must say the same thing, and
+// whichever table gets a new `ledger_block_mutation()` guard in the future
+// must not require a matching edit here. Tables with a *partial*
+// (whitelist-based) guard -- classifications
+// (`ledger_classifications_guard`), reservations
 // (`ledger_reservations_guard`), journals
 // (`ledger_journals_block_arbitrary_update`, which permits the event_id
 // set-once backfill) -- are deliberately NOT in this set: those tables are
@@ -55,9 +54,10 @@ import (
 // ledger_app UPDATE grant for that to work; only their trigger enforces
 // which columns may change, not the ACL layer.
 //
-// ⚠️ Expected to go red when P6 (ledger_attestations/entry_attestations,
-// migration 047) or the P5-fix auth_status column work (051) merge without
-// their own GRANT -- that is this pin doing its job, not a bug in it.
+// ⚠️ Expected to go red the moment any future migration adds a table (e.g.
+// carrying a new attestation or auth-status column) without its own
+// ledger_app/ledger_ro GRANT -- that is this pin doing its job, not a bug
+// in it.
 func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
@@ -142,8 +142,8 @@ func queryAppendOnlyGuardedTables(t *testing.T, pool *pgxpool.Pool) map[string]b
 // counterpart: any table with a SERIAL/BIGSERIAL column needs its owning
 // sequence granted too (USAGE is required for INSERT's implicit nextval()
 // call), or the table grant alone is not enough to actually write.
-// checkpoint_rebuilds_id_seq (050) had exactly this gap alongside its table
-// grant, closed in the same migration (052).
+// checkpoint_rebuilds_id_seq had exactly this gap alongside its table grant
+// during development, closed once this pin caught it.
 //
 // information_schema has no clean "SELECT on sequence" view (role_table_grants
 // does not cover sequences at all; role_usage_grants only reports USAGE) --
