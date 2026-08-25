@@ -20,9 +20,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 )
@@ -355,4 +357,59 @@ func assertGrants(t *testing.T, pool *pgxpool.Pool, grantee, table string, want 
 	}
 	require.NoError(t, rows.Err())
 	assert.ElementsMatch(t, want, got, "%s privileges on %s", grantee, table)
+}
+
+// TestBalanceRolePromotion_RefusedOnceEntriesExist pins migration 004.
+//
+// balance_role buckets a classification into the holder-facing breakdown, and
+// 'available' is the only bucket Reserve spends from. The ” -> <role>
+// upgrade was allowed unconditionally as a one-time install-time move, but
+// nothing tied it to install time: one UPDATE promotes a classification that
+// already holds balances, and every holder's history in it becomes spendable.
+//
+// fee_expense is the shipped example -- user-side, debited on every withdrawal
+// fee -- so promoting it turns each holder's cumulative fees into withdrawable
+// funds through an ordinary, correctly signed withdrawal. Nothing above the
+// bucket notices: the entries are real, the signatures verify, debits equal
+// credits, and the accounting identity is untouched.
+func TestBalanceRolePromotion_RefusedOnceEntriesExist(t *testing.T) {
+	ctx := context.Background()
+	pool := postgrestest.SetupDB(t)
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "BRP", "Role Promo Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	// Two classifications with no role yet: one will be given history, one
+	// stays empty, so the test distinguishes "has entries" from "is named
+	// fee_expense".
+	withHistory := postgrestest.SeedClassification(t, pool, "accrued_fees", "Accrued Fees", "debit", false)
+	untouched := postgrestest.SeedClassification(t, pool, "future_bucket", "Future Bucket", "debit", false)
+	counterpart := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	store := postgres.NewLedgerStore(pool)
+	_, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("role-promo"),
+		Entries: []core.EntryInput{
+			{AccountHolder: 8801, CurrencyUID: curID, ClassificationUID: withHistory, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("1200")},
+			{AccountHolder: -8801, CurrencyUID: curID, ClassificationUID: counterpart, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("1200")},
+		},
+	})
+	require.NoError(t, err)
+
+	t.Run("promoting a classification that already holds balances is refused", func(t *testing.T) {
+		_, err := pool.Exec(ctx, "UPDATE classifications SET balance_role = 'available' WHERE uid = $1::uuid", withHistory)
+		require.Error(t, err, "1200 of recorded balance must not become spendable through a config UPDATE")
+	})
+
+	t.Run("the same promotion is allowed while the classification is empty", func(t *testing.T) {
+		_, err := pool.Exec(ctx, "UPDATE classifications SET balance_role = 'available' WHERE uid = $1::uuid", untouched)
+		require.NoError(t, err, "the install-time upgrade the rule was written for must still work")
+	})
+
+	t.Run("non-spendable buckets stay free even with history", func(t *testing.T) {
+		// pending and locked are shown to the holder but never spent from, so
+		// promoting into them cannot make anyone richer and stays unrestricted.
+		_, err := pool.Exec(ctx, "UPDATE classifications SET balance_role = 'pending' WHERE uid = $1::uuid", withHistory)
+		require.NoError(t, err, "pending is not spendable, so this upgrade carries no money risk")
+	})
 }

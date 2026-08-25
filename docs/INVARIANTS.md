@@ -1099,6 +1099,17 @@ docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
   `'' -> <role>` upgrade `ClassificationStore.SetBalanceRole` performs.
   Switching between two non-empty roles, or reverting to `''`, is rejected —
   including when attempted through `SetBalanceRole` itself a second time.
+  Since migration `004`, `'' -> 'available'` is additionally refused once the
+  classification has journal entries. `available` is the only bucket `Reserve`
+  spends from, so promoting a classification that already holds balances turns
+  them into spendable, withdrawable funds in one statement — the shipped
+  `fee_expense` is debited on every withdrawal fee, so promoting it would hand
+  every holder their fee history back as usable balance, through an ordinary
+  and correctly signed withdrawal. `'' -> 'pending'` and `'' -> 'locked'` stay
+  unrestricted: neither is spendable, so neither can make anyone richer. A
+  deployment that genuinely means to promote a classification with history
+  does it as `ledger_owner` with the guard dropped, which is deliberately more
+  than one statement from an application credential.
 - `reservations.account_holder`/`currency_id`/`reserved_amount`/
   `idempotency_key`/`expires_at`/`created_at`/`uid` are immutable.
   `settled_amount` may only increase (a decrease can only be tampering,
