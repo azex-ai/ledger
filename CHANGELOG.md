@@ -18,7 +18,7 @@ below note which artifact a change affects.
 
 Two release-sized bodies of work landed this cycle. **Tamper-evident ledger**
 (2026-08-21, `docs/plans/2026-08-21-tamper-evident-ledger-design.md`) answers
-a question raised by a real database-credential leak: if an attacker gets DB
+the question a leaked database credential raises: if an attacker gets DB
 write access, what stops them from crediting themselves with a perfectly
 balanced, forged journal? The answer is now "checkpoints are an untrusted
 cache, per-journal writes are cryptographically signed, and withdrawals only
@@ -39,42 +39,47 @@ reconciliation → human review) and a full wallet-side frontend.
   `Complete` flag (zero value = not completed, fail-closed) and
   `ReconcileReport` a `FullCoverage` flag; the `ReconcileCheckResult` metric
   only reports green when a check both ran and finished.
-- **P1 — DB role least privilege** (migrations 042, 049): `ledger_owner`
-  (DDL-capable, owns every object), `ledger_app` (read/write, no DDL), and
-  `ledger_ro` roles; schema ownership transferred to `ledger_owner` and
-  `PUBLIC` access revoked. This is the prerequisite every later DB-layer
-  guard below depends on — without it, any of those triggers could simply
-  be dropped by the credential they exist to constrain. A follow-up
-  (migration 052) closes a gap where two functions and one audit table
-  weren't included in the ownership sweep — now CI-enforced so it can't
-  regress silently.
-- **P2 — Checkpoints are an untrusted cache** (migrations 043, 050):
+- **P1 — DB role least privilege**: `ledger_owner` (DDL-capable, owns every
+  object), `ledger_app` (read/write, no DDL), and `ledger_ro` roles; schema
+  ownership transferred to `ledger_owner` and `PUBLIC` access revoked. This
+  is the prerequisite every later DB-layer guard below depends on — without
+  it, any of those triggers could simply be dropped by the credential they
+  exist to constrain. The ownership sweep originally covered tables and
+  sequences only, leaving all five guard functions — including the two that
+  enforce append-only on `journals` and `journal_entries` — owned by whoever
+  ran the migration. A function's owner can `CREATE OR REPLACE` its body, so
+  that is a silent way to disable every append-only guarantee while leaving
+  the triggers in place and emitting no DDL an audit would flag. The baseline
+  sweeps tables, sequences, views and routines, and asks the catalogue what
+  exists rather than working from a list; a CI check now fails if any object
+  is not owned by `ledger_owner`.
+- **P2 — Checkpoints are an untrusted cache**:
   balances can now be recomputed entirely from `journal_entries`
   (`RebuildCheckpoint`), with a resumable scan cursor and an append-only
   `checkpoint_rebuilds` audit trail. `system_rollups`/`balance_snapshots`
   drift detection no longer inherits checkpoint corruption.
-- **P3 — Per-journal balance enforced at the DB layer again** (migration
-  044): a deferred constraint trigger rejects any journal whose entries
-  don't balance per-currency, independent of the application. This closes a
-  real regression — the equivalent 004 trigger was dropped in migration 018
-  and never replaced, so pure-SQL access could insert unbalanced entries for
-  several months of migration history.
-- **P4 — Mutation guards on non-journal balance tables** (migration 045):
+- **P3 — Per-journal balance enforced at the DB layer again**: a deferred
+  constraint trigger rejects any journal whose entries don't balance
+  per-currency, independent of the application. This closes a
+  real regression — an equivalent trigger existed early on, was dropped
+  during a later refactor and never replaced, so pure-SQL access could insert
+  unbalanced entries for several months of the project's history.
+- **P4 — Mutation guards on non-journal balance tables**:
   `classifications.normal_side`/`balance_role`, `reservations`, and
   `period_closes` can no longer be mutated outside their one legitimate
   entry point. `journals.event_id` gets the same set-once protection —
   see the breaking schema/type change under Changed below.
-- **P5 — Per-journal authorization signing** (migration 046, plus a
-  follow-up fix): a new `core.Attestor` port (distinct from the on-chain
+- **P5 — Per-journal authorization signing** (plus a follow-up fix): a new
+  `core.Attestor` port (distinct from the on-chain
   `core.Signer` — different key, different blast radius) signs every
   journal, reversal, and template batch at write time, including writes
   composed through `RunInTx` (a gap in the initial cut where those weren't
   being signed is now closed).
-- **P6 — Batch attestation chain + external anchor** (migration 047):
+- **P6 — Batch attestation chain + external anchor**:
   journals are chained into signed, gapless batches with an externally
   anchorable head, so a compromised DB owner can't silently truncate the
   tail without `verify` noticing.
-- **P7 — RFC 6962 Merkle tree** (migration 048): batch digests gained a
+- **P7 — RFC 6962 Merkle tree**: batch digests gained a
   Merkle root plus inclusion proofs, so `verify` can localize *which*
   entries were tampered with, not just detect that a batch changed.
 - **Withdrawal-time verified balance** (Wave 2): `ReserveInput.RequireVerifiedBalance`
@@ -126,21 +131,25 @@ reconciliation → human review) and a full wallet-side frontend.
   withdrawal-time verified-balance gate above. Callers constructing a
   `ReserverStore` directly must update the call site.
 - **Breaking**: `journals.event_id` is now nullable with a real foreign key
-  to `events(id)` (migration 045) — previously `NOT NULL DEFAULT 0`, using
+  to `events(id)` — previously `NOT NULL DEFAULT 0`, using
   `0` as an unenforced sentinel for "no event". The generated
   `postgres/sqlcgen.Journal.EventID` field changes from `int64` to
   `pgtype.Int8` accordingly. The public library surface
   (`core.Journal.EventUID string`) is unaffected; only code reading the
   generated struct or the raw column directly needs to switch from
   `== 0` to `.Valid`.
-- **In progress**: the 53 migrations accumulated since the project's first
-  commit are being squashed into a single `001_baseline` migration (Wave 4).
-  New installs will run one migration instead of fifty-three; schema
-  equivalence between the old chain and the baseline is verified by
-  diffing `pg_dump --schema-only` output between the two. This lands via a
-  coordinated merge from a parallel integration branch and had not yet
-  reached this branch's migration directory as of this entry — expect it in
-  the same release or the one after.
+- **Breaking (installation)**: the 53 migrations accumulated since the
+  project's first commit are squashed into a single `001_baseline`. A new
+  install runs one migration instead of fifty-three, and gets the locked-down
+  role configuration in that one step rather than through a staged rollout.
+  **The connection that runs it must be able to `CREATE ROLE`** — a superuser
+  or any role with `CREATEROLE`, which every managed-Postgres master user
+  has. That credential is install-time only and should be rotated or retired
+  afterwards. Equivalence with the old chain is enforced by diffing
+  `pg_dump --schema-only` between a database built by each, which reports no
+  difference. Migration numbers referenced anywhere in these notes are
+  historical: the released artifact contains `001_baseline` and nothing
+  else.
 
 ### Go module — Fixed
 
