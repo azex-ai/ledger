@@ -486,3 +486,100 @@ T4 只换 `postgres.VerifiedBalanceStore` 内部实现，**调用方零改动**�
 - `#4`：`docs/frontend.md` 已有 24 处相关命中，**先核实缺什么再补**，不要重写已有内容
 
 三条都**先给证据再动手**；确认已完成的直接 `bus done` 并附证据，不要为了「有产出」而改。
+
+
+---
+
+# Wave 4 契约层 — migration 压平（2026-08-25）
+
+> Aaron 拍板：这个库没有历史用户，**按全新库对待** —— 把 53 个增量 migration 压成
+> 一个 baseline，让第一次使用的人没有「迁移」这个环节。并且 **baseline 直接落在
+> post-049 状态**（`ledger_owner` 拥有一切 / `PUBLIC` 已 revoke / `ledger_app` 最小权限）。
+
+## W4-0 为什么这次压平能消掉最大一块复杂度
+
+042/049 那套 **expand → migrate → contract** 编排，存在的唯一理由是「有一个在座的连接角色
+不能被 strand」。**全新安装没有在座角色** —— 库还没跑起来，没有连接要保护。所以角色、授权、
+ownership 转移可以一步到位。
+
+这一波的**第一个 Critical 就是那套编排造成的**（042 原稿把 REVOKE + ownership 混进
+expand，测试全绿因为测试身份是 superuser）。压平之后它整个消失，连同 049 的
+`schema_migrations` 窄 re-grant、down-chain 组合风险、以及 7 处依赖中间版本的测试。
+
+**代价**：失去「证明某个 migration 能安全应用到既有库」的能力。无历史用户时这个能力没有价值
+（`ledger-no-compat-constraint`）。
+
+## W4-1 命名空间重置
+
+| 命名空间 | 重置后 |
+|---|---|
+| migration 号 | `001_baseline`；后续新 migration 从 `002` 起 |
+| invariant ID | **不动** —— I-1..I-34 是行为契约，与 migration 编号无关 |
+| hash separator | **不动** |
+| 其余（`.sql` 文件 / check 名 / Scope / AuthStatus） | **不动** |
+
+## W4-2 baseline 的构成（实测确定，非推断）
+
+对一个跑完全部 53 个 migration 的库实测：
+
+- **37 张表 / 64 个索引 / 5 个 function / 15 个 trigger**
+- **唯一有 seed 数据的表是 `classifications`（2 行）** —— 其余全空
+- 011 是真 seed；017/018/025/031/035/037/044/045/051 里的 INSERT/UPDATE 都是对**既有数据**的
+  回填或清洗，全新库无数据可回填，**整个丢掉**
+
+⚠️ seed 行必须取**最终状态**，不是 011 的原文 —— 032 加了 `balance_role`、038 加了
+`display_label`，那两行被后续 migration 改过。
+
+## W4-3 手写 baseline，不用 pg_dump 输出
+
+`pg_dump --schema-only` 是 3509 行机器生成物，**丢掉了 migration 里全部解释性注释**
+（044 为什么用 pg_temp dedup 而不是 004 的 per-row、045 每条 guard 防的是哪条攻击路径、
+049 为什么必须留两个窄 re-grant、033 为什么改成通用 `to_jsonb` 比较）。读 baseline 的人
+将不知道任何一条保护为什么存在 —— 而这个库的价值有一半在那些理由里。
+
+**做法**：手写 `001_baseline.up.sql`，把既有 migration 的 prose 搬过来重组；
+用 pg_dump 输出**作对照物**，不作产物。
+
+**硬门禁（不可协商）**：
+
+```
+库 A：新库 → 跑全部 53 个旧 migration
+库 B：新库 → 只跑 001_baseline
+pg_dump --schema-only 两边 → diff 必须为空
+classifications 两行数据 → 必须逐字段相同
+```
+
+diff 非空就是没做完，不允许「差异可忽略」。
+
+## W4-4 测试怎么处理（区分「断言」与「过渡」）
+
+14 个 `TestMigrationNNN_*` 里，要**分开对待**：
+
+- **断言 schema 事实的**（如「`period_closes` 表存在」「`journal_entries` 有主键」）——
+  事实仍然为真，**改写成对 baseline 的断言，不要删**。删掉等于丢掉 pin。
+- **本质是过渡的**（`m.Migrate(41)` 然后应用 042、非-superuser 在座角色 stranding、
+  down-chain 组合）—— 主题随压平消失，**删除**，并在删除的 commit 信息里说明它证明过什么、
+  为什么不再需要。
+- `migration_files_test.go`（号唯一 + up/down 配对）**保留**，仍然有效。
+- `migration_roundtrip_test.go`（down 链可执行 + 可重新应用）**保留** —— 单 migration 下它
+  变简单但仍然有意义（baseline 的 down 必须真能拆干净）。
+
+## W4-5 文档要跟着改
+
+压平会让若干处文档变成描述一个不存在的机制（本波已提炼的 `phantom-mechanism-comment`）：
+
+- `docs/RUNBOOK.md` §9 的 042/049 cutover 步骤 —— 全新安装不再有这个过程
+- 设计稿 §3 的 expand→migrate→contract 三阶段
+- `INVARIANTS.md` I-22 里引用 042/049 的表述与 `Pinned by`（**注意 pin 引用存在性有机器门禁**）
+- `CLAUDE.md` 的 File Layout 里 migration 相关描述
+- 消费方契约（设计稿 §14）里「049 与 DATABASE_URL 切换同发布」那条 —— 不再适用
+
+**不要留一句描述已废机制的话。**
+
+## W4-6 安装前提（baseline 落在 post-049 的代价）
+
+跑 baseline 的连接必须能 `CREATE ROLE`（superuser 或有 CREATEROLE）。这是一次性的、
+明确的前提，写进 README/RUNBOOK 的安装说明。
+
+理由（Aaron 拍板）：库的默认应该是安全的那一侧。「默认不安全、指望消费方记得再跑一步」
+更糟 —— 这一波已经证明「要人记住的规则会被违反」。
