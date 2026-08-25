@@ -3,7 +3,7 @@
 .next/
 .codegraph/
 examples/fullstack/backend/backend
-.team/
+.team
 
 # Scratch space for measurement reports and local tool state (bench output,
 # gh device id). Never committed -- some of it is credential-adjacent.
