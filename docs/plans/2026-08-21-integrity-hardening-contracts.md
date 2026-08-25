@@ -1,6 +1,11 @@
 # Phase 0 契约层 — 完整性加固 Wave 1（P1–P7）
 
-> 2026-08-21 · Status: CONTRACT（**dev 的唯一 SoT，先于所有实现**）
+> 2026-08-21 · Status: **CLOSED**（2026-08-25 收口）——四波全部交付并合入 main。
+> 本文档由「先于实现的分工契约」转为**历史记录**：它保留了各波的资源分配（migration
+> 号、`.sql` 文件归属、reconcile check 名、hash domain separator）与每一次分配失败的
+> 现场，那是这份文件现在的价值所在。⚠️ 其中的 migration 编号在 Wave 4 的 baseline
+> 压平后已不存在（schema 现由单一 `001_baseline` 定义），编号仅作历史索引；
+> **新工作不要再从本文取分配位**。
 > 设计 SoT：`docs/plans/2026-08-21-tamper-evident-ledger-design.md`（读它拿 WHAT 与理由）
 > 本文只定 **跨任务的契约与资源分配**，不含实现细节。
 > 存在理由：P1–P7 有五个共享写盘点（migration 号、033 函数体、`core/interfaces.go`、

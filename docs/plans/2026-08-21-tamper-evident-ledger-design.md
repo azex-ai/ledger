@@ -1,6 +1,14 @@
 # 防伪造记录与防篡改 — 账本完整性设计
 
-> 2026-08-21 · Status: DESIGN（P0 已实施，见 §0.1；P1–P7 未实施）
+> 2026-08-21 · Status: **IMPLEMENTED**（2026-08-25 收口）
+> P0–P7 全部落地并合入 main，另加两波后续：Wave 2 提现时 verified-balance 闸
+> （`ReserveInput.RequireVerifiedBalance`）、Wave 3 attestation 批量摊销授权判定
+> 与充值复核的职责分离。契约与逐项分工见
+> `docs/plans/2026-08-21-integrity-hardening-contracts.md`；行为契约见
+> `docs/INVARIANTS.md` I-22..I-34（13 条）。
+> 未收口的只剩一项：`ledger_ro` 仍是全库明细 SELECT，§3 想要的聚合视图未做（见 §14 末与 RUNBOOK 待办）。
+> ⚠️ 本稿描述的 migration 编号（042–054）在 2026-08-25 的 baseline 压平中已不存在，
+> schema 现由单一 `001_baseline` 定义；编号在此仅作历史索引。
 > **起因**：把「数据库写凭证已经泄露」当作前提来设计，而不是当作要防的事。
 > 要回答的问题因此不是「怎么防泄露」，而是
 > **「攻击者拿到 DB 写权限后，直接改余额或插入一条伪造的账目记录，账本层面怎么防」**。
