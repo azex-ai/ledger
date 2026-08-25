@@ -436,7 +436,7 @@ misattribute or hide postings. See
 **Pinned by**:
 - `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
   `..._Past_OK`, `..._WithinTolerance_OK`, `..._FarFuture_Rejected`
-- `postgres.TestMigration025_EffectiveAtColumnsExist` (schema pin)
+- `postgres.TestEffectiveAtColumnsExist` (schema pin)
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow`
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_Backdated` (also pins
   entry/journal `effective_at` equality)
@@ -468,7 +468,7 @@ this method) and rejects with `core.ErrPeriodClosed` when
 `effective_at < close_before`.
 
 **Pinned by**:
-- `postgres.TestMigration026_PeriodClosesTableExists` (schema pin)
+- `postgres.TestPeriodClosesTableExists` (schema pin)
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed`
 - `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` (rejects before
   the line, accepts at/after it)
@@ -901,44 +901,23 @@ mutated through controlled paths.
   revoked it since (see "Note on ACL/trigger consistency" above).
 
 **Pinned by**:
-- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
-  first and confirms the single connection has *unrestricted* DDL there
-  (proving the restrictions below are not vacuous), then migrates the rest
-  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
+- `postgres.TestLedgerAppIsLeastPrivilege` — confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
   `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
   journal_entries`/touch `schema_migrations`, while it can still
   `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
-  `journal_entries`.
-- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
-  exactly to 042 through a non-superuser role that owns the database
-  (simulating a managed-Postgres master user) and confirms that role can
-  still write afterward. This is the regression pin for the combined-
-  migration bug described above: it fails with `permission denied for
-  table schema_migrations` against the old (pre-split) combined 042 and
-  passes against the current (pure-expand) 042.
-- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
-  counterpart pin for 049: the same non-superuser role can still write
-  after 042 alone, but loses access to business tables once 049 runs
-  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
-  §9). Also proves 049 itself can apply cleanly under a non-superuser
-  connection -- an earlier revision without its narrow
-  schema-USAGE/schema_migrations re-grants could never successfully apply
-  at all, on any non-superuser connection, regardless of `DATABASE_URL`
-  cutover timing.
-- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — after manually granting `ledger_owner` ownership of `journal_entries`
-  (mirroring what 049 does, scoped to just this one table so the test does
-  not depend on 049's exact implementation), a partition it creates *after*
-  042's grant ran is still writable by `ledger_app` through the parent
-  table name.
-- `postgres.TestMigration042_RoleAttributes` — pins role attributes
+  `journal_entries`. Those last two subtests are what keep the refusals
+  from being vacuous: a role granted nothing at all would also fail every
+  forbidden operation, so the pin only means something because the
+  permitted operations are asserted to succeed in the same run.
+- `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant`
+  — a partition created *after* the
+  role grants were issued is still writable by `ledger_app` through the
+  parent table name. The grants name the parent, and a partition attached
+  later inherits them; nothing has to re-grant per partition.
+- `postgres.TestRoleAttributes` — pins role attributes
   (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
   role holds (`information_schema.role_table_grants`) on an ordinary table,
   `journal_entries`, and `schema_migrations`.
-- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
-  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
-  for 042 and 049 each roll back cleanly and leave the original connection
-  able to operate normally.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants`
   / `postgres.TestGrantCoverage_EverySequenceHasExpectedGrants` — enumerate
   every table/sequence in `public` (not a fixed list) and assert the exact
@@ -1805,63 +1784,6 @@ every consumer of a Merkle root implicitly relies on).
   `insertAttestationWithoutLeafHashes`): a supplied reference still
   narrows `TAMPERED` to the exact entry id; no reference and no
   self-contained data means no entry list, never a fabricated one.
-
----
-
-> Numbering note: I-22 (P1 DB roles) is allocated in the Phase 0 contract
-> (`docs/plans/2026-08-21-integrity-hardening-contracts.md` §5) to a parallel
-> task that has not merged yet, so this document does not yet contain it.
-> Whoever merges P1 inserts I-22 into that slot — the number is a contract,
-> not a reflection of merge order.
-- `postgres/sql/migrations/042_ledger_roles.up.sql` — creates `ledger_owner`
-  / `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
-  `journal_entries`, no DDL of any kind) / `ledger_ro`, and grants each
-  additively. `REVOKE ALL ON SCHEMA public FROM PUBLIC` and the ownership
-  transfer that makes `ledger_owner` DDL-capable are deliberately NOT in
-  this migration (see "Note on scope" above) — they live in
-  `postgres/sql/migrations/049_ledger_roles_ownership_transfer.up.sql`
-  instead, which must ship in the same release as the `DATABASE_URL`
-  cutover (`docs/RUNBOOK.md` §9).
-
-**Pinned by**:
-- `postgres.TestMigration042_LedgerAppIsLeastPrivilege` — migrates to 041
-  first and confirms the single connection has *unrestricted* DDL there
-  (proving the restrictions below are not vacuous), then migrates the rest
-  of the way and confirms `ledger_app` cannot `TRUNCATE`/`DROP TRIGGER`/
-  `ALTER TABLE`/`CREATE TABLE`/`UPDATE journal_entries`/`DELETE FROM
-  journal_entries`/touch `schema_migrations`, while it can still
-  `SELECT`/`INSERT`/`UPDATE` an ordinary table and `SELECT`/`INSERT`
-  `journal_entries`.
-- `postgres.TestMigration042_DoesNotStrandTheMigrationRunner` — migrates
-  exactly to 042 through a non-superuser role that owns the database
-  (simulating a managed-Postgres master user) and confirms that role can
-  still write afterward. This is the regression pin for the combined-
-  migration bug described above: it fails with `permission denied for
-  table schema_migrations` against the old (pre-split) combined 042 and
-  passes against the current (pure-expand) 042.
-- `postgres.TestMigration049_StrandsTheOldConnectionByDesign` — the
-  counterpart pin for 049: the same non-superuser role can still write
-  after 042 alone, but loses access to business tables once 049 runs
-  (`schema_migrations` is deliberately excepted -- see `docs/RUNBOOK.md`
-  §9). Also proves 049 itself can apply cleanly under a non-superuser
-  connection -- an earlier revision without its narrow
-  schema-USAGE/schema_migrations re-grants could never successfully apply
-  at all, on any non-superuser connection, regardless of `DATABASE_URL`
-  cutover timing.
-- `postgres.TestMigration042_LedgerAppInsertsIntoPartitionCreatedAfterGrant`
-  — after manually granting `ledger_owner` ownership of `journal_entries`
-  (mirroring what 049 does, scoped to just this one table so the test does
-  not depend on 049's exact implementation), a partition it creates *after*
-  042's grant ran is still writable by `ledger_app` through the parent
-  table name.
-- `postgres.TestMigration042_RoleAttributes` — pins role attributes
-  (`LOGIN`, not superuser/createdb/createrole) and the exact grant set each
-  role holds (`information_schema.role_table_grants`) on an ordinary table,
-  `journal_entries`, and `schema_migrations`.
-- `postgres.TestMigration042_DownDropsRolesAndRestoresOwnership` /
-  `postgres.TestMigration049_DownRestoresOwnership` — the down migrations
-  for 042 and 049 each roll back cleanly and leave the original connection
-  able to operate normally.
 
 ---
 
