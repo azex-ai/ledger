@@ -235,7 +235,7 @@ func (a *RollupAdapter) sumEntriesSinceWithQueries(ctx context.Context, q *sqlcg
 	maxRow, err := q.GetMaxEntryForAccountCurrencySince(ctx, sqlcgen.GetMaxEntryForAccountCurrencySinceParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
-		ID:            pgtype.Int8{Int64: sinceEntryID, Valid: true},
+		ID:            sinceEntryID,
 	})
 	if err != nil {
 		return nil, nil, 0, time.Time{}, fmt.Errorf("postgres: sum entries since: max entry: %w", err)

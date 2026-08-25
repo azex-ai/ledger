@@ -55,7 +55,7 @@ func (s *AttestationStore) UncoveredEntries(ctx context.Context, limit int32) ([
 	out := make([]core.AttestedEntry, len(rows))
 	for i, r := range rows {
 		out[i] = core.AttestedEntry{
-			EntryID:          r.ID.Int64,
+			EntryID:          r.ID,
 			JournalID:        r.JournalID,
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
@@ -78,7 +78,7 @@ func (s *AttestationStore) EntriesForAttestation(ctx context.Context, seq int64)
 	out := make([]core.AttestedEntry, len(rows))
 	for i, r := range rows {
 		out[i] = core.AttestedEntry{
-			EntryID:          r.ID.Int64,
+			EntryID:          r.ID,
 			JournalID:        r.JournalID,
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,

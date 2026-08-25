@@ -348,13 +348,9 @@ func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries
 		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: originalType}
 		already := alreadyReversed[key]
 		if already.Add(newAmount).GreaterThan(originalAmount) {
-			var entryID int64
-			if e.ID.Valid {
-				entryID = e.ID.Int64
-			}
 			return nil, fmt.Errorf(
 				"postgres: reverse journal fraction: entry %d: cumulative reversed %s + this reversal's %s would exceed original amount %s: %w",
-				entryID, already, newAmount, originalAmount, core.ErrConflict,
+				e.ID, already, newAmount, originalAmount, core.ErrConflict,
 			)
 		}
 

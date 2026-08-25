@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS journal_types CASCADE;
-DROP TABLE IF EXISTS classifications CASCADE;
