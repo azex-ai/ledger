@@ -120,8 +120,15 @@ func anyToDecimal(v any) (decimal.Decimal, error) {
 	case int64:
 		return decimal.NewFromInt(val), nil
 	case float64:
-		slog.Warn("postgres: anyToDecimal: float64 path hit, possible precision loss", "value", val)
-		return decimal.NewFromFloat(val), nil
+		// financial.md: amounts are decimal.Decimal end to end, never
+		// float64. pgx v5 does not return float64 for NUMERIC columns (see
+		// docs/audits/2026-08-25-financial-engineering/lead-financial-spotchecks.md
+		// "抽查 2" -- this branch is unreachable today), but a defensive
+		// branch on an absolute rule must fail loud, not warn-and-continue:
+		// decimal.NewFromFloat silently and irreversibly loses precision
+		// before any caller can react, and every later reconciliation
+		// balances against the wrong number. Reject instead.
+		return decimal.Zero, fmt.Errorf("postgres: convert: refusing float64 amount %v (precision loss, financial.md forbids float64 for money): %w", val, core.ErrPrecisionExceeded)
 	case string:
 		return decimal.NewFromString(val)
 	default:
