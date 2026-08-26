@@ -145,7 +145,145 @@ breaks after a Postgres upgrade. Once a quarter:
 If the drill has not been run in the last quarter, treat the system as
 having **no verified backup** and prioritize accordingly.
 
-## 6. Monitoring the backup pipeline
+### Drill log
+
+**2026-08-26 — first drill ever run against this procedure.** Before this
+date §5's three-step verification had only been read, never executed
+(2026-08-25 financial-engineering audit §6: "restore flow only got static
+review"). Executed in an isolated Docker network (`dr-drill-net`, host ports
+15432–15435), never touching the shared local-dev Postgres on 5432 — see
+`~/.claude/rules/infra.md`. All scratch containers, volumes, and the network
+were torn down afterward; nothing was committed except this record.
+
+Procedure: `postgres:17.2-alpine` primary with `archive_mode=on` and a
+file-based `archive_command` to a bind-mounted directory (stand-in for
+pgBackRest/wal-g's WAL shipping — this repo has no managed-Postgres account
+to test the provider-PITR path against, so this drill exercises the
+self-hosted §2 mechanism, which is the stricter case). Seeded via
+`examples/embed`'s pattern (currency/classification/journal-type bootstrap +
+`PostJournal`) run through a throwaway seed program: 20 journals
+(the "known-good" batch), a `pg_basebackup`, 20 more journals, an explicit
+WAL segment switch to mark the recovery point, then 20 more journals
+representing data to be discarded (a bad batch, modeling the "logical
+corruption" §4 step 2 scenario). Restored into a **new** container from the
+base backup + archived WAL with `recovery_target_time` set to the point
+between the good and bad batches, `recovery_target_action=promote`.
+
+Results:
+
+- **RTO (mechanical restore, this dataset)**: Postgres itself went from
+  `database system was interrupted` to `ready to accept connections` in
+  **~0.45s** (see container log timestamps 15:33:03.925 → 15:33:04.379) —
+  base backup restore + WAL replay + promotion. At 120 journal-entry rows
+  this number does not extrapolate to production scale (`docs/CAPACITY.md`
+  is the place for a sizing-driven RTO estimate); it confirms the mechanism
+  is correct and fast, not a production timing benchmark.
+- **RTO (wall clock, including drill tooling)**: ~110s from "stop writes"
+  to "reconcile --full all green" — dominated by manually building
+  `ledger-cli`, `chown`-ing the copied data directory for the container,
+  and running the verification commands one at a time, not by Postgres.
+- **RPO**: the drill picked its own recovery point (mid-stream, by design)
+  rather than measuring live archive lag against an actual incident.
+  `pg_stat_archiver` on the primary showed `failed_count=0` throughout —
+  this is the metric §6 says to alert on for a production RPO number; the
+  drill validated the *mechanism* reads correctly, not a live-lag figure.
+- **Verification (§5)**: `ledger-cli reconcile --full` — **all 13 runnable
+  checks `passed: true`**, `overall_passed: true`.
+  (`full_coverage: false` only because `unauthorized_journals` needs an
+  `AuthVerifier` this throwaway seed script never wired via
+  `ledger.WithAttestor` — a seed-script gap, not a restore defect.)
+  `ledger-cli solvency --currency <USDT uid>` → `"solvent": true`.
+  `ledger-cli journals --limit 50` → all 40 expected journals present
+  (20 good + 20 good), the 20 "bad" batch correctly absent — PITR cut
+  exactly where intended.
+- **Full logical restore also tested** (the §2 "belt-and-suspenders"
+  `pg_dump`): restoring a `pg_dump -Fc` of the primary into a brand-new
+  instance reproduced `max(id) == journal_entries_id_seq.last_value`
+  exactly (120 == 120) — `pg_dump` emits an explicit `setval()` for the
+  actual sequence state at dump time, so this path is sequence-safe too.
+  One friction point found and worth fixing in this doc later: restoring
+  into a **truly virgin** cluster (one `ledger.Migrate` never touched)
+  throws `GRANT ... role "ledger_app" does not exist` errors during
+  `pg_restore` for every role-scoped GRANT the dump captured — harmless
+  (`pg_restore --no-owner` + role errors are non-fatal, data still lands),
+  but §4 doesn't currently tell the operator to expect it. Not fixed here
+  per this task's scope (docs-only, and this is upstream of the sequence
+  question this drill was chartered to answer).
+
+Tear-down verified: `docker ps` after cleanup showed zero `dr-drill-*`
+containers/networks and `dev-postgres` (shared local-dev instance, port
+5432) unaffected throughout.
+
+### Investigated: does restore ever regress `journal_entries_id_seq` below `max(id)`?
+
+Migration `008_journal_entries_id_sequence_only.up.sql`'s own comment names
+two triggers for the cross-partition duplicate-`id` risk it closes for
+`ledger_app`: an explicit-`id` `INSERT` under a leaked credential, **or**
+"a sequence that regresses after a PITR restore and starts re-issuing ids
+the table has already seen in an older partition." Only the first is
+guarded by 008 (a column-level `GRANT` that blocks `ledger_app` specifically
+from naming `id`). This drill tested the second claim directly, since
+nothing in this repo — not `DR.md` §4, not `reconcile`'s 13 checks — ever
+checks sequence health, so if the claim is true it's a live, unguarded gap.
+
+**Verdict: the claim does not hold for either restore path this repo
+documents or endorses (§2/§4 physical PITR, §2's logical `pg_dump`
+belt-and-suspenders copy). Evidence:**
+
+- After the physical-PITR drill above discarded the 20-journal "bad" batch
+  (which had already consumed sequence values through `nextval()` before
+  being rolled back — ids up to 120), the restored instance's
+  `journal_entries_id_seq.last_value` was **106**, against a restored
+  `max(id)` of **80**. The sequence came back *ahead* of the highest
+  surviving row, not behind it — the opposite of the regression the
+  migration comment describes.
+- This is not a coincidence of this dataset: PostgreSQL WAL-logs a
+  sequence's counter in advance of actual consumption (looking ahead by a
+  fixed block, independent of transaction commit/rollback) specifically so
+  that crash recovery — which is mechanically what PITR replay and replica
+  promotion both are — can never re-issue a value that `nextval()` may
+  already have handed to a caller pre-crash. `nextval()`'s WAL record is
+  always written before the row that consumes its value can be built, let
+  alone committed, so any replay that reaches far enough to show a given
+  row also necessarily replayed that row's `nextval()` log entry first.
+  This is true independent of *how* the WAL is delivered — file-based
+  `archive_command` (this drill), streaming replication + promotion, or a
+  managed provider's PITR — because it's a property of the WAL stream
+  itself, not of the restore tooling.
+- The logical path (`pg_dump`/`pg_restore`) is safe by a different,
+  simpler mechanism: `pg_dump` captures the sequence's actual `last_value`
+  at dump time via an explicit `setval()` call in the dump, and restoring
+  it reproduced `max(id) == last_value` exactly (120 == 120, see above).
+
+**What this drill did not settle**: a restore that mixes old row data
+(explicit `id`s) into an *already-diverged, already-running* live
+database — as opposed to restoring into a brand-new instance per §4 step 3
+— was attempted and abandoned rather than forced. `journal_entries` is
+partitioned (composite PK is partition-local, the exact gap 008 closes for
+`ledger_app`) but the `journals` table it references is not (single-column
+PK, global), so a naive partial restore hits a `journals` PK conflict
+before the `journal_entries` duplicate-id question is even reachable —
+producing either an outright error or FK-satisfied-but-semantically-wrong
+data, not the clean silent duplicate the migration comment describes.
+Reproducing the exact scenario cleanly would require hand-crafting an
+explicit-`id` `INSERT` under an elevated role (`ledger_owner`/superuser,
+which 008 does not restrict) rather than replaying an actual backup —
+which is the ad hoc "just restore the affected rows" shortcut §4 step 2
+already tells operators to avoid for logical errors, for an unrelated
+reason (PITR discards everything after the point, not just bad rows). That
+makes it an **operator-access-control** question (should `ledger_owner`
+itself be reachable for ad hoc writes outside a migration?), not a
+**restore-procedure** question, so it is out of this drill's scope; noted
+here rather than pursued further to avoid manufacturing a scenario no real
+restore path produces.
+
+**Recommendation**: migration 008's comment should be corrected — the
+"sequence that regresses after a PITR restore" clause is not supported by
+evidence and overstates 008's own justification (the `ledger_app`
+explicit-`id` fix stands on its own merits without it). No code or
+`reconcile` check changes are proposed here: there is no verified failure
+mode for either checks or restore steps to guard against. Left to Team Lead
+per this task's instructions to report before touching code.
 
 Alert on these (wire into the same alerting as the RUNBOOK scenarios):
 
