@@ -112,11 +112,94 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// account_holder its own value so RETURNING yields the existing row. The
 	// row never changes, so the guard passes it, but the statement is still
 	// an UPDATE and still needs the grant.
+	//
+	// account_policy_changes / reservation_settlement_legs /
+	// reservation_operation_receipts / booking_transition_receipts /
+	// reconcile_scan_cursor_changes / config_table_changes are NOT listed
+	// here even though migration 006 revoked UPDATE on all six: each carries
+	// a `ledger_block_mutation()` guard, so queryAppendOnlyGuardedTables
+	// already classifies them append-only and this map would be redundant --
+	// see migration 006's header for why they have no legitimate UPDATE.
 	updateRevoked := map[string]bool{"entry_template_lines": true}
+
+	// webhook_subscribers is column-scoped for ledger_ro as of migration
+	// 007: it holds every outbound webhook's HMAC secret
+	// (webhook_subscribers.secret), which a blanket SELECT ON ALL TABLES
+	// handed to a read-only BI credential along with everything else. It
+	// keeps table-level SELECT/INSERT/UPDATE for ledger_app (nothing about
+	// the app's own access changed) but ledger_ro's grant is now
+	// column-level, which information_schema.role_table_grants does not
+	// report at all -- asserting plain "SELECT" against it here would read
+	// as "no access", which is wrong; the real assertion is in
+	// TestLedgerRoCannotReadWebhookSecret (roles_test.go) and in the
+	// column-level check below.
+	roColumnScoped := map[string]bool{"webhook_subscribers": true}
+
+	// ####  threat-model.md Major: "no gate can discover a missing guard"  ####
+	//
+	// Before this, any table not in appendOnly/updateRevoked silently fell
+	// into the `else` branch and got full SELECT/INSERT/UPDATE -- the exact
+	// fail-open default the finding describes ("没有 trigger 一律读成『可
+	// UPDATE 是意图』"). That default is what let seven tables (bookings,
+	// events, account_policies, account_policy_changes and three
+	// idempotency-receipt tables) keep a UPDATE grant nobody had reviewed.
+	// Migration 006 closed those seven specifically; this closes the shape of
+	// the gap, not just today's instances of it: reviewed is now an explicit
+	// allowlist of every OTHER table this test enumerates, and any table
+	// this loop finds that is in none of appendOnly/updateRevoked/reviewed
+	// fails loudly instead of defaulting to "ordinary". A future migration
+	// that adds an eighth ungated table now has to earn its way into this
+	// list -- or this test goes red on the PR that adds it, not years later
+	// in an audit.
+	//
+	// "reviewed" does not mean "guarded" -- most of these are guarded by a
+	// column-whitelist or dimension-key trigger (currencies, journal_types,
+	// entry_templates, deposit_addresses, classifications, reservations,
+	// journals, account_policies, bookings, events all are; see 003, 045 and
+	// 006), which this test cannot see because that guard is enforced by
+	// trigger logic, not by the ACL -- their ACL shape genuinely is ordinary
+	// SELECT/INSERT/UPDATE, and mutation_guards_test.go / roles_test.go pin
+	// the trigger behavior directly. The rest (balance_checkpoints,
+	// balance_snapshots, chain_cursors, deposits/withdrawals (history,
+	// nothing reads or writes them), ingest_dead_letters,
+	// reconcile_scan_cursors (mutable by design -- see
+	// TestReconcileScanCursorChangesAudited), registration_rescans,
+	// rollup_queue, system_rollups, webhook_nonces, webhook_subscribers)
+	// have no guard at all and this is the record of that having been a
+	// conscious call, not an oversight.
+	reviewed := map[string]bool{
+		"account_policies":       true,
+		"balance_checkpoints":    true,
+		"balance_snapshots":      true,
+		"bookings":               true,
+		"chain_cursors":          true,
+		"classifications":        true,
+		"currencies":             true,
+		"deposit_addresses":      true,
+		"deposits":               true,
+		"entry_templates":        true,
+		"events":                 true,
+		"ingest_dead_letters":    true,
+		"journal_types":          true,
+		"journals":               true,
+		"reconcile_scan_cursors": true,
+		"registration_rescans":   true,
+		"reservations":           true,
+		"rollup_queue":           true,
+		"system_rollups":         true,
+		"webhook_nonces":         true,
+		"webhook_subscribers":    true,
+		"withdrawals":            true,
+	}
 
 	for _, table := range tables {
 		table := table
 		t.Run(table, func(t *testing.T) {
+			if !appendOnly[table] && !updateRevoked[table] && !reviewed[table] {
+				t.Fatalf("table %q is not classified in grant_coverage_test.go (append-only / update-revoked / reviewed-ordinary) -- "+
+					"a new table defaults to nothing, not to full access; decide its mutation policy and add it to one of the three sets", table)
+			}
+
 			wantApp := []string{"SELECT", "INSERT", "UPDATE"}
 			if appendOnly[table] {
 				wantApp = []string{"SELECT", "INSERT"}
@@ -128,9 +211,46 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 				wantApp = append(wantApp, "DELETE")
 			}
 			assertGrants(t, pool, "ledger_app", table, wantApp)
+
+			if roColumnScoped[table] {
+				assertGrants(t, pool, "ledger_ro", table, nil)
+				assertColumnPrivilegeExists(t, pool, "ledger_ro", table, "name")
+				assertColumnPrivilegeAbsent(t, pool, "ledger_ro", table, "secret")
+				return
+			}
 			assertGrants(t, pool, "ledger_ro", table, []string{"SELECT"})
 		})
 	}
+}
+
+// assertColumnPrivilegeExists confirms grantee holds a column-level SELECT
+// on the named column -- the counterpart check for tables in roColumnScoped,
+// which have no table-level grant for information_schema.role_table_grants
+// to report.
+func assertColumnPrivilegeExists(t *testing.T, pool *pgxpool.Pool, grantee, table, column string) {
+	t.Helper()
+	ctx := context.Background()
+	var privilege string
+	err := pool.QueryRow(ctx, `
+		SELECT privilege_type FROM information_schema.column_privileges
+		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3
+	`, grantee, table, column).Scan(&privilege)
+	require.NoError(t, err, "%s must hold a column-level grant on %s.%s", grantee, table, column)
+	assert.Equal(t, "SELECT", privilege)
+}
+
+// assertColumnPrivilegeAbsent is assertColumnPrivilegeExists' negative --
+// confirms grantee holds no privilege at all on the named column.
+func assertColumnPrivilegeAbsent(t *testing.T, pool *pgxpool.Pool, grantee, table, column string) {
+	t.Helper()
+	ctx := context.Background()
+	rows, err := pool.Query(ctx, `
+		SELECT privilege_type FROM information_schema.column_privileges
+		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3
+	`, grantee, table, column)
+	require.NoError(t, err)
+	defer rows.Close()
+	assert.False(t, rows.Next(), "%s must hold no privilege on %s.%s", grantee, table, column)
 }
 
 // queryAppendOnlyGuardedTables returns the set of `public` tables carrying

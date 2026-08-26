@@ -1212,6 +1212,37 @@ docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
   `active`.
 - `period_closes` is now actually append-only (previously documented as such
   but unenforced) — no `UPDATE`, no `DELETE`.
+- `account_policies.status`/`.min_balance`/`.enforce_min_balance`/`.note`/
+  `.updated_at` are the only columns `UPSERT AccountPolicy` may change;
+  `account_holder`/`currency_id`/`classification_id` (the policy's identifying
+  dimension) are immutable. `account_policies` is the only DB-enforced
+  freeze/overdraft floor (`postgres/account_policy_enforce.go`), so widening
+  its dimension in the same statement that flips `status` to `active` is the
+  same class of attack as `balance_role`'s promotion above.
+- `account_policy_changes` — its own audit trail — is append-only: no
+  `UPDATE`, no `DELETE`.
+- `bookings.journal_id` is set-once (`NULL -> non-NULL` only), matching the
+  "at most one journal-bearing transition" rule `CLAUDE.md` already
+  documents but which no trigger enforced before migration 006.
+  `account_holder`/`currency_id`/`classification_id`/`amount`/
+  `channel_name`/`reservation_id`/`idempotency_key`/`expires_at`/
+  `created_at`/`uid` are immutable; `status`/`channel_ref`/`settled_amount`/
+  `metadata`/`updated_at` are `UpdateBookingTransition`'s actual mutable set,
+  and `settled_amount` may only increase (same reasoning as
+  `reservations.settled_amount`).
+- `events.journal_id` is set-once; `account_holder`/`currency_id`/
+  `classification_code`/`from_status`/`to_status`/`amount`/`settled_amount`/
+  `booking_id`/`metadata`/`occurred_at`/`actor_id`/`source`/`uid` — the
+  record of what happened — are immutable. `delivery_status`/`attempts`/
+  `next_attempt_at`/`delivered_at` (the outbound delivery queue's own state)
+  remain mutable.
+- `reservation_settlement_legs`, `reservation_operation_receipts` and
+  `booking_transition_receipts` — the three idempotency-receipt tables — are
+  append-only: no `UPDATE`, no `DELETE`. Forging or rewriting a receipt lets
+  an attacker short-circuit the matching Settle/Release/FinalizeSettlement/
+  Transition call for that idempotency key: the operation reports success
+  without re-applying, while whatever it was supposed to close (a
+  reservation, a booking transition) stays open.
 - `journals.event_id` is set-once (`NULL -> non-NULL` only) and now carries
   the FK to `events(id)` it never had. Before this, the column wasn't even in
   the anti-tamper guard's comparison list — 033's and 018's trigger comments
@@ -1235,37 +1266,87 @@ single journal row to change a holder's effective balance — flipping
 `balance_role` reclassifies `locked` funds as `available`; enlarging
 `reserved_amount` or fabricating a `reservations` row changes availability
 with zero accounting trail; rewriting `journals.event_id` breaks posting
-provenance without touching any protected journal column.
+provenance without touching any protected journal column; repointing
+`bookings.journal_id`/`deposit_addresses.account_holder` or a template's
+`entry_template_lines` row changes what a *future*, correctly-signed journal
+says without touching the signature mechanism at all — the attestation chain
+authenticates what the application read, not what actually happened, so a
+credential that can rewrite the inputs to a signature doesn't need to forge
+the signature itself.
+
+⚠️ **26-08-26 correction**: the original enforcement below was itself
+fail-open by construction, not just incomplete. `001_baseline` section 14
+derives `ledger_app`'s grants from each table's own trigger — a table
+carrying a `ledger_block_mutation()` `BEFORE UPDATE` trigger gets
+`SELECT`/`INSERT` only, *every other table* gets `SELECT`/`INSERT`/`UPDATE`.
+That default runs the other direction from every other guard in this file:
+absence of a trigger reads as "this table may be freely mutated", not as
+"nobody has decided yet". Seven tables were in that state and every one of
+them decides where money goes or whether tampering can be seen:
+`account_policies`, `account_policy_changes`, `bookings`, `events`,
+`reservation_settlement_legs`, `reservation_operation_receipts`,
+`booking_transition_receipts`. Every `UPDATE` migration 006 now refuses was
+run against a real database as `ledger_app`, before migration 006 existed,
+and every one succeeded — see its header for the specific statements.
+`postgres/grant_coverage_test.go`'s coverage test made this worse rather
+than catching it: it re-derives the append-only set from the *same*
+`pg_trigger`/`pg_proc` predicate the migration uses, so it could only ever
+confirm the migration's grants matched the migration's own trigger scan,
+never that the trigger scan itself was the right test to run. Migration 006
+closes the seven instances; `grant_coverage_test.go` closes the shape of the
+gap by requiring every table in `public` to be explicitly classified
+(append-only / update-revoked / reviewed-ordinary) — a table in none of the
+three now fails the test loudly instead of defaulting to full access.
 
 **Enforced by**:
 - `ledger_classifications_guard()` / `classifications_mutation_guard`
-  trigger (`postgres/sql/migrations/045_mutation_guards.up.sql`).
+  trigger (`postgres/sql/migrations/001_baseline.up.sql`, tightened by
+  `003_config_table_guards.up.sql`).
 - `ledger_reservations_guard()` / `reservations_mutation_guard` trigger
-  (same migration).
+  (`001_baseline.up.sql`).
 - `period_closes_no_update` / `period_closes_no_delete` triggers, reusing
-  `ledger_block_mutation()` from 018 (same migration).
-- `ledger_journals_block_arbitrary_update()` (033's per-migration column
-  list replaced by 045 with a generic `to_jsonb` comparison against a
-  mutable-column whitelist, per
-  `docs/plans/2026-08-21-integrity-hardening-contracts.md` §2; `event_id`'s
+  `ledger_block_mutation()` (`001_baseline.up.sql`).
+- `ledger_journals_block_arbitrary_update()` — a generic `to_jsonb`
+  comparison against a mutable-column whitelist (`event_id`'s
   `NULL -> non-NULL` set-once check lives in the function body, not a
-  trigger `WHEN` clause) + `journals_event_id_fkey` FK.
+  trigger `WHEN` clause) + `journals_event_id_fkey` FK
+  (`001_baseline.up.sql`).
+- `ledger_account_policies_guard()` / `account_policies_mutation_guard`,
+  `ledger_bookings_guard()` / `bookings_mutation_guard`,
+  `ledger_events_guard()` / `events_mutation_guard` — the same
+  whitelist-comparison shape, added by
+  `006_threat_model_guard_coverage.up.sql`.
+- `account_policy_changes_no_update`/`_no_delete`,
+  `reservation_settlement_legs_no_update`/`_no_delete`,
+  `reservation_operation_receipts_no_update`/`_no_delete`,
+  `booking_transition_receipts_no_update`/`_no_delete` — blanket
+  `ledger_block_mutation()` refusal plus `REVOKE UPDATE`, matching
+  `entry_template_lines`' 003 treatment (`006_threat_model_guard_coverage.up.sql`).
 - Depends on P1 (the `ledger_app`/`ledger_owner` role separation, I-22):
   without role separation, the same credential that would abuse these
   columns can `DROP TRIGGER` the guard itself.
 
-**Pinned by** (`postgres/mutation_guards_test.go`, each verified to fail —
-i.e. the tamper attempt would have succeeded — with its specific guard
-trigger/function manually removed before this migration existed):
-- `TestClassificationsGuard_NormalSideImmutable`
-- `TestClassificationsGuard_BalanceRoleOnlyUpgradesFromEmpty`
-- `TestReservationsGuard_DimensionColumnsImmutable`
-- `TestReservationsGuard_SettledAmountMustNotDecrease`
-- `TestReservationsGuard_JournalIDSetOnce`
-- `TestReservationsGuard_StatusWhitelist`
-- `TestPeriodClosesGuard_NoUpdateNoDelete`
-- `TestJournalsGuard_EventIDSetOnce`
-- `TestJournalsGuard_FutureColumnsProtectedByDefault`
+**Pinned by**:
+- `postgres/mutation_guards_test.go` (classifications / reservations /
+  period_closes / journals, pre-dating migration 006):
+  - `TestClassificationsGuard_NormalSideImmutable`
+  - `TestClassificationsGuard_BalanceRoleOnlyUpgradesFromEmpty`
+  - `TestReservationsGuard_DimensionColumnsImmutable`
+  - `TestReservationsGuard_SettledAmountMustNotDecrease`
+  - `TestReservationsGuard_JournalIDSetOnce`
+  - `TestReservationsGuard_StatusWhitelist`
+  - `TestPeriodClosesGuard_NoUpdateNoDelete`
+  - `TestJournalsGuard_EventIDSetOnce`
+  - `TestJournalsGuard_FutureColumnsProtectedByDefault`
+- `postgres/roles_test.go` (the seven tables migration 006 added, each pin
+  runs the attack statement as `ledger_app` and requires it to fail):
+  - `TestAccountPoliciesGuard`
+  - `TestBookingsAndEventsGuards`
+  - `TestIdempotencyReceiptTablesAreAppendOnly`
+- `postgres/grant_coverage_test.go`'s
+  `TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants` now
+  fails on any table absent from its append-only/update-revoked/reviewed
+  classification, which is the structural half of this fix.
 
 ---
 
@@ -2225,6 +2306,154 @@ consumer that never calls `Run()` must not skip the check).
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+
+---
+
+## I-38: Partition maintenance never requires the serving credential to hold DDL or table ownership
+
+(`docs/audits/2026-08-25-financial-engineering/threat-model.md`, "分区维护路径要求应用持有 owner 权限"; `docs/plans/2026-08-26-audit-remediation-contracts.md` §4 item 2.)
+
+**Rule**: `postgres/partition_store.go` creates monthly partitions and
+rebalances the default partition by calling two `SECURITY DEFINER`
+functions — `ledger_create_monthly_partition` and
+`ledger_rebalance_default_partition` — rather than issuing
+`CREATE TABLE ... PARTITION OF` / `ALTER TABLE ... DETACH/ATTACH PARTITION` /
+`TRUNCATE` directly. Both functions are owned by `ledger_owner` and run with
+its privileges regardless of the caller, so `ledger_app`'s grant is `EXECUTE`
+on exactly these two functions — nothing that looks like DDL.
+
+**Why**: all four statements the old direct-DDL version issued are
+owner-gated; `ledger_app` holds none of them (confirmed: `CREATE TABLE
+... PARTITION OF` → `permission denied for schema public`, `DETACH
+PARTITION` → `must be owner of table`, `TRUNCATE` → `permission denied`, run
+against a real database before migration 007). The only way the previous
+`PartitionStore` could ever have worked in a deployment that actually
+enforces P1 role separation was a serving pool connected as `ledger_owner`
+— and that pool's `TRUNCATE journal_entries_default` walks straight past
+`journal_entries`' no-DELETE trigger: `TRUNCATE` does not fire row-level
+triggers at all, confirmed by inserting two real, balanced journal entries
+into the default partition, connecting as `ledger_owner`, and watching
+`TRUNCATE` silently remove both with no trigger firing. `journal_entries`'
+append-only guarantee (I-2) is only as strong as the weakest way to bypass
+it, and giving the app pool ownership to make partitioning work was that
+weakest way. `SECURITY DEFINER` closes both problems in one move: the
+serving pool never needs elevation, and the only owner-privileged code path
+reachable from `ledger_app` is one that always copies rows into their
+permanent partition inside the same statement before truncating what is now
+guaranteed to be an exact duplicate — the same move-then-truncate order the
+Go code always used, now the only path available rather than a convention a
+caller happens to follow.
+
+**Enforced by**: `ledger_create_monthly_partition` / `ledger_rebalance_default_partition`
+(`postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql`,
+both `SECURITY DEFINER` with `SET search_path = public` to remove
+schema-shadowing as a privilege-escalation vector); `GRANT EXECUTE ... TO
+ledger_app` on both, and nothing else; `postgres/partition_store.go` calling
+only these two functions, never raw DDL. `ledger_create_monthly_partition`
+additionally validates its name argument against
+`^journal_entries_y[0-9]{4}m[0-9]{2}$` before using it in `format(%I)`,
+since `EXECUTE` on the function is itself a `ledger_app`-reachable
+capability and must not accept an arbitrary identifier.
+
+**Pinned by**:
+- `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` — rewritten
+  for this migration: it now uses a single `ledger_app` pool for both
+  creating the partition and inserting into it (previously required a
+  separate `ledger_owner` pool `PartitionStore` in production has no way to
+  construct — a green result there proved nothing about what `ledgerd`
+  could actually do).
+- `postgres.TestPartitionMaintenanceRejectsUnshapedPartitionNames` — the
+  name-shape validation, including a statement-terminator injection
+  attempt.
+- `postgres.TestLedgerAppIsLeastPrivilege` (unchanged) still pins that
+  `ledger_app` cannot `TRUNCATE`/`ALTER TABLE`/`CREATE TABLE` directly —
+  this invariant is about the one narrow path around that, not a
+  relaxation of it.
+
+---
+
+## I-39: A read-only role's grant never exposes a write-path secret, and a legitimate change to a config table's guarded columns is never invisible
+
+(`docs/audits/2026-08-25-financial-engineering/threat-model.md`, "`ledger_ro`
+能读出站 webhook HMAC 密钥"; `docs/audits/.../TODO.md` §9 "共同盲区".)
+
+**Rule** (two properties under one invariant — both are about what a
+narrowly-scoped, otherwise-legitimate grant can quietly do):
+
+1. `ledger_ro` holds a column-level `SELECT` on `webhook_subscribers`
+   covering every column except `secret` — the HMAC key each outbound event
+   delivery signs with (`service/delivery/webhook.go`). It has no
+   table-level grant on `webhook_subscribers` at all; `SELECT *` and
+   `SELECT secret` both fail.
+2. `currencies`/`classifications`/`journal_types`/`entry_templates` (the
+   config tables I-25 guards) get an `AFTER UPDATE` trigger that logs every
+   *committed* change — old row, new row, `current_user`, timestamp — to
+   `config_table_changes`. `reconcile_scan_cursors` (outside I-25's scope
+   since it does not participate in balance computation, but still
+   decides whether the checkpoint-drift detector scans anything) gets the
+   same treatment via `reconcile_scan_cursor_changes`. Both audit tables are
+   themselves append-only.
+
+**Why**: (1) — a blanket `GRANT SELECT ON ALL TABLES IN SCHEMA public TO
+ledger_ro` was written under the framing "broader than ideal, but only a
+confidentiality concern" (design docs' non-goal 1). Reading
+`webhook_subscribers.secret` is not that: it is the key `ledger_ro`'s own
+holder uses to authenticate every event this ledger sends outbound, so a
+read-only credential that can read it can forge signed deliveries to any
+subscriber — an integrity capability smuggled through a confidentiality
+grant, confirmed by connecting as `ledger_ro` and selecting `url, secret`
+straight off the table before this migration.
+
+(2) — I-25's guards (003's whitelist, 006's additions) stop illegitimate
+writes to these tables, but a legitimate one the guard allows — an
+`is_active` toggle, a `display_label` edit, the `''  -> available`
+`balance_role` upgrade — previously left no record of who changed it or
+when. "看不出改过" per the audit's §9: C2 (I-25) *prevents* the attack the
+threat model describes; it does not make an attempt to try it, successful
+or not, visible after the fact for the writes it does allow through.
+`current_user` is always `ledger_app` in every deployment — that is
+precisely the credential this whole guard system defends against — so this
+does not attribute a change to a business actor; it answers "this row
+changed from A to B at time T", which is what was missing. A rejected write
+(the guard raises, the statement never commits) still leaves nothing behind
+in `config_table_changes` — the `AFTER` trigger never runs on a rolled-back
+transaction — which is a residual gap this invariant does not close, only
+names: a rejected attack attempt and a normal day still look identical from
+inside the database, only successful narrow mutations are now attributable.
+
+**Enforced by**: `REVOKE SELECT ON public.webhook_subscribers FROM
+ledger_ro` + column-level `GRANT SELECT (...) ... TO ledger_ro` naming every
+column except `secret`
+(`postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql`).
+`ledger_log_config_table_change()` / `currencies_audit` /
+`classifications_audit` / `journal_types_audit` / `entry_templates_audit`
+(`WHEN (to_jsonb(OLD) IS DISTINCT FROM to_jsonb(NEW))` so a true no-op
+UPDATE — e.g. `deposit_addresses`' idempotent re-registration upsert
+pattern, were it applied to one of these tables — is not logged);
+`ledger_log_reconcile_scan_cursor_change()` / `reconcile_scan_cursors_audit`
+(same `WHEN` shape); `config_table_changes` and
+`reconcile_scan_cursor_changes` both carry `ledger_block_mutation()` on
+`UPDATE`/`DELETE`, so the audit trail cannot itself be edited or erased by
+the same credential whose writes it records
+(`postgres/sql/migrations/006_threat_model_guard_coverage.up.sql`).
+
+**Pinned by**:
+- `postgres.TestLedgerRoCannotReadWebhookSecret` — direct `secret` select,
+  `SELECT *`, and every other column, all against a real `ledger_ro`
+  connection.
+- `postgres.TestConfigTableChangesAudited` — a legitimate `is_active`
+  toggle produces exactly one audit row with the right before/after values
+  and `changed_by = 'ledger_app'`; a rejected `exponent` change (003's
+  guard) produces none; the audit table itself refuses `UPDATE`/`DELETE`.
+- `postgres.TestReconcileScanCursorChangesAudited` — the exact §4-3 attack
+  (parking the cursor at `INT64_MAX` with `lap_dirty = false` to fake a
+  fully-scanned lap) is confirmed to still succeed at the DB layer (this
+  invariant does not claim to block it — `SetScanCursor` legitimately writes
+  arbitrary values, so a whitelist guard cannot distinguish the attack from
+  a legitimate lap reset) while producing an audit row that shows exactly
+  what changed; refusing to trust a zero-row scan as `Complete=true` is
+  `service/reconcile.go`'s half of this seam, not this invariant's.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.
