@@ -120,7 +120,17 @@ WITH page_journals AS (
 SELECT
     j.id   AS journal_id,
     j.uid  AS journal_uid,
-    jt.code AS kind,
+    -- kind is journal_types.uid, not journal_types.code: the code is an
+    -- internal accounting-engine identifier an operator names when
+    -- configuring their own journal types (e.g. "deposit_confirm",
+    -- "dev_credit") -- it narrates *how the ledger produced the balance*,
+    -- which the holder-facing surface must not do
+    -- (~/.claude/rules/user-facing-surfaces.md; the same principle
+    -- presets/devcredit.go documents for kind_label's DisplayLabel choice).
+    -- The uid is an equally stable per-deployment key a product can map to
+    -- its own icon/i18n label, but is opaque -- it encodes nothing about the
+    -- engine's internal taxonomy.
+    jt.uid::text AS kind,
     CASE
         WHEN COUNT(DISTINCT c.id) = 1 AND MAX(c.display_label) <> '' THEN MAX(c.display_label)
         WHEN jt.display_label <> '' THEN jt.display_label

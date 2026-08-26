@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -95,6 +96,11 @@ type Server struct {
 	// holder is the optional holder wallet surface (SetHolderSurface); nil
 	// keeps every /holder* route answering 404.
 	holder *holderSurface
+
+	// protectedTemplateCodes is Config.ProtectedTemplateCodes, indexed for
+	// O(1) lookup by handlePostTemplate. Empty (the default) protects
+	// nothing -- see that field's doc comment.
+	protectedTemplateCodes map[string]bool
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
@@ -126,6 +132,26 @@ type Config struct {
 	// deployment can enable it by config accident. The accounting side is
 	// presets.DevCreditBundle, which must be installed separately.
 	DevCreditEnabled bool
+	// ProtectedTemplateCodes (PROTECTED_TEMPLATE_CODES, comma-separated)
+	// lists entry-template codes that POST /journals/template refuses (403)
+	// no matter how the caller got a write-scope key — structure.md's
+	// finding: unlike POST /dev/credits (which is hardcoded to one narrow
+	// template and gated behind DevCreditEnabled), the generic template
+	// endpoint has no allowlist at all, so a write-scope key can post a
+	// journal indistinguishable from a real verified deposit by naming its
+	// template code directly (e.g. presets' "deposit_confirm",
+	// "deposit_confirm_pending", "deposit_release_pending",
+	// "deposit_record_overage" — every template a deployment's own
+	// verified-deposit orchestration posts via PostAuthorized, never over
+	// this endpoint).
+	//
+	// Empty by default (unchanged behavior: this library does not know which
+	// of a deployment's own template codes are meant to be system-only —
+	// that classification is the deployment's, made once here, mirroring
+	// core.ReserveInput.RequireVerifiedBalance's "mechanism in the library,
+	// policy in the consumer" split). A production deployment that installs
+	// any deposit-confirmation preset SHOULD set this to those codes.
+	ProtectedTemplateCodes []string
 }
 
 // Validate rejects configurations that would expose a production server or
@@ -200,14 +226,24 @@ func LoadConfig() (*Config, error) {
 
 	devCredit := os.Getenv("DEV_CREDIT_ENABLED") == "true"
 
+	var protectedTemplateCodes []string
+	if v := os.Getenv("PROTECTED_TEMPLATE_CODES"); v != "" {
+		for _, code := range strings.Split(v, ",") {
+			if code = strings.TrimSpace(code); code != "" {
+				protectedTemplateCodes = append(protectedTemplateCodes, code)
+			}
+		}
+	}
+
 	cfg := &Config{
-		Env:               env,
-		CORSAllowOrigin:   corsOrigin,
-		APIKeys:           keys,
-		MaxBodyBytes:      maxBytes,
-		TrustedProxyCIDRs: trustedCIDRs,
-		HolderTokenSecret: holderSecret,
-		DevCreditEnabled:  devCredit,
+		Env:                    env,
+		CORSAllowOrigin:        corsOrigin,
+		APIKeys:                keys,
+		MaxBodyBytes:           maxBytes,
+		TrustedProxyCIDRs:      trustedCIDRs,
+		HolderTokenSecret:      holderSecret,
+		DevCreditEnabled:       devCredit,
+		ProtectedTemplateCodes: protectedTemplateCodes,
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -280,37 +316,122 @@ func NewWithConfig(
 	periodCloser core.PeriodCloser,
 	trialBalance core.TrialBalanceReader,
 ) *Server {
+	deps := Deps{
+		Journals:         journals,
+		Balances:         balances,
+		Reserver:         reserver,
+		Booker:           booker,
+		BookingReader:    bookingReader,
+		EventReader:      eventReader,
+		Classifications:  classifications,
+		JournalTypes:     journalTypes,
+		Templates:        templates,
+		Currencies:       currencies,
+		Channels:         channels,
+		Reconciler:       reconciler,
+		Snapshotter:      snapshotter,
+		SystemRollup:     systemRollup,
+		Queries:          queries,
+		Audit:            audit,
+		PlatformBalances: platformBalances,
+		Solvency:         solvency,
+		BalanceTrends:    balanceTrends,
+		FullReconciler:   fullReconciler,
+		AccountPolicies:  accountPolicies,
+		PeriodCloser:     periodCloser,
+		TrialBalance:     trialBalance,
+	}
 	if err := cfg.Validate(); err != nil {
 		panic(fmt.Sprintf("server: invalid config: %v", err))
 	}
+	return newServer(cfg, deps)
+}
+
+// Deps bundles every dependency NewWithConfig/New take as positional
+// parameters. Prefer NewFromDeps(cfg, deps) for new composition roots:
+// twenty-three same-shaped interface parameters in a fixed positional order
+// (New/NewWithConfig, unchanged for backward compatibility) has no compiler
+// help catching an accidental transposition -- interfaces don't carry field
+// names, so two swapped arguments of matching interface shape compile clean
+// and fail at runtime instead (structure.md's Minor).
+type Deps struct {
+	Journals         core.JournalWriter
+	Balances         core.BalanceReader
+	Reserver         core.Reserver
+	Booker           core.Booker
+	BookingReader    core.BookingReader
+	EventReader      core.EventReader
+	Classifications  core.ClassificationStore
+	JournalTypes     core.JournalTypeStore
+	Templates        core.TemplateStore
+	Currencies       core.CurrencyStore
+	Channels         map[string]channel.Adapter
+	Reconciler       core.Reconciler
+	Snapshotter      core.Snapshotter
+	SystemRollup     *service.SystemRollupService
+	Queries          core.QueryProvider
+	Audit            core.AuditQuerier
+	PlatformBalances core.PlatformBalanceReader
+	Solvency         core.SolvencyChecker
+	BalanceTrends    core.BalanceTrendReader
+	FullReconciler   core.FullReconciler
+	AccountPolicies  core.AccountPolicyStore
+	PeriodCloser     core.PeriodCloser
+	TrialBalance     core.TrialBalanceReader
+}
+
+// NewFromDeps is NewWithConfig taking a Deps struct instead of twenty-three
+// positional parameters, and returning an error instead of panicking on an
+// invalid config -- the caller decides how to fail (os.Exit, log.Fatal,
+// propagate up its own composition root), rather than every composition
+// root needing its own recover() to turn NewWithConfig's panic into a
+// graceful exit.
+func NewFromDeps(cfg *Config, deps Deps) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("server: invalid config: %w", err)
+	}
+	return newServer(cfg, deps), nil
+}
+
+// newServer is the shared builder behind NewWithConfig and NewFromDeps.
+// Callers must validate cfg first.
+func newServer(cfg *Config, deps Deps) *Server {
+	var protectedTemplateCodes map[string]bool
+	if len(cfg.ProtectedTemplateCodes) > 0 {
+		protectedTemplateCodes = make(map[string]bool, len(cfg.ProtectedTemplateCodes))
+		for _, code := range cfg.ProtectedTemplateCodes {
+			protectedTemplateCodes[code] = true
+		}
+	}
 	s := &Server{
-		journals:         journals,
-		balances:         balances,
-		reserver:         reserver,
-		booker:           booker,
-		bookingReader:    bookingReader,
-		eventReader:      eventReader,
-		classifications:  classifications,
-		journalTypes:     journalTypes,
-		templates:        templates,
-		currencies:       currencies,
-		accountPolicies:  accountPolicies,
-		channels:         channels,
-		audit:            audit,
-		platformBalances: platformBalances,
-		solvency:         solvency,
-		balanceTrends:    balanceTrends,
-		periodCloser:     periodCloser,
-		trialBalance:     trialBalance,
-		reconciler:       reconciler,
-		fullReconciler:   fullReconciler,
-		snapshotter:      snapshotter,
-		systemRollup:     systemRollup,
-		queries:          queries,
-		ready:            &atomic.Bool{},
-		rateLimiter:      newRateLimiter(defaultRateLimiterConfig()),
-		authEnabled:      len(cfg.APIKeys) > 0,
-		devCreditEnabled: cfg.DevCreditEnabled,
+		journals:               deps.Journals,
+		balances:               deps.Balances,
+		reserver:               deps.Reserver,
+		booker:                 deps.Booker,
+		bookingReader:          deps.BookingReader,
+		eventReader:            deps.EventReader,
+		classifications:        deps.Classifications,
+		journalTypes:           deps.JournalTypes,
+		templates:              deps.Templates,
+		currencies:             deps.Currencies,
+		accountPolicies:        deps.AccountPolicies,
+		channels:               deps.Channels,
+		audit:                  deps.Audit,
+		platformBalances:       deps.PlatformBalances,
+		solvency:               deps.Solvency,
+		balanceTrends:          deps.BalanceTrends,
+		periodCloser:           deps.PeriodCloser,
+		trialBalance:           deps.TrialBalance,
+		reconciler:             deps.Reconciler,
+		fullReconciler:         deps.FullReconciler,
+		snapshotter:            deps.Snapshotter,
+		systemRollup:           deps.SystemRollup,
+		queries:                deps.Queries,
+		ready:                  &atomic.Bool{},
+		rateLimiter:            newRateLimiter(defaultRateLimiterConfig()),
+		authEnabled:            len(cfg.APIKeys) > 0,
+		devCreditEnabled:       cfg.DevCreditEnabled,
+		protectedTemplateCodes: protectedTemplateCodes,
 	}
 	if cfg.DevCreditEnabled {
 		slog.Warn("server: developer credit endpoint is ENABLED — POST /api/v1/dev/credits mints holder balance with no custodied asset behind it")

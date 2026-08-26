@@ -31,6 +31,7 @@ type transitionRequest struct {
 	Amount     string            `json:"amount"`
 	Metadata   map[string]string `json:"metadata"`
 	ActorID    int64             `json:"actor_id"`
+	Source     string            `json:"source"`
 	// IdempotencyKey is required (I-3, core.TransitionInput.Validate).
 	// Callers may instead pass it via the Idempotency-Key header
 	// (idempotencyHeaderAliasMiddleware injects it here before decoding).
@@ -69,6 +70,8 @@ type eventResponse struct {
 	JournalUID         string            `json:"journal_uid,omitempty"`
 	Metadata           map[string]string `json:"metadata"`
 	OccurredAt         string            `json:"occurred_at"`
+	ActorID            int64             `json:"actor_id"`
+	Source             string            `json:"source"`
 }
 
 // --- Conversion helpers ---
@@ -111,6 +114,8 @@ func eventToResponse(evt *core.Event) eventResponse {
 		JournalUID:         evt.JournalUID,
 		Metadata:           evt.Metadata,
 		OccurredAt:         evt.OccurredAt.Format(time.RFC3339),
+		ActorID:            evt.ActorID,
+		Source:             evt.Source,
 	}
 }
 
@@ -186,6 +191,7 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 		Amount:         amount,
 		Metadata:       req.Metadata,
 		ActorID:        req.ActorID,
+		Source:         req.Source,
 		IdempotencyKey: req.IdempotencyKey,
 	}
 
@@ -244,7 +250,7 @@ func (s *Server) handleListBookings(w http.ResponseWriter, r *http.Request) {
 
 	resp := PagedResponse[bookingResponse]{
 		List:       make([]bookingResponse, len(bookings)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i, op := range bookings {
 		resp.List[i] = bookingToResponse(&op)

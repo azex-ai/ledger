@@ -87,7 +87,7 @@ func (s *Server) handleListDepositReviews(w http.ResponseWriter, r *http.Request
 
 	resp := PagedResponse[bookingResponse]{
 		List:       make([]bookingResponse, len(bookings)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i := range bookings {
 		resp.List[i] = bookingToResponse(&bookings[i])

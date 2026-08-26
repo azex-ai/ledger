@@ -22,6 +22,8 @@ type postJournalRequest struct {
 	Metadata       map[string]string `json:"metadata"`
 	ActorID        int64             `json:"actor_id"`
 	Source         string            `json:"source"`
+	// EffectiveAt is RFC3339; empty means "now" (core.JournalInput.EffectiveAt).
+	EffectiveAt string `json:"effective_at"`
 }
 
 type entryInputJSON struct {
@@ -159,6 +161,15 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var effectiveAt time.Time
+	if req.EffectiveAt != "" {
+		effectiveAt, err = time.Parse(time.RFC3339, req.EffectiveAt)
+		if err != nil {
+			httpx.Error(w, httpx.ErrBadRequest("effective_at must be RFC3339 format"))
+			return
+		}
+	}
+
 	input := core.JournalInput{
 		JournalTypeUID: req.JournalTypeUID,
 		IdempotencyKey: req.IdempotencyKey,
@@ -167,6 +178,7 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 		Metadata:       req.Metadata,
 		ActorID:        req.ActorID,
 		Source:         req.Source,
+		EffectiveAt:    effectiveAt,
 	}
 
 	journal, err := s.journals.PostJournal(r.Context(), input)
@@ -181,6 +193,17 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 	req, err := httpx.Decode[postTemplateRequest](r)
 	if err != nil {
 		httpx.Error(w, err)
+		return
+	}
+
+	// Config.ProtectedTemplateCodes (empty by default): a deployment that has
+	// enumerated its own system-only template codes (e.g. deposit
+	// confirmation, meant to be posted only via its verified-deposit
+	// orchestration) gets this endpoint refused for those codes, same as
+	// POST /dev/credits is hardcoded to a single narrow template rather than
+	// accepting an arbitrary code (handler_devcredit.go).
+	if s.protectedTemplateCodes[req.TemplateCode] {
+		httpx.Error(w, httpx.ErrForbidden("template_code "+req.TemplateCode+" is protected: post it through its dedicated orchestration, not this generic endpoint"))
 		return
 	}
 
@@ -358,7 +381,7 @@ func (s *Server) handleListJournals(w http.ResponseWriter, r *http.Request) {
 
 	resp := PagedResponse[journalResponse]{
 		List:       make([]journalResponse, len(journals)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i, j := range journals {
 		resp.List[i] = toJournalResponse(&j)
@@ -390,7 +413,7 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 
 	resp := PagedResponse[entryResponse]{
 		List:       make([]entryResponse, len(entries)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i, e := range entries {
 		resp.List[i] = toEntryResponse(&e)

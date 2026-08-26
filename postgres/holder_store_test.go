@@ -146,7 +146,12 @@ func TestHolderTransactionsProjection(t *testing.T) {
 	assert.Equal(t, jDeposit.UID, items[4].UID)
 	assert.Equal(t, core.HolderTransactionIn, items[4].Direction)
 	assert.Equal(t, "Deposit", items[4].KindLabel, "journal type display_label wins")
-	assert.Equal(t, "ht_deposit", items[4].Kind)
+	// Kind is the journal type's uid, not its code -- the code
+	// ("ht_deposit") narrates how the ledger produced the balance, which the
+	// holder-facing surface must not do (~/.claude/rules/user-facing-surfaces.md;
+	// see server/openapi_contract_test.go / postgres/sql/queries/holder.sql
+	// for the fix this pins).
+	assert.Equal(t, f.jtUID, items[4].Kind)
 	assert.Empty(t, items[4].ReversalOfUID)
 
 	// User-facing surface guard: no internal vocabulary leaks through fields.

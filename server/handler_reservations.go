@@ -17,6 +17,13 @@ type createReservationRequest struct {
 	Amount         string `json:"amount"`
 	IdempotencyKey string `json:"idempotency_key"`
 	ExpiresInSec   int64  `json:"expires_in_sec"`
+	// RequireVerifiedBalance threads straight through to
+	// core.ReserveInput.RequireVerifiedBalance -- see that field's doc
+	// comment for what it does. Off by default; this is the only HTTP
+	// surface that can set it (structure.md's Major: without this field the
+	// tamper-evident verification gate is unreachable over HTTP, even when a
+	// consumer's composition root wires an Attestor in).
+	RequireVerifiedBalance bool `json:"require_verified_balance"`
 }
 
 type settleReservationRequest struct {
@@ -93,11 +100,12 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 	expiresIn := time.Duration(req.ExpiresInSec) * time.Second
 
 	input := core.ReserveInput{
-		AccountHolder:  req.AccountHolder,
-		CurrencyUID:    req.CurrencyUID,
-		Amount:         amount,
-		IdempotencyKey: req.IdempotencyKey,
-		ExpiresIn:      expiresIn,
+		AccountHolder:          req.AccountHolder,
+		CurrencyUID:            req.CurrencyUID,
+		Amount:                 amount,
+		IdempotencyKey:         req.IdempotencyKey,
+		ExpiresIn:              expiresIn,
+		RequireVerifiedBalance: req.RequireVerifiedBalance,
 	}
 
 	reservation, err := s.reserver.Reserve(r.Context(), input)
@@ -242,5 +250,5 @@ func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) 
 	for i, r := range reservations {
 		data[i] = toReservationResponse(&r)
 	}
-	httpx.OK(w, PagedResponse[reservationResponse]{List: data, NextCursor: nextCursor})
+	httpx.OK(w, PagedResponse[reservationResponse]{List: data, NextCursor: cursorPtr(nextCursor)})
 }

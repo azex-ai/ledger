@@ -251,3 +251,39 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
       `core/booking.go` `booking_id must be positive` → `booking_uid required`）——
       纯文案变更，前端若按错误字符串做过匹配需要更新
 - Go module 与 npm 包从 0.5.0 起版本对齐，**须同发**
+- **D-contract（2026-08-26，Wave 2）**：契约面修复，覆盖 §7 全部 + §5 的 `expires_in` 漂移。
+  消费方需要做的事：
+  - **`next_cursor` 类型变化**：`server.PagedResponse.NextCursor` 与
+    `holderTransactionsPage.NextCursor` 从 `string`（`omitempty`，到底时缺字段或空串两种口径
+    并存）改为 `*string`（到底时恒为字面 `null`，api-contract.md §6）。JSON wire 上唯一变化是
+    「到底」时的表现形式：以前是缺字段或 `""`，现在是 `"next_cursor": null`。按
+    `!body.next_cursor` 判断到底的消费方不受影响；按 `"next_cursor" in body` 或
+    `typeof next_cursor === "string"` 判断的消费方需要改为 `=== null` 判断。
+  - **`GET /holder/transactions` 的 `kind` 字段语义变化**：从 journal type 的
+    `code`（如 `"deposit_confirm"`，narrates 内部实现）改为其 `uid`（不透明字符串）——
+    `user-facing-surfaces.md` 要求 holder 面不叙述余额是怎么产生的。按字面值匹配 `kind`
+    的消费方（如 `if (tx.kind === "deposit_confirm")`）需要改为按各自创建 journal type 时
+    拿到的 `journal_type_uid` 匹配；`kind_label`（人类可读文案）字段不变。
+  - **新增可选字段，之前静默丢弃、现在生效**：`POST /journals` 的 `effective_at`、
+    `POST /bookings/{uid}/transition` 的 `source`——两个字段此前 openapi.yaml 有文档但
+    HTTP 层从未读取，现在按文档生效。若消费方过去往这两个字段塞过垃圾值指望它被忽略，
+    现在会真的生效，需要检查。
+  - **`GET /events`、`GET /events/{uid}` 响应新增 `actor_id`/`source`**：`core.Event` 一直有
+    这两个字段，只是 `eventResponse` 从未序列化过；纯新增字段，非破坏性，但按精确字段集
+    做 schema 校验的消费方（如 `additionalProperties: false`）需要放行。
+  - **`POST /journals/template` 可能新增 403**：仅当部署方主动设置
+    `server.Config.ProtectedTemplateCodes`（默认空，行为不变）时才会拒绝列在其中的
+    `template_code`。机制新增，默认不生效。
+  - **`GET /system/health`、`GET /system/ready` 失败响应体形状变化**：从手写的
+    `{"status":"degraded","db":"down"}` / `{"status":"starting"}`
+    改为统一信封 `{"code":18101,"message":{"text":"..."},"data":null}`（api-contract.md §1，
+    探针不再是信封的例外）。按旧 `status` 字段解析的监控/探针脚本需要改成按 HTTP status
+    503 判断存活，不再解析 body 里的 `status` 字符串。
+  - **`docs/openapi.yaml` 文档修正（未改变已上线的 Go 行为，只是文档之前就是错的）**：
+    `ReserveInput.expires_in`（字符串 duration）→ `expires_in_sec`（int64 秒，Go 一直是这个
+    形状）；`POST /balances/batch` 请求体 `holders` → `holder_ids`（Go 一直是这个字段名）；
+    `Entry` schema 删除了从未存在过的 `uid` 字段（entries 没有各自的 uid）；
+    `POST /templates/{code}/preview` 改用专属的窄 schema `TemplatePreviewRequest`
+    （不再误导消费方以为需要传 `idempotency_key`/`actor_id`/`source`/`metadata`）。
+  - 新增 `server.Deps` + `server.NewFromDeps(cfg, deps) (*Server, error)`，纯增量 API，
+    `server.New`/`server.NewWithConfig` 签名与行为不变（仍 panic on invalid config）。
