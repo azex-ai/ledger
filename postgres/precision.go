@@ -1,11 +1,13 @@
 package postgres
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/shopspring/decimal"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
 
 // checkAmountPrecision rejects amount if it carries more decimal places than
@@ -23,12 +25,20 @@ func checkAmountPrecision(amount decimal.Decimal, currency dimCurrency) error {
 }
 
 // validateEntriesPrecision checks every resolved entry's amount against its
-// currency's exponent. Pure: the exponent was captured during uid resolution,
-// so no query round-trip is needed here.
-func validateEntriesPrecision(entries []resolvedEntry) error {
+// currency's exponent. The exponent was already captured during uid
+// resolution, but the currency's short code was not carried onto
+// resolvedEntry -- only its internal id and uid -- so the code is resolved
+// here via the (cache-backed, cheap after the first miss) dims lookup by id.
+// Without this, the error message quoted the uid twice under a "code" label,
+// which silently dropped the one piece of information (the short code) an
+// operator actually needs to identify the currency at a glance.
+func validateEntriesPrecision(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, entries []resolvedEntry) error {
 	for i, e := range entries {
-		currency := dimCurrency{UID: e.CurrencyUID, Code: e.CurrencyUID, Exponent: e.exponent}
-		if err := checkAmountPrecision(e.Amount, currency); err != nil {
+		cur, err := dims.currencyByIDOrErr(ctx, q, e.currencyID)
+		if err != nil {
+			return fmt.Errorf("postgres: entry[%d]: %w", i, err)
+		}
+		if err := checkAmountPrecision(e.Amount, cur); err != nil {
 			return fmt.Errorf("postgres: entry[%d]: %w", i, err)
 		}
 	}

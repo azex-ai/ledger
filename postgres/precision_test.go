@@ -228,6 +228,42 @@ func TestPrecision_Booking_RejectsOverPrecisionAmount(t *testing.T) {
 	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
 }
 
+// TestPrecision_PostJournal_ErrorMessageIncludesRealCurrencyCode pins a
+// Minor from the 2026-08-25 financial-engineering audit
+// (postgres/precision.go:28-31, financial-correctness.md): the PostJournal
+// path built its error's "code" from the currency uid, not its actual short
+// code, so the message quoted the same uid twice and the code an operator
+// actually needs to identify the currency was never in the text. Seed the
+// currency with a code that is visibly different from its uid (uids are
+// UUIDs) and assert the code -- not another copy of the uid -- appears.
+func TestPrecision_PostJournal_ErrorMessageIncludesRealCurrencyCode(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	store := postgres.NewLedgerStore(pool)
+
+	const code = "JPY-CODE-CHECK"
+	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, code, "Japanese Yen Code Check", 0)
+	mainWallet := postgrestest.SeedClassification(t, pool, "main_wallet_jpy_code_check", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial_jpy_code_check", "Custodial", "credit", true)
+	jt := postgrestest.SeedJournalType(t, pool, "test_jpy_code_check", "Test JPY Code Check")
+
+	userID := int64(9008)
+
+	_, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jt,
+		IdempotencyKey: postgrestest.UniqueKey("jpy-code-check"),
+		Source:         "precision-test",
+		Entries: []core.EntryInput{
+			{AccountHolder: userID, CurrencyUID: jpyID, ClassificationUID: mainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.RequireFromString("0.5")},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: jpyID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.RequireFromString("0.5")},
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
+	assert.Contains(t, err.Error(), code, "error message must contain the currency's actual code, not just its uid")
+}
+
 // TestPrecision_SettlePartial_RejectsOverPrecisionAmount pins I-16 on the
 // partial-settlement increment.
 func TestPrecision_SettlePartial_RejectsOverPrecisionAmount(t *testing.T) {

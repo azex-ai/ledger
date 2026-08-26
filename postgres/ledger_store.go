@@ -847,7 +847,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		}
 		eventID = id
 	}
-	if err := validateEntriesPrecision(resolved); err != nil {
+	if err := validateEntriesPrecision(ctx, s.dims, q, resolved); err != nil {
 		return nil, err
 	}
 	reversalOfID := int64(0)
