@@ -252,12 +252,40 @@ commit. That serializes commit order = id order within a pair, which is what
 lets the rollup use `MAX(id)` as a safe checkpoint watermark and lets
 `checkpoint + Σ(id > last_entry_id)` never skip an entry. Any future write
 path that inserts entries without `acquireBalanceLocks` silently reopens
-this visibility race — do not add one.
+this visibility race — do not add one. This was, until 2026-08-26, a prose-only
+warning with no machine gate (docs/audits/2026-08-25-financial-engineering/financial-correctness.md);
+`postgres.TestInsertJournalEntry_SingleChokePoint` now makes it one — it
+parses this package's AST and fails if `InsertJournalEntry` ever gets a second
+call site, or if its one call site stops calling `acquireBalanceLocks`.
+
+**Known gap, not closed by the above**: the delta filter's `id > last_entry_id`
+comparison assumes `id` is unique across the whole table, but the schema's
+actual guarantee is narrower — `journal_entries`' primary key is
+`(id, created_at)`, not `id` alone, because a partitioned table's primary key
+must include the partition key (`created_at`, monthly range partitions). Under
+normal operation this is harmless (one shared `BIGSERIAL` sequence backs every
+partition, so sequence-driven ids never collide), but it is not a schema-level
+backstop against a row inserted with an explicit, already-used `id` in a
+different partition — which the `ledger_app`-credential threat model this
+audit wave treats as in-scope elsewhere (see I-22) already permits.
+`postgres.TestJournalEntries_DuplicateIDAcrossPartitions_SplitsBooks` confirms
+the consequence is real, not merely plausible: such a forged, internally-
+balanced pair is permanently invisible to `GetBalance` (its id never exceeds
+the watermark) while `SumGlobalDebitCreditByCurrency`/`reconcile.sql` count it
+and see a balanced total either way — the two views of the ledger diverge
+without violating any id-range invariant or tripping the global debit==credit
+check. Closing this gap is a DB-role/grant hardening change (restricting who
+may specify `journal_entries.id` explicitly), out of this file's scope; see
+`docs/plans/2026-08-26-audit-remediation-contracts.md`.
 
 **Pinned by**:
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
 - `postgres.TestPlatformBalance_RealtimeReflectsUnrolledJournal`
 - `postgres.TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal`
+- `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing prerequisite,
+  now a machine gate)
+- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_SplitsBooks`
+  (verification pin for the known gap above, not a fix — see the note)
 
 ## I-6: Decimal precision is `NUMERIC(30,18)`
 
@@ -484,6 +512,26 @@ caller could schedule a journal into the future, those reports would silently
 misattribute or hide postings. See
 `docs/plans/2026-07-02-financial-core-hardening-design.md` §1.
 
+**As-of reads self-heal against retroactive posting (added 2026-08-26)**:
+`ListBalancesAt` itself always reads live from `journal_entries` and was
+never affected by this. But `balance_snapshots` is a cache of `ListBalancesAt`
+computed once (`service.SnapshotService.CreateDailySnapshot`), and nothing
+re-triggered that computation when a later write retroactively backdated
+(`effective_at` earlier than the snapshot's own `created_at`) into an
+already-snapshotted business date — the cached row stayed wrong forever, even
+though the live query was always correct (see
+`docs/audits/2026-08-25-financial-engineering/financial-correctness.md`
+Major #2, "effective_at 回溯记账不会让已写入的历史快照失效"). Fixed at the
+read boundary: `postgres.RollupAdapter.GetSnapshotBalances` now checks each
+cached row against `journal_entries` for exactly that condition
+(`GetMaxEntryCreatedAtForDimensionBefore` in
+`postgres/sql/queries/checkpoints.sql`) and recomputes live from
+`ListBalancesAt` when a row is found stale, instead of trusting the cache
+unconditionally. `service/snapshot.go`'s write path is unchanged — this is a
+read-time self-heal, not a write-time invalidation, so a snapshot row can
+still be numerically wrong in storage; only reads through
+`GetSnapshotBalances` are guaranteed correct.
+
 **Enforced by**:
 - `core.JournalInput.Validate` rejects `effective_at` beyond the future
   tolerance.
@@ -493,6 +541,8 @@ misattribute or hide postings. See
 - Reversal journals (`ReverseJournal`) never copy the original journal's
   `effective_at` — they always default to "now" (open period), which is the
   standard close-then-correct pattern (see I-15).
+- `postgres.RollupAdapter.GetSnapshotBalances`'s staleness check and live
+  recompute (see above).
 
 **Pinned by**:
 - `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
@@ -505,6 +555,9 @@ misattribute or hide postings. See
 - `postgres.TestLedgerStore_ReverseJournal_EffectiveAt_DoesNotInheritOriginal`
 - `postgres.TestRollupAdapter_ListBalancesAt_UsesEffectiveAt` (as-of reporting
   reads the business date, not the write date)
+- `postgres.TestRollupAdapter_GetSnapshotBalances_BackdatedEntryInvalidatesCache`
+  (the Major #2 fix: a snapshot written before a backdated entry lands must
+  read back the corrected total, not the stale cached one)
 
 ## I-15: The accounting period close line is a hard write barrier
 
@@ -2225,6 +2278,49 @@ consumer that never calls `Run()` must not skip the check).
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+
+## I-35: Solvency liability counts only role-bearing user-side balances
+
+(`docs/plans/2026-08-26-audit-remediation-contracts.md`, D-money;
+`docs/audits/2026-08-25-financial-engineering/financial-correctness.md`
+Major #1, "偿付能力把 user-side debit-normal 费用账当成负债".)
+
+**Rule**: `SolvencyReport.Liability` (and `GetTotalLiabilityByAsset`) is the
+sum of user-side (`account_holder > 0`) balances for classifications with a
+**non-empty `balance_role`** (`available` / `pending` / `locked`) only — the
+same basis `BalanceReader.GetBalanceBreakdown` uses for a holder's
+spendable-money view (I-11). Role-less user-side classifications (e.g.
+`fee_expense`, a debit-normal cost/memo account booked to the user's own
+holder id purely for per-user fee reporting) are excluded.
+
+**Why**: `fee_expense` is money the user already paid, not money the platform
+owes back — it has no `balance_role` for exactly that reason (I-11: role-less
+means "not part of the holder's spendable-money view"). Summing it into the
+liability figure anyway turned every dollar of cumulative fee revenue into a
+phantom dollar of insolvency: the standard preset flow (deposit 500 → lock
+105 → withdraw_fee 5 → withdraw_confirm 100, leaving
+`main_wallet=395, locked=0, fee_expense=5, custodial=395`) reported
+`Liability=400` against `Custodial=395` — `Margin=-5, Solvent=false` — for a
+platform that was, in fact, fully solvent (custodial covered every reservable
+user balance exactly). Fee revenue is the platform's *income*, not a growing
+hole in its books; a solvency check that manufactures a deficit proportional
+to it is worse than no check, because it also **hides** a real deficit of the
+same magnitude behind the same-looking number (`Margin=-5` from fees alone is
+indistinguishable from `Margin=-5` from an actual unbacked issuance).
+
+**Enforced by**:
+- `postgres/sql/queries/platform_balances.sql`'s `GetTotalUserSideBalance`
+  joins `classifications` and filters `c.balance_role <> ''` before summing.
+- `postgres.PlatformBalanceStore.SolvencyCheck` /
+  `GetTotalLiabilityByAsset` consume that query unchanged — the fix is
+  entirely in the query's `active` CTE.
+
+**Pinned by**:
+- `postgres.TestSolvencyCheck_WithdrawFee_DoesNotManufactureDeficit` — the
+  exact repro above: before the fix this test's own numbers show
+  `Liability=400, Margin=-5, Solvent=false`; after, `Liability=395, Margin=0,
+  Solvent=true`, and `GetTotalLiabilityByAsset` agrees with `SolvencyCheck`.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.
