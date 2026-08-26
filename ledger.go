@@ -329,14 +329,32 @@ func (s *Service) SolvencyChecker() core.SolvencyChecker { return s.platformBala
 //
 // Returns an error if WithAttestor was never called -- RunAttestBatch has
 // nothing to sign with otherwise, and failing here (once, at construction)
-// is clearer than failing on every tick.
+// is clearer than failing on every tick. Also returns an error when called
+// on the transaction-bound clone RunInTx hands to its callback: the
+// returned service reads/writes through s.pool directly (postJournal
+// batches spanning many rows, not something that belongs inside a caller's
+// transaction), so building one from a clone would silently operate outside
+// the transaction the caller thinks it is composing with. Call this on the
+// top-level Service, before or after RunInTx, never from inside it.
 func (s *Service) AttestationService(anchor core.Anchor) (*service.AttestationService, error) {
+	if s.tx != nil {
+		return nil, fmt.Errorf("ledger: attestation service: called on a transaction-bound store; AttestationService reads/writes through the pool directly and must not be built from inside RunInTx: %w", core.ErrInvalidInput)
+	}
 	if s.attestor == nil {
 		return nil, fmt.Errorf("ledger: attestation service: WithAttestor was never called")
 	}
+	return s.attestationServiceUnchecked(anchor), nil
+}
+
+// attestationServiceUnchecked builds the *service.AttestationService without
+// re-checking s.attestor/s.tx -- callers (AttestationService above, and
+// (*Service).Worker's auto-wiring) that have already established both
+// preconditions use this directly so the precondition failure has exactly
+// one error message, not two copies that could drift.
+func (s *Service) attestationServiceUnchecked(anchor core.Anchor) *service.AttestationService {
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 	store := postgres.NewAttestationStore(s.pool)
-	return service.NewAttestationService(store, s.attestor, s.authVerifier, anchor, engine), nil
+	return service.NewAttestationService(store, s.attestor, s.authVerifier, anchor, engine)
 }
 
 // VerifyLedger runs the five-step tamper-evidence verification (design doc
@@ -358,9 +376,23 @@ func (s *Service) AttestationService(anchor core.Anchor) (*service.AttestationSe
 // fail-closed by design -- a check that could not run must never read as one
 // that passed.
 //
+// Also returns NOT_RUN, for the same fail-closed reason, when called on the
+// transaction-bound clone RunInTx hands to its callback: the attestation
+// chain is read through s.pool directly regardless, while other checks
+// would read through the clone's transaction -- mixing a live transactional
+// view with a pool-level snapshot inside one verification run would make a
+// "mismatch" finding ambiguous between "tampered" and "read before the
+// transaction committed". Call this on the top-level Service.
+//
 // cfg's zero value is usable; see service.DefaultVerifyConfig for what the
 // defaults are.
 func (s *Service) VerifyLedger(ctx context.Context, anchor core.Anchor, cfg service.VerifyConfig) service.VerifyReport {
+	if s.tx != nil {
+		return service.VerifyReport{
+			Status:  service.VerifyStatusNotRun,
+			Reasons: []string{"VerifyLedger called on a transaction-bound store; call it on the top-level Service, not from inside RunInTx"},
+		}
+	}
 	if cfg.JournalSampleSize == 0 && cfg.ChainPageSize == 0 && cfg.ReferenceEntries == nil {
 		cfg = service.DefaultVerifyConfig()
 	}
@@ -404,12 +436,41 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 //     transaction's isolation level (READ COMMITTED by default) applies.
 //   - Advisory locks acquired inside fn are held until commit/rollback — this
 //     is correct behaviour for the balance-locking invariant.
+//   - Nesting is not supported: calling RunInTx (or RunInTxWithOptions) again
+//     on the *Service handed to fn returns an error rather than silently
+//     opening a second, independent transaction on a fresh pool connection
+//     (which would defeat the atomicity RunInTx exists to provide, and can
+//     self-deadlock if the outer and inner transactions both want the same
+//     advisory lock). Compose your writes into one callback instead.
+//   - core.JournalWriter.PostJournal / ExecuteTemplate / ExecuteTemplateBatch
+//     called on the clone can never sign a journal, even when this Service
+//     was constructed WithAttestor: there is no point left inside an
+//     already-open transaction to call the Attestor without violating
+//     financial.md. Every journal posted this way carries
+//     core.AuthStatusUnsignedTxMode, and once posted it stays that way
+//     forever (journals are append-only) — VerifiedBalanceReader treats any
+//     dimension with such a contributing journal as permanently UNDEFINED,
+//     with no remediation API. If a journal composed inside RunInTx must be
+//     verifiable later, call Authorize (or AuthorizeTemplate) on the
+//     top-level Service BEFORE RunInTx opens, then call PostAuthorized on
+//     the clone inside the callback — see service/onchain.go's
+//     postDepositConfirmedJournal for the pattern this library's own
+//     internal callers use.
+//   - AttestationService, VerifyLedger, and EnableOnchain all reach past the
+//     clone's transaction (the first two read/write directly through the
+//     pool; the latter would set state on a Service value that is discarded
+//     when fn returns) and are refused on a transaction-bound clone: call
+//     them on the top-level Service instead.
 func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 	return s.RunInTxWithOptions(ctx, pgx.TxOptions{}, fn)
 }
 
 // RunInTxWithOptions is RunInTx with explicit PostgreSQL transaction options.
 func (s *Service) RunInTxWithOptions(ctx context.Context, opts pgx.TxOptions, fn func(*Service) error) error {
+	if s.tx != nil {
+		return fmt.Errorf("ledger: RunInTx: already inside a transaction (nested RunInTx is not supported: it would open an independent transaction from the pool instead of composing with the outer one — call fn's *Service directly instead): %w", core.ErrInvalidInput)
+	}
+
 	tx, err := s.pool.BeginTx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("ledger: RunInTx: begin: %w", err)
@@ -490,10 +551,22 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 	channels := maps.Clone(s.channels)
 	s.channelsMu.RUnlock()
 	return &Service{
-		pool:                 s.pool,
-		tx:                   tx,
-		logger:               s.logger,
-		metrics:              s.metrics,
+		pool:    s.pool,
+		tx:      tx,
+		logger:  s.logger,
+		metrics: s.metrics,
+		// attestor/authVerifier: carried onto the clone so accessors that
+		// read them directly (AuthVerifier(), and the s.tx-guarded
+		// AttestationService()/VerifyLedger() above) see the same
+		// configuration the top-level Service has, rather than silently
+		// observing "WithAttestor was never called" for a Service that in
+		// fact was. This has no effect on signing itself: ls (the clone's
+		// LedgerStore) already carries its own attestor via WithDB (see
+		// postgres.LedgerStore.WithDB), and PostJournal's tx-mode branch
+		// never consults it regardless -- see RunInTx's doc comment on
+		// AuthStatusUnsignedTxMode.
+		attestor:             s.attestor,
+		authVerifier:         s.authVerifier,
 		ledgerStore:          ls,
 		reserverStore:        s.reserverStore.WithDB(tx, ls),
 		bookingStore:         s.bookingStore.WithDB(tx),
@@ -637,6 +710,9 @@ func (s *Service) Channels() map[string]channel.Adapter {
 // EnableOnchain with a fixed config (the "already configured" guard above
 // only trips once s.onchain is actually set).
 func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, scanner core.ChainScanner, sweeper core.Sweeper, opts ...service.OnchainOption) (*service.Onchain, error) {
+	if s.tx != nil {
+		return nil, fmt.Errorf("ledger: EnableOnchain: called on a transaction-bound store; s.onchain would be set on a clone that RunInTx discards when the callback returns, leaving the top-level Service.Onchain() nil despite this call reporting success -- call EnableOnchain on the top-level Service instead: %w", core.ErrInvalidInput)
+	}
 	if s.onchain != nil {
 		return nil, fmt.Errorf("ledger: EnableOnchain: already configured")
 	}
@@ -709,6 +785,17 @@ func (c onchainTxComposer) AuthorizeTemplate(ctx context.Context, templateCode s
 // so callers get a safe-by-default Worker even when they pass a partially
 // populated config or service.WorkerConfig{}. The EventStore and RollupAdapter
 // claim-leases are configured from the merged cfg.
+//
+// If this Service was constructed WithAttestor, the returned Worker also has
+// the P6 batch attestation job wired in (Worker.SetAttestor), with anchor
+// left nil (no external carrier configured) -- the batch chain still
+// advances and every batch is still signed, it just is not published
+// anywhere outside this database. Consumers that do have an anchor can
+// override this with their own worker.SetAttestor(as) call after Worker
+// returns; a plain setter call like that simply replaces the auto-wired
+// default. Previously SetAttestor had to be called manually and no shipped
+// entry point ever did, so a WithAttestor deployment's batch chain never
+// advanced even though DefaultWorkerConfig configured an interval for it.
 func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	cfg = mergeWorkerConfig(cfg)
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
@@ -716,7 +803,19 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	rollupAdapter := postgres.NewRollupAdapter(s.pool)
 	rollupAdapter.SetClaimLease(cfg.RollupClaimLease)
 
-	s.eventStore.SetClaimLease(cfg.EventClaimLease)
+	// A dedicated EventStore, not the shared s.eventStore also handed out by
+	// EventReader(): SetClaimLease below mutates a plain unsynchronized
+	// field, and s.eventStore is one instance shared by every accessor and
+	// every past/future Worker() call on this Service. Reusing it here meant
+	// two Worker() calls (even sequential ones building two long-lived
+	// workers, e.g. one per replica-local goroutine) silently fought over
+	// the same claim lease -- whichever call happened last won, retroactively
+	// changing the lease an already-running worker's poller uses -- and
+	// under -race, concurrent Worker() calls flagged a genuine data race on
+	// that field. A fresh instance per Worker() call has no shared state to
+	// race or clobber.
+	eventPoller := postgres.NewEventStore(s.pool)
+	eventPoller.SetClaimLease(cfg.EventClaimLease)
 
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.reserverStore, s.bookingStore, s.bookingStore, engine)
@@ -734,7 +833,10 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	// subscribes gets a working subscription without having to know about a
 	// separate wiring call. Before this, Subscribe built a dispatcher with a
 	// nil poller, which failed on every tick, logged, and delivered nothing.
-	w.SetLocalPoller(s.eventStore)
+	w.SetLocalPoller(eventPoller)
+	if s.attestor != nil {
+		w.SetAttestor(s.attestationServiceUnchecked(nil))
+	}
 	return w
 }
 
@@ -785,6 +887,12 @@ func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
 	}
 	if cfg.PartitionMonthsAhead <= 0 {
 		cfg.PartitionMonthsAhead = d.PartitionMonthsAhead
+	}
+	if cfg.AttestInterval <= 0 {
+		cfg.AttestInterval = d.AttestInterval
+	}
+	if cfg.AttestBatchSize <= 0 {
+		cfg.AttestBatchSize = d.AttestBatchSize
 	}
 	return cfg
 }

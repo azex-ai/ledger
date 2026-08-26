@@ -169,6 +169,24 @@ const authDigestDomain = byte(0x10)
 // journals.event_id), never a cryptographic one -- signing could not add
 // atomicity to that link anyway.
 //
+// input.Metadata is ALSO deliberately not part of this digest, for a
+// simpler reason: it is caller-supplied free-form annotation (e.g.
+// PendingStore's "reason" key on a cancellation), never posting intent a
+// verifier needs to recompute, and folding an unbounded map into a
+// fixed-layout byte encoding would need its own canonicalization (sorted
+// keys, escaping) this function does not otherwise require. Practical
+// consequence: VerifyJournalAuth's signature check says nothing about
+// whether a journal's stored metadata matches what was signed -- a party
+// who can write to the journals table directly (the threat model this
+// signing subsystem exists for, design doc §1) could in principle alter
+// metadata on an existing row without invalidating auth_signature. Nothing
+// in financial content (accounts, amounts, journal type, idempotency key,
+// reversal linkage) is affected either way. Whether journals.metadata
+// itself should be append-only-guarded at the DB role layer (the same
+// mechanism migration 003 added for the config tables C2 found writable) is
+// a threat-model question orthogonal to this digest, not something adding
+// Metadata to the byte layout above would resolve on its own.
+//
 // Byte layout (all integers big-endian, unsigned unless noted):
 //
 //	SHA-256(

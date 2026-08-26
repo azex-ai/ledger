@@ -643,3 +643,104 @@ func TestConfirmPending_ConcurrentSameKey_NeverInsufficientBalance(t *testing.T)
 		require.NoError(t, err, "a same-key replay must resolve idempotently, never fail")
 	}
 }
+
+// TestPendingStore_ConfirmPending_SignsWhenAttestorConfigured pins the fix
+// to a gap the audit found: ConfirmPending posts through
+// checkPendingBalanceAndPost, which opens its own transaction around
+// LedgerStore.PostJournal even in "pool mode" -- so from PostJournal's own
+// point of view it always looked tx-bound, and its tx-mode branch never
+// signs regardless of whether an Attestor is configured. The journal came
+// back core.AuthStatusUnsignedTxMode forever (journals are append-only), and
+// VerifiedBalanceReader treats any dimension with such a contributing
+// journal as permanently UNDEFINED -- exactly the same failure mode
+// service/onchain.go's postDepositConfirmedJournal was built to avoid for
+// its own RunInTx-composed journal, just reached through a different call
+// path.
+func TestPendingStore_ConfirmPending_SignsWhenAttestorConfigured(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	attestor, _ := newTestAttestor(t, "pending-confirm-key")
+	ls := postgres.NewLedgerStore(p).WithAuth(attestor)
+
+	curID := postgrestest.SeedCurrency(t, p, "USDT-CSIGN", "Test USDT")
+	ps := postgres.NewPendingStore(p, ls, cs)
+
+	userID := int64(5001)
+	amount := decimal.NewFromInt(400)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curID,
+		Amount:         amount,
+		IdempotencyKey: postgrestest.UniqueKey("confirm-sign-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	j, err := ps.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curID,
+		Amount:         amount,
+		IdempotencyKey: postgrestest.UniqueKey("confirm-sign-confirm"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, j)
+	assert.Equal(t, core.AuthStatusSigned, j.AuthStatus,
+		"ConfirmPending must sign its journal when an Attestor is configured -- "+
+			"got %q, which is what a WithDB-bound LedgerStore.PostJournal call always produces "+
+			"regardless of Attestor configuration", j.AuthStatus)
+
+	digest, signature, keyID, _ := fetchAuthColumns(t, p, ctx, j.UID)
+	assert.NotEmpty(t, digest, "signed journal must have a stored digest")
+	assert.NotEmpty(t, signature, "signed journal must have a stored signature")
+	assert.NotEmpty(t, keyID, "signed journal must have a stored key id")
+}
+
+// TestPendingStore_CancelPending_SignsWhenAttestorConfigured is
+// TestPendingStore_ConfirmPending_SignsWhenAttestorConfigured's sibling for
+// the other write path checkPendingBalanceAndPost backs.
+func TestPendingStore_CancelPending_SignsWhenAttestorConfigured(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	attestor, _ := newTestAttestor(t, "pending-cancel-key")
+	ls := postgres.NewLedgerStore(p).WithAuth(attestor)
+
+	curID := postgrestest.SeedCurrency(t, p, "USDT-XSIGN", "Test USDT")
+	ps := postgres.NewPendingStore(p, ls, cs)
+
+	userID := int64(5002)
+	amount := decimal.NewFromInt(150)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curID,
+		Amount:         amount,
+		IdempotencyKey: postgrestest.UniqueKey("cancel-sign-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	j, err := ps.CancelPending(ctx, core.CancelPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curID,
+		Amount:         amount,
+		Reason:         "test-cancel",
+		IdempotencyKey: postgrestest.UniqueKey("cancel-sign-cancel"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, j)
+	assert.Equal(t, core.AuthStatusSigned, j.AuthStatus,
+		"CancelPending must sign its journal when an Attestor is configured, got %q", j.AuthStatus)
+}

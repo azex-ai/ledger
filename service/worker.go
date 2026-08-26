@@ -149,6 +149,12 @@ func (w *Worker) SetPartitionService(p *PartitionService) {
 // SetFullReconciler; unlike PostJournal's per-call nil-Attestor tolerance,
 // there is no partial mode here because the whole job either runs or
 // doesn't.
+//
+// ledger.Service.Worker calls this automatically (with a nil Anchor) when
+// the Service was constructed WithAttestor, so most callers never need to
+// call it directly. Call it yourself only to override that default -- e.g.
+// to supply a real core.Anchor for external publication -- in which case
+// your call after Worker() returns simply replaces the auto-wired one.
 func (w *Worker) SetAttestor(a *AttestationService) {
 	w.attestation = a
 }
@@ -161,9 +167,15 @@ func (w *Worker) SetPool(pool *pgxpool.Pool) {
 }
 
 // Subscribe registers an in-process handler that receives every emitted event.
-// Handlers are invoked from a background poll loop ("event_callback").  If a
-// handler returns an error the event is logged and still marked delivered —
-// blocking the queue on a buggy handler is worse than a missed notification.
+// Handlers are invoked from a background poll loop ("event_callback"), with
+// the same at-least-once semantics as webhook delivery
+// (delivery.WebhookDeliverer): if a handler returns an error the event is
+// logged and scheduled for retry (bounded by max_attempts, after which it is
+// marked 'dead') rather than marked delivered — blocking the queue on a
+// buggy handler is worse than a delayed retry, but it also means a handler
+// that errors after doing partial work WILL be invoked again for the same
+// event. Handlers must therefore be idempotent per event UID; do not write a
+// handler that assumes "returns an error" means "had no effect".
 //
 // Subscribe wires a delivery.LocalDispatcher the first time it is called,
 // using the poller already set by SetLocalPoller. ledger.Service.Worker sets
@@ -190,7 +202,23 @@ func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
 
 // Run starts all background jobs and blocks until ctx is cancelled.
 // Returns nil when all goroutines exit cleanly after context cancellation.
+//
+// Four jobs -- full reconciliation suite, webhook event delivery, local
+// event-callback delivery, and P6 batch attestation -- only start when the
+// corresponding Set* method was called first; Run logs, once, which of them
+// are enabled so "this job never ran" is a line a consumer can grep for at
+// startup instead of an absence they have to notice on their own
+// (working-agreements.md §3: a skipped optional job and a running one must
+// never look the same from the outside).
 func (w *Worker) Run(ctx context.Context) error {
+	w.logger.Info("worker: starting",
+		"full_reconcile", w.fullReconcile != nil,
+		"event_delivery_webhook", w.eventDeliverer != nil,
+		"event_delivery_local_callback", w.localDeliverer != nil,
+		"attestation", w.attestation != nil,
+		"partition", w.partition != nil,
+	)
+
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
