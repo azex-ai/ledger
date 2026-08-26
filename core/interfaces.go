@@ -289,6 +289,48 @@ type ClassificationInput struct {
 	Lifecycle    *Lifecycle
 }
 
+// Validate checks that the input is well-formed and, for a non-system
+// classification, that BalanceRole was explicitly declared (M-4 fix,
+// docs/INVARIANTS.md I-37 addendum: `.local/independent-review-2026-08-26.md`,
+// docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+// fix-backend-1 batch, board #43).
+//
+// Before this rule, BalanceRoleNone ("") carried two different intents for a
+// non-system classification -- "this is a deliberate memo/cost account, not
+// a liability" (fee_expense) and "nobody has tagged this yet" -- and nothing
+// distinguished them. In this library's own convention a real user-side
+// liability is NOT necessarily credit-normal (main_wallet, the canonical
+// liability-shaped classification, is debit-normal by construction: DR
+// increases what the platform owes the holder), so normal_side cannot be
+// used to infer intent either -- balance_role is the ONLY signal, and this
+// is exactly the field that goes missing when a classification is copied
+// from an existing preset without also copying its role. Requiring an
+// explicit choice -- BalanceRoleAvailable/Pending/Locked for a real
+// liability bucket, or the new BalanceRoleMemo for a deliberate
+// non-liability memo/cost account -- closes the ambiguity at the only point
+// it can structurally be closed: creation time, before the information is
+// gone. is_system classifications are exempt: they are never part of the
+// holder-facing breakdown by construction and BalanceRoleNone remains their
+// natural (and only sensible) value.
+func (i ClassificationInput) Validate() error {
+	if i.Code == "" {
+		return fmt.Errorf("core: classification: code required: %w", ErrInvalidInput)
+	}
+	if i.Name == "" {
+		return fmt.Errorf("core: classification: name required: %w", ErrInvalidInput)
+	}
+	if !i.NormalSide.IsValid() {
+		return fmt.Errorf("core: classification: invalid normal side %q: %w", i.NormalSide, ErrInvalidInput)
+	}
+	if !i.BalanceRole.IsValid() {
+		return fmt.Errorf("core: classification: invalid balance role %q: %w", i.BalanceRole, ErrInvalidInput)
+	}
+	if !i.IsSystem && i.BalanceRole == BalanceRoleNone {
+		return fmt.Errorf("core: classification: non-system classification %q must declare an explicit balance_role (available/pending/locked for a real liability bucket, or memo for a deliberate non-liability memo/cost account): %w", i.Code, ErrInvalidInput)
+	}
+	return nil
+}
+
 // JournalTypeStore manages dynamic journal types.
 type JournalTypeStore interface {
 	CreateJournalType(ctx context.Context, input JournalTypeInput) (*JournalType, error)

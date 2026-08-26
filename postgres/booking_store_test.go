@@ -35,6 +35,7 @@ func TestBookingStore_ListExpiredBookings_ExcludesFailed(t *testing.T) {
 		Code:       "withdraw_expiry_test",
 		Name:       "Withdraw Expiry Test",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)
@@ -84,6 +85,7 @@ func TestBookingStore_ListExpiredBookings_ExcludesCustomTerminalState(t *testing
 		Code:       "booking_terminal_done",
 		Name:       "Booking Terminal Done",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)
@@ -134,6 +136,7 @@ func TestBookingStore_CreateBooking_IdempotentPayloadMismatch(t *testing.T) {
 		Code:       "booking_idem_mismatch",
 		Name:       "Booking Idem Mismatch",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)
@@ -195,6 +198,7 @@ func TestBookingStore_Transition_IdempotencyKey_SurvivesForwardProgress(t *testi
 		Code:       "booking_transition_idem",
 		Name:       "Booking Transition Idem",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)
@@ -285,6 +289,7 @@ func TestBookingStore_Transition_RevisitingSameStatus_DistinctKeysDoNotCollide(t
 		Code:       "withdrawal_revisit_test",
 		Name:       "Withdrawal Revisit Test",
 		NormalSide: core.NormalSideDebit,
+		IsSystem:   true,
 		Lifecycle:  presets.WithdrawalLifecycle,
 	})
 	require.NoError(t, err)

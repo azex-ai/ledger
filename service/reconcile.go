@@ -67,6 +67,23 @@ type NegativeBalanceAccount struct {
 	Balance          decimal.Decimal
 }
 
+// RoleLessLiability is a (holder, currency, classification) with a nonzero
+// balance on a non-system, user-side classification that carries no
+// balance_role (M-4 fix): GetTotalUserSideBalance (I-37) excludes it from
+// SolvencyReport.Liability by construction, so a nonzero balance here is a
+// real, currently-invisible understatement of what the platform owes. Not
+// scoped to credit-normal -- this library's own convention has real
+// liabilities on both sides (main_wallet is debit-normal) -- balance_role
+// alone, not NormalSide, is what would have distinguished this from a
+// legitimate role-less memo account (BalanceRoleMemo).
+type RoleLessLiability struct {
+	AccountHolder    int64
+	CurrencyID       int64
+	ClassificationID int64
+	NormalSide       string
+	Balance          decimal.Decimal
+}
+
 // OrphanReservation is a reservation whose journal_id does not resolve.
 type OrphanReservation struct {
 	ID            int64
@@ -157,6 +174,11 @@ type ReconcileQuerier interface {
 	SettlementNettingViolations(ctx context.Context, classCode string, windowMinutes int) ([]SettlementNettingViolation, error)
 	// Check #6
 	NegativeBalanceAccounts(ctx context.Context, pageLimit int) ([]NegativeBalanceAccount, error)
+	// role_less_liability (M-4 fix): user-side, non-system
+	// classifications with a nonzero balance and no balance_role -- silently
+	// excluded from SolvencyReport.Liability. Not scoped to credit-normal;
+	// see RoleLessLiability's doc for why.
+	RoleLessLiabilities(ctx context.Context, pageLimit int) ([]RoleLessLiability, error)
 	// Check #7
 	OrphanReservations(ctx context.Context) ([]OrphanReservation, error)
 	// Check #9
@@ -174,13 +196,30 @@ type ReconcileQuerier interface {
 	// GetScanCursor returns the persisted resume cursor for the named check
 	// (C4b), plus lapDirty: whether an earlier segment of the current lap
 	// already found a violation (so the run that completes the lap can still
-	// report Passed=false). Implementations must return (cursorStartHolder,
-	// cursorStartCurrency, false, nil) when no cursor has been persisted yet
-	// — that is a normal "first run" state, not an error.
-	GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, err error)
-	// SetScanCursor persists the resume cursor and lapDirty flag for the
-	// named check.
-	SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool) error
+	// report Passed=false), and lapScanned: the cumulative number of
+	// account/currency pairs actually walked by every run of the CURRENT lap
+	// so far (M-1 fix — see the lapScanned doc on SetScanCursor). Implementations
+	// must return (cursorStartHolder, cursorStartCurrency, false, 0, nil) when
+	// no cursor has been persisted yet — that is a normal "first run" state,
+	// not an error.
+	GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, lapScanned int64, err error)
+	// SetScanCursor persists the resume cursor, lapDirty flag, and lapScanned
+	// (cumulative pairs verified so far this lap) for the named check.
+	// lapScanned resets to 0 exactly when the cursor resets to the fresh-lap
+	// sentinel (a new lap starting); otherwise it carries forward
+	// lapScannedAtStart + this run's own scanned count, so a lap spanning
+	// several capped/timed-out runs accumulates a trustworthy total instead
+	// of forgetting how much of the fleet earlier runs in the same lap
+	// already covered.
+	SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool, lapScanned int64) error
+	// CountCheckpointAccountPairs returns the number of distinct
+	// (account_holder, currency_id) pairs that currently have at least one
+	// row in balance_checkpoints — the same population ListCheckpointAccountsPage
+	// paginates over. Used by check #2 (M-1 fix) to cross-check a resumed
+	// lap's cumulative lapScanned against a value the resumed cursor's own
+	// position cannot influence, so "no more rows after this cursor" cannot
+	// by itself certify full coverage on a resumed lap.
+	CountCheckpointAccountPairs(ctx context.Context) (int64, error)
 	// system_rollup_integrity — raw (internal-id) read of system_rollups,
 	// compared against AccountingEquationRows (the same entries-based
 	// recompute the accounting_equation check uses) so system_rollups is
@@ -379,7 +418,7 @@ func NewFullReconciliationService(
 // failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 13)
+	checks := make([]core.CheckResult, 0, 14)
 
 	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
@@ -401,6 +440,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- Check #6: Non-negative user balances ---
 	checks = append(checks, s.runCheck6NonNegativeBalances(ctx))
+
+	// --- role_less_liability: user-side credit-normal classification missing balance_role (M-4 fix) ---
+	checks = append(checks, s.runCheckRoleLessLiability(ctx))
 
 	// --- Check #7: Orphan reservations ---
 	checks = append(checks, s.runCheck7OrphanReservations(ctx))
@@ -595,7 +637,7 @@ func (s *FullReconciliationService) runCheck2GlobalBalance(ctx context.Context) 
 	// Cursor reads/writes use ctx, not scanCtx: they must still succeed after
 	// scanCtx's own deadline has been reached (that deadline bounds the scan
 	// loop below, not bookkeeping around it).
-	afterHolder, afterCurrency, lapDirtyAtStart, err := s.querier.GetScanCursor(ctx, checkpointBalanceCheckName)
+	afterHolder, afterCurrency, lapDirtyAtStart, lapScannedAtStart, err := s.querier.GetScanCursor(ctx, checkpointBalanceCheckName)
 	if err != nil {
 		result.Passed = false
 		result.Complete = false
@@ -709,6 +751,17 @@ pageLoop:
 		})
 	}
 
+	// lapScanned is this lap's cumulative coverage: every pair actually
+	// walked by every run since the cursor last reset to the fresh-lap
+	// sentinel, including this run's own scanned count. It is the M-1 fix's
+	// independent signal -- unlike afterHolder/afterCurrency, which the
+	// resumed cursor's OWN starting position directly determines (and which
+	// threat-model.md's §4-3 established has no DB-level mutation guard
+	// against ledger_app), lapScanned only ever grows by this loop's own
+	// verified page-query results, never by a resumed run trusting where it
+	// was told to start.
+	lapScanned := lapScannedAtStart + int64(scanned)
+
 	if partialReason != "" {
 		// Coverage was not achieved. Passed may still be true (nothing was
 		// wrong in the subset we examined, and no prior segment of this lap
@@ -719,7 +772,7 @@ pageLoop:
 			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
 			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next run resumes from the persisted cursor (holder %d)", scanned, afterHolder),
 		})
-		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty); setErr != nil {
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty, lapScanned); setErr != nil {
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
 				Description: "checkpoint scan cursor persist failed",
@@ -758,21 +811,79 @@ pageLoop:
 			Description: "checkpoint scan: resumed from a non-fresh cursor and found zero pairs on the first page",
 			Detail:      "cannot distinguish a lap that legitimately finished exactly at the persisted resume point from a cursor advanced by something other than this scan (see docs/RUNBOOK.md); not counted as full coverage",
 		})
-		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false); setErr != nil {
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
 				Description: "checkpoint scan cursor reset failed",
 				Detail:      setErr.Error(),
 			})
 		}
+	} else if resumedLap {
+		// The page loop reached the natural end of the data ("no more rows
+		// after this cursor") AND found at least one pair this run (the
+		// scanned == 0 case above already handles zero) -- but this run's
+		// starting cursor still was not the fresh-lap sentinel. This is
+		// M-1's exact finding: the branch above only ever distrusted a
+		// resumed run that found LITERALLY NOTHING, so a cursor tampered to
+		// leave exactly one (or any small number of) pairs unscanned sailed
+		// straight through it and reported Complete=true, resetting the
+		// cursor back to fresh -- one forged UPDATE bought one permanently
+		// clean-looking run. "No more rows after this cursor" cannot
+		// certify coverage on a resumed lap at ANY pair count, because the
+		// resumed cursor's own starting position is exactly what an
+		// attacker (or anything else rewriting reconcile_scan_cursors)
+		// controls. The independent check: how many pairs has this LAP
+		// verified in total, across every run since it last started fresh,
+		// against how many pairs the checkpoint fleet actually has right
+		// now.
+		total, cerr := s.querier.CountCheckpointAccountPairs(ctx)
+		if cerr != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint account pair count failed",
+				Detail:      cerr.Error(),
+			})
+			return result
+		}
+		if lapScanned < total {
+			result.Complete = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint scan: resumed lap ended without reaching the ledger's full pair count",
+				Detail: fmt.Sprintf(
+					"resumed from a non-fresh cursor and verified %d account/currency pairs cumulatively this lap, but %d pairs currently exist; cannot distinguish a lap that legitimately finished exactly at the persisted resume point from a cursor advanced by something other than this scan (see docs/RUNBOOK.md); not counted as full coverage",
+					lapScanned, total),
+			})
+			// Restart the lap from scratch rather than trust the current
+			// (possibly tampered) position for a continuation: the next run
+			// re-walks from the true beginning, and lapScanned resets to 0
+			// so it does not inherit a count this run could not verify.
+			if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
+				result.Passed = false
+				result.Findings = append(result.Findings, core.Finding{
+					Description: "checkpoint scan cursor reset failed",
+					Detail:      setErr.Error(),
+				})
+			}
+		} else {
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified this run", scanned),
+			})
+			if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
+				result.Passed = false
+				result.Findings = append(result.Findings, core.Finding{
+					Description: "checkpoint scan cursor reset failed",
+					Detail:      setErr.Error(),
+				})
+			}
+		}
 	} else {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified this run", scanned),
 		})
-		// A full lap just completed: reset the cursor and lap_dirty flag so
-		// the next run starts a fresh lap instead of replaying this resume
-		// point (or a stale dirty flag) forever.
-		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false); setErr != nil {
+		// A full lap just completed: reset the cursor, lap_dirty flag, and
+		// lapScanned counter so the next run starts a fresh lap instead of
+		// replaying this resume point (or a stale dirty flag/count) forever.
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
 				Description: "checkpoint scan cursor reset failed",
@@ -952,6 +1063,41 @@ func (s *FullReconciliationService) runCheck6NonNegativeBalances(ctx context.Con
 			Description: fmt.Sprintf("holder %d currency %s classification %s has negative balance",
 				acc.AccountHolder, s.externalCurrencyRef(ctx, acc.CurrencyID), s.externalClassificationRef(ctx, acc.ClassificationID)),
 			Detail: fmt.Sprintf("balance=%s (normal_side=%s)", acc.Balance, acc.NormalSide),
+		})
+	}
+	return result
+}
+
+// runCheckRoleLessLiability verifies every user-side (holder > 0), non-system
+// classification with a nonzero balance carries a balance_role (M-4 fix):
+// GetTotalUserSideBalance (I-37) sums liability only from role-bearing
+// classifications, so a classification mistagged without a role is a real,
+// currently-invisible understatement of SolvencyReport.Liability -- the
+// "false surplus" direction, the most dangerous one for a solvency check to
+// be wrong in. Not scoped to credit-normal: this library's own convention
+// has real liabilities on both sides (main_wallet, the canonical liability,
+// is debit-normal), so normal_side cannot distinguish a mistagged liability
+// from a legitimate role-less memo account the way balance_role does
+// (BalanceRoleMemo, migration 011) -- see RoleLessLiability's doc.
+func (s *FullReconciliationService) runCheckRoleLessLiability(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "role_less_liability", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rows, err := s.querier.RoleLessLiabilities(ctx, s.cfg.NegativeBalancePageLimit)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "role-less liability scan failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	for _, r := range rows {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("holder %d currency %s classification %s is user-side and non-system, but carries no balance_role",
+				r.AccountHolder, s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID)),
+			Detail: fmt.Sprintf("balance=%s (normal_side=%s) is excluded from SolvencyReport.Liability by GetTotalUserSideBalance's balance_role filter -- tag this classification's balance_role (available/pending/locked if it is a real liability, memo if it is a deliberate non-liability memo/cost account) or confirm it should be is_system", r.Balance, r.NormalSide),
 		})
 	}
 	return result

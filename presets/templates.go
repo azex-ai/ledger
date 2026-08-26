@@ -70,7 +70,11 @@ var depositOnlyClassifications = []ClassificationPreset{
 
 var withdrawalOnlyClassifications = []ClassificationPreset{
 	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleLocked},
-	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit},
+	// BalanceRoleMemo (M-4 fix): a real per-user cost account, not a
+	// liability -- explicitly declared as such rather than leaving
+	// balance_role blank (see docs/INVARIANTS.md I-37's addendum for why "no
+	// role" alone can no longer mean that).
+	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleMemo},
 	{Code: "fee_revenue", Name: "Fee Revenue", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
 

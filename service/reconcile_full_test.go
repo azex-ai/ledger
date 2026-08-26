@@ -28,9 +28,11 @@ type mockReconcileQuerier struct {
 	equationRows     []AccountingEquationRow
 	settlementViols  []SettlementNettingViolation
 	negativeAccounts []NegativeBalanceAccount
-	orphanReservs    []OrphanReservation
-	staleItems       []StaleRollupItem
-	dupeKeys         []DuplicateIdempotencyKey
+	// roleLessLiabilities drives the role_less_liability check (M-4 fix).
+	roleLessLiabilities []RoleLessLiability
+	orphanReservs       []OrphanReservation
+	staleItems          []StaleRollupItem
+	dupeKeys            []DuplicateIdempotencyKey
 
 	// checkpointAccounts must be pre-sorted ascending by (AccountHolder,
 	// CurrencyID) — ListCheckpointAccountsPage paginates over it using the
@@ -45,34 +47,40 @@ type mockReconcileQuerier struct {
 
 	// cursor* fields back GetScanCursor/SetScanCursor. cursorSet mirrors "a
 	// row exists in reconcile_scan_cursors" — false means GetScanCursor must
-	// return the (cursorStartHolder, cursorStartCurrency, false) default, the
-	// same behavior the real adapter gives on zero rows.
+	// return the (cursorStartHolder, cursorStartCurrency, false, 0) default,
+	// the same behavior the real adapter gives on zero rows. cursorLapScanned
+	// (M-1 fix) is the cumulative pairs-verified counter for the current lap.
 	cursorSet           bool
 	cursorAfterHolder   int64
 	cursorAfterCurrency int64
 	cursorLapDirty      bool
+	cursorLapScanned    int64
 	getScanCursorCalls  int
-	setScanCursorCalls  int
+	// errCountCheckpointAccountPairs forces CountCheckpointAccountPairs to
+	// fail, when set.
+	errCountCheckpointAccountPairs error
+	setScanCursorCalls             int
 
 	systemRollups  []SystemRollupRow
 	snapshotDrifts []SnapshotDriftRow
 
 	// force errors
-	errOrphanCount      error
-	errOrphanSample     error
-	errEquation         error
-	errSettlement       error
-	errNegBal           error
-	errOrphanReservs    error
-	errDupeKeys         error
-	errStaleItems       error
-	errCheckpointPage   error
-	errUnbalancedCount  error
-	errUnbalancedSample error
-	errGetScanCursor    error
-	errSetScanCursor    error
-	errSystemRollups    error
-	errSnapshotDrifts   error
+	errOrphanCount         error
+	errOrphanSample        error
+	errEquation            error
+	errSettlement          error
+	errNegBal              error
+	errRoleLessLiabilities error
+	errOrphanReservs       error
+	errDupeKeys            error
+	errStaleItems          error
+	errCheckpointPage      error
+	errUnbalancedCount     error
+	errUnbalancedSample    error
+	errGetScanCursor       error
+	errSetScanCursor       error
+	errSystemRollups       error
+	errSnapshotDrifts      error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -89,6 +97,9 @@ func (m *mockReconcileQuerier) SettlementNettingViolations(_ context.Context, _ 
 }
 func (m *mockReconcileQuerier) NegativeBalanceAccounts(_ context.Context, _ int) ([]NegativeBalanceAccount, error) {
 	return m.negativeAccounts, m.errNegBal
+}
+func (m *mockReconcileQuerier) RoleLessLiabilities(_ context.Context, _ int) ([]RoleLessLiability, error) {
+	return m.roleLessLiabilities, m.errRoleLessLiabilities
 }
 func (m *mockReconcileQuerier) OrphanReservations(_ context.Context) ([]OrphanReservation, error) {
 	return m.orphanReservs, m.errOrphanReservs
@@ -125,19 +136,19 @@ func (m *mockReconcileQuerier) UnbalancedJournalsSample(_ context.Context) ([]Un
 	return m.unbalancedJournals, m.errUnbalancedSample
 }
 
-func (m *mockReconcileQuerier) GetScanCursor(_ context.Context, _ string) (int64, int64, bool, error) {
+func (m *mockReconcileQuerier) GetScanCursor(_ context.Context, _ string) (int64, int64, bool, int64, error) {
 	m.getScanCursorCalls++
 	if m.errGetScanCursor != nil {
-		return 0, 0, false, m.errGetScanCursor
+		return 0, 0, false, 0, m.errGetScanCursor
 	}
 	if !m.cursorSet {
 		// Mirrors the real adapter's zero-rows default.
-		return math.MinInt64, math.MinInt64, false, nil
+		return math.MinInt64, math.MinInt64, false, 0, nil
 	}
-	return m.cursorAfterHolder, m.cursorAfterCurrency, m.cursorLapDirty, nil
+	return m.cursorAfterHolder, m.cursorAfterCurrency, m.cursorLapDirty, m.cursorLapScanned, nil
 }
 
-func (m *mockReconcileQuerier) SetScanCursor(_ context.Context, _ string, afterHolder, afterCurrency int64, lapDirty bool) error {
+func (m *mockReconcileQuerier) SetScanCursor(_ context.Context, _ string, afterHolder, afterCurrency int64, lapDirty bool, lapScanned int64) error {
 	m.setScanCursorCalls++
 	if m.errSetScanCursor != nil {
 		return m.errSetScanCursor
@@ -146,7 +157,18 @@ func (m *mockReconcileQuerier) SetScanCursor(_ context.Context, _ string, afterH
 	m.cursorAfterHolder = afterHolder
 	m.cursorAfterCurrency = afterCurrency
 	m.cursorLapDirty = lapDirty
+	m.cursorLapScanned = lapScanned
 	return nil
+}
+
+// CountCheckpointAccountPairs mirrors the real adapter's semantics: the
+// total distinct pairs currently reachable via ListCheckpointAccountsPage,
+// i.e. the same checkpointAccounts population the mock's paginator walks.
+func (m *mockReconcileQuerier) CountCheckpointAccountPairs(_ context.Context) (int64, error) {
+	if m.errCountCheckpointAccountPairs != nil {
+		return 0, m.errCountCheckpointAccountPairs
+	}
+	return int64(len(m.checkpointAccounts)), nil
 }
 
 func (m *mockReconcileQuerier) ListSystemRollupsRaw(_ context.Context) ([]SystemRollupRow, error) {
@@ -197,7 +219,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 13, "should run exactly 13 checks")
+	assert.Len(t, report.Checks, 14, "should run exactly 14 checks (M-4 fix added role_less_liability)")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. unauthorized_journals is skipped (buildFullSvc never calls
@@ -490,6 +512,47 @@ func TestCheck6NonNegativeBalances_QueryError(t *testing.T) {
 
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
 	result := svc.runCheck6NonNegativeBalances(context.Background())
+	assert.False(t, result.Passed)
+	assert.Contains(t, result.Findings[0].Detail, "scan failed")
+}
+
+// ---------------------------------------------------------------------------
+// role_less_liability — mistagged liability classification (M-4 fix)
+// ---------------------------------------------------------------------------
+
+func TestRoleLessLiability_Clean(t *testing.T) {
+	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
+	result := svc.runCheckRoleLessLiability(context.Background())
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+}
+
+// TestRoleLessLiability_Violation pins the M-1-shaped danger direction
+// M-4 closes: a nonzero balance on a credit-normal, non-system, user-side
+// classification with no balance_role must surface as a Finding instead of
+// silently understating SolvencyReport.Liability.
+func TestRoleLessLiability_Violation(t *testing.T) {
+	q := cleanQuerier()
+	q.roleLessLiabilities = []RoleLessLiability{
+		{AccountHolder: 42, CurrencyID: 1, ClassificationID: 7, Balance: decimal.NewFromInt(100)},
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckRoleLessLiability(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Description, "holder 42")
+	assert.Contains(t, result.Findings[0].Description, "no balance_role")
+	assert.Contains(t, result.Findings[0].Detail, "100")
+	assert.Contains(t, result.Findings[0].Detail, "SolvencyReport.Liability")
+}
+
+func TestRoleLessLiability_QueryError(t *testing.T) {
+	q := cleanQuerier()
+	q.errRoleLessLiabilities = errors.New("scan failed")
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckRoleLessLiability(context.Background())
 	assert.False(t, result.Passed)
 	assert.Contains(t, result.Findings[0].Detail, "scan failed")
 }
@@ -877,10 +940,15 @@ func TestCheck2GlobalBalance_ResumesFromPersistedCursor(t *testing.T) {
 		{AccountHolder: 2, CurrencyID: 1},
 		{AccountHolder: 3, CurrencyID: 1},
 	}
-	// Pretend a previous (partial) run already advanced past holder 2.
+	// Pretend a previous (partial) run already advanced past holder 2 --
+	// genuinely, having scanned holders 1 and 2 (M-1 fix: lapScanned must
+	// reflect that real prior progress for this run's completion to be
+	// trusted; see TestCheck2GlobalBalance_ResumedLapUndercountedIsIncomplete
+	// for the same shape WITHOUT this genuine prior progress).
 	q.cursorSet = true
 	q.cursorAfterHolder = 2
 	q.cursorAfterCurrency = 1
+	q.cursorLapScanned = 2
 
 	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
 	result := svc.runCheck2GlobalBalance(context.Background())
@@ -1059,6 +1127,182 @@ func TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete(t *testing.T) {
 
 	assert.True(t, result.Passed)
 	assert.True(t, result.Complete, "a fresh lap that genuinely finds nothing is a legitimate clean bill of health")
+}
+
+// TestCheck2GlobalBalance_ResumedLapUndercountedIsIncomplete pins the M-1 fix
+// (`.local/independent-review-2026-08-26.md`, docs/plans/2026-08-26-audit-remediation-contracts.md
+// follow-on fix-backend-1 batch, board #43): the pre-fix code only distrusted
+// a resumed lap that found LITERALLY ZERO pairs on its first page
+// (TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete, unchanged
+// above). A cursor tampered to leave exactly one real pair unscanned sailed
+// straight through that check -- the run below scans its one remaining pair
+// (holder 5), finds nothing wrong locally, reaches the natural end of the
+// data (fewer pairs than the page size), and resumedLap is true throughout.
+// Before this fix this reported Complete=true, resetting the cursor and
+// discarding the four pairs (holders 1-4) the tampering skipped, in one
+// forged `UPDATE reconcile_scan_cursors SET after_holder = 4` -- repeatable
+// indefinitely. The fix's independent signal (lapScanned, cumulative across
+// this lap, vs. CountCheckpointAccountPairs) catches it: lapScanned is 1
+// here (nothing about this cursor position was ever legitimately produced by
+// a prior run of THIS scan loop), but 5 pairs actually exist.
+func TestCheck2GlobalBalance_ResumedLapUndercountedIsIncomplete(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []BalanceCheckpoint{
+			{AccountHolder: 5, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 2, CurrencyID: 1},
+		{AccountHolder: 3, CurrencyID: 1},
+		{AccountHolder: 4, CurrencyID: 1},
+		{AccountHolder: 5, CurrencyID: 1},
+	}
+	// Simulates the exact attack: a single UPDATE moves the cursor to sit
+	// one pair before the true end, WITHOUT any real prior run of this scan
+	// loop having actually walked holders 1-4 (cursorLapScanned stays at its
+	// zero default -- nothing legitimately advanced it).
+	q.cursorSet = true
+	q.cursorAfterHolder = 4
+	q.cursorAfterCurrency = 1
+	q.cursorLapDirty = false
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed, "nothing was found wrong in the one pair this run actually examined")
+	assert.False(t, result.Complete,
+		"a resumed lap whose cumulative lapScanned (1) falls short of the ledger's actual pair count (5) must not claim full coverage, even though the page query itself found no MORE rows")
+
+	var flagged bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "resumed lap ended without reaching the ledger's full pair count") {
+			flagged = true
+			assert.Contains(t, f.Detail, "verified 1 account/currency pairs")
+			assert.Contains(t, f.Detail, "5 pairs currently exist")
+		}
+	}
+	assert.True(t, flagged, "must name the undercount explicitly; got: %+v", result.Findings)
+
+	// The lap restarts from scratch (same recovery as the zero-pairs case),
+	// discarding the untrustworthy resumed position rather than treating it
+	// as a valid continuation point.
+	require.Equal(t, 1, q.setScanCursorCalls)
+	assert.Equal(t, int64(math.MinInt64), q.cursorAfterHolder)
+	assert.Equal(t, int64(math.MinInt64), q.cursorAfterCurrency)
+	assert.False(t, q.cursorLapDirty)
+	assert.Equal(t, int64(0), q.cursorLapScanned, "lapScanned must also reset with the cursor, not carry an unverifiable count into the next lap")
+}
+
+// TestCheck2GlobalBalance_ResumedLapReachesFullCoverageAcrossCappedRuns is
+// the (b)-direction companion the M-1 fix must not break: a LEGITIMATE
+// multi-run lap (capped by Check2ScanLimit, exactly the resumability C4b
+// exists for) must still be able to report Complete=true on the run that
+// finishes it, because its cumulative lapScanned genuinely reaches the
+// ledger's pair count across the two real runs below -- unlike the previous
+// test, where lapScanned never advanced through a real run of this loop at
+// all.
+func TestCheck2GlobalBalance_ResumedLapReachesFullCoverageAcrossCappedRuns(t *testing.T) {
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []BalanceCheckpoint{
+			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{
+		{AccountHolder: 1, CurrencyID: 1},
+		{AccountHolder: 2, CurrencyID: 1},
+		{AccountHolder: 3, CurrencyID: 1},
+		{AccountHolder: 4, CurrencyID: 1},
+		{AccountHolder: 5, CurrencyID: 1},
+	}
+
+	// Run 1: capped at 3 pairs (holders 1-3) -- genuinely scanned by this
+	// loop, not forged.
+	svc1 := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{Check2ScanLimit: 3})
+	result1 := svc1.runCheck2GlobalBalance(context.Background())
+	assert.True(t, result1.Passed)
+	assert.False(t, result1.Complete, "run 1 is capped; two pairs remain")
+	assert.Equal(t, int64(3), q.cursorLapScanned, "run 1's own genuine progress must be persisted cumulatively")
+	assert.Equal(t, int64(3), q.cursorAfterHolder)
+
+	// Run 2: resumes at holder 3, scans holders 4 and 5 -- reaches the
+	// natural end of the data (2 pairs, fewer than the page size), with
+	// resumedLap still true throughout.
+	svc2 := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{Check2ScanLimit: 3})
+	result2 := svc2.runCheck2GlobalBalance(context.Background())
+	assert.True(t, result2.Passed)
+	assert.True(t, result2.Complete,
+		"run 2's cumulative lapScanned (3 from run 1 + 2 this run = 5) reaches the ledger's actual pair count (5), so this resumed completion is trustworthy")
+	require.Len(t, result2.Findings, 1)
+	assert.Contains(t, result2.Findings[0].Description, "checkpoint scan complete: 2 account/currency pairs verified this run")
+
+	// The completed lap resets both the cursor and the cumulative counter
+	// for the next lap.
+	assert.Equal(t, int64(math.MinInt64), q.cursorAfterHolder)
+	assert.Equal(t, int64(0), q.cursorLapScanned)
+}
+
+// TestCheck2GlobalBalance_CountCheckpointAccountPairsErrorIsReported pins the
+// error path of the M-1 fix's new query: a resumed lap that reaches the
+// natural end of the data must not silently fall back to trusting it when
+// the independent pair-count check itself cannot be answered.
+func TestCheck2GlobalBalance_CountCheckpointAccountPairsErrorIsReported(t *testing.T) {
+	q := cleanQuerier()
+	q.checkpointAccounts = []CheckpointAccountKey{{AccountHolder: 5, CurrencyID: 1}}
+	q.cursorSet = true
+	q.cursorAfterHolder = 4
+	q.cursorAfterCurrency = 1
+	q.errCountCheckpointAccountPairs = errors.New("db unavailable")
+
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 10, UID: "cls-10", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	cpReader := &mockCheckpointReader{
+		checkpoints: []BalanceCheckpoint{
+			{AccountHolder: 5, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
+		},
+	}
+	accountEntries := &mockAccountEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{10: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{},
+	}
+
+	svc := buildFullSvcForCheck2(t, accountEntries, cpReader, cls, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.False(t, result.Passed)
+	var found bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "checkpoint account pair count failed") {
+			found = true
+			assert.Contains(t, f.Detail, "db unavailable")
+		}
+	}
+	assert.True(t, found, "got: %+v", result.Findings)
 }
 
 // ---------------------------------------------------------------------------

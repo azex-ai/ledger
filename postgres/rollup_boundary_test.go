@@ -53,6 +53,7 @@ func TestRollup_BoundarySemanticsAcrossConsecutiveRollups(t *testing.T) {
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "main_wallet_rb", Name: "Main Wallet Rollup Boundary", NormalSide: core.NormalSideCredit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 

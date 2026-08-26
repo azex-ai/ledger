@@ -70,6 +70,56 @@ HAVING ledger_signed_delta(
 ORDER BY je.account_holder, je.classification_id
 LIMIT sqlc.arg(page_limit)::int;
 
+-- name: ReconcileRoleLessLiabilities :many
+-- M-4 fix (`.local/independent-review-2026-08-26.md`,
+-- docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+-- fix-backend-1 batch, board #43): GetTotalUserSideBalance (I-37) sums only
+-- user-side classifications tagged with a non-empty balance_role. That is
+-- correct GIVEN every real liability classification is actually tagged --
+-- nothing in ClassificationInput enforced that (closed separately by
+-- ClassificationInput.Validate, docs/INVARIANTS.md I-37 addendum).
+--
+-- This query does NOT filter on normal_side: an earlier version of this fix
+-- filtered `c.normal_side = 'credit'`, reasoning "liability-shaped by
+-- construction". That reasoning does not hold in THIS library's own
+-- convention -- main_wallet, the canonical real liability, is DEBIT-normal
+-- (DR increases what the platform owes the holder). balance_role is the
+-- ONLY signal that distinguishes a real liability from a legitimate
+-- role-less memo/cost account (fee_expense and friends, also debit-normal)
+-- -- normal_side cannot do it. Filtering on normal_side therefore missed
+-- exactly the shape a consumer would produce by copying main_wallet without
+-- also copying its balance_role, which independent review confirmed
+-- end-to-end: SolvencyCheck.Liability stayed unchanged (understated) with
+-- such a classification carrying a real, nonzero balance.
+--
+-- False positives on role-less memo accounts (fee_expense) are avoided by
+-- BalanceRoleMemo (migration 011), not by a normal_side filter:
+-- ClassificationInput.Validate requires every new non-system classification
+-- to declare EITHER a spendable role OR 'memo' explicitly, so "balance_role
+-- = ''" on a non-system classification means exactly one thing going
+-- forward -- nobody tagged it -- and is safe to treat uniformly as
+-- suspicious, regardless of normal_side.
+SELECT
+  je.account_holder,
+  je.currency_id,
+  je.classification_id,
+  c.normal_side,
+  COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE 0 END), 0)::numeric AS total_debit,
+  COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)::numeric AS total_credit
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.account_holder > 0
+  AND c.balance_role = ''
+  AND NOT c.is_system
+GROUP BY je.account_holder, je.currency_id, je.classification_id, c.normal_side
+HAVING ledger_signed_delta(
+  MIN(c.normal_side),
+  COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
+) != 0
+ORDER BY je.account_holder, je.classification_id
+LIMIT sqlc.arg(page_limit)::int;
+
 -- name: ReconcileOrphanReservations :many
 -- Check #7: reservations whose journal_id references a non-existent journal.
 -- Since migration 035 journal_id is a nullable FK (NULL = no journal), so
@@ -137,24 +187,38 @@ LIMIT sqlc.arg(page_limit)::int;
 -- name: GetReconcileScanCursor :one
 -- Persisted resume cursor for check #2's fleet-wide scan (C4b). Zero rows
 -- (no cursor persisted yet, e.g. first run ever) is a normal state, not an
--- error — the adapter maps it to the same (MinInt64, MinInt64, false) start
+-- error — the adapter maps it to the same (MinInt64, MinInt64, false, 0) start
 -- the in-memory cursor always used, NOT (0, 0): system holders are negative
 -- (core.SystemHolder), so a zero start would reintroduce the bug fixed in
 -- docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md (B1). lap_dirty
 -- carries "did an earlier segment of this lap already find a violation" so
--- the check that completes the lap can still report Passed=false.
-SELECT after_holder, after_currency, lap_dirty
+-- the check that completes the lap can still report Passed=false. lap_scanned
+-- (M-1 fix, migration 010) carries the cumulative count of pairs verified by
+-- every run of the current lap so far, independent of the resumed cursor's
+-- own position.
+SELECT after_holder, after_currency, lap_dirty, lap_scanned
 FROM reconcile_scan_cursors
 WHERE check_name = sqlc.arg(check_name)::text;
 
 -- name: UpsertReconcileScanCursor :exec
--- Called at the end of every check #2 run: persists the resume point and
--- lap_dirty flag when the scan was capped or timed out (partial coverage),
--- or resets both to their start values ((MinInt64, MinInt64), false) when a
--- full lap completed, so the next run begins a fresh lap rather than
--- replaying the same resume point (or a stale dirty flag) forever.
-INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, updated_at)
-VALUES (sqlc.arg(check_name)::text, sqlc.arg(after_holder)::bigint, sqlc.arg(after_currency)::bigint, sqlc.arg(lap_dirty)::boolean, now())
+-- Called at the end of every check #2 run: persists the resume point,
+-- lap_dirty flag and cumulative lap_scanned when the scan was capped or
+-- timed out (partial coverage), or resets all three to their start values
+-- ((MinInt64, MinInt64), false, 0) when a full lap completed, so the next
+-- run begins a fresh lap rather than replaying the same resume point (or a
+-- stale dirty flag/count) forever.
+INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, lap_scanned, updated_at)
+VALUES (sqlc.arg(check_name)::text, sqlc.arg(after_holder)::bigint, sqlc.arg(after_currency)::bigint, sqlc.arg(lap_dirty)::boolean, sqlc.arg(lap_scanned)::bigint, now())
 ON CONFLICT (check_name)
 DO UPDATE SET after_holder = EXCLUDED.after_holder, after_currency = EXCLUDED.after_currency,
-              lap_dirty = EXCLUDED.lap_dirty, updated_at = now();
+              lap_dirty = EXCLUDED.lap_dirty, lap_scanned = EXCLUDED.lap_scanned, updated_at = now();
+
+-- name: ReconcileCountCheckpointAccountPairs :one
+-- Check #2 (M-1 fix, migration 010): the total number of distinct
+-- (account_holder, currency_id) pairs currently present in
+-- balance_checkpoints -- the same population ReconcileListCheckpointAccountsPage
+-- paginates over. Used as the independent cross-check a resumed lap's
+-- cumulative lap_scanned must reach before "no more rows after this cursor"
+-- is trusted as full coverage.
+SELECT COUNT(*)::bigint AS total
+FROM (SELECT DISTINCT account_holder, currency_id FROM balance_checkpoints) pairs;

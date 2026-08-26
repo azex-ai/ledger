@@ -80,11 +80,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	main, err := ensureClassification(ctx, svc, "main_wallet", "Main Wallet", core.NormalSideDebit, false)
+	main, err := ensureClassification(ctx, svc, "main_wallet", "Main Wallet", core.NormalSideDebit, false, core.BalanceRoleAvailable)
 	if err != nil {
 		return err
 	}
-	custody, err := ensureClassification(ctx, svc, "custodial", "Custodial", core.NormalSideCredit, true)
+	custody, err := ensureClassification(ctx, svc, "custodial", "Custodial", core.NormalSideCredit, true, core.BalanceRoleNone)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	return created.UID, nil
 }
 
-func ensureClassification(ctx context.Context, svc *ledger.Service, code, name string, side core.NormalSide, system bool) (*core.Classification, error) {
+func ensureClassification(ctx context.Context, svc *ledger.Service, code, name string, side core.NormalSide, system bool, role core.BalanceRole) (*core.Classification, error) {
 	c, err := svc.Classifications().GetByCode(ctx, code)
 	if err == nil {
 		return c, nil
@@ -186,9 +186,10 @@ func ensureClassification(ctx context.Context, svc *ledger.Service, code, name s
 		return nil, fmt.Errorf("get classification %s: %w", code, err)
 	}
 	return svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
-		Code:       code,
-		Name:       name,
-		NormalSide: side,
-		IsSystem:   system,
+		Code:        code,
+		Name:        name,
+		NormalSide:  side,
+		IsSystem:    system,
+		BalanceRole: role,
 	})
 }

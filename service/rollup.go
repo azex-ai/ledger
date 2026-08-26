@@ -247,6 +247,16 @@ func (s *RollupService) processItem(
 				"classification", classCode,
 				"balance", newBalance.String(),
 			)
+			// M-3 fix (I-41 point 3): BalanceDrift's Gauge is labelled
+			// (class, currency) without holder, so a healthy item for a
+			// DIFFERENT holder sharing this label can Set it back to zero
+			// right after this one reports the violation -- the very next
+			// line below does exactly that for a healthy item, by design,
+			// so the violation this run just found would otherwise become
+			// invisible the moment any other holder's item in the same
+			// bucket is processed. NegativeBalanceDetected is monotonic and
+			// cannot be masked that way; it is the signal to alert on.
+			s.metrics.NegativeBalanceDetected(classCode, item.CurrencyID)
 		}
 		s.metrics.BalanceDrift(classCode, item.CurrencyID, drift)
 	}

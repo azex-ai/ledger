@@ -29,6 +29,7 @@ func TestAudit_ListJournalsByAccount_OrderedByID(t *testing.T) {
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "wallet_audit", Name: "Wallet Audit", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 
@@ -104,6 +105,7 @@ func TestAudit_ListEntriesByJournal(t *testing.T) {
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "wallet_ent", Name: "Wallet Ent", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 
@@ -154,6 +156,7 @@ func TestAudit_ListJournalsByTimeRange(t *testing.T) {
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "wallet_tr", Name: "Wallet TR", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 
@@ -224,6 +227,7 @@ func TestAudit_TraceBooking(t *testing.T) {
 		Code:       "deposit_trace",
 		Name:       "Deposit Trace",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  presets.DepositLifecycle,
 	})
 	require.NoError(t, err)
@@ -287,6 +291,7 @@ func TestAudit_ListReversals(t *testing.T) {
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "wallet_rev", Name: "Wallet Rev", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 

@@ -118,7 +118,15 @@ func InstallDepositClassification(ctx context.Context, classifications core.Clas
 		Code:       DepositClassificationCode,
 		Name:       "Deposit",
 		NormalSide: core.NormalSideCredit,
-		Lifecycle:  DepositLifecycle,
+		// IsSystem: true (M-4 fix) -- this classification is a Booker
+		// lifecycle key only; no journal entry is ever posted directly
+		// against it (see the doc comment above), so it was never a
+		// candidate for balance_role in the first place. Matches
+		// InstallSweepClassification's sibling classification, which was
+		// already IsSystem: true for the identical reason -- this one
+		// simply hadn't been updated to match when that convention was set.
+		IsSystem:  true,
+		Lifecycle: DepositLifecycle,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("presets: create deposit classification: %w", err)

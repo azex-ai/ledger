@@ -51,14 +51,8 @@ func (s *ClassificationStore) WithDB(db DBTX) *ClassificationStore {
 
 // CreateClassification inserts a new classification.
 func (s *ClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
-	if input.Code == "" || input.Name == "" {
-		return nil, fmt.Errorf("postgres: create classification: code and name required: %w", core.ErrInvalidInput)
-	}
-	if !input.NormalSide.IsValid() {
-		return nil, fmt.Errorf("postgres: create classification: invalid normal side %q: %w", input.NormalSide, core.ErrInvalidInput)
-	}
-	if !input.BalanceRole.IsValid() {
-		return nil, fmt.Errorf("postgres: create classification: invalid balance role %q: %w", input.BalanceRole, core.ErrInvalidInput)
+	if err := input.Validate(); err != nil {
+		return nil, fmt.Errorf("postgres: create classification: %w", err)
 	}
 
 	var lifecycle []byte

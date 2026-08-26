@@ -208,6 +208,7 @@ func TestPrecision_Booking_RejectsOverPrecisionAmount(t *testing.T) {
 		Code:       "bkg_prec",
 		Name:       "Booking Precision Test",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle: &core.Lifecycle{
 			Initial:     "pending",
 			Terminal:    []core.Status{"confirmed"},

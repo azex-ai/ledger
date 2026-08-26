@@ -67,6 +67,7 @@ func setupAttestFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Context) a
 	require.NoError(t, err)
 	cls, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: fmt.Sprintf("attest_main_%d", suffix), Name: "Attest Main", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 	jt, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{

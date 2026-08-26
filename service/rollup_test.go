@@ -466,6 +466,92 @@ func TestRollupService_DriftDetection_ClearsOnceHealthy(t *testing.T) {
 		metrics.balanceDriftCalls[1])
 }
 
+// TestRollupService_NegativeBalanceDetected_SurvivesUnrelatedHealthyItem pins
+// the M-3 fix (I-41 point 3, `.local/independent-review-2026-08-26.md`):
+// BalanceDrift's Gauge is labelled (class, currency) WITHOUT holder, so an
+// unrelated healthy holder sharing that label legitimately re-Sets the same
+// series back to zero right after a genuine violation was reported for a
+// DIFFERENT holder -- that is reproduced directly below (holder 300 violates,
+// holder 301 is healthy, both under classification 30/currency 1), and the
+// Gauge really does read 0 afterward. Before this fix, that Gauge reading was
+// the ONLY signal a violation had occurred, so this exact sequence made a
+// real, still-open violation for holder 300 invisible to anything alerting
+// on the Gauge. NegativeBalanceDetected is monotonic and must still show the
+// violation happened, regardless of what the Gauge reads afterward.
+func TestRollupService_NegativeBalanceDetected_SurvivesUnrelatedHealthyItem(t *testing.T) {
+	cpRW := newMockCheckpointRW()
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 30, UID: "cls-30", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+	metrics := &recordingMetrics{}
+	engine := core.NewEngine(core.WithMetrics(metrics))
+
+	// A checkpoint must already exist for a dimension before processItem
+	// reports drift for it at all (cp != nil gate) -- seed both holders'
+	// starting checkpoints, same as TestRollupService_DriftDetection does
+	// for its single holder.
+	cpRW.checkpoints[checkpointKey{300, 1, 30}] = &BalanceCheckpoint{
+		AccountHolder: 300, CurrencyID: 1, ClassificationID: 30, Balance: decimal.Zero,
+	}
+	cpRW.checkpoints[checkpointKey{301, 1, 30}] = &BalanceCheckpoint{
+		AccountHolder: 301, CurrencyID: 1, ClassificationID: 30, Balance: decimal.Zero,
+	}
+
+	// First batch: holder 300 goes to 0 + (0 - 50) = -50, a violation.
+	queue := &mockRollupQueuer{
+		items: []RollupQueueItem{
+			{ID: 1, AccountHolder: 300, CurrencyID: 1, ClassificationID: 30},
+		},
+	}
+	entries := &mockEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{30: decimal.NewFromInt(0)},
+		creditByClass: map[int64]decimal.Decimal{30: decimal.NewFromInt(50)},
+		maxEntryID:    1,
+		maxEntryAt:    time.Now(),
+	}
+	svc := NewRollupService(queue, cpRW, entries, cls, engine)
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Equal(t, 1, metrics.negativeBalanceDetectedCalls, "the violation must be counted")
+	require.Len(t, metrics.balanceDriftCalls, 1)
+	require.False(t, metrics.balanceDriftCalls[0].IsZero())
+
+	// Second batch: a DIFFERENT holder (301), same classification/currency
+	// label, healthy from the start -- nothing about holder 300 changed.
+	queue2 := &mockRollupQueuer{
+		items: []RollupQueueItem{
+			{ID: 2, AccountHolder: 301, CurrencyID: 1, ClassificationID: 30},
+		},
+	}
+	entries2 := &mockEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{30: decimal.NewFromInt(100)},
+		creditByClass: map[int64]decimal.Decimal{30: decimal.NewFromInt(0)},
+		maxEntryID:    2,
+		maxEntryAt:    time.Now(),
+	}
+	svc2 := NewRollupService(queue2, cpRW, entries2, cls, engine)
+	processed2, err := svc2.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed2)
+
+	// Reproduces the exact shape M-3 flagged: the Gauge's second reading is
+	// zero -- holder 301's healthy item shares holder 300's (class,
+	// currency) label and legitimately re-Sets it. This assertion is not
+	// the bug; it is the precondition the bug depended on.
+	require.Len(t, metrics.balanceDriftCalls, 2)
+	assert.True(t, metrics.balanceDriftCalls[1].IsZero(),
+		"holder 301's healthy item shares holder 300's label and legitimately clears the Gauge -- this is expected, not the fix")
+
+	// The fix: the monotonic counter must NOT have been reset by holder
+	// 301's healthy item, and must still show exactly the one violation
+	// holder 300 produced.
+	assert.Equal(t, 1, metrics.negativeBalanceDetectedCalls,
+		"NegativeBalanceDetected must still report holder 300's violation even though the Gauge for the same label already read back to zero")
+}
+
 func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 	queue := &mockRollupQueuer{
 		items: []RollupQueueItem{
@@ -531,10 +617,11 @@ func TestRollupService_ReleasesClaimAfterParentCtxCancelled(t *testing.T) {
 // recordingMetrics captures specific metric calls for testing.
 type recordingMetrics struct {
 	core.Metrics
-	balanceDriftCalled bool
-	balanceDriftCalls  []decimal.Decimal // every value passed to BalanceDrift, in call order
-	rollupProcessed    int
-	rollupItemFailed   int
+	balanceDriftCalled           bool
+	balanceDriftCalls            []decimal.Decimal // every value passed to BalanceDrift, in call order
+	rollupProcessed              int
+	rollupItemFailed             int
+	negativeBalanceDetectedCalls int // count of NegativeBalanceDetected calls
 }
 
 func (m *recordingMetrics) JournalPosted(string)                  {}
@@ -560,4 +647,7 @@ func (m *recordingMetrics) RollupLatency(time.Duration)           {}
 func (m *recordingMetrics) BalanceDrift(_ string, _ int64, delta decimal.Decimal) {
 	m.balanceDriftCalled = true
 	m.balanceDriftCalls = append(m.balanceDriftCalls, delta)
+}
+func (m *recordingMetrics) NegativeBalanceDetected(string, int64) {
+	m.negativeBalanceDetectedCalls++
 }

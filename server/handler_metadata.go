@@ -14,34 +14,37 @@ import (
 // --- Classification types ---
 
 type createClassificationRequest struct {
-	Code       string          `json:"code"`
-	Name       string          `json:"name"`
-	NormalSide string          `json:"normal_side"`
-	IsSystem   bool            `json:"is_system"`
-	Lifecycle  *core.Lifecycle `json:"lifecycle"`
+	Code        string          `json:"code"`
+	Name        string          `json:"name"`
+	NormalSide  string          `json:"normal_side"`
+	IsSystem    bool            `json:"is_system"`
+	BalanceRole string          `json:"balance_role"`
+	Lifecycle   *core.Lifecycle `json:"lifecycle"`
 }
 
 type classificationResponse struct {
-	UID        string          `json:"uid"`
-	Code       string          `json:"code"`
-	Name       string          `json:"name"`
-	NormalSide string          `json:"normal_side"`
-	IsSystem   bool            `json:"is_system"`
-	IsActive   bool            `json:"is_active"`
-	Lifecycle  *core.Lifecycle `json:"lifecycle,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
+	UID         string          `json:"uid"`
+	Code        string          `json:"code"`
+	Name        string          `json:"name"`
+	NormalSide  string          `json:"normal_side"`
+	IsSystem    bool            `json:"is_system"`
+	IsActive    bool            `json:"is_active"`
+	BalanceRole string          `json:"balance_role"`
+	Lifecycle   *core.Lifecycle `json:"lifecycle,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
 }
 
 func toClassificationResponse(c *core.Classification) classificationResponse {
 	return classificationResponse{
-		UID:        c.UID,
-		Code:       c.Code,
-		Name:       c.Name,
-		NormalSide: string(c.NormalSide),
-		IsSystem:   c.IsSystem,
-		IsActive:   c.IsActive,
-		Lifecycle:  c.Lifecycle,
-		CreatedAt:  c.CreatedAt,
+		UID:         c.UID,
+		Code:        c.Code,
+		Name:        c.Name,
+		NormalSide:  string(c.NormalSide),
+		IsSystem:    c.IsSystem,
+		IsActive:    c.IsActive,
+		BalanceRole: string(c.BalanceRole),
+		Lifecycle:   c.Lifecycle,
+		CreatedAt:   c.CreatedAt,
 	}
 }
 
@@ -187,11 +190,12 @@ func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Reque
 	}
 
 	cls, err := s.classifications.CreateClassification(r.Context(), core.ClassificationInput{
-		Code:       req.Code,
-		Name:       req.Name,
-		NormalSide: ns,
-		IsSystem:   req.IsSystem,
-		Lifecycle:  req.Lifecycle,
+		Code:        req.Code,
+		Name:        req.Name,
+		NormalSide:  ns,
+		IsSystem:    req.IsSystem,
+		BalanceRole: core.BalanceRole(req.BalanceRole),
+		Lifecycle:   req.Lifecycle,
 	})
 	if err != nil {
 		httpx.Error(w, err)

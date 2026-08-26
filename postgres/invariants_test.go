@@ -336,6 +336,7 @@ func setupInvariantsFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Contex
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: fmt.Sprintf("main_wallet_%d", suffix), Name: "Main Wallet", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 	custodial, err := classStore.CreateClassification(ctx, core.ClassificationInput{

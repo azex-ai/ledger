@@ -221,6 +221,7 @@ func TestJournalsGuard_EventIDSetOnce(t *testing.T) {
 		Code:       postgrestest.UniqueKey("guard-event-booking-cls"),
 		Name:       "Guard Event Booking",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)

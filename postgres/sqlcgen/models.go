@@ -310,6 +310,7 @@ type ReconcileScanCursor struct {
 	AfterCurrency int64     `json:"after_currency"`
 	LapDirty      bool      `json:"lap_dirty"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	LapScanned    int64     `json:"lap_scanned"`
 }
 
 type ReconcileScanCursorChange struct {
@@ -323,6 +324,8 @@ type ReconcileScanCursorChange struct {
 	NewLapDirty      bool      `json:"new_lap_dirty"`
 	ChangedBy        string    `json:"changed_by"`
 	ChangedAt        time.Time `json:"changed_at"`
+	OldLapScanned    int64     `json:"old_lap_scanned"`
+	NewLapScanned    int64     `json:"new_lap_scanned"`
 }
 
 type RegistrationRescan struct {

@@ -2561,6 +2561,88 @@ indistinguishable from `Margin=-5` from an actual unbacked issuance).
   `Liability=400, Margin=-5, Solvent=false`; after, `Liability=395, Margin=0,
   Solvent=true`, and `GetTotalLiabilityByAsset` agrees with `SolvencyCheck`.
 
+> **Addendum (M-4 fix, `.local/independent-review-2026-08-26.md`,
+> docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+> fix-backend-1 batch, board #43).** The rule above is correct GIVEN that
+> every real liability classification is actually tagged with a
+> `balance_role` — nothing in `ClassificationInput` enforced that. A
+> classification created without one (the exact shape the independent review
+> found: commit `6c83236`'s own message reported fixing three pre-existing
+> test fixtures that built "liability" classifications with no
+> `balance_role`) is silently excluded from `Liability` by the rule above,
+> understating what the platform owes — the "false surplus" direction, the
+> most dangerous one for a solvency check to be wrong in.
+>
+> Two structural changes close this, both required:
+>
+> 1. `core.ClassificationInput.Validate` now refuses `balance_role = ""` on
+>    any NEW non-system classification. A new `BalanceRole` value,
+>    `BalanceRoleMemo` (migration 011 widens the `balance_role` CHECK
+>    constraint to allow it), lets a classification declare "deliberately
+>    NOT a liability" explicitly instead of leaving the field blank —
+>    `BalanceRoleNone` ("") no longer has to carry both that intent AND
+>    "nobody tagged this yet" at once. `presets.DefaultTemplateClassifications`'
+>    `fee_expense` now declares `BalanceRoleMemo` explicitly (previously
+>    blank); `GetTotalUserSideBalance`'s filter changed from
+>    `balance_role <> ''` to `balance_role NOT IN ('', 'memo')` so a
+>    memo-tagged classification is excluded from `Liability` the same way an
+>    untagged one always was (folding 'memo' into "any non-empty role means
+>    liability" would have reproduced the exact phantom-insolvency bug this
+>    invariant's main rule already fixed, via a different route).
+> 2. A new reconcile check, `role_less_liability`, closes the visibility gap
+>    for classifications that predate this rule or were written directly
+>    (detection, not prevention — it does not change what
+>    `SolvencyReport.Liability` counts): it flags any user-side, non-system
+>    classification with a nonzero balance and `balance_role = ''`,
+>    independent of the query `GetTotalUserSideBalance` itself uses.
+>
+> **Correction (same batch, after Team Lead review).** The first version of
+> this addendum's reconcile check filtered `c.normal_side = 'credit'`,
+> reasoning "liability-shaped by construction". That reasoning is false in
+> THIS library's own convention: `main_wallet`, the canonical real
+> liability, is DEBIT-normal (DR increases what the platform owes the
+> holder) — a classification built by copying `main_wallet`'s shape without
+> its `balance_role` is a role-less DEBIT-normal classification, exactly the
+> shape the credit-only filter let through uncaught. Team Lead reproduced
+> this end-to-end on the pre-correction code: a `main_wallet`-shaped
+> classification with a real, nonzero balance and no `balance_role` produced
+> `custodial=600 liability=500 margin=100 solvent=true` — identical to the
+> unfixed behavior. `balance_role`, not `normal_side`, is the only signal
+> that ever distinguished a real liability from a legitimate memo account;
+> filtering on `normal_side` filtered on the wrong axis. The query no longer
+> filters on `normal_side` at all — see change 1 above (`BalanceRoleMemo`)
+> for how false positives on legitimate memo accounts are avoided instead.
+>
+> **Enforced by (addendum)**: `core.ClassificationInput.Validate`
+> (`core/interfaces.go`); `core.BalanceRoleMemo`
+> (`core/types.go`); `postgres/sql/migrations/011_balance_role_memo.up.sql`;
+> `presets.DefaultTemplateClassifications`'s `fee_expense` entry
+> (`presets/templates.go`); `postgres/sql/queries/platform_balances.sql`'s
+> `GetTotalUserSideBalance`; `postgres/sql/queries/reconcile.sql`'s
+> `ReconcileRoleLessLiabilities`; `service.FullReconciliationService.runCheckRoleLessLiability`
+> (`service/reconcile.go`), wired into the check suite as
+> `role_less_liability`.
+>
+> **Pinned by (addendum)**:
+> `service.TestRoleLessLiability_Violation` /
+> `TestRoleLessLiability_Clean` /
+> `TestFullReconciliation_RoleLessLiability_ExplicitMemoIsNotFlagged`
+> (an explicitly memo-tagged debit-normal classification must never be
+> flagged) /
+> `TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged` —
+> the correction's own pin: a role-less DEBIT-normal classification (the
+> exact shape the credit-only filter missed) with a real balance is flagged,
+> and `SolvencyCheck.Liability` is confirmed blind to it directly /
+> `TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification`
+> — the original DB-backed pin (credit-normal mistagged shape), still
+> correctly caught by the corrected (broader) query /
+> `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict` — `fee_expense`
+> upgrades to `BalanceRoleMemo` on install, not `BalanceRoleNone` /
+> `postgres.TestSolvencyCheck_WithdrawFee_DoesNotManufactureDeficit` — this
+> invariant's original pin, re-verified against the corrected
+> `GetTotalUserSideBalance` filter (a memo-tagged `fee_expense` must still be
+> excluded from `Liability`, not just an untagged one).
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.
@@ -3154,6 +3236,79 @@ of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPri
   `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
   `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
 
+> **Correction (M-1 fix on point 2, `.local/independent-review-2026-08-26.md`,
+> docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+> fix-backend-1 batch, board #43).** Point 2 as originally written only
+> distrusted a resumed run that found **literally zero** pairs on its first
+> page. A cursor tampered to leave exactly one (or any small number of, up to
+> the page size) pairs unscanned sailed straight through it: the run scanned
+> its few remaining pairs, found nothing wrong, reached the natural end of
+> the data, and reported `Complete=true` — resetting the cursor and
+> discarding every pair the tampering skipped. Corrected rule: a resumed run
+> reaching the natural end of the data may only report `Complete=true` when
+> its **cumulative pairs verified this lap** (`lap_scanned`, persisted
+> alongside the resume cursor, reset to 0 exactly when the cursor resets to
+> the fresh-lap sentinel) reaches the number of distinct (holder, currency)
+> pairs the checkpoint fleet currently has (`CountCheckpointAccountPairs`) —
+> not merely "the next page query came back short", which a resumed cursor's
+> own (attacker- or otherwise-reachable) starting position can produce at any
+> pair count, not just zero. A resumed run finding literally zero pairs keeps
+> the original (unchanged) treatment as a stricter special case. This does
+> not weaken point 2's guarantee for legitimate multi-run laps (the
+> resumability C4b exists for): `lap_scanned` accumulates across every
+> capped/timed-out run of the same lap, so a lap that genuinely finishes
+> across several runs still reaches the required total and reports
+> `Complete=true` on the run that completes it.
+>
+> **Enforced by (correction)**: `service/reconcile.go`'s `runCheck2GlobalBalance`,
+> the `resumedLap` branch requiring `lapScanned >= total` (queried via
+> `ReconcileQuerier.CountCheckpointAccountPairs`); `postgres/sql/migrations/010_reconcile_scan_lap_coverage.up.sql`
+> (`reconcile_scan_cursors.lap_scanned` column + extended audit trigger);
+> `postgres/sql/queries/reconcile.sql`'s `UpsertReconcileScanCursor` /
+> `GetReconcileScanCursor` / `ReconcileCountCheckpointAccountPairs`.
+>
+> **Pinned by (correction)**:
+> `service.TestCheck2GlobalBalance_ResumedLapUndercountedIsIncomplete` — the
+> exact repro (a cursor tampered to sit one pair before the true end, with no
+> genuine prior progress recorded, is no longer trusted as `Complete=true`) /
+> `TestCheck2GlobalBalance_ResumedLapReachesFullCoverageAcrossCappedRuns` —
+> the non-regression companion: a legitimate multi-run lap whose cumulative
+> `lap_scanned` genuinely reaches the fleet's pair count still completes /
+> `TestCheck2GlobalBalance_ResumesFromPersistedCursor` (updated) —
+> the original resumed-with-real-prior-progress scenario, still trustworthy /
+> `TestCheck2GlobalBalance_CountCheckpointAccountPairsErrorIsReported`.
+
+> **Correction (M-3 fix on point 3, same batch).** Point 3 as originally
+> written re-emits `BalanceDrift` on every rollup for a dimension, healthy or
+> not, so the gauge can return to zero. That Gauge is labelled `(class,
+> currency)` WITHOUT holder (deliberately, to keep cardinality bounded), so a
+> healthy item for a DIFFERENT holder sharing that label can legitimately
+> re-`Set` the same series back to zero immediately after a genuine violation
+> was reported for the FIRST holder — making a real, still-open violation
+> invisible to anything alerting on the Gauge the moment any other holder in
+> the same bucket is next processed. The Gauge's per-item self-clearing
+> behavior described in point 3 is unchanged and still correct for what it
+> is (a coarse, most-recent-reading-per-label indicator) — what changed is
+> that alerting no longer relies on it alone. A new monotonic Counter,
+> `core.Metrics.NegativeBalanceDetected` (Prometheus
+> `negative_balance_detected_total`, same `(class, currency)` labels),
+> increments exactly when a violation is detected and — being monotonic —
+> cannot be reset by an unrelated holder's healthy item the way the Gauge
+> can. Alerting should key off `increase(negative_balance_detected_total[window]) > 0`.
+>
+> **Enforced by (correction)**: `core.Metrics.NegativeBalanceDetected`
+> (`core/metrics.go`); `observability.PrometheusMetrics.NegativeBalanceDetected`
+> (`observability/prometheus.go`); `service.RollupService.processItem`'s call
+> alongside the existing `BalanceDrift` call, on the same violation branch
+> (`service/rollup.go`).
+>
+> **Pinned by (correction)**:
+> `service.TestRollupService_NegativeBalanceDetected_SurvivesUnrelatedHealthyItem`
+> — reproduces the exact cross-holder clobbering shape (holder A violates,
+> holder B is healthy and shares A's label) and asserts the Gauge's second
+> reading really is zero (the precondition, not the bug) while the Counter
+> still shows exactly one detection.
+
 ## I-42: `journal_entries.id` is sourced from the sequence alone, never an explicit value
 
 (board #37 / `docs/audits/2026-08-25-financial-engineering/financial-correctness.md`'s
@@ -3238,6 +3393,35 @@ never lists `id` in its column list, so it is unaffected.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants/journal_entries` --
   the same shape, enumerated structurally alongside every other table's grant
   policy rather than hardcoded to this one table.
+
+> **Correction (M-5 fix, `.local/independent-review-2026-08-26.md`,
+> docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+> fix-backend-1 batch, board #43).** `docs/RUNBOOK.md` §9's emergency-freeze
+> "restore privileges" step used to be a single blanket
+> `GRANT INSERT ON journals, journal_entries, events, bookings TO ledger_app`.
+> Following that step after any emergency freeze silently undid this
+> invariant's entire protection: it hands `ledger_app` back its table-level
+> INSERT on `journal_entries`, `id` column included, regardless of what this
+> migration's column-level grant says. Corrected: `journal_entries` is
+> excluded from the blanket `GRANT` and restored instead by re-running this
+> migration's own `pg_partition_tree`-driven DO loop, which is safe to
+> re-run at any time (it derives every partition from the catalog, not a
+> hardcoded list). RUNBOOK.md now also names the same trap in 001_baseline's
+> own ACL-derivation loop comment (section 14), which issues the identical
+> table-level `GRANT SELECT, INSERT` and would silently undo this migration
+> the same way if ever re-run against `journal_entries` by name.
+>
+> **Enforced by (correction)**: `docs/RUNBOOK.md` §9 step 4 (corrected text,
+> re-running this migration's DO loop verbatim).
+>
+> **Pinned by (correction)**: no compiled code executes a markdown file, so
+> this is pinned directly against the two SQL fragments (old vs. corrected)
+> rather than against the doc: `postgres.TestRunbookEmergencyRecovery_NaiveGrantReopensIDColumn`
+> (the OLD step 4 text really does reopen explicit-id INSERT under
+> `ledger_app` -- proves the vulnerability RUNBOOK.md used to hand every
+> on-call engineer) / `postgres.TestRunbookEmergencyRecovery_CorrectedGrantKeepsIDColumnClosed`
+> (the corrected step 4 keeps `id` closed AND leaves ordinary id-omitting
+> inserts unaffected).
 ## I-43: A classification's normal_side is interpreted in exactly one place, on each side of the language boundary, and an unrecognized value is refused rather than defaulted
 
 (2026-08-25 financial-engineering audit, `financial-correctness.md` Minor

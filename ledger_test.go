@@ -232,6 +232,7 @@ func TestServiceWorker_AttestsAutomaticallyWhenAttestorConfigured(t *testing.T) 
 	require.NoError(t, err)
 	cls, err := svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
 		Code: fmt.Sprintf("watt_main_%d", suffix), Name: "Worker Attest Main", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 	jt, err := svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{

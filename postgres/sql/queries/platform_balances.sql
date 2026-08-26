@@ -56,25 +56,27 @@ ORDER BY c.code, holder_side;
 -- Returns the realtime sum of all user-side (holder > 0) LIABILITY balances
 -- for a currency — what the platform owes users in aggregate.
 --
--- "Liability" is scoped to classifications tagged with a non-empty
--- balance_role (available/pending/locked), the same basis GetBalanceBreakdown
--- uses for a holder's spendable-money view (see I-11 in docs/INVARIANTS.md).
--- Role-less user-side classifications (fee_expense and friends) are
--- debit-normal cost/memo accounts booked to the user's holder id for
--- per-user reporting — never part of what the platform owes back. Summing
--- them into the liability figure previously turned every dollar of
--- cumulative fee revenue into a phantom dollar of insolvency (SolvencyCheck
--- would report Margin == -fee_total even though custodial == every
--- reservable balance): see
--- docs/audits/2026-08-25-financial-engineering/financial-correctness.md
--- Major #1 ("偿付能力把 user-side debit-normal 费用账当成负债").
+-- "Liability" is scoped to classifications tagged with balance_role
+-- available/pending/locked, the same basis GetBalanceBreakdown uses for a
+-- holder's spendable-money view (see I-11 in docs/INVARIANTS.md). Both
+-- balance_role = '' (untagged) AND balance_role = 'memo' (M-4 fix,
+-- migration 011) are excluded: memo classifications (fee_expense and
+-- friends) are debit-normal cost/memo accounts booked to the user's holder
+-- id for per-user reporting — never part of what the platform owes back.
+-- 'memo' has to be excluded explicitly, not folded into "any non-empty role
+-- means liability" the way the original two-value role world allowed --
+-- summing a memo-tagged classification into the liability figure would
+-- reproduce the exact phantom-insolvency bug this query was originally
+-- fixed for (docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+-- Major #1, "偿付能力把 user-side debit-normal 费用账当成负债"), just via a
+-- different route (an explicit tag instead of a missing one).
 WITH active AS (
   SELECT DISTINCT je.account_holder, je.classification_id
   FROM journal_entries je
   INNER JOIN classifications c ON c.id = je.classification_id
   WHERE je.currency_id = $1
     AND je.account_holder > 0
-    AND c.balance_role <> ''
+    AND c.balance_role NOT IN ('', 'memo')
 )
 SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
 FROM active a

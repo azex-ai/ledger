@@ -28,9 +28,10 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 	require.NoError(t, err)
 
 	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
-		Code:       "wallet_trend",
-		Name:       "Wallet Trend",
-		NormalSide: core.NormalSideDebit,
+		Code:        "wallet_trend",
+		Name:        "Wallet Trend",
+		NormalSide:  core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 

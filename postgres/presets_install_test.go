@@ -573,10 +573,13 @@ func TestInstallPresets_BalanceRoleUpgradeAndConflict(t *testing.T) {
 	classStore := postgres.NewClassificationStore(pool)
 	tmplStore := postgres.NewTemplateStore(pool)
 
-	// Pre-existing row without a role (pre-032 install).
-	preexisting, err := classStore.CreateClassification(ctx, core.ClassificationInput{
-		Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit,
-	})
+	// Pre-existing row without a role (pre-032 install). Seeded via raw SQL,
+	// not classStore.CreateClassification: ClassificationInput.Validate now
+	// refuses a non-system classification with no balance_role (M-4 fix) --
+	// exactly the shape this test needs to simulate as PRE-EXISTING data
+	// that predates Validate ever having run.
+	postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	preexisting, err := classStore.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
 	require.Equal(t, core.BalanceRoleNone, preexisting.BalanceRole)
 
@@ -596,7 +599,10 @@ func TestInstallPresets_BalanceRoleUpgradeAndConflict(t *testing.T) {
 
 	feeExpense, err := classStore.GetByCode(ctx, "fee_expense")
 	require.NoError(t, err)
-	assert.Equal(t, core.BalanceRoleNone, feeExpense.BalanceRole)
+	// M-4 fix: fee_expense is now explicitly tagged BalanceRoleMemo instead
+	// of relying on BalanceRoleNone to mean both "deliberate memo account"
+	// and "nobody tagged this yet" (docs/INVARIANTS.md I-37 addendum).
+	assert.Equal(t, core.BalanceRoleMemo, feeExpense.BalanceRole)
 
 	// Re-install is a no-op (roles already match).
 	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))

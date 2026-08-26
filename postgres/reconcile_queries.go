@@ -141,6 +141,45 @@ func (a *ReconcileAdapter) NegativeBalanceAccounts(ctx context.Context, pageLimi
 	return result, nil
 }
 
+// RoleLessLiabilities returns user-side (holder > 0), non-system
+// classifications with a nonzero balance and no balance_role, up to
+// pageLimit rows (M-4 fix): each is a real, currently-invisible
+// understatement of SolvencyReport.Liability. Not filtered by normal_side --
+// this library's own convention has real liabilities on both sides
+// (main_wallet is debit-normal), so balance_role alone -- not normal_side --
+// is what distinguishes a real liability from a legitimate role-less memo
+// account (BalanceRoleMemo, migration 011).
+func (a *ReconcileAdapter) RoleLessLiabilities(ctx context.Context, pageLimit int) ([]service.RoleLessLiability, error) {
+	rows, err := a.q.ReconcileRoleLessLiabilities(ctx, int32(pageLimit)) //nolint:gosec
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: role-less liabilities: %w", err)
+	}
+	result := make([]service.RoleLessLiability, len(rows))
+	for i, r := range rows {
+		debit, err := numericToDecimal(r.TotalDebit)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: debit convert: %w", err)
+		}
+		credit, err := numericToDecimal(r.TotalCredit)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: credit convert: %w", err)
+		}
+		// core.Delta is the sole authority for this computation (I-43).
+		balance, err := core.Delta(core.NormalSide(r.NormalSide), debit, credit)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: classification %d: %w", r.ClassificationID, err)
+		}
+		result[i] = service.RoleLessLiability{
+			AccountHolder:    r.AccountHolder,
+			CurrencyID:       r.CurrencyID,
+			ClassificationID: r.ClassificationID,
+			NormalSide:       r.NormalSide,
+			Balance:          balance,
+		}
+	}
+	return result, nil
+}
+
 // OrphanReservations returns reservations whose journal_id (non-zero) does not
 // resolve to any journals row.
 func (a *ReconcileAdapter) OrphanReservations(ctx context.Context) ([]service.OrphanReservation, error) {
@@ -240,33 +279,50 @@ func (a *ReconcileAdapter) UnbalancedJournalsSample(ctx context.Context) ([]serv
 
 // GetScanCursor returns the persisted resume cursor for the named check
 // (C4b). Zero rows (no cursor persisted yet) is a normal "first run" state:
-// it maps to (cursorStartHolder-equivalent MinInt64, MinInt64, lapDirty=false),
-// matching the in-memory default check #2 always used before this table
-// existed -- NOT (0, 0), which would exclude every negative (system) holder
-// from the very first page (docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md, B1).
-func (a *ReconcileAdapter) GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, err error) {
+// it maps to (cursorStartHolder-equivalent MinInt64, MinInt64, lapDirty=false,
+// lapScanned=0), matching the in-memory default check #2 always used before
+// this table existed -- NOT (0, 0), which would exclude every negative
+// (system) holder from the very first page
+// (docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md, B1). lapScanned
+// (M-1 fix, migration 010) is the cumulative pairs-verified counter for the
+// current lap.
+func (a *ReconcileAdapter) GetScanCursor(ctx context.Context, checkName string) (afterHolder, afterCurrency int64, lapDirty bool, lapScanned int64, err error) {
 	row, err := a.q.GetReconcileScanCursor(ctx, checkName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return math.MinInt64, math.MinInt64, false, nil
+			return math.MinInt64, math.MinInt64, false, 0, nil
 		}
-		return 0, 0, false, fmt.Errorf("postgres: reconcile: get scan cursor: %w", err)
+		return 0, 0, false, 0, fmt.Errorf("postgres: reconcile: get scan cursor: %w", err)
 	}
-	return row.AfterHolder, row.AfterCurrency, row.LapDirty, nil
+	return row.AfterHolder, row.AfterCurrency, row.LapDirty, row.LapScanned, nil
 }
 
-// SetScanCursor persists the resume cursor and lap_dirty flag for the named
-// check.
-func (a *ReconcileAdapter) SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool) error {
+// SetScanCursor persists the resume cursor, lap_dirty flag, and cumulative
+// lap_scanned counter (M-1 fix, migration 010) for the named check.
+func (a *ReconcileAdapter) SetScanCursor(ctx context.Context, checkName string, afterHolder, afterCurrency int64, lapDirty bool, lapScanned int64) error {
 	if err := a.q.UpsertReconcileScanCursor(ctx, sqlcgen.UpsertReconcileScanCursorParams{
 		CheckName:     checkName,
 		AfterHolder:   afterHolder,
 		AfterCurrency: afterCurrency,
 		LapDirty:      lapDirty,
+		LapScanned:    lapScanned,
 	}); err != nil {
 		return fmt.Errorf("postgres: reconcile: set scan cursor: %w", err)
 	}
 	return nil
+}
+
+// CountCheckpointAccountPairs returns the number of distinct
+// (account_holder, currency_id) pairs currently present in
+// balance_checkpoints -- the same population ListCheckpointAccountsPage
+// paginates over. Used by check #2 (M-1 fix) to cross-check a resumed lap's
+// cumulative coverage independent of the resumed cursor's own position.
+func (a *ReconcileAdapter) CountCheckpointAccountPairs(ctx context.Context) (int64, error) {
+	total, err := a.q.ReconcileCountCheckpointAccountPairs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: reconcile: count checkpoint account pairs: %w", err)
+	}
+	return total, nil
 }
 
 // ListSystemRollupsRaw returns every system_rollups row in internal-id space,
