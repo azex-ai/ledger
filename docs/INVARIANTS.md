@@ -2589,20 +2589,68 @@ renamed; update this doc.
    `encoding/json` renders as `null`. Every `docs/openapi.yaml` schema with a
    `next_cursor` property types it to admit `"null"`
    (`type: [string, "null"]` in OpenAPI 3.1), and every requestBody /
-   response schema referenced by a handler agrees on field names with that
-   handler's Go wire struct -- both mechanically, not by convention: a
-   `go test ./server/...` run checks the openapi.yaml source against `server`
-   package reflection on every push and PR (unlike the pre-existing
-   `ledger-react.yml` gate, this one is not path-filtered and needs no
-   running server).
-2. `POST /journals/template` refuses (403) any `template_code` listed in
-   `server.Config.ProtectedTemplateCodes` (empty by default), no matter what
-   scope the caller's API key holds. A deployment that installs a
-   verified-deposit-confirmation preset should list those template codes
-   here, mirroring `POST /dev/credits`'s hardcoded-to-one-template design
-   (`server/handler_devcredit.go`) rather than leaving the generic template
-   endpoint as an unrestricted way to post a journal indistinguishable from
-   a real confirmed deposit.
+   response schema **registered in `server/openapi_contract_test.go`'s
+   `requestBodySchemaCases` / `responseEnvelopeCases` / `listEnvelopeCases`**
+   agrees on field names with that handler's Go wire struct -- both
+   mechanically, not by convention: a `go test ./server/...` run checks the
+   openapi.yaml source against `server` package reflection on every push and
+   PR (unlike the pre-existing `ledger-react.yml` gate, this one is not
+   path-filtered and needs no running server).
+   **Revision note (M-8, 2026-08-26 independent review, second pass):** the
+   bolded qualifier above is the fix. The first revision's three registries
+   were hand-maintained lists with nothing asserting they covered every
+   schema `paths` actually references -- a new endpoint with a new named
+   schema, or an existing endpoint whose schema silently drifted from the
+   registries above, passed with zero signal, exactly the class of gap this
+   guarantee exists to close. Two completeness tests
+   (`TestOpenAPIContract_EveryRequestBodySchemaIsRegistered` /
+   `TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered`) now
+   enumerate every schema `docs/openapi.yaml`'s `paths` references (requestBody,
+   and 2xx responses respectively) and `Fatalf` on anything not present in
+   one of the three registries -- mirroring
+   `postgres/grant_coverage_test.go`'s "a new table defaults to nothing, not
+   to full access" shape. Turning these two tests on immediately surfaced
+   three real, pre-existing drifts the un-gated registries had missed (fixed
+   in the same pass, not left for a future one): `GET
+   /balances/{holder}/{currency}` was documented as `BalancesEnvelope`
+   (`{list, next_cursor}` of `Balance`) but its handler
+   (`handleGetBalanceByCurrency`) actually returns `{total, classifications}`
+   -- now its own `BalanceByCurrencyEnvelope` schema;
+   `JournalWithEntriesEnvelope` documented `data: {journal: {...}, entries:
+   [...]}` but `handleGetJournal` returns a flat `journalResponse` with
+   `entries` as a sibling field, not nested under a `journal` key -- fixed to
+   `allOf: [Journal, {entries: [...]}]`; `POST /reconcile` and `POST
+   /reconcile/full` referenced the bare `ReconcileResult` / `ReconcileReport`
+   schemas directly, with no `Envelope` wrapping at all, even though both
+   handlers go through `httpx.OK` like every other endpoint and therefore do
+   envelope their response at runtime -- now `ReconcileEnvelope` /
+   `ReconcileReportEnvelope`. `POST /reconcile/account` was also missing a
+   response schema entirely (fixed to `ReconcileEnvelope`, matching its
+   handler). None of the three represent a behavior change -- the Go
+   handlers were already correct; only the documentation the completeness
+   gate exists to keep honest was wrong.
+2. `POST /journals/template` refuses (403) any `template_code` in the
+   effective protected set, no matter what scope the caller's API key holds.
+   The effective set is `presets.ProtectedTemplateCodes()` (the four codes
+   named below) PLUS `server.Config.ProtectedTemplateCodes` (a deployment's
+   own additional system-only codes) MINUS `Config.AllowGenericTemplatePost`
+   (an explicit, per-code opt-out). A deployment does not need to enumerate
+   the library's own codes to get them protected -- that used to be true
+   (`ProtectedTemplateCodes` defaulted to empty, protecting nothing until a
+   deployment separately opted in) and is the subject of the revision note
+   below.
+   **Revision note (M-2, 2026-08-26 independent review, second pass):** the
+   first revision of this guarantee left `ProtectedTemplateCodes` empty by
+   default, on the theory that "this library does not know which of a
+   deployment's own template codes are meant to be system-only." That is
+   true of a deployment's OWN codes, but not of the library's own
+   deposit-confirmation codes, which it ships and therefore already knows
+   are dangerous to expose here -- so every deployment that installed a
+   deposit preset and did not separately remember to configure this field
+   stayed exposed to the exact finding this guarantee exists to close. The
+   default now includes the library's own codes; `AllowGenericTemplatePost`
+   is the new opt-out for a deployment with a reviewed reason to post one of
+   them through this endpoint anyway.
 
 **Why**: Before (1), a client following `docs/openapi.yaml` literally (e.g.
 checking `data.next_cursor === null` to know when to stop paging, or sending
@@ -2616,19 +2664,25 @@ and its siblings (`deposit_confirm_pending`, `deposit_release_pending`,
 `deposit_record_overage`) were reachable by name through the same endpoint
 any other template goes through, with no gate at all -- a leaked or
 over-scoped write-scope key could mint accounting indistinguishable from a
-verified on-chain deposit.
+verified on-chain deposit. The empty-by-default revision closed that only
+for a deployment that remembered to opt in; the current revision closes it
+by default.
 
 **Enforced by**: `server.PagedResponse` / `cursorPtr` (`server/response.go`);
-`server.Config.ProtectedTemplateCodes` / `server.Server.protectedTemplateCodes`
-(`server/server.go`) checked in `handlePostTemplate`
+`presets.ProtectedTemplateCodes()` (`presets/protected_templates.go`) merged
+with `server.Config.ProtectedTemplateCodes` and reduced by
+`Config.AllowGenericTemplatePost` into `server.Server.protectedTemplateCodes`
+(`server/server.go`), checked in `handlePostTemplate`
 (`server/handler_journals.go`); `server/openapi_contract_test.go`'s
 `TestOpenAPIContract_RequestBodiesMatchGoStructs` /
 `TestOpenAPIContract_ResponseEnvelopesMatchGoStructs` /
 `TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs` /
-`TestOpenAPIContract_NextCursorIsNullable`, run unconditionally by `ci.yml`'s
-`test` job; `.github/workflows/ledger-react-publish.yml`'s `verify` job now
-also runs `codegen:check` before publishing (previously only `ledger-react.yml`
-did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
+`TestOpenAPIContract_NextCursorIsNullable` /
+`TestOpenAPIContract_EveryRequestBodySchemaIsRegistered` /
+`TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered`, run
+unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publish.yml`'s
+`verify` job now also runs `codegen:check` before publishing (previously only
+`ledger-react.yml` did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
 
 **Pinned by**:
 - `server.TestDepositReview_SelfMintSelfApprove_MI2` — the end-to-end mi2
@@ -2658,6 +2712,28 @@ did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+- `server.TestPostTemplate_DefaultProtectsDepositCodes` — M-2's own pin:
+  table-driven over `presets.ProtectedTemplateCodes()` itself (not a
+  hardcoded literal list), an unconfigured `Config.ProtectedTemplateCodes`
+  still refuses every one of them; verified red before this revision (all
+  four posted 201, not 403).
+- `server.TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes` — the
+  default is not a blanket deny: a code outside the library's own set and
+  outside `Config.ProtectedTemplateCodes` still posts normally.
+- `server.TestPostTemplate_AllowGenericTemplatePostOptsCodeBackIn` /
+  `TestPostTemplate_AllowGenericTemplatePostIsScopedToOneCode` — the escape
+  hatch opts a specific default-protected code back in without opening the
+  others, answering whether defaulting protection on could brick a
+  deployment with a reviewed reason to post one of these codes generically.
+- `server.TestOpenAPIContract_EveryRequestBodySchemaIsRegistered` /
+  `TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered` — M-8's own
+  pins: verified red by construction (delete any single entry from
+  `requestBodySchemaCases` / `responseEnvelopeCases` / `listEnvelopeCases`
+  and either test fails, naming exactly the schema that was removed);
+  restoring the entry passes again. Registering `BalanceByCurrencyEnvelope`,
+  `JournalWithEntriesEnvelope`, `ReconcileEnvelope`, and
+  `ReconcileReportEnvelope` to make these two tests pass is what surfaced
+  the three real drifts the revision note above describes.
 ## I-39: Advisory-lock coordination is structurally safe, not conventionally safe
 
 (`docs/audits/2026-08-25-financial-engineering/concurrency.md`, board #30/#24,
@@ -2667,21 +2743,53 @@ D-lock.)
 checkpoint for why they were not split further):
 
 1. **Disjoint lock namespaces.** `AcquireBalanceLock` and
-   `AcquireIdempotencyLock` (`postgres/sql/queries/journals.sql`) use
-   PostgreSQL's two-key advisory lock form, `pg_advisory_xact_lock(int4,
-   int4)`, with fixed namespace literals (`1` for balance, `2` for
-   idempotency) as the first argument — not the single-key `bigint` form
-   both used before this fix. The two-key API is a genuinely separate lock
-   space from the single-key API regardless of the values passed (a 4th
-   field in PostgreSQL's internal `LOCKTAG` distinguishes them), and the
-   two-key space is further partitioned by its first argument. A caller
-   fully controls `idempotency_key` end to end
-   (`server/handler_journals.go` accepts it with no format restriction) and
-   could previously pick a string like `"balance:1:1"` to alias a real
-   balance-lock key, constructing an ABBA deadlock between two ordinary
-   `POST /journals` calls with no malicious intent required on the amounts
-   or accounts themselves. This is now structurally impossible, not merely
-   discouraged by convention.
+   `AcquireIdempotencyLock` (`postgres/sql/queries/journals.sql`) hash a
+   literal per-query string prefix concatenated onto the caller's key
+   (`'bal:' || key` / `'idem:' || key`) through
+   `hashtextextended(text, 0)`, then take a single-key
+   `pg_advisory_xact_lock(bigint)` on the full 64-bit result. A caller
+   fully controls `idempotency_key` end to end (`server/handler_journals.go`
+   accepts it with no format restriction) and could otherwise pick a string
+   like `"balance:1:1"` to alias a real balance-lock key, constructing an
+   ABBA deadlock between two ordinary `POST /journals` calls with no
+   malicious intent required on the amounts or accounts themselves; because
+   the two prefixes differ in their first byte, the set of strings each
+   query can hash is disjoint by construction, so no caller-supplied key can
+   land the two namespaces on the same lock. This is structurally
+   impossible, not merely discouraged by convention.
+   **Revision note (M-6, 2026-08-26 independent review, second pass):** an
+   intermediate revision of this guarantee used PostgreSQL's two-key form,
+   `pg_advisory_xact_lock(int4, int4)`, with fixed namespace literals (`1`
+   for balance, `2` for idempotency) as the first argument, relying on the
+   two-key API being a genuinely separate lock space from the single-key API
+   regardless of the values passed (a 4th field in PostgreSQL's internal
+   `LOCKTAG` distinguishes them). That closed the ABBA above, but it also
+   narrowed the *hashed* value from `hashtextextended`'s 64 bits to
+   `hashtext`'s 32 bits — and a 32-bit collision between two DIFFERENT
+   `(holder, currency_id)` pairs is reachable at realistic account
+   cardinalities (found by an offline birthday-attack search in under a
+   second; see `postgres.TestAcquireBalanceLocks_HashCollisionCrossBatchDeadlock_Fixed`).
+   Guarantee 2 below (whole-batch lock order) sorts each transaction's OWN
+   pairs by `(holder, currency_id)`, not by the hash the lock is actually
+   taken on, so it does not prevent two transactions with disjoint holder
+   sets from interleaving into a real ABBA when their pairs alias the same
+   32-bit hash — reintroducing the exact deadlock shape this guarantee
+   exists to close. The string-prefix approach above restores the full
+   64-bit range while keeping the same "disjoint by construction" property
+   the two-key form had, without depending on PostgreSQL's internal
+   two-key/single-key LOCKTAG distinction.
+   **Residual, accepted risk**: this single-key form shares its 64-bit
+   space with every other single-key `pg_advisory_lock`/
+   `pg_try_advisory_lock` caller in the codebase — currently
+   `service.advisoryLockKey` (an FNV-64a hash of a small fixed set of job
+   names, used by `LockedJob` and `SnapshotService`), which the two-key form
+   was also disjoint from. A job-name hash landing on the same 64-bit value
+   as a live balance/idempotency key is not attacker-influenceable (job
+   names are fixed constants, not caller input), and every such caller uses
+   the non-blocking `pg_try_advisory_lock`, so the only possible effect is a
+   single skipped/delayed lock-wait, never a deadlock (a non-blocking
+   acquire cannot participate in a wait-for cycle) and never an incorrect
+   result.
 2. **Whole-batch lock order.** `ExecuteTemplateBatch`'s pool-mode branch
    (`postgres/ledger_store.go`) unions every journal's `(holder,
    currency_id)` pairs across the WHOLE batch, sorts once
@@ -2775,9 +2883,10 @@ available until its own precondition excludes the failure state it exists
 to fix.
 
 **Enforced by**:
-- `postgres/sql/queries/journals.sql`'s `AcquireBalanceLock` (namespace 1)
-  and `AcquireIdempotencyLock` (namespace 2), both
-  `pg_advisory_xact_lock(int4, int4)`.
+- `postgres/sql/queries/journals.sql`'s `AcquireBalanceLock`
+  (`hashtextextended('bal:' || key, 0)`) and `AcquireIdempotencyLock`
+  (`hashtextextended('idem:' || key, 0)`), both single-key
+  `pg_advisory_xact_lock(bigint)`.
 - `postgres/ledger_store.go`'s `sortedUniquePairs` (shared dedupe+sort,
   extracted from `balancePairsFromEntries`) and `ExecuteTemplateBatch`'s
   pool-mode pre-lock step, before its per-journal posting loop.
@@ -2805,10 +2914,19 @@ to fix.
 
 **Pinned by**:
 - `postgres.TestAcquireIdempotencyLock_NeverCollidesWithBalanceLock` —
-  drives a real two-transaction deadlock scenario that the pre-fix shared
-  namespace reproduces (verified by temporarily reverting the namespace
-  separation and confirming this test fails with SQLSTATE 40P01) and the
-  fix eliminates outright.
+  drives a real two-transaction deadlock scenario that a shared namespace
+  (either the very first revision, which hashed the caller's key directly
+  with no prefix, or a hypothetical un-prefixed single-key form) reproduces
+  and the `'bal:'`/`'idem:'` prefix separation eliminates outright.
+- `postgres.TestAcquireBalanceLocks_HashCollisionCrossBatchDeadlock_Fixed` —
+  M-6's own pin: two real transactions, sorted and locked through the exact
+  `sortedUniquePairs`+`acquireBalanceLocks` primitives `ExecuteTemplateBatch`
+  uses, over four `(holder, currency_id)` pairs that are real `hashtext()`
+  32-bit collisions (found by an offline birthday-attack search, verified
+  against the live DB at test time rather than assumed stable). Verified red
+  against the intermediate 32-bit two-key revision (a real SQLSTATE 40P01,
+  confirmed by running this test before applying the 64-bit fix); green
+  against the current `hashtextextended` revision.
 - `postgres.TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock` —
   two real transactions modeling "two batches whose journals touch the same
   two holders in reverse order," using the exact

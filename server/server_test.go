@@ -827,8 +827,13 @@ func TestPostTemplate_PassesEventID(t *testing.T) {
 		}
 	})
 
+	// Template code is incidental to this test (it exercises event_uid
+	// passthrough, not template protection) -- "withdraw_fee" isn't in
+	// presets.ProtectedTemplateCodes()'s default-protected set, unlike
+	// "deposit_confirm" which this test used before that default existed
+	// (M-2, 2026-08-26 independent review).
 	body := map[string]any{
-		"template_code":   "deposit_confirm",
+		"template_code":   "withdraw_fee",
 		"holder_id":       100,
 		"currency_uid":    "cur-1",
 		"idempotency_key": "tmpl-event-link",
@@ -839,7 +844,7 @@ func TestPostTemplate_PassesEventID(t *testing.T) {
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", body)
 	require.Equal(t, http.StatusCreated, w.Code)
-	assert.Equal(t, "deposit_confirm", capturedCode)
+	assert.Equal(t, "withdraw_fee", capturedCode)
 	assert.Equal(t, "evt-88", captured.EventUID)
 
 	data := parseEnvelope(t, w.Body.Bytes())

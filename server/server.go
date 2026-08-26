@@ -15,6 +15,7 @@ import (
 
 	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/service"
 )
 
@@ -97,9 +98,10 @@ type Server struct {
 	// keeps every /holder* route answering 404.
 	holder *holderSurface
 
-	// protectedTemplateCodes is Config.ProtectedTemplateCodes, indexed for
-	// O(1) lookup by handlePostTemplate. Empty (the default) protects
-	// nothing -- see that field's doc comment.
+	// protectedTemplateCodes is presets.ProtectedTemplateCodes() plus
+	// Config.ProtectedTemplateCodes, minus Config.AllowGenericTemplatePost,
+	// indexed for O(1) lookup by handlePostTemplate. See those fields' doc
+	// comments.
 	protectedTemplateCodes map[string]bool
 }
 
@@ -139,19 +141,37 @@ type Config struct {
 	// template and gated behind DevCreditEnabled), the generic template
 	// endpoint has no allowlist at all, so a write-scope key can post a
 	// journal indistinguishable from a real verified deposit by naming its
-	// template code directly (e.g. presets' "deposit_confirm",
-	// "deposit_confirm_pending", "deposit_release_pending",
-	// "deposit_record_overage" — every template a deployment's own
-	// verified-deposit orchestration posts via PostAuthorized, never over
-	// this endpoint).
+	// template code directly.
 	//
-	// Empty by default (unchanged behavior: this library does not know which
-	// of a deployment's own template codes are meant to be system-only —
-	// that classification is the deployment's, made once here, mirroring
-	// core.ReserveInput.RequireVerifiedBalance's "mechanism in the library,
-	// policy in the consumer" split). A production deployment that installs
-	// any deposit-confirmation preset SHOULD set this to those codes.
+	// The effective protected set is presets.ProtectedTemplateCodes()
+	// (deposit_confirm, deposit_confirm_pending, deposit_release_pending,
+	// deposit_record_overage — every template a deployment's own
+	// verified-deposit orchestration posts via PostAuthorized, never over
+	// this endpoint) PLUS this field, MINUS AllowGenericTemplatePost below.
+	// This field is additive: list a deployment's own system-only template
+	// codes here, on top of the library default — it does not need to (and
+	// should not need to) repeat the library's own codes to get them
+	// protected.
+	//
+	// The library defaults this protection on, rather than requiring every
+	// deployment to remember to enable it, because it already knows which
+	// codes its own deposit bundles install (InstallDefaultTemplatePresets,
+	// DepositBundle, InstallPendingBundle) — the earlier "empty by default"
+	// design left the finding open in every deployment that didn't
+	// separately opt in. A deployment that genuinely wants one of the
+	// default-protected codes reachable through this generic endpoint sets
+	// AllowGenericTemplatePost, rather than this list being empty by
+	// omission.
 	ProtectedTemplateCodes []string
+	// AllowGenericTemplatePost (ALLOW_GENERIC_TEMPLATE_POST, comma-separated)
+	// removes codes from the effective protected set computed above --
+	// applied last, so it can opt a library-default code (e.g.
+	// "deposit_confirm") back into POST /journals/template for a deployment
+	// that has its own reason to allow it there (e.g. a reviewed,
+	// admin-scope-only internal tool). Empty by default: the library
+	// defaults land closed, and only a deployment that explicitly names a
+	// code here weakens that.
+	AllowGenericTemplatePost []string
 }
 
 // Validate rejects configurations that would expose a production server or
@@ -182,6 +202,21 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("server: MaxBodyBytes must be positive")
 	}
 	return nil
+}
+
+// parseCommaSeparated splits a comma-separated env value into a trimmed,
+// empty-entry-filtered slice. Returns nil for an empty/whitespace-only
+// input, matching the pre-existing behavior of the inline parsing this
+// replaces (PROTECTED_TEMPLATE_CODES had its own copy; this is now shared
+// with ALLOW_GENERIC_TEMPLATE_POST).
+func parseCommaSeparated(raw string) []string {
+	var out []string
+	for _, entry := range strings.Split(raw, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // LoadConfig reads server config from env. Returns an error in production
@@ -226,24 +261,19 @@ func LoadConfig() (*Config, error) {
 
 	devCredit := os.Getenv("DEV_CREDIT_ENABLED") == "true"
 
-	var protectedTemplateCodes []string
-	if v := os.Getenv("PROTECTED_TEMPLATE_CODES"); v != "" {
-		for _, code := range strings.Split(v, ",") {
-			if code = strings.TrimSpace(code); code != "" {
-				protectedTemplateCodes = append(protectedTemplateCodes, code)
-			}
-		}
-	}
+	protectedTemplateCodes := parseCommaSeparated(os.Getenv("PROTECTED_TEMPLATE_CODES"))
+	allowGenericTemplatePost := parseCommaSeparated(os.Getenv("ALLOW_GENERIC_TEMPLATE_POST"))
 
 	cfg := &Config{
-		Env:                    env,
-		CORSAllowOrigin:        corsOrigin,
-		APIKeys:                keys,
-		MaxBodyBytes:           maxBytes,
-		TrustedProxyCIDRs:      trustedCIDRs,
-		HolderTokenSecret:      holderSecret,
-		DevCreditEnabled:       devCredit,
-		ProtectedTemplateCodes: protectedTemplateCodes,
+		Env:                      env,
+		CORSAllowOrigin:          corsOrigin,
+		APIKeys:                  keys,
+		MaxBodyBytes:             maxBytes,
+		TrustedProxyCIDRs:        trustedCIDRs,
+		HolderTokenSecret:        holderSecret,
+		DevCreditEnabled:         devCredit,
+		ProtectedTemplateCodes:   protectedTemplateCodes,
+		AllowGenericTemplatePost: allowGenericTemplatePost,
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -396,12 +426,16 @@ func NewFromDeps(cfg *Config, deps Deps) (*Server, error) {
 // newServer is the shared builder behind NewWithConfig and NewFromDeps.
 // Callers must validate cfg first.
 func newServer(cfg *Config, deps Deps) *Server {
-	var protectedTemplateCodes map[string]bool
-	if len(cfg.ProtectedTemplateCodes) > 0 {
-		protectedTemplateCodes = make(map[string]bool, len(cfg.ProtectedTemplateCodes))
-		for _, code := range cfg.ProtectedTemplateCodes {
-			protectedTemplateCodes[code] = true
-		}
+	defaultProtected := presets.ProtectedTemplateCodes()
+	protectedTemplateCodes := make(map[string]bool, len(defaultProtected)+len(cfg.ProtectedTemplateCodes))
+	for _, code := range defaultProtected {
+		protectedTemplateCodes[code] = true
+	}
+	for _, code := range cfg.ProtectedTemplateCodes {
+		protectedTemplateCodes[code] = true
+	}
+	for _, code := range cfg.AllowGenericTemplatePost {
+		delete(protectedTemplateCodes, code)
 	}
 	s := &Server{
 		journals:               deps.Journals,

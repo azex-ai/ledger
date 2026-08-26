@@ -133,13 +133,14 @@ paths:
       tags: [Journals]
       summary: Render a template into a journal and post it.
       description: >-
-        Answers 403 when template_code is one of the deployment's
-        Config.ProtectedTemplateCodes (empty by default) -- deployments that
-        install a verified-deposit-confirmation preset should list its
-        template codes there so a write-scope key cannot mint a journal
-        indistinguishable from a real confirmed deposit through this generic
-        endpoint; those codes are meant to be posted only by the deployment's
-        own orchestration.
+        Answers 403 when template_code is in the effective protected set:
+        presets.ProtectedTemplateCodes() (deposit_confirm and its siblings,
+        protected by default) plus Config.ProtectedTemplateCodes (a
+        deployment's own additional system-only codes), minus
+        Config.AllowGenericTemplatePost (an explicit per-code opt-out).
+        Those codes are meant to be posted only by the deployment's own
+        verified-deposit orchestration, never by naming the code directly
+        through this generic endpoint.
       requestBody:
         required: true
         content:
@@ -299,6 +300,12 @@ paths:
     get:
       tags: [Balances]
       summary: Balances for one holder × currency.
+      description: >-
+        Per-classification breakdown for one currency, with the sum across
+        classifications as `total` -- a different shape from GET
+        /balances/{holder} (which lists one Balance per currency, no
+        cross-classification sum), so it has its own envelope
+        (BalanceByCurrencyEnvelope) rather than reusing BalancesEnvelope.
       parameters:
         - in: path
           name: holder
@@ -310,10 +317,10 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "200":
-          description: Balance list.
+          description: Per-classification balances for this holder × currency, plus their total.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BalancesEnvelope" }
+              schema: { $ref: "#/components/schemas/BalanceByCurrencyEnvelope" }
   /balances/{holder}/{currency}/breakdown:
     get:
       tags: [Balances]
@@ -979,7 +986,7 @@ paths:
           description: Reconciliation result.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ReconcileResult" }
+              schema: { $ref: "#/components/schemas/ReconcileEnvelope" }
   /reconcile/account:
     post:
       tags: [Reconciliation]
@@ -997,6 +1004,9 @@ paths:
       responses:
         "200":
           description: Reconciliation result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReconcileEnvelope" }
   /reconcile/full:
     post:
       tags: [Reconciliation]
@@ -1014,7 +1024,7 @@ paths:
           description: Full reconciliation report.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ReconcileReport" }
+              schema: { $ref: "#/components/schemas/ReconcileReportEnvelope" }
 
   /snapshots:
     get:
@@ -1633,17 +1643,23 @@ components:
                   type: [string, "null"]
                   description: Opaque cursor; null when exhausted or when the endpoint returns its full result set (not paginated).
     JournalWithEntriesEnvelope:
+      description: >-
+        GET /journals/{uid}'s data is a Journal with entries appended as a
+        sibling field, not journal/entries nested under separate keys
+        (server/handler_journals.go's handleGetJournal returns a single
+        journalResponse whose Entries field carries them).
       allOf:
         - $ref: "#/components/schemas/Envelope"
         - type: object
           properties:
             data:
-              type: object
-              properties:
-                journal: { $ref: "#/components/schemas/Journal" }
-                entries:
-                  type: array
-                  items: { $ref: "#/components/schemas/Entry" }
+              allOf:
+                - $ref: "#/components/schemas/Journal"
+                - type: object
+                  properties:
+                    entries:
+                      type: array
+                      items: { $ref: "#/components/schemas/Entry" }
 
     Balance:
       type: object
@@ -1666,6 +1682,20 @@ components:
                 next_cursor:
                   type: [string, "null"]
                   description: Always null -- this endpoint returns its full result set (not paginated).
+
+    BalanceByCurrencyEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [total, classifications]
+              properties:
+                total: { $ref: "#/components/schemas/Decimal", description: "Sum of every classification's balance for this holder × currency." }
+                classifications:
+                  type: array
+                  items: { $ref: "#/components/schemas/Balance" }
 
     BalanceBreakdown:
       type: object
@@ -2089,6 +2119,12 @@ components:
               actual:   { $ref: "#/components/schemas/Decimal" }
               drift:    { $ref: "#/components/schemas/Decimal" }
         checked_at: { $ref: "#/components/schemas/Timestamp" }
+    ReconcileEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/ReconcileResult" }
 
     BookingTrace:
       type: object
@@ -2204,3 +2240,9 @@ components:
                   properties:
                     description: { type: string }
                     detail: { type: string }
+    ReconcileReportEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/ReconcileReport" }

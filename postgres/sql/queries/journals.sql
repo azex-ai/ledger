@@ -148,31 +148,67 @@ LIMIT 1;
 -- concurrent reserves and journal posts that touch the same pair serialize.
 -- The caller passes a stable composite text key (e.g. "balance:<holder>:<currency_id>").
 --
--- Two-key form pg_advisory_xact_lock(int4, int4) with a fixed namespace (1)
--- in the first slot -- NOT the single-arg bigint form. PostgreSQL's advisory
--- lock tag carries a 4th field that distinguishes the two-key API from the
--- single-key API, so pg_advisory_xact_lock(bigint) and
--- pg_advisory_xact_lock(int4, int4) are genuinely disjoint lock spaces no
--- matter what values are passed; the two-key space is additionally
--- partitioned by its first argument. This namespace (1) can therefore never
--- collide with AcquireIdempotencyLock's namespace (2) below, even though a
--- caller fully controls the idempotency_key string end to end
--- (server/handler_journals.go accepts it with no format restriction) and
--- could otherwise pick a string like "balance:1:1" to alias a real balance
--- pair -- see concurrency.md's ABBA-deadlock finding this closes. Hash
--- collisions *within* this namespace (two different (holder,currency_id)
--- pairs landing on the same hashtext() value) only reduce concurrency, they
--- do not affect correctness.
-SELECT pg_advisory_xact_lock(1::int4, hashtext(sqlc.arg(key)::text));
+-- Single-key form pg_advisory_xact_lock(bigint), hashed through
+-- hashtextextended(text, seed) (returns the full 64-bit range) rather than
+-- hashtext() (32-bit int4). An earlier revision of this query used the
+-- two-key form pg_advisory_xact_lock(1::int4, hashtext(key)) to get
+-- namespace separation from AcquireIdempotencyLock below "for free" via
+-- PostgreSQL's disjoint two-key lock-tag space -- but that traded the
+-- 64-bit hash range for a 32-bit one, and a 32-bit hashtext() collision
+-- between two DIFFERENT (holder, currency_id) pairs is reachable at
+-- realistic account cardinalities. Because the batch-level defense
+-- (sortedUniquePairs in ledger_store.go) only sorts a SINGLE transaction's
+-- own pairs by (holder, currency_id) -- not by the hash the lock is
+-- actually taken on -- two transactions touching entirely disjoint holder
+-- sets whose pairs alias the same 32-bit hash could still interleave into
+-- a genuine ABBA, reintroducing the exact deadlock shape this query's
+-- namespace separation was meant to close (see M-6, 2026-08-26 independent
+-- review; postgres/lock_order_test.go's
+-- TestAcquireBalanceLocks_HashCollisionCrossBatchDeadlock_Fixed
+-- reproduces a real 40P01 against the 32-bit version using an actual
+-- hashtext() collision pair, confirmed by running that test before this
+-- fix was applied).
+--
+-- Namespace separation from AcquireIdempotencyLock is instead carried by a
+-- literal string prefix baked into the hashed value itself ('bal:' here,
+-- 'idem:' there) rather than by a second int4 lock-tag field. The prefixes
+-- differ in their first byte ('b' vs 'i'), so the set of strings this
+-- query can hash and the set AcquireIdempotencyLock can hash are disjoint
+-- by construction -- no caller-supplied key (idempotency_key has no
+-- format restriction; server/handler_journals.go accepts it as-is) can
+-- pick a value that lands the two namespaces on the same lock, closing
+-- the same ABBA finding concurrency.md originally raised without
+-- narrowing the hash width that reopened it.
+--
+-- Residual, accepted risk noted while fixing M-6 (not itself part of that
+-- finding): the two-key form was ALSO disjoint from every single-key
+-- pg_advisory_lock/pg_try_advisory_lock caller elsewhere in the codebase
+-- (service.advisoryLockKey, an FNV-64a hash of a small fixed set of job
+-- names, used by LockedJob and SnapshotService) via the same lock-tag
+-- classid mechanism -- this single-key form shares that 64-bit space with
+-- them. A job-name hash landing on the same value as a live
+-- (holder,currency) or idempotency key is not attacker-influenceable (job
+-- names are fixed constants, not caller input) and every one of those
+-- other callers uses the non-blocking pg_try_advisory_lock, so the only
+-- possible effect is one skipped/delayed lock-wait, never a deadlock
+-- (pg_try_advisory_lock cannot participate in a wait-for cycle) and never
+-- an incorrect result. Judged negligible; flagged here rather than silently
+-- assumed away, and left unmitigated because closing it would mean
+-- reserving a bit-pattern across both journals.sql and
+-- service/locked_job.go / service/snapshot.go, outside this fix's file
+-- scope.
+SELECT pg_advisory_xact_lock(hashtextextended('bal:' || sqlc.arg(key)::text, 0));
 
 -- name: AcquireIdempotencyLock :exec
 -- Serialize concurrent requests that present the same idempotency key, even if
--- they touch different account dimensions. Namespace 2 in the two-key
--- advisory lock form -- see AcquireBalanceLock's comment for why this cannot
--- collide with the balance-lock namespace regardless of the key string a
--- caller supplies. Collisions within this namespace only reduce concurrency;
--- they do not affect correctness.
-SELECT pg_advisory_xact_lock(2::int4, hashtext(sqlc.arg(key)::text));
+-- they touch different account dimensions. See AcquireBalanceLock's comment
+-- above for why the 'idem:' prefix keeps this namespace disjoint from the
+-- balance-lock namespace regardless of the key string a caller supplies,
+-- and why this is a single-key hashtextextended(text, 0) call (full 64-bit
+-- range) rather than the narrower two-key hashtext() form. Collisions
+-- within this namespace only reduce concurrency; they do not affect
+-- correctness.
+SELECT pg_advisory_xact_lock(hashtextextended('idem:' || sqlc.arg(key)::text, 0));
 
 -- name: GetJournalByUID :one
 SELECT * FROM journals WHERE uid = $1;
