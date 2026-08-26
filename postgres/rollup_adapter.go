@@ -408,6 +408,16 @@ func (a *RollupAdapter) UpsertSnapshot(ctx context.Context, snap core.BalanceSna
 	})
 }
 
+// GetSnapshotBalances reads the stored balance_snapshots row for (holder,
+// currency, date). A snapshot is computed once, from whatever entries
+// existed at that moment (service/snapshot.go's CreateDailySnapshot); nothing
+// re-triggers it when a later write retroactively backdates (effective_at
+// earlier than the snapshot's own creation) into an already-snapshotted
+// business date. So before trusting a cached row, it is checked against
+// journal_entries for exactly that condition and recomputed live -- bypassing
+// the stale cache -- when found stale. See
+// docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+// Major #2 ("effective_at 回溯记账不会让已写入的历史快照失效").
 func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error) {
 	cur, err := a.dims.currencyByUIDOrErr(ctx, a.q, currencyUID)
 	if err != nil {
@@ -421,20 +431,90 @@ func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder int64, c
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get snapshot balances: %w", err)
 	}
+
+	// Exclusive upper bound matching CreateDailySnapshot's own cutoff
+	// (service/snapshot.go: cutoff = snapshotDate.AddDate(0, 0, 1)):
+	// "as of the end of `date`" == effective_at < date+1.
+	cutoff := date.AddDate(0, 0, 1)
+
 	result := make([]core.Balance, len(rows))
+	var live map[int64]decimal.Decimal // classification_id -> recomputed balance; fetched at most once, lazily
 	for i, r := range rows {
 		cls, err := a.dims.classByIDOrErr(ctx, a.q, r.ClassificationID)
 		if err != nil {
 			return nil, err
 		}
+
+		balance := mustNumericToDecimal(r.Balance)
+		stale, err := a.snapshotDimensionIsStale(ctx, holder, cur.ID, r.ClassificationID, cutoff, r.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: get snapshot balances: staleness check: %w", err)
+		}
+		if stale {
+			if live == nil {
+				live, err = a.liveBalancesByClassificationAt(ctx, holder, cur.ID, cutoff)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if v, ok := live[r.ClassificationID]; ok {
+				balance = v
+			} else {
+				balance = decimal.Zero // no entries remain for this dimension as of cutoff
+			}
+		}
+
 		result[i] = core.Balance{
 			AccountHolder:     r.AccountHolder,
 			CurrencyUID:       currencyUID,
 			ClassificationUID: cls.UID,
-			Balance:           mustNumericToDecimal(r.Balance),
+			Balance:           balance,
 		}
 	}
 	return result, nil
+}
+
+// snapshotDimensionIsStale reports whether a journal_entries write for this
+// exact (holder, currency, classification) dimension, backdated (effective_at
+// < cutoff) into the snapshotted window, landed after the snapshot row itself
+// was written -- i.e. after a value that could not have included it.
+func (a *RollupAdapter) snapshotDimensionIsStale(ctx context.Context, holder, currencyID, classificationID int64, cutoff, snapshotCreatedAt time.Time) (bool, error) {
+	raw, err := a.q.GetMaxEntryCreatedAtForDimensionBefore(ctx, sqlcgen.GetMaxEntryCreatedAtForDimensionBeforeParams{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: classificationID,
+		EffectiveAt:      cutoff,
+	})
+	if err != nil {
+		return false, err
+	}
+	maxCreatedAt, err := anyToTime(raw)
+	if err != nil {
+		return false, err
+	}
+	return maxCreatedAt.After(snapshotCreatedAt), nil
+}
+
+// liveBalancesByClassificationAt recomputes every classification's balance
+// for one (holder, currency) as of cutoff directly from journal_entries,
+// bypassing the balance_snapshots cache entirely. Reuses ListBalancesAt's
+// query (the normal_side/entry_type sign convention already implemented
+// there) instead of re-implementing it a third time in this file -- the
+// audit that found this bug separately flagged 17 independent copies of that
+// exact convention as its own Minor; this fix must not add an 18th.
+func (a *RollupAdapter) liveBalancesByClassificationAt(ctx context.Context, holder, currencyID int64, cutoff time.Time) (map[int64]decimal.Decimal, error) {
+	rows, err := a.q.ListBalancesAt(ctx, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get snapshot balances: live recompute: %w", err)
+	}
+	out := make(map[int64]decimal.Decimal)
+	for _, row := range rows {
+		if row.AccountHolder != holder || row.CurrencyID != currencyID {
+			continue
+		}
+		out[row.ClassificationID] = mustNumericToDecimal(row.Balance)
+	}
+	return out, nil
 }
 
 // --- CheckpointAggregator ---

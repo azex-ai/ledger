@@ -222,6 +222,46 @@ func (q *Queries) GetCheckpointMaxAgeSeconds(ctx context.Context) (int64, error)
 	return max_age_seconds, err
 }
 
+const getMaxEntryCreatedAtForDimensionBefore = `-- name: GetMaxEntryCreatedAtForDimensionBefore :one
+SELECT COALESCE(MAX(created_at), 'epoch'::timestamptz) AS max_created_at
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND classification_id = $3
+  AND effective_at < $4
+`
+
+type GetMaxEntryCreatedAtForDimensionBeforeParams struct {
+	AccountHolder    int64     `json:"account_holder"`
+	CurrencyID       int64     `json:"currency_id"`
+	ClassificationID int64     `json:"classification_id"`
+	EffectiveAt      time.Time `json:"effective_at"`
+}
+
+// Returns the latest created_at among journal_entries for exactly one
+// (account_holder, currency_id, classification_id) dimension whose
+// effective_at is before cutoff, or the epoch sentinel when none exist.
+//
+// Used to detect a stale balance_snapshots row: a snapshot is computed once,
+// from whatever entries existed at that moment (service/snapshot.go's
+// CreateDailySnapshot). Nothing re-triggers it when a later write
+// retroactively backdates (effective_at < cutoff) into an already-
+// snapshotted business date — this value being later than the snapshot
+// row's own created_at is exactly that condition. See
+// docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+// Major #2 ("effective_at 回溯记账不会让已写入的历史快照失效").
+func (q *Queries) GetMaxEntryCreatedAtForDimensionBefore(ctx context.Context, arg GetMaxEntryCreatedAtForDimensionBeforeParams) (interface{}, error) {
+	row := q.db.QueryRow(ctx, getMaxEntryCreatedAtForDimensionBefore,
+		arg.AccountHolder,
+		arg.CurrencyID,
+		arg.ClassificationID,
+		arg.EffectiveAt,
+	)
+	var max_created_at interface{}
+	err := row.Scan(&max_created_at)
+	return max_created_at, err
+}
+
 const getMaxEntryForAccountCurrencySince = `-- name: GetMaxEntryForAccountCurrencySince :one
 SELECT
   COALESCE(MAX(id), 0)::bigint AS max_entry_id,

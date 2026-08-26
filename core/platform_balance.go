@@ -27,9 +27,17 @@ type PlatformBalance struct {
 
 // SolvencyReport is the result of a solvency check for a single currency.
 //
-// Liability is the sum of all user-side balances (holder > 0) across every
-// active classification for the given currency. This represents what the
-// platform owes to users in aggregate.
+// Liability is the sum of user-side balances (holder > 0) across every
+// active classification tagged with a non-empty BalanceRole (Available,
+// Pending, or Locked) for the given currency — the same basis
+// BalanceReader.GetBalanceBreakdown uses for a holder's spendable-money
+// view. This represents what the platform owes to users in aggregate.
+// Role-less classifications (fee_expense and similar debit-normal cost/memo
+// accounts booked to a user's holder id for per-user reporting) are
+// excluded: they are not liabilities, and summing them in previously turned
+// every dollar of cumulative fee revenue into a phantom dollar of
+// insolvency (docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+// Major #1).
 //
 // Custodial is the sum of system-side balances for classifications whose code
 // is "custodial". This represents funds the platform holds in custody on behalf
@@ -56,8 +64,9 @@ type PlatformBalanceReader interface {
 	// code; missing classifications have zero balance.
 	GetPlatformBalances(ctx context.Context, currencyUID string) (*PlatformBalance, error)
 
-	// GetTotalLiabilityByAsset returns the sum of all user-side balances
-	// (holder > 0) across all classifications for the given currency.
+	// GetTotalLiabilityByAsset returns the sum of user-side (holder > 0)
+	// balances for classifications with a non-empty BalanceRole for the
+	// given currency (see SolvencyReport.Liability).
 	GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error)
 }
 
@@ -65,7 +74,8 @@ type PlatformBalanceReader interface {
 type SolvencyChecker interface {
 	// SolvencyCheck returns a SolvencyReport for the given currency.
 	// Custodial is the total of system-side "custodial" classification balances.
-	// Liability is the total of all user-side balances.
+	// Liability is the total of user-side balances with a non-empty
+	// BalanceRole (see SolvencyReport.Liability).
 	// Implementations should ensure the custodial and liability figures describe
 	// the same point in time.
 	SolvencyCheck(ctx context.Context, currencyUID string) (*SolvencyReport, error)

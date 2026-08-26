@@ -27,8 +27,14 @@ import (
 //
 // Net effect on system books after both legs settle:
 //
-//	settlement (CCY-A): +qtyA   ← platform owes / holds in CCY-A
-//	settlement (CCY-B): -qtyB   ← platform consumed in CCY-B
+//	settlement (CCY-A): -qtyA   ← platform absorbed the user's CCY-A sale
+//	settlement (CCY-B): +qtyB   ← platform absorbed the user's CCY-B purchase
+//
+// (settlement is credit-normal, presets/transfer.go; fx_sell debits it,
+// fx_buy credits it — same polarity as transfer_out/transfer_in's shared
+// transit account, which nets to zero across a matched pair. FX legs are
+// cross-currency, so CCY-A and CCY-B never net against each other; each
+// stays on the books as the platform's per-currency FX exposure.)
 //
 // Reconciling settlement balances against external custody figures is the
 // caller's responsibility — the ledger only records what was promised, not
@@ -41,11 +47,15 @@ var fxJournalTypes = []JournalTypePreset{
 
 // fx_sell — user gives up their CCY-A; platform settlement pool absorbs it.
 //
-//	DR main_wallet (user)        CR settlement (system)
+//	CR main_wallet (user)        DR settlement (system)
 //
 // fx_buy — platform settlement pool releases CCY-B; user receives it.
 //
-//	DR settlement (system)       CR main_wallet (user)
+//	CR settlement (system)       DR main_wallet (user)
+//
+// main_wallet is debit-normal (presets/templates.go): CR decreases it (user
+// gives up CCY-A in fx_sell), DR increases it (user receives CCY-B in
+// fx_buy) — same polarity as transfer_out/transfer_in (presets/transfer.go).
 var fxTemplates = []TemplatePreset{
 	{
 		Code:            "fx_sell",
