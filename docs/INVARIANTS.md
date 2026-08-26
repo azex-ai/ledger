@@ -2930,6 +2930,101 @@ without a qualifier per this doc's bare-citation convention -- see I-13):
   different `EventClaimLease` no longer race on a shared
   `*postgres.EventStore`, because each `Worker()` call now builds its own.
 
+## I-41: Reconciliation coverage and onchain money-path signals fail closed on ambiguity rather than folding it into a clean bill of health
+
+(2026-08-25 financial-engineering audit, `operability.md` + `onchain-money-path.md`
++ `threat-model.md` §4-3; contract `docs/plans/2026-08-26-audit-remediation-contracts.md`
+Wave 2 D-ops.)
+
+**Rule** (five independent properties, one task):
+
+1. `FullReconciliationService`'s check suite contains no check that can
+   structurally never run. A check whose `Complete` field is permanently
+   `false` for every possible input carries no information and poisons
+   `ReconcileReport.FullCoverage` to false forever — it is removed from the
+   suite rather than left in as a permanently-red placeholder.
+2. `checkpoint_balance` (check #2)'s `Complete` signal additionally
+   requires that either this run's scan started from the fresh-lap
+   sentinel cursor, or it actually examined at least one (holder, currency)
+   pair. A run that resumes from a non-fresh persisted cursor and finds
+   zero pairs on its very first page reports `Complete=false` — that shape
+   is indistinguishable, on the wire, from a cursor advanced by something
+   other than this scan loop genuinely walking the data (`reconcile_scan_cursors`
+   has no DB-level mutation guard against `ledger_app`).
+3. `core.Metrics.BalanceDrift` is fed the drift-from-the-zero-floor
+   (0 when a dimension is healthy, the shortfall's magnitude when it is
+   not), not the raw balance, and is re-emitted on every rollup for that
+   dimension — including the healthy ones — so the gauge can return to
+   zero instead of staying pinned at the last violation it ever observed.
+4. `chains/evm.Scanner.ScanBalances` fails closed uniformly on an
+   unreadable balance (a reverted call, or a malformed return length),
+   regardless of which internal path (Multicall3 aggregate3, or the
+   concurrent single-call fallback) a chain happens to support at scan
+   time. Treating an unreadable balance as a genuine zero silently drops
+   that address from the sweep-eligible set with no error, no log, no
+   metric.
+5. `chains/evm.Sweeper.BatchSweep`'s gas-bump replacement fee floor
+   prefers the actual fee of the transaction sitting at the caller-supplied
+   `priorTxHash`, read from the chain via `TransactionByHash`, over this
+   process's own in-memory record of the last fee it used — the in-memory
+   record does not survive a process restart, while a hash sourced from a
+   booking's durably persisted `ChannelRef` does. `Sweeper.GasPrice`
+   reports the identical fee-cap basis `BatchSweep`'s non-retry path
+   actually pays, so `core.SweepPolicy.GasCeiling` bounds what will really
+   be paid rather than a different, lower-tending RPC estimate.
+
+**Why**: (1) `full_coverage` existed specifically so a run that only
+partially covered the fleet could not be read as a clean bill of health
+(P0 of the 2026-08-21 tamper-evident-ledger wave) — a permanently-poisoned
+version of that exact signal defeats its own purpose and trains operators
+to ignore it (`~/.claude/rules/working-agreements.md` §3: an unusable
+signal is equivalent to no signal). (2) Without this, an attacker who
+resets `reconcile_scan_cursors` before every scheduled reconcile run keeps
+`checkpoint_balance` — the only detector for checkpoint tampering — reading
+green throughout an entire poisoning window. (3) A gauge that can only ever
+increase from zero and never return to it is, functionally, a one-shot
+alarm masquerading as a live signal; worse, it shared an alert rule with
+`reconcile_gap_units` (the actual checkpoint-tamper detector), so silencing
+the never-clearing false alarm would have silenced the real one too. (4)
+"unreadable" and "zero" have different remediations (retry vs. genuinely
+nothing to sweep) and different urgency (a persistently unreadable balance
+means funds are invisible to the sweep job, not that they don't exist).
+(5) Before this fix, a gas-bumped sweep transaction that got stuck (e.g. in
+a gas spike) and then hit a process restart had no way to reconstruct a
+replacement fee high enough to beat whatever was genuinely still pending —
+every subsequent bump attempt inherited the same blind spot, permanently
+stalling that chain's fund collection with no self-healing path
+(onchain-money-path.md's headline finding).
+
+**Enforced by**: `service.FullReconciliationService.RunFullReconciliation`
+(check suite composition, `service/reconcile.go`); `runCheck2GlobalBalance`'s
+`resumedLap` tracking and the `scanned == 0 && resumedLap` branch (same
+file); `service.RollupService.processItem`'s `BalanceDrift` call (`service/rollup.go`);
+`chains/evm.multicallResultsToBalances` / `chains/evm.decodeERC20BalanceOf`
+(`chains/evm/scanner.go`) both returning `evm.ErrBalanceUnreadable` instead
+of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPrice`
+/ `chains/evm.feeCapBasis` (`chains/evm/sweeper.go`); `core.Sweeper.BatchSweep`'s
+`priorTxHash` parameter (`core/interfaces.go`).
+
+**Pinned by**:
+- `service.TestFullReconciliation_AllPass` / `TestFullReconciliation_FullCoverageCanBeTrue` —
+  the suite now runs exactly 13 checks, and `FullCoverage` can actually read
+  `true` when everything is wired and nothing is capped or skipped (the DB-backed
+  half is `service.TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid`'s
+  added `FullCoverage` assertion).
+- `service.TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete` /
+  `TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete` — the
+  resumed-vs-fresh boundary, both directions; `service.TestFullReconciliation_Check2ResumesAcrossRuns`'s
+  fourth run is the DB-backed pin for the same boundary.
+- `service.TestRollupService_DriftDetection` (asserts the reported value is
+  the positive magnitude 85, not the raw balance -85) /
+  `TestRollupService_DriftDetection_ClearsOnceHealthy`.
+- `chains/evm.TestMulticallResultsToBalances_FailsClosedOnUnreadableCall` /
+  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`.
+- `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
+  `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
+  `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+
 ## How to add a new invariant
 
 ---

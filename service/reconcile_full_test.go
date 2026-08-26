@@ -197,17 +197,16 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 14, "should run exactly 14 checks")
+	assert.Len(t, report.Checks, 13, "should run exactly 13 checks")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
-	// health. Check #8 is skipped outright (journals.status not in the
-	// schema), and unauthorized_journals is skipped too (buildFullSvc never
-	// calls SetAuthCheck, contracts §W2-2's own "skip rather than run with
-	// no verifier" contract) -- so the run must admit incomplete coverage
+	// health. unauthorized_journals is skipped (buildFullSvc never calls
+	// SetAuthCheck, contracts §W2-2's own "skip rather than run with no
+	// verifier" contract) -- so the run must admit incomplete coverage
 	// rather than let a never-executed check count as verified.
 	assert.False(t, report.FullCoverage,
-		"check #8 and unauthorized_journals are both skipped, so the suite cannot claim full coverage")
-	skippedChecks := map[string]bool{"pending_journal_timeout": true, "unauthorized_journals": true}
+		"unauthorized_journals is skipped, so the suite cannot claim full coverage")
+	skippedChecks := map[string]bool{"unauthorized_journals": true}
 	for _, c := range report.Checks {
 		if skippedChecks[c.Name] {
 			assert.False(t, c.Complete, "a skipped check is never complete")
@@ -215,6 +214,57 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 			assert.True(t, c.Complete, "check %s ran but did not report coverage", c.Name)
 		}
 	}
+}
+
+// TestFullReconciliation_FullCoverageCanBeTrue pins the fix for operability.md's
+// "full_coverage 永远为假" Major: with every check wired (including
+// unauthorized_journals via SetAuthCheck) and nothing capped or skipped,
+// FullCoverage must actually be able to read true. Before this fix, the
+// permanently-skipped check #8 ("pending_journal_timeout") one-voted
+// FullCoverage to false on every possible run, no matter how the rest of the
+// suite was configured -- this test could not have passed against the old
+// code no matter what it wired up, which is exactly the "signal that can
+// never be true carries no information" failure the removal fixes.
+func TestFullReconciliation_FullCoverageCanBeTrue(t *testing.T) {
+	q := cleanQuerier()
+	engine := core.NewEngine()
+	basic := NewReconciliationService(balancedGlobalSummer(), nil, nil, nil, engine)
+	svc := NewFullReconciliationService(basic, q, FullReconciliationConfig{}, engine)
+	svc.SetAuthCheck(&fakeJournalQueryProvider{}, alwaysValidVerifier{})
+
+	report, err := svc.RunFullReconciliation(context.Background())
+	require.NoError(t, err)
+	assert.True(t, report.OverallPassed)
+	assert.True(t, report.FullCoverage,
+		"every check ran to completion with nothing capped or skipped -- FullCoverage must be able to be true")
+	for _, c := range report.Checks {
+		assert.True(t, c.Complete, "check %s: expected Complete=true", c.Name)
+	}
+}
+
+// fakeJournalQueryProvider satisfies core.QueryProvider with an empty
+// journal list, enough to drive runCheckUnauthorizedJournals's "wired but
+// nothing to check" path for TestFullReconciliation_FullCoverageCanBeTrue.
+// Only the two methods FullReconciliationService actually calls
+// (ListJournals/GetJournal) need real behavior; the rest of the composed
+// interface is never reached by that check.
+type fakeJournalQueryProvider struct{ core.QueryProvider }
+
+func (fakeJournalQueryProvider) ListJournals(_ context.Context, _ string, _ int32) ([]core.Journal, string, error) {
+	return nil, "", nil
+}
+
+func (fakeJournalQueryProvider) GetJournal(_ context.Context, _ string) (*core.Journal, []core.Entry, error) {
+	return nil, nil, nil
+}
+
+// alwaysValidVerifier is a core.AuthVerifier that is never actually invoked
+// in TestFullReconciliation_FullCoverageCanBeTrue (no journals claim a
+// signature), but must be non-nil for SetAuthCheck to arm the check at all.
+type alwaysValidVerifier struct{}
+
+func (alwaysValidVerifier) Verify(_ context.Context, _, _ []byte, _ string) error {
+	return fmt.Errorf("alwaysValidVerifier: unexpected call")
 }
 
 // recordingReconcileMetrics captures ReconcileCheckResult calls for testing.
@@ -252,9 +302,10 @@ func TestFullReconciliation_EmitsMetricsPerCheck(t *testing.T) {
 			"check %q metric must fold coverage into the green signal", c.Name)
 	}
 
-	// Concretely: check #8 never executes, so its metric must be false even
-	// though its CheckResult.Passed is true.
-	assert.False(t, metrics.results["pending_journal_timeout"],
+	// Concretely: unauthorized_journals is skipped in this config (no
+	// SetAuthCheck call), so its metric must be false even though its
+	// CheckResult.Passed is true.
+	assert.False(t, metrics.results["unauthorized_journals"],
 		"a skipped check must not emit a green metric")
 }
 
@@ -475,20 +526,6 @@ func TestCheck7OrphanReservations_QueryError(t *testing.T) {
 	result := svc.runCheck7OrphanReservations(context.Background())
 	assert.False(t, result.Passed)
 	assert.Contains(t, result.Findings[0].Detail, "timeout")
-}
-
-// ---------------------------------------------------------------------------
-// Check #8 — Pending journal timeout (skipped)
-// ---------------------------------------------------------------------------
-
-func TestCheck8PendingJournalTimeout_Skipped(t *testing.T) {
-	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
-	result := svc.runCheck8PendingJournalTimeout()
-	// Skipped check reports passed=true with an informational Finding.
-	assert.True(t, result.Passed)
-	require.Len(t, result.Findings, 1)
-	assert.Contains(t, result.Findings[0].Description, "skipped")
-	assert.Contains(t, result.Findings[0].Detail, "journals.status")
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +987,78 @@ func TestCheck2GlobalBalance_PartialRunPersistsLapDirty(t *testing.T) {
 	assert.True(t, q.cursorSet)
 	assert.True(t, q.cursorLapDirty, "the violation found this run must survive into the persisted cursor")
 	assert.Equal(t, int64(1), q.cursorAfterHolder)
+}
+
+// TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete pins
+// threat-model.md's §4-3 Major: "扫了 0 个不得报 Complete=true, Passed=true".
+// reconcile_scan_cursors has no DB-level mutation guard against ledger_app
+// (that half of the fix is a separate migration, out of this Go-only
+// package's reach), so a run that resumes from a non-fresh cursor and finds
+// zero pairs on its very first page is EXACTLY the shape
+// `UPDATE reconcile_scan_cursors SET after_holder = <huge>, lap_dirty =
+// false` produces -- and, without an independent count to cross-check
+// against, is indistinguishable from a lap that genuinely finished at that
+// exact point. Before this fix, this exact mock setup produced
+// Complete=true (folded into the same green signal as a real, full,
+// zero-violation scan); this test would have failed against that code.
+func TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete(t *testing.T) {
+	q := cleanQuerier()
+	// Simulates a cursor sitting mid-lap (not the fresh sentinel) with
+	// nothing beyond it -- whether because a prior run legitimately
+	// advanced it there, or because something else (accident or attacker)
+	// wrote it there directly. checkpointAccounts is empty: the page query
+	// starting from this position returns nothing either way.
+	q.cursorSet = true
+	q.cursorAfterHolder = 9223372036854775807 // math.MaxInt64
+	q.cursorAfterCurrency = 9223372036854775807
+	q.cursorLapDirty = false
+
+	svc := buildFullSvcForCheck2(t, nil, nil, nil, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed, "nothing was found wrong -- Passed reports only on what was examined")
+	assert.False(t, result.Complete,
+		"a resumed cursor finding zero pairs must not claim the same full-coverage signal a genuinely fresh, empty-fleet scan gets")
+
+	var flagged bool
+	for _, f := range result.Findings {
+		if strings.Contains(f.Description, "resumed from a non-fresh cursor and found zero pairs") {
+			flagged = true
+		}
+	}
+	assert.True(t, flagged, "must name the ambiguity explicitly; got: %+v", result.Findings)
+
+	// The cursor still resets to the fresh sentinel: a legitimately-finished
+	// lap self-corrects on the very next run (which will then start fresh
+	// and, if the fleet really is empty, correctly report Complete=true) --
+	// see TestCheck2GlobalBalance_NoCheckpoints for that case.
+	require.Equal(t, 1, q.setScanCursorCalls)
+	assert.Equal(t, int64(math.MinInt64), q.cursorAfterHolder)
+	assert.Equal(t, int64(math.MinInt64), q.cursorAfterCurrency)
+	assert.False(t, q.cursorLapDirty)
+}
+
+// TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete is the
+// non-regression companion: a FRESH lap (the sentinel start, e.g. a brand
+// new install with zero checkpoints anywhere) finding zero pairs is the
+// legitimate case this fix must not break -- see
+// TestCheck2GlobalBalance_NoCheckpoints for the equivalent scenario via the
+// default (unset) cursor; this variant pins it explicitly via an EXPLICITLY
+// persisted fresh-sentinel cursor, so the "was this resumed" check is
+// exercised on its true/false boundary rather than only on cleanQuerier's
+// unset-cursor default.
+func TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete(t *testing.T) {
+	q := cleanQuerier()
+	q.cursorSet = true
+	q.cursorAfterHolder = math.MinInt64
+	q.cursorAfterCurrency = math.MinInt64
+	q.cursorLapDirty = false
+
+	svc := buildFullSvcForCheck2(t, nil, nil, nil, q, FullReconciliationConfig{})
+	result := svc.runCheck2GlobalBalance(context.Background())
+
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete, "a fresh lap that genuinely finds nothing is a legitimate clean bill of health")
 }
 
 // ---------------------------------------------------------------------------

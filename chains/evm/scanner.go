@@ -139,12 +139,30 @@ func (s *Scanner) scanViaMulticall(ctx context.Context, client *ethclient.Client
 	if len(results) != len(addresses) {
 		return nil, fmt.Errorf("evm: scanner: aggregate3 returned %d results for %d addresses", len(results), len(addresses))
 	}
+	return multicallResultsToBalances(addresses, results, decimals)
+}
 
+// multicallResultsToBalances translates an already-unpacked
+// Multicall3.aggregate3 response into a balance map. Split out of
+// scanViaMulticall as a pure function (no RPC client involved) so the
+// fail-closed behavior below is directly unit-testable -- see
+// TestMulticallResultsToBalances_FailsClosedOnUnreadableCall.
+func multicallResultsToBalances(addresses []string, results []multicall3Result, decimals int32) (map[string]decimal.Decimal, error) {
 	balances := make(map[string]decimal.Decimal, len(addresses))
 	for i, addr := range addresses {
 		if !results[i].Success || len(results[i].ReturnData) != 32 {
-			balances[addr] = decimal.Zero // untrusted RPC/target: treat unreadable balance as zero, not a hard failure
-			continue
+			// Fail closed, matching scanConcurrently's RPC-error path below:
+			// a reverted call or a malformed return length is not the same
+			// fact as "balance is zero" (a broken/malicious token contract,
+			// or a transient node issue, can produce exactly this shape).
+			// Returning zero here silently dropped the address from this
+			// round's sweep-eligible set with no error, no log, no metric --
+			// onchain-money-path.md's Major finding. ScanBalances is called
+			// from a periodic sweep round (service/onchain.go), so failing
+			// this call closed costs a retry on the next cycle, not a
+			// correctness gap.
+			return nil, fmt.Errorf("evm: scanner: aggregate3 call for %s: success=%v len(return_data)=%d (want 32): %w",
+				addr, results[i].Success, len(results[i].ReturnData), ErrBalanceUnreadable)
 		}
 		raw := new(big.Int).SetBytes(results[i].ReturnData)
 		balances[addr] = normalizeAmount(raw, decimals)
@@ -190,10 +208,9 @@ func (s *Scanner) scanConcurrently(ctx context.Context, client *ethclient.Client
 				if err != nil {
 					return fmt.Errorf("evm: scanner: balanceOf %s: %w", addr, err)
 				}
-				if len(out) != 32 {
-					raw = big.NewInt(0)
-				} else {
-					raw = new(big.Int).SetBytes(out)
+				raw, err = decodeERC20BalanceOf(addr, out)
+				if err != nil {
+					return err
 				}
 			}
 			mu.Lock()
@@ -206,4 +223,19 @@ func (s *Scanner) scanConcurrently(ctx context.Context, client *ethclient.Client
 		return nil, err
 	}
 	return balances, nil
+}
+
+// decodeERC20BalanceOf decodes a raw balanceOf(address) return value. A
+// pure function (no RPC client) so the fail-closed behavior is directly
+// unit-testable -- see TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn.
+// Before this fix, a malformed (non-32-byte) return here silently became a
+// zero balance, self-contradicting scanConcurrently's own RPC-error branch
+// two lines up the call stack (which already fails closed) -- the same
+// onchain-money-path.md Major as the multicall path above.
+func decodeERC20BalanceOf(addr string, out []byte) (*big.Int, error) {
+	if len(out) != 32 {
+		return nil, fmt.Errorf("evm: scanner: balanceOf %s: len(return_data)=%d (want 32): %w",
+			addr, len(out), ErrBalanceUnreadable)
+	}
+	return new(big.Int).SetBytes(out), nil
 }

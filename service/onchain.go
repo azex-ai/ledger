@@ -1736,7 +1736,9 @@ func (o *Onchain) advanceSweep(ctx context.Context, b *core.Booking, policy core
 		if err != nil {
 			return fmt.Errorf("sweep: resolve targets: %w", err)
 		}
-		txHash, err := o.deps.Sweeper.BatchSweep(ctx, chainID, token, targets, nonce)
+		// First-ever dispatch for this (chain, token, nonce): nothing to
+		// replace yet, so priorTxHash is empty.
+		txHash, err := o.deps.Sweeper.BatchSweep(ctx, chainID, token, targets, nonce, "")
 		if err != nil {
 			return fmt.Errorf("sweep: batch sweep: %w", err)
 		}
@@ -1823,7 +1825,13 @@ func (o *Onchain) recheckSweepSent(ctx context.Context, b *core.Booking, chainID
 	if err != nil {
 		return fmt.Errorf("sweep: resolve targets for gas-bump: %w", err)
 	}
-	newTxHash, err := o.deps.Sweeper.BatchSweep(ctx, chainID, token, targets, nonce)
+	// priorTxHash: whichever hash we just used to check TxIncluded above --
+	// the still-live in-memory tracking if this process broadcast it, else
+	// the booking's durably persisted ChannelRef (the first-ever broadcast's
+	// hash, which survives a restart even though o.sweepTx does not). See
+	// core.Sweeper.BatchSweep's doc comment and priorFeeFloor in
+	// chains/evm/sweeper.go.
+	newTxHash, err := o.deps.Sweeper.BatchSweep(ctx, chainID, token, targets, nonce, txHash)
 	if err != nil {
 		return fmt.Errorf("sweep: gas-bump rebroadcast: %w", err)
 	}

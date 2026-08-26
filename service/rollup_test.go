@@ -387,8 +387,83 @@ func TestRollupService_DriftDetection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, processed)
 
-	// Balance = 10 + (5 - 100) = -85 (negative on debit-normal = drift)
-	assert.True(t, metrics.balanceDriftCalled)
+	// Balance = 10 + (5 - 100) = -85 (negative on debit-normal = violation).
+	// BalanceDrift's documented contract (core.Metrics) is "drift between
+	// expected and actual balance": the expected floor for a debit-normal
+	// account is 0, so the reported drift must be the positive magnitude of
+	// the shortfall (85), NOT the signed balance itself (-85) -- passing the
+	// balance verbatim was operability.md's Major finding (service/rollup.go
+	// previously fed newBalance straight into a metric documented as "drift").
+	require.True(t, metrics.balanceDriftCalled)
+	require.Len(t, metrics.balanceDriftCalls, 1)
+	assert.True(t, metrics.balanceDriftCalls[0].Equal(decimal.NewFromInt(85)),
+		"want drift magnitude 85, got %s (a signed -85 here means the raw balance leaked through instead of a drift)",
+		metrics.balanceDriftCalls[0])
+}
+
+// TestRollupService_DriftDetection_ClearsOnceHealthy pins the other half of
+// the same fix: once a rollup for this item is no longer in violation, the
+// gauge must report back to zero, not stay pinned at the last violation it
+// ever observed. Before this fix, BalanceDrift was only ever called on the
+// violation branch -- nothing in service/rollup.go ever set it back to zero,
+// so a real Prometheus gauge would stay red on a dashboard forever after a
+// single transient negative balance, even once fixed (working-agreements
+// §3: a signal that cannot clear is indistinguishable from "still broken").
+func TestRollupService_DriftDetection_ClearsOnceHealthy(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []RollupQueueItem{
+			{ID: 3, AccountHolder: 300, CurrencyID: 1, ClassificationID: 30},
+		},
+	}
+	cpRW := newMockCheckpointRW()
+	cpRW.checkpoints[checkpointKey{300, 1, 30}] = &BalanceCheckpoint{
+		AccountHolder:    300,
+		CurrencyID:       1,
+		ClassificationID: 30,
+		Balance:          decimal.NewFromInt(10),
+		LastEntryID:      5,
+		UpdatedAt:        time.Now().Add(-time.Hour),
+	}
+	entries := &mockEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{30: decimal.NewFromInt(5)},
+		creditByClass: map[int64]decimal.Decimal{30: decimal.NewFromInt(100)},
+		maxEntryID:    15,
+		maxEntryAt:    time.Now(),
+	}
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 30, UID: "cls-30", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+
+	metrics := &recordingMetrics{}
+	engine := core.NewEngine(core.WithMetrics(metrics))
+	svc := NewRollupService(queue, cpRW, entries, cls, engine)
+
+	// First batch: balance goes to 10 + (5 - 100) = -85, a violation.
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+	require.Len(t, metrics.balanceDriftCalls, 1)
+	require.False(t, metrics.balanceDriftCalls[0].IsZero(), "first rollup must report the violation")
+
+	// Second batch: a large credit-side entry brings the balance back
+	// positive. The checkpoint now reflects -85 + 200 = 115.
+	queue.items = []RollupQueueItem{
+		{ID: 6, AccountHolder: 300, CurrencyID: 1, ClassificationID: 30},
+	}
+	entries.debitByClass = map[int64]decimal.Decimal{30: decimal.NewFromInt(200)}
+	entries.creditByClass = map[int64]decimal.Decimal{30: decimal.NewFromInt(0)}
+	entries.maxEntryID = 25
+
+	processed, err = svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, processed)
+
+	require.Len(t, metrics.balanceDriftCalls, 2, "the second, healthy rollup must still report a reading")
+	assert.True(t, metrics.balanceDriftCalls[1].IsZero(),
+		"the gauge must clear back to zero once the account is no longer in violation, got %s",
+		metrics.balanceDriftCalls[1])
 }
 
 func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
@@ -457,6 +532,7 @@ func TestRollupService_ReleasesClaimAfterParentCtxCancelled(t *testing.T) {
 type recordingMetrics struct {
 	core.Metrics
 	balanceDriftCalled bool
+	balanceDriftCalls  []decimal.Decimal // every value passed to BalanceDrift, in call order
 	rollupProcessed    int
 	rollupItemFailed   int
 }
@@ -481,6 +557,7 @@ func (m *recordingMetrics) ReservedAmount(int64, decimal.Decimal) {}
 func (m *recordingMetrics) RollupProcessed(count int)             { m.rollupProcessed += count }
 func (m *recordingMetrics) RollupItemFailed()                     { m.rollupItemFailed++ }
 func (m *recordingMetrics) RollupLatency(time.Duration)           {}
-func (m *recordingMetrics) BalanceDrift(_ string, _ int64, _ decimal.Decimal) {
+func (m *recordingMetrics) BalanceDrift(_ string, _ int64, delta decimal.Decimal) {
 	m.balanceDriftCalled = true
+	m.balanceDriftCalls = append(m.balanceDriftCalls, delta)
 }

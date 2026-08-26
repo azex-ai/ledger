@@ -24,6 +24,8 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 11. [Partition management & archival](#11-partition-management--archival)
 12. [Deep reorg on a confirmed crypto deposit](#12-deep-reorg-on-a-confirmed-crypto-deposit)
 13. [Large / unreconciled deposit parked in review](#13-large--unreconciled-deposit-parked-in-review)
+14. [Onchain money-path metrics -- this library ships none of the alerting](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)
+15. [A chain's sweep collection has stopped moving](#15-a-chains-sweep-collection-has-stopped-moving)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -68,7 +70,6 @@ proof of the count):
 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
 | `non_negative_balances` | no holder > 0 has balance < 0 |
 | `orphan_reservations` | reservations with no matching journal |
-| `pending_journal_timeout` | skipped — `journals.status` not yet in the schema |
 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
 | `journal_dr_cr` | genuine per-journal, per-currency balance (M1/I-24) — catches two journals that are each individually unbalanced but net to zero in aggregate, which `global_dr_cr_equality` structurally cannot see |
@@ -99,7 +100,6 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
 - **`non_negative_balances`** — a user got debited beyond their balance.
   Usually a missing `Reserve` step. Find the journal that drove the balance
   negative; reverse it; investigate the calling service.
-- **`pending_journal_timeout`** — the worker is stuck. See §3.
 - **`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity`
   (checkpoint / system_rollups / balance_snapshots drift, I-23)** —
   **do not** just re-run reconcile and move on: these three all mean a
@@ -915,6 +915,159 @@ more often signals a real problem with the *primary* sighting source (RPC
 lag, wrong contract address, log-parsing bug) than the reconciliation
 control being wrong — investigate the primary source before touching
 `ReconcileCeiling`.
+
+---
+
+## 14. Onchain money-path metrics -- this library ships none of the alerting
+
+> **Context (26-08-25 audit, `operability.md`)**: `observability/prometheus.go`
+> registers every metric below; this library ships **no Prometheus alert
+> rules of its own** (the service binary and its `deploy/` Helm chart were
+> removed -- see `docs/audits/2026-08-25-financial-engineering/TODO.md` §0).
+> Wiring a `PrometheusMetrics` registry into a scrape endpoint and writing
+> alert rules on top of it is entirely your composition root's
+> responsibility. This section is the "what does each metric mean and what
+> do I do" reference that a from-scratch alert rule needs -- it existed for
+> neither the onchain metrics nor `balance_drift_units` before this fix.
+
+### Payment-affecting counters (page on any nonzero rate)
+
+| Metric | Means | Action |
+|---|---|---|
+| `ledger_sweep_unattributed_total{chain_id}` | A sweep batch collected a token not in that chain's `CreditTokens` allowlist -- value moved to the factory's treasury with **no corresponding user ledger balance**. | Solvency-adjacent: identify the token and amount from the sweep transaction on-chain, decide whether to add it to `CreditTokens` retroactively (crediting the affected users) or treat it as an operational recovery (capital adjustment journal, `presets/capital.go`). Do not ignore -- this is unattributed custody, not free money. |
+| `ledger_deposit_reorg_detected_total{chain_id}` | A previously-confirmed deposit's transaction has disappeared from the canonical chain (deep reorg). | Go straight to [§12](#12-deep-reorg-on-a-confirmed-crypto-deposit) -- this metric is that section's alert source. |
+| `ledger_registration_rescan_failed_total{chain_id}` | `EnsureDepositAddress`'s background historical rescan (catching deposits sent before an address was registered) failed and did not retry to completion. | The "deposit sent before registration" gap stays open for that address/chain until a retry succeeds. Check watcher logs for the specific address/chain; a persistently failing rescan on one chain usually means an RPC provider issue on that chain specifically, not a code bug. |
+
+### Backlog / degradation gauges and counters (page on sustained growth, not a single blip)
+
+| Metric | Means | Action |
+|---|---|---|
+| `ledger_chain_cursor_lag_blocks{chain_id}` | Blocks behind the chain tip the deposit watcher's cursor currently is. | A transient bump (RPC hiccup, a slightly slow block) is normal. A monotonically climbing lag means the watcher loop (`Onchain.scanChainOnce`) is stuck or too slow for that chain's block rate -- check watcher logs for repeated errors; same shape of triage as [§3](#3-rollup-queue-is-backlogged)'s worker-liveness check, different loop. |
+| `ledger_rollup_items_failed_total` | A rollup queue item's claim was released after a failed processing attempt (`RollupService.processItem` returned an error). | Check `RollupItemFailed`-adjacent logs (`"service: rollup: process item failed"`) for the specific `holder`/`currency_id`/`classification_id` and the underlying error. That dimension's checkpoint stops advancing until a retry succeeds -- balance reads stay correct via the delta path meanwhile ([§3](#3-rollup-queue-is-backlogged)'s "critical fact"), so this is urgency-by-volume, not an immediate correctness incident. |
+| `ledger_template_failed_total{template, reason}` | An `entry_templates` execution failed (`TemplateFailed`). | The triggering business operation did not get its accounting posted. Cross-reference `reason` against [§7](#7-journal-posting-failures)'s table (same reason vocabulary) and find the caller that invoked the template. |
+
+### `balance_drift_units{class, currency_id}` -- read this together with `reconcile_gap_units`
+
+This gauge reports the magnitude of a debit-normal account going negative,
+as observed by the rollup worker (`service.RollupService.processItem`) --
+**0 when the most recently processed item for that (class, currency) label
+is healthy, positive when it is not**. It is a *different* signal from
+`reconcile_gap_units` ([§1](#1-reconciliation-failed)'s `checkpoint_balance`
+/ `global_dr_cr_equality` checks), which is the actual checkpoint-tamper
+detector: `reconcile_gap_units` catches a checkpoint that disagrees with a
+fresh recompute from `journal_entries` (the class of drift a leaked DB
+credential's direct `UPDATE` would produce); `balance_drift_units` catches
+a *business-logic* violation (a debit-normal account was allowed to go
+negative -- usually a missing `Reserve` step, same as
+[§1](#1-reconciliation-failed)'s `non_negative_balances` check, just
+observed at rollup time instead of reconcile time).
+
+**If you are writing your own alert rule for these**: do not combine them
+into one rule the way this library's now-removed `deploy/` chart used to
+(`ledger_balance_drift_units != 0 or ledger_reconcile_gap_units != 0`).
+Before this fix, `balance_drift_units` never reset to zero once triggered
+(it was fed the raw balance, not the drift, and only ever `.Set()` on the
+violation branch) -- a real checkpoint-tamper event and a stale
+`balance_drift_units` reading that never clears look identical, and
+silencing the alert to stop the false alarm silences the real detector
+too. It is fixed now (this gauge clears to 0 on the next healthy rollup for
+that dimension), but the two remain **independent business questions**
+("did a checkpoint get tampered with" vs. "did an account go negative") and
+belong in **independent alert rules** even so.
+
+## 15. A chain's sweep collection has stopped moving
+
+**Alert source**: no dedicated metric exists for "this specific nonce is
+stuck" (a documented gap, see [§14](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)) --
+this section is triggered by noticing `ledger_chain_cursor_lag_blocks` is
+fine (deposits are still being seen) but no `sweep`-classification bookings
+for a chain/token have reached `confirmed` in longer than expected, or by a
+user/support report that a chain's treasury balance has stopped growing
+despite deposits continuing to arrive at CREATE2 addresses.
+
+**Severity**: P2 -- funds are not lost (they sit safely at each deposit
+address; deposits themselves keep landing), but they are not making it to
+the treasury. Escalate to P1 if it has been stuck long enough that it looks
+like it will never self-resolve (see below).
+
+### Confirm
+
+```sql
+-- Find sweep bookings stuck in "sent" (broadcast but not yet confirmed) for
+-- this chain/token, oldest first.
+SELECT uid, metadata->>'chain_id' AS chain_id, metadata->>'token' AS token,
+       channel_ref, status, updated_at
+FROM bookings
+WHERE classification_id = (SELECT id FROM classifications WHERE code = 'sweep')
+  AND status = 'sent'
+ORDER BY updated_at ASC;
+```
+
+A booking sitting in `sent` for much longer than `SweepPolicy.Interval` is
+the "stuck" signal `Onchain.recheckSweepSent`'s gas-bump retry loop exists
+to self-heal. Check the transaction at `channel_ref` (or the booking's
+`metadata` for a fresher hash if this process has bumped it more than
+once, though that tracking is in-memory only -- see below) on a block
+explorer: if it shows `replacement transaction underpriced` failures in
+your node's logs, the retry loop is fighting an underpriced replacement.
+
+### Background: what "stuck" means here and the fix (26-08-26)
+
+`Onchain.recheckSweepSent` gas-bumps (rebroadcasts at the same nonce, fee
++12.5%) a sweep transaction that has been in `sent` longer than
+`sweepStuckAfter`. Before this fix, the fee floor for that bump came ONLY
+from `chains/evm.Sweeper`'s own in-memory `lastFee` map -- wiped by every
+process restart. A restart mid-retry (routine deploy, crash, OOM) meant the
+next bump attempt quoted off the current market rate with **no bump at
+all**, which is very likely to be *underpriced* relative to whatever is
+genuinely still pending on chain if the original stall was caused by a gas
+spike (the common case) -- the replacement gets rejected by the node
+forever, and every later bump attempt inherits the identical blind spot.
+**The chain's entire sweep collection stalls with no self-healing path**,
+because EVM nonces are strictly sequential: that one stuck nonce blocks
+every later sweep for the same signing key, even on unrelated chains/tokens
+sharing it.
+
+The fix: `Sweeper.BatchSweep` now also reads the ACTUAL fee of the
+transaction at the caller-supplied `priorTxHash` straight from the chain
+(`TransactionByHash`) before falling back to its in-memory map. The
+booking's persisted `ChannelRef` (durable, survives a restart) is one
+source of that hash; if this process has bumped more than once without a
+restart, its own in-memory tracking (fresher, since `ChannelRef` only ever
+reflects the first broadcast) is preferred automatically.
+
+**Residual limitation, disclosed rather than hidden**: this closes the
+"underpriced forever" failure mode, but the gas-bump *attempt counter*
+(`SweepPolicy`'s implicit bump cap, tracked in `Onchain.sweepBump`, also
+in-memory) still resets to zero on a restart. A chain that restarts
+repeatedly while a sweep is stuck could therefore retry more times than
+its configured cap intends before finally giving up and marking the
+booking `failed` -- extra gas spend, not a correctness or fund-safety
+issue (each retry now correctly outbids whatever is really pending, so it
+either succeeds or is itself superseded by the next bump). Persisting the
+bump count durably (so it survives a restart too) is tracked as follow-up
+work, not done in this pass.
+
+### Resolution
+
+- If the transaction is genuinely stuck (underpriced, confirmed via block
+  explorer / node logs): wait for the next scheduled `recheckSweepSent`
+  tick -- with the fix above, it will now successfully out-bid the
+  genuinely pending transaction. No manual intervention needed in the
+  common case.
+- If it has exceeded `SweepPolicy`'s bump cap and transitioned to `failed`:
+  the nonce is freed for later sweeps to proceed (see
+  `service/onchain.go`'s `reviveFailedSweep`/`findFailedSweep` comments),
+  but THIS batch's funds are still sitting at their deposit addresses,
+  uncollected. Investigate why gas stayed elevated long enough to exhaust
+  the retry budget (a sustained network-wide gas spike, not a bug), and
+  either raise `SweepPolicy.GasCeiling` for that chain/token if it was set
+  too conservatively, or manually trigger a fresh sweep once gas normalizes.
+- If a chain's sweeps have stopped ENTIRELY (not just one stuck nonce): check
+  for a bad nonce anywhere in the sequence first (`NextNonce` uses
+  `PendingNonceAt`, so any earlier unconfirmed nonce for the signing key --
+  including a manually-sent transaction outside this library -- blocks
+  everything after it).
 
 ---
 

@@ -498,10 +498,25 @@ type Sweeper interface {
 	// address because the factory's batchSweep ABI takes CREATE2 salts
 	// (nonces), not addresses -- CREATE2 is one-way, so the adapter cannot
 	// recover a holder's salt from its address alone.
-	BatchSweep(ctx context.Context, chainID int64, token string, targets []SweepTarget, signerNonce uint64) (txHash string, err error)
-	// GasPrice returns the current suggested gas price (gwei) on chainID, for
-	// the caller to compare against SweepPolicy.GasCeiling before
-	// broadcasting or gas-bumping.
+	//
+	// priorTxHash is the hash of the transaction this call is replacing --
+	// empty on the first-ever dispatch for signerNonce. Callers should pass
+	// the most durable hash they have (a booking's persisted ChannelRef, at
+	// minimum): an implementation MAY use it to read the actual fee still
+	// pending on chain (via a node RPC) as the floor a gas-bump replacement
+	// must beat, rather than relying only on its own process-local memory of
+	// the last fee it used -- that memory does not survive a restart, while
+	// a hash sourced from durable storage does (onchain-money-path.md).
+	BatchSweep(ctx context.Context, chainID int64, token string, targets []SweepTarget, signerNonce uint64, priorTxHash string) (txHash string, err error)
+	// GasPrice returns the current gas price (gwei) on chainID, for the
+	// caller to compare against SweepPolicy.GasCeiling before broadcasting
+	// or gas-bumping. An implementation MUST report the same basis it will
+	// actually pay in BatchSweep's non-retry fee cap -- reporting a
+	// different, lower-tending estimate here (e.g. a legacy suggested gas
+	// price when the real payment uses a wider EIP-1559 fee-cap formula)
+	// makes GasCeiling a soft threshold instead of the upper bound its own
+	// doc comment (core.SweepPolicy.GasCeiling) promises
+	// (onchain-money-path.md Minor).
 	GasPrice(ctx context.Context, chainID int64) (decimal.Decimal, error)
 }
 
