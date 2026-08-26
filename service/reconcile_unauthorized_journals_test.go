@@ -66,6 +66,16 @@ func TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreV
 	check := findCheck(t, report, "unauthorized_journals")
 	assert.True(t, check.Passed, "findings: %+v", check.Findings)
 	assert.True(t, check.Complete)
+
+	// Every check in the suite is now wired and nothing is capped or
+	// skipped, so the report must be able to say so. Before operability.md's
+	// "full_coverage 永远为假" fix (the permanently-skipped check #8), this
+	// assertion could never pass against ANY database state or wiring --
+	// FullCoverage was structurally false on every run. This is the DB-backed
+	// half of that pin (TestFullReconciliation_FullCoverageCanBeTrue in
+	// reconcile_full_test.go is the unit-level half).
+	assert.True(t, report.FullCoverage,
+		"every check ran to completion with nothing capped or skipped -- FullCoverage must be able to be true")
 }
 
 func TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature(t *testing.T) {

@@ -316,15 +316,27 @@ func TestFullReconciliation_Check2ResumesAcrossRuns(t *testing.T) {
 	assert.Equal(t, holderC, afterHolder)
 	assert.True(t, lapDirty)
 
-	// Run 4: resumes past holder C. Zero pairs remain, so the scan
-	// genuinely reaches the tail this time -- lap completes for real. This
-	// is the self-healing property that makes the ambiguity above harmless:
-	// it costs one extra cheap round-trip, never a permanently-stuck lap.
+	// Run 4: resumes past holder C. Zero pairs remain, so the lap ends here
+	// either way -- but this run started from a resumed (non-fresh) cursor
+	// and found nothing at all, which is EXACTLY the shape a tampered cursor
+	// produces (threat-model.md's §4-3 Major:
+	// `UPDATE reconcile_scan_cursors SET after_holder = <huge>, lap_dirty =
+	// false` makes every page query return zero rows, indistinguishable
+	// on the wire from a lap that legitimately finished at that exact
+	// point). Go alone cannot tell "genuinely reached the tail" apart from
+	// "a cursor moved there by something other than this scan" without an
+	// independent count -- so this run reports Complete=false rather than
+	// asserting coverage it cannot actually vouch for. The cursor and
+	// lap_dirty still reset below: a legitimately-finished lap self-corrects
+	// on the very next (now fresh) run at the cost of one conservative
+	// under-claim, which is cheap compared to the alternative (an attacker
+	// who resets the cursor before every scheduled run keeping this check
+	// permanently green).
 	report, err = full.RunFullReconciliation(ctx)
 	require.NoError(t, err)
 	check2 = findCheck(t, report, "checkpoint_balance")
 	assert.False(t, check2.Passed, "the run that completes the lap must still surface the earlier drift")
-	assert.True(t, check2.Complete, "all pairs have now been visited and the tail was genuinely reached")
+	assert.False(t, check2.Complete, "a resumed cursor finding zero pairs must not claim coverage it cannot vouch for")
 
 	require.NoError(t, pgpool.QueryRow(ctx,
 		"SELECT after_holder, after_currency, lap_dirty FROM reconcile_scan_cursors WHERE check_name='checkpoint_balance'",

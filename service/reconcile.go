@@ -299,10 +299,9 @@ type FullReconciliationService struct {
 
 	// journals/verifier back the unauthorized_journals check (contracts
 	// §W2-2, I-32). Both nil (the default -- SetAuthCheck was never called)
-	// means the check is skipped outright (Complete=false), same posture as
-	// check #8's "feature not available" skip: a deployment that never
-	// configured signing has nothing for this check to verify, and every
-	// unsigned journal in that state is expected, not evidence of
+	// means the check is skipped outright (Complete=false): a deployment
+	// that never configured signing has nothing for this check to verify,
+	// and every unsigned journal in that state is expected, not evidence of
 	// tampering.
 	journals core.QueryProvider
 	verifier core.AuthVerifier
@@ -380,7 +379,7 @@ func NewFullReconciliationService(
 // failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 14)
+	checks := make([]core.CheckResult, 0, 13)
 
 	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
@@ -406,8 +405,19 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 	// --- Check #7: Orphan reservations ---
 	checks = append(checks, s.runCheck7OrphanReservations(ctx))
 
-	// --- Check #8: Pending journal timeout (skipped — schema feature pending) ---
-	checks = append(checks, s.runCheck8PendingJournalTimeout())
+	// Check #8 ("pending_journal_timeout") used to live here: it required a
+	// journals.status field that was never added to the schema, so it could
+	// structurally never run -- runCheck8PendingJournalTimeout always
+	// returned Complete=false unconditionally, for every run, forever. Its
+	// single vote permanently poisoned FullCoverage below to false (operability.md
+	// Major: "full_coverage 永远为假"), which made the whole point of adding
+	// Complete/FullCoverage moot -- a signal that can never be true carries no
+	// information (working-agreements §3: a check that can never run is not
+	// a check). Removed rather than patched around: a check belongs in this
+	// suite only once it can actually execute. The pending work item
+	// (journals.status field, then re-add a real check against it) is
+	// tracked in the audit remediation backlog, not as a permanently-red
+	// placeholder in the suite that reports itself.
 
 	// --- Check #9: Idempotency uniqueness audit ---
 	checks = append(checks, s.runCheck9IdempotencyAudit(ctx))
@@ -595,6 +605,16 @@ func (s *FullReconciliationService) runCheck2GlobalBalance(ctx context.Context) 
 		})
 		return result
 	}
+	// resumedLap records whether this run's starting cursor was mid-lap
+	// (persisted by an earlier, capped/timed-out run) rather than the
+	// fresh-lap sentinel. Captured before the loop below reassigns
+	// afterHolder/afterCurrency as it advances -- see the "0 pairs on a
+	// resumed lap" handling after the loop for why this distinction exists
+	// (threat-model.md Major, §4-3: reconcile_scan_cursors has no DB-level
+	// mutation guard against ledger_app, so a resumed lap that finds
+	// literally nothing left is not automatically trustworthy the way a
+	// fresh lap finding nothing is).
+	resumedLap := afterHolder != cursorStartHolder || afterCurrency != cursorStartCurrency
 	scanned := 0
 	partialReason := ""
 
@@ -703,6 +723,45 @@ pageLoop:
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
 				Description: "checkpoint scan cursor persist failed",
+				Detail:      setErr.Error(),
+			})
+		}
+	} else if scanned == 0 && resumedLap {
+		// The lap "completed" on its very first page fetch of this run, but
+		// that page was fetched starting from a cursor already mid-lap, not
+		// from the fresh sentinel -- and it came back completely empty.
+		// This is EXACTLY the shape a tampered cursor produces (threat-model.md:
+		// `UPDATE reconcile_scan_cursors SET after_holder = <huge>, lap_dirty
+		// = false` makes every subsequent page query return zero rows, and
+		// nothing about "the page was empty" on its own says whether that is
+		// because the fleet is genuinely exhausted at this exact point or
+		// because the cursor was moved there by something other than this
+		// scan loop actually walking through the data). Reporting
+		// Complete=true here would be indistinguishable, on the wire, from a
+		// full-fleet scan that legitimately found nothing -- the same
+		// "looks green when it isn't" shape P0 fixed for capped/timed-out
+		// runs, just one level deeper (a scan that never advanced the cursor
+		// itself, only inherited someone else's).
+		//
+		// The cursor still resets to the fresh sentinel below (same as the
+		// genuinely-clean branch): a legitimate lap that happens to finish
+		// exactly on a page boundary self-corrects on the VERY NEXT run
+		// (which will then start from the fresh sentinel and, if the fleet
+		// really is empty, correctly report Complete=true) -- one
+		// conservative run of under-claimed coverage is a cheap price for
+		// closing the "reset the cursor before every scheduled run" attack
+		// this finding describes: with this check in place, that attack
+		// keeps FullCoverage honestly false for as long as it is repeated,
+		// instead of reading as a continuously clean bill of health.
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "checkpoint scan: resumed from a non-fresh cursor and found zero pairs on the first page",
+			Detail:      "cannot distinguish a lap that legitimately finished exactly at the persisted resume point from a cursor advanced by something other than this scan (see docs/RUNBOOK.md); not counted as full coverage",
+		})
+		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false); setErr != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: "checkpoint scan cursor reset failed",
 				Detail:      setErr.Error(),
 			})
 		}
@@ -913,28 +972,6 @@ func (s *FullReconciliationService) runCheck7OrphanReservations(ctx context.Cont
 		})
 	}
 	return result
-}
-
-// runCheck8PendingJournalTimeout is skipped because the journals.status field
-// required for this check has not yet been added to the schema. The δ-pending
-// agent will integrate this field; once merged, this check can query
-// journals WHERE status NOT IN ('posted', 'reversed') AND created_at < now()-threshold.
-func (s *FullReconciliationService) runCheck8PendingJournalTimeout() core.CheckResult {
-	return core.CheckResult{
-		Name:   "pending_journal_timeout",
-		Passed: true,
-		// This check never runs, so it cannot pass. Complete=false keeps a
-		// skipped check out of the report's clean-bill-of-health signal
-		// (ReconcileReport.FullCoverage) instead of counting as verified.
-		Complete: false,
-		Findings: []core.Finding{
-			{
-				Description: "check skipped: feature requires journals.status field",
-				Detail:      "pending integration with δ-pending agent; re-enable once journals.status migration is applied",
-			},
-		},
-		CheckedAt: time.Now(),
-	}
 }
 
 // runCheck9IdempotencyAudit scans for duplicate idempotency_key values in the
