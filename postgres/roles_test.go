@@ -323,10 +323,13 @@ func TestRoleAttributes(t *testing.T) {
 		assert.False(t, a.createRole, "%s must not be able to create roles", name)
 	}
 
-	// ledger_app: SELECT/INSERT/UPDATE on an ordinary table, SELECT/INSERT
-	// only (no UPDATE) on journal_entries, nothing on schema_migrations.
+	// ledger_app: SELECT/INSERT/UPDATE on an ordinary table, SELECT
+	// table-level plus a column-scoped INSERT (id excluded, migration 008)
+	// on journal_entries, nothing on schema_migrations.
 	assertGrants(t, pool, "ledger_app", "currencies", []string{"SELECT", "INSERT", "UPDATE"})
-	assertGrants(t, pool, "ledger_app", "journal_entries", []string{"SELECT", "INSERT"})
+	assertGrants(t, pool, "ledger_app", "journal_entries", []string{"SELECT"})
+	assertColumnPrivilegeExists(t, pool, "ledger_app", "journal_entries", "journal_id", "INSERT")
+	assertColumnPrivilegeAbsent(t, pool, "ledger_app", "journal_entries", "id", "INSERT")
 	assertGrants(t, pool, "ledger_app", "schema_migrations", nil)
 
 	// ledger_ro: SELECT everywhere, including journal_entries.

@@ -135,6 +135,21 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// column-level check below.
 	roColumnScoped := map[string]bool{"webhook_subscribers": true}
 
+	// journal_entries is column-scoped for ledger_app's INSERT as of
+	// migration 008: id is excluded, making the shared journal_entries_id_seq
+	// the only source of a row's id (board #37 / I-43 -- a partitioned
+	// table's composite (id, created_at) primary key only guarantees
+	// uniqueness within one partition, not across the whole table). SELECT
+	// stays table-level and unaffected (RETURNING id off the one legitimate
+	// INSERT still works off that grant, not a column-level one). Same
+	// information_schema blind spot as roColumnScoped above: a column-level
+	// INSERT does not show up in role_table_grants, so the plain-INSERT
+	// expectation append-only tables otherwise get would misread as "no
+	// INSERT at all" -- the real assertion is in
+	// TestJournalEntries_DuplicateIDAcrossPartitions_Rejected (an actual
+	// ledger_app-credentialed attack) and the column-level check below.
+	appInsertColumnScoped := map[string]bool{"journal_entries": true}
+
 	// ####  threat-model.md Major: "no gate can discover a missing guard"  ####
 	//
 	// Before this, any table not in appendOnly/updateRevoked silently fell
@@ -207,15 +222,23 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 			if updateRevoked[table] {
 				wantApp = []string{"SELECT", "INSERT"}
 			}
+			if appInsertColumnScoped[table] {
+				wantApp = []string{"SELECT"}
+			}
 			if deleteAllowed[table] {
 				wantApp = append(wantApp, "DELETE")
 			}
 			assertGrants(t, pool, "ledger_app", table, wantApp)
 
+			if appInsertColumnScoped[table] {
+				assertColumnPrivilegeExists(t, pool, "ledger_app", table, "journal_id", "INSERT")
+				assertColumnPrivilegeAbsent(t, pool, "ledger_app", table, "id", "INSERT")
+			}
+
 			if roColumnScoped[table] {
 				assertGrants(t, pool, "ledger_ro", table, nil)
-				assertColumnPrivilegeExists(t, pool, "ledger_ro", table, "name")
-				assertColumnPrivilegeAbsent(t, pool, "ledger_ro", table, "secret")
+				assertColumnPrivilegeExists(t, pool, "ledger_ro", table, "name", "SELECT")
+				assertColumnPrivilegeAbsent(t, pool, "ledger_ro", table, "secret", "SELECT")
 				return
 			}
 			assertGrants(t, pool, "ledger_ro", table, []string{"SELECT"})
@@ -223,34 +246,41 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	}
 }
 
-// assertColumnPrivilegeExists confirms grantee holds a column-level SELECT
-// on the named column -- the counterpart check for tables in roColumnScoped,
-// which have no table-level grant for information_schema.role_table_grants
-// to report.
-func assertColumnPrivilegeExists(t *testing.T, pool *pgxpool.Pool, grantee, table, column string) {
+// assertColumnPrivilegeExists confirms grantee holds a column-level grant of
+// the given privilege type on the named column -- the counterpart check for
+// tables/columns where the privilege is scoped narrower than the whole
+// table, which information_schema.role_table_grants (table-level-ACL-only)
+// does not report at all.
+func assertColumnPrivilegeExists(t *testing.T, pool *pgxpool.Pool, grantee, table, column, privilege string) {
 	t.Helper()
 	ctx := context.Background()
-	var privilege string
+	var got string
 	err := pool.QueryRow(ctx, `
 		SELECT privilege_type FROM information_schema.column_privileges
-		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3
-	`, grantee, table, column).Scan(&privilege)
-	require.NoError(t, err, "%s must hold a column-level grant on %s.%s", grantee, table, column)
-	assert.Equal(t, "SELECT", privilege)
+		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3 AND privilege_type = $4
+	`, grantee, table, column, privilege).Scan(&got)
+	require.NoError(t, err, "%s must hold %s on %s.%s", grantee, privilege, table, column)
+	assert.Equal(t, privilege, got)
 }
 
-// assertColumnPrivilegeAbsent is assertColumnPrivilegeExists' negative --
-// confirms grantee holds no privilege at all on the named column.
-func assertColumnPrivilegeAbsent(t *testing.T, pool *pgxpool.Pool, grantee, table, column string) {
+// assertColumnPrivilegeAbsent confirms grantee holds no grant of the given
+// privilege type on the named column -- scoped to that one privilege type,
+// not "no privilege of any kind", because information_schema.column_privileges
+// also surfaces a column's row for every OTHER privilege the grantee
+// independently holds at the table level (e.g. journal_entries.id still
+// carries a SELECT row from ledger_app's unrelated, unmodified table-level
+// SELECT grant -- checking for "any row at all" there would misfire on that
+// and read as a regression that never happened).
+func assertColumnPrivilegeAbsent(t *testing.T, pool *pgxpool.Pool, grantee, table, column, privilege string) {
 	t.Helper()
 	ctx := context.Background()
 	rows, err := pool.Query(ctx, `
 		SELECT privilege_type FROM information_schema.column_privileges
-		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3
-	`, grantee, table, column)
+		WHERE grantee = $1 AND table_schema = 'public' AND table_name = $2 AND column_name = $3 AND privilege_type = $4
+	`, grantee, table, column, privilege)
 	require.NoError(t, err)
 	defer rows.Close()
-	assert.False(t, rows.Next(), "%s must hold no privilege on %s.%s", grantee, table, column)
+	assert.False(t, rows.Next(), "%s must hold no %s privilege on %s.%s", grantee, privilege, table, column)
 }
 
 // queryAppendOnlyGuardedTables returns the set of `public` tables carrying

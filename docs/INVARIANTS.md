@@ -263,25 +263,35 @@ warning with no machine gate (docs/audits/2026-08-25-financial-engineering/finan
 parses this package's AST and fails if `InsertJournalEntry` ever gets a second
 call site, or if its one call site stops calling `acquireBalanceLocks`.
 
-**Known gap, not closed by the above**: the delta filter's `id > last_entry_id`
-comparison assumes `id` is unique across the whole table, but the schema's
-actual guarantee is narrower — `journal_entries`' primary key is
-`(id, created_at)`, not `id` alone, because a partitioned table's primary key
-must include the partition key (`created_at`, monthly range partitions). Under
-normal operation this is harmless (one shared `BIGSERIAL` sequence backs every
-partition, so sequence-driven ids never collide), but it is not a schema-level
+**Closed gap (was open through migration 007)**: the delta filter's
+`id > last_entry_id` comparison assumes `id` is unique across the whole
+table, but the schema's actual guarantee is narrower — `journal_entries`'
+primary key is `(id, created_at)`, not `id` alone, because a partitioned
+table's primary key must include the partition key (`created_at`, monthly
+range partitions). `001_baseline.up.sql`'s own comment calls this "a
+uniqueness backstop beyond trusting the sequence" — **that description is
+wrong and is left uncorrected in the migration itself** (already-applied
+migrations are never edited; see `~/.claude/rules/deployment.md`) — the
+composite key only forbids the exact same `id` repeating inside the *same*
+partition; nothing at the schema level stopped the same `id` from appearing
+once per partition. Before migration 008, that was not a schema-level
 backstop against a row inserted with an explicit, already-used `id` in a
 different partition — which the `ledger_app`-credential threat model this
-audit wave treats as in-scope elsewhere (see I-22) already permits.
-`postgres.TestJournalEntries_DuplicateIDAcrossPartitions_SplitsBooks` confirms
-the consequence is real, not merely plausible: such a forged, internally-
-balanced pair is permanently invisible to `GetBalance` (its id never exceeds
-the watermark) while `SumGlobalDebitCreditByCurrency`/`reconcile.sql` count it
-and see a balanced total either way — the two views of the ledger diverge
-without violating any id-range invariant or tripping the global debit==credit
-check. Closing this gap is a DB-role/grant hardening change (restricting who
-may specify `journal_entries.id` explicitly), out of this file's scope; see
-`docs/plans/2026-08-26-audit-remediation-contracts.md`.
+audit wave treats as in-scope elsewhere (see I-22) already permitted.
+The pre-migration-008 form of the pin below (see git history for its prior
+name and body) confirmed the consequence was real, not merely plausible: such
+a forged, internally-balanced pair was
+permanently invisible to `GetBalance` (its id never exceeds the watermark)
+while `SumGlobalDebitCreditByCurrency`/`reconcile.sql` counted it and saw a
+balanced total either way — the two views of the ledger diverged without
+violating any id-range invariant or tripping the global debit==credit check.
+**Migration 008 (I-43) closes this**: `ledger_app`'s INSERT on
+`journal_entries` (every partition, derived from `pg_partition_tree`, plus
+the parent) is now column-scoped to exclude `id`, so the shared
+`journal_entries_id_seq` — one sequence for the whole partitioned table — is
+the only remaining source of a row's `id`, and any INSERT statement naming
+`id` explicitly is refused at the ACL layer (`42501`) regardless of what
+value it supplies. See I-43 for the full argument.
 
 **Pinned by**:
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
@@ -289,8 +299,9 @@ may specify `journal_entries.id` explicitly), out of this file's scope; see
 - `postgres.TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal`
 - `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing prerequisite,
   now a machine gate)
-- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_SplitsBooks`
-  (verification pin for the known gap above, not a fix — see the note)
+- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-43's
+  pin — the same forged-id attack, now asserted refused under a real
+  `ledger_app` credential)
 
 ## I-6: Decimal precision is `NUMERIC(30,18)`
 
@@ -3024,6 +3035,75 @@ of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPri
 - `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
   `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
   `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+
+## I-43: `journal_entries.id` is sourced from the sequence alone, never an explicit value
+
+(board #37 / `docs/audits/2026-08-25-financial-engineering/financial-correctness.md`'s
+Minor -- "`journal_entries.id` 单独不唯一, I-5 的单调性完全依赖序列" -- schema-fact
+CONFIRMED, consequence PLAUSIBLE at audit time, CONFIRMED by the pin below;
+`docs/plans/2026-08-26-audit-remediation-contracts.md` §9, W3-id.)
+
+**Rule**: `ledger_app` cannot INSERT into `journal_entries` (the parent or any
+of its partitions) with a statement that names the `id` column explicitly.
+The only path by which a row's `id` is ever assigned is the column's
+`DEFAULT` -- `nextval` on `journal_entries_id_seq`, one sequence shared by
+the parent and every partition.
+
+**Why**: `journal_entries` is partitioned monthly by `created_at`, and a
+partitioned table's primary key must include the partition key, so the table
+is keyed on `(id, created_at)`, not `id` alone. `001_baseline.up.sql`'s own
+comment calls this "a uniqueness backstop beyond trusting the sequence" --
+it is not one, and that comment is left as-written (already-applied
+migrations are never edited). The composite key only forbids the exact same
+`id` repeating inside the *same* partition; nothing at the schema level
+stopped the same `id` from appearing once per partition before this
+invariant closed the gap. Every per-account balance path filters strictly on
+`id > checkpoint.last_entry_id` (I-5), so a row whose `id` duplicates one
+already at or below the watermark would be permanently invisible to
+`GetBalance`, while `SumGlobalDebitCreditByCurrency`/`reconcile.sql` (which
+sum every row, unfiltered by `id`) would count it regardless -- and because
+such a forged pair is itself internally balanced, the global debit==credit
+sanity check stays green throughout, so nothing else in the system flags the
+divergence. The pre-migration-008 form of the pin below (see git history for
+its prior name and body) confirmed this consequence directly rather than
+leaving it PLAUSIBLE. The realistic trigger is not "an
+attacker guesses a free `id`" -- `ledger_app` already holds INSERT on
+`journal_entries` (I-22 classifies it append-only: SELECT/INSERT, no
+UPDATE), and until migration 008 that grant was table-level, covering every
+column including `id`. A raw INSERT under a leaked `ledger_app` credential,
+or a sequence that regresses after a PITR restore and re-issues an `id` the
+table already used in an older partition, both land here.
+
+**Enforced by**: `postgres/sql/migrations/008_journal_entries_id_sequence_only.up.sql`
+-- a `pg_partition_tree('journal_entries')`-driven loop (so it reaches
+whichever partitions a given deployment has actually accumulated, not a
+hardcoded name list) that `REVOKE`s `ledger_app`'s table-level INSERT on the
+parent and every existing partition and replaces it with a column-level
+INSERT naming every column except `id`. Partitions created after this
+migration (`ledger_create_monthly_partition` /
+`ledger_rebalance_default_partition`, both migration 007, both SECURITY
+DEFINER) never receive a per-partition grant at all -- the only way
+`ledger_app` reaches them is tuple-routing through the parent's own name,
+which Postgres checks against the parent's ACL (the one this migration
+restricts), not the partition the row physically lands in --
+`postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` (I-35) already
+pins that routing behavior. `postgres/sql/queries/journals.sql`'s
+`InsertJournalEntry` is the sole production write path into this table and
+never lists `id` in its column list, so it is unaffected.
+
+**Pinned by**:
+- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` --
+  the same forged-id attack the pre-fix pin demonstrated, now run against a
+  real `ledger_app` credential (`newAppPool`) and asserted refused
+  (`SQLSTATE 42501`) rather than silently splitting the ledger's two views
+  of the same balance.
+- `postgres.TestRoleAttributes` -- static ACL shape: `journal_entries` keeps
+  table-level `SELECT` for `ledger_app`, no table-level `INSERT`, a
+  column-level `INSERT` on `journal_id` (representative of the
+  non-`id` column set), and no column-level `INSERT` on `id`.
+- `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants/journal_entries` --
+  the same shape, enumerated structurally alongside every other table's grant
+  policy rather than hardcoded to this one table.
 
 ## How to add a new invariant
 
