@@ -3070,9 +3070,25 @@ leaving it PLAUSIBLE. The realistic trigger is not "an
 attacker guesses a free `id`" -- `ledger_app` already holds INSERT on
 `journal_entries` (I-22 classifies it append-only: SELECT/INSERT, no
 UPDATE), and until migration 008 that grant was table-level, covering every
-column including `id`. A raw INSERT under a leaked `ledger_app` credential,
-or a sequence that regresses after a PITR restore and re-issues an `id` the
-table already used in an older partition, both land here.
+column including `id`. A raw INSERT under a leaked `ledger_app` credential
+lands here.
+
+> **Correction (2026-08-26).** Migration 008's own comment, and an earlier
+> draft of this paragraph, also named "a sequence that regresses after a PITR
+> restore" as a trigger. **That claim is false**, and the first DR drill
+> (`docs/DR.md`, same date) falsified it directly rather than by argument:
+> PostgreSQL WAL-logs sequence advancement *ahead* of `nextval()` consumption
+> — crash-safety by design — so a restored sequence comes back at or ahead of
+> the highest id in the table, never behind. Measured on the restored
+> instance: `last_value` 106 against `max(id)` 80. `pg_dump` / `pg_restore`
+> preserves exact state through its own `setval()` (120 to 120). The
+> direction of error is toward **gaps** in the id space, never duplicates.
+>
+> The migration's comment is left as written, because a migration that has
+> landed is never edited (`deployment.md`); this paragraph is the correction
+> of record. What 008 actually defends against is the leaked-credential
+> path — which is real, and was demonstrated: with 008 neutralised, an
+> explicit-id INSERT as `ledger_app` succeeds.
 
 **Enforced by**: `postgres/sql/migrations/008_journal_entries_id_sequence_only.up.sql`
 -- a `pg_partition_tree('journal_entries')`-driven loop (so it reaches
