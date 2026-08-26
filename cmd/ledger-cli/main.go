@@ -56,6 +56,12 @@ func main() {
 	}
 }
 
+// reconcileFullFlagUsage is the --full flag's help text, pulled out to a
+// named constant (rather than an inline literal in cmdReconcile) so it can
+// be pinned by test without invoking the flag package's ExitOnError parsing
+// path. See TestReconcileFullFlagUsage_DoesNotHardcodeACheckCount.
+const reconcileFullFlagUsage = "run the full reconcile check suite (see the report's checks[] array for exactly which checks ran); default is just the global accounting equation"
+
 const usage = `ledger-cli — read-only ledger investigation tool
 
 usage:
@@ -231,7 +237,7 @@ func cmdTrace(ctx context.Context, svc *ledger.Service, args []string) error {
 
 func cmdReconcile(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
-	full := fs.Bool("full", false, "run all 10 reconcile checks; default is just the global accounting equation")
+	full := fs.Bool("full", false, reconcileFullFlagUsage)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
