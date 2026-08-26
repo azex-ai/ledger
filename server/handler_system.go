@@ -51,28 +51,35 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	httpx.OK(w, map[string]string{"status": "ready"})
 }
 
+// systemRollupResponse is the wire shape of GET /system/balances' list items
+// (docs/openapi.yaml's SystemRollup). A package-level named type, not a
+// function-local one -- server/openapi_contract_test.go's
+// TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs reflects on it via
+// reflect.TypeOf, which needs an addressable, reachable type; a type
+// declared inside handleSystemBalances only would not be.
+type systemRollupResponse struct {
+	CurrencyUID       string `json:"currency_uid"`
+	ClassificationUID string `json:"classification_uid"`
+	TotalBalance      string `json:"total_balance"`
+	UpdatedAt         string `json:"updated_at"`
+}
+
 func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 	rollups, err := s.queries.GetSystemRollups(r.Context())
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	type systemBalanceResp struct {
-		CurrencyUID       string `json:"currency_uid"`
-		ClassificationUID string `json:"classification_uid"`
-		TotalBalance      string `json:"total_balance"`
-		UpdatedAt         string `json:"updated_at"`
-	}
-	data := make([]systemBalanceResp, len(rollups))
+	data := make([]systemRollupResponse, len(rollups))
 	for i, r := range rollups {
-		data[i] = systemBalanceResp{
+		data[i] = systemRollupResponse{
 			CurrencyUID:       r.CurrencyUID,
 			ClassificationUID: r.ClassificationUID,
 			TotalBalance:      r.TotalBalance.String(),
 			UpdatedAt:         r.UpdatedAt.Format(time.RFC3339),
 		}
 	}
-	httpx.OK(w, PagedResponse[systemBalanceResp]{List: data})
+	httpx.OK(w, PagedResponse[systemRollupResponse]{List: data})
 }
 
 // --- Reconciliation ---

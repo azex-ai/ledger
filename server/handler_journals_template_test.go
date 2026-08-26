@@ -9,20 +9,22 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 )
 
 // newProtectedTemplateServer builds a server with an explicit
-// ProtectedTemplateCodes list -- newTestServerWith hardcodes its config, so
-// this constructs one directly with the same mock set (mirrors
-// newDevCreditServer's pattern in handler_devcredit_test.go).
-func newProtectedTemplateServer(protected []string, journals core.JournalWriter) *server.Server {
+// ProtectedTemplateCodes / AllowGenericTemplatePost pair -- newTestServerWith
+// hardcodes its config, so this constructs one directly with the same mock
+// set (mirrors newDevCreditServer's pattern in handler_devcredit_test.go).
+func newProtectedTemplateServer(protected, allowed []string, journals core.JournalWriter) *server.Server {
 	return server.NewWithConfig(
 		&server.Config{
-			Env:                    "dev",
-			CORSAllowOrigin:        "*",
-			MaxBodyBytes:           256 * 1024,
-			ProtectedTemplateCodes: protected,
+			Env:                      "dev",
+			CORSAllowOrigin:          "*",
+			MaxBodyBytes:             256 * 1024,
+			ProtectedTemplateCodes:   protected,
+			AllowGenericTemplatePost: allowed,
 		},
 		journals,
 		&mockBalanceReader{},
@@ -64,24 +66,27 @@ func postTemplateBody(code string) map[string]any {
 // Config.ProtectedTemplateCodes existed, POST /journals/template had no
 // allowlist/denylist at all -- any write-scope key could post a journal
 // under a template code like presets.DepositConfirmTemplateCode
-// ("deposit_confirm"), indistinguishable from a real verified deposit.
+// ("deposit_confirm"), indistinguishable from a real verified deposit. This
+// exercises the additive half: a deployment-specific code named in
+// Config.ProtectedTemplateCodes, on top of the library default.
 func TestPostTemplate_ProtectedCodeIsRefused(t *testing.T) {
-	srv := newProtectedTemplateServer([]string{"deposit_confirm", "deposit_confirm_pending"}, &mockJournalWriter{
+	srv := newProtectedTemplateServer([]string{"acme_custom_confirm"}, nil, &mockJournalWriter{
 		templateFn: func(context.Context, string, core.TemplateParams) (*core.Journal, error) {
 			t.Fatal("ExecuteTemplate must not be called for a protected template code")
 			return nil, nil
 		},
 	})
 
-	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody("deposit_confirm"))
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody("acme_custom_confirm"))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-// TestPostTemplate_UnprotectedCodeStillWorks pins the off-by-default half:
-// a code not on the list still executes normally.
+// TestPostTemplate_UnprotectedCodeStillWorks: a code that is neither in the
+// library default set nor in Config.ProtectedTemplateCodes still executes
+// normally.
 func TestPostTemplate_UnprotectedCodeStillWorks(t *testing.T) {
 	var gotCode string
-	srv := newProtectedTemplateServer([]string{"deposit_confirm"}, &mockJournalWriter{
+	srv := newProtectedTemplateServer([]string{"acme_custom_confirm"}, nil, &mockJournalWriter{
 		templateFn: func(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 			gotCode = code
 			return &core.Journal{UID: "j-1", IdempotencyKey: params.IdempotencyKey}, nil
@@ -93,24 +98,81 @@ func TestPostTemplate_UnprotectedCodeStillWorks(t *testing.T) {
 	assert.Equal(t, "some_other_template", gotCode)
 }
 
-// TestPostTemplate_EmptyProtectedListChangesNothing pins the default: an
-// empty (unset) Config.ProtectedTemplateCodes is the same behavior as
-// before this fix -- every template code, including deposit_confirm,
-// remains postable. This is a deliberate default (mechanism in the
-// library, policy in the consumer, same split as
-// core.ReserveInput.RequireVerifiedBalance) -- not an oversight, and this
-// test exists so nobody "fixes" it into a surprise default-deny later
-// without updating this pin.
-func TestPostTemplate_EmptyProtectedListChangesNothing(t *testing.T) {
+// TestPostTemplate_DefaultProtectsDepositCodes pins M-2 of the 2026-08-26
+// independent review: an empty (unset) Config.ProtectedTemplateCodes used to
+// mean "protect nothing" -- the finding structure.md raised stayed open in
+// every deployment that installed a deposit preset and didn't separately
+// remember to opt in. It now means "protect the library's own
+// presets.ProtectedTemplateCodes() set" -- every one of them, not just the
+// single code the earlier version of this test happened to cover. Before
+// this fix this loop is red on all four (each posts 201, not 403).
+func TestPostTemplate_DefaultProtectsDepositCodes(t *testing.T) {
+	for _, code := range presets.ProtectedTemplateCodes() {
+		t.Run(code, func(t *testing.T) {
+			srv := newProtectedTemplateServer(nil, nil, &mockJournalWriter{
+				templateFn: func(context.Context, string, core.TemplateParams) (*core.Journal, error) {
+					t.Fatal("ExecuteTemplate must not be called for a default-protected template code")
+					return nil, nil
+				},
+			})
+
+			w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody(code))
+			assert.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
+}
+
+// TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes proves the default
+// isn't a blanket deny: a code that isn't one of the library's own
+// deposit-confirmation codes, and isn't listed in
+// Config.ProtectedTemplateCodes, still posts normally under the new
+// default -- so a deployment with entirely unrelated template codes isn't
+// affected by this default flipping on.
+func TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes(t *testing.T) {
 	var gotCode string
-	srv := newProtectedTemplateServer(nil, &mockJournalWriter{
+	srv := newProtectedTemplateServer(nil, nil, &mockJournalWriter{
 		templateFn: func(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 			gotCode = code
 			return &core.Journal{UID: "j-1", IdempotencyKey: params.IdempotencyKey}, nil
 		},
 	})
 
-	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody("deposit_confirm"))
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody("withdraw_fee"))
 	require.Equal(t, http.StatusCreated, w.Code)
-	assert.Equal(t, "deposit_confirm", gotCode)
+	assert.Equal(t, "withdraw_fee", gotCode)
+}
+
+// TestPostTemplate_AllowGenericTemplatePostOptsCodeBackIn answers M-2's (b)
+// direction: does defaulting the deposit codes to protected brick an
+// existing deployment that has a reviewed reason to post one of them
+// through this generic endpoint? No -- AllowGenericTemplatePost is a
+// deliberate, per-code, machine-checkable escape hatch, applied after both
+// the library default and Config.ProtectedTemplateCodes.
+func TestPostTemplate_AllowGenericTemplatePostOptsCodeBackIn(t *testing.T) {
+	var gotCode string
+	srv := newProtectedTemplateServer(nil, []string{presets.DepositConfirmTemplateCode}, &mockJournalWriter{
+		templateFn: func(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+			gotCode = code
+			return &core.Journal{UID: "j-1", IdempotencyKey: params.IdempotencyKey}, nil
+		},
+	})
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody(presets.DepositConfirmTemplateCode))
+	require.Equal(t, http.StatusCreated, w.Code)
+	assert.Equal(t, presets.DepositConfirmTemplateCode, gotCode)
+}
+
+// TestPostTemplate_AllowGenericTemplatePostIsScopedToOneCode: opting out
+// deposit_confirm does not opt out the other three default-protected codes
+// -- AllowGenericTemplatePost removes exactly the codes it names.
+func TestPostTemplate_AllowGenericTemplatePostIsScopedToOneCode(t *testing.T) {
+	srv := newProtectedTemplateServer(nil, []string{presets.DepositConfirmTemplateCode}, &mockJournalWriter{
+		templateFn: func(context.Context, string, core.TemplateParams) (*core.Journal, error) {
+			t.Fatal("ExecuteTemplate must not be called for a still-protected template code")
+			return nil, nil
+		},
+	})
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody(presets.DepositConfirmPendingTemplateCode))
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }

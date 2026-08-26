@@ -196,12 +196,13 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Config.ProtectedTemplateCodes (empty by default): a deployment that has
-	// enumerated its own system-only template codes (e.g. deposit
-	// confirmation, meant to be posted only via its verified-deposit
-	// orchestration) gets this endpoint refused for those codes, same as
-	// POST /dev/credits is hardcoded to a single narrow template rather than
-	// accepting an arbitrary code (handler_devcredit.go).
+	// s.protectedTemplateCodes defaults to presets.ProtectedTemplateCodes()
+	// (deposit_confirm and friends) plus whatever Config.ProtectedTemplateCodes
+	// adds, minus Config.AllowGenericTemplatePost -- see server.go's Config
+	// doc comments. This endpoint refuses those codes no matter how the
+	// caller got a write-scope key, same as POST /dev/credits being
+	// hardcoded to a single narrow template rather than accepting an
+	// arbitrary code (handler_devcredit.go).
 	if s.protectedTemplateCodes[req.TemplateCode] {
 		httpx.Error(w, httpx.ErrForbidden("template_code "+req.TemplateCode+" is protected: post it through its dedicated orchestration, not this generic endpoint"))
 		return
