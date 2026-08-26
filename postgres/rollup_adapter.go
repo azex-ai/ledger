@@ -67,7 +67,7 @@ func (a *RollupAdapter) SetClaimLease(d time.Duration) {
 
 // --- RollupQueuer ---
 
-func (a *RollupAdapter) DequeueRollupBatch(ctx context.Context, batchSize int) ([]core.RollupQueueItem, error) {
+func (a *RollupAdapter) DequeueRollupBatch(ctx context.Context, batchSize int) ([]service.RollupQueueItem, error) {
 	rows, err := a.q.DequeueRollupBatch(ctx, sqlcgen.DequeueRollupBatchParams{
 		Limit:        int32(batchSize),
 		ClaimedUntil: timeToTimestamptz(time.Now().Add(a.claimLease)),
@@ -76,9 +76,9 @@ func (a *RollupAdapter) DequeueRollupBatch(ctx context.Context, batchSize int) (
 		return nil, fmt.Errorf("postgres: dequeue rollup batch: %w", err)
 	}
 
-	items := make([]core.RollupQueueItem, 0, batchSize)
+	items := make([]service.RollupQueueItem, 0, batchSize)
 	for _, row := range rows {
-		item := core.RollupQueueItem{
+		item := service.RollupQueueItem{
 			ID:               row.ID,
 			AccountHolder:    row.AccountHolder,
 			CurrencyID:       row.CurrencyID,
@@ -143,7 +143,7 @@ func (a *RollupAdapter) EnqueueRollup(ctx context.Context, holder, currencyID, c
 
 // --- CheckpointReadWriter ---
 
-func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, classificationID int64) (*core.BalanceCheckpoint, error) {
+func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, classificationID int64) (*service.BalanceCheckpoint, error) {
 	row, err := a.q.GetBalanceCheckpoint(ctx, sqlcgen.GetBalanceCheckpointParams{
 		AccountHolder:    holder,
 		CurrencyID:       currencyID,
@@ -155,7 +155,7 @@ func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, c
 		}
 		return nil, fmt.Errorf("postgres: get checkpoint: %w", err)
 	}
-	return &core.BalanceCheckpoint{
+	return &service.BalanceCheckpoint{
 		AccountHolder:    row.AccountHolder,
 		CurrencyID:       row.CurrencyID,
 		ClassificationID: row.ClassificationID,
@@ -166,7 +166,7 @@ func (a *RollupAdapter) GetCheckpoint(ctx context.Context, holder, currencyID, c
 	}, nil
 }
 
-func (a *RollupAdapter) UpsertCheckpoint(ctx context.Context, cp core.BalanceCheckpoint) error {
+func (a *RollupAdapter) UpsertCheckpoint(ctx context.Context, cp service.BalanceCheckpoint) error {
 	return a.q.UpsertBalanceCheckpoint(ctx, sqlcgen.UpsertBalanceCheckpointParams{
 		AccountHolder:    cp.AccountHolder,
 		CurrencyID:       cp.CurrencyID,
@@ -316,7 +316,7 @@ func (a *RollupAdapter) SumEntriesByAccountClassification(ctx context.Context, h
 
 // --- CheckpointReader ---
 
-func (a *RollupAdapter) GetCheckpoints(ctx context.Context, holder, currencyID int64) ([]core.BalanceCheckpoint, error) {
+func (a *RollupAdapter) GetCheckpoints(ctx context.Context, holder, currencyID int64) ([]service.BalanceCheckpoint, error) {
 	rows, err := a.q.GetBalanceCheckpoints(ctx, sqlcgen.GetBalanceCheckpointsParams{
 		AccountHolder: holder,
 		CurrencyID:    currencyID,
@@ -324,9 +324,9 @@ func (a *RollupAdapter) GetCheckpoints(ctx context.Context, holder, currencyID i
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get checkpoints: %w", err)
 	}
-	result := make([]core.BalanceCheckpoint, len(rows))
+	result := make([]service.BalanceCheckpoint, len(rows))
 	for i, r := range rows {
-		result[i] = core.BalanceCheckpoint{
+		result[i] = service.BalanceCheckpoint{
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,
@@ -341,14 +341,14 @@ func (a *RollupAdapter) GetCheckpoints(ctx context.Context, holder, currencyID i
 
 // --- CheckpointLister ---
 
-func (a *RollupAdapter) ListAllCheckpoints(ctx context.Context) ([]core.BalanceCheckpoint, error) {
+func (a *RollupAdapter) ListAllCheckpoints(ctx context.Context) ([]service.BalanceCheckpoint, error) {
 	rows, err := a.q.ListAllBalanceCheckpoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list all checkpoints: %w", err)
 	}
-	result := make([]core.BalanceCheckpoint, len(rows))
+	result := make([]service.BalanceCheckpoint, len(rows))
 	for i, r := range rows {
-		result[i] = core.BalanceCheckpoint{
+		result[i] = service.BalanceCheckpoint{
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,

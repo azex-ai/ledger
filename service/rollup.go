@@ -12,7 +12,7 @@ import (
 
 // RollupQueuer provides rollup queue read/write operations.
 type RollupQueuer interface {
-	DequeueRollupBatch(ctx context.Context, batchSize int) ([]core.RollupQueueItem, error)
+	DequeueRollupBatch(ctx context.Context, batchSize int) ([]RollupQueueItem, error)
 	// MarkRollupProcessed marks the item processed only if claimToken still owns
 	// the claim. Returns false (no error) when the claim was lost to a concurrent
 	// re-dirty or re-claim, leaving the row pending for its rightful owner.
@@ -24,8 +24,8 @@ type RollupQueuer interface {
 
 // CheckpointReadWriter provides checkpoint read/write operations.
 type CheckpointReadWriter interface {
-	GetCheckpoint(ctx context.Context, holder, currencyID, classificationID int64) (*core.BalanceCheckpoint, error)
-	UpsertCheckpoint(ctx context.Context, cp core.BalanceCheckpoint) error
+	GetCheckpoint(ctx context.Context, holder, currencyID, classificationID int64) (*BalanceCheckpoint, error)
+	UpsertCheckpoint(ctx context.Context, cp BalanceCheckpoint) error
 }
 
 // EntrySummer sums journal entries for rollup computation.
@@ -159,7 +159,7 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 
 func (s *RollupService) processItem(
 	ctx context.Context,
-	item core.RollupQueueItem,
+	item RollupQueueItem,
 	normalSides map[int64]core.NormalSide,
 	classCodeMap map[int64]string,
 ) error {
@@ -232,7 +232,7 @@ func (s *RollupService) processItem(
 	}
 
 	// Upsert checkpoint
-	if err := s.checkpoints.UpsertCheckpoint(ctx, core.BalanceCheckpoint{
+	if err := s.checkpoints.UpsertCheckpoint(ctx, BalanceCheckpoint{
 		AccountHolder:    item.AccountHolder,
 		CurrencyID:       item.CurrencyID,
 		ClassificationID: item.ClassificationID,

@@ -136,7 +136,7 @@ func TestCheckpointIntegrity_RebuildCheckpoint_OvercomesMonotonicGuard(t *testin
 	require.NoError(t, err)
 	require.True(t, correctBalance.Equal(trueBalance))
 
-	require.NoError(t, rollup.UpsertCheckpoint(ctx, core.BalanceCheckpoint{
+	require.NoError(t, rollup.UpsertCheckpoint(ctx, service.BalanceCheckpoint{
 		AccountHolder:    holderID,
 		CurrencyID:       currencyID,
 		ClassificationID: mainWalletID,

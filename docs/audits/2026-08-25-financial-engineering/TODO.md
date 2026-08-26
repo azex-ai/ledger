@@ -199,17 +199,26 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
     单纯 `bizcode.Retryable(code)` 判断重试的消费方不受影响（三者的 retryable 布尔值不变，只有
     `ErrUnauthorizedJournal` 那一个从 `true` 改成 `false`，且改对是本次修复的目的）。
     新增库函数 `core.IsRetryable(err error) bool`（纯增量，不影响任何既有签名）。
-  - `core.CheckpointIntegrityStore.RebuildCheckpoint` 的返回类型从 `*core.BalanceCheckpoint`
-    （`CurrencyID`/`ClassificationID int64`，内部 id）改为新类型 `*core.RebuiltCheckpoint`
-    （`CurrencyUID`/`ClassificationUID string`，与传入的 `currencyUID`/`classificationUID`
-    参数同值，且不再携带 `LastEntryID`）—— **库消费方需要把读取 `cp.CurrencyID`/
-    `cp.ClassificationID` 的调用点改成 `cp.CurrencyUID`/`cp.ClassificationUID`**（字符串，
-    值即调用方自己传入的 uid，不需要额外查表）；若依赖 `cp.LastEntryID` 做水位判断，需改用
-    `CheckpointIntegrityStore.RecomputeBalance` 或直接查询 `checkpoint_rebuilds` 审计表。
-    `core.BalanceCheckpoint` 本身不变（仍是内部 rollup/reconcile 引擎的工作类型，从未经任何
-    `Service` 方法对外暴露，不受此影响）。同时 `server/contract_pin_test.go` 的 I-18 门禁改为
-    从 `postgres/sql/migrations/*.up.sql` 机械派生内部 id 列名，不再是硬编码词表 —— 无消费方
-    可见影响，仅记录以防未来有人依赖旧的固定词表行为。
+  - **W15-B（最终形态，取代下方 W1-B 的中间态描述）**：`core.CheckpointIntegrityStore.RebuildCheckpoint`
+    的返回类型从原来携带内部 id 的 `*core.BalanceCheckpoint`（`CurrencyID`/`ClassificationID int64`）
+    改为同名但语义不同的 `*core.BalanceCheckpoint`（`CurrencyUID`/`ClassificationUID string`，与传入
+    的 `currencyUID`/`classificationUID` 参数同值，不再携带 `LastEntryID`）—— **库消费方需要把读取
+    `cp.CurrencyID`/`cp.ClassificationID` 的调用点改成 `cp.CurrencyUID`/`cp.ClassificationUID`**
+    （字符串，值即调用方自己传入的 uid，不需要额外查表）；若依赖 `cp.LastEntryID` 做水位判断，需
+    改用 `CheckpointIntegrityStore.RecomputeBalance` 或直接查询 `checkpoint_rebuilds` 审计表。
+    Aaron 拍板不接受 W1-B 把 I-18 收窄为「只约束跨 `Service` 访问器的 `core` 类型」并对
+    `core.BalanceCheckpoint` 开豁免 —— 恢复 I-18 原始的全称命题（"`core` 类型和接口一律只说
+    uid"）后，原来内部 id 版的 `core.BalanceCheckpoint` **整体移出 `core` 包**，落在
+    `service.BalanceCheckpoint`（rollup/reconcile 引擎的工作类型，`RollupQueuer`/
+    `CheckpointReadWriter`/`CheckpointReader` 及其 postgres 适配器消费；`core.RollupQueueItem`
+    同理移到 `service.RollupQueueItem`）。原来的 uid 版类型 `core.RebuiltCheckpoint` 就地改名为
+    `core.BalanceCheckpoint`（少一个类型名）。**这两个类型都不在任何库消费方公开签名上出现过**
+    （`service.BalanceCheckpoint`/`service.RollupQueueItem` 只是内部 wiring 用的包内类型；旧
+    `core.RebuiltCheckpoint`→新名只是改了类型名，字段与语义不变），因此除上面那条
+    `cp.CurrencyID`/`cp.ClassificationID` 字段访问的变更外，**没有额外的消费方可见影响**。
+    同时新增 `core.TestNoInternalIDFieldsInCoreTypes`：把 `server/contract_pin_test.go` 那套从
+    migrations 机械派生内部 id 列名的门禁镜像到 `core` 包本身，直接扫描 `core/*.go` 的类型定义，
+    不必等类型被接进某个 HTTP handler 才能被抓到 —— 无消费方可见影响，纯新增测试。
   - **W1-A（本条目）**：`Settle`/`Release`/`FinalizeSettlement`/`Transition` 幂等键补齐，
     migration `005`（`reservation_operation_receipts` + `booking_transition_receipts` 两张新表）。
     消费方需要做的事：

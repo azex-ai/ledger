@@ -1226,7 +1226,7 @@ type AccountEntrySummer interface {
 
 // CheckpointReader reads checkpoints for reconciliation.
 type CheckpointReader interface {
-	GetCheckpoints(ctx context.Context, holder, currencyID int64) ([]core.BalanceCheckpoint, error)
+	GetCheckpoints(ctx context.Context, holder, currencyID int64) ([]BalanceCheckpoint, error)
 }
 
 // ReconciliationService verifies accounting integrity.
@@ -1342,7 +1342,7 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 		CheckedAt: time.Now(),
 	}
 
-	checkpointByClass := make(map[int64]core.BalanceCheckpoint, len(cps))
+	checkpointByClass := make(map[int64]BalanceCheckpoint, len(cps))
 	classificationSet := make(map[int64]struct{}, len(cps)+len(debitByClass)+len(creditByClass))
 	for _, cp := range cps {
 		checkpointByClass[cp.ClassificationID] = cp

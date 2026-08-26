@@ -129,7 +129,7 @@ type countingRollupQueuer struct {
 	count *atomic.Int64
 }
 
-func (c *countingRollupQueuer) DequeueRollupBatch(_ context.Context, _ int) ([]core.RollupQueueItem, error) {
+func (c *countingRollupQueuer) DequeueRollupBatch(_ context.Context, _ int) ([]RollupQueueItem, error) {
 	c.count.Add(1)
 	return nil, nil
 }
