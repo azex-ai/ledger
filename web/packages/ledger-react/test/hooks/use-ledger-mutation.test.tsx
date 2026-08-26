@@ -31,4 +31,54 @@ describe("useLedgerMutation", () => {
     expect(invalidated).toContainEqual(["ledger", "balances"]);
     expect(invalidated).toContainEqual(["ledger", "system-balances"]);
   });
+
+  // M4 (2026-08-26 web audit): a fresh Idempotency-Key minted on every HTTP
+  // attempt defeats the ledger's replay-receipt short-circuit (I-3) —
+  // api-contract.md §9 requires the key to be generated once per operation
+  // and reused across retries. Pin the lifecycle directly on the hook that
+  // every mutation in the package goes through.
+  test("reuses the same idempotency key across a retry after failure, mints a new one after success", async () => {
+    const qc = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+        {children}
+      </LedgerProvider>
+    );
+
+    const keys: string[] = [];
+    let shouldFail = true;
+    const { result } = renderHook(
+      () =>
+        useLedgerMutation<string, void>((_vars, idempotencyKey) => {
+          keys.push(idempotencyKey);
+          if (shouldFail) return Promise.reject(new Error("boom"));
+          return Promise.resolve("done");
+        }, []),
+      { wrapper },
+    );
+
+    // Attempt 1: fails.
+    result.current.mutate(undefined);
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    // Attempt 2: a manual retry of the SAME logical operation — same key.
+    result.current.mutate(undefined);
+    await waitFor(() => expect(result.current.isError).toBe(true));
+
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+
+    // Attempt 3: now succeeds.
+    shouldFail = false;
+    result.current.mutate(undefined);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(keys).toHaveLength(3);
+    expect(keys[2]).toBe(keys[0]); // still the same attempt sequence
+
+    // Attempt 4: a NEW distinct action after success — fresh key.
+    result.current.mutate(undefined);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(keys).toHaveLength(4);
+    expect(keys[3]).not.toBe(keys[0]);
+  });
 });

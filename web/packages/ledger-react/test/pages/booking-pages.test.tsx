@@ -1,9 +1,11 @@
-import { screen, waitFor } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { describe, expect, test, vi } from "vitest";
+import { toast } from "sonner";
 import { DepositsPage } from "../../src/components/pages/DepositsPage";
 import { WithdrawalsPage } from "../../src/components/pages/WithdrawalsPage";
 import { ReservationsPage } from "../../src/components/pages/ReservationsPage";
-import { renderPage, server, getOk } from "./render-page";
+import { renderPage, server, getOk, BASE } from "./render-page";
 
 function booking(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -57,6 +59,36 @@ describe("WithdrawalsPage", () => {
     renderPage(<WithdrawalsPage />);
     expect(screen.getByRole("heading", { name: "Withdrawals" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("#bk-9")).toBeInTheDocument());
+  });
+
+  // C1 regression (2026-08-26 web audit): a rejected transition used to be
+  // completely silent in this skin — the AlertDialog closed, isPending
+  // reverted, and nothing told the operator it failed. Pin the failure
+  // feedback so this class of bug can't come back.
+  test("a rejected approve shows failure feedback instead of silently succeeding", async () => {
+    const errorSpy = vi.spyOn(toast, "error").mockImplementation(() => "" as never);
+    server.use(
+      getOk("/api/v1/classifications", classifications()),
+      getOk("/api/v1/bookings", { list: [booking({ uid: "bk-9", status: "reviewing" })], next_cursor: "" }),
+      http.post(`${BASE}/api/v1/bookings/bk-9/transition`, () =>
+        HttpResponse.json(
+          { code: 19999, message: { text: "internal error" }, data: null },
+          { status: 500 },
+        ),
+      ),
+    );
+    renderPage(<WithdrawalsPage />);
+    await waitFor(() => expect(screen.getByText("#bk-9")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    const dialogHeading = await screen.findByText("Approve Withdrawal #bk-9?");
+    const dialog = dialogHeading.closest('[role="alertdialog"]') as HTMLElement;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("Failed to approve withdrawal"));
+    // The row must still show up — the transition never happened server-side.
+    expect(screen.getByText("#bk-9")).toBeInTheDocument();
+    errorSpy.mockRestore();
   });
 });
 

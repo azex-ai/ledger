@@ -82,6 +82,7 @@ function ConfirmingDialog({ id }: { id: string }) {
                 toast.success("Deposit moved to confirming");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to update deposit"),
             })}
             disabled={mutation.isPending}
           >
@@ -129,6 +130,7 @@ function ConfirmDialog({ id }: { id: string }) {
                   toast.success("Deposit confirmed");
                   setOpen(false);
                 },
+                onError: () => toast.error("Failed to confirm deposit"),
               });
             }}
             disabled={mutation.isPending || !amount || !channelRef}
@@ -178,6 +180,7 @@ function FailDialog({ id }: { id: string }) {
                 toast.success("Deposit marked as failed");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to mark deposit as failed"),
             })}
             disabled={mutation.isPending}
           >

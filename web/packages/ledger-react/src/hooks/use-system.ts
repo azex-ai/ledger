@@ -1,4 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useRef } from "react";
 import { useLedgerClient } from "../provider/context";
 import { ledgerKeys } from "./keys";
 
@@ -21,8 +22,18 @@ export function useSystemBalances() {
 
 export function useReconcileGlobal() {
   const client = useLedgerClient();
+  // Stable across retries of a failed run, cleared on success so the next
+  // deliberate "Run Global Check" click gets its own identity, not a replay
+  // of a stale result (api-contract.md §9).
+  const idempotencyKeyRef = useRef<string | null>(null);
   return useMutation({
-    mutationFn: () => client.reconcileGlobal(),
+    mutationFn: () => {
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+      return client.reconcileGlobal(idempotencyKeyRef.current);
+    },
+    onSuccess: () => {
+      idempotencyKeyRef.current = null;
+    },
   });
 }
 

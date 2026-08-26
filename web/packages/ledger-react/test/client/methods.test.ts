@@ -164,12 +164,14 @@ describe("reservations", () => {
 
   test("settleReservation + releaseReservation (204)", async () => {
     const s = intercept("post", "/api/v1/reservations/uid-4/settle", null, 204);
-    await client.settleReservation("uid-4", "3");
+    await client.settleReservation("uid-4", "3", "settle-key");
     expect(s.captured()?.body).toEqual({ actual_amount: "3" });
+    expect(s.captured()?.idempotencyKey).toBe("settle-key");
 
     const r = intercept("post", "/api/v1/reservations/uid-4/release", null, 204);
-    await client.releaseReservation("uid-4");
+    await client.releaseReservation("uid-4", "release-key");
     expect(r.captured()?.method).toBe("POST");
+    expect(r.captured()?.idempotencyKey).toBe("release-key");
   });
 });
 
@@ -190,9 +192,10 @@ describe("bookings", () => {
 
   test("transitionBooking", async () => {
     const i = intercept("post", "/api/v1/bookings/uid-8/transition", {});
-    await client.transitionBooking("uid-8", { to_status: "confirmed" });
+    await client.transitionBooking("uid-8", { to_status: "confirmed" }, "transition-key");
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/bookings/uid-8/transition`);
     expect(i.captured()?.body).toEqual({ to_status: "confirmed" });
+    expect(i.captured()?.idempotencyKey).toBe("transition-key");
   });
 
   test("getBooking + listBookings", async () => {
@@ -245,8 +248,9 @@ describe("classifications", () => {
       null,
       204,
     );
-    await client.deactivateClassification("uid-3");
+    await client.deactivateClassification("uid-3", "deactivate-key");
     expect(d.captured()?.method).toBe("POST");
+    expect(d.captured()?.idempotencyKey).toBe("deactivate-key");
   });
 });
 
@@ -263,8 +267,9 @@ describe("journal-types", () => {
     expect(c.captured()?.body).toEqual({ code: "jt", name: "JT" });
 
     const d = intercept("post", "/api/v1/journal-types/uid-2/deactivate", null, 204);
-    await client.deactivateJournalType("uid-2");
+    await client.deactivateJournalType("uid-2", "deactivate-key");
     expect(d.captured()?.method).toBe("POST");
+    expect(d.captured()?.idempotencyKey).toBe("deactivate-key");
   });
 });
 
@@ -284,8 +289,9 @@ describe("templates", () => {
     expect(c.captured()?.auth).toBe(`Bearer ${API_KEY}`);
 
     const d = intercept("post", "/api/v1/templates/uid-9/deactivate", null, 204);
-    await client.deactivateTemplate("uid-9");
+    await client.deactivateTemplate("uid-9", "deactivate-key");
     expect(d.captured()?.method).toBe("POST");
+    expect(d.captured()?.idempotencyKey).toBe("deactivate-key");
 
     const p = intercept("post", "/api/v1/templates/dep/preview", {
       entries: [],
@@ -320,18 +326,20 @@ describe("currencies", () => {
 
   test("deactivateCurrency", async () => {
     const i = intercept("post", "/api/v1/currencies/uid-4/deactivate", null, 204);
-    await client.deactivateCurrency("uid-4");
+    await client.deactivateCurrency("uid-4", "deactivate-key");
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/currencies/uid-4/deactivate`);
     expect(i.captured()?.method).toBe("POST");
+    expect(i.captured()?.idempotencyKey).toBe("deactivate-key");
   });
 });
 
 describe("reconciliation", () => {
   test("reconcileGlobal + reconcileAccount", async () => {
     const g = intercept("post", "/api/v1/reconcile", {});
-    await client.reconcileGlobal();
+    await client.reconcileGlobal("reconcile-key");
     expect(g.captured()?.method).toBe("POST");
     expect(g.captured()?.auth).toBe(`Bearer ${API_KEY}`);
+    expect(g.captured()?.idempotencyKey).toBe("reconcile-key");
 
     const a = intercept("post", "/api/v1/reconcile/account", {});
     await client.reconcileAccount(1, "cur-2");
@@ -374,14 +382,16 @@ describe("crypto deposit", () => {
 
   test("approveDepositReview + rejectDepositReview", async () => {
     const a = intercept("post", "/api/v1/deposits/uid-1/review/approve", {});
-    await client.approveDepositReview("uid-1");
+    await client.approveDepositReview("uid-1", "approve-key");
     expect(a.captured()?.url).toBe(
       `${BASE}/api/v1/deposits/uid-1/review/approve`,
     );
     expect(a.captured()?.auth).toBe(`Bearer ${API_KEY}`);
+    expect(a.captured()?.idempotencyKey).toBe("approve-key");
 
     const r = intercept("post", "/api/v1/deposits/uid-1/review/reject", {});
-    await client.rejectDepositReview("uid-1", "amount mismatch");
+    await client.rejectDepositReview("uid-1", "amount mismatch", "reject-key");
     expect(r.captured()?.body).toEqual({ reason: "amount mismatch" });
+    expect(r.captured()?.idempotencyKey).toBe("reject-key");
   });
 });

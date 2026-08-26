@@ -4,6 +4,7 @@ import {
   useQueryClient,
   type InfiniteData,
 } from "@tanstack/react-query";
+import { useRef } from "react";
 import { useLedgerClient } from "../provider/context";
 import type { Booking, PaginatedResponse } from "../client/types";
 import { ledgerKeyPrefix, ledgerKeys } from "./keys";
@@ -70,17 +71,31 @@ function invalidateReviewQueue(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
 }
 
+// Both mutations below mint their own idempotency key by hand (rather than
+// via useLedgerMutation) because they need custom optimistic-update
+// onMutate/onError, not just the generic invalidate-on-success wrapper. The
+// key lifecycle mirrors useLedgerMutation exactly (api-contract.md §9): mint
+// lazily, reuse across retries of a failed attempt, clear on success so the
+// next distinct click gets a fresh identity.
+
 export function useApproveDepositReview() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotencyKeyRef = useRef<string | null>(null);
   return useMutation({
-    mutationFn: (uid: string) => client.approveDepositReview(uid),
+    mutationFn: (uid: string) => {
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+      return client.approveDepositReview(uid, idempotencyKeyRef.current);
+    },
     onMutate: async (uid) => {
       await qc.cancelQueries({ queryKey: ["ledger", "deposit-reviews"] });
       return { previous: optimisticallyRemoveFromQueue(qc, uid) };
     },
     onError: (_err, _uid, context) => {
       if (context) rollback(qc, context.previous);
+    },
+    onSuccess: () => {
+      idempotencyKeyRef.current = null;
     },
     onSettled: () => invalidateReviewQueue(qc),
   });
@@ -89,15 +104,21 @@ export function useApproveDepositReview() {
 export function useRejectDepositReview() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotencyKeyRef = useRef<string | null>(null);
   return useMutation({
-    mutationFn: ({ uid, reason }: { uid: string; reason: string }) =>
-      client.rejectDepositReview(uid, reason),
+    mutationFn: ({ uid, reason }: { uid: string; reason: string }) => {
+      if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
+      return client.rejectDepositReview(uid, reason, idempotencyKeyRef.current);
+    },
     onMutate: async ({ uid }) => {
       await qc.cancelQueries({ queryKey: ["ledger", "deposit-reviews"] });
       return { previous: optimisticallyRemoveFromQueue(qc, uid) };
     },
     onError: (_err, _vars, context) => {
       if (context) rollback(qc, context.previous);
+    },
+    onSuccess: () => {
+      idempotencyKeyRef.current = null;
     },
     onSettled: () => invalidateReviewQueue(qc),
   });

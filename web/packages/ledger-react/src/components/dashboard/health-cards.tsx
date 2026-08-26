@@ -2,24 +2,52 @@
 
 import { useHealth } from "../../hooks/use-system";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
+import { Badge } from "../ui/badge";
 import { Activity, Clock, Lock, Scale } from "lucide-react";
 import { ErrorState } from "../error-state";
+import { cn } from "../../lib/utils/cn";
+
+// Same thresholds as the HeroUI skin (src/heroui/pages/DashboardPage.tsx) —
+// keep in sync, otherwise operators on the two skins get different
+// operational alarms from identical data (M6, 2026-08-26 web audit).
+const ROLLUP_QUEUE_WARN_THRESHOLD = 100;
+const CHECKPOINT_AGE_WARN_THRESHOLD_S = 300;
+
+interface HealthBadge {
+  label: string;
+  className: string;
+}
 
 export function HealthCards() {
   const { data, isLoading, isError, refetch } = useHealth();
 
-  const cards = [
+  const rollupDepth = data ? Number(data.rollup_queue_depth) : undefined;
+  const checkpointAge = data ? Number(data.checkpoint_max_age_seconds) : undefined;
+
+  const cards: { title: string; value: string | number; icon: typeof Activity; desc: string; badge?: HealthBadge }[] = [
     {
       title: "Rollup Queue",
       value: data?.rollup_queue_depth ?? "-",
       icon: Activity,
       desc: "Pending rollups",
+      badge:
+        rollupDepth === undefined
+          ? undefined
+          : rollupDepth > ROLLUP_QUEUE_WARN_THRESHOLD
+            ? { label: "Backlogged", className: "bg-amber-500/15 text-amber-400 border-amber-500/20" }
+            : { label: "Normal", className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20" },
     },
     {
       title: "Checkpoint Age",
       value: data ? `${data.checkpoint_max_age_seconds}s` : "-",
       icon: Clock,
       desc: "Max age (seconds)",
+      badge:
+        checkpointAge === undefined
+          ? undefined
+          : checkpointAge > CHECKPOINT_AGE_WARN_THRESHOLD_S
+            ? { label: "Stale", className: "bg-amber-500/15 text-amber-400 border-amber-500/20" }
+            : { label: "Fresh", className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/20" },
     },
     {
       title: "Active Reservations",
@@ -57,13 +85,18 @@ export function HealthCards() {
               <Icon className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
-                {isLoading ? (
-                  <span className="inline-block h-7 w-16 animate-shimmer rounded" />
-                ) : (
-                  String(c.value)
-                )}
-              </div>
+              {isLoading ? (
+                <span className="inline-block h-7 w-16 animate-shimmer rounded" />
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-2xl font-bold">{String(c.value)}</span>
+                  {c.badge ? (
+                    <Badge variant="outline" className={cn("text-xs font-medium", c.badge.className)}>
+                      {c.badge.label}
+                    </Badge>
+                  ) : null}
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">{c.desc}</p>
             </CardContent>
           </Card>

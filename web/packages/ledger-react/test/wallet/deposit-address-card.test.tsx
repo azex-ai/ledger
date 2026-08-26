@@ -3,6 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { toast } from "sonner";
 import { WalletProvider } from "../../src/wallet/provider";
 import { DepositAddressCard } from "../../src/wallet/components/deposit-address-card";
 import { DepositAddressCard as HerouiDepositAddressCard } from "../../src/wallet/heroui/deposit-address-card";
@@ -110,6 +111,31 @@ describe.each([
     await waitFor(() =>
       expect(screen.getByText("Your deposit address")).toBeInTheDocument(),
     );
+  });
+
+  // C2 regression (2026-08-26 web audit): the UI used to assert "Address
+  // copied" unconditionally, before the clipboard write was known to have
+  // succeeded — a false success on a money-directing action.
+  test("a rejected clipboard write shows failure feedback, never a false 'copied'", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockImplementation(() => "" as never);
+    const errorSpy = vi.spyOn(toast, "error").mockImplementation(() => "" as never);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn(() => Promise.reject(new Error("denied"))) },
+      configurable: true,
+    });
+    server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
+    render(wrap(<Card />));
+
+    await waitFor(() => expect(screen.getByTitle(ADDRESS)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Copy address" }));
+
+    await waitFor(() =>
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(ADDRESS),
+    );
+    await waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    expect(successSpy).not.toHaveBeenCalled();
+    successSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 
   test("shows a sanitized error state on API failure", async () => {

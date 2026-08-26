@@ -102,7 +102,7 @@ export function ReconciliationPage() {
                       : `Drift detected (gap: ${accountResult.gap})`}
                   </span>
                 </div>
-                {accountResult.details.length > 0 ? (
+                {accountResult.details && accountResult.details.length > 0 ? (
                   <Table>
                     <Table.ScrollContainer>
                       <Table.Content aria-label="Account drift details" className="min-w-[560px]">

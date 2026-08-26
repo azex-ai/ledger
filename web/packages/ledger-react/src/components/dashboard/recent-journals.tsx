@@ -74,16 +74,18 @@ export function RecentJournals({
             <TableBody>
               {journals.map((j) => (
                 <TableRow key={j.uid}>
-                  <TableCell>
+                  <TableCell className="max-w-[200px]">
                     <Link
                       href={`/journals/${j.uid}`}
-                      className="text-primary underline-offset-4 hover:underline"
+                      className="text-primary underline-offset-4 hover:underline block"
                     >
-                      #{j.uid}
+                      <span className="block truncate" title={j.uid}>#{j.uid}</span>
                     </Link>
                   </TableCell>
-                  <TableCell className="font-mono text-xs max-w-[200px] truncate">
-                    {j.idempotency_key}
+                  <TableCell className="font-mono text-xs max-w-[200px]">
+                    <span className="block truncate" title={j.idempotency_key}>
+                      {j.idempotency_key}
+                    </span>
                   </TableCell>
                   <TableCell className="text-muted-foreground">{j.source}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>

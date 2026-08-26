@@ -64,6 +64,7 @@ function ProcessDialog({ id }: { id: string }) {
                 toast.success("Withdrawal processing");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to process withdrawal"),
             })}
             disabled={mutation.isPending || !channelRef}
             title={
@@ -112,6 +113,7 @@ function FailDialog({ id }: { id: string }) {
                 toast.success("Withdrawal marked as failed");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to mark withdrawal as failed"),
             })}
             disabled={mutation.isPending}
           >
@@ -139,7 +141,10 @@ function ReserveButton({ id }: { id: string }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal reserved") })}>
+          <AlertDialogAction onClick={() => mutation.mutate(id, {
+            onSuccess: () => toast.success("Withdrawal reserved"),
+            onError: () => toast.error("Failed to reserve withdrawal"),
+          })}>
             Reserve
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -165,7 +170,10 @@ function ReviewButtons({ id }: { id: string }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => mutation.mutate({ id, approved: true }, { onSuccess: () => toast.success("Withdrawal approved") })}>
+            <AlertDialogAction onClick={() => mutation.mutate({ id, approved: true }, {
+              onSuccess: () => toast.success("Withdrawal approved"),
+              onError: () => toast.error("Failed to approve withdrawal"),
+            })}>
               Approve
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -184,7 +192,10 @@ function ReviewButtons({ id }: { id: string }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => mutation.mutate({ id, approved: false }, { onSuccess: () => toast.success("Withdrawal rejected") })}>
+            <AlertDialogAction variant="destructive" onClick={() => mutation.mutate({ id, approved: false }, {
+              onSuccess: () => toast.success("Withdrawal rejected"),
+              onError: () => toast.error("Failed to reject withdrawal"),
+            })}>
               Reject
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -210,7 +221,10 @@ function ConfirmButton({ id }: { id: string }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal confirmed") })}>
+          <AlertDialogAction onClick={() => mutation.mutate(id, {
+            onSuccess: () => toast.success("Withdrawal confirmed"),
+            onError: () => toast.error("Failed to confirm withdrawal"),
+          })}>
             Confirm
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -235,7 +249,10 @@ function RetryButton({ id }: { id: string }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={() => mutation.mutate(id, { onSuccess: () => toast.success("Withdrawal retrying") })}>
+          <AlertDialogAction onClick={() => mutation.mutate(id, {
+            onSuccess: () => toast.success("Withdrawal retrying"),
+            onError: () => toast.error("Failed to retry withdrawal"),
+          })}>
             Retry
           </AlertDialogAction>
         </AlertDialogFooter>

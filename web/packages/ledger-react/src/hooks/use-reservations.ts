@@ -25,8 +25,8 @@ export function useReservations(params: {
 export function useSettleReservation() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, actualAmount }: { id: string; actualAmount: string }) =>
-      client.settleReservation(id, actualAmount),
+    ({ id, actualAmount }: { id: string; actualAmount: string }, idempotencyKey) =>
+      client.settleReservation(id, actualAmount, idempotencyKey),
     ["reservations"],
   );
 }
@@ -50,7 +50,7 @@ export function useSettlePartialReservation() {
 export function useFinalizeReservationSettlement() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: string) => client.finalizeReservationSettlement(id),
+    (id: string, idempotencyKey) => client.finalizeReservationSettlement(id, idempotencyKey),
     ["reservations"],
   );
 }
@@ -58,7 +58,7 @@ export function useFinalizeReservationSettlement() {
 export function useReleaseReservation() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    (id: string) => client.releaseReservation(id),
+    (id: string, idempotencyKey) => client.releaseReservation(id, idempotencyKey),
     ["reservations"],
   );
 }

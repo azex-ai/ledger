@@ -53,6 +53,7 @@ function CreateDialog() {
               toast.success("Journal type created");
               setOpen(false);
             },
+            onError: () => toast.error("Failed to create journal type"),
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -85,6 +86,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Journal type deactivated");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to deactivate journal type"),
             })}
             disabled={mutation.isPending}
           >
