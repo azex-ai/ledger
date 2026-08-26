@@ -83,6 +83,15 @@ type PrometheusMetrics struct {
 	reservedAmount     *prometheus.GaugeVec
 	chainCursorLag     *prometheus.GaugeVec
 
+	// negativeBalanceDetected is a monotonic counterpart to the balanceDrift
+	// Gauge above (M-3 fix, I-41 point 3): the Gauge's label omits holder to
+	// keep cardinality bounded, so a healthy item can overwrite a different
+	// holder's still-negative reading under the same (class, currency)
+	// label. This Counter can only ever go up, so it stays a reliable
+	// alerting signal (`increase(...) > 0`) regardless of how many other
+	// holders' healthy items are interleaved.
+	negativeBalanceDetected *prometheus.CounterVec
+
 	// Onchain counters
 	depositReorgDetected     *prometheus.CounterVec
 	sweepUnattributed        *prometheus.CounterVec
@@ -221,6 +230,11 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "balance_drift_units",
 			Help:      "Drift between expected and actual balance, labelled by class and currency.",
 		}, []string{"class", "currency_id"}),
+		negativeBalanceDetected: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "negative_balance_detected_total",
+			Help:      "Total rollup items found with a negative balance on a debit-normal classification, labelled by class and currency. Monotonic -- unlike balance_drift_units, cannot be masked by a different holder's healthy item sharing the same label.",
+		}, []string{"class", "currency_id"}),
 		reconcileGap: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "reconcile_gap_units",
@@ -267,7 +281,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.rollupItemFailed, m.reconcileCheckResult,
 		m.journalLatency, m.rollupLatency, m.snapshotLatency, m.journalEntryCount,
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
-		m.balanceDrift, m.reconcileGap, m.reservedAmount,
+		m.balanceDrift, m.negativeBalanceDetected, m.reconcileGap, m.reservedAmount,
 		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
 		m.registrationRescanFailed, m.depositReviewRequired,
 	)
@@ -381,6 +395,13 @@ func (m *PrometheusMetrics) CheckpointAge(classCode string, age time.Duration) {
 // don't need 30 digits of precision; if precision matters, alert on the source.
 func (m *PrometheusMetrics) BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal) {
 	m.balanceDrift.WithLabelValues(safeLabel(classCode), int64Label(currencyID)).Set(decimalToFloat(delta))
+}
+
+// NegativeBalanceDetected increments the monotonic negative-balance counter.
+// See the negativeBalanceDetected field doc for why this exists alongside
+// BalanceDrift instead of replacing it.
+func (m *PrometheusMetrics) NegativeBalanceDetected(classCode string, currencyID int64) {
+	m.negativeBalanceDetected.WithLabelValues(safeLabel(classCode), int64Label(currencyID)).Inc()
 }
 
 func (m *PrometheusMetrics) ReconcileGap(currencyID int64, gap decimal.Decimal) {

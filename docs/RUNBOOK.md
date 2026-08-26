@@ -69,6 +69,7 @@ proof of the count):
 | `accounting_equation` | Σ(debit-normal net) = Σ(credit-normal net) per currency |
 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
 | `non_negative_balances` | no holder > 0 has balance < 0 |
+| `role_less_credit_liability` | no user-side (holder > 0), credit-normal, non-system classification with a nonzero balance is missing a `balance_role` (M-4/I-37) — such a balance is silently excluded from `SolvencyReport.Liability` |
 | `orphan_reservations` | reservations with no matching journal |
 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
@@ -100,6 +101,17 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
 - **`non_negative_balances`** — a user got debited beyond their balance.
   Usually a missing `Reserve` step. Find the journal that drove the balance
   negative; reverse it; investigate the calling service.
+- **`role_less_credit_liability`** — a deployer created a credit-normal,
+  non-system classification (posted to a user holder, so it looks like a
+  liability) without tagging it with a `balance_role`. This is not corrupted
+  data — the finding's `balance` figure is real and correct — the problem is
+  that `SolvencyReport.Liability` currently excludes it entirely, so solvency
+  reports look better than they are by exactly that amount. Fix by either
+  tagging the classification's `balance_role` (`available`/`pending`/`locked`
+  if it should count as spendable-money the user can reserve against) via
+  `ClassificationStore.SetBalanceRole`, or confirming it should have been
+  `is_system` instead (recreate/relabel per your migration process — this
+  library never mutates `is_system` after creation).
 - **`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity`
   (checkpoint / system_rollups / balance_snapshots drift, I-23)** —
   **do not** just re-run reconcile and move on: these three all mean a
@@ -501,8 +513,49 @@ corruption):
 4. **After recovery**, restore privileges:
 
    ```sql
-   GRANT INSERT ON journals, journal_entries, events, bookings TO ledger_app;
+   GRANT INSERT ON journals, events, bookings TO ledger_app;
    ```
+
+   `journal_entries` is deliberately **not** in that statement. A blanket
+   `GRANT INSERT ON journal_entries TO ledger_app` reopens the table-level
+   grant migration 008 (I-42) closed — it hands `ledger_app` INSERT on
+   every column again, `id` included, which is exactly the leaked-credential
+   path 008 exists to close (`postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected`
+   is the pin that fails once this happens). CI cannot catch this after the
+   fact: its grant-coverage gate runs against a freshly migrated database,
+   not this production instance's ACL state post-recovery. Restore the
+   column-level grant instead, by re-running 008's own DO loop (it derives
+   every partition from the catalog rather than a hardcoded list, so it is
+   safe to re-run regardless of how many monthly partitions exist today):
+
+   ```sql
+   DO $$
+   DECLARE
+       r RECORD;
+   BEGIN
+       FOR r IN
+           SELECT c.relname
+           FROM pg_partition_tree('journal_entries'::regclass) pt
+           JOIN pg_class c ON c.oid = pt.relid
+       LOOP
+           EXECUTE format(
+               'GRANT INSERT (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at) ON public.%I TO ledger_app',
+               r.relname);
+       END LOOP;
+   END $$;
+   ```
+
+   Verify before declaring recovery complete: as `ledger_app`,
+   `INSERT INTO journal_entries (id, journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at) VALUES (...)`
+   must still fail with `permission denied` (`SQLSTATE 42501`) — an
+   explicit-`id` INSERT succeeding means 008's protection did not survive
+   this recovery.
+
+   The same trap exists in step 14 of `001_baseline.up.sql`'s own comment,
+   which points at its ACL-derivation loop as the "better" way to grant a
+   future table — that loop also issues a table-level `GRANT SELECT, INSERT`
+   and would silently undo 008 the same way if ever re-run against
+   `journal_entries` by name.
 
 Reads remain available throughout. `GET /balances/*`, `GET /journals*`,
 `GET /events*` are unaffected.

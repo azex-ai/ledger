@@ -12,7 +12,7 @@ import (
 )
 
 const getReconcileScanCursor = `-- name: GetReconcileScanCursor :one
-SELECT after_holder, after_currency, lap_dirty
+SELECT after_holder, after_currency, lap_dirty, lap_scanned
 FROM reconcile_scan_cursors
 WHERE check_name = $1::text
 `
@@ -21,20 +21,29 @@ type GetReconcileScanCursorRow struct {
 	AfterHolder   int64 `json:"after_holder"`
 	AfterCurrency int64 `json:"after_currency"`
 	LapDirty      bool  `json:"lap_dirty"`
+	LapScanned    int64 `json:"lap_scanned"`
 }
 
 // Persisted resume cursor for check #2's fleet-wide scan (C4b). Zero rows
 // (no cursor persisted yet, e.g. first run ever) is a normal state, not an
-// error — the adapter maps it to the same (MinInt64, MinInt64, false) start
+// error — the adapter maps it to the same (MinInt64, MinInt64, false, 0) start
 // the in-memory cursor always used, NOT (0, 0): system holders are negative
 // (core.SystemHolder), so a zero start would reintroduce the bug fixed in
 // docs/bugs/2026-08-21-reconcile-coverage-blind-spots.md (B1). lap_dirty
 // carries "did an earlier segment of this lap already find a violation" so
-// the check that completes the lap can still report Passed=false.
+// the check that completes the lap can still report Passed=false. lap_scanned
+// (M-1 fix, migration 010) carries the cumulative count of pairs verified by
+// every run of the current lap so far, independent of the resumed cursor's
+// own position.
 func (q *Queries) GetReconcileScanCursor(ctx context.Context, checkName string) (GetReconcileScanCursorRow, error) {
 	row := q.db.QueryRow(ctx, getReconcileScanCursor, checkName)
 	var i GetReconcileScanCursorRow
-	err := row.Scan(&i.AfterHolder, &i.AfterCurrency, &i.LapDirty)
+	err := row.Scan(
+		&i.AfterHolder,
+		&i.AfterCurrency,
+		&i.LapDirty,
+		&i.LapScanned,
+	)
 	return i, err
 }
 
@@ -86,6 +95,24 @@ func (q *Queries) ReconcileAccountingEquation(ctx context.Context) ([]ReconcileA
 		return nil, err
 	}
 	return items, nil
+}
+
+const reconcileCountCheckpointAccountPairs = `-- name: ReconcileCountCheckpointAccountPairs :one
+SELECT COUNT(*)::bigint AS total
+FROM (SELECT DISTINCT account_holder, currency_id FROM balance_checkpoints) pairs
+`
+
+// Check #2 (M-1 fix, migration 010): the total number of distinct
+// (account_holder, currency_id) pairs currently present in
+// balance_checkpoints -- the same population ReconcileListCheckpointAccountsPage
+// paginates over. Used as the independent cross-check a resumed lap's
+// cumulative lap_scanned must reach before "no more rows after this cursor"
+// is trusted as full coverage.
+func (q *Queries) ReconcileCountCheckpointAccountPairs(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, reconcileCountCheckpointAccountPairs)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
 }
 
 const reconcileDuplicateIdempotencyKeys = `-- name: ReconcileDuplicateIdempotencyKeys :many
@@ -350,6 +377,78 @@ func (q *Queries) ReconcileOrphanReservations(ctx context.Context) ([]ReconcileO
 	return items, nil
 }
 
+const reconcileRoleLessCreditLiabilities = `-- name: ReconcileRoleLessCreditLiabilities :many
+SELECT
+  je.account_holder,
+  je.currency_id,
+  je.classification_id,
+  COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE 0 END), 0)::numeric AS total_debit,
+  COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)::numeric AS total_credit
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.account_holder > 0
+  AND c.normal_side = 'credit'
+  AND c.balance_role = ''
+  AND NOT c.is_system
+GROUP BY je.account_holder, je.currency_id, je.classification_id
+HAVING ledger_signed_delta(
+  'credit',
+  COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
+) != 0
+ORDER BY je.account_holder, je.classification_id
+LIMIT $1::int
+`
+
+type ReconcileRoleLessCreditLiabilitiesRow struct {
+	AccountHolder    int64          `json:"account_holder"`
+	CurrencyID       int64          `json:"currency_id"`
+	ClassificationID int64          `json:"classification_id"`
+	TotalDebit       pgtype.Numeric `json:"total_debit"`
+	TotalCredit      pgtype.Numeric `json:"total_credit"`
+}
+
+// M-4 fix (`.local/independent-review-2026-08-26.md`,
+// docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
+// fix-backend-1 batch, board #43): GetTotalUserSideBalance (I-37) sums only
+// user-side classifications tagged with a non-empty balance_role -- correct
+// for role-bearing liabilities and role-less debit-normal memo accounts
+// (fee_expense and friends) alike. But nothing in ClassificationInput
+// enforces that a credit-normal, non-system classification (liability-shaped
+// by construction: a credit-normal balance posted to a user holder) actually
+// carries a balance_role. A mistagged one is silently excluded from
+// SolvencyReport.Liability -- understating what the platform owes and
+// reporting more margin than actually exists, the most dangerous direction
+// for a solvency check to be wrong in. This scans for exactly that mistagged
+// shape with a nonzero balance, independently of the query
+// GetTotalUserSideBalance itself uses, so a misconfigured deployment is
+// surfaced instead of silently trusted.
+func (q *Queries) ReconcileRoleLessCreditLiabilities(ctx context.Context, pageLimit int32) ([]ReconcileRoleLessCreditLiabilitiesRow, error) {
+	rows, err := q.db.Query(ctx, reconcileRoleLessCreditLiabilities, pageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReconcileRoleLessCreditLiabilitiesRow{}
+	for rows.Next() {
+		var i ReconcileRoleLessCreditLiabilitiesRow
+		if err := rows.Scan(
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.ClassificationID,
+			&i.TotalDebit,
+			&i.TotalCredit,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const reconcileSettlementNetting = `-- name: ReconcileSettlementNetting :many
 SELECT
   je.currency_id,
@@ -451,11 +550,11 @@ func (q *Queries) ReconcileStaleRollupItems(ctx context.Context, thresholdMinute
 }
 
 const upsertReconcileScanCursor = `-- name: UpsertReconcileScanCursor :exec
-INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, updated_at)
-VALUES ($1::text, $2::bigint, $3::bigint, $4::boolean, now())
+INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, lap_scanned, updated_at)
+VALUES ($1::text, $2::bigint, $3::bigint, $4::boolean, $5::bigint, now())
 ON CONFLICT (check_name)
 DO UPDATE SET after_holder = EXCLUDED.after_holder, after_currency = EXCLUDED.after_currency,
-              lap_dirty = EXCLUDED.lap_dirty, updated_at = now()
+              lap_dirty = EXCLUDED.lap_dirty, lap_scanned = EXCLUDED.lap_scanned, updated_at = now()
 `
 
 type UpsertReconcileScanCursorParams struct {
@@ -463,19 +562,22 @@ type UpsertReconcileScanCursorParams struct {
 	AfterHolder   int64  `json:"after_holder"`
 	AfterCurrency int64  `json:"after_currency"`
 	LapDirty      bool   `json:"lap_dirty"`
+	LapScanned    int64  `json:"lap_scanned"`
 }
 
-// Called at the end of every check #2 run: persists the resume point and
-// lap_dirty flag when the scan was capped or timed out (partial coverage),
-// or resets both to their start values ((MinInt64, MinInt64), false) when a
-// full lap completed, so the next run begins a fresh lap rather than
-// replaying the same resume point (or a stale dirty flag) forever.
+// Called at the end of every check #2 run: persists the resume point,
+// lap_dirty flag and cumulative lap_scanned when the scan was capped or
+// timed out (partial coverage), or resets all three to their start values
+// ((MinInt64, MinInt64), false, 0) when a full lap completed, so the next
+// run begins a fresh lap rather than replaying the same resume point (or a
+// stale dirty flag/count) forever.
 func (q *Queries) UpsertReconcileScanCursor(ctx context.Context, arg UpsertReconcileScanCursorParams) error {
 	_, err := q.db.Exec(ctx, upsertReconcileScanCursor,
 		arg.CheckName,
 		arg.AfterHolder,
 		arg.AfterCurrency,
 		arg.LapDirty,
+		arg.LapScanned,
 	)
 	return err
 }

@@ -68,6 +68,20 @@ type Metrics interface {
 
 	// Financial
 	BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal)
+	// NegativeBalanceDetected is a monotonic counter incremented every time a
+	// rollup item's recomputed balance is found negative on a debit-normal
+	// classification -- the same trigger condition BalanceDrift's non-zero
+	// readings report. It exists because BalanceDrift is a Gauge labelled
+	// (class, currency) WITHOUT holder (deliberately, to keep cardinality
+	// bounded -- see the call site in service/rollup.go), so a healthy item
+	// for one holder can overwrite a genuinely still-negative reading left by
+	// a different holder sharing the same label: the Gauge alone cannot tell
+	// "the fleet recovered" from "an unrelated holder in the same bucket
+	// happened to be processed last". A Counter cannot be un-incremented by
+	// anything, so `increase(negative_balance_detected_total[window]) > 0`
+	// stays a reliable alert even while BalanceDrift's own reading bounces
+	// back to zero in between (working-agreements §3; I-41 point 3).
+	NegativeBalanceDetected(classCode string, currencyID int64)
 	ReconcileGap(currencyID int64, gap decimal.Decimal)
 	ReservedAmount(currencyID int64, amount decimal.Decimal)
 
@@ -131,6 +145,7 @@ func (NoopMetrics) PendingRollups(int64)                        {}
 func (NoopMetrics) ActiveReservations(int64)                    {}
 func (NoopMetrics) CheckpointAge(string, time.Duration)         {}
 func (NoopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
+func (NoopMetrics) NegativeBalanceDetected(string, int64)       {}
 func (NoopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
 func (NoopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 
