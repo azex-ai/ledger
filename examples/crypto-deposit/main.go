@@ -1,30 +1,37 @@
-// Example: end-to-end EVM deposit booking, driven through the orchestrated
-// crypto-deposit shape (docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
+// Example: end-to-end EVM deposit booking, driven through the production
+// crypto-deposit orchestration (docs/plans/2026-07-11-crypto-deposit-sweep-design.md).
 //
-// Two steps, mirroring the real production flow:
+// Two calls, mirroring the real production flow:
 //
-//  1. ensureDepositAddress: derive (CREATE2) + register a holder's custody
-//     address -- idempotent, safe to call repeatedly.
-//  2. ingestDeposit: normalize an observed on-chain transfer into a
+//  1. svc.EnableOnchain(...).EnsureDepositAddress -- derive (CREATE2) + durably
+//     register a holder's custody address. Idempotent, safe to call repeatedly.
+//  2. onchain.IngestDeposit -- normalize an observed on-chain transfer into a
 //     core.DepositSighting and drive it through create-or-advance booking +
-//     accounting. This is the single entry point BOTH the chains/evm
-//     watcher (pull, polling eth_getLogs) and the onchain webhook (push, see
+//     accounting, including the M3 AutoCreditCeiling review gate (design doc
+//     §9.2). This is the single entry point BOTH the chains/evm watcher
+//     (pull, polling eth_getLogs) and the onchain webhook (push, see
 //     server/handler_webhooks.go) call in production -- here it's driven by
 //     a simulated sighting instead of a real chain, since this example only
 //     needs to demonstrate the shape.
 //
-// The AddressRegistry used below is an in-memory stand-in for
-// postgres.NewDepositAddressStore (S1 #2, not part of this branch yet) --
-// swap it for the real Postgres-backed core.AddressRegistry once available;
-// nothing about ensureDepositAddress/ingestDeposit changes. Once
-// service.OnchainService lands, these two local helpers are replaced
-// one-for-one by svc.Onchain().EnsureDepositAddress(ctx, holder) and
-// svc.Onchain().IngestDeposit(ctx, sighting) -- same signatures, same
-// idempotency contract.
+// EnableOnchain's reader/scanner/sweeper are all nil here: this example only
+// exercises the two calls above, which work standalone (e.g. from an HTTP
+// handler) without the background watch/sweep loops ever running -- see
+// service.OnchainDeps.validateCore's doc comment. A real deployment supplies
+// a chains/evm.Reader/Scanner/Sweeper for those loops; nothing about
+// EnsureDepositAddress/IngestDeposit changes when it does.
+//
+// The address registry and the AutoCreditCeiling gate below are NOT
+// hand-rolled: EnableOnchain wires postgres.NewDepositAddressStore (durable,
+// survives restarts) and IngestDeposit enforces AutoCreditCeiling itself. An
+// earlier version of this example reimplemented both by hand -- an in-memory
+// registry that forgot every address on restart, and an ingest path with no
+// ceiling at all -- while its own comment said the production API "isn't
+// part of this branch yet." It was: this file now calls it.
 //
 // The older hand-rolled 3-step flow (CreateBooking -> Transition(confirming)
 // -> Transition(confirmed)+journal, calling Booker/JournalWriter directly)
-// still works unchanged and is exactly what ingestDeposit does internally --
+// still works unchanged and is exactly what IngestDeposit does internally --
 // see examples/event-subscribe for that shape used standalone.
 //
 // Run order:
@@ -42,7 +49,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -82,8 +88,7 @@ func run() error {
 		return fmt.Errorf("ledger facade: %w", err)
 	}
 
-	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
-	if err != nil {
+	if _, err := ensureCurrency(ctx, svc, "USDT", "Tether USD", 6); err != nil {
 		return err
 	}
 
@@ -105,215 +110,117 @@ func run() error {
 		return err
 	}
 
-	// -- 1. Address issuance -------------------------------------------
-	registry := newInMemoryAddressRegistry()
+	// -- Wire the onchain subsystem --------------------------------------
+	//
+	// AutoCreditCeiling MUST be set on every CreditTokens entry (M3.1
+	// secure-by-default, design doc §9.2 addendum) -- EnableOnchain refuses
+	// to hand back an *Onchain otherwise. 300 USDT is this example's
+	// deliberately low ceiling so it can demonstrate both sides of the gate
+	// below with round numbers; a real deployment sets this to its own risk
+	// tolerance for a single-RPC-source auto-credit.
+	const ceiling = "300"
 	chain := core.ChainConfig{
 		ChainID:       1,
 		Confirmations: 12,
 		Factory:       "0x6CE5E7A510C693E1E4FC032d8De0c394C9C1A323",
 		InitHash:      "0x2ef28d391fa40901fc8c61168ece13f5247e49e87925cd7f617262b9231b9ece",
 		CreditTokens: map[string]core.TokenConfig{
-			"0xusdt": {TokenAddress: "0xusdt", CurrencyCode: "USDT", Decimals: 6},
+			"0xusdt": {
+				TokenAddress:      "0xusdt",
+				CurrencyCode:      "USDT",
+				Decimals:          6,
+				AutoCreditCeiling: decimal.RequireFromString(ceiling),
+			},
 		},
 	}
+	// reader/scanner/sweeper are nil: this example drives EnsureDepositAddress
+	// and IngestDeposit directly, the same way a webhook handler would,
+	// without ever calling onchain.Run (which starts the watch/sweep loops).
+	onchain, err := svc.EnableOnchain(core.ChainSet{chain.ChainID: chain}, nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("enable onchain: %w", err)
+	}
 
+	// -- 1. Address issuance -----------------------------------------------
 	holder := int64(1001)
-	depositAddr, err := ensureDepositAddress(ctx, registry, chain, holder)
+	depositAddr, err := onchain.EnsureDepositAddress(ctx, holder)
 	if err != nil {
 		return fmt.Errorf("ensure deposit address: %w", err)
 	}
-	fmt.Printf("holder %d deposit address: %s\n", holder, depositAddr.Address)
+	fmt.Printf("holder %d deposit address: %s (persisted in postgres, survives a restart)\n", holder, depositAddr.Address)
 
-	// -- 2. Ingestion (simulating a watcher/webhook sighting) -----------
-	sighting := core.DepositSighting{
+	// -- 2. Ingestion: a deposit within the ceiling auto-credits -----------
+	withinCeiling := core.DepositSighting{
 		ChainID:       chain.ChainID,
 		TxHash:        "0xabc123",
 		TxLogSeq:      0,
 		Token:         "0xusdt",
 		From:          "0xsender",
 		To:            depositAddr.Address,
-		Amount:        decimal.RequireFromString("500.00"),
-		Confirmations: chain.Confirmations, // already past threshold -> confirms immediately
-		BlockNumber:   1_000_000,           // the block this (simulated) transfer was mined in
+		Amount:        decimal.RequireFromString("200.00"), // <= ceiling
+		Confirmations: chain.Confirmations,                 // already past threshold -> confirms immediately
+		BlockNumber:   1_000_000,
 	}
-	booking, err := ingestDeposit(ctx, svc, registry, currencyUID, sighting, chain.Confirmations)
+	booking, err := onchain.IngestDeposit(ctx, withinCeiling)
 	if err != nil {
-		return fmt.Errorf("ingest deposit: %w", err)
+		return fmt.Errorf("ingest deposit (within ceiling): %w", err)
 	}
-	fmt.Printf("booking uid=%s status=%s journal_uid=%s\n", booking.UID, booking.Status, booking.JournalUID)
+	fmt.Printf("within-ceiling deposit: booking uid=%s status=%s journal_uid=%s (auto-credited)\n",
+		booking.UID, booking.Status, booking.JournalUID)
+
+	// -- 3. Ingestion: a deposit OVER the ceiling is parked, not credited --
+	//
+	// This is the M3 compensating control the earlier version of this
+	// example bypassed entirely by hand-rolling its own ingest path: a
+	// single-RPC-source sighting above the ceiling does not auto-credit --
+	// it stops at "review" with no journal, until ApproveReview or
+	// RejectReview (both on *service.Onchain) is called by a human.
+	overCeiling := core.DepositSighting{
+		ChainID:       chain.ChainID,
+		TxHash:        "0xdef456",
+		TxLogSeq:      0,
+		Token:         "0xusdt",
+		From:          "0xsender",
+		To:            depositAddr.Address,
+		Amount:        decimal.RequireFromString("5000.00"), // > ceiling
+		Confirmations: chain.Confirmations,
+		BlockNumber:   1_000_001,
+	}
+	reviewBooking, err := onchain.IngestDeposit(ctx, overCeiling)
+	if err != nil {
+		return fmt.Errorf("ingest deposit (over ceiling): %w", err)
+	}
+	if reviewBooking.Status != "review" || reviewBooking.JournalUID != "" {
+		return fmt.Errorf("over-ceiling deposit was not parked for review: status=%s journal_uid=%s -- the AutoCreditCeiling gate did not hold",
+			reviewBooking.Status, reviewBooking.JournalUID)
+	}
+	fmt.Printf("over-ceiling deposit: booking uid=%s status=%s journal_uid=%q (parked for human review, NOT auto-credited)\n",
+		reviewBooking.UID, reviewBooking.Status, reviewBooking.JournalUID)
+
 	return nil
 }
 
-// ensureDepositAddress is a minimal stand-in for
-// svc.Onchain().EnsureDepositAddress(ctx, holder) (design doc §2) -- derive
-// the CREATE2 address, then register it (idempotent upsert). Once
-// service.OnchainService lands (S1 #2) this local helper goes away entirely.
-func ensureDepositAddress(ctx context.Context, registry core.AddressRegistry, chain core.ChainConfig, holder int64) (*core.DepositAddress, error) {
-	address, err := core.DeriveDepositAddress(chain.Factory, chain.InitHash, holder)
-	if err != nil {
-		return nil, fmt.Errorf("derive deposit address: %w", err)
-	}
-	return registry.EnsureAddress(ctx, core.AddressRegistrationInput{
-		AccountHolder: holder,
-		Address:       address,
-		Factory:       chain.Factory,
-		InitHash:      chain.InitHash,
-	})
-}
-
-// ingestDeposit is a minimal stand-in for svc.Onchain().IngestDeposit(ctx,
-// sighting) (design doc §3). Idempotency key =
-// deposit-{chain_id}-{tx_hash}-{txlog_seq} -- deliberately not the chain's
-// block-level log_index, which is reassigned across a reorg and would mint a
-// fresh key for an already-recorded transfer.
-func ingestDeposit(ctx context.Context, svc *ledger.Service, registry core.AddressRegistry, currencyUID string, sighting core.DepositSighting, requiredConfirmations int32) (*core.Booking, error) {
-	if err := sighting.Validate(); err != nil {
-		return nil, err
-	}
-
-	owner, err := registry.GetByAddress(ctx, sighting.To)
-	if err != nil {
-		return nil, fmt.Errorf("resolve holder for address %s: %w", sighting.To, err)
-	}
-
-	idemKey := fmt.Sprintf("deposit-%d-%s-%d", sighting.ChainID, sighting.TxHash, sighting.TxLogSeq)
-	booking, err := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
-		ClassificationCode: "deposit",
-		AccountHolder:      owner.AccountHolder,
-		CurrencyUID:        currencyUID,
-		Amount:             sighting.Amount,
-		IdempotencyKey:     idemKey,
-		ChannelName:        "evm",
-		Metadata: map[string]string{
-			"chain_id": fmt.Sprintf("%d", sighting.ChainID),
-			"tx_hash":  sighting.TxHash,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create booking: %w", err)
-	}
-
-	// A sighting means the transfer is on chain, which is what "confirming"
-	// records. DepositLifecycle deliberately has no pending -> confirmed edge:
-	// a deposit is always observed before it is credited, so the two facts
-	// ("we have seen it" and "it has enough confirmations to pay out") stay
-	// separate states rather than collapsing into one.
-	if _, err := svc.Booker().Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "confirming",
-		ChannelRef: sighting.TxHash,
-		Source:     "example.crypto_deposit",
-		// DepositLifecycle has no cycles, so this status is reached at most
-		// once per booking -- the booking's own (deterministically derived,
-		// see idemKey above) identity is a safe key.
-		IdempotencyKey: idemKey + "-confirming",
-	}); err != nil {
-		return nil, fmt.Errorf("transition confirming: %w", err)
-	}
-
-	if sighting.Confirmations < requiredConfirmations {
-		// Not enough confirmations yet. The booking stays in "confirming" and
-		// the caller re-checks on the next sighting; no accounting has
-		// happened, so nothing has to be undone if it never confirms.
-		return svc.BookingReader().GetBooking(ctx, booking.UID)
-	}
-
-	var confirmedEvent *core.Event
-	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
-		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
-			BookingUID:     booking.UID,
-			ToStatus:       "confirmed",
-			ChannelRef:     sighting.TxHash,
-			Amount:         sighting.Amount,
-			Source:         "example.crypto_deposit",
-			IdempotencyKey: idemKey + "-confirmed",
-		})
-		if err != nil {
-			return err
-		}
-
-		if _, err := txSvc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
-			HolderID:       booking.AccountHolder,
-			CurrencyUID:    booking.CurrencyUID,
-			IdempotencyKey: fmt.Sprintf("deposit-confirm-journal:%s", booking.UID),
-			EventUID:       evt.UID,
-			Amounts:        map[string]decimal.Decimal{"amount": sighting.Amount},
-			Source:         "example.crypto_deposit",
-		}); err != nil {
-			return err
-		}
-		confirmedEvent = evt
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("transition confirmed + journal: %w", err)
-	}
-	_ = confirmedEvent
-
-	return svc.BookingReader().GetBooking(ctx, booking.UID)
-}
-
-// inMemoryAddressRegistry is a minimal stand-in for
-// postgres.NewDepositAddressStore(pool) (S1 #2, not part of this branch
-// yet) -- swap it for the real Postgres-backed core.AddressRegistry in
-// production; ensureDepositAddress/ingestDeposit don't change.
-type inMemoryAddressRegistry struct {
-	byHolder map[int64]*core.DepositAddress
-}
-
-func newInMemoryAddressRegistry() *inMemoryAddressRegistry {
-	return &inMemoryAddressRegistry{byHolder: make(map[int64]*core.DepositAddress)}
-}
-
-func (r *inMemoryAddressRegistry) EnsureAddress(ctx context.Context, input core.AddressRegistrationInput) (*core.DepositAddress, error) {
-	if err := input.Validate(); err != nil {
-		return nil, err
-	}
-	if existing, ok := r.byHolder[input.AccountHolder]; ok {
-		return existing, nil
-	}
-	addr := &core.DepositAddress{
-		UID:           fmt.Sprintf("addr-%d", input.AccountHolder),
-		AccountHolder: input.AccountHolder,
-		Address:       input.Address,
-		Factory:       input.Factory,
-		InitHash:      input.InitHash,
-		CreatedAt:     time.Now(),
-	}
-	r.byHolder[input.AccountHolder] = addr
-	return addr, nil
-}
-
-func (r *inMemoryAddressRegistry) GetByAddress(ctx context.Context, address string) (*core.DepositAddress, error) {
-	for _, a := range r.byHolder {
-		if a.Address == address {
-			return a, nil
-		}
-	}
-	return nil, core.ErrNotFound
-}
-
-func (r *inMemoryAddressRegistry) ListAddresses(ctx context.Context) ([]core.DepositAddress, error) {
-	out := make([]core.DepositAddress, 0, len(r.byHolder))
-	for _, a := range r.byHolder {
-		out = append(out, *a)
-	}
-	return out, nil
-}
-
-func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
+// ensureCurrency creates currency code/name if it doesn't already exist
+// (idempotent), and errors if a currency with that code exists at a
+// different exponent -- precision is a property of the money, not something
+// a second caller gets to silently redefine.
+func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string, exponent int32) (string, error) {
 	list, err := svc.Currencies().ListCurrencies(ctx, false)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
-		return "", fmt.Errorf("create currency: %w", err)
+		return "", fmt.Errorf("create currency %s: %w", code, err)
 	}
 	return created.UID, nil
 }
@@ -321,7 +228,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 // installDepositLifecycle attaches presets.DepositLifecycle to the "deposit"
 // classification the schema seeds as label-only.
 func installDepositLifecycle(ctx context.Context, classStore *postgres.ClassificationStore) error {
-	class, err := classStore.GetByCode(ctx, "deposit")
+	class, err := classStore.GetByCode(ctx, presets.DepositClassificationCode)
 	if err != nil {
 		return fmt.Errorf("get deposit classification: %w", err)
 	}
