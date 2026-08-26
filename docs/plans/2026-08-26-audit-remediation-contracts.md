@@ -225,3 +225,33 @@ Wave 1 的两条改动各自弱化了一条不变式。Aaron 两条都选了**�
 **顺带暴露的另一处未声明争用**：`docs/INVARIANTS.md` 被八个分支共同写入。
 各分支**只追加自己那一节，不重排、不动别人段落**；合并冲突由 Team Lead 解。
 下次分波时，共享文档与共享号段应当与代码文件一样进独占表。
+
+---
+
+## 9. Wave 3（收尾波，2026-08-26）
+
+Wave 2 八域全部合入，main 绿，`I-34..I-41` 连续，migration 至 `007`。本波两条并行 + Team Lead 收口。
+
+| 任务 | 覆盖 | 独占 | 号段 |
+|---|---|---|---|
+| **W3-sign** | §1「同一符号语义 17 处独立实现」 | `core/account_policy.go`、`service/rollup.go`、`service/reconcile.go` 的符号判断部分、`postgres/ledger_store.go` 的符号判断部分、`postgres/trial_balance_store.go`、`postgres/reconcile_queries.go`、以及 5 个 `.sql` 里的符号表达式 | migration **009**、**I-42** |
+| **W3-id** | board `#37` `journal_entries.id` 跨分区不唯一 | 新 migration、`postgres/roles_test.go`、`postgres/grant_coverage_test.go` | migration **008**、**I-43** |
+| **W3-lead** | CHANGELOG、TODO 处置表、发版口径 | Team Lead | — |
+
+### 号段分配的教训（已在 §8 记过，本波按新办法做）
+
+预分配号段导致八个分支各自留洞、`TestInvariantsDocIsOrderedAndGapless` 反复红，
+且八个分支全撞 `docs/INVARIANTS.md`。**本波只有两条任务，仍按分配走，但 Team Lead 在
+合并时重编号，各分支不得自行改号**——办法同 Wave 2，只是规模小到不至于反复冲突。
+
+### W3-sign 的设计要点（不是机械替换）
+
+- Go 侧收敛成**单一判断点**（一个函数），其余调用它，不各自实现
+- SQL 侧 10 处表达式、3 种写法（4-way CASE + `ELSE 0`、3-way + 兜底当 debit、`OR` 合并式、
+  字符串比较式、`MIN(normal_side)`）—— 建议收敛成一个 `IMMUTABLE` 的 SQL 函数，
+  由 migration 009 提供，各查询调用它
+- ⚠️ **性能**：符号判断在 rollup / reconcile / balance 的热路径上逐行执行。若走 SQL 函数，
+  必须确认 Postgres 能内联（简单 SQL 函数 + `IMMUTABLE`），并**实测**对照
+  `postgres/benchmarks_test.go` 的既有基线。**不许凭感觉说「差不多」**——本仓有先例要求实测数字
+- ⚠️ **`ELSE 0` 是唯一会静默少算钱的那一份**（`checkpoints.sql:62`）：该 entry 不计入余额。
+  收敛时这种「未知符号 → 静默吞掉」必须变成**拒绝**，不是保留
