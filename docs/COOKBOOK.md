@@ -236,7 +236,7 @@ rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
 })
 
 // run finishes; actual cost was 32 credits → 18 released automatically
-err = svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32")})
+err = svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32"), IdempotencyKey: ledger.NewIdempotencyKey("run-settle")})
 ```
 
 - Reserve does **not** move the balance — it's a soft lock reducing *available*.

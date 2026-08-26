@@ -151,11 +151,15 @@ type Reserver interface {
 	// reservation's reserved amount; over-settlement is rejected with
 	// ErrInvalidInput, never silently clamped. The unused remainder (reserved
 	// minus actual) is implicitly released by the settle transition.
+	// input.IdempotencyKey is REQUIRED (I-3): see SettleInput's doc comment
+	// for why the reservation's own state machine cannot serve as a replay
+	// signal for a terminal transition.
 	Settle(ctx context.Context, input SettleInput) error
 	// Release cancels an active reservation, freeing its entire reserved
 	// amount without any accounting effect. It is a no-op on the ledger
 	// balance beyond removing the hold — no partial release is supported.
-	Release(ctx context.Context, reservationUID string) error
+	// input.IdempotencyKey is REQUIRED (I-3); see ReleaseInput's doc comment.
+	Release(ctx context.Context, input ReleaseInput) error
 	// SettlePartial settles part of a reservation. input.Amount must be
 	// positive. The first call transitions the reservation from active to
 	// settling; subsequent calls accumulate settled_amount further, which
@@ -172,8 +176,9 @@ type Reserver interface {
 	// It is rejected (ErrInvalidTransition) on any other status — in
 	// particular, calling it on an active reservation that never received a
 	// SettlePartial call is not a valid "settle everything" shortcut; use
-	// Settle for that.
-	FinalizeSettlement(ctx context.Context, reservationUID string) error
+	// Settle for that. input.IdempotencyKey is REQUIRED (I-3); see
+	// FinalizeSettlementInput's doc comment.
+	FinalizeSettlement(ctx context.Context, input FinalizeSettlementInput) error
 	// HeldAmount returns the holder's outstanding holds in the given currency:
 	// full reserved_amount for active reservations plus the unsettled
 	// remainder of settling ones — the exact figure Reserve subtracts

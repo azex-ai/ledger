@@ -167,7 +167,11 @@ func run() error {
 	fmt.Printf("  reserved 50 credits (uid=%s, status=%s) — balance unchanged, available reduced\n", rsv.UID, rsv.Status)
 
 	// Run finished, actual cost 32 → capture it and release the 18 remainder.
-	if err := svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32")}); err != nil {
+	if err := svc.Reserver().Settle(ctx, core.SettleInput{
+		ReservationUID: rsv.UID,
+		Amount:         decimal.RequireFromString("32"),
+		IdempotencyKey: ledger.NewIdempotencyKey("run-settle"),
+	}); err != nil {
 		return fmt.Errorf("recipe 4 settle: %w", err)
 	}
 	// Post the actual spend so it hits the books (credits flow back to settlement).

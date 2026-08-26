@@ -21,6 +21,19 @@ type createReservationRequest struct {
 
 type settleReservationRequest struct {
 	ActualAmount string `json:"actual_amount"`
+	// IdempotencyKey is required (I-3): settled is a terminal status, so a
+	// retried request without a key cannot be told apart from a genuine
+	// conflict (see core.SettleInput's doc comment).
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// terminalReservationOpRequest is the request body for Release and
+// FinalizeSettlement -- both take no payload beyond the idempotency key
+// required by I-3 (see core.ReleaseInput / core.FinalizeSettlementInput's
+// doc comments for why the reservation's own terminal status cannot serve
+// as a replay signal).
+type terminalReservationOpRequest struct {
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type settlePartialReservationRequest struct {
@@ -114,7 +127,11 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationUID: uid, Amount: amount}); err != nil {
+	if req.IdempotencyKey == "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		return
+	}
+	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationUID: uid, Amount: amount, IdempotencyKey: req.IdempotencyKey}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -158,7 +175,17 @@ func (s *Server) handleFinalizeReservationSettlement(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := s.reserver.FinalizeSettlement(r.Context(), uid); err != nil {
+	req, err := httpx.Decode[terminalReservationOpRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if req.IdempotencyKey == "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		return
+	}
+
+	if err := s.reserver.FinalizeSettlement(r.Context(), core.FinalizeSettlementInput{ReservationUID: uid, IdempotencyKey: req.IdempotencyKey}); err != nil {
 		httpx.Error(w, err)
 		return
 	}
@@ -172,7 +199,17 @@ func (s *Server) handleReleaseReservation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.reserver.Release(r.Context(), uid); err != nil {
+	req, err := httpx.Decode[terminalReservationOpRequest](r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	if req.IdempotencyKey == "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		return
+	}
+
+	if err := s.reserver.Release(r.Context(), core.ReleaseInput{ReservationUID: uid, IdempotencyKey: req.IdempotencyKey}); err != nil {
 		httpx.Error(w, err)
 		return
 	}

@@ -144,7 +144,7 @@ func TestReservationsGuard_StatusWhitelist(t *testing.T) {
 
 	t.Run("settled_cannot_reopen_to_active", func(t *testing.T) {
 		res, reserverStore := seedActiveReservation(t, pool, ctx)
-		err := reserverStore.Settle(ctx, core.SettleInput{ReservationUID: res.uid, Amount: decimal.NewFromInt(50)})
+		err := reserverStore.Settle(ctx, core.SettleInput{ReservationUID: res.uid, Amount: decimal.NewFromInt(50), IdempotencyKey: postgrestest.UniqueKey("guard-settle")})
 		require.NoError(t, err)
 
 		_, err = pool.Exec(ctx, "UPDATE reservations SET status = 'active' WHERE id = $1", res.id)

@@ -78,11 +78,33 @@ type TransitionInput struct {
 	ActorID  int64             `json:"actor_id"`
 	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
 	Source string `json:"source"`
+	// IdempotencyKey is OPTIONAL (unlike every other write in this package).
+	//
+	// Transition already has a narrower, state-comparison-based idempotency
+	// path: when the booking is already AT ToStatus, it compares the latest
+	// event's payload against this call and either returns that event
+	// (matching payload) or ErrConflict (diverging payload) -- see
+	// idempotentTransitionEvent in postgres/booking_store.go. That path
+	// covers the common "retry lands before anything else moves the
+	// booking" case without requiring every caller (many of which are
+	// system-driven watchers with no natural request-scoped key) to change.
+	//
+	// It cannot cover the case I-3 exists for: a retry that arrives AFTER a
+	// later, legitimate transition has moved the booking past ToStatus. At
+	// that point current status != ToStatus and the retry is rejected with
+	// ErrInvalidTransition, indistinguishable from a genuine invalid
+	// request. Setting IdempotencyKey opts a call into a durable receipt
+	// (independent of the booking's current status) that survives forward
+	// progress: a replay with the same key and the same (booking, to_status,
+	// channel_ref, amount) always returns the original event, even after the
+	// booking has moved on; the same key with a different payload is
+	// ErrConflict. Leaving it empty preserves today's behavior exactly.
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (i TransitionInput) Validate() error {
 	if i.BookingUID == "" {
-		return fmt.Errorf("core: booking: booking_id must be positive: %w", ErrInvalidInput)
+		return fmt.Errorf("core: booking: booking_uid required: %w", ErrInvalidInput)
 	}
 	if i.ToStatus == "" {
 		return fmt.Errorf("core: booking: to_status required: %w", ErrInvalidInput)

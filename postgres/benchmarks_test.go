@@ -159,7 +159,7 @@ func BenchmarkReserveSettle(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if err := reserver.Settle(context.Background(), core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.NewFromInt(1)}); err != nil {
+		if err := reserver.Settle(context.Background(), core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.NewFromInt(1), IdempotencyKey: postgrestest.UniqueKey("bench-settle")}); err != nil {
 			b.Fatal(err)
 		}
 	}

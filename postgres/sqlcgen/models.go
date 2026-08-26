@@ -72,6 +72,17 @@ type Booking struct {
 	Uid              pgtype.UUID    `json:"uid"`
 }
 
+type BookingTransitionReceipt struct {
+	ID             int64          `json:"id"`
+	BookingID      int64          `json:"booking_id"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	ToStatus       string         `json:"to_status"`
+	ChannelRef     string         `json:"channel_ref"`
+	Amount         pgtype.Numeric `json:"amount"`
+	EventID        int64          `json:"event_id"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
 type ChainCursor struct {
 	ChainID          int64     `json:"chain_id"`
 	LastScannedBlock int64     `json:"last_scanned_block"`
@@ -320,6 +331,15 @@ type Reservation struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	Uid            pgtype.UUID    `json:"uid"`
+}
+
+type ReservationOperationReceipt struct {
+	ID             int64          `json:"id"`
+	ReservationID  int64          `json:"reservation_id"`
+	Operation      string         `json:"operation"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 type ReservationSettlementLeg struct {

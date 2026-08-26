@@ -140,9 +140,10 @@ func run() error {
 	// to that transaction -- use it for everything inside, and do not keep it.
 	// -----------------------------------------------------------------------
 	actualCost := decimal.RequireFromString("15.75")
+	settleKey := ledger.NewIdempotencyKey("settle")
 	chargeKey := ledger.NewIdempotencyKey("charge")
 	if err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
-		if err := tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actualCost}); err != nil {
+		if err := tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actualCost, IdempotencyKey: settleKey}); err != nil {
 			return fmt.Errorf("settle: %w", err)
 		}
 		if _, err := tx.JournalWriter().ExecuteTemplate(ctx, "fee_charge", core.TemplateParams{

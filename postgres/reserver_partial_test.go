@@ -61,12 +61,13 @@ func TestReserverStore_SettlePartial_AccumulatesAndFinalizes(t *testing.T) {
 
 	// One-shot Settle on a settling reservation is rejected — it would
 	// overwrite the accumulated settled_amount.
-	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(40)})
+	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(40), IdempotencyKey: postgrestest.UniqueKey("psettle-settle")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 
 	// Finalize: settling → settled; the hold is fully released.
-	require.NoError(t, reserver.FinalizeSettlement(ctx, res.UID))
+	finalizeKey := postgrestest.UniqueKey("psettle-finalize")
+	require.NoError(t, reserver.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: finalizeKey}))
 	held, err := reserver.HeldAmount(ctx, 21, curID)
 	require.NoError(t, err)
 	assert.True(t, held.IsZero(), "hold must be zero after finalize, got %s", held)
@@ -74,7 +75,7 @@ func TestReserverStore_SettlePartial_AccumulatesAndFinalizes(t *testing.T) {
 	// Terminal: no further partial settlement or finalize.
 	err = reserver.SettlePartial(ctx, core.SettlePartialInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(1), IdempotencyKey: postgrestest.UniqueKey("psettle-leg")})
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
-	err = reserver.FinalizeSettlement(ctx, res.UID)
+	err = reserver.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: postgrestest.UniqueKey("psettle-finalize-again")})
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
 
@@ -115,12 +116,12 @@ func TestReserverStore_FinalizeSettlement_OnActiveRejected(t *testing.T) {
 
 	// Finalizing a reservation that never had a partial settlement is a
 	// contract misuse (nothing was settled — Release is the right call).
-	err := reserver.FinalizeSettlement(ctx, res.UID)
+	err := reserver.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: postgrestest.UniqueKey("psettle-finalize")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 
 	// The reservation is untouched: a one-shot Settle still works.
-	require.NoError(t, reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30)}))
+	require.NoError(t, reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(30), IdempotencyKey: postgrestest.UniqueKey("psettle-settle")}))
 }
 
 func TestReserverStore_SettlePartial_NonPositiveRejected(t *testing.T) {
@@ -162,7 +163,7 @@ func TestSettlePartial_IdempotentReplay(t *testing.T) {
 
 	// Replay after finalization still resolves idempotently (not
 	// ErrInvalidTransition) — the retry may arrive after the caller finalized.
-	require.NoError(t, reserver.FinalizeSettlement(ctx, res.UID))
+	require.NoError(t, reserver.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: postgrestest.UniqueKey("psettle-finalize")}))
 	require.NoError(t, reserver.SettlePartial(ctx, in))
 
 	// Missing key is rejected outright.

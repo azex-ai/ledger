@@ -217,6 +217,20 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		return nil, fmt.Errorf("postgres: transition: get booking %q: %w", input.BookingUID, err)
 	}
 
+	// Opt-in durable idempotency (I-3) -- see TransitionInput.IdempotencyKey's
+	// doc comment for why this is opt-in rather than mandatory. Checked
+	// BEFORE the state-comparison-based path below, and independent of the
+	// booking's CURRENT status, because it covers a case that path cannot: a
+	// retry arriving after a LATER, legitimate transition has already moved
+	// the booking past ToStatus.
+	if input.IdempotencyKey != "" {
+		if receipt, err := qtx.GetBookingTransitionReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+			return s.ensureBookingTransitionReceiptMatches(ctx, qtx, receipt, op.ID, input)
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: transition: check idempotency: %w", err)
+		}
+	}
+
 	// Load classification for lifecycle validation
 	class, err := qtx.GetClassification(ctx, op.ClassificationID)
 	if err != nil {
@@ -330,7 +344,66 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		return nil, wrapStoreError("postgres: transition: insert event", err)
 	}
 
+	if input.IdempotencyKey != "" {
+		if err := s.recordBookingTransitionReceipt(ctx, qtx, op.ID, eventRow.ID, input); err != nil {
+			return nil, err
+		}
+	}
+
 	return eventFromRow(ctx, s.dims, qtx, eventRow)
+}
+
+// ensureBookingTransitionReceiptMatches is Transition's opt-in idempotency
+// check (I-3): a replay with the same booking, to_status, channel_ref and
+// amount returns the event the original call produced; any divergence is
+// core.ErrConflict.
+func (s *BookingStore) ensureBookingTransitionReceiptMatches(ctx context.Context, qtx *sqlcgen.Queries, receipt sqlcgen.BookingTransitionReceipt, bookingID int64, input core.TransitionInput) (*core.Event, error) {
+	if receipt.BookingID != bookingID {
+		return nil, fmt.Errorf("postgres: transition: idempotency key %q already used for a different booking: %w", input.IdempotencyKey, core.ErrConflict)
+	}
+	if receipt.ToStatus != string(input.ToStatus) {
+		return nil, fmt.Errorf("postgres: transition: idempotency key %q already used for a different to_status (%s): %w", input.IdempotencyKey, receipt.ToStatus, core.ErrConflict)
+	}
+	if input.ChannelRef != "" && receipt.ChannelRef != input.ChannelRef {
+		return nil, fmt.Errorf("postgres: transition: idempotency key %q payload mismatch on channel_ref: %w", input.IdempotencyKey, core.ErrConflict)
+	}
+	receiptAmount, err := numericToDecimal(receipt.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: transition: convert receipt amount: %w", err)
+	}
+	if !input.Amount.IsZero() && !receiptAmount.Equal(input.Amount) {
+		return nil, fmt.Errorf("postgres: transition: idempotency key %q payload mismatch on amount (recorded %s, got %s): %w", input.IdempotencyKey, receiptAmount, input.Amount, core.ErrConflict)
+	}
+
+	eventRow, err := qtx.GetEvent(ctx, receipt.EventID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: transition: load original event: %w", err)
+	}
+	return eventFromRow(ctx, s.dims, qtx, eventRow)
+}
+
+// recordBookingTransitionReceipt inserts the durable idempotency record for
+// a just-applied Transition call. A 23505 on the unique idempotency_key
+// index (caught via ON CONFLICT DO NOTHING returning no row, surfaced here
+// as pgx.ErrNoRows) means a concurrent call on a DIFFERENT booking raced
+// this one to the same key after the caller's own pre-check -- the row lock
+// on THIS booking already serializes same-booking racers -- and is reported
+// as ErrConflict, matching reservation_operation_receipts' race handling.
+func (s *BookingStore) recordBookingTransitionReceipt(ctx context.Context, qtx *sqlcgen.Queries, bookingID, eventID int64, input core.TransitionInput) error {
+	if _, err := qtx.InsertBookingTransitionReceipt(ctx, sqlcgen.InsertBookingTransitionReceiptParams{
+		BookingID:      bookingID,
+		IdempotencyKey: input.IdempotencyKey,
+		ToStatus:       string(input.ToStatus),
+		ChannelRef:     input.ChannelRef,
+		Amount:         decimalToNumeric(input.Amount),
+		EventID:        eventID,
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: transition: idempotency key %q raced a concurrent application: %w", input.IdempotencyKey, core.ErrConflict)
+		}
+		return wrapStoreError("postgres: transition: record receipt", err)
+	}
+	return nil
 }
 
 func idempotentTransitionEvent(current *core.Booking, latest *core.Event, input core.TransitionInput) (*core.Event, error) {

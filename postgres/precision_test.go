@@ -271,7 +271,7 @@ func TestPrecision_SettlePartial_RejectsOverPrecisionAmount(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
 
-	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("10.5")})
+	err = reserver.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.RequireFromString("10.5"), IdempotencyKey: postgrestest.UniqueKey("jpy-settle")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrPrecisionExceeded)
 }

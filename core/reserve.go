@@ -78,7 +78,7 @@ func (i ReserveInput) Validate() error {
 		return fmt.Errorf("core: reserve: account_holder required: %w", ErrInvalidInput)
 	}
 	if i.CurrencyUID == "" {
-		return fmt.Errorf("core: reserve: currency_id must be positive: %w", ErrInvalidInput)
+		return fmt.Errorf("core: reserve: currency_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("core: reserve: amount must be positive: %w", ErrInvalidInput)
@@ -93,17 +93,77 @@ func (i ReserveInput) Validate() error {
 }
 
 // SettleInput is the input for a one-shot settlement of an active reservation.
+//
+// IdempotencyKey is REQUIRED (I-3): the reservation's own state machine
+// cannot serve as a replay signal here, because "settled" is terminal --
+// replaying a lost-response retry of the exact same Settle call used to land
+// on ErrInvalidTransition, indistinguishable from a genuine conflict (someone
+// else settling a different amount, or the reservation having been released
+// out from under the caller). A replayed key with the same amount now
+// returns nil without re-applying; a replayed key with a different amount is
+// ErrConflict; the same key reused against a different reservation is also
+// ErrConflict.
 type SettleInput struct {
 	ReservationUID string          `json:"reservation_uid"`
 	Amount         decimal.Decimal `json:"amount"`
+	IdempotencyKey string          `json:"idempotency_key"`
 }
 
 func (i SettleInput) Validate() error {
 	if i.ReservationUID == "" {
-		return fmt.Errorf("core: settle: reservation_id must be positive: %w", ErrInvalidInput)
+		return fmt.Errorf("core: settle: reservation_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("core: settle: amount must be positive: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: settle: idempotency key required: %w", ErrInvalidInput)
+	}
+	return nil
+}
+
+// ReleaseInput is the input to cancel an active (or settling) reservation.
+//
+// IdempotencyKey is REQUIRED (I-3) for the same reason SettleInput's is:
+// "released" is terminal, so a lost-response retry of Release used to land
+// on ErrInvalidTransition with no way to tell "I already did this" apart
+// from a genuine conflict. A replayed key against the same reservation
+// returns nil without re-applying; the same key reused against a different
+// reservation is ErrConflict.
+type ReleaseInput struct {
+	ReservationUID string `json:"reservation_uid"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (i ReleaseInput) Validate() error {
+	if i.ReservationUID == "" {
+		return fmt.Errorf("core: release: reservation_uid required: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: release: idempotency key required: %w", ErrInvalidInput)
+	}
+	return nil
+}
+
+// FinalizeSettlementInput is the input to complete a reservation that has
+// been partially settled via SettlePartial.
+//
+// IdempotencyKey is REQUIRED (I-3) for the same reason SettleInput's and
+// ReleaseInput's are: the settling -> settled transition is terminal, so a
+// lost-response retry used to land on ErrInvalidTransition. A replayed key
+// against the same reservation returns nil without re-applying; the same key
+// reused against a different reservation is ErrConflict.
+type FinalizeSettlementInput struct {
+	ReservationUID string `json:"reservation_uid"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (i FinalizeSettlementInput) Validate() error {
+	if i.ReservationUID == "" {
+		return fmt.Errorf("core: finalize settlement: reservation_uid required: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: finalize settlement: idempotency key required: %w", ErrInvalidInput)
 	}
 	return nil
 }
@@ -123,7 +183,7 @@ type SettlePartialInput struct {
 
 func (i SettlePartialInput) Validate() error {
 	if i.ReservationUID == "" {
-		return fmt.Errorf("core: settle partial: reservation_id must be positive: %w", ErrInvalidInput)
+		return fmt.Errorf("core: settle partial: reservation_uid required: %w", ErrInvalidInput)
 	}
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("core: settle partial: amount must be positive: %w", ErrInvalidInput)

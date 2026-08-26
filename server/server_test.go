@@ -130,9 +130,9 @@ func (m *mockReserver) Settle(ctx context.Context, input core.SettleInput) error
 	return nil
 }
 
-func (m *mockReserver) Release(ctx context.Context, reservationUID string) error {
+func (m *mockReserver) Release(ctx context.Context, input core.ReleaseInput) error {
 	if m.releaseFn != nil {
-		return m.releaseFn(ctx, reservationUID)
+		return m.releaseFn(ctx, input.ReservationUID)
 	}
 	return nil
 }
@@ -151,9 +151,9 @@ func (m *mockReserver) SettlePartial(ctx context.Context, input core.SettleParti
 	return nil
 }
 
-func (m *mockReserver) FinalizeSettlement(ctx context.Context, reservationUID string) error {
+func (m *mockReserver) FinalizeSettlement(ctx context.Context, input core.FinalizeSettlementInput) error {
 	if m.finalizeSettlementFn != nil {
-		return m.finalizeSettlementFn(ctx, reservationUID)
+		return m.finalizeSettlementFn(ctx, input.ReservationUID)
 	}
 	return nil
 }
@@ -944,14 +944,14 @@ func TestCreateReservation(t *testing.T) {
 
 func TestSettleReservation(t *testing.T) {
 	srv := newTestServer()
-	body := map[string]any{"actual_amount": "48.50"}
+	body := map[string]any{"actual_amount": "48.50", "idempotency_key": "settle-1"}
 	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/settle", body)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestReleaseReservation(t *testing.T) {
 	srv := newTestServer()
-	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/release", nil)
+	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/release", map[string]any{"idempotency_key": "release-1"})
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -1366,7 +1366,7 @@ func TestSettleReservation_NotFound(t *testing.T) {
 			},
 		}
 	})
-	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/99/settle", map[string]any{"actual_amount": "50.00"})
+	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/99/settle", map[string]any{"actual_amount": "50.00", "idempotency_key": "settle-99"})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
@@ -1378,7 +1378,7 @@ func TestSettleReservation_InvalidTransition(t *testing.T) {
 			},
 		}
 	})
-	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/settle", map[string]any{"actual_amount": "50.00"})
+	w := doRequest(srv, http.MethodPost, "/api/v1/reservations/1/settle", map[string]any{"actual_amount": "50.00", "idempotency_key": "settle-1"})
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 

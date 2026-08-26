@@ -187,4 +187,25 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
   - `transfer_out`/`transfer_in`/`fee_charge` 的借贷方向修正 —— **消费方需要冲销既有 journal**
   - 分数冲销的聚合口径修正 —— **需要检查含重复维度的既有冲销**
   - `NewReserverStore` 签名、`journals.event_id` 的 Go 类型（更早的变更）
+  - **W1-A（本条目）**：`Settle`/`Release`/`FinalizeSettlement`/`Transition` 幂等键补齐，
+    migration `005`（`reservation_operation_receipts` + `booking_transition_receipts` 两张新表）。
+    消费方需要做的事：
+    - `core.SettleInput` 新增必填字段 `IdempotencyKey`（`Validate()` 现在会在为空时拒绝）——
+      所有现有 `Settle` 调用点必须补上一个幂等键（客户端发起用随机 UUID，系统事件发起用
+      从源事件派生的确定性 key，见 `api-contract.md` §9）
+    - `core.Reserver.Release` 签名从 `Release(ctx, reservationUID string) error` 改为
+      `Release(ctx, input core.ReleaseInput) error`（`ReservationUID` + 必填 `IdempotencyKey`）
+    - `core.Reserver.FinalizeSettlement` 签名从 `FinalizeSettlement(ctx, reservationUID string) error`
+      改为 `FinalizeSettlement(ctx, input core.FinalizeSettlementInput) error`（同上）
+    - HTTP 面：`POST /reservations/{uid}/settle` 请求体新增必填 `idempotency_key`；
+      `POST /reservations/{uid}/finalize` 与 `POST /reservations/{uid}/release`
+      原本无请求体，现在都要求 `{"idempotency_key": "..."}`（`docs/openapi.yaml` 已同步）
+    - `core.TransitionInput` 新增**可选**字段 `IdempotencyKey`（不设置 = 行为与之前完全一致，
+      见 `docs/INVARIANTS.md` I-3 的 Transition 段）——现有调用点不需要改，但想要「重放在
+      booking 状态已推进之后仍然幂等」这个更强保证的调用点应该开始传它
+    - 顺带修正三处引用了不存在字段名的校验错误文案（`core/reserve.go`
+      `currency_id must be positive` → `currency_uid required`、
+      `reservation_id must be positive` → `reservation_uid required`（两处）；
+      `core/booking.go` `booking_id must be positive` → `booking_uid required`）——
+      纯文案变更，前端若按错误字符串做过匹配需要更新
 - Go module 与 npm 包从 0.5.0 起版本对齐，**须同发**
