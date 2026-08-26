@@ -219,16 +219,40 @@ func (s *RollupService) processItem(
 		classCode := classCodeMap[item.ClassificationID]
 		s.metrics.CheckpointAge(classCode, time.Since(cp.UpdatedAt))
 
-		// If balance went negative for a debit-normal account, that's suspicious
+		// BalanceDrift reports the same point-in-time-for-the-item-currently-
+		// being-processed semantics as CheckpointAge just above: a reading for
+		// THIS item, not an aggregate across every holder sharing this (class,
+		// currency) label (the label deliberately omits holder to keep
+		// cardinality bounded -- splitting this into a per-holder or a
+		// separately-named metric is a larger redesign left for a future
+		// change, not this fix).
+		//
+		// The interface documents this gauge as "Drift between expected and
+		// actual balance" (core.Metrics.BalanceDrift), but the previous
+		// implementation passed newBalance itself -- the account's balance,
+		// not a drift -- and only ever called this on the violation branch,
+		// so the gauge could set but never clear: once any account under this
+		// label went negative, the series stayed pinned at that stale
+		// negative reading forever (surviving even after the violation was
+		// fixed), indistinguishable on a dashboard from "still broken"
+		// (working-agreements §3). Reporting the actual drift-from-the-
+		// zero-floor -- 0 when this item is healthy, the shortfall's
+		// magnitude when it is not -- both matches the documented semantics
+		// and gives the metric a value it can return to.
+		drift := decimal.Zero
 		if newBalance.IsNegative() && ns == core.NormalSideDebit {
+			// Expected floor is 0 (debit-normal balances must not go
+			// negative); drift is the distance below it, reported as a
+			// positive magnitude.
+			drift = newBalance.Neg()
 			s.logger.Warn("service: rollup: negative balance on debit-normal account",
 				"holder", item.AccountHolder,
 				"currency_id", item.CurrencyID,
 				"classification", classCode,
 				"balance", newBalance.String(),
 			)
-			s.metrics.BalanceDrift(classCode, item.CurrencyID, newBalance)
 		}
+		s.metrics.BalanceDrift(classCode, item.CurrencyID, drift)
 	}
 
 	// Upsert checkpoint
