@@ -627,6 +627,9 @@ All accessors return interfaces from `core/` so your application code depends on
 |-------------------|-------------|
 | `svc.RunInTx(ctx, fn)` | Combine ledger writes + your writes in one PostgreSQL transaction |
 | `svc.RunInTxWithOptions(ctx, opts, fn)` | `RunInTx` with explicit `pgx.TxOptions` (e.g. `pgx.Serializable`) |
+| `svc.Authorize(ctx, input)` | Compute a journal's canonical digest and sign it **outside** any transaction, so a `RunInTx` write can still land signed (KMS signing is an external call; `financial.md` forbids those inside a transaction) |
+| `svc.AuthorizeTemplate(ctx, req)` | `Authorize` for a template execution |
+| `svc.DBTX()` | The active `pgx` executor — the pool, or the transaction when called on a `RunInTx` clone |
 | `svc.Pool()` | Underlying `*pgxpool.Pool` for custom queries |
 | `svc.RegisterChannel(adapter)` | Register inbound webhook channel adapter (registers under `adapter.Name()`) |
 | `svc.Channels()` | Snapshot of registered adapters |
