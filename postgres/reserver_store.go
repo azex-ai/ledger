@@ -110,7 +110,22 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// core.AuthVerifier's doc comment), so financial.md's "no external
 	// calls inside a transaction" applies here exactly as it does to
 	// Attestor.Sign.
+	//
+	// s.pool == nil means this store is tx-bound (constructed via WithDB,
+	// reachable from inside a caller's ledger.Service.RunInTx callback): a
+	// transaction is already open, so running the gate here would be the
+	// exact violation the comment above describes -- verifiedBalance is
+	// deliberately NOT re-bound to the transaction in WithDB (see that
+	// method's doc comment) precisely so this path has no connection to
+	// silently call out on. Fail closed instead of doing so anyway, mirroring
+	// LedgerStore.Authorize's identical guard (concurrency.md Major: this gate
+	// previously copied Authorize's placement comment but not its guard).
 	if input.RequireVerifiedBalance {
+		if s.pool == nil {
+			err := fmt.Errorf("postgres: reserve: called on a transaction-bound store with RequireVerifiedBalance=true; the verified-balance gate may call a remote AuthVerifier and financial.md forbids that inside an open transaction -- call Reserve with RequireVerifiedBalance set BEFORE opening a RunInTx, not from inside its callback: %w", core.ErrInvalidInput)
+			ledgerotel.RecordError(span, err)
+			return nil, err
+		}
 		if err := s.requireVerifiedAvailableBalance(ctx, input.AccountHolder, input.CurrencyUID, cur.ID); err != nil {
 			ledgerotel.RecordError(span, err)
 			return nil, err
@@ -211,8 +226,10 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// Invariant (matches LedgerStore.PostJournal): all balance-mutating tx must
 	// take pg_advisory_xact_lock(holder, currency_id) for every affected pair,
 	// in sorted order. Reserve only ever touches a single pair, but we still
-	// route through the same helper so the lock space (two-arg int4 form) stays
-	// consistent across reserve and post-journal.
+	// route through the same helper (acquireBalanceLocks -> AcquireBalanceLock,
+	// two-key advisory lock form, namespace 1 -- see that query's doc comment
+	// in journals.sql) so the lock space stays genuinely consistent, not just
+	// nominally so, across reserve and post-journal.
 	if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
 		holder:     input.AccountHolder,
 		currencyID: currencyID,

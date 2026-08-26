@@ -107,41 +107,66 @@ func (s *LedgerStore) resolveEntries(ctx context.Context, q *sqlcgen.Queries, en
 }
 
 func balancePairsFromEntries(entries []resolvedEntry) []balancePair {
-	seen := make(map[balancePair]struct{}, len(entries))
 	pairs := make([]balancePair, 0, len(entries))
 	for _, e := range entries {
-		p := balancePair{holder: e.AccountHolder, currencyID: e.currencyID}
+		pairs = append(pairs, balancePair{holder: e.AccountHolder, currencyID: e.currencyID})
+	}
+	return sortedUniquePairs(pairs)
+}
+
+// sortedUniquePairs dedupes pairs and sorts them lexicographically by
+// (holder, currency_id). Extracted out of balancePairsFromEntries so a caller
+// that needs the lock order for MORE than one journal's entries at once (see
+// ExecuteTemplateBatch below) can union several journals' pairs first and
+// still get the same canonical order a single-journal caller would derive —
+// sorting per-journal and then concatenating would NOT give the same order
+// two batches with a different journal sequence would need to agree on.
+func sortedUniquePairs(pairs []balancePair) []balancePair {
+	seen := make(map[balancePair]struct{}, len(pairs))
+	out := make([]balancePair, 0, len(pairs))
+	for _, p := range pairs {
 		if _, ok := seen[p]; ok {
 			continue
 		}
 		seen[p] = struct{}{}
-		pairs = append(pairs, p)
+		out = append(out, p)
 	}
-	sort.Slice(pairs, func(i, j int) bool {
-		if pairs[i].holder != pairs[j].holder {
-			return pairs[i].holder < pairs[j].holder
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].holder != out[j].holder {
+			return out[i].holder < out[j].holder
 		}
-		return pairs[i].currencyID < pairs[j].currencyID
+		return out[i].currencyID < out[j].currencyID
 	})
-	return pairs
+	return out
 }
 
 // acquireBalanceLocks takes a transaction-scoped advisory lock on every
 // (holder, currency_id) pair in pairs. Pairs must be presorted (see
 // balancePairsFromEntries). The locks are tx-scoped and released at COMMIT/ROLLBACK.
+//
+// pg_advisory_xact_lock blocks (it is not the _try_ variant), so this is
+// exactly where a genuine ABBA deadlock between two transactions' lock
+// orders would surface as SQLSTATE 40P01 -- routed through
+// normalizeStoreError (bus #24) so it comes back wrapped in
+// core.ErrTransient instead of an unclassified error only
+// core.IsRetryable's default:true catch-all would call retryable.
 func acquireBalanceLocks(ctx context.Context, q *sqlcgen.Queries, pairs []balancePair) error {
 	for _, p := range pairs {
 		key := fmt.Sprintf("balance:%d:%d", p.holder, p.currencyID)
 		if err := q.AcquireBalanceLock(ctx, key); err != nil {
-			return fmt.Errorf("postgres: post journal: advisory lock (%d,%d): %w", p.holder, p.currencyID, err)
+			return fmt.Errorf("postgres: post journal: advisory lock (%d,%d): %w", p.holder, p.currencyID, normalizeStoreError(err))
 		}
 	}
 	return nil
 }
 
+// acquireIdempotencyLock takes a transaction-scoped advisory lock on key.
+// Like acquireBalanceLocks, this blocks rather than trying, so a real
+// deadlock across two transactions' lock orders surfaces here as SQLSTATE
+// 40P01 -- routed through normalizeStoreError (bus #24) for the same reason.
 func acquireIdempotencyLock(ctx context.Context, q *sqlcgen.Queries, key string) error {
 	if err := q.AcquireIdempotencyLock(ctx, key); err != nil {
-		return fmt.Errorf("postgres: idempotency lock %q: %w", key, err)
+		return fmt.Errorf("postgres: idempotency lock %q: %w", key, normalizeStoreError(err))
 	}
 	return nil
 }
@@ -550,6 +575,34 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
+
+	// Global lock order across the whole batch (concurrency.md Major):
+	// balancePairsFromEntries only orders locks WITHIN a single journal, but
+	// this method posts N journals in one transaction. Two concurrent
+	// batches whose journals touch the same holders in a different sequence
+	// could each acquire their first journal's balance lock and then block
+	// waiting for the other's -- an ABBA deadlock that needs no malicious
+	// input, just two ordinary batches (e.g. two batch settlements) that
+	// happen to list the same two holders in reverse order. Pre-acquiring
+	// the union of every pair the batch will touch, sorted once, fixes the
+	// order at the transaction's first balance-touching statement instead
+	// of re-deriving it per journal. Each journal's own acquireBalanceLocks
+	// call inside postJournalWithQueries below then re-takes the same
+	// (already-held) locks -- a no-op under Postgres's reentrant advisory
+	// xact locks -- so a lone-journal caller (ExecuteTemplate, which never
+	// goes through this batch path) is unaffected.
+	var allPairs []balancePair
+	for i, input := range inputs {
+		resolved, err := s.resolveEntries(ctx, qtx, input.Entries)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch[%d]: resolve entries for lock order: %w", i, err)
+		}
+		allPairs = append(allPairs, balancePairsFromEntries(resolved)...)
+	}
+	if err := acquireBalanceLocks(ctx, qtx, sortedUniquePairs(allPairs)); err != nil {
+		return nil, fmt.Errorf("postgres: execute template batch: %w", err)
+	}
+
 	journals := make([]*core.Journal, 0, len(inputs))
 	for i, input := range inputs {
 		journal, err := s.postJournalWithQueries(ctx, qtx, input, effectiveAts[i], auths[i])

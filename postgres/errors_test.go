@@ -47,6 +47,26 @@ func TestNormalizeStoreError(t *testing.T) {
 			},
 			want: core.ErrConflict,
 		},
+		{
+			// bus #24: serialization_failure -- SERIALIZABLE/REPEATABLE READ
+			// conflict. See lock_order_test.go for the real-deadlock
+			// counterpart that drives this through the actual adapter code
+			// path instead of a hand-built pgconn.PgError.
+			name: "serialization failure",
+			err: &pgconn.PgError{
+				Code: "40001",
+			},
+			want: core.ErrTransient,
+		},
+		{
+			// bus #24: deadlock_detected -- Postgres picked this session as
+			// the deadlock victim.
+			name: "deadlock detected",
+			err: &pgconn.PgError{
+				Code: "40P01",
+			},
+			want: core.ErrTransient,
+		},
 	}
 
 	for _, tc := range cases {

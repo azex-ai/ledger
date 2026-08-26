@@ -555,7 +555,7 @@ func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) {
 			defer cancel()
 			if err := o.processRegistrationRescan(jobCtx, job); err != nil {
 				delay := time.Second << min(int(job.Attempts), 6)
-				if retryErr := o.deps.RegistrationRescans.RetryRegistrationRescan(ctx, job.UID, err.Error(), time.Now().Add(delay)); retryErr != nil {
+				if retryErr := o.deps.RegistrationRescans.RetryRegistrationRescan(ctx, job.UID, err.Error(), time.Now().Add(delay), job.Attempts); retryErr != nil {
 					o.log().Error("service: onchain: persist registration rescan retry failed", "uid", job.UID, "error", retryErr)
 				}
 				o.log().Error("service: onchain: registration rescan failed", "chain_id", job.ChainID, "address", job.Address, "error", err)
@@ -572,7 +572,7 @@ func (o *Onchain) processRegistrationRescan(ctx context.Context, job core.Regist
 		return fmt.Errorf("latest block: %w", err)
 	}
 	if job.NextBlock > latest {
-		return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, job.NextBlock, true)
+		return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, job.NextBlock, true, job.Attempts)
 	}
 	to := job.NextBlock + o.maxBlocksPerScan - 1
 	if to > latest {
@@ -587,7 +587,7 @@ func (o *Onchain) processRegistrationRescan(ctx context.Context, job core.Regist
 			return fmt.Errorf("ingest deposit %s/%d: %w", sighting.TxHash, sighting.TxLogSeq, err)
 		}
 	}
-	return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, to+1, to == latest)
+	return o.deps.RegistrationRescans.AdvanceRegistrationRescan(ctx, job.UID, to+1, to == latest, job.Attempts)
 }
 
 // IngestDeposit is the single orchestration entry point both ingestion

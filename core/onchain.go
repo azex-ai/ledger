@@ -295,11 +295,24 @@ type RegistrationRescan struct {
 
 // RegistrationRescanStore persists and leases address-registration rescans.
 // Implementations must make Claim safe across multiple service replicas.
+//
+// AdvanceRegistrationRescan and RetryRegistrationRescan both take
+// expectedAttempts: the Attempts value the caller observed on the
+// RegistrationRescan it claimed (ClaimRegistrationRescans bumps Attempts by
+// one on every claim, including a re-claim after a lease expired). A write
+// only applies if the stored row's attempts still equals expectedAttempts --
+// the same claim-token-guard shape rollup_queue's MarkRollupProcessed and
+// events' UpdateEventDelivered already use (keyed on claimed_until /
+// next_attempt_at there; keyed on attempts here since Attempts is the value
+// already threaded through RegistrationRescan, so no new column is needed).
+// Without it, a worker whose lease outlived its own processing could
+// overwrite progress a worker that re-claimed the same row after the lease
+// expired already recorded (concurrency.md Major, board #30).
 type RegistrationRescanStore interface {
 	EnqueueRegistrationRescans(ctx context.Context, jobs []RegistrationRescan) error
 	ClaimRegistrationRescans(ctx context.Context, limit int, lease time.Duration) ([]RegistrationRescan, error)
-	AdvanceRegistrationRescan(ctx context.Context, uid string, nextBlock int64, completed bool) error
-	RetryRegistrationRescan(ctx context.Context, uid, lastError string, retryAt time.Time) error
+	AdvanceRegistrationRescan(ctx context.Context, uid string, nextBlock int64, completed bool, expectedAttempts int32) error
+	RetryRegistrationRescan(ctx context.Context, uid, lastError string, retryAt time.Time, expectedAttempts int32) error
 }
 
 // ChainSet is the full multi-chain configuration a consumer injects into the
