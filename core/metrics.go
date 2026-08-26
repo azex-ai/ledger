@@ -67,6 +67,11 @@ type Metrics interface {
 	CheckpointAge(classCode string, age time.Duration)
 
 	// Financial
+
+	// BalanceDrift reports the most recent drift-from-zero reading for a
+	// (class, currency) label. Do not alert on this alone -- see
+	// NegativeBalanceDetected's doc for why a healthy item can mask a real,
+	// still-open violation under the same label. Fine for dashboards.
 	BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal)
 	// NegativeBalanceDetected is a monotonic counter incremented every time a
 	// rollup item's recomputed balance is found negative on a debit-normal

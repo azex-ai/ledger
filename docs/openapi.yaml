@@ -1533,6 +1533,18 @@ components:
     HolderRole:
       type: string
       enum: [user, system]
+    BalanceRole:
+      type: string
+      description: >-
+        Semantic liquidity tag for a classification's balance in the
+        holder-facing breakdown. "" excludes the classification from that
+        view -- valid for is_system classifications, but refused by the
+        server for a non-system classification (M-4 fix, docs/INVARIANTS.md
+        I-37 addendum): a non-system classification must declare either a
+        spendable bucket (available/pending/locked) or "memo" (a deliberate
+        non-liability memo/cost account, e.g. per-user fee tracking)
+        explicitly.
+      enum: ["", available, pending, locked, memo]
 
     EntryInput:
       type: object
@@ -1964,6 +1976,7 @@ components:
         name: { type: string }
         normal_side: { $ref: "#/components/schemas/NormalSide" }
         is_system: { type: boolean }
+        balance_role: { $ref: "#/components/schemas/BalanceRole" }
         lifecycle: { $ref: "#/components/schemas/Lifecycle" }
 
     TemplateLineInput:

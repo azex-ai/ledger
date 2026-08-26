@@ -28,8 +28,8 @@ type mockReconcileQuerier struct {
 	equationRows     []AccountingEquationRow
 	settlementViols  []SettlementNettingViolation
 	negativeAccounts []NegativeBalanceAccount
-	// roleLessLiabilities drives the role_less_credit_liability check (M-4 fix).
-	roleLessLiabilities []RoleLessCreditLiability
+	// roleLessLiabilities drives the role_less_liability check (M-4 fix).
+	roleLessLiabilities []RoleLessLiability
 	orphanReservs       []OrphanReservation
 	staleItems          []StaleRollupItem
 	dupeKeys            []DuplicateIdempotencyKey
@@ -98,7 +98,7 @@ func (m *mockReconcileQuerier) SettlementNettingViolations(_ context.Context, _ 
 func (m *mockReconcileQuerier) NegativeBalanceAccounts(_ context.Context, _ int) ([]NegativeBalanceAccount, error) {
 	return m.negativeAccounts, m.errNegBal
 }
-func (m *mockReconcileQuerier) RoleLessCreditLiabilities(_ context.Context, _ int) ([]RoleLessCreditLiability, error) {
+func (m *mockReconcileQuerier) RoleLessLiabilities(_ context.Context, _ int) ([]RoleLessLiability, error) {
 	return m.roleLessLiabilities, m.errRoleLessLiabilities
 }
 func (m *mockReconcileQuerier) OrphanReservations(_ context.Context) ([]OrphanReservation, error) {
@@ -219,7 +219,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 14, "should run exactly 14 checks (M-4 fix added role_less_credit_liability)")
+	assert.Len(t, report.Checks, 14, "should run exactly 14 checks (M-4 fix added role_less_liability)")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. unauthorized_journals is skipped (buildFullSvc never calls
@@ -517,28 +517,28 @@ func TestCheck6NonNegativeBalances_QueryError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// role_less_credit_liability — mistagged liability classification (M-4 fix)
+// role_less_liability — mistagged liability classification (M-4 fix)
 // ---------------------------------------------------------------------------
 
-func TestRoleLessCreditLiability_Clean(t *testing.T) {
+func TestRoleLessLiability_Clean(t *testing.T) {
 	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
-	result := svc.runCheckRoleLessCreditLiability(context.Background())
+	result := svc.runCheckRoleLessLiability(context.Background())
 	assert.True(t, result.Passed)
 	assert.True(t, result.Complete)
 }
 
-// TestRoleLessCreditLiability_Violation pins the M-1-shaped danger direction
+// TestRoleLessLiability_Violation pins the M-1-shaped danger direction
 // M-4 closes: a nonzero balance on a credit-normal, non-system, user-side
 // classification with no balance_role must surface as a Finding instead of
 // silently understating SolvencyReport.Liability.
-func TestRoleLessCreditLiability_Violation(t *testing.T) {
+func TestRoleLessLiability_Violation(t *testing.T) {
 	q := cleanQuerier()
-	q.roleLessLiabilities = []RoleLessCreditLiability{
+	q.roleLessLiabilities = []RoleLessLiability{
 		{AccountHolder: 42, CurrencyID: 1, ClassificationID: 7, Balance: decimal.NewFromInt(100)},
 	}
 
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
-	result := svc.runCheckRoleLessCreditLiability(context.Background())
+	result := svc.runCheckRoleLessLiability(context.Background())
 	assert.False(t, result.Passed)
 	require.Len(t, result.Findings, 1)
 	assert.Contains(t, result.Findings[0].Description, "holder 42")
@@ -547,12 +547,12 @@ func TestRoleLessCreditLiability_Violation(t *testing.T) {
 	assert.Contains(t, result.Findings[0].Detail, "SolvencyReport.Liability")
 }
 
-func TestRoleLessCreditLiability_QueryError(t *testing.T) {
+func TestRoleLessLiability_QueryError(t *testing.T) {
 	q := cleanQuerier()
 	q.errRoleLessLiabilities = errors.New("scan failed")
 
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
-	result := svc.runCheckRoleLessCreditLiability(context.Background())
+	result := svc.runCheckRoleLessLiability(context.Background())
 	assert.False(t, result.Passed)
 	assert.Contains(t, result.Findings[0].Detail, "scan failed")
 }

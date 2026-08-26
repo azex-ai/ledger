@@ -43,6 +43,7 @@ func seedPendingEvent(t *testing.T, pool *pgxpool.Pool, classCode string) {
 		Code:       classCode,
 		Name:       classCode,
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)

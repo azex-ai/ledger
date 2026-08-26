@@ -1395,6 +1395,7 @@ func TestOnchain_ApproveReview_RejectReview_RefuseNonDepositClassification(t *te
 		Code:       "other-thing",
 		Name:       "Other Thing",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  otherLifecycle,
 	})
 	require.NoError(t, err)

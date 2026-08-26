@@ -2566,36 +2566,82 @@ indistinguishable from `Margin=-5` from an actual unbacked issuance).
 > fix-backend-1 batch, board #43).** The rule above is correct GIVEN that
 > every real liability classification is actually tagged with a
 > `balance_role` — nothing in `ClassificationInput` enforced that. A
-> credit-normal, non-system classification created without one (the exact
-> shape the independent review found: commit `6c83236`'s own message
-> reported fixing three pre-existing test fixtures that built "liability"
-> classifications with no `balance_role`) is silently excluded from
-> `Liability` by the rule above, understating what the platform owes — the
-> "false surplus" direction, the most dangerous one for a solvency check to
-> be wrong in. A new reconcile check, `role_less_credit_liability`, closes
-> the visibility gap (detection, not prevention — it does not change what
-> `SolvencyReport.Liability` counts, which stays exactly as this invariant
-> specifies): it flags any user-side, credit-normal, non-system
-> classification with a nonzero balance and no `balance_role`, independent of
-> the query `GetTotalUserSideBalance` itself uses.
+> classification created without one (the exact shape the independent review
+> found: commit `6c83236`'s own message reported fixing three pre-existing
+> test fixtures that built "liability" classifications with no
+> `balance_role`) is silently excluded from `Liability` by the rule above,
+> understating what the platform owes — the "false surplus" direction, the
+> most dangerous one for a solvency check to be wrong in.
 >
-> **Enforced by (addendum)**: `postgres/sql/queries/reconcile.sql`'s
-> `ReconcileRoleLessCreditLiabilities`; `service.FullReconciliationService.runCheckRoleLessCreditLiability`
+> Two structural changes close this, both required:
+>
+> 1. `core.ClassificationInput.Validate` now refuses `balance_role = ""` on
+>    any NEW non-system classification. A new `BalanceRole` value,
+>    `BalanceRoleMemo` (migration 011 widens the `balance_role` CHECK
+>    constraint to allow it), lets a classification declare "deliberately
+>    NOT a liability" explicitly instead of leaving the field blank —
+>    `BalanceRoleNone` ("") no longer has to carry both that intent AND
+>    "nobody tagged this yet" at once. `presets.DefaultTemplateClassifications`'
+>    `fee_expense` now declares `BalanceRoleMemo` explicitly (previously
+>    blank); `GetTotalUserSideBalance`'s filter changed from
+>    `balance_role <> ''` to `balance_role NOT IN ('', 'memo')` so a
+>    memo-tagged classification is excluded from `Liability` the same way an
+>    untagged one always was (folding 'memo' into "any non-empty role means
+>    liability" would have reproduced the exact phantom-insolvency bug this
+>    invariant's main rule already fixed, via a different route).
+> 2. A new reconcile check, `role_less_liability`, closes the visibility gap
+>    for classifications that predate this rule or were written directly
+>    (detection, not prevention — it does not change what
+>    `SolvencyReport.Liability` counts): it flags any user-side, non-system
+>    classification with a nonzero balance and `balance_role = ''`,
+>    independent of the query `GetTotalUserSideBalance` itself uses.
+>
+> **Correction (same batch, after Team Lead review).** The first version of
+> this addendum's reconcile check filtered `c.normal_side = 'credit'`,
+> reasoning "liability-shaped by construction". That reasoning is false in
+> THIS library's own convention: `main_wallet`, the canonical real
+> liability, is DEBIT-normal (DR increases what the platform owes the
+> holder) — a classification built by copying `main_wallet`'s shape without
+> its `balance_role` is a role-less DEBIT-normal classification, exactly the
+> shape the credit-only filter let through uncaught. Team Lead reproduced
+> this end-to-end on the pre-correction code: a `main_wallet`-shaped
+> classification with a real, nonzero balance and no `balance_role` produced
+> `custodial=600 liability=500 margin=100 solvent=true` — identical to the
+> unfixed behavior. `balance_role`, not `normal_side`, is the only signal
+> that ever distinguished a real liability from a legitimate memo account;
+> filtering on `normal_side` filtered on the wrong axis. The query no longer
+> filters on `normal_side` at all — see change 1 above (`BalanceRoleMemo`)
+> for how false positives on legitimate memo accounts are avoided instead.
+>
+> **Enforced by (addendum)**: `core.ClassificationInput.Validate`
+> (`core/interfaces.go`); `core.BalanceRoleMemo`
+> (`core/types.go`); `postgres/sql/migrations/011_balance_role_memo.up.sql`;
+> `presets.DefaultTemplateClassifications`'s `fee_expense` entry
+> (`presets/templates.go`); `postgres/sql/queries/platform_balances.sql`'s
+> `GetTotalUserSideBalance`; `postgres/sql/queries/reconcile.sql`'s
+> `ReconcileRoleLessLiabilities`; `service.FullReconciliationService.runCheckRoleLessLiability`
 > (`service/reconcile.go`), wired into the check suite as
-> `role_less_credit_liability`.
+> `role_less_liability`.
 >
 > **Pinned by (addendum)**:
-> `service.TestRoleLessCreditLiability_Violation` /
-> `TestRoleLessCreditLiability_Clean` /
-> `TestFullReconciliation_RoleLessCreditLiability_DebitNormalMemoIsNotFlagged`
-> (the debit-normal `fee_expense` shape must never be flagged — only
-> role-less CREDIT-normal classifications are liability-shaped) /
-> `TestFullReconciliation_RoleLessCreditLiability_DetectsMistaggedClassification`
-> — the DB-backed pin, which also asserts the actual consequence directly:
-> `SolvencyCheck.Liability` reflects only the correctly-tagged holder's
-> balance, confirming the mistagged holder's balance really is invisible to
-> it (the gap this addendum's check now surfaces as a Finding instead of
-> leaving silent).
+> `service.TestRoleLessLiability_Violation` /
+> `TestRoleLessLiability_Clean` /
+> `TestFullReconciliation_RoleLessLiability_ExplicitMemoIsNotFlagged`
+> (an explicitly memo-tagged debit-normal classification must never be
+> flagged) /
+> `TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged` —
+> the correction's own pin: a role-less DEBIT-normal classification (the
+> exact shape the credit-only filter missed) with a real balance is flagged,
+> and `SolvencyCheck.Liability` is confirmed blind to it directly /
+> `TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification`
+> — the original DB-backed pin (credit-normal mistagged shape), still
+> correctly caught by the corrected (broader) query /
+> `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict` — `fee_expense`
+> upgrades to `BalanceRoleMemo` on install, not `BalanceRoleNone` /
+> `postgres.TestSolvencyCheck_WithdrawFee_DoesNotManufactureDeficit` — this
+> invariant's original pin, re-verified against the corrected
+> `GetTotalUserSideBalance` filter (a memo-tagged `fee_expense` must still be
+> excluded from `Liability`, not just an untagged one).
 
 ## How to add a new invariant
 

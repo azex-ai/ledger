@@ -141,35 +141,39 @@ func (a *ReconcileAdapter) NegativeBalanceAccounts(ctx context.Context, pageLimi
 	return result, nil
 }
 
-// RoleLessCreditLiabilities returns user-side (holder > 0), credit-normal,
-// non-system classifications with a nonzero balance and no balance_role, up
-// to pageLimit rows (M-4 fix): each is a real, currently-invisible
-// understatement of SolvencyReport.Liability.
-func (a *ReconcileAdapter) RoleLessCreditLiabilities(ctx context.Context, pageLimit int) ([]service.RoleLessCreditLiability, error) {
-	rows, err := a.q.ReconcileRoleLessCreditLiabilities(ctx, int32(pageLimit)) //nolint:gosec
+// RoleLessLiabilities returns user-side (holder > 0), non-system
+// classifications with a nonzero balance and no balance_role, up to
+// pageLimit rows (M-4 fix): each is a real, currently-invisible
+// understatement of SolvencyReport.Liability. Not filtered by normal_side --
+// this library's own convention has real liabilities on both sides
+// (main_wallet is debit-normal), so balance_role alone -- not normal_side --
+// is what distinguishes a real liability from a legitimate role-less memo
+// account (BalanceRoleMemo, migration 011).
+func (a *ReconcileAdapter) RoleLessLiabilities(ctx context.Context, pageLimit int) ([]service.RoleLessLiability, error) {
+	rows, err := a.q.ReconcileRoleLessLiabilities(ctx, int32(pageLimit)) //nolint:gosec
 	if err != nil {
-		return nil, fmt.Errorf("postgres: reconcile: role-less credit liabilities: %w", err)
+		return nil, fmt.Errorf("postgres: reconcile: role-less liabilities: %w", err)
 	}
-	result := make([]service.RoleLessCreditLiability, len(rows))
+	result := make([]service.RoleLessLiability, len(rows))
 	for i, r := range rows {
 		debit, err := numericToDecimal(r.TotalDebit)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: reconcile: role-less credit liability: debit convert: %w", err)
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: debit convert: %w", err)
 		}
 		credit, err := numericToDecimal(r.TotalCredit)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: reconcile: role-less credit liability: credit convert: %w", err)
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: credit convert: %w", err)
 		}
-		// core.Delta is the sole authority for this computation (I-43). The
-		// query filters c.normal_side = 'credit', so this is always credit-normal.
-		balance, err := core.Delta(core.NormalSideCredit, debit, credit)
+		// core.Delta is the sole authority for this computation (I-43).
+		balance, err := core.Delta(core.NormalSide(r.NormalSide), debit, credit)
 		if err != nil {
-			return nil, fmt.Errorf("postgres: reconcile: role-less credit liability: classification %d: %w", r.ClassificationID, err)
+			return nil, fmt.Errorf("postgres: reconcile: role-less liability: classification %d: %w", r.ClassificationID, err)
 		}
-		result[i] = service.RoleLessCreditLiability{
+		result[i] = service.RoleLessLiability{
 			AccountHolder:    r.AccountHolder,
 			CurrencyID:       r.CurrencyID,
 			ClassificationID: r.ClassificationID,
+			NormalSide:       r.NormalSide,
 			Balance:          balance,
 		}
 	}

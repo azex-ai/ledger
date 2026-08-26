@@ -467,7 +467,7 @@ func TestFullReconciliation_DetectsSnapshotDrift(t *testing.T) {
 	assert.True(t, driftFound, "got: %+v", check12.Findings)
 }
 
-// TestFullReconciliation_RoleLessCreditLiability_DetectsMistaggedClassification
+// TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification
 // is the DB-backed pin for the M-4 fix (`.local/independent-review-2026-08-26.md`,
 // docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
 // fix-backend-1 batch, board #43): GetTotalUserSideBalance (I-37) only sums
@@ -478,7 +478,7 @@ func TestFullReconciliation_DetectsSnapshotDrift(t *testing.T) {
 // `6c83236` had to fix three pre-existing test fixtures that built their own
 // "liability" classifications without a balance_role. This test reproduces
 // exactly that shape against real Postgres and real journal_entries.
-func TestFullReconciliation_RoleLessCreditLiability_DetectsMistaggedClassification(t *testing.T) {
+func TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification(t *testing.T) {
 	pgpool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -541,7 +541,7 @@ func TestFullReconciliation_RoleLessCreditLiability_DetectsMistaggedClassificati
 
 	report, err := full.RunFullReconciliation(ctx)
 	require.NoError(t, err)
-	check := findCheck(t, report, "role_less_credit_liability")
+	check := findCheck(t, report, "role_less_liability")
 	assert.False(t, check.Passed, "the mistagged classification's nonzero balance must be caught")
 
 	var flagged bool
@@ -568,13 +568,18 @@ func TestFullReconciliation_RoleLessCreditLiability_DetectsMistaggedClassificati
 		"Liability must reflect ONLY holderB's correctly-tagged 200 -- holderA's 100 stays invisible to SolvencyReport by design (I-37), which is exactly why this reconcile check exists as an independent safety net: got %s", solvency.Liability)
 }
 
-// TestFullReconciliation_RoleLessCreditLiability_DebitNormalMemoIsNotFlagged
-// is the other b-direction non-regression: a role-less, non-system,
-// user-side classification that is DEBIT-normal (the fee_expense shape I-37
-// documents as a legitimate memo/cost account, never a liability) must never
-// be flagged by this check -- only role-less CREDIT-normal classifications
-// are liability-shaped.
-func TestFullReconciliation_RoleLessCreditLiability_DebitNormalMemoIsNotFlagged(t *testing.T) {
+// TestFullReconciliation_RoleLessLiability_ExplicitMemoIsNotFlagged is the
+// other b-direction non-regression, corrected after Team Lead's finding that
+// an earlier version of this fix filtered on normal_side='credit': this
+// library's own convention has real liabilities on BOTH sides (main_wallet
+// is debit-normal), so normal_side cannot distinguish a mistagged liability
+// from a legitimate memo account -- only balance_role can. A non-system,
+// user-side classification EXPLICITLY tagged BalanceRoleMemo (the
+// fee_expense shape, debit-normal, a real per-user cost account, never a
+// liability -- I-37) must never be flagged by this check, regardless of
+// normal_side, because "balance_role = ”" (not "debit-normal") is this
+// check's only trigger.
+func TestFullReconciliation_RoleLessLiability_ExplicitMemoIsNotFlagged(t *testing.T) {
 	pgpool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -584,9 +589,12 @@ func TestFullReconciliation_RoleLessCreditLiability_DebitNormalMemoIsNotFlagged(
 	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether M4Memo")
 	jtUID := postgrestest.SeedJournalType(t, pgpool, "m4_fee", "M4 Fee")
 
-	// fee_expense shape: debit-normal, non-system, no role -- a legitimate
-	// memo/cost account, never a liability (I-37).
-	feeUID := postgrestest.SeedClassification(t, pgpool, "fee_expense_m4", "Fee Expense M4", "debit", false)
+	// fee_expense shape: debit-normal, non-system, EXPLICITLY tagged memo --
+	// a legitimate cost account, never a liability (I-37). Seeded via
+	// SeedClassificationWithRole so balance_role='memo' is not empty, unlike
+	// the mistagged classification in the DetectsMistaggedClassification
+	// test above.
+	feeUID := postgrestest.SeedClassificationWithRole(t, pgpool, "fee_expense_m4", "Fee Expense M4", "debit", false, "memo")
 	revenueUID := postgrestest.SeedClassification(t, pgpool, "fee_revenue_m4", "Fee Revenue M4", "credit", true)
 
 	holder := int64(9702)
@@ -598,6 +606,62 @@ func TestFullReconciliation_RoleLessCreditLiability_DebitNormalMemoIsNotFlagged(
 
 	report, err := full.RunFullReconciliation(ctx)
 	require.NoError(t, err)
-	check := findCheck(t, report, "role_less_credit_liability")
-	assert.True(t, check.Passed, "a role-less DEBIT-normal memo account must never be flagged: got %+v", check.Findings)
+	check := findCheck(t, report, "role_less_liability")
+	assert.True(t, check.Passed, "an explicitly memo-tagged classification must never be flagged: got %+v", check.Findings)
+}
+
+// TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged pins
+// the exact gap Team Lead's finding closed: a role-less DEBIT-normal
+// classification with a nonzero balance -- the main_wallet shape, this
+// library's canonical REAL liability -- must be flagged. An earlier version
+// of this fix filtered on normal_side='credit' and missed this entirely; a
+// classification built by copying main_wallet's shape but forgetting its
+// balance_role reproduces precisely that miss.
+func TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged(t *testing.T) {
+	pgpool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	rollup := postgres.NewRollupAdapter(pgpool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pgpool)
+
+	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether M4DebitGap")
+	jtUID := postgrestest.SeedJournalType(t, pgpool, "m4_debitgap_deposit", "M4 Debit Gap Deposit")
+
+	// main_wallet shape, copied without its balance_role: debit-normal,
+	// non-system, balance_role='' -- seeded via raw SQL (SeedClassification),
+	// bypassing ClassificationInput.Validate, to model data that predates
+	// the M-4 fix or was written directly (the exact ambiguity this check
+	// exists to surface for already-existing data).
+	mistaggedUID := postgrestest.SeedClassification(t, pgpool, "copied_wallet_m4", "Copied Wallet M4", "debit", false)
+	custodialUID := postgrestest.SeedClassification(t, pgpool, "custodial_m4dg", "Custodial M4DG", "credit", true)
+
+	holder := int64(9703)
+	seedJournal(t, pgpool, jtUID, holder, currencyUID, mistaggedUID, custodialUID, decimal.NewFromInt(300), time.Now(), postgrestest.UniqueKey("m4-debitgap"))
+
+	eng := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, eng)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, eng)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "role_less_liability")
+	assert.False(t, check.Passed, "a role-less DEBIT-normal classification with a real balance must be flagged -- this is exactly what the credit-only filter missed")
+
+	var flagged bool
+	for _, f := range check.Findings {
+		if strings.Contains(f.Description, fmt.Sprintf("holder %d", holder)) && strings.Contains(f.Description, "no balance_role") {
+			flagged = true
+			assert.Contains(t, f.Detail, "300")
+			assert.Contains(t, f.Detail, "normal_side=debit")
+		}
+	}
+	assert.True(t, flagged, "got: %+v", check.Findings)
+
+	// Confirms the actual consequence: SolvencyCheck.Liability stays blind
+	// to this holder's real 300 balance.
+	pbStore := postgres.NewPlatformBalanceStore(pgpool)
+	solvency, err := pbStore.SolvencyCheck(ctx, currencyUID)
+	require.NoError(t, err)
+	assert.True(t, solvency.Liability.IsZero(),
+		"Liability must stay blind to the untagged debit-normal balance -- this is the invisible understatement the check now surfaces: got %s", solvency.Liability)
 }

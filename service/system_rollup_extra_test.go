@@ -146,6 +146,7 @@ func TestPlatformBalanceStore_GetPlatformBalances(t *testing.T) {
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "main_wallet_pb1", Name: "Main Wallet PB1", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 

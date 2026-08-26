@@ -18,10 +18,11 @@ func TestClassificationStore_CRUD(t *testing.T) {
 	ctx := context.Background()
 
 	cls, err := store.CreateClassification(ctx, core.ClassificationInput{
-		Code:       "main_wallet",
-		Name:       "Main Wallet",
-		NormalSide: core.NormalSideDebit,
-		IsSystem:   false,
+		Code:        "main_wallet",
+		Name:        "Main Wallet",
+		NormalSide:  core.NormalSideDebit,
+		IsSystem:    false,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "main_wallet", cls.Code)
@@ -73,6 +74,7 @@ func TestClassificationStore_CreateWithLifecycle(t *testing.T) {
 		Code:       "deposit_test",
 		Name:       "Deposit Test",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)

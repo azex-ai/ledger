@@ -243,14 +243,15 @@ type mockClassificationStore struct{}
 
 func (m *mockClassificationStore) CreateClassification(ctx context.Context, input core.ClassificationInput) (*core.Classification, error) {
 	return &core.Classification{
-		UID:        "cls-1",
-		Code:       input.Code,
-		Name:       input.Name,
-		NormalSide: input.NormalSide,
-		IsSystem:   input.IsSystem,
-		IsActive:   true,
-		Lifecycle:  input.Lifecycle,
-		CreatedAt:  time.Now(),
+		UID:         "cls-1",
+		Code:        input.Code,
+		Name:        input.Name,
+		NormalSide:  input.NormalSide,
+		IsSystem:    input.IsSystem,
+		IsActive:    true,
+		BalanceRole: input.BalanceRole,
+		Lifecycle:   input.Lifecycle,
+		CreatedAt:   time.Now(),
 	}, nil
 }
 
@@ -1073,6 +1074,33 @@ func TestCreateClassification_WithLifecycle(t *testing.T) {
 	lifecycle, ok := data["lifecycle"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "pending", lifecycle["initial"])
+}
+
+// TestCreateClassification_BalanceRoleRoundTrips pins the M-4 fix
+// (`.local/independent-review-2026-08-26.md`, docs/plans/2026-08-26-audit-remediation-contracts.md
+// follow-on fix-backend-1 batch, board #43): before this fix,
+// createClassificationRequest had no balance_role field at all, so
+// POST /classifications had no way to satisfy core.ClassificationInput.Validate's
+// new requirement that a non-system classification declare one explicitly
+// -- every such request would have failed against the real store. This
+// confirms the field actually flows request -> ClassificationInput ->
+// response, both for a spendable role and for BalanceRoleMemo.
+func TestCreateClassification_BalanceRoleRoundTrips(t *testing.T) {
+	srv := newTestServer()
+
+	for _, role := range []string{"available", "memo"} {
+		body := map[string]any{
+			"code":         "wallet_" + role,
+			"name":         "Wallet " + role,
+			"normal_side":  "debit",
+			"balance_role": role,
+		}
+		w := doRequest(srv, http.MethodPost, "/api/v1/classifications", body)
+		require.Equal(t, http.StatusCreated, w.Code, "role=%s: %s", role, w.Body.String())
+
+		data := parseEnvelope(t, w.Body.Bytes())
+		assert.Equal(t, role, data["balance_role"], "role=%s", role)
+	}
 }
 
 func TestJournalTypeCRUD(t *testing.T) {

@@ -174,7 +174,17 @@ type BalanceRole string
 
 const (
 	// BalanceRoleNone excludes the classification from the holder's
-	// spendable-money view (fee/revenue/suspense/custodial style accounts).
+	// spendable-money view. Legitimate for is_system classifications (they
+	// are never part of the holder-facing breakdown by construction), and
+	// for legacy non-system rows created before ClassificationInput.Validate
+	// started requiring an explicit role. ClassificationInput.Validate
+	// refuses "" on any NEW non-system classification (M-4 fix,
+	// docs/INVARIANTS.md I-37 addendum): "" used to mean both "this is a
+	// deliberate memo/cost account" (fee_expense) and "nobody tagged this
+	// yet" -- the same value carrying two different intents made the second
+	// one silently invisible to SolvencyReport.Liability. Non-system memo
+	// accounts must now declare BalanceRoleMemo explicitly instead of
+	// leaving this blank.
 	BalanceRoleNone BalanceRole = ""
 	// BalanceRoleAvailable marks immediately spendable funds (main_wallet).
 	BalanceRoleAvailable BalanceRole = "available"
@@ -182,11 +192,19 @@ const (
 	BalanceRolePending BalanceRole = "pending"
 	// BalanceRoleLocked marks journal-locked funds (withdrawal in flight).
 	BalanceRoleLocked BalanceRole = "locked"
+	// BalanceRoleMemo marks a non-system, user-side classification that is
+	// deliberately NOT part of the holder's spendable-money view and NOT a
+	// liability the platform owes back (fee_expense and friends: money the
+	// user already paid, tracked per-holder for reporting only). Exists so a
+	// classification can say "excluded on purpose" instead of leaving
+	// BalanceRoleNone to do double duty as both that AND "unset" -- see the
+	// BalanceRoleNone doc and docs/INVARIANTS.md I-37's addendum.
+	BalanceRoleMemo BalanceRole = "memo"
 )
 
 func (r BalanceRole) IsValid() bool {
 	switch r {
-	case BalanceRoleNone, BalanceRoleAvailable, BalanceRolePending, BalanceRoleLocked:
+	case BalanceRoleNone, BalanceRoleAvailable, BalanceRolePending, BalanceRoleLocked, BalanceRoleMemo:
 		return true
 	}
 	return false

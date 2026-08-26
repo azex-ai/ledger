@@ -69,7 +69,7 @@ proof of the count):
 | `accounting_equation` | Σ(debit-normal net) = Σ(credit-normal net) per currency |
 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
 | `non_negative_balances` | no holder > 0 has balance < 0 |
-| `role_less_credit_liability` | no user-side (holder > 0), credit-normal, non-system classification with a nonzero balance is missing a `balance_role` (M-4/I-37) — such a balance is silently excluded from `SolvencyReport.Liability` |
+| `role_less_liability` | no user-side (holder > 0), non-system classification with a nonzero balance is missing a `balance_role` (M-4/I-37) — such a balance is silently excluded from `SolvencyReport.Liability`. Not limited to credit-normal: `main_wallet`, the canonical real liability, is debit-normal |
 | `orphan_reservations` | reservations with no matching journal |
 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
@@ -101,17 +101,20 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
 - **`non_negative_balances`** — a user got debited beyond their balance.
   Usually a missing `Reserve` step. Find the journal that drove the balance
   negative; reverse it; investigate the calling service.
-- **`role_less_credit_liability`** — a deployer created a credit-normal,
-  non-system classification (posted to a user holder, so it looks like a
-  liability) without tagging it with a `balance_role`. This is not corrupted
-  data — the finding's `balance` figure is real and correct — the problem is
-  that `SolvencyReport.Liability` currently excludes it entirely, so solvency
-  reports look better than they are by exactly that amount. Fix by either
-  tagging the classification's `balance_role` (`available`/`pending`/`locked`
-  if it should count as spendable-money the user can reserve against) via
-  `ClassificationStore.SetBalanceRole`, or confirming it should have been
-  `is_system` instead (recreate/relabel per your migration process — this
-  library never mutates `is_system` after creation).
+- **`role_less_liability`** — a deployer created a non-system classification
+  (posted to a user holder, so it looks like a liability) without tagging it
+  with a `balance_role`. This fires regardless of `normal_side` -- this
+  library's real liabilities are not all credit-normal (`main_wallet`, the
+  canonical one, is debit-normal). This is not corrupted data — the finding's
+  `balance` figure is real and correct — the problem is that
+  `SolvencyReport.Liability` currently excludes it entirely, so solvency
+  reports look better than they are by exactly that amount. Fix by tagging
+  the classification's `balance_role` via `ClassificationStore.SetBalanceRole`:
+  `available`/`pending`/`locked` if it should count as spendable-money the
+  user can reserve against, or `memo` if it is a deliberate non-liability
+  cost/memo account (the `fee_expense` shape) — or confirm it should have
+  been `is_system` instead (recreate/relabel per your migration process —
+  this library never mutates `is_system` after creation).
 - **`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity`
   (checkpoint / system_rollups / balance_snapshots drift, I-23)** —
   **do not** just re-run reconcile and move on: these three all mean a
@@ -1027,6 +1030,24 @@ too. It is fixed now (this gauge clears to 0 on the next healthy rollup for
 that dimension), but the two remain **independent business questions**
 ("did a checkpoint get tampered with" vs. "did an account go negative") and
 belong in **independent alert rules** even so.
+
+**M-3 fix (`.local/independent-review-2026-08-26.md`, board #43, same date as
+this document but a later batch than the paragraph above): even fixed,
+`balance_drift_units` is still not safe to alert on alone.** Its label set
+is `(class, currency_id)` WITHOUT holder (kept deliberately bounded), so a
+HEALTHY item for a DIFFERENT holder sharing that label legitimately
+`.Set()`s the same series back to 0 immediately after a genuinely-still-open
+violation for a FIRST holder was reported -- the exact self-clearing
+behavior the paragraph above describes as "fixed" is also what makes a real,
+ongoing violation invisible the moment any other holder in the same bucket
+is next processed. **Alert on `ledger_negative_balance_detected_total{class,
+currency_id}` instead** (`core.Metrics.NegativeBalanceDetected`, a monotonic
+counter incremented on the same violation branch `balance_drift_units`
+reads from): `increase(ledger_negative_balance_detected_total[window]) > 0`
+cannot be un-incremented by an unrelated holder's healthy item the way the
+Gauge can. Keep `balance_drift_units` for dashboards (a coarse "most recent
+reading for this label" indicator), just not as the alerting source of
+truth.
 
 ## 15. A chain's sweep collection has stopped moving
 

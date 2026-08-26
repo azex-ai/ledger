@@ -67,16 +67,20 @@ type NegativeBalanceAccount struct {
 	Balance          decimal.Decimal
 }
 
-// RoleLessCreditLiability is a (holder, currency, classification) with a
-// nonzero balance on a credit-normal, non-system, user-side classification
-// that carries no balance_role (M-4 fix): GetTotalUserSideBalance (I-37)
-// excludes it from SolvencyReport.Liability by construction, so a nonzero
-// balance here is a real, currently-invisible understatement of what the
-// platform owes.
-type RoleLessCreditLiability struct {
+// RoleLessLiability is a (holder, currency, classification) with a nonzero
+// balance on a non-system, user-side classification that carries no
+// balance_role (M-4 fix): GetTotalUserSideBalance (I-37) excludes it from
+// SolvencyReport.Liability by construction, so a nonzero balance here is a
+// real, currently-invisible understatement of what the platform owes. Not
+// scoped to credit-normal -- this library's own convention has real
+// liabilities on both sides (main_wallet is debit-normal) -- balance_role
+// alone, not NormalSide, is what would have distinguished this from a
+// legitimate role-less memo account (BalanceRoleMemo).
+type RoleLessLiability struct {
 	AccountHolder    int64
 	CurrencyID       int64
 	ClassificationID int64
+	NormalSide       string
 	Balance          decimal.Decimal
 }
 
@@ -170,10 +174,11 @@ type ReconcileQuerier interface {
 	SettlementNettingViolations(ctx context.Context, classCode string, windowMinutes int) ([]SettlementNettingViolation, error)
 	// Check #6
 	NegativeBalanceAccounts(ctx context.Context, pageLimit int) ([]NegativeBalanceAccount, error)
-	// role_less_credit_liability (M-4 fix): user-side, credit-normal,
-	// non-system classifications with a nonzero balance and no balance_role
-	// -- silently excluded from SolvencyReport.Liability.
-	RoleLessCreditLiabilities(ctx context.Context, pageLimit int) ([]RoleLessCreditLiability, error)
+	// role_less_liability (M-4 fix): user-side, non-system
+	// classifications with a nonzero balance and no balance_role -- silently
+	// excluded from SolvencyReport.Liability. Not scoped to credit-normal;
+	// see RoleLessLiability's doc for why.
+	RoleLessLiabilities(ctx context.Context, pageLimit int) ([]RoleLessLiability, error)
 	// Check #7
 	OrphanReservations(ctx context.Context) ([]OrphanReservation, error)
 	// Check #9
@@ -436,8 +441,8 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 	// --- Check #6: Non-negative user balances ---
 	checks = append(checks, s.runCheck6NonNegativeBalances(ctx))
 
-	// --- role_less_credit_liability: user-side credit-normal classification missing balance_role (M-4 fix) ---
-	checks = append(checks, s.runCheckRoleLessCreditLiability(ctx))
+	// --- role_less_liability: user-side credit-normal classification missing balance_role (M-4 fix) ---
+	checks = append(checks, s.runCheckRoleLessLiability(ctx))
 
 	// --- Check #7: Orphan reservations ---
 	checks = append(checks, s.runCheck7OrphanReservations(ctx))
@@ -1063,21 +1068,25 @@ func (s *FullReconciliationService) runCheck6NonNegativeBalances(ctx context.Con
 	return result
 }
 
-// runCheckRoleLessCreditLiability verifies every user-side (holder > 0),
-// credit-normal, non-system classification with a nonzero balance carries a
-// balance_role (M-4 fix): GetTotalUserSideBalance (I-37) sums liability only
-// from role-bearing classifications, so a credit-normal classification
-// mistagged without a role is a real, currently-invisible understatement of
-// SolvencyReport.Liability -- the "false surplus" direction, the most
-// dangerous one for a solvency check to be wrong in.
-func (s *FullReconciliationService) runCheckRoleLessCreditLiability(ctx context.Context) core.CheckResult {
-	result := core.CheckResult{Name: "role_less_credit_liability", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+// runCheckRoleLessLiability verifies every user-side (holder > 0), non-system
+// classification with a nonzero balance carries a balance_role (M-4 fix):
+// GetTotalUserSideBalance (I-37) sums liability only from role-bearing
+// classifications, so a classification mistagged without a role is a real,
+// currently-invisible understatement of SolvencyReport.Liability -- the
+// "false surplus" direction, the most dangerous one for a solvency check to
+// be wrong in. Not scoped to credit-normal: this library's own convention
+// has real liabilities on both sides (main_wallet, the canonical liability,
+// is debit-normal), so normal_side cannot distinguish a mistagged liability
+// from a legitimate role-less memo account the way balance_role does
+// (BalanceRoleMemo, migration 011) -- see RoleLessLiability's doc.
+func (s *FullReconciliationService) runCheckRoleLessLiability(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "role_less_liability", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
-	rows, err := s.querier.RoleLessCreditLiabilities(ctx, s.cfg.NegativeBalancePageLimit)
+	rows, err := s.querier.RoleLessLiabilities(ctx, s.cfg.NegativeBalancePageLimit)
 	if err != nil {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: "role-less credit liability scan failed",
+			Description: "role-less liability scan failed",
 			Detail:      err.Error(),
 		})
 		return result
@@ -1086,9 +1095,9 @@ func (s *FullReconciliationService) runCheckRoleLessCreditLiability(ctx context.
 	for _, r := range rows {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("holder %d currency %s classification %s is credit-normal, user-side, and non-system, but carries no balance_role",
+			Description: fmt.Sprintf("holder %d currency %s classification %s is user-side and non-system, but carries no balance_role",
 				r.AccountHolder, s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID)),
-			Detail: fmt.Sprintf("balance=%s is excluded from SolvencyReport.Liability by GetTotalUserSideBalance's balance_role filter -- tag this classification's balance_role (available/pending/locked) or confirm it should be is_system", r.Balance),
+			Detail: fmt.Sprintf("balance=%s (normal_side=%s) is excluded from SolvencyReport.Liability by GetTotalUserSideBalance's balance_role filter -- tag this classification's balance_role (available/pending/locked if it is a real liability, memo if it is a deliberate non-liability memo/cost account) or confirm it should be is_system", r.Balance, r.NormalSide),
 		})
 	}
 	return result

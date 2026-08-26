@@ -62,6 +62,7 @@ func setupAuthFixture(t testing.TB, pool *pgxpool.Pool, ctx context.Context) aut
 	require.NoError(t, err)
 	mw, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: fmt.Sprintf("auth_main_%d", suffix), Name: "Auth Main Wallet", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 	cust, err := classStore.CreateClassification(ctx, core.ClassificationInput{

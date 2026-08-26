@@ -35,6 +35,7 @@ func TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal(t *testing.
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "main_wallet_qs_rt", Name: "Main Wallet QueryStore RT", NormalSide: core.NormalSideCredit,
+		BalanceRole: core.BalanceRoleAvailable,
 	})
 	require.NoError(t, err)
 

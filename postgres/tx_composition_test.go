@@ -230,6 +230,7 @@ func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 		Code:       "booking_link_deposit",
 		Name:       "Booking Link Deposit",
 		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
 		Lifecycle:  lifecycle,
 	})
 	require.NoError(t, err)

@@ -70,37 +70,50 @@ HAVING ledger_signed_delta(
 ORDER BY je.account_holder, je.classification_id
 LIMIT sqlc.arg(page_limit)::int;
 
--- name: ReconcileRoleLessCreditLiabilities :many
+-- name: ReconcileRoleLessLiabilities :many
 -- M-4 fix (`.local/independent-review-2026-08-26.md`,
 -- docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
 -- fix-backend-1 batch, board #43): GetTotalUserSideBalance (I-37) sums only
--- user-side classifications tagged with a non-empty balance_role -- correct
--- for role-bearing liabilities and role-less debit-normal memo accounts
--- (fee_expense and friends) alike. But nothing in ClassificationInput
--- enforces that a credit-normal, non-system classification (liability-shaped
--- by construction: a credit-normal balance posted to a user holder) actually
--- carries a balance_role. A mistagged one is silently excluded from
--- SolvencyReport.Liability -- understating what the platform owes and
--- reporting more margin than actually exists, the most dangerous direction
--- for a solvency check to be wrong in. This scans for exactly that mistagged
--- shape with a nonzero balance, independently of the query
--- GetTotalUserSideBalance itself uses, so a misconfigured deployment is
--- surfaced instead of silently trusted.
+-- user-side classifications tagged with a non-empty balance_role. That is
+-- correct GIVEN every real liability classification is actually tagged --
+-- nothing in ClassificationInput enforced that (closed separately by
+-- ClassificationInput.Validate, docs/INVARIANTS.md I-37 addendum).
+--
+-- This query does NOT filter on normal_side: an earlier version of this fix
+-- filtered `c.normal_side = 'credit'`, reasoning "liability-shaped by
+-- construction". That reasoning does not hold in THIS library's own
+-- convention -- main_wallet, the canonical real liability, is DEBIT-normal
+-- (DR increases what the platform owes the holder). balance_role is the
+-- ONLY signal that distinguishes a real liability from a legitimate
+-- role-less memo/cost account (fee_expense and friends, also debit-normal)
+-- -- normal_side cannot do it. Filtering on normal_side therefore missed
+-- exactly the shape a consumer would produce by copying main_wallet without
+-- also copying its balance_role, which independent review confirmed
+-- end-to-end: SolvencyCheck.Liability stayed unchanged (understated) with
+-- such a classification carrying a real, nonzero balance.
+--
+-- False positives on role-less memo accounts (fee_expense) are avoided by
+-- BalanceRoleMemo (migration 011), not by a normal_side filter:
+-- ClassificationInput.Validate requires every new non-system classification
+-- to declare EITHER a spendable role OR 'memo' explicitly, so "balance_role
+-- = ''" on a non-system classification means exactly one thing going
+-- forward -- nobody tagged it -- and is safe to treat uniformly as
+-- suspicious, regardless of normal_side.
 SELECT
   je.account_holder,
   je.currency_id,
   je.classification_id,
+  c.normal_side,
   COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE 0 END), 0)::numeric AS total_debit,
   COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)::numeric AS total_credit
 FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
 WHERE je.account_holder > 0
-  AND c.normal_side = 'credit'
   AND c.balance_role = ''
   AND NOT c.is_system
-GROUP BY je.account_holder, je.currency_id, je.classification_id
+GROUP BY je.account_holder, je.currency_id, je.classification_id, c.normal_side
 HAVING ledger_signed_delta(
-  'credit',
+  MIN(c.normal_side),
   COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
 ) != 0
