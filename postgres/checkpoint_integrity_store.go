@@ -85,7 +85,7 @@ func (s *CheckpointIntegrityStore) RecomputeBalance(ctx context.Context, holder 
 // checkpoint already found to have drifted (reconcile's checkpoint_balance
 // check). See core.CheckpointIntegrityStore for the full contract, including
 // why every call durably records itself in checkpoint_rebuilds.
-func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*core.BalanceCheckpoint, error) {
+func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*core.RebuiltCheckpoint, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,11 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 
 	if s.pool == nil {
 		// Tx mode: participate in the caller's transaction directly.
-		return s.rebuildWithQueries(ctx, s.q, holder, cur.ID, cls.ID, actorID)
+		cp, err := s.rebuildWithQueries(ctx, s.q, holder, cur.ID, cls.ID, actorID)
+		if err != nil {
+			return nil, err
+		}
+		return toRebuiltCheckpoint(cp, currencyUID, classificationUID), nil
 	}
 
 	// Pool mode: own the transaction lifecycle.
@@ -116,7 +120,24 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("postgres: rebuild checkpoint: commit: %w", err)
 	}
-	return cp, nil
+	return toRebuiltCheckpoint(cp, currencyUID, classificationUID), nil
+}
+
+// toRebuiltCheckpoint translates rebuildWithQueries' internal, id-keyed
+// result into the uid-based type CheckpointIntegrityStore.RebuildCheckpoint
+// actually returns to library consumers (core.RebuiltCheckpoint, I-18). The
+// uids are the caller's own input, not a re-resolved value: RebuildCheckpoint
+// already validated currencyUID/classificationUID resolve to cp's
+// CurrencyID/ClassificationID before rebuildWithQueries ever ran, so no
+// extra lookup is needed here.
+func toRebuiltCheckpoint(cp *core.BalanceCheckpoint, currencyUID, classificationUID string) *core.RebuiltCheckpoint {
+	return &core.RebuiltCheckpoint{
+		AccountHolder:     cp.AccountHolder,
+		CurrencyUID:       currencyUID,
+		ClassificationUID: classificationUID,
+		Balance:           cp.Balance,
+		LastEntryAt:       cp.LastEntryAt,
+	}
 }
 
 // rebuildWithQueries runs the lock + precondition + recompute + overwrite +

@@ -6,6 +6,8 @@ package postgres_test
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,4 +240,37 @@ func TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly(t *testing.T) {
 
 	_, err = pool.Exec(ctx, "DELETE FROM checkpoint_rebuilds")
 	assert.Error(t, err, "checkpoint_rebuilds must reject DELETE")
+}
+
+// TestCheckpointIntegrity_RebuildCheckpoint_ReturnsUIDsNotInternalIDs pins
+// I-18 on the one place a checkpoint crosses the library API boundary:
+// RebuildCheckpoint takes currencyUID/classificationUID strings in, and
+// (docs/audits/2026-08-25-financial-engineering/structure.md's "Major" on
+// core.BalanceCheckpoint, test-credibility.md:140) used to hand back internal
+// BIGSERIAL ids for the very same dimension, with no field letting the
+// caller map the returned ids back to the uids it passed in. This asserts
+// both the value (round-trips the same uids) and the shape (no
+// internal-id-looking json tag survives on the result type, so a future
+// regression that adds one back fails here even before anyone notices the
+// value is wrong).
+func TestCheckpointIntegrity_RebuildCheckpoint_ReturnsUIDsNotInternalIDs(t *testing.T) {
+	deps, _, pool, holderID, _ := setupPoisonedCheckpoint(t)
+	ctx := context.Background()
+
+	ci := postgres.NewCheckpointIntegrityStore(pool)
+	cp, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, 777)
+	require.NoError(t, err)
+
+	assert.Equal(t, deps.Currency, cp.CurrencyUID, "must echo back the currency uid the caller passed in, not its internal id")
+	assert.Equal(t, deps.MainWallet, cp.ClassificationUID, "must echo back the classification uid the caller passed in, not its internal id")
+	assert.Equal(t, holderID, cp.AccountHolder)
+
+	typ := reflect.TypeOf(*cp)
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		name := strings.SplitN(f.Tag.Get("json"), ",", 2)[0]
+		if name == "id" || strings.HasSuffix(name, "_id") {
+			t.Errorf("%s.%s has internal-id-shaped json tag %q -- RebuildCheckpoint's result must speak uids exclusively (I-18)", typ, f.Name, name)
+		}
+	}
 }

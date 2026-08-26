@@ -187,4 +187,15 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
   - `transfer_out`/`transfer_in`/`fee_charge` 的借贷方向修正 —— **消费方需要冲销既有 journal**
   - 分数冲销的聚合口径修正 —— **需要检查含重复维度的既有冲销**
   - `NewReserverStore` 签名、`journals.event_id` 的 Go 类型（更早的变更）
+  - `core.CheckpointIntegrityStore.RebuildCheckpoint` 的返回类型从 `*core.BalanceCheckpoint`
+    （`CurrencyID`/`ClassificationID int64`，内部 id）改为新类型 `*core.RebuiltCheckpoint`
+    （`CurrencyUID`/`ClassificationUID string`，与传入的 `currencyUID`/`classificationUID`
+    参数同值，且不再携带 `LastEntryID`）—— **库消费方需要把读取 `cp.CurrencyID`/
+    `cp.ClassificationID` 的调用点改成 `cp.CurrencyUID`/`cp.ClassificationUID`**（字符串，
+    值即调用方自己传入的 uid，不需要额外查表）；若依赖 `cp.LastEntryID` 做水位判断，需改用
+    `CheckpointIntegrityStore.RecomputeBalance` 或直接查询 `checkpoint_rebuilds` 审计表。
+    `core.BalanceCheckpoint` 本身不变（仍是内部 rollup/reconcile 引擎的工作类型，从未经任何
+    `Service` 方法对外暴露，不受此影响）。同时 `server/contract_pin_test.go` 的 I-18 门禁改为
+    从 `postgres/sql/migrations/*.up.sql` 机械派生内部 id 列名，不再是硬编码词表 —— 无消费方
+    可见影响，仅记录以防未来有人依赖旧的固定词表行为。
 - Go module 与 npm 包从 0.5.0 起版本对齐，**须同发**
