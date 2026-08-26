@@ -31,6 +31,9 @@ type EventStore struct {
 	q          *sqlcgen.Queries
 	claimLease time.Duration
 	dims       *dimCache
+	// logger is nil until SetLogger is called. nil means "fall back to
+	// slog.Default()" -- see warn.
+	logger core.Logger
 }
 
 // NewEventStore creates a new EventStore. The internal sqlc Queries instance
@@ -47,6 +50,7 @@ func (s *EventStore) WithDB(db DBTX) *EventStore {
 		q:          sqlcgen.New(db),
 		claimLease: s.claimLease,
 		dims:       s.dims,
+		logger:     s.logger,
 	}
 }
 
@@ -55,6 +59,36 @@ func (s *EventStore) SetClaimLease(d time.Duration) {
 	if d > 0 {
 		s.claimLease = d
 	}
+}
+
+// SetLogger routes this store's own diagnostic warnings (the claim-lost
+// lines in MarkDelivered/MarkRetry/MarkDead below) through the consumer's
+// injected core.Logger instead of the package-level slog default they used
+// unconditionally before this method existed. Wire it from your composition
+// root:
+//
+//	eventStore := postgres.NewEventStore(pool)
+//	eventStore.SetLogger(engine.Logger()) // engine is the *core.Engine you built with core.NewEngine(core.WithLogger(...))
+//
+// Until this is called, warn falls back to slog.Default() -- the historical
+// behavior, unchanged, so not calling this is not a regression. It exists
+// because a consumer who explicitly configured a core.Logger (via
+// ledger.WithLogger) reasonably expects EVERY line the library logs to go
+// through it; before this method existed, these three specific lines always
+// bypassed that configuration silently.
+func (s *EventStore) SetLogger(logger core.Logger) *EventStore {
+	s.logger = logger
+	return s
+}
+
+// warn is the single call site every claim-lost warning below goes through,
+// so the fallback-to-slog-default behavior lives in exactly one place.
+func (s *EventStore) warn(msg string, args ...any) {
+	if s.logger != nil {
+		s.logger.Warn(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
 }
 
 // GetEvent returns an event by ID.
@@ -169,7 +203,7 @@ func (s *EventStore) MarkDelivered(ctx context.Context, id int64, claimToken tim
 		return fmt.Errorf("postgres: mark event delivered: %w", err)
 	}
 	if n == 0 {
-		slog.Warn("postgres: mark event delivered: claim lost, outcome dropped", "event_id", id)
+		s.warn("postgres: mark event delivered: claim lost, outcome dropped", "event_id", id)
 	}
 	return nil
 }
@@ -186,7 +220,7 @@ func (s *EventStore) MarkRetry(ctx context.Context, id int64, claimToken time.Ti
 		return fmt.Errorf("postgres: mark event retry: %w", err)
 	}
 	if n == 0 {
-		slog.Warn("postgres: mark event retry: claim lost, outcome dropped", "event_id", id)
+		s.warn("postgres: mark event retry: claim lost, outcome dropped", "event_id", id)
 	}
 	return nil
 }
@@ -202,7 +236,7 @@ func (s *EventStore) MarkDead(ctx context.Context, id int64, claimToken time.Tim
 		return fmt.Errorf("postgres: mark event dead: %w", err)
 	}
 	if n == 0 {
-		slog.Warn("postgres: mark event dead: claim lost, outcome dropped", "event_id", id)
+		s.warn("postgres: mark event dead: claim lost, outcome dropped", "event_id", id)
 	}
 	return nil
 }
