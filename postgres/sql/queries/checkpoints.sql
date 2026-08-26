@@ -184,6 +184,26 @@ WHERE je.effective_at < $1
 GROUP BY je.account_holder, je.currency_id, je.classification_id
 ORDER BY je.account_holder, je.currency_id, je.classification_id;
 
+-- name: GetMaxEntryCreatedAtForDimensionBefore :one
+-- Returns the latest created_at among journal_entries for exactly one
+-- (account_holder, currency_id, classification_id) dimension whose
+-- effective_at is before cutoff, or the epoch sentinel when none exist.
+--
+-- Used to detect a stale balance_snapshots row: a snapshot is computed once,
+-- from whatever entries existed at that moment (service/snapshot.go's
+-- CreateDailySnapshot). Nothing re-triggers it when a later write
+-- retroactively backdates (effective_at < cutoff) into an already-
+-- snapshotted business date — this value being later than the snapshot
+-- row's own created_at is exactly that condition. See
+-- docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+-- Major #2 ("effective_at 回溯记账不会让已写入的历史快照失效").
+SELECT COALESCE(MAX(created_at), 'epoch'::timestamptz) AS max_created_at
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND classification_id = $3
+  AND effective_at < $4;
+
 -- name: ListAllBalanceCheckpoints :many
 SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
 FROM balance_checkpoints
