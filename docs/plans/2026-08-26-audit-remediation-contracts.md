@@ -31,8 +31,13 @@ TODO 按主题分组便于阅读，但**主题与文件不是一一对应**：`l
 
 1. **`financial.md`** —— 金额只用 `decimal.Decimal`；journal append-only，纠错只走 reversal；
    **DB 事务内禁止外部调用**（§2 的 Reserve 那条 Major 正是踩了这条）。
-2. **`deployment.md`** —— 已合入 main 的 migration **永不修改**，错了写新的。每个新 migration
-   必须可重入（`IF NOT EXISTS` / `ON CONFLICT DO NOTHING`）且带 down 脚本。
+2. **`deployment.md`** —— 已合入 main 的 migration **永不修改**，错了写新的；每个新 migration
+   必须带 down 脚本。
+   ⚠️ **勘误（2026-08-26，Team Lead）**：本条初版还要求「必须可重入（`IF NOT EXISTS`）」，
+   那是全局规则的字面搬用，**对本仓不成立**——`001_baseline` 的 31 个 `CREATE TABLE` 与
+   002/003/004 全部是裸写法，golang-migrate 的版本表已保证单次执行。**跟随本仓既有写法**，
+   不要为了满足这一条去加 `IF NOT EXISTS`（那会与全仓风格不一致，且掩盖真正的重复执行问题）。
+   新建表仍需显式 `GRANT` 给 `ledger_app` / `ledger_ro`（042 的 GRANT 循环只覆盖它执行时已存在的表）。
 3. **`working-agreements.md` §3 —— 静默失败是最高级别的 bug**：未运行 ≠ 通过；降级必须落痕；
    fail-closed 而非 fail-open。本波有 6 条发现就是这个形态（`full_coverage`、扫了 0 个报
    complete、scanner fail-open、存证 job 静默跳过、Warn 打进 NopLogger、守卫拒绝不留痕）。
