@@ -654,7 +654,7 @@ func TestCheck2GlobalBalance_DetectsDrift(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
 		},
 	}
@@ -696,7 +696,7 @@ func TestCheck2GlobalBalance_ScansNegativeSystemHolders(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
 		},
 	}
@@ -734,7 +734,7 @@ func TestCheck2GlobalBalance_PaginatesAcrossMultiplePages(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
 		},
 	}
@@ -769,7 +769,7 @@ func TestCheck2GlobalBalance_ScanLimitReportsPartialCoverage(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
 		},
 	}
@@ -825,7 +825,7 @@ func TestCheck2GlobalBalance_ResumesFromPersistedCursor(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 3, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
 		},
 	}
@@ -871,7 +871,7 @@ func TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 6, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(100)},
 		},
 	}
@@ -923,7 +923,7 @@ func TestCheck2GlobalBalance_PartialRunPersistsLapDirty(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{AccountHolder: 1, CurrencyID: 1, ClassificationID: 10, Balance: decimal.NewFromInt(500)},
 		},
 	}

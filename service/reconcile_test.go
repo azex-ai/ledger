@@ -31,10 +31,10 @@ func (m *mockAccountEntrySummer) SumEntriesByAccountClassification(_ context.Con
 }
 
 type mockCheckpointReader struct {
-	checkpoints []core.BalanceCheckpoint
+	checkpoints []BalanceCheckpoint
 }
 
-func (m *mockCheckpointReader) GetCheckpoints(_ context.Context, _, _ int64) ([]core.BalanceCheckpoint, error) {
+func (m *mockCheckpointReader) GetCheckpoints(_ context.Context, _, _ int64) ([]BalanceCheckpoint, error) {
 	return m.checkpoints, nil
 }
 
@@ -94,7 +94,7 @@ func TestReconciliationService_AccountCheckpointDrift(t *testing.T) {
 		},
 	}
 	cpReader := &mockCheckpointReader{
-		checkpoints: []core.BalanceCheckpoint{
+		checkpoints: []BalanceCheckpoint{
 			{
 				AccountHolder:    100,
 				CurrencyID:       1,

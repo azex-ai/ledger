@@ -670,19 +670,19 @@ Go-side at insert time. Internal `BIGSERIAL`/`IDENTITY` ids exist only inside
 storage (primary keys, foreign keys, advisory-lock keys, keyset-pagination
 cursors) and appear in **no public contract**: not in HTTP request or
 response bodies, not in path or query parameters, and not in the
-library-mode Go API (`core` types and interfaces that cross into
-`Service`-accessor return values speak uids exclusively). Pagination cursors
-that encode an internal position are opaque base64 strings.
+library-mode Go API (`core` types and interfaces speak uids exclusively).
+Pagination cursors that encode an internal position are opaque base64
+strings.
 
-Some `core` types are internal working representations of a storage-layer
-engine (e.g. `core.BalanceCheckpoint`, keyed on `CurrencyID`/
-`ClassificationID int64` for the rollup/reconcile engine's hot path) and are
-never returned by any `Service` accessor — they do not cross the library API
-boundary, so they are not held to this invariant (see `BalanceCheckpoint`'s
-doc comment). The one place a checkpoint DOES cross that boundary —
+The rollup/reconcile engine's internal, id-keyed working representations
+(`service.BalanceCheckpoint`, `service.RollupQueueItem`, keyed on
+`CurrencyID`/`ClassificationID int64` for that engine's hot path) live in
+`service`, not `core` — the same convention as `service.ClassificationDim`'s
+doc comment ("internal ids never leave the service"). The one place a
+checkpoint crosses into the public library API —
 `CheckpointIntegrityStore.RebuildCheckpoint`, reached via
 `Service.CheckpointIntegrity()` — returns the uid-based
-`core.RebuiltCheckpoint` instead.
+`core.BalanceCheckpoint` instead.
 
 **Why**: bigserial ids leak write ordering and table cardinality, invite
 enumeration, and weld consumers to a storage implementation detail. A single
@@ -704,6 +704,15 @@ every external reference stable across dump/restore.
   `TestContract_NoInternalIDKeysInJSON_CatchesSchemaColumnsMissedByOldWordList`
   regression-pins the specific columns — `policy_id`, `entry_id`,
   `last_entry_id` — the old hand list missed)
+- `core.TestNoInternalIDFieldsInCoreTypes` (same schema-derived banned-key
+  set, mirrored into `core` — scans every exported type declared in
+  `core/*.go` directly, so a `core` type carrying an internal id is caught
+  even before anyone wires it into an HTTP handler, matching this
+  invariant's "`core` types ... speak uids exclusively" clause literally
+  rather than only its HTTP-wire consequence;
+  `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation`
+  regression-pins that the scan itself still fires against a planted
+  fixture)
 - `service.TestReconcileFindings_NoInternalIDPatternsInSource` (the reconcile
   report is an API response body; its free-text Description/Detail strings
   carry uids/codes, never internal ids — per-row forensics go to server logs)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
+	"github.com/azex-ai/ledger/service"
 )
 
 var _ core.CheckpointIntegrityStore = (*CheckpointIntegrityStore)(nil)
@@ -85,7 +86,7 @@ func (s *CheckpointIntegrityStore) RecomputeBalance(ctx context.Context, holder 
 // checkpoint already found to have drifted (reconcile's checkpoint_balance
 // check). See core.CheckpointIntegrityStore for the full contract, including
 // why every call durably records itself in checkpoint_rebuilds.
-func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*core.RebuiltCheckpoint, error) {
+func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*core.BalanceCheckpoint, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
 		return nil, err
@@ -101,7 +102,7 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 		if err != nil {
 			return nil, err
 		}
-		return toRebuiltCheckpoint(cp, currencyUID, classificationUID), nil
+		return toCoreCheckpoint(cp, currencyUID, classificationUID), nil
 	}
 
 	// Pool mode: own the transaction lifecycle.
@@ -120,18 +121,18 @@ func (s *CheckpointIntegrityStore) RebuildCheckpoint(ctx context.Context, holder
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("postgres: rebuild checkpoint: commit: %w", err)
 	}
-	return toRebuiltCheckpoint(cp, currencyUID, classificationUID), nil
+	return toCoreCheckpoint(cp, currencyUID, classificationUID), nil
 }
 
-// toRebuiltCheckpoint translates rebuildWithQueries' internal, id-keyed
-// result into the uid-based type CheckpointIntegrityStore.RebuildCheckpoint
-// actually returns to library consumers (core.RebuiltCheckpoint, I-18). The
-// uids are the caller's own input, not a re-resolved value: RebuildCheckpoint
-// already validated currencyUID/classificationUID resolve to cp's
-// CurrencyID/ClassificationID before rebuildWithQueries ever ran, so no
-// extra lookup is needed here.
-func toRebuiltCheckpoint(cp *core.BalanceCheckpoint, currencyUID, classificationUID string) *core.RebuiltCheckpoint {
-	return &core.RebuiltCheckpoint{
+// toCoreCheckpoint translates rebuildWithQueries' internal, id-keyed result
+// (service.BalanceCheckpoint) into the uid-based type
+// CheckpointIntegrityStore.RebuildCheckpoint actually returns to library
+// consumers (core.BalanceCheckpoint, I-18). The uids are the caller's own
+// input, not a re-resolved value: RebuildCheckpoint already validated
+// currencyUID/classificationUID resolve to cp's CurrencyID/ClassificationID
+// before rebuildWithQueries ever ran, so no extra lookup is needed here.
+func toCoreCheckpoint(cp *service.BalanceCheckpoint, currencyUID, classificationUID string) *core.BalanceCheckpoint {
+	return &core.BalanceCheckpoint{
 		AccountHolder:     cp.AccountHolder,
 		CurrencyUID:       currencyUID,
 		ClassificationUID: classificationUID,
@@ -146,7 +147,7 @@ func toRebuiltCheckpoint(cp *core.BalanceCheckpoint, currencyUID, classification
 // shares the SAME transaction as the overwrite (both go through q), so a
 // repair can never commit without its forensic record, and the record can
 // never exist without the repair having happened.
-func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, classificationID, actorID int64) (*core.BalanceCheckpoint, error) {
+func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sqlcgen.Queries, holder, currencyID, classificationID, actorID int64) (*service.BalanceCheckpoint, error) {
 	// Lock the (holder, currency_id) dimension: the same advisory-lock key
 	// space PostJournal and Reserve take before mutating balance state (see
 	// acquireBalanceLocks), so no concurrent journal post or reserve for this
@@ -247,7 +248,7 @@ func (s *CheckpointIntegrityStore) rebuildWithQueries(ctx context.Context, q *sq
 		return nil, fmt.Errorf("postgres: rebuild checkpoint: write audit: %w", err)
 	}
 
-	return &core.BalanceCheckpoint{
+	return &service.BalanceCheckpoint{
 		AccountHolder:    holder,
 		CurrencyID:       currencyID,
 		ClassificationID: classificationID,

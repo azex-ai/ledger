@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/service"
 )
 
 // TestRollupQueue_ReDirtyPreventsLostEnqueue pins the DB-level closure of the
@@ -149,13 +149,13 @@ func TestRollupQueue_CheckpointUpsertIsMonotonic(t *testing.T) {
 	const holder, currency, class = int64(300), int64(1), int64(30)
 
 	// Fresh checkpoint at last_entry_id = 100.
-	require.NoError(t, adapter.UpsertCheckpoint(ctx, core.BalanceCheckpoint{
+	require.NoError(t, adapter.UpsertCheckpoint(ctx, service.BalanceCheckpoint{
 		AccountHolder: holder, CurrencyID: currency, ClassificationID: class,
 		Balance: decimal.NewFromInt(500), LastEntryID: 100,
 	}))
 
 	// Stale writer (older snapshot, last_entry_id = 50) must NOT regress it.
-	require.NoError(t, adapter.UpsertCheckpoint(ctx, core.BalanceCheckpoint{
+	require.NoError(t, adapter.UpsertCheckpoint(ctx, service.BalanceCheckpoint{
 		AccountHolder: holder, CurrencyID: currency, ClassificationID: class,
 		Balance: decimal.NewFromInt(250), LastEntryID: 50,
 	}))
@@ -167,7 +167,7 @@ func TestRollupQueue_CheckpointUpsertIsMonotonic(t *testing.T) {
 	assert.True(t, cp.Balance.Equal(decimal.NewFromInt(500)), "stale upsert must not regress balance")
 
 	// Fresher writer (last_entry_id = 150) advances it.
-	require.NoError(t, adapter.UpsertCheckpoint(ctx, core.BalanceCheckpoint{
+	require.NoError(t, adapter.UpsertCheckpoint(ctx, service.BalanceCheckpoint{
 		AccountHolder: holder, CurrencyID: currency, ClassificationID: class,
 		Balance: decimal.NewFromInt(750), LastEntryID: 150,
 	}))

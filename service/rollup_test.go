@@ -17,16 +17,16 @@ import (
 // --- Mock implementations ---
 
 type mockRollupQueuer struct {
-	items             []core.RollupQueueItem
+	items             []RollupQueueItem
 	processed         []int64
 	released          []int64
-	enqueued          []core.RollupQueueItem
+	enqueued          []RollupQueueItem
 	pending           int64
 	enqueueErr        error // when set, EnqueueRollup returns it (after recording the call)
 	lastReleaseCtxErr error // ctx.Err() observed by the most recent ReleaseRollupClaim call
 }
 
-func (m *mockRollupQueuer) DequeueRollupBatch(_ context.Context, batchSize int) ([]core.RollupQueueItem, error) {
+func (m *mockRollupQueuer) DequeueRollupBatch(_ context.Context, batchSize int) ([]RollupQueueItem, error) {
 	if batchSize > len(m.items) {
 		batchSize = len(m.items)
 	}
@@ -51,7 +51,7 @@ func (m *mockRollupQueuer) CountPendingRollups(_ context.Context) (int64, error)
 }
 
 func (m *mockRollupQueuer) EnqueueRollup(_ context.Context, holder, currencyID, classificationID int64) error {
-	m.enqueued = append(m.enqueued, core.RollupQueueItem{
+	m.enqueued = append(m.enqueued, RollupQueueItem{
 		AccountHolder:    holder,
 		CurrencyID:       currencyID,
 		ClassificationID: classificationID,
@@ -60,7 +60,7 @@ func (m *mockRollupQueuer) EnqueueRollup(_ context.Context, holder, currencyID, 
 }
 
 type mockCheckpointRW struct {
-	checkpoints map[checkpointKey]*core.BalanceCheckpoint
+	checkpoints map[checkpointKey]*BalanceCheckpoint
 }
 
 type checkpointKey struct {
@@ -69,16 +69,16 @@ type checkpointKey struct {
 
 func newMockCheckpointRW() *mockCheckpointRW {
 	return &mockCheckpointRW{
-		checkpoints: make(map[checkpointKey]*core.BalanceCheckpoint),
+		checkpoints: make(map[checkpointKey]*BalanceCheckpoint),
 	}
 }
 
-func (m *mockCheckpointRW) GetCheckpoint(_ context.Context, holder, currencyID, classificationID int64) (*core.BalanceCheckpoint, error) {
+func (m *mockCheckpointRW) GetCheckpoint(_ context.Context, holder, currencyID, classificationID int64) (*BalanceCheckpoint, error) {
 	cp := m.checkpoints[checkpointKey{holder, currencyID, classificationID}]
 	return cp, nil
 }
 
-func (m *mockCheckpointRW) UpsertCheckpoint(_ context.Context, cp core.BalanceCheckpoint) error {
+func (m *mockCheckpointRW) UpsertCheckpoint(_ context.Context, cp BalanceCheckpoint) error {
 	m.checkpoints[checkpointKey{cp.AccountHolder, cp.CurrencyID, cp.ClassificationID}] = &cp
 	return nil
 }
@@ -139,7 +139,7 @@ func (m *mockClassificationLister) CurrencyUIDByID(_ context.Context, id int64) 
 
 func TestRollupService_ProcessSingleItem(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
 		},
 	}
@@ -176,13 +176,13 @@ func TestRollupService_ProcessSingleItem(t *testing.T) {
 
 func TestRollupService_CreditNormalBalance(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 2, AccountHolder: 200, CurrencyID: 1, ClassificationID: 20},
 		},
 	}
 	cpRW := newMockCheckpointRW()
 	// Pre-existing checkpoint with balance 100
-	cpRW.checkpoints[checkpointKey{200, 1, 20}] = &core.BalanceCheckpoint{
+	cpRW.checkpoints[checkpointKey{200, 1, 20}] = &BalanceCheckpoint{
 		AccountHolder:    200,
 		CurrencyID:       1,
 		ClassificationID: 20,
@@ -238,7 +238,7 @@ func TestRollupService_EmptyQueue(t *testing.T) {
 // up instead of lagging forever.
 func TestRollupService_ReenqueuesCoalescedEntries(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
 		},
 	}
@@ -267,7 +267,7 @@ func TestRollupService_ReenqueuesCoalescedEntries(t *testing.T) {
 
 	// The coalesced entry must have triggered a re-enqueue of the same dimension.
 	require.Len(t, queue.enqueued, 1)
-	assert.Equal(t, core.RollupQueueItem{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10}, queue.enqueued[0])
+	assert.Equal(t, RollupQueueItem{AccountHolder: 100, CurrencyID: 1, ClassificationID: 10}, queue.enqueued[0])
 
 	// Non-tautology guard: the re-check MUST read entries past the checkpoint we
 	// just wrote (since = maxEntryID = 42), not re-read from the original since
@@ -282,7 +282,7 @@ func TestRollupService_ReenqueuesCoalescedEntries(t *testing.T) {
 // re-enqueue (otherwise a hot sibling classification would churn this one).
 func TestRollupService_NoReenqueueWhenNothingNew(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
 		},
 	}
@@ -316,7 +316,7 @@ func TestRollupService_NoReenqueueWhenNothingNew(t *testing.T) {
 // turn a successful rollup into a failure (which would orphan the processed row).
 func TestRollupService_ReenqueueFailureDoesNotFailRollup(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 1, AccountHolder: 100, CurrencyID: 1, ClassificationID: 10},
 		},
 		enqueueErr: errors.New("db unavailable"),
@@ -352,12 +352,12 @@ func TestRollupService_ReenqueueFailureDoesNotFailRollup(t *testing.T) {
 
 func TestRollupService_DriftDetection(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 3, AccountHolder: 300, CurrencyID: 1, ClassificationID: 30},
 		},
 	}
 	cpRW := newMockCheckpointRW()
-	cpRW.checkpoints[checkpointKey{300, 1, 30}] = &core.BalanceCheckpoint{
+	cpRW.checkpoints[checkpointKey{300, 1, 30}] = &BalanceCheckpoint{
 		AccountHolder:    300,
 		CurrencyID:       1,
 		ClassificationID: 30,
@@ -393,7 +393,7 @@ func TestRollupService_DriftDetection(t *testing.T) {
 
 func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 4, AccountHolder: 400, CurrencyID: 1, ClassificationID: 40},
 		},
 	}
@@ -426,7 +426,7 @@ func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 // lease expires; cleanupContext must detach from that cancellation.
 func TestRollupService_ReleasesClaimAfterParentCtxCancelled(t *testing.T) {
 	queue := &mockRollupQueuer{
-		items: []core.RollupQueueItem{
+		items: []RollupQueueItem{
 			{ID: 5, AccountHolder: 500, CurrencyID: 1, ClassificationID: 50},
 		},
 	}
