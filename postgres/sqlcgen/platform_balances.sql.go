@@ -141,10 +141,12 @@ func (q *Queries) GetSystemSideCustodialBalance(ctx context.Context, currencyID 
 
 const getTotalUserSideBalance = `-- name: GetTotalUserSideBalance :one
 WITH active AS (
-  SELECT DISTINCT account_holder, classification_id
-  FROM journal_entries
-  WHERE currency_id = $1
-    AND account_holder > 0
+  SELECT DISTINCT je.account_holder, je.classification_id
+  FROM journal_entries je
+  INNER JOIN classifications c ON c.id = je.classification_id
+  WHERE je.currency_id = $1
+    AND je.account_holder > 0
+    AND c.balance_role <> ''
 )
 SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
 FROM active a
@@ -170,8 +172,21 @@ LEFT JOIN LATERAL (
 ) d ON TRUE
 `
 
-// Returns the realtime sum of all user-side (holder > 0) balances for a currency.
-// This is the total liability — what the platform owes users in aggregate.
+// Returns the realtime sum of all user-side (holder > 0) LIABILITY balances
+// for a currency — what the platform owes users in aggregate.
+//
+// "Liability" is scoped to classifications tagged with a non-empty
+// balance_role (available/pending/locked), the same basis GetBalanceBreakdown
+// uses for a holder's spendable-money view (see I-11 in docs/INVARIANTS.md).
+// Role-less user-side classifications (fee_expense and friends) are
+// debit-normal cost/memo accounts booked to the user's holder id for
+// per-user reporting — never part of what the platform owes back. Summing
+// them into the liability figure previously turned every dollar of
+// cumulative fee revenue into a phantom dollar of insolvency (SolvencyCheck
+// would report Margin == -fee_total even though custodial == every
+// reservable balance): see
+// docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+// Major #1 ("偿付能力把 user-side debit-normal 费用账当成负债").
 func (q *Queries) GetTotalUserSideBalance(ctx context.Context, currencyID int64) (pgtype.Numeric, error) {
 	row := q.db.QueryRow(ctx, getTotalUserSideBalance, currencyID)
 	var total pgtype.Numeric

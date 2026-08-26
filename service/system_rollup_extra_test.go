@@ -209,11 +209,13 @@ func TestPlatformBalanceStore_GetTotalLiabilityByAsset(t *testing.T) {
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "mw_lb1", Name: "Main Wallet LB1", NormalSide: core.NormalSideCredit,
+		BalanceRole: core.BalanceRoleAvailable, // I-35: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 
 	locked, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "locked_lb1", Name: "Locked LB1", NormalSide: core.NormalSideCredit,
+		BalanceRole: core.BalanceRoleLocked, // I-35: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 
@@ -279,6 +281,7 @@ func TestPlatformBalanceStore_SolvencyCheck_SolventThenInsolvent(t *testing.T) {
 	// Liability account (credit-normal — what we owe users).
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "mw_sc1", Name: "Main Wallet SC1", NormalSide: core.NormalSideCredit,
+		BalanceRole: core.BalanceRoleAvailable, // I-35: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 	// "custodial" code is required by SolvencyCheck (debit-normal asset).
