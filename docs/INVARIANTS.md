@@ -2309,7 +2309,7 @@ consumer that never calls `Run()` must not skip the check).
 
 ---
 
-## I-38: Partition maintenance never requires the serving credential to hold DDL or table ownership
+## I-35: Partition maintenance never requires the serving credential to hold DDL or table ownership
 
 (`docs/audits/2026-08-25-financial-engineering/threat-model.md`, "分区维护路径要求应用持有 owner 权限"; `docs/plans/2026-08-26-audit-remediation-contracts.md` §4 item 2.)
 
@@ -2372,7 +2372,7 @@ capability and must not accept an arbitrary identifier.
 
 ---
 
-## I-39: A read-only role's grant never exposes a write-path secret, and a legitimate change to a config table's guarded columns is never invisible
+## I-36: A read-only role's grant never exposes a write-path secret, and a legitimate change to a config table's guarded columns is never invisible
 
 (`docs/audits/2026-08-25-financial-engineering/threat-model.md`, "`ledger_ro`
 能读出站 webhook HMAC 密钥"; `docs/audits/.../TODO.md` §9 "共同盲区".)
