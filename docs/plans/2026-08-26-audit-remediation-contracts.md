@@ -162,3 +162,49 @@ Wave 1 的两条改动各自弱化了一条不变式。Aaron 两条都选了**�
 - 同步 `docs/audits/2026-08-25-financial-engineering/TODO.md` §10：Wave 1 记的破坏性变更条目
   要更新成最终形态（例如「`TransitionInput` 新增**可选**字段」现在是**必填**）
 - 越界文件（`examples/` 等）**只做编译修复**，不夹带行为变更
+
+---
+
+## 8. Wave 2 发车说明（2026-08-26，Wave 1 + 1.5 已全部合入）
+
+号段重新核对后的实际分配（`I-34` 仍是当前最大，`005` 是当前最大 migration）：
+
+| 任务 | invariant | migration |
+|---|---|---|
+| D-money | **I-35** | — |
+| D-lock | **I-36** | — |
+| D-attest | **I-37** | — |
+| D-threat | **I-38 I-39** | **006 007** |
+| D-contract | **I-40** | — |
+| D-ops | **I-41** | — |
+| D-surface / D-tests | — | — |
+
+### 已被 Wave 1 / 1.5 提前做掉的条目（不要重复做）
+
+- §2 首条 Major（终态操作幂等键）→ W1-A + W15-A
+- §3「`ErrUnauthorizedJournal` 无 bizcode」、§5「无瞬时可重试分类」→ W1-C
+- §7 第 3、4 条 Major（`BalanceCheckpoint` uid / I-18 门禁）→ W1-B + W15-B
+- §5「校验错误信息引用不存在的字段名」→ W1-A
+
+### 两处必须知道的接缝
+
+1. **`postgres/ledger_store.go` 被 D-lock 与 D-attest 同时命中，但区域不同**：
+   D-lock 只碰 `balancePairsFromEntries` / `acquireBalanceLocks` / `ExecuteTemplateBatch`
+   （约 68–132 与批量分支）；D-attest 只碰 tx 模式的 `AuthStatusUnsignedTxMode` 分支
+   （约 427、574–590）。**双方都不得重排、不得整文件 gofmt 之外的格式变动。**
+   合并顺序：**D-lock 先合，D-attest 后合**，冲突由 Team Lead 解。
+2. **§4-3（检测层游标）仍是跨域接缝**：guard/migration 归 D-threat，
+   「扫了 0 个不得报 `Complete=true`」的 Go 侧归 D-ops。**任何一半单独上线都不构成修复**，
+   两边都要在 bus 上 checkpoint 自己那半完成。
+
+### Wave 1 留下的三条追加任务（已在 board）
+
+`#24` → D-lock（`ErrTransient` 接线）｜`#25` → D-threat（收据表守卫）｜`#28` → D-tests（门禁派生去重）
+
+### 本波新增的硬要求（来自 Wave 1 的教训）
+
+- **注释里的「以后要记得」= 缺一个门禁**。W15-A 的 deposit 键安全性挂在「生命周期无环」上，
+  只写在注释里、没有任何检查 —— 合并前补了 `presets/lifecycle_acyclic_test.go`。
+  你写下任何「因为 X 成立所以这样做是安全的」，就要问：**X 能不能机器检查？**能就去做。
+- **交付三样齐备**：`bus done` + `bus send team-lead result` + 最终回复。
+  上一波有 agent 报 idle 但正文零送达，Team Lead 只能自己重跑一遍它的活。
