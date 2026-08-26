@@ -2279,7 +2279,7 @@ consumer that never calls `Run()` must not skip the check).
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
 
-## I-35: Solvency liability counts only role-bearing user-side balances
+## I-37: Solvency liability counts only role-bearing user-side balances
 
 (`docs/plans/2026-08-26-audit-remediation-contracts.md`, D-money;
 `docs/audits/2026-08-25-financial-engineering/financial-correctness.md`

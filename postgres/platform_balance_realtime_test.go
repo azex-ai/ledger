@@ -33,7 +33,7 @@ func TestPlatformBalance_RealtimeReflectsUnrolledJournal(t *testing.T) {
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "main_wallet_rt", Name: "Main Wallet RT", NormalSide: core.NormalSideDebit,
-		BalanceRole: core.BalanceRoleAvailable, // I-35: liability now scoped to role-bearing classifications
+		BalanceRole: core.BalanceRoleAvailable, // I-37: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 
@@ -122,7 +122,7 @@ func TestPlatformBalance_RealtimeReflectsSecondJournal(t *testing.T) {
 
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "mw_rt2", Name: "Main Wallet RT2", NormalSide: core.NormalSideDebit,
-		BalanceRole: core.BalanceRoleAvailable, // I-35: liability now scoped to role-bearing classifications
+		BalanceRole: core.BalanceRoleAvailable, // I-37: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 
@@ -182,7 +182,7 @@ func TestPlatformBalance_RealtimeSolvencyCheck(t *testing.T) {
 	// Liability account: credit-normal (what we owe users).
 	mainWallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
 		Code: "mw_solv", Name: "MW Solv", NormalSide: core.NormalSideCredit,
-		BalanceRole: core.BalanceRoleAvailable, // I-35: liability now scoped to role-bearing classifications
+		BalanceRole: core.BalanceRoleAvailable, // I-37: liability now scoped to role-bearing classifications
 	})
 	require.NoError(t, err)
 	// Custodial: debit-normal asset (what we hold).
