@@ -103,6 +103,19 @@ func (i ReserveInput) Validate() error {
 // returns nil without re-applying; a replayed key with a different amount is
 // ErrConflict; the same key reused against a different reservation is also
 // ErrConflict.
+//
+// COMPOSITION WARNING. Settle does not move money -- the charge is a separate
+// journal the caller posts, and the documented pattern (examples/billing) runs
+// both inside one RunInTx. Retrying that whole block is only safe if the
+// journal's idempotency key is reused too, exactly as this one must be
+// (api-contract.md §9: the key is generated once by the initiator and reused
+// across retries, never regenerated inside the retry path). Note what changed
+// here: before this field existed, a retry of the block died at Settle with
+// ErrInvalidTransition and took the transaction down with it, so a
+// freshly-keyed charge could never land. That accident was doing real work.
+// Now Settle correctly short-circuits to success, and the charge's own key is
+// the only thing left standing between a retry and a double charge. Generate
+// both keys outside the retry, not inside it.
 type SettleInput struct {
 	ReservationUID string          `json:"reservation_uid"`
 	Amount         decimal.Decimal `json:"amount"`
