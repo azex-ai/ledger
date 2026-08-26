@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,6 +14,18 @@ import (
 // (see migration 037 and docs/INVARIANTS.md I-13). DDL cannot be
 // parameterized; every interpolated value below is derived from time.Time —
 // no user input reaches the SQL.
+//
+// Every operation goes through the SECURITY DEFINER functions migration 007
+// installs (ledger_create_monthly_partition / ledger_rebalance_default_partition)
+// rather than issuing DDL directly. Partition creation, DETACH/ATTACH and
+// TRUNCATE are all owner-gated in Postgres, and the pool passed in here is
+// the ordinary ledger_app serving pool — it holds none of those grants and
+// was never meant to. The two functions run with their owner's (ledger_owner)
+// privileges regardless of caller, so PartitionStore needs nothing beyond
+// EXECUTE. See migration 007's header comment for why: giving the serving
+// pool ledger_owner instead (the only alternative that made the old
+// direct-DDL version work) also hands it a bare TRUNCATE that walks straight
+// past journal_entries' no-DELETE trigger, which does not fire on TRUNCATE.
 type PartitionStore struct {
 	pool *pgxpool.Pool
 }
@@ -71,26 +82,19 @@ func (s *PartitionStore) EnsureMonthlyPartitions(ctx context.Context, now time.T
 	return created, nil
 }
 
-// createPartition issues CREATE TABLE IF NOT EXISTS for one month. Returns
-// whether the table was newly created.
+// createPartition calls ledger_create_monthly_partition for one month.
+// Returns whether the table was newly created.
 func (s *PartitionStore) createPartition(ctx context.Context, month time.Time) (bool, error) {
 	name := partitionName(month)
-	var exists bool
-	if err := s.pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists); err != nil {
-		return false, fmt.Errorf("postgres: partition: check %s: %w", name, err)
-	}
-	if exists {
-		return false, nil
-	}
 	next := month.AddDate(0, 1, 0)
-	sql := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s PARTITION OF journal_entries FOR VALUES FROM ('%s') TO ('%s')",
+	var didCreate bool
+	if err := s.pool.QueryRow(ctx,
+		"SELECT ledger_create_monthly_partition($1, $2, $3)",
 		name, month.Format("2006-01-02"), next.Format("2006-01-02"),
-	)
-	if _, err := s.pool.Exec(ctx, sql); err != nil {
+	).Scan(&didCreate); err != nil {
 		return false, fmt.Errorf("postgres: partition: create %s: %w", name, err)
 	}
-	return true, nil
+	return didCreate, nil
 }
 
 // DefaultPartitionHasRows reports whether journal_entries_default holds any
@@ -123,73 +127,42 @@ func isDefaultOverlapError(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23514"
 }
 
-// rebalanceDefault performs the migration-037 dance at runtime: inside one
-// transaction, detach the default partition, create every monthly partition
-// needed to cover its rows plus the requested horizon, move the rows into
-// their monthly homes, and re-attach the emptied default.
+// rebalanceDefault calls ledger_rebalance_default_partition, which performs
+// the migration-037 dance at runtime: detach the default partition, create
+// every monthly partition needed to cover its rows plus the requested
+// horizon, move the rows into their monthly homes, and re-attach the emptied
+// default — all inside the function's own implicit transaction, so this is
+// a single round trip rather than a hand-managed pgx transaction.
 //
-// LOCKING TRADEOFF: DETACH/ATTACH here are non-CONCURRENT (CONCURRENTLY is
-// forbidden inside a transaction, and this dance needs atomicity), so the
-// whole transaction — including the bulk row move — holds an ACCESS
-// EXCLUSIVE lock on journal_entries, blocking every ledger read and write
-// until it commits. With an active partition job the default partition is
-// empty or near-empty and this is milliseconds; it only becomes expensive
-// after the horizon has already lapsed. See RUNBOOK §11.
+// LOCKING TRADEOFF: DETACH/ATTACH inside the function are non-CONCURRENT
+// (CONCURRENTLY is forbidden inside a transaction, and this dance needs
+// atomicity), so the whole statement — including the bulk row move — holds
+// an ACCESS EXCLUSIVE lock on journal_entries, blocking every ledger read
+// and write until it returns. With an active partition job the default
+// partition is empty or near-empty and this is milliseconds; it only
+// becomes expensive after the horizon has already lapsed. See RUNBOOK §11.
 func (s *PartitionStore) rebalanceDefault(ctx context.Context, now time.Time, monthsAhead int) ([]string, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: partition: begin rebalance: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx, "ALTER TABLE journal_entries DETACH PARTITION journal_entries_default"); err != nil {
-		return nil, fmt.Errorf("postgres: partition: detach default: %w", err)
-	}
-
-	var minAt, maxAt *time.Time
-	if err := tx.QueryRow(ctx,
-		"SELECT min(created_at), max(created_at) FROM journal_entries_default",
-	).Scan(&minAt, &maxAt); err != nil {
-		return nil, fmt.Errorf("postgres: partition: scan default range: %w", err)
-	}
-
 	first := monthStart(now.UTC())
 	last := first.AddDate(0, monthsAhead, 0)
-	if minAt != nil {
-		if m := monthStart(minAt.UTC()); m.Before(first) {
-			first = m
-		}
-		if m := monthStart(maxAt.UTC()); m.After(last) {
-			last = m
-		}
-	}
 
 	var created []string
-	for month := first; !month.After(last); month = month.AddDate(0, 1, 0) {
-		name := partitionName(month)
-		sql := fmt.Sprintf(
-			"CREATE TABLE IF NOT EXISTS %s PARTITION OF journal_entries FOR VALUES FROM ('%s') TO ('%s')",
-			name, month.Format("2006-01-02"), month.AddDate(0, 1, 0).Format("2006-01-02"),
-		)
-		if _, err := tx.Exec(ctx, sql); err != nil {
-			return nil, fmt.Errorf("postgres: partition: rebalance create %s: %w", name, err)
+	rows, err := s.pool.Query(ctx,
+		"SELECT unnest(ledger_rebalance_default_partition($1, $2))",
+		first.Format("2006-01-02"), last.Format("2006-01-02"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: partition: rebalance: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("postgres: partition: rebalance: scan: %w", err)
 		}
 		created = append(created, name)
 	}
-
-	if minAt != nil {
-		if _, err := tx.Exec(ctx, "INSERT INTO journal_entries SELECT * FROM journal_entries_default"); err != nil {
-			return nil, fmt.Errorf("postgres: partition: move default rows: %w", err)
-		}
-		if _, err := tx.Exec(ctx, "TRUNCATE journal_entries_default"); err != nil {
-			return nil, fmt.Errorf("postgres: partition: truncate default: %w", err)
-		}
-	}
-	if _, err := tx.Exec(ctx, "ALTER TABLE journal_entries ATTACH PARTITION journal_entries_default DEFAULT"); err != nil {
-		return nil, fmt.Errorf("postgres: partition: re-attach default: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: partition: commit rebalance: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: partition: rebalance: %w", err)
 	}
 	return created, nil
 }
