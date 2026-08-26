@@ -14,6 +14,181 @@ import (
 	"github.com/azex-ai/ledger/presets"
 )
 
+// TestInstallExtendedPresets_PostsAgainstRealPostgres pins the Extended
+// preset bundle (FX, Capital, Settlement, Spread -- installed together by
+// presets.InstallExtendedPresets, same as ledger.Service.InstallExtendedPresets)
+// against a REAL Postgres store. Before this test, every *_test.go in the
+// presets package that exercises these four bundles does so only against
+// presets_test.go's in-memory fake stores (newFakeClassificationStore /
+// newFakeJournalTypeStore / newFakeTemplateStore), which are strictly more
+// permissive than the real postgres.ClassificationStore/TemplateStore (e.g.
+// the fake's SetBalanceRole allows switching role back and forth freely;
+// the real one only allows a one-time empty->non-empty upgrade). A bundle
+// that passes every fake-store test could still fail to install, or install
+// with a subtly different amount split, against the real schema and its
+// triggers/constraints -- and nothing in the repo would catch it, because
+// the only two real-Postgres examples that call
+// svc.InstallExtendedPresets(ctx) (examples/credits-topup, examples/billing)
+// have zero automated tests (`find examples -name "*_test.go"` is empty).
+//
+// This does not adjudicate whether the FX/settlement templates' DR/CR
+// assignment is business-correct -- presets/fx.go's own doc comment
+// disagrees with its own code on that point, and TODO.md §1 already tracks
+// it separately ("presets/fx.go 的文档与自己的代码符号相反", deferred to
+// W3-sign, out of this task's scope). The assertions below pin the actual
+// current behavior of the real store (so a regression in precision
+// validation, classification wiring, or template rendering trips this
+// test), not an aspirational "correct" sign.
+func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+	ledgerStore := postgres.NewLedgerStore(pool)
+
+	require.NoError(t, presets.InstallExtendedPresets(ctx, classStore, classStore, tmplStore))
+	// Idempotent re-install: existing rows are validated and reused, not
+	// duplicated or rejected.
+	require.NoError(t, presets.InstallExtendedPresets(ctx, classStore, classStore, tmplStore))
+
+	spread, err := classStore.GetByCode(ctx, "spread")
+	require.NoError(t, err)
+	assert.Equal(t, core.NormalSideCredit, spread.NormalSide)
+	assert.True(t, spread.IsSystem)
+
+	mainWallet, err := classStore.GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+	settlement, err := classStore.GetByCode(ctx, "settlement")
+	require.NoError(t, err)
+	equity, err := classStore.GetByCode(ctx, "equity")
+	require.NoError(t, err)
+	custodial, err := classStore.GetByCode(ctx, "custodial")
+	require.NoError(t, err)
+	fees, err := classStore.GetByCode(ctx, "fees")
+	require.NoError(t, err)
+
+	// --- FX: fund a user in currency A, then run the fx_sell / fx_buy legs
+	// for real against Postgres -- this is the exact composition FXBundle's
+	// doc comment describes as the caller workflow for a CCY-A -> CCY-B swap.
+	curA := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("FXA"), "FX Currency A")
+	curB := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("FXB"), "FX Currency B")
+	fxUser := int64(910001)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+		HolderID:       fxUser,
+		CurrencyUID:    curA,
+		IdempotencyKey: postgrestest.UniqueKey("fx-fund"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(500)},
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{
+		HolderID:       fxUser,
+		CurrencyUID:    curA,
+		IdempotencyKey: postgrestest.UniqueKey("fx-sell"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
+		Source:         "test",
+	})
+	require.NoError(t, err, "fx_sell must post against the real store (precision + classification wiring must be intact)")
+
+	walletA, err := ledgerStore.GetBalance(ctx, fxUser, curA, mainWallet.UID)
+	require.NoError(t, err)
+	assert.True(t, walletA.Equal(decimal.NewFromInt(400)), "user's CCY-A wallet must reflect the fx_sell leg, want 400 got %s", walletA)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
+		HolderID:       fxUser,
+		CurrencyUID:    curB,
+		IdempotencyKey: postgrestest.UniqueKey("fx-buy"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(250)},
+		Source:         "test",
+	})
+	require.NoError(t, err, "fx_buy must post against the real store")
+
+	walletB, err := ledgerStore.GetBalance(ctx, fxUser, curB, mainWallet.UID)
+	require.NoError(t, err)
+	assert.True(t, walletB.Equal(decimal.NewFromInt(250)), "user's CCY-B wallet must reflect the fx_buy leg, want 250 got %s", walletB)
+
+	settlementB, err := ledgerStore.GetBalance(ctx, -fxUser, curB, settlement.UID)
+	require.NoError(t, err)
+	assert.True(t, settlementB.Equal(decimal.NewFromInt(250)), "settlement's CCY-B leg must move with the fx_buy posting, want 250 got %s", settlementB)
+
+	// --- Capital: injection then withdrawal, real store, own currency so
+	// equity/custodial start clean.
+	curC := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("CAP"), "Capital Currency")
+	sysHolder := int64(910002)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "capital_injection", core.TemplateParams{
+		HolderID:       sysHolder,
+		CurrencyUID:    curC,
+		IdempotencyKey: postgrestest.UniqueKey("capital-inject"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(1000)},
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	equityBal, err := ledgerStore.GetBalance(ctx, -sysHolder, curC, equity.UID)
+	require.NoError(t, err)
+	assert.True(t, equityBal.Equal(decimal.NewFromInt(1000)), "equity after injection, want 1000 got %s", equityBal)
+
+	// The other leg of capital_injection must land on custodial specifically
+	// (not, say, settlement or fees) -- a template line pointed at the wrong
+	// classification code still renders and posts a perfectly balanced
+	// journal (Render only checks debit==credit per currency, not which
+	// classification received it), so only a per-classification balance
+	// check like this one would catch a wrong-classification-code bug.
+	custodialBalCapital, err := ledgerStore.GetBalance(ctx, -sysHolder, curC, custodial.UID)
+	require.NoError(t, err)
+	assert.True(t, custodialBalCapital.Equal(decimal.NewFromInt(-1000)), "custodial after injection (credit-normal debited), want -1000 got %s", custodialBalCapital)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "capital_withdraw", core.TemplateParams{
+		HolderID:       sysHolder,
+		CurrencyUID:    curC,
+		IdempotencyKey: postgrestest.UniqueKey("capital-withdraw"),
+		Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(300)},
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	equityBal, err = ledgerStore.GetBalance(ctx, -sysHolder, curC, equity.UID)
+	require.NoError(t, err)
+	assert.True(t, equityBal.Equal(decimal.NewFromInt(700)), "equity after a 300 withdrawal from 1000, want 700 got %s", equityBal)
+
+	// --- Settlement: gross (no fee) and net (with fee) legs, real store.
+	merchant := int64(910003)
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "checkout_settlement_gross", core.TemplateParams{
+		HolderID:       merchant,
+		CurrencyUID:    curC,
+		IdempotencyKey: postgrestest.UniqueKey("settle-gross"),
+		Amounts:        map[string]decimal.Decimal{"gross_amount": decimal.NewFromInt(200)},
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	custodialAfterGross, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
+	require.NoError(t, err)
+	assert.False(t, custodialAfterGross.IsZero(), "custodial must move when checkout_settlement_gross posts against the real store")
+
+	_, err = ledgerStore.ExecuteTemplate(ctx, "checkout_settlement_net", core.TemplateParams{
+		HolderID:       merchant,
+		CurrencyUID:    curC,
+		IdempotencyKey: postgrestest.UniqueKey("settle-net"),
+		Amounts: map[string]decimal.Decimal{
+			"gross_amount": decimal.NewFromInt(100),
+			"net_amount":   decimal.NewFromInt(95),
+			"fee_amount":   decimal.NewFromInt(5),
+		},
+		Source: "test",
+	})
+	require.NoError(t, err)
+
+	feesBal, err := ledgerStore.GetBalance(ctx, -merchant, curC, fees.UID)
+	require.NoError(t, err)
+	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount leg, want 5 got %s", feesBal)
+}
+
 func TestInstallDefaultTemplatePresets(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
