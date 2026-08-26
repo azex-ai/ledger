@@ -1,5 +1,11 @@
 # 审计遗留工作清单
 
+> ## ⚠️ 本文件已不是待办清单 —— 见下方「处置状态」
+>
+> 2026-08-26 的三波整改（Wave 1 / 1.5 / 2）已处理掉其中绝大部分。
+> **下面按主题分组的表格是审计当时的原始清单，保留作为论证与定位的索引，
+> 不再代表「还剩什么」。** 还剩什么看 `README.md` 的处置表与 bus board。
+>
 > 源：`docs/audits/2026-08-25-financial-engineering/`（8 份 territory 报告 + lead 抽查，
 > 原始 90 条发现 = 11 Critical + 44 Major + 35 Minor）。
 > **8 条（去重后）Critical 已修**，处置表见本目录 `README.md`。本文件列剩下的全部 Major 与 Minor ——

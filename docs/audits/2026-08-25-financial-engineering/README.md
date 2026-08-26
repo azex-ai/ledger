@@ -22,9 +22,40 @@
 | C7 | 转账/收费借贷方向反了 | `d5c7357` | 实跑转账 100：付款方 +100 → 修复后 −100 |
 | C8 | 「冲销剩余全部」静默少退 | `b49cb20` | 实跑：账上剩 40 → 0 |
 
-**Major 与 Minor 未处理**（原始 44 + 35 条，合并跨 territory 的重复命中后为 **40 + 34** 条）。
-清单见本目录 `TODO.md` —— 按主题分组、带 `file:line` 与来源报告，冷启动可直接开工；
-完整论证、失效场景、最小复现在各 territory 报告原文里。
+### Major / Minor 的整改（2026-08-26，三波）
+
+原始 44 Major + 35 Minor（合并跨 territory 重复命中后 40 + 34），经 Wave 1 / 1.5 / 2 处理。
+契约与波次划分见 `docs/plans/2026-08-26-audit-remediation-contracts.md`。
+
+| 波次 | 内容 | 结果 |
+|---|---|---|
+| **Wave 1** | 契约层三条：终态操作幂等键、`BalanceCheckpoint` uid 化 + I-18 门禁重建、错误分类（bizcode 14010 + 瞬时可重试） | 已合入 |
+| **Wave 1.5** | Aaron 拍板恢复被弱化的两条不变式：`Transition` 幂等键改必填（I-3 恢复全称）、id-keyed checkpoint 类型移出 `core`（I-18 恢复原措辞） | 已合入 |
+| **Wave 2** | 八个域并行：记账正确性 / 锁与键空间 / 防篡改接线 / DB 角色与守卫 / HTTP 与契约面 / 可观测与链上 / 文档与 examples / 测试可信度 | 已合入 |
+| **Wave 3** | 符号语义收敛、`journal_entries.id` 跨分区不唯一、发版收口 | 进行中 |
+
+**这一轮真正的产出不是「修了 N 条」，是把「靠人记得」换成了「机器会拦」**：
+
+- I-18 门禁从硬编码词表改成从 `postgres/sql/migrations/*.up.sql` **机械派生**，并抽进
+  `internal/idschema` 单一事实源（原来 `core` / `server` 各一份，会静默漂移）
+- 新增 `server/openapi_contract_test.go`：反射 Go wire struct 对照 `docs/openapi.yaml`，
+  **双向**报「文档有代码没有」与「代码有文档没有」，跑在 `go test ./...` 无 path filter
+  —— 旧门禁只比对两个静态文件，谁都没碰过 Go handler，这是所有契约漂移的元凶
+- 新增 `readme_api_surface_test.go`：任何导出的 `*Service` 方法不在 README 表里就红。
+  上次审计发现「缺 11 个方法」，人工补完又漏 3 个（含 `Authorize` / `AuthorizeTemplate`
+  —— RunInTx 下拿到已签名 journal 的唯一途径）。**手工补表就是会漏，两次为证**
+- 新增 `presets/lifecycle_acyclic_test.go`：deposit 幂等键的安全性挂在「生命周期无环」上，
+  原本只写在注释里。加一条 `failed → confirming` 重试边就会让合法重试被当成重放静默吞掉，
+  而**没有一个测试会红**
+- `grant_coverage_test.go` 从「镜像 schema 用的同一个谓词」改成显式三分类，**新表不分类直接 fail**
+
+**验证方式**：每一条修复都由 Team Lead 在合并前亲手证伪 —— 拆掉实现、种回漂移、
+以 `ledger_app` 实跑攻击、停掉 advisory lock。**报告说绿不算数，我自己看它红过才算。**
+
+几个代表性证据：拆掉 advisory lock 后 10 路并发预留总额 **150 > 余额 100**（旧 pin 在同样条件下是绿的）；
+还原 `expires_in` 漂移，契约门禁两个方向同时报错；拆掉存证接线，
+pin 报 `the P6 batch attestation chain never advanced within 5s`；
+以 `ledger_app` 伪造收据的 UPDATE 被 SQLSTATE 42501 拒绝。
 
 ### 修复期间改动的两条 invariant
 
