@@ -150,10 +150,11 @@ type fakeSweeper struct {
 }
 
 type fakeBatchSweepCall struct {
-	chainID int64
-	token   string
-	targets []core.SweepTarget
-	nonce   uint64
+	chainID     int64
+	token       string
+	targets     []core.SweepTarget
+	nonce       uint64
+	priorTxHash string
 }
 
 func (f *fakeSweeper) NextNonce(ctx context.Context, chainID int64) (uint64, error) {
@@ -165,11 +166,11 @@ func (f *fakeSweeper) NextNonce(ctx context.Context, chainID int64) (uint64, err
 	return n, nil
 }
 
-func (f *fakeSweeper) BatchSweep(ctx context.Context, chainID int64, token string, targets []core.SweepTarget, nonce uint64) (string, error) {
+func (f *fakeSweeper) BatchSweep(ctx context.Context, chainID int64, token string, targets []core.SweepTarget, nonce uint64, priorTxHash string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.txHashSeq++
-	f.batchSweeps = append(f.batchSweeps, fakeBatchSweepCall{chainID, token, targets, nonce})
+	f.batchSweeps = append(f.batchSweeps, fakeBatchSweepCall{chainID, token, targets, nonce, priorTxHash})
 	return "0xsweep" + decimal.NewFromInt(int64(f.txHashSeq)).String(), nil
 }
 
