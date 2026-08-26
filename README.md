@@ -154,29 +154,12 @@ svc.Booker().Transition(ctx, core.TransitionInput{
 })
 ```
 
-Background worker (rollup, expiry, snapshots — always on):
+Background worker (rollup, expiry, reconcile, snapshots, event delivery):
 
 ```go
 worker := svc.Worker(service.DefaultWorkerConfig())
 go worker.Run(ctx)
 ```
-
-`svc.Worker(cfg)` alone does **not** wire webhook event delivery or the full
-reconciliation suite — both are separate, optional `Worker` methods, and
-skipping them is silent: events sit in the `events` table unretried, with no
-error and no log line. Wire them explicitly if you need them:
-
-```go
-worker.SetEventDeliverer(delivery.NewWebhookDeliverer(
-    postgres.NewEventStore(pool),             // implements delivery.EventPoller
-    postgres.NewWebhookSubscriberStore(pool), // implements delivery.SubscriberLister
-    core.NopLogger(), nil,                    // metrics nil defaults to a no-op; logger does not
-))
-worker.SetFullReconciler(svc.FullReconciler(service.FullReconciliationConfig{}))
-```
-
-See [`examples/fullstack/backend`](examples/fullstack/backend/main.go) for
-this wired end-to-end alongside the HTTP API.
 
 Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
 
