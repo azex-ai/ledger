@@ -7,8 +7,20 @@ import (
 )
 
 // Metrics is the observability interface for counters, histograms, and gauges.
-// Inject Prometheus, OpenTelemetry, or DataDog implementation. Default: nopMetrics (silent).
+// Inject Prometheus, OpenTelemetry, or DataDog implementation. Default:
+// NoopMetrics (silent), via NopMetrics().
 // NOTE: reason/code parameters must be constrained enums, not free-form strings (Prometheus cardinality).
+//
+// This interface is intentionally wide (one method per emitted signal, not
+// grouped into a handful of generic Counter/Gauge/Histogram calls) so each
+// call site names what it means rather than a raw metric name string. A
+// consumer implementing only a few of these -- e.g. wiring just
+// JournalPosted into an existing internal dashboard -- should embed
+// NoopMetrics and override the handful it cares about, rather than writing
+// 30 empty method bodies by hand:
+//
+//	type myMetrics struct{ core.NoopMetrics }
+//	func (m *myMetrics) JournalPosted(code string) { ... }
 type Metrics interface {
 	// Counters
 	JournalPosted(journalTypeCode string)
@@ -88,39 +100,45 @@ type Metrics interface {
 	DepositReviewRequired(chainID int64, reason string)
 }
 
-type nopMetrics struct{}
+// NoopMetrics is a Metrics implementation where every method is a no-op.
+// Exported (unlike its predecessor, an unexported nopMetrics) so consumers
+// can embed it as a base and override only the handful of methods they
+// actually wire up -- see the Metrics doc comment for the embedding pattern.
+// NopMetrics() below returns this same type behind the Metrics interface for
+// callers that just want a working default with no customization.
+type NoopMetrics struct{}
 
-func (nopMetrics) JournalPosted(string)                        {}
-func (nopMetrics) JournalFailed(string, string)                {}
-func (nopMetrics) ReserveCreated()                             {}
-func (nopMetrics) ReserveSettled()                             {}
-func (nopMetrics) ReserveReleased()                            {}
-func (nopMetrics) RollupProcessed(int)                         {}
-func (nopMetrics) ReconcileCompleted(bool)                     {}
-func (nopMetrics) IdempotencyCollision(string)                 {}
-func (nopMetrics) TemplateFailed(string, string)               {}
-func (nopMetrics) BookingTransitioned(string, string)          {}
-func (nopMetrics) EventDelivered()                             {}
-func (nopMetrics) EventDeliveryFailed()                        {}
-func (nopMetrics) EventDead()                                  {}
-func (nopMetrics) RollupItemFailed()                           {}
-func (nopMetrics) ReconcileCheckResult(string, bool)           {}
-func (nopMetrics) JournalLatency(time.Duration)                {}
-func (nopMetrics) RollupLatency(time.Duration)                 {}
-func (nopMetrics) SnapshotLatency(time.Duration)               {}
-func (nopMetrics) JournalEntryCount(string, int)               {}
-func (nopMetrics) PendingRollups(int64)                        {}
-func (nopMetrics) ActiveReservations(int64)                    {}
-func (nopMetrics) CheckpointAge(string, time.Duration)         {}
-func (nopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
-func (nopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
-func (nopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
+func (NoopMetrics) JournalPosted(string)                        {}
+func (NoopMetrics) JournalFailed(string, string)                {}
+func (NoopMetrics) ReserveCreated()                             {}
+func (NoopMetrics) ReserveSettled()                             {}
+func (NoopMetrics) ReserveReleased()                            {}
+func (NoopMetrics) RollupProcessed(int)                         {}
+func (NoopMetrics) ReconcileCompleted(bool)                     {}
+func (NoopMetrics) IdempotencyCollision(string)                 {}
+func (NoopMetrics) TemplateFailed(string, string)               {}
+func (NoopMetrics) BookingTransitioned(string, string)          {}
+func (NoopMetrics) EventDelivered()                             {}
+func (NoopMetrics) EventDeliveryFailed()                        {}
+func (NoopMetrics) EventDead()                                  {}
+func (NoopMetrics) RollupItemFailed()                           {}
+func (NoopMetrics) ReconcileCheckResult(string, bool)           {}
+func (NoopMetrics) JournalLatency(time.Duration)                {}
+func (NoopMetrics) RollupLatency(time.Duration)                 {}
+func (NoopMetrics) SnapshotLatency(time.Duration)               {}
+func (NoopMetrics) JournalEntryCount(string, int)               {}
+func (NoopMetrics) PendingRollups(int64)                        {}
+func (NoopMetrics) ActiveReservations(int64)                    {}
+func (NoopMetrics) CheckpointAge(string, time.Duration)         {}
+func (NoopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
+func (NoopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
+func (NoopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 
-func (nopMetrics) ChainCursorLag(int64, int64)         {}
-func (nopMetrics) DepositReorgDetected(int64)          {}
-func (nopMetrics) SweepUnattributed(int64)             {}
-func (nopMetrics) RegistrationRescanFailed(int64)      {}
-func (nopMetrics) DepositReviewRequired(int64, string) {}
+func (NoopMetrics) ChainCursorLag(int64, int64)         {}
+func (NoopMetrics) DepositReorgDetected(int64)          {}
+func (NoopMetrics) SweepUnattributed(int64)             {}
+func (NoopMetrics) RegistrationRescanFailed(int64)      {}
+func (NoopMetrics) DepositReviewRequired(int64, string) {}
 
 // NopMetrics returns a no-op metrics collector.
-func NopMetrics() Metrics { return nopMetrics{} }
+func NopMetrics() Metrics { return NoopMetrics{} }
