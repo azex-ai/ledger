@@ -243,10 +243,11 @@ func TestAudit_TraceBooking(t *testing.T) {
 	// Transition the booking to generate an event (CreateBooking alone does not emit events).
 	// Deposit lifecycle: pending -> confirming -> confirmed | failed | expired
 	event, err := bookingStore.Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "confirming",
-		Amount:     decimal.NewFromInt(300),
-		ActorID:    userID,
+		BookingUID:     booking.UID,
+		ToStatus:       "confirming",
+		Amount:         decimal.NewFromInt(300),
+		ActorID:        userID,
+		IdempotencyKey: postgrestest.UniqueKey("trace-booking-transition"),
 	})
 	require.NoError(t, err)
 	require.NotNil(t, event)

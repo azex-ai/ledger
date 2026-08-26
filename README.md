@@ -35,7 +35,7 @@ Core engine capabilities:
 - **Platform solvency API** -- `PlatformBalanceReader` + `SolvencyChecker` read from the `system_rollups` materialised view in O(1)
 - **Sparse daily snapshots** -- historical balance snapshots; startup backfill with advisory-lock guard for multi-replica safety
 - **Prometheus / OTEL observability** -- `observability.NewPrometheusMetrics()` + OTEL trace propagation on journal/booking paths
-- **Idempotent writes** -- every mutation requires an idempotency key (`Transition`'s is opt-in, see `docs/INVARIANTS.md` I-3); duplicates return the original result without side effects, mismatched payloads return `ErrConflict`
+- **Idempotent writes** -- every mutation requires an idempotency key, `Transition` included (see `docs/INVARIANTS.md` I-3); duplicates return the original result without side effects, mismatched payloads return `ErrConflict`
 - **Async rollup worker** -- background checkpoint materialisation with `SKIP LOCKED` queue and leader election
 - **NO NULL policy** -- all DB columns `NOT NULL` with meaningful defaults; all Go fields are value types
 

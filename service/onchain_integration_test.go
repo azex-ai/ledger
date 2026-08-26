@@ -723,6 +723,109 @@ func TestOnchain_Sweep_FailedRevivesToSentWithNewNonce(t *testing.T) {
 	assert.Empty(t, confirmed.JournalUID, "sweep bookings must never post a journal, even after a revival")
 }
 
+// TestOnchain_Sweep_TwoRevivalCycles_DoNotCollide pins W15-A's core hazard
+// (docs/plans/2026-08-26-audit-remediation-contracts.md §7): Transition's
+// idempotency key is now mandatory, and SweepLifecycle (unlike deposit's) has
+// a real cycle -- failed -> pending -> sent -> failed -> pending -> ...
+// (presets/sweep.go's failed->pending retry edge). A key derived from just
+// (booking, to_status) -- e.g. "<uid>-failed" or "<uid>-pending" -- would be
+// IDENTICAL across two distinct revival cycles: the second cycle's "failed"
+// transition would find the FIRST cycle's booking_transition_receipts row,
+// match on payload (plausible if ChannelRef/Amount happen to coincide), and
+// silently return the first cycle's event without ever applying -- the
+// booking would stay stuck wherever it already was instead of progressing.
+//
+// This test drives the SAME sweep booking through the failure+revival cycle
+// TWICE and asserts the second cycle's "failed" and "pending" transitions
+// actually apply: distinct events from the first cycle's, and real forward
+// progress (nonce advances again, booking reaches "sent" and then
+// "confirmed" a second time). onchain.go's sweepFailedKey/sweepReviveKey
+// avoid the collision by folding in the cycle's own ChannelRef (the
+// broadcast tx hash that opened it), which BatchSweep mints fresh every
+// cycle -- see those helpers' doc comment.
+func TestOnchain_Sweep_TwoRevivalCycles_DoNotCollide(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-revive2", 2)
+	h := setupOnchain(t, chains, []string{"USDT-revive2"},
+		service.WithMaxSweepBumps(0),
+		service.WithSweepStuckAfter(0),
+	)
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 7701)
+	require.NoError(t, err)
+	h.scanner.balances[da.Address] = decimal.NewFromInt(50)
+
+	policy := core.SweepPolicy{
+		ChainID:      chainID,
+		Token:        token,
+		MinThreshold: decimal.NewFromInt(10),
+		GasCeiling:   decimal.NewFromInt(100),
+		BatchLimit:   10,
+		Interval:     time.Minute,
+	}
+
+	// Cycle 1: pending -> sent (nonce 0) -> failed.
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	sweepUID := h.classificationUID(t, "sweep")
+	bookings, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{ClassificationUID: sweepUID, Status: "sent", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, bookings, 1)
+	bookingUID := bookings[0].UID
+	firstSentChannelRef := bookings[0].ChannelRef
+
+	h.reader.setIncluded(chainID, firstSentChannelRef, false)
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	afterCycle1Failed, err := h.bookings.GetBooking(ctx, bookingUID)
+	require.NoError(t, err)
+	require.Equal(t, core.Status("failed"), afterCycle1Failed.Status)
+	require.Equal(t, firstSentChannelRef, afterCycle1Failed.ChannelRef, "failed keeps the cycle's own ChannelRef unchanged (recheckSweepSent's doc comment)")
+
+	// Cycle 1's revival: failed -> pending -> sent (nonce 1).
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	afterCycle1Revived, err := h.bookings.GetBooking(ctx, bookingUID)
+	require.NoError(t, err)
+	require.Equal(t, core.Status("sent"), afterCycle1Revived.Status)
+	secondSentChannelRef := afterCycle1Revived.ChannelRef
+	require.NotEqual(t, firstSentChannelRef, secondSentChannelRef, "revival broadcasts a fresh tx, so ChannelRef must change across cycles")
+
+	// Cycle 2: this second "sent" also fails to include -> failed again. This
+	// is the exact case the naive "<uid>-failed" key would have collided on:
+	// a SECOND, distinct application of Transition(..., ToStatus: "failed").
+	h.reader.setIncluded(chainID, secondSentChannelRef, false)
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	afterCycle2Failed, err := h.bookings.GetBooking(ctx, bookingUID)
+	require.NoError(t, err)
+	require.Equal(t, core.Status("failed"), afterCycle2Failed.Status,
+		"the second cycle's failed transition must actually apply, not silently short-circuit to the first cycle's receipt")
+	require.Equal(t, secondSentChannelRef, afterCycle2Failed.ChannelRef,
+		"ChannelRef must reflect cycle 2's own broadcast, proving this failed transition really re-applied rather than replaying cycle 1's event")
+
+	// Cycle 2's revival: failed -> pending -> sent (nonce 2). This is the
+	// exact case the naive "<uid>-pending" key would have collided on: a
+	// SECOND, distinct application of Transition(..., ToStatus: "pending").
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	afterCycle2Revived, err := h.bookings.GetBooking(ctx, bookingUID)
+	require.NoError(t, err)
+	require.Equal(t, core.Status("sent"), afterCycle2Revived.Status,
+		"the second revival must actually apply, not silently short-circuit to the first revival's receipt")
+	require.Equal(t, "2", afterCycle2Revived.Metadata["nonce"], "second revival must use a third, freshly-requested nonce")
+	require.Len(t, h.sweeper.batchSweeps, 3, "three distinct broadcasts total: initial send, revival 1, revival 2")
+
+	// Final tick: the second revival's broadcast gets included -> confirms.
+	// This is the third distinct application of Transition(..., ToStatus:
+	// "confirmed") across the whole flow -- pins sweepConfirmedKey the same way.
+	h.reader.setIncluded(chainID, afterCycle2Revived.ChannelRef, true)
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+	confirmed, err := h.bookings.GetBooking(ctx, bookingUID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), confirmed.Status)
+	assert.Empty(t, confirmed.JournalUID, "sweep bookings must never post a journal, even after two revivals")
+}
+
 func TestOnchain_Sweep_UnattributedToken(t *testing.T) {
 	const chainID = int64(1)
 	chains := core.ChainSet{
@@ -1286,9 +1389,10 @@ func TestOnchain_ApproveReview_RejectReview_RefuseNonDepositClassification(t *te
 	})
 	require.NoError(t, err)
 	_, err = h.bookings.Transition(ctx, core.TransitionInput{
-		BookingUID: otherBooking.UID,
-		ToStatus:   "review",
-		Source:     "test",
+		BookingUID:     otherBooking.UID,
+		ToStatus:       "review",
+		Source:         "test",
+		IdempotencyKey: "other-thing-1-review",
 	})
 	require.NoError(t, err)
 

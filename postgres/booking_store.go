@@ -217,18 +217,15 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		return nil, fmt.Errorf("postgres: transition: get booking %q: %w", input.BookingUID, err)
 	}
 
-	// Opt-in durable idempotency (I-3) -- see TransitionInput.IdempotencyKey's
-	// doc comment for why this is opt-in rather than mandatory. Checked
-	// BEFORE the state-comparison-based path below, and independent of the
-	// booking's CURRENT status, because it covers a case that path cannot: a
-	// retry arriving after a LATER, legitimate transition has already moved
-	// the booking past ToStatus.
-	if input.IdempotencyKey != "" {
-		if receipt, err := qtx.GetBookingTransitionReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
-			return s.ensureBookingTransitionReceiptMatches(ctx, qtx, receipt, op.ID, input)
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: transition: check idempotency: %w", err)
-		}
+	// Durable idempotency (I-3, mandatory -- TransitionInput.Validate already
+	// rejected an empty key). Checked BEFORE the state-comparison-based path
+	// below, and independent of the booking's CURRENT status, because it
+	// covers a case that path cannot: a retry arriving after a LATER,
+	// legitimate transition has already moved the booking past ToStatus.
+	if receipt, err := qtx.GetBookingTransitionReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return s.ensureBookingTransitionReceiptMatches(ctx, qtx, receipt, op.ID, input)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: transition: check idempotency: %w", err)
 	}
 
 	// Load classification for lifecycle validation
@@ -344,16 +341,14 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		return nil, wrapStoreError("postgres: transition: insert event", err)
 	}
 
-	if input.IdempotencyKey != "" {
-		if err := s.recordBookingTransitionReceipt(ctx, qtx, op.ID, eventRow.ID, input); err != nil {
-			return nil, err
-		}
+	if err := s.recordBookingTransitionReceipt(ctx, qtx, op.ID, eventRow.ID, input); err != nil {
+		return nil, err
 	}
 
 	return eventFromRow(ctx, s.dims, qtx, eventRow)
 }
 
-// ensureBookingTransitionReceiptMatches is Transition's opt-in idempotency
+// ensureBookingTransitionReceiptMatches is Transition's mandatory idempotency
 // check (I-3): a replay with the same booking, to_status, channel_ref and
 // amount returns the event the original call produced; any divergence is
 // core.ErrConflict.

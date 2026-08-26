@@ -138,9 +138,21 @@ func (s *ExpirationService) ExpireStaleBookings(ctx context.Context, batchSize i
 
 	expired := 0
 	for _, b := range bookings {
+		// Deterministic key (api-contract.md §9), same reasoning as the
+		// reservation sweep above: ListExpiredBookings only returns a
+		// booking whose CURRENT status still has an outgoing "expired" edge
+		// (postgres/sql/queries/bookings.sql), and "expired" is one of the
+		// built-in presets' (deposit, withdrawal) terminal statuses -- once
+		// this transition applies, the booking's new status has no
+		// "expired" edge and the booking drops out of this query for good.
+		// A booking's own uid is therefore a safe key here, unless some
+		// future custom classification defines a lifecycle where "expired"
+		// is itself non-terminal and re-reachable; that would need a key
+		// that also distinguishes which pass over ExpiresAt this is.
 		_, err := s.bookingTransit.Transition(ctx, core.TransitionInput{
-			BookingUID: b.UID,
-			ToStatus:   "expired",
+			BookingUID:     b.UID,
+			ToStatus:       "expired",
+			IdempotencyKey: "expire-booking-" + b.UID,
 		})
 		if err != nil {
 			s.logger.Error("service: expiration: expire booking failed",

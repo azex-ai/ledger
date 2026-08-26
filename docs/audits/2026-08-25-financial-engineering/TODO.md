@@ -232,9 +232,19 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
     - HTTP 面：`POST /reservations/{uid}/settle` 请求体新增必填 `idempotency_key`；
       `POST /reservations/{uid}/finalize` 与 `POST /reservations/{uid}/release`
       原本无请求体，现在都要求 `{"idempotency_key": "..."}`（`docs/openapi.yaml` 已同步）
-    - `core.TransitionInput` 新增**可选**字段 `IdempotencyKey`（不设置 = 行为与之前完全一致，
-      见 `docs/INVARIANTS.md` I-3 的 Transition 段）——现有调用点不需要改，但想要「重放在
-      booking 状态已推进之后仍然幂等」这个更强保证的调用点应该开始传它
+    - `core.TransitionInput` 新增字段 `IdempotencyKey`，W1-A 落地时是**可选**的（不设置=行为
+      与之前完全一致）；**W15-A（2026-08-26，Aaron 拍板收紧）改为必填** ——
+      `Validate()` 现在会在为空时拒绝，消掉了 I-3 曾经给 `Transition` 开的例外，恢复「每个状态
+      变更都要幂等键」的全称命题（见 `docs/INVARIANTS.md` I-3 的 Transition 段）。
+      **消费方需要做的事**：所有现有 `Transition` 调用点必须补上一个幂等键。⚠️ 关键陷阱：
+      不能简单派生成 `<booking_uid>-<to_status>` —— booking 的生命周期可能合法地多次到达
+      同一状态（如提现的 `failed → reserved` 重试边、sweep 的 `failed → pending` 复活边），
+      这种派生会让第二次合法重试撞上第一次的幂等收据而静默短路。系统事件发起方应从触发该次
+      occurrence 的源事件派生确定性 key（链上广播 tx hash、源事件 id，或 —— 仅当该状态在这条
+      生命周期里可证明至多到达一次时 —— booking 自身 uid）；客户端发起方（
+      `POST /bookings/{uid}/transition`）走 `Idempotency-Key` header（`api-contract.md` §9）。
+      `service/onchain.go` 的 9 个调用点 + `service/expiration.go` + 遗留 webhook transition
+      路径已按此原则补齐，可作为参考实现。
     - 顺带修正三处引用了不存在字段名的校验错误文案（`core/reserve.go`
       `currency_id must be positive` → `currency_uid required`、
       `reservation_id must be positive` → `reservation_uid required`（两处）；
