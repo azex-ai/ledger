@@ -431,6 +431,7 @@ func TestSweepBooking_NeverPostsJournal(t *testing.T) {
 
 	sentEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
 		BookingUID: booking.UID, ToStatus: "sent", ChannelRef: "0xsweeptx1", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-invariant-sent"),
 	})
 	require.NoError(t, err)
 	assert.Empty(t, sentEvt.JournalUID)
@@ -440,6 +441,7 @@ func TestSweepBooking_NeverPostsJournal(t *testing.T) {
 
 	confirmedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
 		BookingUID: booking.UID, ToStatus: "confirmed", ChannelRef: "0xsweeptx1", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-invariant-confirmed"),
 	})
 	require.NoError(t, err)
 	assert.Empty(t, confirmedEvt.JournalUID)

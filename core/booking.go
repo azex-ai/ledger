@@ -78,28 +78,42 @@ type TransitionInput struct {
 	ActorID  int64             `json:"actor_id"`
 	// Source identifies the calling service or scope (e.g. "api", "worker", "webhook").
 	Source string `json:"source"`
-	// IdempotencyKey is OPTIONAL (unlike every other write in this package).
+	// IdempotencyKey is REQUIRED, like every other write in this package
+	// (I-3: every state-changing operation requires a key). It is checked
+	// under the booking's row lock, before the lifecycle transition gate,
+	// against a durable booking_transition_receipts row (booking, to_status,
+	// channel_ref, amount, and the event_id the original call produced): a
+	// replay with the same key and the same payload always returns the
+	// original event, even after the booking has since moved on to a later
+	// status; the same key with a different payload is ErrConflict.
 	//
-	// Transition already has a narrower, state-comparison-based idempotency
-	// path: when the booking is already AT ToStatus, it compares the latest
-	// event's payload against this call and either returns that event
-	// (matching payload) or ErrConflict (diverging payload) -- see
-	// idempotentTransitionEvent in postgres/booking_store.go. That path
-	// covers the common "retry lands before anything else moves the
-	// booking" case without requiring every caller (many of which are
-	// system-driven watchers with no natural request-scoped key) to change.
+	// Deriving the key is the caller's responsibility, and it is not simply
+	// "booking uid + to_status": a booking's lifecycle can legitimately
+	// revisit the same status more than once (e.g. the withdrawal preset's
+	// failed -> reserved retry edge, or the sweep preset's failed -> pending
+	// revival edge). A key that ignores which *occurrence* of that status a
+	// call is describing collides across two genuinely different, legitimate
+	// transitions -- the second one would silently short-circuit to the
+	// first one's receipt instead of applying. The key must be deterministic
+	// across retries of the exact same source event (system-driven callers:
+	// derive from that event's own identity -- an upstream tx hash, event
+	// id, or attempt count) or a client-generated random UUID carried on the
+	// caller's Idempotency-Key header (api-contract.md §9). See
+	// service/onchain.go's Transition call sites for worked examples.
 	//
-	// It cannot cover the case I-3 exists for: a retry that arrives AFTER a
-	// later, legitimate transition has moved the booking past ToStatus. At
-	// that point current status != ToStatus and the retry is rejected with
-	// ErrInvalidTransition, indistinguishable from a genuine invalid
-	// request. Setting IdempotencyKey opts a call into a durable receipt
-	// (independent of the booking's current status) that survives forward
-	// progress: a replay with the same key and the same (booking, to_status,
-	// channel_ref, amount) always returns the original event, even after the
-	// booking has moved on; the same key with a different payload is
-	// ErrConflict. Leaving it empty preserves today's behavior exactly.
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// Separately from this key, Transition also has a narrower,
+	// state-comparison-based idempotency path for calls that race to apply
+	// the *same* occurrence concurrently under two different (but both
+	// freshly-derived) keys: when the booking is already AT ToStatus with no
+	// matching receipt for this call's key, it compares the latest event's
+	// payload against this call and either returns that event (matching
+	// payload) or ErrConflict (diverging payload) -- see
+	// idempotentTransitionEvent in postgres/booking_store.go. That path only
+	// fires when nothing has moved the booking away from ToStatus since; a
+	// later, distinct occurrence targeting the same status necessarily
+	// passes through an intervening transition first, so it never mis-fires
+	// on the retry-to-the-same-status case above.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 func (i TransitionInput) Validate() error {
@@ -113,6 +127,9 @@ func (i TransitionInput) Validate() error {
 	// only negative amounts are a shape error at this layer.
 	if i.Amount.IsNegative() {
 		return fmt.Errorf("core: booking: amount must not be negative: %w", ErrInvalidInput)
+	}
+	if i.IdempotencyKey == "" {
+		return fmt.Errorf("core: booking: idempotency key required: %w", ErrInvalidInput)
 	}
 	return nil
 }

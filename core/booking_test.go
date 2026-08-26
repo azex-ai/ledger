@@ -80,9 +80,10 @@ func TestCreateBookingInput_Validate(t *testing.T) {
 
 func TestTransitionInput_Validate(t *testing.T) {
 	valid := TransitionInput{
-		BookingUID: "bk-1",
-		ToStatus:   "confirmed",
-		Amount:     decimal.NewFromInt(100),
+		BookingUID:     "bk-1",
+		ToStatus:       "confirmed",
+		Amount:         decimal.NewFromInt(100),
+		IdempotencyKey: "transition-1",
 	}
 	require.NoError(t, valid.Validate())
 
@@ -93,21 +94,32 @@ func TestTransitionInput_Validate(t *testing.T) {
 		{
 			name: "invalid booking id",
 			input: TransitionInput{
-				ToStatus: "confirmed",
+				ToStatus:       "confirmed",
+				IdempotencyKey: "transition-1",
 			},
 		},
 		{
 			name: "missing status",
 			input: TransitionInput{
-				BookingUID: "bk-1",
+				BookingUID:     "bk-1",
+				IdempotencyKey: "transition-1",
 			},
 		},
 		{
 			name: "negative amount",
 			input: TransitionInput{
+				BookingUID:     "bk-1",
+				ToStatus:       "confirmed",
+				Amount:         decimal.NewFromInt(-1),
+				IdempotencyKey: "transition-1",
+			},
+		},
+		{
+			name: "missing idempotency key",
+			input: TransitionInput{
 				BookingUID: "bk-1",
 				ToStatus:   "confirmed",
-				Amount:     decimal.NewFromInt(-1),
+				Amount:     decimal.NewFromInt(100),
 			},
 		},
 	}

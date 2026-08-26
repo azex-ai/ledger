@@ -134,10 +134,11 @@ func run() error {
 	fmt.Printf("created booking uid=%s status=%s\n", booking.UID, booking.Status)
 
 	if _, err := booker.Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "confirming",
-		ChannelRef: "0xdemo",
-		Source:     "event-subscribe-example",
+		BookingUID:     booking.UID,
+		ToStatus:       "confirming",
+		ChannelRef:     "0xdemo",
+		Source:         "event-subscribe-example",
+		IdempotencyKey: ledger.NewIdempotencyKey("event-demo-confirming"),
 	}); err != nil {
 		cancelWorker()
 		<-workerDone

@@ -31,6 +31,10 @@ type transitionRequest struct {
 	Amount     string            `json:"amount"`
 	Metadata   map[string]string `json:"metadata"`
 	ActorID    int64             `json:"actor_id"`
+	// IdempotencyKey is required (I-3, core.TransitionInput.Validate).
+	// Callers may instead pass it via the Idempotency-Key header
+	// (idempotencyHeaderAliasMiddleware injects it here before decoding).
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type bookingResponse struct {
@@ -176,12 +180,13 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := core.TransitionInput{
-		BookingUID: uid,
-		ToStatus:   core.Status(req.ToStatus),
-		ChannelRef: req.ChannelRef,
-		Amount:     amount,
-		Metadata:   req.Metadata,
-		ActorID:    req.ActorID,
+		BookingUID:     uid,
+		ToStatus:       core.Status(req.ToStatus),
+		ChannelRef:     req.ChannelRef,
+		Amount:         amount,
+		Metadata:       req.Metadata,
+		ActorID:        req.ActorID,
+		IdempotencyKey: req.IdempotencyKey,
 	}
 
 	evt, err := s.booker.Transition(r.Context(), input)

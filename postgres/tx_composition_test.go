@@ -262,11 +262,12 @@ func TestTxComposition_RunInTx_BookingEventJournalLinkage(t *testing.T) {
 	var journalUID string
 	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
 		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
-			BookingUID: booking.UID,
-			ToStatus:   "confirmed",
-			Amount:     decimal.NewFromInt(125),
-			ActorID:    80,
-			Source:     "tx-test",
+			BookingUID:     booking.UID,
+			ToStatus:       "confirmed",
+			Amount:         decimal.NewFromInt(125),
+			ActorID:        80,
+			Source:         "tx-test",
+			IdempotencyKey: postgrestest.UniqueKey("booking-link-transition"),
 		})
 		if err != nil {
 			return err

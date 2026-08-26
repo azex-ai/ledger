@@ -68,9 +68,10 @@ func TestServiceWorker_SubscribeWorksWithoutManualWiring(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.Booker().Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "confirming",
-		Source:     "subscribe-wiring-test",
+		BookingUID:     booking.UID,
+		ToStatus:       "confirming",
+		Source:         "subscribe-wiring-test",
+		IdempotencyKey: postgrestest.UniqueKey("subscribe-wiring-transition"),
 	})
 	require.NoError(t, err)
 

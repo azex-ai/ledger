@@ -236,9 +236,10 @@ func TestJournalsGuard_EventIDSetOnce(t *testing.T) {
 		})
 		require.NoError(t, err)
 		evt, err := bookingStore.Transition(ctx, core.TransitionInput{
-			BookingUID: booking.UID,
-			ToStatus:   "confirmed",
-			Source:     "test",
+			BookingUID:     booking.UID,
+			ToStatus:       "confirmed",
+			Source:         "test",
+			IdempotencyKey: postgrestest.UniqueKey("guard-event-transition"),
 		})
 		require.NoError(t, err)
 		return evt.UID

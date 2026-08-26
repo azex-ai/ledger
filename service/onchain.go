@@ -693,6 +693,23 @@ func depositChannelRef(txHash string, txLogSeq int32) string {
 	return fmt.Sprintf("%s#%d", txHash, txLogSeq)
 }
 
+// depositTransitionKey derives Booker.Transition's mandatory idempotency key
+// (I-3) for a step in the deposit lifecycle (pending -> confirming ->
+// confirmed|failed|review; review -> confirmed|failed -- presets/deposit.go).
+// DepositLifecycle has no cycles: every status is reached at most once per
+// booking, ever. That makes the booking's own identity enough to key on --
+// it is itself derived deterministically from the triggering deposit
+// sighting (depositIdempotencyKey, via CreateBooking's idempotent create),
+// so two observations of the same on-chain event always resolve to the same
+// booking and therefore the same key here, while two different bookings
+// (necessarily different deposits) never collide. Unlike the sweep saga
+// below, there is no revisit to guard against, so (booking, to_status) alone
+// is a safe key -- see TransitionInput.IdempotencyKey's doc comment for why
+// that shortcut is NOT safe in general.
+func depositTransitionKey(bookingUID string, toStatus core.Status) string {
+	return fmt.Sprintf("deposit-%s-%s", toStatus, bookingUID)
+}
+
 // advanceConfirmation pushes booking through pending -> confirming ->
 // confirmed|review as confirmations allows, sharing logic between
 // IngestDeposit's first-seen call and the pending/confirming recheck loop's
@@ -709,10 +726,11 @@ func (o *Onchain) advanceConfirmation(ctx context.Context, booking *core.Booking
 		return booking, nil
 	case "pending":
 		if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-			BookingUID: booking.UID,
-			ToStatus:   "confirming",
-			ChannelRef: channelRef,
-			Source:     onchainSource,
+			BookingUID:     booking.UID,
+			ToStatus:       "confirming",
+			ChannelRef:     channelRef,
+			Source:         onchainSource,
+			IdempotencyKey: depositTransitionKey(booking.UID, "confirming"),
 		}); err != nil {
 			return nil, fmt.Errorf("advance to confirming: %w", err)
 		}
@@ -867,11 +885,12 @@ func (o *Onchain) clearReconcileFailure(bookingUID string) {
 // ApproveReview or RejectReview.
 func (o *Onchain) routeToReview(ctx context.Context, booking *core.Booking, channelRef, reason string) (*core.Booking, error) {
 	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "review",
-		ChannelRef: channelRef,
-		Source:     onchainSource,
-		Metadata:   map[string]string{reviewReasonMetaKey: reason},
+		BookingUID:     booking.UID,
+		ToStatus:       "review",
+		ChannelRef:     channelRef,
+		Source:         onchainSource,
+		Metadata:       map[string]string{reviewReasonMetaKey: reason},
+		IdempotencyKey: depositTransitionKey(booking.UID, "review"),
 	}); err != nil {
 		return nil, fmt.Errorf("route to review: %w", err)
 	}
@@ -941,12 +960,13 @@ func (o *Onchain) postDepositConfirmedJournal(ctx context.Context, booking *core
 
 	err = o.deps.TxComposer.RunInTx(ctx, func(ctx context.Context, booker core.Booker, journals core.JournalWriter) error {
 		evt, err := booker.Transition(ctx, core.TransitionInput{
-			BookingUID: booking.UID,
-			ToStatus:   "confirmed",
-			ChannelRef: channelRef,
-			Amount:     booking.Amount,
-			Source:     onchainSource,
-			Metadata:   transitionMeta,
+			BookingUID:     booking.UID,
+			ToStatus:       "confirmed",
+			ChannelRef:     channelRef,
+			Amount:         booking.Amount,
+			Source:         onchainSource,
+			Metadata:       transitionMeta,
+			IdempotencyKey: depositTransitionKey(booking.UID, "confirmed"),
 		})
 		if err != nil {
 			return err
@@ -1066,11 +1086,12 @@ func (o *Onchain) RejectReview(ctx context.Context, bookingUID, actor, reason st
 		rejectMeta[rejectedByMetaKey] = actor
 	}
 	if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-		BookingUID: booking.UID,
-		ToStatus:   "failed",
-		ChannelRef: booking.ChannelRef,
-		Source:     onchainSource,
-		Metadata:   rejectMeta,
+		BookingUID:     booking.UID,
+		ToStatus:       "failed",
+		ChannelRef:     booking.ChannelRef,
+		Source:         onchainSource,
+		Metadata:       rejectMeta,
+		IdempotencyKey: depositTransitionKey(booking.UID, "failed"),
 	}); err != nil {
 		return nil, fmt.Errorf("service: onchain: reject review: %w", err)
 	}
@@ -1293,10 +1314,11 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 			// threshold. No journal was ever posted for this booking, so a
 			// plain failed transition is sufficient (design doc §6).
 			if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-				BookingUID: b.UID,
-				ToStatus:   "failed",
-				ChannelRef: depositChannelRef(txHash, txLogSeq),
-				Source:     onchainSource,
+				BookingUID:     b.UID,
+				ToStatus:       "failed",
+				ChannelRef:     depositChannelRef(txHash, txLogSeq),
+				Source:         onchainSource,
+				IdempotencyKey: depositTransitionKey(b.UID, "failed"),
 			}); err != nil {
 				o.log().Error("service: onchain: recheck: transition to failed failed", "booking_uid", b.UID, "error", err)
 			}
@@ -1523,6 +1545,47 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 	return o.advanceSweep(ctx, booking, policy)
 }
 
+// sweepReviveKey, sweepSentKey, sweepConfirmedKey and sweepFailedKey derive
+// Booker.Transition's mandatory idempotency key (I-3) for each step of a
+// sweep booking's saga. Unlike the deposit lifecycle, SweepLifecycle has a
+// real cycle -- failed -> pending -> sent -> confirmed|failed
+// (presets/sweep.go: gas-bump exhaustion revives the SAME booking rather
+// than minting a new one, reviveFailedSweep's doc comment) -- so the SAME
+// booking legitimately revisits "pending", "sent" and "failed" once per
+// revival. A key of just (booking, to_status) collides across two
+// genuinely different revivals; each helper below folds in the on-chain
+// broadcast tx hash that uniquely identifies which cycle a given call
+// belongs to.
+//
+//   - sweepSentKey/sweepConfirmedKey key off the tx hash of THIS call's own
+//     broadcast (BatchSweep mints a fresh hash on every call, initial send or
+//     gas-bump), so distinct broadcasts always get distinct keys.
+//   - sweepFailedKey keys off the booking's persisted ChannelRef, which
+//     recheckSweepSent's sent->failed transition deliberately leaves
+//     unchanged across in-cycle gas-bumps (see that function's doc comment)
+//     but which IS refreshed to a new broadcast hash every time the booking
+//     re-enters "sent" via a revival -- so it is stable within one cycle and
+//     distinct across cycles, exactly matching how many times "failed" can
+//     legitimately be reached.
+//   - sweepReviveKey keys off the failed booking's own ChannelRef for the
+//     same reason: it identifies which failed cycle is being revived, so two
+//     distinct revivals (of two distinct failed cycles) never collide.
+func sweepSentKey(bookingUID, txHash string) string {
+	return fmt.Sprintf("sweep-sent-%s-%s", bookingUID, txHash)
+}
+
+func sweepConfirmedKey(bookingUID, txHash string) string {
+	return fmt.Sprintf("sweep-confirmed-%s-%s", bookingUID, txHash)
+}
+
+func sweepFailedKey(bookingUID, cycleChannelRef string) string {
+	return fmt.Sprintf("sweep-failed-%s-%s", bookingUID, cycleChannelRef)
+}
+
+func sweepReviveKey(failedBookingUID, failedCycleChannelRef string) string {
+	return fmt.Sprintf("sweep-revive-%s-%s", failedBookingUID, failedCycleChannelRef)
+}
+
 // reviveFailedSweep re-drives a sweep booking that exhausted its gas-bump
 // retries and was transitioned to terminal "failed" (SweepLifecycle's
 // failed->pending retry edge, presets/sweep.go), instead of leaving it
@@ -1558,6 +1621,7 @@ func (o *Onchain) reviveFailedSweep(ctx context.Context, failed *core.Booking, n
 			"nonce":     strconv.FormatUint(nonce, 10),
 			"addresses": strings.Join(eligible, ","),
 		},
+		IdempotencyKey: sweepReviveKey(failed.UID, failed.ChannelRef),
 	}); err != nil {
 		return fmt.Errorf("sweep: revive failed booking %s: %w", failed.UID, err)
 	}
@@ -1677,10 +1741,11 @@ func (o *Onchain) advanceSweep(ctx context.Context, b *core.Booking, policy core
 			return fmt.Errorf("sweep: batch sweep: %w", err)
 		}
 		if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-			BookingUID: b.UID,
-			ToStatus:   "sent",
-			ChannelRef: txHash,
-			Source:     onchainSource,
+			BookingUID:     b.UID,
+			ToStatus:       "sent",
+			ChannelRef:     txHash,
+			Source:         onchainSource,
+			IdempotencyKey: sweepSentKey(b.UID, txHash),
 		}); err != nil {
 			return fmt.Errorf("sweep: transition sent: %w", err)
 		}
@@ -1716,10 +1781,11 @@ func (o *Onchain) recheckSweepSent(ctx context.Context, b *core.Booking, chainID
 	}
 	if included {
 		if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-			BookingUID: b.UID,
-			ToStatus:   "confirmed",
-			ChannelRef: txHash,
-			Source:     onchainSource,
+			BookingUID:     b.UID,
+			ToStatus:       "confirmed",
+			ChannelRef:     txHash,
+			Source:         onchainSource,
+			IdempotencyKey: sweepConfirmedKey(b.UID, txHash),
 		}); err != nil {
 			return fmt.Errorf("sweep: transition confirmed: %w", err)
 		}
@@ -1733,10 +1799,11 @@ func (o *Onchain) recheckSweepSent(ctx context.Context, b *core.Booking, chainID
 	bumps := o.sweepBumpCount(b.UID)
 	if bumps >= o.maxSweepBumps {
 		if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-			BookingUID: b.UID,
-			ToStatus:   "failed",
-			ChannelRef: b.ChannelRef,
-			Source:     onchainSource,
+			BookingUID:     b.UID,
+			ToStatus:       "failed",
+			ChannelRef:     b.ChannelRef,
+			Source:         onchainSource,
+			IdempotencyKey: sweepFailedKey(b.UID, b.ChannelRef),
 		}); err != nil {
 			return fmt.Errorf("sweep: transition failed: %w", err)
 		}

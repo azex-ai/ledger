@@ -203,6 +203,10 @@ func ingestDeposit(ctx context.Context, svc *ledger.Service, registry core.Addre
 		ToStatus:   "confirming",
 		ChannelRef: sighting.TxHash,
 		Source:     "example.crypto_deposit",
+		// DepositLifecycle has no cycles, so this status is reached at most
+		// once per booking -- the booking's own (deterministically derived,
+		// see idemKey above) identity is a safe key.
+		IdempotencyKey: idemKey + "-confirming",
 	}); err != nil {
 		return nil, fmt.Errorf("transition confirming: %w", err)
 	}
@@ -217,11 +221,12 @@ func ingestDeposit(ctx context.Context, svc *ledger.Service, registry core.Addre
 	var confirmedEvent *core.Event
 	err = svc.RunInTx(ctx, func(txSvc *ledger.Service) error {
 		evt, err := txSvc.Booker().Transition(ctx, core.TransitionInput{
-			BookingUID: booking.UID,
-			ToStatus:   "confirmed",
-			ChannelRef: sighting.TxHash,
-			Amount:     sighting.Amount,
-			Source:     "example.crypto_deposit",
+			BookingUID:     booking.UID,
+			ToStatus:       "confirmed",
+			ChannelRef:     sighting.TxHash,
+			Amount:         sighting.Amount,
+			Source:         "example.crypto_deposit",
+			IdempotencyKey: idemKey + "-confirmed",
 		})
 		if err != nil {
 			return err

@@ -1677,7 +1677,7 @@ components:
         expires_at: { $ref: "#/components/schemas/Timestamp" }
     TransitionInput:
       type: object
-      required: [to_status]
+      required: [to_status, idempotency_key]
       properties:
         to_status: { type: string }
         channel_ref: { type: string }
@@ -1687,6 +1687,14 @@ components:
           additionalProperties: true
         actor_id: { type: integer, format: int64 }
         source:   { type: string }
+        idempotency_key:
+          type: string
+          description: >-
+            Required (I-3). May instead be supplied via the Idempotency-Key
+            header. A retried request with the same key and the same
+            (to_status, channel_ref, amount) payload replays the original
+            event, even after the booking has since moved on to a later
+            status; the same key with a different payload is a conflict.
     Booking:
       type: object
       properties:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -109,12 +110,20 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// System-event-derived key (api-contract.md §9): this channel adapter's
+	// contract (channel/adapter.go's Adapter doc comment) already promises
+	// "a repeated transition for the same booking/channel_ref ... resolves
+	// to the original result" -- (booking_uid, status, channel_ref) IS this
+	// channel's definition of "the same callback", so deriving the key from
+	// exactly those three fields matches the behavior the adapter interface
+	// already documents, without inventing a new identity concept.
 	evt, err := s.booker.Transition(r.Context(), core.TransitionInput{
-		BookingUID: payload.BookingUID,
-		ToStatus:   core.Status(payload.Status),
-		ChannelRef: payload.ChannelRef,
-		Amount:     payload.ActualAmount,
-		Metadata:   payload.Metadata,
+		BookingUID:     payload.BookingUID,
+		ToStatus:       core.Status(payload.Status),
+		ChannelRef:     payload.ChannelRef,
+		Amount:         payload.ActualAmount,
+		Metadata:       payload.Metadata,
+		IdempotencyKey: fmt.Sprintf("webhook-%s-%s-%s", payload.BookingUID, payload.Status, payload.ChannelRef),
 	})
 	if err != nil {
 		httpx.Error(w, err)

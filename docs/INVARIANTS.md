@@ -160,24 +160,37 @@ different reservation, different operation, or different amount — is
 `released` mutually exclusive terminal states reachable by exactly one of
 these three calls, one receipt per reservation is enough to disambiguate.
 
-`Transition` (`core.Booker`) is the one exception to "every state-changing
-operation requires a key": `TransitionInput.IdempotencyKey` is **optional**.
-Transition already has a narrower, state-comparison-based idempotency path
-(`idempotentTransitionEvent`) that resolves the common case — a retry
-arriving before anything else has moved the booking — without requiring
-every caller (many are system-driven watchers with no natural
-request-scoped key) to change. That path cannot cover a retry arriving
-*after* a later, legitimate transition has moved the booking past
-`ToStatus`: at that point `lifecycle.CanTransition(current, ToStatus)` is
-false and the retry is rejected with `ErrInvalidTransition`, indistinguishable
-from a genuine invalid request. A caller that sets `IdempotencyKey` opts into
-a durable `booking_transition_receipts` row (booking, to_status, channel_ref,
-amount, and the `event_id` the original call produced) that survives forward
-progress: a replay with the same key and payload always returns the original
-event, even after the booking has moved on; the same key with a different
-payload is `ErrConflict`. Leaving it empty preserves the pre-`005` behavior
-exactly — this is the one place in the ledger where "no key" is a supported,
-unchanged configuration rather than a validation error.
+`Transition` (`core.Booker`) requires `TransitionInput.IdempotencyKey` like
+every other write in this package (W15-A closed the exception W1-A had
+carved out here — see docs/plans/2026-08-26-audit-remediation-contracts.md
+§7). `Validate()` rejects an empty key. Every call is checked against a
+durable `booking_transition_receipts` row (booking, to_status, channel_ref,
+amount, and the `event_id` the original call produced), under the booking's
+row lock and before the lifecycle transition gate: a replay with the same
+key and payload always returns the original event, even after the booking
+has since moved on to a later status — the case a narrower,
+state-comparison-based path (`idempotentTransitionEvent`, still present as a
+secondary safeguard for two calls racing to apply the exact same occurrence
+under different freshly-derived keys) cannot cover, since at that point
+`lifecycle.CanTransition(current, ToStatus)` is false and the retry would
+otherwise be rejected with `ErrInvalidTransition`, indistinguishable from a
+genuine invalid request; the same key with a different payload is
+`ErrConflict`.
+
+Deriving that key is not simply `<booking_uid>-<to_status>`: a booking's
+lifecycle can legitimately revisit the same status more than once (the
+withdrawal preset's `failed` → `reserved` retry edge, or the sweep preset's
+`failed` → `pending` revival edge). A key that ignores which *occurrence* of
+that status a call is describing collides across two genuinely different,
+legitimate transitions — the second one silently short-circuits to the
+first one's receipt instead of applying, and the caller sees success while
+nothing actually happened. Every system-driven call site
+(`service/onchain.go`, `service/expiration.go`, the legacy webhook
+transition path) derives its key from that occurrence's own identity (an
+on-chain broadcast tx hash, a source event, or — where the target status is
+provably reached at most once for that lifecycle — the booking's own uid);
+client-driven calls (`POST /bookings/{uid}/transition`) carry a
+caller-supplied key via the `Idempotency-Key` header (api-contract.md §9).
 
 **Pinned by**:
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
@@ -191,6 +204,9 @@ unchanged configuration rather than a validation error.
 - `postgres.TestReserverStore_Release_IdempotentReplay`
 - `postgres.TestReserverStore_FinalizeSettlement_IdempotentReplay`
 - `postgres.TestBookingStore_Transition_IdempotencyKey_SurvivesForwardProgress`
+- `postgres.TestBookingStore_Transition_RevisitingSameStatus_DistinctKeysDoNotCollide`
+- `core.TestTransitionInput_Validate` (missing idempotency key)
+- `service.TestOnchain_Sweep_TwoRevivalCycles_DoNotCollide`
 
 ## I-4: TOCTOU-safe reserve/settle
 
