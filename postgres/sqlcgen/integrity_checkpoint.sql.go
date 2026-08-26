@@ -19,6 +19,7 @@ WHERE account_holder = $1::bigint
   AND currency_id = $2::bigint
   AND classification_id = $3::bigint
   AND processed_at IS NULL
+  AND failed_attempts < 10
 `
 
 type CountPendingRollupForDimensionParams struct {
@@ -33,6 +34,17 @@ type CountPendingRollupForDimensionParams struct {
 // overwrite the rebuild with poisoned-base-plus-delta immediately after it
 // commits. RebuildCheckpoint refuses (core.ErrRollupPending) rather than race
 // it — the operator drains or waits for the item first.
+//
+// failed_attempts < 10 mirrors checkpoints.sql's DequeueRollupBatch: once an
+// item crosses that threshold it is permanently excluded from dequeue (never
+// retried, never processed_at) and its "pending" row would otherwise count
+// forever -- meaning RebuildCheckpoint would refuse indefinitely, blocked by
+// the exact failure it exists to repair (concurrency.md Minor: "RebuildCheckpoint
+// 会被它要修的东西永久挡住"). An item this store can prove will never dequeue
+// and process cannot race a rebuild the way an in-flight one could, so it is
+// correctly excluded from "pending" here, not swept under the rug: it still
+// shows up via CountPendingRollups / the rollup_queue table itself for an
+// operator to investigate why it keeps failing.
 func (q *Queries) CountPendingRollupForDimension(ctx context.Context, arg CountPendingRollupForDimensionParams) (int64, error) {
 	row := q.db.QueryRow(ctx, countPendingRollupForDimension, arg.AccountHolder, arg.CurrencyID, arg.ClassificationID)
 	var column_1 int64

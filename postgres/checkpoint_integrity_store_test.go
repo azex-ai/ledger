@@ -185,6 +185,53 @@ func TestCheckpointIntegrity_RebuildCheckpoint_RefusesWhenRollupPending(t *testi
 	assert.ErrorIs(t, err, core.ErrRollupPending)
 }
 
+// TestCheckpointIntegrity_RebuildCheckpoint_NotBlockedByPermanentlyFailedRollupItem
+// pins the fix for concurrency.md's Minor: "RebuildCheckpoint 会被它要修的东西永久
+// 挡住". A rollup_queue item that has exhausted DequeueRollupBatch's own retry
+// budget (failed_attempts >= 10, see checkpoints.sql's DequeueRollupBatch) is
+// permanently excluded from ever being dequeued and processed -- so it can
+// never race a rebuild the way an in-flight item could -- yet its
+// processed_at stays NULL forever. Before this fix
+// CountPendingRollupForDimension counted it as "pending" unconditionally, so
+// RebuildCheckpoint refused with core.ErrRollupPending forever: the exact
+// fault (a poisoned checkpoint caused by a repeatedly-failing rollup)
+// permanently blocked its own remedy.
+func TestCheckpointIntegrity_RebuildCheckpoint_NotBlockedByPermanentlyFailedRollupItem(t *testing.T) {
+	deps, _, pool, holderID, trueBalance := setupPoisonedCheckpoint(t)
+	ctx := context.Background()
+
+	rollup := postgres.NewRollupAdapter(pool)
+	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
+	mainWalletID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
+
+	// Re-dirty the dimension, then simulate DequeueRollupBatch's own
+	// exhaustion threshold directly ("AND failed_attempts < 10" in
+	// checkpoints.sql) rather than looping 10 real claim/release cycles.
+	require.NoError(t, rollup.EnqueueRollup(ctx, holderID, currencyID, mainWalletID))
+	_, err := pool.Exec(ctx,
+		"UPDATE rollup_queue SET failed_attempts = 10 WHERE account_holder=$1 AND currency_id=$2 AND classification_id=$3",
+		holderID, currencyID, mainWalletID,
+	)
+	require.NoError(t, err)
+
+	// Sanity: this item is now permanently excluded from dequeue -- it will
+	// never be processed, confirming it truly cannot race the rebuild below
+	// (this is what makes excluding it from "pending" correct, not a
+	// loophole).
+	items, err := rollup.DequeueRollupBatch(ctx, 10)
+	require.NoError(t, err)
+	for _, item := range items {
+		require.False(t,
+			item.AccountHolder == holderID && item.CurrencyID == currencyID && item.ClassificationID == mainWalletID,
+			"sanity check: the exhausted item must not be dequeueable")
+	}
+
+	ci := postgres.NewCheckpointIntegrityStore(pool)
+	cp, err := ci.RebuildCheckpoint(ctx, holderID, deps.Currency, deps.MainWallet, 424242)
+	require.NoError(t, err, "an exhausted rollup_queue item must not block RebuildCheckpoint forever")
+	assert.True(t, cp.Balance.Equal(trueBalance))
+}
+
 // TestCheckpointIntegrity_RebuildCheckpoint_RecordsAuditRow pins the
 // team-lead review follow-up: a manual repair has the exact same
 // evidence-destroying property automatic repair does (the drift vanishes

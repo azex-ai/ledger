@@ -13,26 +13,43 @@ import (
 )
 
 const acquireBalanceLock = `-- name: AcquireBalanceLock :exec
-SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+SELECT pg_advisory_xact_lock(1::int4, hashtext($1::text))
 `
 
 // Take a transaction-scoped advisory lock keyed on (holder, currency_id) so
 // concurrent reserves and journal posts that touch the same pair serialize.
-// The caller passes a stable composite text key (e.g. "balance:<holder>:<currency_id>");
-// hash collisions only reduce concurrency, they do not affect correctness.
-// Single-arg bigint form is used so int64 ids do not need to be narrowed to int32.
+// The caller passes a stable composite text key (e.g. "balance:<holder>:<currency_id>").
+//
+// Two-key form pg_advisory_xact_lock(int4, int4) with a fixed namespace (1)
+// in the first slot -- NOT the single-arg bigint form. PostgreSQL's advisory
+// lock tag carries a 4th field that distinguishes the two-key API from the
+// single-key API, so pg_advisory_xact_lock(bigint) and
+// pg_advisory_xact_lock(int4, int4) are genuinely disjoint lock spaces no
+// matter what values are passed; the two-key space is additionally
+// partitioned by its first argument. This namespace (1) can therefore never
+// collide with AcquireIdempotencyLock's namespace (2) below, even though a
+// caller fully controls the idempotency_key string end to end
+// (server/handler_journals.go accepts it with no format restriction) and
+// could otherwise pick a string like "balance:1:1" to alias a real balance
+// pair -- see concurrency.md's ABBA-deadlock finding this closes. Hash
+// collisions *within* this namespace (two different (holder,currency_id)
+// pairs landing on the same hashtext() value) only reduce concurrency, they
+// do not affect correctness.
 func (q *Queries) AcquireBalanceLock(ctx context.Context, key string) error {
 	_, err := q.db.Exec(ctx, acquireBalanceLock, key)
 	return err
 }
 
 const acquireIdempotencyLock = `-- name: AcquireIdempotencyLock :exec
-SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+SELECT pg_advisory_xact_lock(2::int4, hashtext($1::text))
 `
 
 // Serialize concurrent requests that present the same idempotency key, even if
-// they touch different account dimensions. Collisions in the hash only reduce
-// concurrency; they do not affect correctness.
+// they touch different account dimensions. Namespace 2 in the two-key
+// advisory lock form -- see AcquireBalanceLock's comment for why this cannot
+// collide with the balance-lock namespace regardless of the key string a
+// caller supplies. Collisions within this namespace only reduce concurrency;
+// they do not affect correctness.
 func (q *Queries) AcquireIdempotencyLock(ctx context.Context, key string) error {
 	_, err := q.db.Exec(ctx, acquireIdempotencyLock, key)
 	return err

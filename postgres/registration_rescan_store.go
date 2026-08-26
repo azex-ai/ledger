@@ -82,7 +82,16 @@ func (s *RegistrationRescanStore) ClaimRegistrationRescans(ctx context.Context, 
 	return out, nil
 }
 
-func (s *RegistrationRescanStore) AdvanceRegistrationRescan(ctx context.Context, uid string, nextBlock int64, completed bool) error {
+// AdvanceRegistrationRescan applies a scan's progress only if the row's
+// attempts still equals expectedAttempts (claim-token guard, see
+// core.RegistrationRescanStore's doc comment). A concurrent re-claim
+// (ClaimRegistrationRescans bumps attempts) changes attempts out from under
+// a stale worker, so this affects 0 rows for a claim the caller no longer
+// owns, and RowsAffected()==0 is reported the same way "uid does not exist"
+// already was -- both mean "this write did not apply", which is exactly
+// what a caller holding a lost claim needs to know: not to trust its own
+// view of next_block/status any further.
+func (s *RegistrationRescanStore) AdvanceRegistrationRescan(ctx context.Context, uid string, nextBlock int64, completed bool, expectedAttempts int32) error {
 	status := "pending"
 	if completed {
 		status = "completed"
@@ -91,7 +100,7 @@ func (s *RegistrationRescanStore) AdvanceRegistrationRescan(ctx context.Context,
 		UPDATE registration_rescans
 		SET next_block = $2, status = $3, available_at = now(),
 		    claimed_until = NULL, last_error = NULL, updated_at = now()
-		WHERE uid = $1::uuid`, uid, nextBlock, status)
+		WHERE uid = $1::uuid AND attempts = $4`, uid, nextBlock, status, expectedAttempts)
 	if err != nil {
 		return fmt.Errorf("postgres: advance registration rescan: %w", err)
 	}
@@ -101,12 +110,14 @@ func (s *RegistrationRescanStore) AdvanceRegistrationRescan(ctx context.Context,
 	return nil
 }
 
-func (s *RegistrationRescanStore) RetryRegistrationRescan(ctx context.Context, uid, lastError string, retryAt time.Time) error {
+// RetryRegistrationRescan is AdvanceRegistrationRescan's failure-path
+// counterpart; same claim-token guard, same reasoning.
+func (s *RegistrationRescanStore) RetryRegistrationRescan(ctx context.Context, uid, lastError string, retryAt time.Time, expectedAttempts int32) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE registration_rescans
 		SET status = 'pending', available_at = $2, claimed_until = NULL,
 		    last_error = left($3, 2000), updated_at = now()
-		WHERE uid = $1::uuid`, uid, retryAt, lastError)
+		WHERE uid = $1::uuid AND attempts = $4`, uid, retryAt, lastError, expectedAttempts)
 	if err != nil {
 		return fmt.Errorf("postgres: retry registration rescan: %w", err)
 	}

@@ -2225,6 +2225,208 @@ consumer that never calls `Run()` must not skip the check).
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+## I-36: Advisory-lock coordination is structurally safe, not conventionally safe
+
+(`docs/audits/2026-08-25-financial-engineering/concurrency.md`, board #30/#24,
+D-lock.)
+
+**Rule** (six independent guarantees under one number — see this task's bus
+checkpoint for why they were not split further):
+
+1. **Disjoint lock namespaces.** `AcquireBalanceLock` and
+   `AcquireIdempotencyLock` (`postgres/sql/queries/journals.sql`) use
+   PostgreSQL's two-key advisory lock form, `pg_advisory_xact_lock(int4,
+   int4)`, with fixed namespace literals (`1` for balance, `2` for
+   idempotency) as the first argument — not the single-key `bigint` form
+   both used before this fix. The two-key API is a genuinely separate lock
+   space from the single-key API regardless of the values passed (a 4th
+   field in PostgreSQL's internal `LOCKTAG` distinguishes them), and the
+   two-key space is further partitioned by its first argument. A caller
+   fully controls `idempotency_key` end to end
+   (`server/handler_journals.go` accepts it with no format restriction) and
+   could previously pick a string like `"balance:1:1"` to alias a real
+   balance-lock key, constructing an ABBA deadlock between two ordinary
+   `POST /journals` calls with no malicious intent required on the amounts
+   or accounts themselves. This is now structurally impossible, not merely
+   discouraged by convention.
+2. **Whole-batch lock order.** `ExecuteTemplateBatch`'s pool-mode branch
+   (`postgres/ledger_store.go`) unions every journal's `(holder,
+   currency_id)` pairs across the WHOLE batch, sorts once
+   (`sortedUniquePairs`), and acquires that union before posting any
+   journal in the batch — instead of letting each journal's
+   `postJournalWithQueries` call `acquireBalanceLocks` independently
+   (correct within one journal, uncoordinated across the N journals one
+   batch call posts in a single transaction). Two ordinary batches whose
+   journals list the same two holders in opposite order (e.g. two batch
+   settlements) no longer deadlock.
+3. **No external call from a transaction-bound store.**
+   `ReserverStore.Reserve`'s `RequireVerifiedBalance` gate
+   (`postgres/reserver_store.go`) may invoke a `core.AuthVerifier`, which
+   `core.AuthVerifier`'s own doc comment permits to be a remote call —
+   `financial.md`'s "no external calls inside a DB transaction" applies to
+   it exactly as it does to `Attestor.Sign`. The gate now refuses
+   (`core.ErrInvalidInput`) when called on a transaction-bound store
+   (`WithDB`, reachable from inside `ledger.Service.RunInTx`'s callback),
+   mirroring `LedgerStore.Authorize`'s identical guard — before this fix it
+   copied Authorize's placement comment but not its guard, and would
+   silently run the gate (and any remote call it makes) from inside the
+   caller's open transaction.
+4. **Every background job is leader-elected.** The `expiration` job
+   (`service/worker.go`) is now wrapped in `service.NewLockedJob`, like its
+   five siblings (`reconcile`, `system_rollup`, `full_reconcile`,
+   `partition`, `attestation`). It was previously the one job that ran
+   unconditionally on every replica: `K` replicas racing
+   `GetExpiredReservations`/`ListExpiredBookings` on the same tick all read
+   the same expired batch and each call `Release`/`Transition` on it — the
+   row lock inside those calls serializes the writes so nothing corrupts,
+   but `K-1` of every `K` calls fail with `ErrInvalidTransition` and get
+   logged as errors, drowning out genuine failures in noise.
+5. **A permanently-excluded rollup item cannot block its own remedy
+   forever.** `CheckpointIntegrityStore.RebuildCheckpoint`'s precondition
+   query (`CountPendingRollupForDimension`,
+   `postgres/sql/queries/integrity_checkpoint.sql`) now excludes
+   `rollup_queue` rows with `failed_attempts >= 10` — the same threshold
+   `DequeueRollupBatch` (`checkpoints.sql`) uses to permanently stop
+   retrying an item. An item past that threshold can never be dequeued and
+   processed again, so it can never race a rebuild the way an in-flight
+   item could; before this fix its `processed_at` stayed `NULL` forever, so
+   `RebuildCheckpoint` refused with `core.ErrRollupPending` indefinitely —
+   blocked by the exact class of failure (a repeatedly-failing rollup) it
+   exists to repair.
+6. **Registration-rescan progress has a claim-token guard, like its two
+   siblings.** `AdvanceRegistrationRescan` and `RetryRegistrationRescan`
+   (`postgres/registration_rescan_store.go`) now only apply when the row's
+   `attempts` still equals the `expectedAttempts` the caller observed when
+   it claimed the job (`core.RegistrationRescan.Attempts`, bumped by
+   `ClaimRegistrationRescans` on every claim including a re-claim after an
+   expired lease) — the same claim-token-guard shape `rollup_queue`'s
+   `MarkRollupProcessed` and `events`' `UpdateEventDelivered` already use,
+   keyed on `attempts` here rather than a lease timestamp since `Attempts`
+   was already threaded through `core.RegistrationRescan` (no new column).
+   `registration_rescans` was previously the one claim mechanism among the
+   three (`rollup_queue`, `events`, `registration_rescans`) with no guard at
+   all: a worker whose lease outlived its own processing (e.g. a slow RPC)
+   could write progress after another worker had already re-claimed and
+   possibly re-advanced the same row, clearing the second worker's live
+   claim (`claimed_until = NULL`) out from under it.
+   **Verified, not assumed** (concurrency.md marked "能否造成漏扫" PLAUSIBLE):
+   tracing every write path found no way for a missing guard to cause a
+   **skipped** block range — `RetryRegistrationRescan` never writes
+   `next_block` at all, and `AdvanceRegistrationRescan` always derives its
+   written `next_block` from a window that was actually fetched and
+   ingested, so the worst pre-fix outcome is a **regression** (a stale
+   worker's late write can move `next_block` backward, or re-open a
+   `completed` row to `pending`), causing a redundant rescan of an
+   already-covered range — safe because `IngestDeposit`'s idempotency key
+   (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) makes re-ingestion a no-op,
+   not a duplicate credit. The guard is fixed here regardless (the missing
+   mechanism itself was already CONFIRMED, independent of this severity
+   finding): it still eliminates real waste (redundant multi-block rescans)
+   and a real correctness smell (a live claim being silently cleared by a
+   worker that no longer owns it), even though it does not close a
+   fund-safety gap the way (1)-(3) above do.
+
+**Why**: advisory locks are the library's only cross-transaction
+coordination primitive on the money path (I-4, I-5's load-bearing
+prerequisite). A shared key space or an uncoordinated multi-resource
+acquisition turns that primitive into a source of deadlocks and
+availability incidents (SQLSTATE 40P01 / stuck workers) that scale with
+caller behavior no one has to intend maliciously — see (1) and (2) above.
+Guarantee (3) is `financial.md`'s core red line applied to a gate that
+copied its sibling's comment without its enforcement. Guarantees (4) and
+(5) are instances of `working-agreements.md` §5 ("能被结构强制的规则不应该靠
+人记忆/约定"): a job that "should" be leader-elected because its five
+siblings are is not actually leader-elected until it is wrapped the same
+way, and a remedy that "should" always be available is not actually always
+available until its own precondition excludes the failure state it exists
+to fix.
+
+**Enforced by**:
+- `postgres/sql/queries/journals.sql`'s `AcquireBalanceLock` (namespace 1)
+  and `AcquireIdempotencyLock` (namespace 2), both
+  `pg_advisory_xact_lock(int4, int4)`.
+- `postgres/ledger_store.go`'s `sortedUniquePairs` (shared dedupe+sort,
+  extracted from `balancePairsFromEntries`) and `ExecuteTemplateBatch`'s
+  pool-mode pre-lock step, before its per-journal posting loop.
+- `postgres/reserver_store.go`'s `s.pool == nil` guard inside `Reserve`'s
+  `RequireVerifiedBalance` branch.
+- `service/worker.go`'s `expirationJob := service.NewLockedJob("expiration",
+  ...)`, mirroring `reconcileJob` / `sysRollupJob` / `fullReconcileJob` /
+  `partitionJob` / `attestJob`.
+- `postgres/sql/queries/integrity_checkpoint.sql`'s
+  `CountPendingRollupForDimension`, `AND failed_attempts < 10`.
+- `postgres/registration_rescan_store.go`'s `AdvanceRegistrationRescan` /
+  `RetryRegistrationRescan`, both `WHERE uid = $1::uuid AND attempts = $N`;
+  `core.RegistrationRescanStore`'s interface doc comment
+  (`core/onchain.go`); the 3 call sites in `service/onchain.go` that thread
+  `job.Attempts` through as `expectedAttempts`.
+- `postgres/errors.go`'s `normalizeStoreError`, SQLSTATE `40001`
+  (`serialization_failure`) / `40P01` (`deadlock_detected`) wrapped into
+  `core.ErrTransient` (bus #24) — called from `acquireBalanceLocks` and
+  `acquireIdempotencyLock` themselves (not only the generic
+  `wrapStoreError` call sites), so a real deadlock surfacing at the
+  advisory-lock statement itself — exactly where guarantees (1) and (2)
+  above are enforced — is classified correctly rather than falling through
+  to `core.IsRetryable`'s `default: true` catch-all, indistinguishable from
+  a permanent bug.
+
+**Pinned by**:
+- `postgres.TestAcquireIdempotencyLock_NeverCollidesWithBalanceLock` —
+  drives a real two-transaction deadlock scenario that the pre-fix shared
+  namespace reproduces (verified by temporarily reverting the namespace
+  separation and confirming this test fails with SQLSTATE 40P01) and the
+  fix eliminates outright.
+- `postgres.TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock` —
+  two real transactions modeling "two batches whose journals touch the same
+  two holders in reverse order," using the exact
+  `sortedUniquePairs`+`acquireBalanceLocks` primitives `ExecuteTemplateBatch`
+  now calls.
+- `postgres.TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient` — the
+  per-journal-only pattern's real ABBA deadlock (the shape guarantee (2)
+  eliminates for `ExecuteTemplateBatch` specifically), doubling as bus #24's
+  real-trigger pin: asserts the losing side's error satisfies
+  `errors.Is(err, core.ErrTransient)`, not merely `core.IsRetryable`'s
+  default.
+- `postgres.TestReserve_RequireVerifiedBalance_RejectsOnTransactionBoundStore` —
+  contrasts pool mode (gate runs, returns `core.ErrUnauthorizedJournal` with
+  no `AuthVerifier` configured) against tx mode (guard refuses with
+  `core.ErrInvalidInput` before the gate runs at all); verified red before
+  the fix (reverting the guard makes tx mode return
+  `ErrUnauthorizedJournal` too, proving it reached the gate from inside the
+  open transaction).
+- `service.TestWorker_Expiration_SkipsWhenAnotherReplicaHoldsTheLock` /
+  `TestWorker_Expiration_RunsWhenLockIsFree` — holds the real
+  `job:expiration` advisory lock on a separate session and asserts the
+  finder is never called while held, and is called once the lock is free;
+  verified red before the fix (14 calls leaked through while the lock was
+  held).
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_NotBlockedByPermanentlyFailedRollupItem` —
+  poisons a checkpoint, exhausts a `rollup_queue` item's `failed_attempts`
+  to 10, confirms the item is genuinely unreachable via
+  `DequeueRollupBatch`, and asserts `RebuildCheckpoint` still succeeds;
+  verified red before the fix (`core.ErrRollupPending` forever).
+- `postgres.TestNormalizeStoreError` — table-driven unit coverage for the
+  `40001`/`40P01` → `core.ErrTransient` classification itself.
+- `postgres.TestRegistrationRescanStore_AdvanceRejectsStaleClaim` /
+  `TestRegistrationRescanStore_RetryRejectsStaleClaim` — construct the real
+  timing sequence (worker A claims with a short lease, the lease genuinely
+  expires, worker B re-claims and bumps `attempts`, A then tries to write
+  using its stale `attempts`) rather than asserting on the guard's SQL in
+  isolation; assert both that A's write is rejected and that B's live claim
+  and the row's real `next_block` are untouched by it. Verified red before
+  the fix by temporarily dropping `AND attempts = $N` from each query: A's
+  write silently succeeds instead of erroring.
+
+**Known residual gap** (documented, not silently left): `ExecuteTemplateBatch`'s
+tx-mode counterpart, `executeTemplateBatchWithQueries`, has the identical
+per-journal-only lock-order defect guarantee (2) above fixes in pool mode —
+concurrency.md notes both branches explicitly. That function's lines sit
+inside the tx-mode `AuthStatusUnsignedTxMode` region assigned to a different
+task in this wave (board #30/#31's file-ownership seam,
+`docs/plans/2026-08-26-audit-remediation-contracts.md` §8), so it is left
+unfixed here rather than crossing that boundary; flagged to Team Lead for a
+follow-up applying the same `sortedUniquePairs` pre-lock pattern there.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

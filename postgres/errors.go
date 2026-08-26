@@ -38,6 +38,20 @@ func normalizeStoreError(err error) error {
 		return fmt.Errorf("check constraint %q violated: %w", pgErr.ConstraintName, core.ErrInvalidInput)
 	case "23503", "23502", "22P02":
 		return fmt.Errorf("invalid database input: %w", core.ErrInvalidInput)
+	case "40001", "40P01":
+		// SQLSTATE class 40 (transaction rollback): 40001 serialization_failure
+		// (SERIALIZABLE/REPEATABLE READ conflict) and 40P01 deadlock_detected
+		// (Postgres picked this session as the deadlock victim). Both mean the
+		// transaction was rolled back for reasons that have nothing to do with
+		// the request's validity -- resubmitting the SAME request with the SAME
+		// idempotency key is expected to succeed once the contending
+		// transaction clears (bus #24: "接线 core.ErrTransient 到 postgres
+		// adapter" -- before this, both fell through to `default: return err`
+		// and only reached core.IsRetryable's `default: true` catch-all, making
+		// them indistinguishable from an unclassified permanent bug at every
+		// call site that inspects the wrapped error chain instead of the bare
+		// bool).
+		return fmt.Errorf("transient postgres error %s: %w: %w", pgErr.Code, err, core.ErrTransient)
 	default:
 		return err
 	}

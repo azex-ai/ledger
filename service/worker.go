@@ -89,13 +89,13 @@ type Worker struct {
 	// only when someone has actually subscribed: LocalDispatcher marks every
 	// event it polls as delivered, and with no handlers registered that is a
 	// silent drain of the delivery queue.
-	localPoller delivery.EventPoller
-	fullReconcile  core.FullReconciler // nil = skip the full reconciliation suite job
-	partition      *PartitionService   // nil = skip partition management
-	attestation    *AttestationService // nil = skip the P6 batch attestation job
-	pool           *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
-	config         WorkerConfig
-	logger         core.Logger
+	localPoller   delivery.EventPoller
+	fullReconcile core.FullReconciler // nil = skip the full reconciliation suite job
+	partition     *PartitionService   // nil = skip partition management
+	attestation   *AttestationService // nil = skip the P6 batch attestation job
+	pool          *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
+	config        WorkerConfig
+	logger        core.Logger
 }
 
 // NewWorker creates a new Worker.
@@ -201,13 +201,31 @@ func (w *Worker) Run(ctx context.Context) error {
 		})
 	})
 
+	// expiration — advisory-locked so only one replica runs per tick
+	// (concurrency.md Major: this was the one background job among
+	// {reconcile, system_rollup, full_reconcile, partition, attestation,
+	// expiration} that ran unconditionally on every replica. Without
+	// leader election, K replicas racing GetExpiredReservations/
+	// ListExpiredBookings on the same tick all read the same expired batch
+	// and each call Release/Transition on it; the row lock inside
+	// Release/Transition serializes the writes so nothing corrupts, but
+	// K-1 of every K calls fail with ErrInvalidTransition and get logged as
+	// errors, drowning out genuine failures in noise. Wrapping in
+	// NewLockedJob, like its five siblings, means only one replica ever
+	// runs the batch per tick).
+	expirationJob := NewLockedJob("expiration", func(ctx context.Context) error {
+		if _, err := w.expiration.ExpireStaleReservations(ctx, w.config.ExpirationBatchSize); err != nil {
+			w.logger.Error("worker: expire reservations failed", "error", err)
+		}
+		if _, err := w.expiration.ExpireStaleBookings(ctx, w.config.ExpirationBatchSize); err != nil {
+			w.logger.Error("worker: expire bookings failed", "error", err)
+		}
+		return nil
+	}, w.pool, w.logger)
 	g.Go(func() error {
 		return w.runLoop(ctx, "expiration", w.config.ExpirationInterval, func(ctx context.Context) {
-			if _, err := w.expiration.ExpireStaleReservations(ctx, w.config.ExpirationBatchSize); err != nil {
-				w.logger.Error("worker: expire reservations failed", "error", err)
-			}
-			if _, err := w.expiration.ExpireStaleBookings(ctx, w.config.ExpirationBatchSize); err != nil {
-				w.logger.Error("worker: expire bookings failed", "error", err)
+			if err := expirationJob.Run(ctx); err != nil {
+				w.logger.Error("worker: expiration job failed", "error", err)
 			}
 		})
 	})
