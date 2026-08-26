@@ -1,7 +1,27 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { useLedgerClient } from "../provider/context";
 import type { LedgerClient } from "../client/client";
 import { ledgerKeys, ledgerKeyPrefix } from "./keys";
+
+/**
+ * Idempotency key stable across retries of one attempt sequence, cleared on
+ * success (api-contract.md §9 — same lifecycle as useLedgerMutation). Used
+ * directly here (rather than useLedgerMutation) because these mutations only
+ * need a plain invalidate-on-success, one line each.
+ */
+function useIdempotencyKey() {
+  const ref = useRef<string | null>(null);
+  return {
+    get: () => {
+      if (!ref.current) ref.current = crypto.randomUUID();
+      return ref.current;
+    },
+    clear: () => {
+      ref.current = null;
+    },
+  };
+}
 
 // ─── Classifications ─────────────────────────────────────────────────
 
@@ -27,10 +47,13 @@ export function useCreateClassification() {
 export function useDeactivateClassification() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
-    mutationFn: (id: string) => client.deactivateClassification(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications }),
+    mutationFn: (id: string) => client.deactivateClassification(id, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications });
+    },
   });
 }
 
@@ -58,10 +81,13 @@ export function useCreateJournalType() {
 export function useDeactivateJournalType() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
-    mutationFn: (id: string) => client.deactivateJournalType(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes }),
+    mutationFn: (id: string) => client.deactivateJournalType(id, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes });
+    },
   });
 }
 
@@ -89,10 +115,13 @@ export function useCreateTemplate() {
 export function useDeactivateTemplate() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
-    mutationFn: (id: string) => client.deactivateTemplate(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates }),
+    mutationFn: (id: string) => client.deactivateTemplate(id, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates });
+    },
   });
 }
 
@@ -137,10 +166,13 @@ export function useCreateCurrency() {
 export function useDeactivateCurrency() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
-    mutationFn: (id: string) => client.deactivateCurrency(id),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies }),
+    mutationFn: (id: string) => client.deactivateCurrency(id, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies });
+    },
   });
 }
 

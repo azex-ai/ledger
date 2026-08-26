@@ -118,6 +118,7 @@ function PostJournalDialog() {
           toast.success("Journal posted");
           setOpen(false);
         },
+        onError: () => toast.danger("Failed to post journal"),
       },
     );
   }
@@ -259,6 +260,7 @@ function TemplateJournalDialog() {
           toast.success("Template journal posted");
           setOpen(false);
         },
+        onError: () => toast.danger("Failed to post template journal"),
       },
     );
   }

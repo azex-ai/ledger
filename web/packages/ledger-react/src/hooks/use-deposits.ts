@@ -44,11 +44,12 @@ export function useDeposits(
 export function useConfirmingDeposit() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, channelRef }: { id: string; channelRef: string }) =>
-      client.transitionBooking(id, {
-        to_status: "confirming",
-        channel_ref: channelRef,
-      }),
+    ({ id, channelRef }: { id: string; channelRef: string }, idempotencyKey) =>
+      client.transitionBooking(
+        id,
+        { to_status: "confirming", channel_ref: channelRef },
+        idempotencyKey,
+      ),
     ["bookings"],
   );
 }
@@ -68,12 +69,12 @@ export function useConfirmDeposit() {
       id: string;
       actual_amount: string;
       channel_ref: string;
-    }) =>
-      client.transitionBooking(id, {
-        to_status: "confirmed",
-        amount: actual_amount,
-        channel_ref,
-      }),
+    }, idempotencyKey) =>
+      client.transitionBooking(
+        id,
+        { to_status: "confirmed", amount: actual_amount, channel_ref },
+        idempotencyKey,
+      ),
     ["bookings"],
   );
 }
@@ -81,11 +82,12 @@ export function useConfirmDeposit() {
 export function useFailDeposit() {
   const client = useLedgerClient();
   return useLedgerMutation(
-    ({ id, reason }: { id: string; reason: string }) =>
-      client.transitionBooking(id, {
-        to_status: "failed",
-        metadata: { reason },
-      }),
+    ({ id, reason }: { id: string; reason: string }, idempotencyKey) =>
+      client.transitionBooking(
+        id,
+        { to_status: "failed", metadata: { reason } },
+        idempotencyKey,
+      ),
     ["bookings"],
   );
 }

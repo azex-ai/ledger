@@ -66,6 +66,7 @@ function CreateDialog() {
               toast.success("Classification created");
               setOpen(false);
             },
+            onError: () => toast.error("Failed to create classification"),
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -98,6 +99,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Classification deactivated");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to deactivate classification"),
             })}
             disabled={mutation.isPending}
           >

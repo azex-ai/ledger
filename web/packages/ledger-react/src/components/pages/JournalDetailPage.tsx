@@ -107,6 +107,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
                 toast.success("Journal reversed");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to reverse journal"),
             })}
             disabled={mutation.isPending || !reason}
           >

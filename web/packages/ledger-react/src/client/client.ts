@@ -240,9 +240,12 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    settleReservation: (id: string, actualAmount: string) =>
+    // idempotencyKey: caller-supplied, stable across retries of the same
+    // attempt sequence (api-contract.md §9 — see useLedgerMutation).
+    settleReservation: (id: string, actualAmount: string, idempotencyKey: string) =>
       request<void>(`/api/v1/reservations/${id}/settle`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ actual_amount: actualAmount }),
       }),
 
@@ -258,11 +261,17 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify({ amount, idempotency_key: idempotencyKey }),
       }),
 
-    finalizeReservationSettlement: (id: string) =>
-      request<void>(`/api/v1/reservations/${id}/finalize`, { method: "POST" }),
+    finalizeReservationSettlement: (id: string, idempotencyKey: string) =>
+      request<void>(`/api/v1/reservations/${id}/finalize`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      }),
 
-    releaseReservation: (id: string) =>
-      request<void>(`/api/v1/reservations/${id}/release`, { method: "POST" }),
+    releaseReservation: (id: string, idempotencyKey: string) =>
+      request<void>(`/api/v1/reservations/${id}/release`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      }),
 
     // Bookings (unified — replaces v1 deposits + withdrawals)
     createBooking: (body: CreateBookingBody) =>
@@ -271,9 +280,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    transitionBooking: (id: string, body: TransitionBookingBody) =>
+    transitionBooking: (id: string, body: TransitionBookingBody, idempotencyKey: string) =>
       request<Event>(`/api/v1/bookings/${id}/transition`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify(body),
       }),
 
@@ -302,16 +312,18 @@ export function createLedgerClient(config: LedgerClientConfig) {
       request<PaginatedResponse<Booking>>(`/api/v1/deposits/reviews${qs(params)}`),
 
     // Idempotent: no-op returning the current booking if already confirmed.
-    approveDepositReview: (uid: string) =>
+    approveDepositReview: (uid: string, idempotencyKey: string) =>
       request<Booking>(`/api/v1/deposits/${uid}/review/approve`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
       }),
 
     // Idempotent: no-op returning the current booking if already failed.
     // No journal is ever posted.
-    rejectDepositReview: (uid: string, reason: string) =>
+    rejectDepositReview: (uid: string, reason: string, idempotencyKey: string) =>
       request<Booking>(`/api/v1/deposits/${uid}/review/reject`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
         body: JSON.stringify({ reason }),
       }),
 
@@ -343,9 +355,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateClassification: (id: string) =>
+    deactivateClassification: (id: string, idempotencyKey: string) =>
       request<void>(`/api/v1/classifications/${id}/deactivate`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
       }),
 
     // Journal Types
@@ -360,9 +373,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateJournalType: (id: string) =>
+    deactivateJournalType: (id: string, idempotencyKey: string) =>
       request<void>(`/api/v1/journal-types/${id}/deactivate`, {
         method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
       }),
 
     // Templates
@@ -388,8 +402,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateTemplate: (id: string) =>
-      request<void>(`/api/v1/templates/${id}/deactivate`, { method: "POST" }),
+    deactivateTemplate: (id: string, idempotencyKey: string) =>
+      request<void>(`/api/v1/templates/${id}/deactivate`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      }),
 
     previewTemplate: (
       code: string,
@@ -415,12 +432,18 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
-    deactivateCurrency: (id: string) =>
-      request<void>(`/api/v1/currencies/${id}/deactivate`, { method: "POST" }),
+    deactivateCurrency: (id: string, idempotencyKey: string) =>
+      request<void>(`/api/v1/currencies/${id}/deactivate`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      }),
 
     // Reconciliation
-    reconcileGlobal: () =>
-      request<ReconcileResult>("/api/v1/reconcile", { method: "POST" }),
+    reconcileGlobal: (idempotencyKey: string) =>
+      request<ReconcileResult>("/api/v1/reconcile", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+      }),
 
     reconcileAccount: (holder: number, currencyUid: string) =>
       request<ReconcileResult>("/api/v1/reconcile/account", {

@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Copy, Wallet } from "lucide-react";
+import { Check, Copy, Wallet, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
 import { Button } from "../../components/ui/button";
@@ -37,18 +37,29 @@ function DepositAddressCardSkeleton() {
 }
 
 function CopyAddressButton({ address }: { address: string }) {
-  const [copied, copy] = useCopyToClipboard();
+  const [state, copy] = useCopyToClipboard();
   return (
     <Button
       variant="ghost"
       size="icon-sm"
       aria-label="Copy address"
       onClick={() => {
-        copy(address);
-        toast.success("Address copied");
+        copy(address).then((ok) => {
+          if (ok) {
+            toast.success("Address copied");
+          } else {
+            toast.error("Couldn't copy — please copy the address manually.");
+          }
+        });
       }}
     >
-      {copied ? <Check className="text-primary" aria-hidden /> : <Copy aria-hidden />}
+      {state === "copied" ? (
+        <Check className="text-primary" aria-hidden />
+      ) : state === "failed" ? (
+        <X className="text-destructive" aria-hidden />
+      ) : (
+        <Copy aria-hidden />
+      )}
     </Button>
   );
 }

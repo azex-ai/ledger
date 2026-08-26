@@ -91,6 +91,7 @@ function CreateTemplateDialog() {
           toast.success("Template created");
           setOpen(false);
         },
+        onError: () => toast.error("Failed to create template"),
       },
     );
   }
@@ -225,6 +226,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Template deactivated");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to deactivate template"),
             })}
             disabled={mutation.isPending}
           >

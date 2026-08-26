@@ -1,7 +1,7 @@
 "use client";
 
 import { Button, Card, Skeleton } from "@heroui/react";
-import { Check, Copy, Wallet } from "lucide-react";
+import { Check, Copy, Wallet, X } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
 import { ErrorState } from "../../heroui/shared";
@@ -30,7 +30,7 @@ function DepositAddressCardSkeleton() {
 }
 
 function CopyAddressButton({ address }: { address: string }) {
-  const [copied, copy] = useCopyToClipboard();
+  const [state, copy] = useCopyToClipboard();
   return (
     <Button
       isIconOnly
@@ -38,11 +38,22 @@ function CopyAddressButton({ address }: { address: string }) {
       variant="ghost"
       aria-label="Copy address"
       onPress={() => {
-        copy(address);
-        toast.success("Address copied");
+        copy(address).then((ok) => {
+          if (ok) {
+            toast.success("Address copied");
+          } else {
+            toast.error("Couldn't copy — please copy the address manually.");
+          }
+        });
       }}
     >
-      {copied ? <Check className="text-success" aria-hidden /> : <Copy aria-hidden />}
+      {state === "copied" ? (
+        <Check className="text-success" aria-hidden />
+      ) : state === "failed" ? (
+        <X className="text-danger" aria-hidden />
+      ) : (
+        <Copy aria-hidden />
+      )}
     </Button>
   );
 }

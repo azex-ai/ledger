@@ -61,6 +61,7 @@ function SettleDialog({ id }: { id: string }) {
                   toast.success("Reservation settled");
                   setOpen(false);
                 },
+                onError: () => toast.error("Failed to settle reservation"),
               });
             }}
             disabled={mutation.isPending || !amount}
@@ -114,6 +115,7 @@ function SettlePartialDialog({ id }: { id: string }) {
                   setOpen(false);
                   setAmount("");
                 },
+                onError: () => toast.error("Failed to record partial settlement"),
               });
             }}
             disabled={mutation.isPending || !amount}
@@ -148,6 +150,7 @@ function FinalizeConfirmDialog({ id }: { id: string }) {
                 toast.success("Reservation finalized");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to finalize reservation"),
             })}
             disabled={mutation.isPending}
           >
@@ -182,6 +185,7 @@ function ReleaseConfirmDialog({ id }: { id: string }) {
                 toast.success("Reservation released");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to release reservation"),
             })}
             disabled={mutation.isPending}
           >
@@ -259,7 +263,7 @@ export function ReservationsPage() {
                   <TableCell>{r.account_holder}</TableCell>
                   <TableCell>{r.currency_uid}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(r.reserved_amount)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.settled_amount ? formatAmount(r.settled_amount) : "-"}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.settled_amount && r.settled_amount !== "0" ? formatAmount(r.settled_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatUTC(r.expires_at)}

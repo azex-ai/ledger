@@ -59,6 +59,7 @@ function CreateDialog() {
               toast.success("Currency created");
               setOpen(false);
             },
+            onError: () => toast.error("Failed to create currency"),
           })} disabled={mutation.isPending || !form.code || !form.name || form.exponent.trim() === "" || Number.isNaN(Number(form.exponent)) || Number(form.exponent) < 0 || Number(form.exponent) > 18}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -91,6 +92,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Currency deactivated");
                 setOpen(false);
               },
+              onError: () => toast.error("Failed to deactivate currency"),
             })}
             disabled={mutation.isPending}
           >
