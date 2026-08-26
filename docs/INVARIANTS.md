@@ -2364,6 +2364,62 @@ split out of the `ScopeWrite` group; `parseScopeAndCapabilities` (API_KEYS
 `AutoCreditCeiling` fence, same rationale: a push-only/webhook-only
 consumer that never calls `Run()` must not skip the check).
 
+## I-40: The HTTP wire contract is machine-checked against docs/openapi.yaml, and a write-scope key cannot mint a deposit-shaped journal through the generic template endpoint
+
+(`docs/audits/2026-08-25-financial-engineering/structure.md`'s two Majors;
+`docs/plans/2026-08-26-audit-remediation-contracts.md` Wave 2, D-contract.)
+
+**Rule** (two independent properties, one task):
+
+1. Every cursor-paginated list response's `next_cursor` field is a JSON
+   `null` when exhausted -- never an omitted key (`undefined` in JS) or an
+   empty string, both of which used to be live, inconsistent spellings of
+   "no more pages" across different handlers. `server.PagedResponse` carries
+   `NextCursor` as `*string`; `cursorPtr("")` (exhausted) is `nil`, which
+   `encoding/json` renders as `null`. Every `docs/openapi.yaml` schema with a
+   `next_cursor` property types it to admit `"null"`
+   (`type: [string, "null"]` in OpenAPI 3.1), and every requestBody /
+   response schema referenced by a handler agrees on field names with that
+   handler's Go wire struct -- both mechanically, not by convention: a
+   `go test ./server/...` run checks the openapi.yaml source against `server`
+   package reflection on every push and PR (unlike the pre-existing
+   `ledger-react.yml` gate, this one is not path-filtered and needs no
+   running server).
+2. `POST /journals/template` refuses (403) any `template_code` listed in
+   `server.Config.ProtectedTemplateCodes` (empty by default), no matter what
+   scope the caller's API key holds. A deployment that installs a
+   verified-deposit-confirmation preset should list those template codes
+   here, mirroring `POST /dev/credits`'s hardcoded-to-one-template design
+   (`server/handler_devcredit.go`) rather than leaving the generic template
+   endpoint as an unrestricted way to post a journal indistinguishable from
+   a real confirmed deposit.
+
+**Why**: Before (1), a client following `docs/openapi.yaml` literally (e.g.
+checking `data.next_cursor === null` to know when to stop paging, or sending
+the documented `expires_in` / `holders` / omitted `source` /
+`effective_at` fields) would get silently wrong behavior with no test or CI
+signal, because nothing ever compared the spec to a running server or the Go
+source -- `ledger-react.yml`'s `codegen:check` only compares the generated
+TS to the same YAML file, a self-consistency check that cannot detect the
+YAML itself being wrong. Before (2), `presets.DepositConfirmTemplateCode`
+and its siblings (`deposit_confirm_pending`, `deposit_release_pending`,
+`deposit_record_overage`) were reachable by name through the same endpoint
+any other template goes through, with no gate at all -- a leaked or
+over-scoped write-scope key could mint accounting indistinguishable from a
+verified on-chain deposit.
+
+**Enforced by**: `server.PagedResponse` / `cursorPtr` (`server/response.go`);
+`server.Config.ProtectedTemplateCodes` / `server.Server.protectedTemplateCodes`
+(`server/server.go`) checked in `handlePostTemplate`
+(`server/handler_journals.go`); `server/openapi_contract_test.go`'s
+`TestOpenAPIContract_RequestBodiesMatchGoStructs` /
+`TestOpenAPIContract_ResponseEnvelopesMatchGoStructs` /
+`TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs` /
+`TestOpenAPIContract_NextCursorIsNullable`, run unconditionally by `ci.yml`'s
+`test` job; `.github/workflows/ledger-react-publish.yml`'s `verify` job now
+also runs `codegen:check` before publishing (previously only `ledger-react.yml`
+did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
+
 **Pinned by**:
 - `server.TestDepositReview_SelfMintSelfApprove_MI2` — the end-to-end mi2
   exploit chain with one ScopeWrite-only key: create a booking (`POST

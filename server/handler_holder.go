@@ -142,8 +142,10 @@ type holderTransactionResponse struct {
 }
 
 type holderTransactionsPage struct {
-	List       []holderTransactionResponse `json:"list"`
-	NextCursor string                      `json:"next_cursor"`
+	List []holderTransactionResponse `json:"list"`
+	// NextCursor is a pointer so exhausted pages serialize to a literal JSON
+	// null (api-contract.md §6), not the empty string this type used to emit.
+	NextCursor *string `json:"next_cursor"`
 }
 
 type holderHoldResponse struct {
@@ -261,7 +263,7 @@ func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http
 			Memo:          it.Memo,
 		}
 	}
-	httpx.OK(w, holderTransactionsPage{List: out, NextCursor: next})
+	httpx.OK(w, holderTransactionsPage{List: out, NextCursor: cursorPtr(next)})
 }
 
 func (hs *holderSurface) handleHolderHolds(w http.ResponseWriter, r *http.Request) {

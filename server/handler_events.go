@@ -45,7 +45,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	resp := PagedResponse[eventResponse]{
 		List:       make([]eventResponse, len(events)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i, evt := range events {
 		resp.List[i] = eventToResponse(&evt)

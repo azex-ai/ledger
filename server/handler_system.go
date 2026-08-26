@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/azex-ai/ledger/pkg/bizcode"
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
@@ -22,9 +23,12 @@ type healthResponse struct {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	metrics, err := s.queries.GetHealthMetrics(r.Context())
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"status":"degraded","db":"down"}`))
+		// api-contract.md §1: every REST response, no exceptions, is the
+		// {code, message, data} envelope -- this probe's failure path used
+		// to hand-write a bare {"status":...} body that broke that contract
+		// (structure.md's Minor). 18101 already carries a fitting generic
+		// "service unavailable" display message and maps to 503.
+		httpx.Error(w, bizcode.New(18101, "database unreachable"))
 		return
 	}
 	httpx.OK(w, healthResponse{
@@ -41,9 +45,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // rotation until we're actually serving.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if !s.IsReady() {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"status":"starting"}`))
+		httpx.Error(w, bizcode.New(18101, "starting up"))
 		return
 	}
 	httpx.OK(w, map[string]string{"status": "ready"})

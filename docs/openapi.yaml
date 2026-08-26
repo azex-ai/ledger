@@ -64,6 +64,11 @@ paths:
       responses:
         "200":
           description: Service is up.
+        "503":
+          description: DB unreachable. Envelope, same as every other error response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /system/ready:
     get:
       tags: [System]
@@ -73,7 +78,10 @@ paths:
         "200":
           description: Ready.
         "503":
-          description: Not ready.
+          description: Not ready yet. Envelope, same as every other error response.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
   /system/balances:
     get:
       tags: [System]
@@ -124,6 +132,14 @@ paths:
     post:
       tags: [Journals]
       summary: Render a template into a journal and post it.
+      description: >-
+        Answers 403 when template_code is one of the deployment's
+        Config.ProtectedTemplateCodes (empty by default) -- deployments that
+        install a verified-deposit-confirmation preset should list its
+        template codes there so a write-scope key cannot mint a journal
+        indistinguishable from a real confirmed deposit through this generic
+        endpoint; those codes are meant to be posted only by the deployment's
+        own orchestration.
       requestBody:
         required: true
         content:
@@ -135,6 +151,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JournalEnvelope" }
+        "403":
+          description: template_code is in this deployment's Config.ProtectedTemplateCodes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "409":
           $ref: "#/components/responses/DomainError"
         "422":
@@ -143,9 +164,17 @@ paths:
     post:
       tags: [Journals]
       summary: Resolve deposit shortfall / overage atomically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DepositToleranceRequest" }
       responses:
         "201":
           description: Plan executed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DepositToleranceEnvelope" }
         "422":
           $ref: "#/components/responses/DomainError"
   /journals/{uid}:
@@ -247,6 +276,9 @@ paths:
       responses:
         "200":
           description: Entries page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EntryListEnvelope" }
 
   /balances/{holder}:
     get:
@@ -317,11 +349,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [holders, currency_uid]
+              required: [holder_ids, currency_uid]
               properties:
-                holders:
+                holder_ids:
                   type: array
                   items: { type: integer, format: int64 }
+                  maxItems: 100
                 currency_uid: { type: string, format: uuid }
       responses:
         "200":
@@ -331,8 +364,25 @@ paths:
     get:
       tags: [Reservations]
       summary: List reservations.
+      parameters:
+        - in: query
+          name: holder
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: status
+          schema: { type: string, enum: [active, settling, settled, released] }
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
       responses:
-        "200": { description: Reservations. }
+        "200":
+          description: Reservations page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReservationListEnvelope" }
     post:
       tags: [Reservations]
       summary: Reserve funds (TOCTOU-safe).
@@ -626,8 +676,28 @@ paths:
     get:
       tags: [Bookings]
       summary: List bookings.
+      parameters:
+        - in: query
+          name: holder
+          schema: { type: integer, format: int64 }
+        - in: query
+          name: classification_uid
+          schema: { type: string, format: uuid }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
       responses:
-        "200": { description: Bookings page. }
+        "200":
+          description: Bookings page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingListEnvelope" }
     post:
       tags: [Bookings]
       summary: Create a booking against a classification's lifecycle.
@@ -684,8 +754,28 @@ paths:
     get:
       tags: [Events]
       summary: List events.
+      parameters:
+        - in: query
+          name: classification_code
+          schema: { type: string }
+        - in: query
+          name: booking_uid
+          schema: { type: string, format: uuid }
+        - in: query
+          name: to_status
+          schema: { type: string }
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
       responses:
-        "200": { description: Events page. }
+        "200":
+          description: Events page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventListEnvelope" }
   /events/{uid}:
     get:
       tags: [Events]
@@ -698,6 +788,9 @@ paths:
       responses:
         "200":
           description: Event.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /webhooks/{channel}:
@@ -824,7 +917,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TemplateParams" }
+            schema: { $ref: "#/components/schemas/TemplatePreviewRequest" }
       responses:
         "200": { description: Rendered JournalInput. }
   /templates/{uid}/deactivate:
@@ -1356,7 +1449,7 @@ components:
       required: [uid, kind, kind_label, direction, amount, currency_uid, currency_code, occurred_at, reversal_of_uid, memo]
       properties:
         uid: { type: string, format: uuid, description: "Journal uid — trace anchor, safe to display." }
-        kind: { type: string, example: "deposit_confirm", description: "Stable code (journal type code); anchor for product-side label overrides / i18n." }
+        kind: { type: string, format: uuid, description: "journal_type_uid -- a stable per-deployment key for product-side label overrides / i18n. Deliberately opaque: it does not reveal the ledger's internal journal-type code (see kind_label for the display text)." }
         kind_label: { type: string, example: "Deposit", description: "Library-side default display label." }
         direction: { type: string, enum: [in, out] }
         amount: { $ref: "#/components/schemas/Decimal", description: "Absolute net amount for this (journal, currency)." }
@@ -1377,7 +1470,7 @@ components:
                 list:
                   type: array
                   items: { $ref: "#/components/schemas/HolderTransaction" }
-                next_cursor: { type: string, description: "Empty when exhausted." }
+                next_cursor: { type: [string, "null"], description: "Null when exhausted." }
 
     HolderHold:
       type: object
@@ -1489,9 +1582,13 @@ components:
         created_at:  { $ref: "#/components/schemas/Timestamp" }
     Entry:
       type: object
+      description: >-
+        Entries are not individually uid'd -- core.Entry has no uid field.
+        An entry is identified by its (journal_uid, account_holder,
+        currency_uid, classification_uid) tuple; its internal BIGSERIAL row
+        id is never exposed (I-18).
       required: [journal_uid, account_holder, currency_uid, classification_uid, entry_type, amount, effective_at, created_at]
       properties:
-        uid: { type: string, format: uuid }
         journal_uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
         currency_uid: { type: string, format: uuid }
@@ -1500,6 +1597,20 @@ components:
         amount:     { $ref: "#/components/schemas/Decimal" }
         effective_at: { $ref: "#/components/schemas/Timestamp" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
+    EntryListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Entry" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Opaque cursor; null when exhausted.
 
     JournalEnvelope:
       allOf:
@@ -1519,8 +1630,8 @@ components:
                   type: array
                   items: { $ref: "#/components/schemas/Journal" }
                 next_cursor:
-                  type: string
-                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
+                  type: [string, "null"]
+                  description: Opaque cursor; null when exhausted or when the endpoint returns its full result set (not paginated).
     JournalWithEntriesEnvelope:
       allOf:
         - $ref: "#/components/schemas/Envelope"
@@ -1553,8 +1664,8 @@ components:
                   type: array
                   items: { $ref: "#/components/schemas/Balance" }
                 next_cursor:
-                  type: string
-                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     BalanceBreakdown:
       type: object
@@ -1591,8 +1702,8 @@ components:
                   type: array
                   items: { $ref: "#/components/schemas/SystemRollup" }
                 next_cursor:
-                  type: string
-                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     ReserveInput:
       type: object
@@ -1602,7 +1713,17 @@ components:
         currency_uid: { type: string, format: uuid }
         amount:         { $ref: "#/components/schemas/Decimal" }
         idempotency_key: { type: string }
-        expires_in:     { type: string, description: 'Go duration string (e.g. 1h, 30m).' }
+        expires_in_sec: { type: integer, format: int64, description: 'Seconds until the reservation expires. Omitted/0 = no expiry.' }
+        require_verified_balance:
+          type: boolean
+          description: >-
+            When true, Reserve additionally refuses (422) unless every
+            balance_role=available classification this holder has touched in
+            currency_uid passes the tamper-evident attestation check -- on
+            top of, not instead of, the normal balance-covers-amount check.
+            Off by default; mechanism lives in the library, the policy of
+            when to require it is the caller's (core.ReserveInput's doc
+            comment).
     Reservation:
       type: object
       properties:
@@ -1625,6 +1746,20 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Reservation" }
+    ReservationListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Reservation" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Opaque cursor; null when exhausted.
 
     AccountPolicyInput:
       type: object
@@ -1722,6 +1857,20 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Booking" }
+    BookingListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Booking" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Opaque cursor; null when exhausted.
 
     DepositAddress:
       type: object
@@ -1752,7 +1901,7 @@ components:
                 list:
                   type: array
                   items: { $ref: "#/components/schemas/Booking" }
-                next_cursor: { type: string, description: "Empty when exhausted." }
+                next_cursor: { type: [string, "null"], description: "Null when exhausted." }
 
     Event:
       type: object
@@ -1779,6 +1928,20 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/Event" }
+    EventListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Event" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Opaque cursor; null when exhausted.
 
     Lifecycle:
       type: object
@@ -1840,6 +2003,21 @@ components:
         metadata:
           type: object
           additionalProperties: { type: string }
+    TemplatePreviewRequest:
+      type: object
+      description: >-
+        Deliberately narrower than TemplateParams / TemplateExecutionRequest:
+        POST /templates/{code}/preview never posts anything (it hardcodes
+        idempotency_key="preview" server-side and does not call
+        JournalWriter), so it takes no idempotency_key, event_uid, actor_id,
+        source, or metadata.
+      required: [holder_id, currency_uid, amounts]
+      properties:
+        holder_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        amounts:
+          type: object
+          additionalProperties: { $ref: "#/components/schemas/Decimal" }
     TemplateExecutionRequest:
       type: object
       required: [template_code, holder_id, currency_uid, idempotency_key, amounts]
@@ -1857,6 +2035,42 @@ components:
         metadata:
           type: object
           additionalProperties: { type: string }
+
+    DepositToleranceRequest:
+      type: object
+      required: [holder_id, currency_uid, idempotency_key, expected_amount, actual_amount, tolerance]
+      properties:
+        holder_id: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        idempotency_key: { type: string }
+        expected_amount: { $ref: "#/components/schemas/Decimal" }
+        actual_amount:   { $ref: "#/components/schemas/Decimal" }
+        tolerance:       { $ref: "#/components/schemas/Decimal" }
+        actor_id: { type: integer, format: int64 }
+        source:   { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+    DepositTolerancePlanResult:
+      type: object
+      properties:
+        outcome:
+          type: string
+          enum: [exact_match, shortfall_auto_released, shortfall_pending_review, overage_auto_credited, overage_recorded_for_review]
+        expected_amount: { $ref: "#/components/schemas/Decimal" }
+        actual_amount:   { $ref: "#/components/schemas/Decimal" }
+        tolerance:       { $ref: "#/components/schemas/Decimal" }
+        delta:           { $ref: "#/components/schemas/Decimal" }
+        requires_manual_review: { type: boolean }
+        journals:
+          type: array
+          items: { $ref: "#/components/schemas/Journal" }
+    DepositToleranceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/DepositTolerancePlanResult" }
 
     ReconcileResult:
       type: object
@@ -1946,8 +2160,8 @@ components:
                   type: array
                   items: { $ref: "#/components/schemas/BalanceTrendPoint" }
                 next_cursor:
-                  type: string
-                  description: Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated.
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     ReconcileReport:
       type: object

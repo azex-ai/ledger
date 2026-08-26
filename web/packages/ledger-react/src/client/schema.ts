@@ -28,6 +28,15 @@ export interface paths {
                     };
                     content?: never;
                 };
+                /** @description DB unreachable. Envelope, same as every other error response. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
+                };
             };
         };
         put?: never;
@@ -62,12 +71,14 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Not ready. */
+                /** @description Not ready yet. Envelope, same as every other error response. */
                 503: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
+                    };
                 };
             };
         };
@@ -189,7 +200,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Render a template into a journal and post it. */
+        /**
+         * Render a template into a journal and post it.
+         * @description Answers 403 when template_code is one of the deployment's Config.ProtectedTemplateCodes (empty by default) -- deployments that install a verified-deposit-confirmation preset should list its template codes there so a write-scope key cannot mint a journal indistinguishable from a real confirmed deposit through this generic endpoint; those codes are meant to be posted only by the deployment's own orchestration.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -210,6 +224,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["JournalEnvelope"];
+                    };
+                };
+                /** @description template_code is in this deployment's Config.ProtectedTemplateCodes. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
                 409: components["responses"]["DomainError"];
@@ -239,14 +262,20 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["DepositToleranceRequest"];
+                };
+            };
             responses: {
                 /** @description Plan executed. */
                 201: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["DepositToleranceEnvelope"];
+                    };
                 };
                 422: components["responses"]["DomainError"];
             };
@@ -436,7 +465,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["EntryListEnvelope"];
+                    };
                 };
             };
         };
@@ -587,7 +618,7 @@ export interface paths {
             requestBody: {
                 content: {
                     "application/json": {
-                        holders: number[];
+                        holder_ids: number[];
                         /** Format: uuid */
                         currency_uid: string;
                     };
@@ -619,19 +650,26 @@ export interface paths {
         /** List reservations. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    holder?: number;
+                    status?: "active" | "settling" | "settled" | "released";
+                    cursor?: string;
+                    limit?: number;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
             };
             requestBody?: never;
             responses: {
-                /** @description Reservations. */
+                /** @description Reservations page. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ReservationListEnvelope"];
+                    };
                 };
             };
         };
@@ -692,6 +730,8 @@ export interface paths {
                     "application/json": {
                         /** @description Decimal as string. */
                         actual_amount: string;
+                        /** @description Required (I-3). Settled is a terminal status, so a retried request replays idempotently instead of returning ErrInvalidTransition: same key + same amount returns the original success, same key + different amount is a conflict. */
+                        idempotency_key: string;
                     };
                 };
             };
@@ -783,7 +823,14 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Required (I-3). Settled is a terminal status, so a retried request replays idempotently instead of returning ErrInvalidTransition: same key returns the original success, same key against a different reservation is a conflict. */
+                        idempotency_key: string;
+                    };
+                };
+            };
             responses: {
                 /** @description Finalized. */
                 200: {
@@ -820,7 +867,14 @@ export interface paths {
                 };
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /** @description Required (I-3). Released is a terminal status, so a retried request replays idempotently instead of returning ErrInvalidTransition: same key returns the original success, same key against a different reservation is a conflict. */
+                        idempotency_key: string;
+                    };
+                };
+            };
             responses: {
                 /** @description Released. */
                 200: {
@@ -1162,7 +1216,13 @@ export interface paths {
         /** List bookings. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    holder?: number;
+                    classification_uid?: string;
+                    status?: string;
+                    cursor?: string;
+                    limit?: number;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1174,7 +1234,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["BookingListEnvelope"];
+                    };
                 };
             };
         };
@@ -1302,7 +1364,13 @@ export interface paths {
         /** List events. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    classification_code?: string;
+                    booking_uid?: string;
+                    to_status?: string;
+                    cursor?: string;
+                    limit?: number;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1314,7 +1382,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["EventListEnvelope"];
+                    };
                 };
             };
         };
@@ -1350,7 +1420,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["EventEnvelope"];
+                    };
                 };
                 404: components["responses"]["NotFound"];
             };
@@ -1686,7 +1758,7 @@ export interface paths {
             };
             requestBody: {
                 content: {
-                    "application/json": components["schemas"]["TemplateParams"];
+                    "application/json": components["schemas"]["TemplatePreviewRequest"];
                 };
             };
             responses: {
@@ -2613,8 +2685,8 @@ export interface components {
              */
             uid: string;
             /**
-             * @description Stable code (journal type code); anchor for product-side label overrides / i18n.
-             * @example deposit_confirm
+             * Format: uuid
+             * @description journal_type_uid -- a stable per-deployment key for product-side label overrides / i18n. Deliberately opaque: it does not reveal the ledger's internal journal-type code (see kind_label for the display text).
              */
             kind: string;
             /**
@@ -2639,8 +2711,8 @@ export interface components {
         HolderTransactionListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list: components["schemas"]["HolderTransaction"][];
-                /** @description Empty when exhausted. */
-                next_cursor: string;
+                /** @description Null when exhausted. */
+                next_cursor: string | null;
             };
         };
         HolderHold: {
@@ -2741,9 +2813,8 @@ export interface components {
             effective_at: components["schemas"]["Timestamp"];
             created_at: components["schemas"]["Timestamp"];
         };
+        /** @description Entries are not individually uid'd -- core.Entry has no uid field. An entry is identified by its (journal_uid, account_holder, currency_uid, classification_uid) tuple; its internal BIGSERIAL row id is never exposed (I-18). */
         Entry: {
-            /** Format: uuid */
-            uid?: string;
             /** Format: uuid */
             journal_uid: string;
             /** Format: int64 */
@@ -2757,14 +2828,21 @@ export interface components {
             effective_at: components["schemas"]["Timestamp"];
             created_at: components["schemas"]["Timestamp"];
         };
+        EntryListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Entry"][];
+                /** @description Opaque cursor; null when exhausted. */
+                next_cursor?: string | null;
+            };
+        };
         JournalEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Journal"];
         };
         JournalListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list?: components["schemas"]["Journal"][];
-                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
-                next_cursor?: string;
+                /** @description Opaque cursor; null when exhausted or when the endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
             };
         };
         JournalWithEntriesEnvelope: components["schemas"]["Envelope"] & {
@@ -2785,8 +2863,8 @@ export interface components {
         BalancesEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list?: components["schemas"]["Balance"][];
-                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
-                next_cursor?: string;
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
             };
         };
         BalanceBreakdown: {
@@ -2813,8 +2891,8 @@ export interface components {
         SystemRollupsEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list?: components["schemas"]["SystemRollup"][];
-                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
-                next_cursor?: string;
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
             };
         };
         ReserveInput: {
@@ -2824,8 +2902,13 @@ export interface components {
             currency_uid: string;
             amount: components["schemas"]["Decimal"];
             idempotency_key: string;
-            /** @description Go duration string (e.g. 1h, 30m). */
-            expires_in?: string;
+            /**
+             * Format: int64
+             * @description Seconds until the reservation expires. Omitted/0 = no expiry.
+             */
+            expires_in_sec?: number;
+            /** @description When true, Reserve additionally refuses (422) unless every balance_role=available classification this holder has touched in currency_uid passes the tamper-evident attestation check -- on top of, not instead of, the normal balance-covers-amount check. Off by default; mechanism lives in the library, the policy of when to require it is the caller's (core.ReserveInput's doc comment). */
+            require_verified_balance?: boolean;
         };
         Reservation: {
             /** Format: uuid */
@@ -2850,6 +2933,13 @@ export interface components {
         };
         ReservationEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Reservation"];
+        };
+        ReservationListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Reservation"][];
+                /** @description Opaque cursor; null when exhausted. */
+                next_cursor?: string | null;
+            };
         };
         AccountPolicyInput: {
             /**
@@ -2915,6 +3005,8 @@ export interface components {
             /** Format: int64 */
             actor_id?: number;
             source?: string;
+            /** @description Required (I-3). May instead be supplied via the Idempotency-Key header. A retried request with the same key and the same (to_status, channel_ref, amount) payload replays the original event, even after the booking has since moved on to a later status; the same key with a different payload is a conflict. */
+            idempotency_key: string;
         };
         Booking: {
             /** Format: uuid */
@@ -2951,6 +3043,13 @@ export interface components {
         BookingEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Booking"];
         };
+        BookingListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Booking"][];
+                /** @description Opaque cursor; null when exhausted. */
+                next_cursor?: string | null;
+            };
+        };
         /** @description The CREATE2 derivation fingerprint (factory/init_hash) is an internal audit-only detail and is deliberately not part of this wire shape. */
         DepositAddress: {
             /** Format: uuid */
@@ -2967,8 +3066,8 @@ export interface components {
         DepositReviewListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list: components["schemas"]["Booking"][];
-                /** @description Empty when exhausted. */
-                next_cursor: string;
+                /** @description Null when exhausted. */
+                next_cursor: string | null;
             };
         };
         Event: {
@@ -3000,6 +3099,13 @@ export interface components {
         };
         EventEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Event"];
+        };
+        EventListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Event"][];
+                /** @description Opaque cursor; null when exhausted. */
+                next_cursor?: string | null;
+            };
         };
         Lifecycle: {
             initial: string;
@@ -3048,6 +3154,16 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /** @description Deliberately narrower than TemplateParams / TemplateExecutionRequest: POST /templates/{code}/preview never posts anything (it hardcodes idempotency_key="preview" server-side and does not call JournalWriter), so it takes no idempotency_key, event_uid, actor_id, source, or metadata. */
+        TemplatePreviewRequest: {
+            /** Format: int64 */
+            holder_id: number;
+            /** Format: uuid */
+            currency_uid: string;
+            amounts: {
+                [key: string]: components["schemas"]["Decimal"];
+            };
+        };
         TemplateExecutionRequest: {
             template_code: string;
             /** Format: int64 */
@@ -3066,6 +3182,35 @@ export interface components {
             metadata?: {
                 [key: string]: string;
             };
+        };
+        DepositToleranceRequest: {
+            /** Format: int64 */
+            holder_id: number;
+            /** Format: uuid */
+            currency_uid: string;
+            idempotency_key: string;
+            expected_amount: components["schemas"]["Decimal"];
+            actual_amount: components["schemas"]["Decimal"];
+            tolerance: components["schemas"]["Decimal"];
+            /** Format: int64 */
+            actor_id?: number;
+            source?: string;
+            metadata?: {
+                [key: string]: string;
+            };
+        };
+        DepositTolerancePlanResult: {
+            /** @enum {string} */
+            outcome?: "exact_match" | "shortfall_auto_released" | "shortfall_pending_review" | "overage_auto_credited" | "overage_recorded_for_review";
+            expected_amount?: components["schemas"]["Decimal"];
+            actual_amount?: components["schemas"]["Decimal"];
+            tolerance?: components["schemas"]["Decimal"];
+            delta?: components["schemas"]["Decimal"];
+            requires_manual_review?: boolean;
+            journals?: components["schemas"]["Journal"][];
+        };
+        DepositToleranceEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["DepositTolerancePlanResult"];
         };
         ReconcileResult: {
             balanced?: boolean;
@@ -3128,8 +3273,8 @@ export interface components {
         BalanceTrendListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list?: components["schemas"]["BalanceTrendPoint"][];
-                /** @description Opaque cursor; absent/empty when exhausted or when the endpoint is not paginated. */
-                next_cursor?: string;
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
             };
         };
         ReconcileReport: {

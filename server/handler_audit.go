@@ -98,7 +98,7 @@ func (s *Server) handleListAuditJournals(w http.ResponseWriter, r *http.Request)
 
 	resp := PagedResponse[journalResponse]{
 		List:       make([]journalResponse, len(journals)),
-		NextCursor: nextCursor,
+		NextCursor: cursorPtr(nextCursor),
 	}
 	for i, j := range journals {
 		resp.List[i] = toJournalResponse(&j)
