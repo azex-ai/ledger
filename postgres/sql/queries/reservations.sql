@@ -101,3 +101,18 @@ RETURNING id, reservation_id, idempotency_key, amount, created_at;
 SELECT id, reservation_id, idempotency_key, amount, created_at
 FROM reservation_settlement_legs
 WHERE idempotency_key = $1;
+
+-- name: InsertReservationOperationReceipt :one
+-- Durable idempotency record for one Settle/Release/FinalizeSettlement
+-- application (I-3), mirroring InsertReservationSettlementLeg's pattern. On
+-- a replayed key this inserts nothing and returns no row; the caller then
+-- fetches the existing receipt and compares payloads.
+INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id, reservation_id, operation, idempotency_key, amount, created_at;
+
+-- name: GetReservationOperationReceiptByIdempotencyKey :one
+SELECT id, reservation_id, operation, idempotency_key, amount, created_at
+FROM reservation_operation_receipts
+WHERE idempotency_key = $1;

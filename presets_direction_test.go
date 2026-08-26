@@ -143,7 +143,7 @@ func TestReserveSettleCharge_ChargesInsideOneTransaction(t *testing.T) {
 
 	actual := decimal.RequireFromString("15.75")
 	require.NoError(t, svc.RunInTx(ctx, func(tx *ledger.Service) error {
-		if err := tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actual}); err != nil {
+		if err := tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: actual, IdempotencyKey: postgrestest.UniqueKey("bill-settle")}); err != nil {
 			return err
 		}
 		_, err := tx.JournalWriter().ExecuteTemplate(ctx, "fee_charge", core.TemplateParams{

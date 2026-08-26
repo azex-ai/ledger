@@ -37,7 +37,7 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 	assert.True(t, res.ReservedAmount.Equal(decimal.NewFromInt(100)))
 
 	// Settle
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(95)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(95), IdempotencyKey: postgrestest.UniqueKey("res-settle-op")})
 	require.NoError(t, err)
 }
 
@@ -59,11 +59,11 @@ func TestReserverStore_Reserve_Release(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Release(ctx, res.UID)
+	err = store.Release(ctx, core.ReleaseInput{ReservationUID: res.UID, IdempotencyKey: postgrestest.UniqueKey("res-release-op")})
 	require.NoError(t, err)
 
 	// Cannot settle after release
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50), IdempotencyKey: postgrestest.UniqueKey("res-settle-after-release")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -166,7 +166,20 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	assert.NotEqual(t, res1.UID, res2.UID)
 }
 
-func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
+// Pins I-3 for Settle. Before this fix, SettleInput carried no idempotency
+// key at all, and this test (then named TestReserverStore_Settle_InvalidTransition)
+// asserted that calling Settle a second time with the exact same payload
+// FAILED with ErrInvalidTransition -- i.e. it certified the bug: a
+// lost-response retry of a successful Settle was indistinguishable from a
+// genuine conflict (someone else settling a different amount, or the
+// reservation having been released out from under the caller). This is
+// inverted, not deleted, so what changed stays visible: a replay (same key,
+// same amount) now returns the original success; a genuinely new attempt
+// (a never-before-seen key) against an already-terminal reservation is
+// still ErrInvalidTransition, because that IS a real conflict, not a
+// replay; and a replayed key with a different amount is ErrConflict, never
+// a silent success.
+func TestReserverStore_Settle_IdempotentReplay(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
 	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
@@ -184,12 +197,26 @@ func TestReserverStore_Settle_InvalidTransition(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Settle once
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100)})
+	key := postgrestest.UniqueKey("double-settle-op")
+
+	// Settle once.
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100), IdempotencyKey: key})
 	require.NoError(t, err)
 
-	// Settle again should fail
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100)})
+	// Lost-response retry: same key, same amount -- must return the
+	// original success, NOT ErrInvalidTransition.
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100), IdempotencyKey: key})
+	require.NoError(t, err)
+
+	// Same key, different amount -- payload mismatch is ErrConflict.
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50), IdempotencyKey: key})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+
+	// A genuinely new attempt (never-before-seen key) against an
+	// already-settled reservation is a real conflict, distinct from a
+	// replay, and is still rejected.
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100), IdempotencyKey: postgrestest.UniqueKey("double-settle-op-new")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidTransition)
 }
@@ -229,7 +256,7 @@ func TestReserverStore_HeldAmount(t *testing.T) {
 	assert.True(t, other.IsZero(), "holder 8 has no reservations, want 0, got %s", other)
 
 	// Releasing one active reservation drops it out of the held total.
-	require.NoError(t, store.Release(ctx, r1.UID))
+	require.NoError(t, store.Release(ctx, core.ReleaseInput{ReservationUID: r1.UID, IdempotencyKey: postgrestest.UniqueKey("held-release")}))
 	held, err = store.HeldAmount(ctx, 7, curID)
 	require.NoError(t, err)
 	assert.True(t, held.Equal(decimal.NewFromInt(20)), "after release, want 20, got %s", held)
@@ -274,7 +301,7 @@ func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.Zero})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.Zero, IdempotencyKey: postgrestest.UniqueKey("settle-zero-op")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -297,7 +324,7 @@ func TestReserverStore_Settle_NegativeAmountRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-1)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(-1), IdempotencyKey: postgrestest.UniqueKey("settle-negative-op")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
@@ -326,7 +353,7 @@ func TestReserverStore_Settle_ExceedsReservedRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50).Add(decimal.NewFromInt(1))})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50).Add(decimal.NewFromInt(1)), IdempotencyKey: postgrestest.UniqueKey("settle-oversettle-op")})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 	assert.Contains(t, err.Error(), "exceeds reserved amount")
@@ -358,6 +385,106 @@ func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50)})
+	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50), IdempotencyKey: postgrestest.UniqueKey("settle-exact-op")})
 	require.NoError(t, err)
+}
+
+// Pins I-3 for Release: before ReleaseInput carried an IdempotencyKey,
+// Release took a bare reservationUID and a lost-response retry of a
+// successful call landed on ErrInvalidTransition (released is terminal),
+// indistinguishable from a genuine conflict. A replay (same key) now
+// returns the original success; the same key reused against a DIFFERENT
+// reservation is ErrConflict.
+func TestReserverStore_Release_IdempotentReplay(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 24, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  24,
+		CurrencyUID:    curID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: postgrestest.UniqueKey("release-idem-rsv"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+
+	key := postgrestest.UniqueKey("release-idem-op")
+
+	require.NoError(t, store.Release(ctx, core.ReleaseInput{ReservationUID: res.UID, IdempotencyKey: key}))
+
+	// Lost-response retry: same key -- must succeed, not ErrInvalidTransition.
+	require.NoError(t, store.Release(ctx, core.ReleaseInput{ReservationUID: res.UID, IdempotencyKey: key}))
+
+	// The same key reused against a different reservation is a real
+	// conflict, not a replay.
+	res2, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  24,
+		CurrencyUID:    curID,
+		Amount:         decimal.NewFromInt(20),
+		IdempotencyKey: postgrestest.UniqueKey("release-idem-rsv-2"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+	err = store.Release(ctx, core.ReleaseInput{ReservationUID: res2.UID, IdempotencyKey: key})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+}
+
+// Pins I-3 for FinalizeSettlement, mirroring TestReserverStore_Settle_IdempotentReplay
+// and TestReserverStore_Release_IdempotentReplay: before
+// FinalizeSettlementInput carried an IdempotencyKey, FinalizeSettlement took
+// a bare reservationUID and a lost-response retry of a successful call
+// landed on ErrInvalidTransition (settled is terminal).
+func TestReserverStore_FinalizeSettlement_IdempotentReplay(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	seedReservableBalance(t, ctx, ledger, pool, 25, curID, decimal.NewFromInt(100))
+
+	res, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  25,
+		CurrencyUID:    curID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: postgrestest.UniqueKey("finalize-idem-rsv"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SettlePartial(ctx, core.SettlePartialInput{
+		ReservationUID: res.UID,
+		Amount:         decimal.NewFromInt(30),
+		IdempotencyKey: postgrestest.UniqueKey("finalize-idem-leg"),
+	}))
+
+	key := postgrestest.UniqueKey("finalize-idem-op")
+	require.NoError(t, store.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: key}))
+
+	// Lost-response retry: same key -- must succeed, not ErrInvalidTransition.
+	require.NoError(t, store.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res.UID, IdempotencyKey: key}))
+
+	// The same key reused against a different (settling) reservation is a
+	// real conflict, not a replay.
+	res2, err := store.Reserve(ctx, core.ReserveInput{
+		AccountHolder:  25,
+		CurrencyUID:    curID,
+		Amount:         decimal.NewFromInt(10),
+		IdempotencyKey: postgrestest.UniqueKey("finalize-idem-rsv-2"),
+		ExpiresIn:      10 * time.Minute,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.SettlePartial(ctx, core.SettlePartialInput{
+		ReservationUID: res2.UID,
+		Amount:         decimal.NewFromInt(5),
+		IdempotencyKey: postgrestest.UniqueKey("finalize-idem-leg-2"),
+	}))
+	err = store.FinalizeSettlement(ctx, core.FinalizeSettlementInput{ReservationUID: res2.UID, IdempotencyKey: key})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
 }

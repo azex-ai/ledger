@@ -159,3 +159,95 @@ func TestBookingStore_CreateBooking_IdempotentPayloadMismatch(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrConflict)
 }
+
+// Pins I-3's opt-in path for Transition (core.TransitionInput.IdempotencyKey).
+//
+// Before this fix, TransitionInput had no idempotency key at all, and the
+// only replay protection was comparing the booking's CURRENT status against
+// the call's ToStatus (idempotentTransitionEvent) -- a path that only works
+// when nothing else has moved the booking since. This test's whole point is
+// the case that path cannot cover: a retry of an EARLIER transition arriving
+// after a LATER, legitimate transition has already moved the booking past
+// ToStatus. Without a durable key, that retry hits
+// lifecycle.CanTransition(current, ToStatus) == false and returns
+// ErrInvalidTransition -- indistinguishable from a genuine invalid request.
+func TestBookingStore_Transition_IdempotencyKey_SurvivesForwardProgress(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	bookingStore := postgres.NewBookingStore(pool)
+
+	lifecycle := &core.Lifecycle{
+		Initial:  "pending",
+		Terminal: []core.Status{"confirmed", "failed"},
+		Transitions: map[core.Status][]core.Status{
+			"pending":    {"confirming", "failed"},
+			"confirming": {"confirmed", "failed"},
+		},
+	}
+
+	cls, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "booking_transition_idem",
+		Name:       "Booking Transition Idem",
+		NormalSide: core.NormalSideCredit,
+		Lifecycle:  lifecycle,
+	})
+	require.NoError(t, err)
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT-BOOK-TRANS-IDEM", "Tether USD")
+
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: cls.Code,
+		AccountHolder:      52,
+		CurrencyUID:        curID,
+		Amount:             decimal.NewFromInt(100),
+		IdempotencyKey:     postgrestest.UniqueKey("booking-transition-idem"),
+		ChannelName:        "test",
+	})
+	require.NoError(t, err)
+
+	confirmingKey := postgrestest.UniqueKey("transition-confirming")
+	event1, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID:     booking.UID,
+		ToStatus:       "confirming",
+		IdempotencyKey: confirmingKey,
+	})
+	require.NoError(t, err)
+
+	// Legitimate forward progress: something else advances the booking past
+	// "confirming" before the retry below arrives.
+	_, err = bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID,
+		ToStatus:   "confirmed",
+	})
+	require.NoError(t, err)
+
+	// The retry of the FIRST transition arrives late. Without IdempotencyKey,
+	// lifecycle.CanTransition("confirmed", "confirming") is false and this
+	// would be ErrInvalidTransition; with it, it must return the original
+	// event unchanged.
+	event2, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID:     booking.UID,
+		ToStatus:       "confirming",
+		IdempotencyKey: confirmingKey,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, event1.UID, event2.UID)
+
+	// The booking itself was NOT reopened back to "confirming" -- the replay
+	// returned the historical event, it did not re-apply the transition.
+	current, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), current.Status)
+
+	// Reusing the same key for a different to_status is a payload mismatch,
+	// not a silent success.
+	_, err = bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID:     booking.UID,
+		ToStatus:       "failed",
+		IdempotencyKey: confirmingKey,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrConflict)
+}

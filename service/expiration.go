@@ -15,12 +15,12 @@ type ExpiredReservationFinder interface {
 
 // ReservationReleaser releases a reservation by uid.
 type ReservationReleaser interface {
-	Release(ctx context.Context, reservationUID string) error
+	Release(ctx context.Context, input core.ReleaseInput) error
 }
 
 // ReservationFinalizer completes a partially-settled (settling) reservation.
 type ReservationFinalizer interface {
-	FinalizeSettlement(ctx context.Context, reservationUID string) error
+	FinalizeSettlement(ctx context.Context, input core.FinalizeSettlementInput) error
 }
 
 // ExpiredBookingFinder finds expired active bookings.
@@ -82,10 +82,22 @@ func (s *ExpirationService) ExpireStaleReservations(ctx context.Context, batchSi
 		var opErr error
 		var opName string
 		if r.Status == core.ReservationStatusSettling {
-			opErr = s.reservationFinalize.FinalizeSettlement(ctx, r.UID)
+			// Deterministic key (api-contract.md §9): this worker sweep has no
+			// client-supplied key to carry, and a reservation can be finalized
+			// by expiration at most once (the FSM makes settling -> settled
+			// terminal), so deriving the key from the reservation's own uid is
+			// safe -- a replay of this exact sweep call always means "I already
+			// finalized this one."
+			opErr = s.reservationFinalize.FinalizeSettlement(ctx, core.FinalizeSettlementInput{
+				ReservationUID: r.UID,
+				IdempotencyKey: "expire-finalize-" + r.UID,
+			})
 			opName = "finalize settlement"
 		} else {
-			opErr = s.reservationRelease.Release(ctx, r.UID)
+			opErr = s.reservationRelease.Release(ctx, core.ReleaseInput{
+				ReservationUID: r.UID,
+				IdempotencyKey: "expire-release-" + r.UID,
+			})
 			opName = "release reservation"
 		}
 		if opErr != nil {

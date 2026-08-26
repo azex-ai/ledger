@@ -206,6 +206,26 @@ func (q *Queries) GetReservationForUpdateByUID(ctx context.Context, uid pgtype.U
 	return i, err
 }
 
+const getReservationOperationReceiptByIdempotencyKey = `-- name: GetReservationOperationReceiptByIdempotencyKey :one
+SELECT id, reservation_id, operation, idempotency_key, amount, created_at
+FROM reservation_operation_receipts
+WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetReservationOperationReceiptByIdempotencyKey(ctx context.Context, idempotencyKey string) (ReservationOperationReceipt, error) {
+	row := q.db.QueryRow(ctx, getReservationOperationReceiptByIdempotencyKey, idempotencyKey)
+	var i ReservationOperationReceipt
+	err := row.Scan(
+		&i.ID,
+		&i.ReservationID,
+		&i.Operation,
+		&i.IdempotencyKey,
+		&i.Amount,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getReservationUIDByID = `-- name: GetReservationUIDByID :one
 SELECT uid FROM reservations WHERE id = $1
 `
@@ -274,6 +294,43 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.Uid,
+	)
+	return i, err
+}
+
+const insertReservationOperationReceipt = `-- name: InsertReservationOperationReceipt :one
+INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (idempotency_key) DO NOTHING
+RETURNING id, reservation_id, operation, idempotency_key, amount, created_at
+`
+
+type InsertReservationOperationReceiptParams struct {
+	ReservationID  int64          `json:"reservation_id"`
+	Operation      string         `json:"operation"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+}
+
+// Durable idempotency record for one Settle/Release/FinalizeSettlement
+// application (I-3), mirroring InsertReservationSettlementLeg's pattern. On
+// a replayed key this inserts nothing and returns no row; the caller then
+// fetches the existing receipt and compares payloads.
+func (q *Queries) InsertReservationOperationReceipt(ctx context.Context, arg InsertReservationOperationReceiptParams) (ReservationOperationReceipt, error) {
+	row := q.db.QueryRow(ctx, insertReservationOperationReceipt,
+		arg.ReservationID,
+		arg.Operation,
+		arg.IdempotencyKey,
+		arg.Amount,
+	)
+	var i ReservationOperationReceipt
+	err := row.Scan(
+		&i.ID,
+		&i.ReservationID,
+		&i.Operation,
+		&i.IdempotencyKey,
+		&i.Amount,
+		&i.CreatedAt,
 	)
 	return i, err
 }

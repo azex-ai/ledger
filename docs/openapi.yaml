@@ -364,9 +364,17 @@ paths:
           application/json:
             schema:
               type: object
-              required: [actual_amount]
+              required: [actual_amount, idempotency_key]
               properties:
                 actual_amount: { type: string, description: Decimal as string. }
+                idempotency_key:
+                  type: string
+                  description: >-
+                    Required (I-3). Settled is a terminal status, so a retried
+                    request replays idempotently instead of returning
+                    ErrInvalidTransition: same key + same amount returns the
+                    original success, same key + different amount is a
+                    conflict.
       responses:
         "200": { description: Settled. }
         "422": { $ref: "#/components/responses/DomainError" }
@@ -413,6 +421,22 @@ paths:
           name: uid
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key]
+              properties:
+                idempotency_key:
+                  type: string
+                  description: >-
+                    Required (I-3). Settled is a terminal status, so a retried
+                    request replays idempotently instead of returning
+                    ErrInvalidTransition: same key returns the original
+                    success, same key against a different reservation is a
+                    conflict.
       responses:
         "200": { description: Finalized. }
         "422": { $ref: "#/components/responses/DomainError" }
@@ -425,6 +449,22 @@ paths:
           name: uid
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key]
+              properties:
+                idempotency_key:
+                  type: string
+                  description: >-
+                    Required (I-3). Released is a terminal status, so a
+                    retried request replays idempotently instead of returning
+                    ErrInvalidTransition: same key returns the original
+                    success, same key against a different reservation is a
+                    conflict.
       responses:
         "200": { description: Released. }
         "422": { $ref: "#/components/responses/DomainError" }

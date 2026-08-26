@@ -209,7 +209,10 @@ func run() error {
 		return fmt.Errorf("ungated reserve was expected to succeed: %w", err)
 	}
 	fmt.Printf("6. ungated reserve         SUCCEEDED uid=%s  <- the forged credit paid out\n", res.UID)
-	if err := svc.Reserver().Release(ctx, res.UID); err != nil {
+	if err := svc.Reserver().Release(ctx, core.ReleaseInput{
+		ReservationUID: res.UID,
+		IdempotencyKey: ledger.NewIdempotencyKey("tamper-evident-ungated-release"),
+	}); err != nil {
 		return fmt.Errorf("release: %w", err)
 	}
 

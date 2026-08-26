@@ -112,6 +112,11 @@ clients double-charge / double-credit users.
 - `UNIQUE` constraint on `journals.idempotency_key`.
 - `UNIQUE` constraint on `reservations.idempotency_key`.
 - `UNIQUE` constraint on `bookings.idempotency_key`.
+- `UNIQUE` constraint on `reservation_operation_receipts.idempotency_key`
+  (migration `005`) — see the `Settle`/`Release`/`FinalizeSettlement`
+  paragraph below.
+- `UNIQUE` constraint on `booking_transition_receipts.idempotency_key`
+  (migration `005`) — see the `Transition` paragraph below.
 - Each `Validate()` method rejects empty idempotency keys at the Go boundary.
 - The store layer re-reads the persisted row after a `23505` race:
   if payload matches, it returns the original record; if payload diverges,
@@ -138,6 +143,42 @@ balance advisory lock**, before the pending-balance gate: a retry racing its
 original request must resolve to the original journal, never to
 `ErrInsufficientBalance` for a confirm that in fact succeeded.
 
+`Settle`, `Release` and `FinalizeSettlement` each move a reservation into a
+**terminal** status (`settled` or `released`). Before migration `005`, none
+of the three took an idempotency key at all: a lost-response retry of an
+already-applied call re-ran the same status-machine check, found the row
+already terminal, and returned `ErrInvalidTransition` — indistinguishable
+from a genuine conflict (someone else settling a different amount, or the
+reservation having been released out from under the caller). Each now
+requires `IdempotencyKey` and records one row in
+`reservation_operation_receipts` (`operation` ∈ `settle` / `release` /
+`finalize_settlement`) on success, checked under the reservation's row lock
+**before** the status-machine gate: a replay with the same reservation,
+operation and amount returns the original success; a payload mismatch —
+different reservation, different operation, or different amount — is
+`ErrConflict`. Because the reservation's state machine makes `settled` and
+`released` mutually exclusive terminal states reachable by exactly one of
+these three calls, one receipt per reservation is enough to disambiguate.
+
+`Transition` (`core.Booker`) is the one exception to "every state-changing
+operation requires a key": `TransitionInput.IdempotencyKey` is **optional**.
+Transition already has a narrower, state-comparison-based idempotency path
+(`idempotentTransitionEvent`) that resolves the common case — a retry
+arriving before anything else has moved the booking — without requiring
+every caller (many are system-driven watchers with no natural
+request-scoped key) to change. That path cannot cover a retry arriving
+*after* a later, legitimate transition has moved the booking past
+`ToStatus`: at that point `lifecycle.CanTransition(current, ToStatus)` is
+false and the retry is rejected with `ErrInvalidTransition`, indistinguishable
+from a genuine invalid request. A caller that sets `IdempotencyKey` opts into
+a durable `booking_transition_receipts` row (booking, to_status, channel_ref,
+amount, and the `event_id` the original call produced) that survives forward
+progress: a replay with the same key and payload always returns the original
+event, even after the booking has moved on; the same key with a different
+payload is `ErrConflict`. Leaving it empty preserves the pre-`005` behavior
+exactly — this is the one place in the ledger where "no key" is a supported,
+unchanged configuration rather than a validation error.
+
 **Pinned by**:
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
 - `postgres.TestLedgerStore_PostJournal_Idempotent`
@@ -146,6 +187,10 @@ original request must resolve to the original journal, never to
 - `postgres.TestIdempotency_ConcurrentSameKey` (100 goroutines, same key)
 - `postgres.TestSettlePartial_IdempotentReplay`
 - `postgres.TestConfirmPending_ConcurrentSameKey_NeverInsufficientBalance`
+- `postgres.TestReserverStore_Settle_IdempotentReplay`
+- `postgres.TestReserverStore_Release_IdempotentReplay`
+- `postgres.TestReserverStore_FinalizeSettlement_IdempotentReplay`
+- `postgres.TestBookingStore_Transition_IdempotencyKey_SurvivesForwardProgress`
 
 ## I-4: TOCTOU-safe reserve/settle
 

@@ -32,7 +32,8 @@ type mockReservationReleaser struct {
 	invalidTransitions map[string]bool
 }
 
-func (m *mockReservationReleaser) Release(_ context.Context, uid string) error {
+func (m *mockReservationReleaser) Release(_ context.Context, input core.ReleaseInput) error {
+	uid := input.ReservationUID
 	if m.invalidTransitions != nil && m.invalidTransitions[uid] {
 		return fmt.Errorf("postgres: release: from %q to released: %w", "settled", core.ErrInvalidTransition)
 	}
@@ -49,7 +50,8 @@ type mockReservationFinalizer struct {
 	invalidTransitions map[string]bool
 }
 
-func (m *mockReservationFinalizer) FinalizeSettlement(_ context.Context, uid string) error {
+func (m *mockReservationFinalizer) FinalizeSettlement(_ context.Context, input core.FinalizeSettlementInput) error {
+	uid := input.ReservationUID
 	if m.invalidTransitions != nil && m.invalidTransitions[uid] {
 		return fmt.Errorf("postgres: finalize settlement: reservation %s has status %q, not settling: %w", uid, "active", core.ErrInvalidTransition)
 	}

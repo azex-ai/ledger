@@ -314,6 +314,63 @@ func resolveReservationExpiresIn(d time.Duration) time.Duration {
 	return d
 }
 
+// Reservation operation names recorded in reservation_operation_receipts
+// (migration 005). These identify WHICH terminal transition applied a given
+// idempotency key, so reusing a key for a different operation on the same
+// reservation is a payload mismatch (ErrConflict), not a silent success.
+const (
+	reservationOpSettle             = "settle"
+	reservationOpRelease            = "release"
+	reservationOpFinalizeSettlement = "finalize_settlement"
+)
+
+// ensureReservationOperationReceiptMatches is Settle/Release/FinalizeSettlement's
+// shared idempotency check (I-3), mirroring ensureReservationMatchesInput and
+// SettlePartial's own leg-comparison pattern: a replay with the same
+// reservation, operation and amount short-circuits to success (nil); any
+// divergence -- different reservation, different operation, or different
+// amount -- is core.ErrConflict.
+func ensureReservationOperationReceiptMatches(receipt sqlcgen.ReservationOperationReceipt, reservationID int64, operation string, amount decimal.Decimal, idempotencyKey string) error {
+	if receipt.ReservationID != reservationID {
+		return fmt.Errorf("postgres: %s: idempotency key %q already used for a different reservation: %w", operation, idempotencyKey, core.ErrConflict)
+	}
+	if receipt.Operation != operation {
+		return fmt.Errorf("postgres: %s: idempotency key %q already used for a different operation (%s): %w", operation, idempotencyKey, receipt.Operation, core.ErrConflict)
+	}
+	receiptAmount, err := numericToDecimal(receipt.Amount)
+	if err != nil {
+		return fmt.Errorf("postgres: %s: convert receipt amount: %w", operation, err)
+	}
+	if !receiptAmount.Equal(amount) {
+		return fmt.Errorf("postgres: %s: idempotency key %q payload mismatch (recorded %s, got %s): %w", operation, idempotencyKey, receiptAmount, amount, core.ErrConflict)
+	}
+	return nil
+}
+
+// recordReservationOperationReceipt inserts the durable idempotency record
+// for a just-applied Settle/Release/FinalizeSettlement call. A 23505 on the
+// unique idempotency_key index (caught via ON CONFLICT DO NOTHING returning
+// no row, surfaced here as pgx.ErrNoRows) means a concurrent call on a
+// DIFFERENT reservation raced this one to the same key after the caller's
+// own pre-check -- the row lock on THIS reservation already serializes
+// same-reservation racers, so this can only be a cross-reservation collision
+// and is reported as ErrConflict, matching InsertReservationSettlementLeg's
+// existing race-handling shape.
+func (s *ReserverStore) recordReservationOperationReceipt(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, operation string, amount decimal.Decimal, idempotencyKey string) error {
+	if _, err := qtx.InsertReservationOperationReceipt(ctx, sqlcgen.InsertReservationOperationReceiptParams{
+		ReservationID:  reservationID,
+		Operation:      operation,
+		IdempotencyKey: idempotencyKey,
+		Amount:         decimalToNumeric(amount),
+	}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: %s: idempotency key %q raced a concurrent application: %w", operation, idempotencyKey, core.ErrConflict)
+		}
+		return wrapStoreError(fmt.Sprintf("postgres: %s: record receipt", operation), err)
+	}
+	return nil
+}
+
 // Settle marks a reservation as settled with the actual amount.
 //
 // In pool mode a new transaction is started and committed here.
@@ -323,16 +380,16 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	if err := input.Validate(); err != nil {
 		return err
 	}
-	reservationUID, actualAmount := input.ReservationUID, input.Amount
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.settle",
-		attribute.String("reservation_uid", reservationUID),
-		attribute.String("actual_amount", actualAmount.String()),
+		attribute.String("reservation_uid", input.ReservationUID),
+		attribute.String("actual_amount", input.Amount.String()),
+		attribute.String("idempotency_key", input.IdempotencyKey),
 	)
 	defer span.End()
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		err := s.settleWithQueries(ctx, s.q, reservationUID, actualAmount)
+		err := s.settleWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -344,7 +401,7 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), reservationUID, actualAmount); err != nil {
+	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -357,7 +414,8 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	return nil
 }
 
-func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string, actualAmount decimal.Decimal) error {
+func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettleInput) error {
+	reservationUID, actualAmount := input.ReservationUID, input.Amount
 	if !actualAmount.IsPositive() {
 		return fmt.Errorf("postgres: settle: actual amount must be positive, got %s: %w", actualAmount, core.ErrInvalidInput)
 	}
@@ -374,6 +432,15 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		return fmt.Errorf("postgres: settle: get reservation: %w", err)
 	}
 	reservationID := res.ID
+
+	// Idempotent replay short-circuit (I-3), checked under the row lock and
+	// BEFORE the status gate: a retried call whose first application already
+	// settled the reservation must return success, not ErrInvalidTransition.
+	if receipt, err := qtx.GetReservationOperationReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return ensureReservationOperationReceiptMatches(receipt, reservationID, reservationOpSettle, actualAmount, input.IdempotencyKey)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: settle: check idempotency: %w", err)
+	}
 
 	status := core.ReservationStatus(res.Status)
 	if status == core.ReservationStatusSettling {
@@ -417,7 +484,7 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		return wrapStoreError("postgres: settle: update", err)
 	}
 
-	return nil
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpSettle, actualAmount, input.IdempotencyKey)
 }
 
 // SettlePartial settles part of a reservation, accumulating settled_amount.
@@ -575,14 +642,18 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 // In pool mode a new transaction is started and committed here. In tx mode
 // (bound via WithDB) the update is applied to the caller's transaction;
 // commit/rollback is the caller's responsibility.
-func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationUID string) error {
+func (s *ReserverStore) FinalizeSettlement(ctx context.Context, input core.FinalizeSettlementInput) error {
+	if err := input.Validate(); err != nil {
+		return err
+	}
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.finalize_settlement",
-		attribute.String("reservation_uid", reservationUID),
+		attribute.String("reservation_uid", input.ReservationUID),
+		attribute.String("idempotency_key", input.IdempotencyKey),
 	)
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.finalizeSettlementWithQueries(ctx, s.q, reservationUID)
+		err := s.finalizeSettlementWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -594,7 +665,7 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationUID s
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), reservationUID); err != nil {
+	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -607,7 +678,8 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, reservationUID s
 	return nil
 }
 
-func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string) error {
+func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.FinalizeSettlementInput) error {
+	reservationUID := input.ReservationUID
 	pgUID, err := uidToPG(reservationUID)
 	if err != nil {
 		return err
@@ -619,17 +691,27 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 		}
 		return fmt.Errorf("postgres: finalize settlement: get reservation: %w", err)
 	}
+	reservationID := res.ID
+
+	// Idempotent replay short-circuit (I-3), checked under the row lock and
+	// BEFORE the status gate: a retried call whose first application already
+	// finalized the reservation must return success, not ErrInvalidTransition.
+	if receipt, err := qtx.GetReservationOperationReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return ensureReservationOperationReceiptMatches(receipt, reservationID, reservationOpFinalizeSettlement, decimal.Zero, input.IdempotencyKey)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: finalize settlement: check idempotency: %w", err)
+	}
 
 	status := core.ReservationStatus(res.Status)
 	if status != core.ReservationStatusSettling {
 		return fmt.Errorf("postgres: finalize settlement: reservation %q has status %q, not settling (use Settle for a one-shot settlement that never called SettlePartial): %w", reservationUID, res.Status, core.ErrInvalidTransition)
 	}
 
-	if err := qtx.FinalizeReservationSettlement(ctx, res.ID); err != nil {
+	if err := qtx.FinalizeReservationSettlement(ctx, reservationID); err != nil {
 		return wrapStoreError("postgres: finalize settlement: update", err)
 	}
 
-	return nil
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpFinalizeSettlement, decimal.Zero, input.IdempotencyKey)
 }
 
 // HeldAmount returns the holder's outstanding holds in the given currency:
@@ -662,15 +744,19 @@ func (s *ReserverStore) HeldAmount(ctx context.Context, holder int64, currencyUI
 // In pool mode a new transaction is started and committed here.
 // In tx mode (bound via withDB) the update is applied to the caller's
 // transaction; commit/rollback is the caller's responsibility.
-func (s *ReserverStore) Release(ctx context.Context, reservationUID string) error {
+func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) error {
+	if err := input.Validate(); err != nil {
+		return err
+	}
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.release",
-		attribute.String("reservation_uid", reservationUID),
+		attribute.String("reservation_uid", input.ReservationUID),
+		attribute.String("idempotency_key", input.IdempotencyKey),
 	)
 	defer span.End()
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		err := s.releaseWithQueries(ctx, s.q, reservationUID)
+		err := s.releaseWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -682,7 +768,7 @@ func (s *ReserverStore) Release(ctx context.Context, reservationUID string) erro
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), reservationUID); err != nil {
+	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -695,7 +781,8 @@ func (s *ReserverStore) Release(ctx context.Context, reservationUID string) erro
 	return nil
 }
 
-func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, reservationUID string) error {
+func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReleaseInput) error {
+	reservationUID := input.ReservationUID
 	pgUID, err := uidToPG(reservationUID)
 	if err != nil {
 		return err
@@ -707,6 +794,16 @@ func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		}
 		return fmt.Errorf("postgres: release: get reservation: %w", err)
 	}
+	reservationID := res.ID
+
+	// Idempotent replay short-circuit (I-3), checked under the row lock and
+	// BEFORE the status gate: a retried call whose first application already
+	// released the reservation must return success, not ErrInvalidTransition.
+	if receipt, err := qtx.GetReservationOperationReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return ensureReservationOperationReceiptMatches(receipt, reservationID, reservationOpRelease, decimal.Zero, input.IdempotencyKey)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: release: check idempotency: %w", err)
+	}
 
 	status := core.ReservationStatus(res.Status)
 	if !status.CanTransitionTo(core.ReservationStatusReleased) {
@@ -714,11 +811,11 @@ func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	}
 
 	if err := qtx.UpdateReservationStatus(ctx, sqlcgen.UpdateReservationStatusParams{
-		ID:     res.ID,
+		ID:     reservationID,
 		Status: string(core.ReservationStatusReleased),
 	}); err != nil {
 		return wrapStoreError("postgres: release: update", err)
 	}
 
-	return nil
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpRelease, decimal.Zero, input.IdempotencyKey)
 }

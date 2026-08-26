@@ -115,7 +115,7 @@ func TestIntegration_FullLedgerFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, core.ReservationStatusActive, reservation.Status)
 
-	err = reserverStore.Settle(ctx, core.SettleInput{ReservationUID: reservation.UID, Amount: decimal.NewFromInt(200)})
+	err = reserverStore.Settle(ctx, core.SettleInput{ReservationUID: reservation.UID, Amount: decimal.NewFromInt(200), IdempotencyKey: postgrestest.UniqueKey("integ-settle")})
 	require.NoError(t, err)
 
 	// Verify after lock: wallet 800, locked 200
