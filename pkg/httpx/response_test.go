@@ -93,6 +93,69 @@ func TestResolveError_WrappedAppError(t *testing.T) {
 	assert.Equal(t, 10201, ae.Code)
 }
 
+// TestResolveError_UnauthorizedJournal pins the fix for the finding at
+// consumer-surface.md:160 -- core.ErrUnauthorizedJournal, tamper detection's
+// only signal, must never fall through to the default 19999 (which both
+// mislabels it as an unclassified 500 and, via Retryable's default, tells
+// clients to retry a rejection that will never change).
+func TestResolveError_UnauthorizedJournal(t *testing.T) {
+	ae := resolveError(core.ErrUnauthorizedJournal)
+	require.NotNil(t, ae)
+	assert.NotEqual(t, 19999, ae.Code, "must not fall through to the unclassified-internal-error default")
+	assert.Equal(t, 14010, ae.Code)
+	assert.Equal(t, http.StatusUnprocessableEntity, ae.HTTPStatus())
+	assert.False(t, bizcode.Retryable(ae.Code), "an unauthorized journal is a permanent rejection, not a transient one")
+}
+
+func TestResolveError_UnauthorizedJournal_Wrapped(t *testing.T) {
+	wrapped := fmt.Errorf("core: verify journal auth: journal has no stored digest: %w", core.ErrUnauthorizedJournal)
+	ae := resolveError(wrapped)
+	require.NotNil(t, ae)
+	assert.Equal(t, 14010, ae.Code)
+}
+
+// TestResolveError_AgreesWithCoreIsRetryable is the structural pin required
+// by contracts §W1-C: library-mode consumers (core.IsRetryable) and HTTP-mode
+// consumers (bizcode.Retryable, applied to whatever code resolveError picks)
+// must reach the SAME retry verdict for the SAME underlying error. Two
+// independently-maintained classification tables that happen to agree today
+// is exactly the failure shape working-agreements.md §5 warns about
+// (default values duplicated across layers) -- this test makes future
+// disagreement a compile-time-adjacent (test-time) failure instead of a
+// silent drift.
+func TestResolveError_AgreesWithCoreIsRetryable(t *testing.T) {
+	cases := []error{
+		core.ErrNotFound,
+		core.ErrInvalidInput,
+		core.ErrInsufficientBalance,
+		core.ErrDuplicateJournal,
+		core.ErrUnbalancedJournal,
+		core.ErrInvalidTransition,
+		core.ErrConflict,
+		core.ErrPrecisionExceeded,
+		core.ErrAccountFrozen,
+		core.ErrAccountClosed,
+		core.ErrPeriodClosed,
+		core.ErrUnauthorizedJournal,
+		core.ErrRollupPending,
+		core.ErrAttestorUnavailable,
+		core.ErrTransient,
+		fmt.Errorf("unclassified dependency hiccup"),
+	}
+
+	for _, err := range cases {
+		t.Run(err.Error(), func(t *testing.T) {
+			ae := resolveError(err)
+			require.NotNil(t, ae)
+			wantRetryable := core.IsRetryable(err)
+			gotRetryable := bizcode.Retryable(ae.Code)
+			assert.Equal(t, wantRetryable, gotRetryable,
+				"core.IsRetryable(%v)=%v but bizcode.Retryable(resolveError(%v).Code=%d)=%v -- library and HTTP modes disagree on the same error",
+				err, wantRetryable, err, ae.Code, gotRetryable)
+		})
+	}
+}
+
 // --- OK / Created response format ---
 
 type successEnvelope struct {

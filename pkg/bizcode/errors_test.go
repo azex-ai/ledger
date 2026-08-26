@@ -22,7 +22,12 @@ func TestRetryable(t *testing.T) {
 		{"invalid transition", 14004, false},
 		{"reservation expired", 14005, false},
 		{"period closed", 14006, false},
+		{"unauthorized journal", 14010, false},
 		{"service unavailable", 18101, true},
+		{"feature not enabled", 18102, true},
+		{"rollup pending", 18103, true},
+		{"attestor unavailable", 18104, true},
+		{"transient failure", 18105, true},
 		{"internal error", 19999, true},
 		{"unclassified code", 99999, true},
 	}

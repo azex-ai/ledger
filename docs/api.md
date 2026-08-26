@@ -116,6 +116,10 @@ Common business codes you may see:
 | `14004` | Invalid state transition | No |
 | `14005` | Reservation expired | No |
 | `14009` | Accounting period is closed | No |
+| `14010` | Journal failed tamper-detection authorization check | No |
+| `18103` | Rollup queue item pending for this dimension | Yes |
+| `18104` | Authorization signer temporarily unavailable | Yes |
+| `18105` | Temporary failure (adapter-classified transient error) | Yes |
 | `19999` | Internal error | Yes |
 
 **Retry semantics.** Retryability is derived from the business code, not from an additional wire field:
