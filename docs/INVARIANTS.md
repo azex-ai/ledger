@@ -2225,6 +2225,88 @@ consumer that never calls `Run()` must not skip the check).
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+
+## I-37: A transaction-bound clone never silently drops or escapes what the top-level Service promised
+
+(2026-08-25 audit, consumer-surface territory: `Worker.SetAttestor` had zero
+production call sites; §3/§5 facade findings on `RunInTx`.)
+
+**Rule** (four independent properties, one task):
+
+1. `(*ledger.Service).Worker` wires the P6 batch attestation job
+   (`Worker.SetAttestor`) automatically whenever the Service was constructed
+   `WithAttestor` — a consumer no longer has to remember a second, separate
+   call. `AttestInterval`/`AttestBatchSize` fill from
+   `service.DefaultWorkerConfig` on a zero-valued `WorkerConfig`, same as
+   every other job's interval/batch-size field.
+2. `PendingStore.ConfirmPending`/`CancelPending` sign their journal in pool
+   mode whenever an Attestor is configured, exactly like every other
+   pool-mode write path (`PostJournal`, `ExecuteTemplateBatch`,
+   `ReverseJournal`). Before this fix they always posted
+   `core.AuthStatusUnsignedTxMode`, regardless of pool/tx mode, because their
+   own transaction wrapping made the inner `LedgerStore` look tx-bound.
+3. Calling `RunInTx` (or `RunInTxWithOptions`) again on the `*Service` handed
+   to an outer `RunInTx` callback returns an error instead of silently
+   opening a second, pool-sourced, independent transaction.
+4. `AttestationService`, `VerifyLedger`, and `EnableOnchain` are refused (an
+   error, or `VerifyStatusNotRun` for `VerifyLedger`, which returns a value
+   not an error) when called on the transaction-bound clone `RunInTx` hands
+   to its callback — each of them either reads/writes through the pool
+   directly (bypassing the caller's transaction) or, for `EnableOnchain`,
+   would set state on a short-lived clone `RunInTx` discards when the
+   callback returns while reporting success.
+
+**Why**: (1)+(2) are the same failure shape C1 named at the top level: a
+mechanism the library implements correctly, with no shipped entry point that
+turns it on. `DefaultWorkerConfig` configuring `AttestInterval: 60s` made a
+WithAttestor deployment's P6 chain look like it was running when nothing
+ever called the one method that starts it. (3) and (4) are TOCTOU-adjacent:
+a `*Service` value looks identical whether it is the top-level Service or a
+transaction-bound clone, so nothing at the call site stops a caller from
+calling a top-level-only method from inside a callback and getting an
+answer that is either silently wrong (mixed pool/tx views for
+`VerifyLedger`) or silently discarded (`EnableOnchain` configuring a value
+nobody keeps) instead of a clear rejection.
+
+**Enforced by**: `(*ledger.Service).Worker`'s `s.attestor != nil` branch and
+`mergeWorkerConfig`'s `AttestInterval`/`AttestBatchSize` cases (`ledger.go`);
+`PendingStore.checkPendingBalanceAndPost`'s pool-mode `Authorize` +
+`PostAuthorized` sequencing (`postgres/pending_store.go`);
+`RunInTxWithOptions`'s `s.tx != nil` guard; `AttestationService` /
+`VerifyLedger` / `EnableOnchain`'s own `s.tx != nil` guards (`ledger.go`).
+`withTx` also now carries `attestor`/`authVerifier` onto the clone (they
+were previously dropped, which happened to make some of the guards above
+pass for the wrong reason before this fix — see the pinned tests' own doc
+comments for how each isolates the guard it protects from that adjacent
+bug).
+
+**Pinned by** (the four below are declared in the root package, cited
+without a qualifier per this doc's bare-citation convention -- see I-13):
+- `TestServiceWorker_AttestsAutomaticallyWhenAttestorConfigured` —
+  goes through `ledger.New` + `WithAttestor` + `svc.Worker(cfg).Run`, no
+  manual `SetAttestor` call, and polls `ledger_attestations` directly for
+  proof the chain advanced; deleting the auto-wiring in `Worker()` turns
+  this red without touching the test.
+- `postgres.TestPendingStore_ConfirmPending_SignsWhenAttestorConfigured` /
+  `TestPendingStore_CancelPending_SignsWhenAttestorConfigured` — both build a
+  `LedgerStore.WithAuth` in pool mode and assert `core.AuthStatusSigned` (and,
+  for Confirm, non-empty stored digest/signature/key id).
+- `TestService_RunInTx_NestedCallIsRejected` — a `RunInTx`
+  callback that calls `tx.RunInTx` again gets an error and the inner
+  callback never runs.
+- `TestService_AttestationService_RefusedOnTxBoundClone` /
+  `TestService_VerifyLedger_NotRunOnTxBoundClone` /
+  `TestService_EnableOnchain_RefusedOnTxBoundClone` — each first proves, on
+  the top-level Service, that its configuration would otherwise succeed
+  (VERIFIED / a non-nil `*service.Onchain`), then proves the identical call
+  is refused from inside `RunInTx` — isolating the guard from the
+  attestor/authVerifier-on-clone fix and from `EnableOnchain`'s own
+  `AutoCreditCeiling` fence.
+- `TestService_Worker_ConcurrentCallsDoNotRaceOnEventStore` — `go
+  test -race`-only: N goroutines each calling `svc.Worker(cfg)` with a
+  different `EventClaimLease` no longer race on a shared
+  `*postgres.EventStore`, because each `Worker()` call now builds its own.
+
 ## How to add a new invariant
 
 1. Write the rule down here under a new `I-N` heading.

@@ -149,12 +149,28 @@ svc.Booker().Transition(ctx, core.TransitionInput{
 })
 ```
 
-Background worker (rollup, expiry, reconcile, snapshots, event delivery):
+Background worker (rollup, expiry, reconcile, snapshots, partition
+management, and — for anything you separately opted into — in-process event
+subscription and the P6 batch attestation chain):
 
 ```go
 worker := svc.Worker(service.DefaultWorkerConfig())
 go worker.Run(ctx)
 ```
+
+`svc.Worker(cfg)` wires everything it can build from the Service alone:
+rollup/expiry/reconcile/snapshot/partition always run; `worker.Subscribe(fn)`
+(in-process event callbacks, no webhook server needed) works with no extra
+wiring call; and if this Service was constructed `WithAttestor`, the P6
+batch attestation job runs too.
+Two jobs still need an explicit call because they need something this
+constructor cannot see: outbound **webhook** delivery
+(`worker.SetEventDeliverer(...)`, needs a `delivery.SubscriberLister`) and
+the fleet-wide **full reconciliation suite**
+(`worker.SetFullReconciler(svc.FullReconciler(cfg))`, deliberately opt-in —
+it is a heavier scan than the lightweight accounting-equation check that
+always runs). `worker.Run` logs, once at startup, which optional jobs are
+enabled.
 
 Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
 
@@ -466,6 +482,13 @@ instead of `PostJournal`/`ExecuteTemplate` inside the callback. Every
 journal's `auth_status` column records which of the two paths was taken
 (`signed`, or `unsigned_tx_mode` if you skip this step), so this is
 observable after the fact rather than a silent gap.
+
+Calling `RunInTx` again on the `*Service` your callback receives is
+rejected (an error, not a second independent transaction). `AttestationService`,
+`VerifyLedger`, and `EnableOnchain` are likewise rejected when called from
+inside a `RunInTx` callback — each needs the top-level Service (they read or
+write through the pool directly, or would set state on a clone `RunInTx`
+discards when the callback returns).
 
 ### What changes when you add what
 

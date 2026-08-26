@@ -25,9 +25,15 @@ var (
 // It operates on top of LedgerStore.PostJournal (which handles advisory
 // locking, idempotency, and rollup-queue enqueueing) using the well-known
 // deposit_pending / deposit_confirm_pending / deposit_release_pending template
-// journal types.  The journal-type IDs are resolved once at construction time
-// and cached; if the pending bundle has not been installed (InstallPendingBundle)
-// the constructor will return an error.
+// journal types. AddPending/ConfirmPending/CancelPending resolve the
+// classification codes each call needs via resolveClassificationIDs, never
+// caching them on the store; ExpirePendingOlderThan does the same. See
+// NewPendingStore's doc comment for why nothing is resolved (or can fail) at
+// construction time -- installing the pending bundle
+// (presets.InstallPendingBundle) is required before any of these methods
+// succeed, but that surfaces as a core.ErrNotFound from the first call that
+// needs a classification the bundle would have created, not from
+// construction.
 //
 // Pool-mode vs tx-mode mirror LedgerStore semantics:
 //   - pool mode: each public method starts its own transaction.
@@ -40,13 +46,12 @@ type PendingStore struct {
 	classStore *ClassificationStore
 }
 
-// NewPendingStore constructs a PendingStore.  Classification IDs are resolved
-// per call (resolveClassificationIDs), never cached on the store — the store is
-// shared across goroutines, so per-call resolution is what keeps it race-free.
-//
-// AddPending / ConfirmPending / CancelPending work whether or not the pending
-// bundle is installed, because they go via LedgerStore template execution;
-// ExpirePendingOlderThan is the one that needs the IDs and resolves them itself.
+// NewPendingStore constructs a PendingStore. It performs no I/O and cannot
+// fail -- classification IDs are resolved per call (resolveClassificationIDs),
+// never cached on the store, so there is nothing to resolve or cache here.
+// Per-call resolution is also what keeps the store race-free across the
+// goroutines it is shared between (caching at construction time would freeze
+// in whatever ids happened to exist yet, and never notice a later install).
 func NewPendingStore(pool *pgxpool.Pool, ledger *LedgerStore, classStore *ClassificationStore) *PendingStore {
 	return &PendingStore{
 		pool:       pool,
@@ -210,6 +215,23 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 //
 // In pool mode this method begins and commits its own transaction. In tx mode
 // the caller's transaction is used; the caller owns commit/rollback.
+//
+// Signing: in pool mode this method owns its own transaction the same way
+// LedgerStore.PostJournal's pool-mode branch does, so it follows the same
+// rule (financial.md: no external call inside an open transaction) —
+// Authorize runs strictly before Begin, and the resulting AuthorizedJournal
+// is posted via PostAuthorized once inside the transaction, instead of
+// calling PostJournal on a WithDB-bound LedgerStore (which would always
+// produce AuthStatusUnsignedTxMode, indistinguishable from "no Attestor
+// configured", regardless of pool mode — see PostJournal's own doc comment).
+// Before this, ConfirmPending/CancelPending journals were unsigned even when
+// this Service was constructed WithAttestor, because this method's own
+// transaction made the inner LedgerStore look tx-bound by the time
+// PostJournal ran. In tx mode (this PendingStore obtained via WithDB, i.e.
+// composed inside ledger.Service.RunInTx) there remains no safe point to
+// call the Attestor, so the journal is posted via the plain PostJournal path
+// and keeps AuthStatusUnsignedTxMode, exactly like every other write
+// composed that way (see ledger.go's RunInTx doc comment).
 func (s *PendingStore) checkPendingBalanceAndPost(
 	ctx context.Context,
 	errPrefix string,
@@ -218,7 +240,7 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 	required decimal.Decimal,
 	input core.JournalInput,
 ) (*core.Journal, error) {
-	run := func(qtx *sqlcgen.Queries, ledger *LedgerStore) (*core.Journal, error) {
+	run := func(qtx *sqlcgen.Queries, ledger *LedgerStore, authorized *core.AuthorizedJournal) (*core.Journal, error) {
 		cur, err := ledger.dims.currencyByUIDOrErr(ctx, qtx, currencyUID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
@@ -251,12 +273,27 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 				errPrefix, bal, required, core.ErrInsufficientBalance,
 			)
 		}
+		if authorized != nil {
+			return ledger.PostAuthorized(ctx, *authorized)
+		}
 		return ledger.PostJournal(ctx, input)
 	}
 
 	if s.pool == nil {
-		// Tx mode: caller owns tx; queries and ledger are already bound to it.
-		return run(s.q, s.ledger)
+		// Tx mode: caller owns tx; queries and ledger are already bound to
+		// it, and the Attestor cannot be called from inside an
+		// already-open transaction. No authorized journal to hand in.
+		return run(s.q, s.ledger, nil)
+	}
+
+	// Pool mode: sign strictly before opening the transaction below (same
+	// placement rule PostJournal's own pool-mode branch follows). Authorize
+	// itself re-checks idempotency before signing (skips signing -- and any
+	// Attestor call -- if this key was already posted), so a retried
+	// ConfirmPending/CancelPending does not needlessly re-sign.
+	authorized, err := s.ledger.Authorize(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("%s: authorize: %w", errPrefix, err)
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -265,7 +302,7 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 	}
 	defer tx.Rollback(ctx)
 
-	j, err := run(s.q.WithTx(tx), s.ledger.WithDB(tx))
+	j, err := run(s.q.WithTx(tx), s.ledger.WithDB(tx), &authorized)
 	if err != nil {
 		return nil, err
 	}
