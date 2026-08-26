@@ -61,10 +61,9 @@ func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Que
 	policyByID := make(map[int64]*sqlcgen.AccountPolicy)
 
 	for _, e := range entries {
-		direction := core.EntryDirection(e.EntryType, e.normalSide)
-		delta := e.Amount
-		if direction == core.BalanceDirectionDecrease {
-			delta = delta.Neg()
+		delta, err := core.SignedAmount(e.normalSide, e.EntryType, e.Amount)
+		if err != nil {
+			return fmt.Errorf("postgres: post journal: %w", err)
 		}
 
 		dim := accountPolicyDim{holder: e.AccountHolder, currencyID: e.currencyID, classificationID: e.classificationID}

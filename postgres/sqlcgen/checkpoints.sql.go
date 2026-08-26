@@ -340,14 +340,7 @@ SELECT
   je.account_holder,
   je.currency_id,
   je.classification_id,
-  COALESCE(SUM(
-    CASE
-      WHEN c.normal_side = 'credit' AND je.entry_type = 'credit' THEN je.amount
-      WHEN c.normal_side = 'credit' AND je.entry_type = 'debit' THEN -je.amount
-      WHEN je.entry_type = 'debit' THEN je.amount
-      ELSE -je.amount
-    END
-  ), 0)::numeric AS balance
+  COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0)::numeric AS balance
 FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
 WHERE je.effective_at < $1
@@ -403,13 +396,7 @@ SELECT
     c.balance_role,
     (
       COALESCE(cp.balance, 0::numeric) +
-      COALESCE(SUM(CASE
-        WHEN c.normal_side = 'debit' AND je.entry_type = 'debit' THEN je.amount
-        WHEN c.normal_side = 'debit' AND je.entry_type = 'credit' THEN -je.amount
-        WHEN c.normal_side = 'credit' AND je.entry_type = 'credit' THEN je.amount
-        WHEN c.normal_side = 'credit' AND je.entry_type = 'debit' THEN -je.amount
-        ELSE 0::numeric
-      END), 0::numeric)
+      COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0::numeric)
     )::numeric AS balance
 FROM populated p
 JOIN classifications c ON c.id = p.classification_id

@@ -30,12 +30,7 @@ LEFT JOIN balance_checkpoints bc
       AND bc.classification_id = a.classification_id
 LEFT JOIN LATERAL (
   SELECT COALESCE(SUM(
-    CASE
-      WHEN (c.normal_side = 'debit'  AND je.entry_type = 'debit')
-        OR (c.normal_side = 'credit' AND je.entry_type = 'credit')
-      THEN je.amount
-      ELSE -je.amount
-    END
+    ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
   ), 0)::numeric AS delta
   FROM journal_entries je
   WHERE je.account_holder    = a.account_holder
@@ -115,12 +110,7 @@ LEFT JOIN balance_checkpoints bc
       AND bc.classification_id = c.id
 LEFT JOIN LATERAL (
   SELECT COALESCE(SUM(
-    CASE
-      WHEN (c.normal_side = 'debit'  AND je.entry_type = 'debit')
-        OR (c.normal_side = 'credit' AND je.entry_type = 'credit')
-      THEN je.amount
-      ELSE -je.amount
-    END
+    ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
   ), 0)::numeric AS delta
   FROM journal_entries je
   WHERE je.account_holder    = a.account_holder
@@ -157,12 +147,7 @@ LEFT JOIN balance_checkpoints bc
       AND bc.classification_id = a.classification_id
 LEFT JOIN LATERAL (
   SELECT COALESCE(SUM(
-    CASE
-      WHEN (c.normal_side = 'debit'  AND je.entry_type = 'debit')
-        OR (c.normal_side = 'credit' AND je.entry_type = 'credit')
-      THEN je.amount
-      ELSE -je.amount
-    END
+    ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
   ), 0)::numeric AS delta
   FROM journal_entries je
   WHERE je.account_holder    = a.account_holder

@@ -75,9 +75,12 @@ func (s *TrialBalanceStore) TrialBalance(ctx context.Context, currencyUID string
 		credit := mustNumericToDecimal(row.TotalCredit)
 		normalSide := core.NormalSide(row.NormalSide)
 
-		net := debit.Sub(credit)
-		if normalSide == core.NormalSideCredit {
-			net = credit.Sub(debit)
+		// core.Delta is the sole authority for this computation (I-42). This
+		// used to default to debit-normal for any normalSide != "credit";
+		// core.Delta refuses an unrecognized normal_side instead.
+		net, err := core.Delta(normalSide, debit, credit)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: trial balance: classification %d: %w", row.ClassificationID, err)
 		}
 
 		cls, err := s.dims.classByIDOrErr(ctx, s.q, row.ClassificationID)

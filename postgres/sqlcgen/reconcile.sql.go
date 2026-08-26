@@ -194,15 +194,10 @@ FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
 WHERE je.account_holder > 0
 GROUP BY je.account_holder, je.currency_id, je.classification_id, c.normal_side
-HAVING (
-  CASE
-    WHEN MIN(c.normal_side) = 'debit'
-      THEN COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0)
-         - COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
-    ELSE
-         COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
-         - COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0)
-  END
+HAVING ledger_signed_delta(
+  MIN(c.normal_side),
+  COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE 0 END), 0),
+  COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0 END), 0)
 ) < 0
 ORDER BY je.account_holder, je.classification_id
 LIMIT $1::int
