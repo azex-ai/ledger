@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -166,23 +167,43 @@ func run() error {
 	}
 	fmt.Printf("  reserved 50 credits (uid=%s, status=%s) — balance unchanged, available reduced\n", rsv.UID, rsv.Status)
 
-	// Run finished, actual cost 32 → capture it and release the 18 remainder.
-	if err := svc.Reserver().Settle(ctx, core.SettleInput{
-		ReservationUID: rsv.UID,
-		Amount:         decimal.RequireFromString("32"),
-		IdempotencyKey: ledger.NewIdempotencyKey("run-settle"),
-	}); err != nil {
-		return fmt.Errorf("recipe 4 settle: %w", err)
-	}
-	// Post the actual spend so it hits the books (credits flow back to settlement).
+	// Run finished, actual cost 32. Settle only closes the hold -- it writes
+	// no entries, the actual debit is the credits_spend journal below -- and
+	// the two must land together. Settle and the journal run inside one
+	// RunInTx: a crash between them would otherwise free the hold and spend
+	// nobody's credits, while the ledger reports success because from its
+	// side nothing failed (the same failure examples/billing used to teach).
 	if err := ensureSpendTemplate(ctx, svc); err != nil {
 		return err
 	}
-	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
-		HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: ledger.NewIdempotencyKey("run-spend"),
-		Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
+	settleKey := ledger.NewIdempotencyKey("run-settle")
+	spendKey := ledger.NewIdempotencyKey("run-spend")
+	if err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		if err := tx.Reserver().Settle(ctx, core.SettleInput{
+			ReservationUID: rsv.UID,
+			Amount:         decimal.RequireFromString("32"),
+			IdempotencyKey: settleKey,
+		}); err != nil {
+			return fmt.Errorf("settle: %w", err)
+		}
+		if _, err := tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
+			HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: spendKey,
+			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
+		}); err != nil {
+			return fmt.Errorf("spend journal: %w", err)
+		}
+		return nil
 	}); err != nil {
-		return fmt.Errorf("recipe 4 spend journal: %w", err)
+		return fmt.Errorf("recipe 4 settle and spend: %w", err)
+	}
+
+	if got, err := creditsBal(); err != nil {
+		return fmt.Errorf("get balance after spend: %w", err)
+	} else if want := decimal.RequireFromString("188"); !got.Equal(want) {
+		// 100 (recipe 1) + 120 (recipe 2b) - 32 (this spend) = 188. A number
+		// that only matches "settled but never spent" here means the charge
+		// did not land -- this is the check examples/billing was missing.
+		return fmt.Errorf("credits balance is %s, expected %s -- the spend journal did not land", got, want)
 	}
 	printBalances(usdtBal, creditsBal, "after spending 32 credits (settled from 50 budget)")
 
@@ -214,12 +235,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
+	const exponent = int32(18)
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
 		return "", fmt.Errorf("create currency %s: %w", code, err)
 	}
@@ -283,8 +309,12 @@ func ensureSpendTemplate(ctx context.Context, svc *ledger.Service) error {
 }
 
 func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name string) (string, error) {
-	if jt, err := svc.JournalTypes().GetJournalTypeByCode(ctx, code); err == nil {
-		return jt.UID, nil
+	existing, err := svc.JournalTypes().GetJournalTypeByCode(ctx, code)
+	if err == nil {
+		return existing.UID, nil
+	}
+	if !errors.Is(err, core.ErrNotFound) {
+		return "", fmt.Errorf("get journal type %s: %w", code, err)
 	}
 	jt, err := svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
 	if err != nil {

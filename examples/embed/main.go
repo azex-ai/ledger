@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -144,6 +145,13 @@ func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name stri
 	if err == nil {
 		return jt, nil
 	}
+	if !errors.Is(err, core.ErrNotFound) {
+		// A transient error (connection drop, timeout) here is not "the
+		// journal type doesn't exist" -- falling through to Create on any
+		// error, instead of specifically ErrNotFound, would race a second
+		// create against the one that actually exists.
+		return nil, fmt.Errorf("get journal type %s: %w", code, err)
+	}
 	return svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
 }
 
@@ -152,12 +160,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
+	const exponent = int32(18)
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
 		return "", fmt.Errorf("create currency: %w", err)
 	}
@@ -168,6 +181,9 @@ func ensureClassification(ctx context.Context, svc *ledger.Service, code, name s
 	c, err := svc.Classifications().GetByCode(ctx, code)
 	if err == nil {
 		return c, nil
+	}
+	if !errors.Is(err, core.ErrNotFound) {
+		return nil, fmt.Errorf("get classification %s: %w", code, err)
 	}
 	return svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
 		Code:       code,

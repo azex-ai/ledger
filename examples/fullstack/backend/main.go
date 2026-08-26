@@ -11,7 +11,12 @@
 //   - svc.InstallDefaultPresets       — deposit/withdrawal bundles ready to use
 //   - server.NewWithConfig(...)       — the full ledger HTTP API as an http.Handler
 //   - r.Handle("/api/v1/*", ...)      — mounting that handler inside a host chi router
-//   - svc.Worker(...)                 — background rollup/snapshot/reconcile loops
+//   - svc.Worker(...)                 — background rollup/expiry/snapshot loops, PLUS
+//     the two jobs svc.Worker does not wire on its own: worker.SetEventDeliverer
+//     (webhook delivery) and worker.SetFullReconciler (the full reconciliation
+//     suite). Both are silent to skip — events sit in the events table
+//     forever with no error, no log line, nothing — so a "complete assembly"
+//     example wires them explicitly instead of teaching the gap.
 //
 // Run:
 //
@@ -31,7 +36,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -44,6 +48,7 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
+	"github.com/azex-ai/ledger/service/delivery"
 )
 
 func main() {
@@ -65,15 +70,11 @@ func run() error {
 	rootCtx, rootCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer rootCancel()
 
-	// Migrations. golang-migrate wants the pgx5:// scheme; accept the common
-	// postgres:// form and convert so the example runs with a stock URL.
-	migrateURL := dbURL
-	if rest, ok := strings.CutPrefix(migrateURL, "postgres://"); ok {
-		migrateURL = "pgx5://" + rest
-	} else if rest, ok := strings.CutPrefix(migrateURL, "postgresql://"); ok {
-		migrateURL = "pgx5://" + rest
-	}
-	if err := ledger.Migrate(migrateURL); err != nil {
+	// ledger.Migrate accepts both postgres:// and postgresql:// directly and
+	// translates to the pgx5:// scheme golang-migrate's driver registry wants
+	// internally (postgres/migrate.go's toMigrateURL) -- no conversion needed
+	// on the caller's side.
+	if err := ledger.Migrate(dbURL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 
@@ -100,11 +101,27 @@ func run() error {
 		return fmt.Errorf("seed: %w", err)
 	}
 
-	// Background worker: balance rollups, reservation expiry, snapshots,
-	// reconciliation. Zero-value config takes safe defaults. The worker gets
-	// its own context (not rootCtx) so a shutdown signal drains HTTP first;
-	// workerCancel fires only after the server has stopped taking traffic.
+	// Background worker: balance rollups, reservation expiry, snapshots.
+	// Zero-value config takes safe defaults. The worker gets its own context
+	// (not rootCtx) so a shutdown signal drains HTTP first; workerCancel
+	// fires only after the server has stopped taking traffic.
 	worker := svc.Worker(service.WorkerConfig{})
+
+	// svc.Worker alone does NOT wire event delivery or the full reconciliation
+	// suite -- both are opt-in Set* calls on *service.Worker, and skipping them
+	// is silent: events sit in the events table forever, unretried, unlogged,
+	// with no error anywhere. This is the one wiring gap in this repo that six
+	// independent audit passes each found on their own (see
+	// docs/audits/2026-08-25-financial-engineering/consumer-surface.md). A
+	// "complete assembly" example has to close it or it teaches the same gap
+	// it exists to prevent.
+	worker.SetEventDeliverer(delivery.NewWebhookDeliverer(
+		postgres.NewEventStore(pool),             // implements delivery.EventPoller
+		postgres.NewWebhookSubscriberStore(pool), // implements delivery.SubscriberLister
+		core.NopLogger(), nil,                    // metrics nil defaults to a no-op inside NewWebhookDeliverer; logger does not, so it can't be nil
+	))
+	worker.SetFullReconciler(svc.FullReconciler(service.FullReconciliationConfig{}))
+
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	workerDone := make(chan error, 1)
@@ -276,12 +293,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
+	const exponent = int32(6)
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 6})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
 		return "", fmt.Errorf("create currency: %w", err)
 	}

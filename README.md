@@ -29,7 +29,7 @@ Core engine capabilities:
 - **Webhook delivery** -- outbound event delivery with per-attempt exponential backoff and dead-letter handling
 - **In-process event subscription** -- `Worker.Subscribe` for library-mode event callbacks without a webhook server
 - **Transaction composition** -- `RunInTx` lets callers combine ledger writes with their own DB writes in one atomic transaction
-- **Extended preset catalogue** -- deposit, withdrawal, transfer, fee, capital, settlement, and spread bundles ship out-of-the-box
+- **Extended preset catalogue** -- deposit, withdrawal, transfer, fee, capital, settlement, spread, and FX bundles ship out-of-the-box
 - **Full reconciliation engine** -- accounting-equation verification, orphan detection, solvency check, idempotency audit, stale-rollup detection, and entries-based checkpoint/system_rollup/snapshot integrity
 - **Balance trends + audit queries** -- time-series trends, reversal chains, booking traces for customer support and compliance
 - **Platform solvency API** -- `PlatformBalanceReader` + `SolvencyChecker` read from the `system_rollups` materialised view in O(1)
@@ -100,18 +100,22 @@ svc, _ := ledger.New(pool)
 
 // Tier 1 still needs at least one Currency, Classification, and JournalType
 // row before any post — see examples/embed/main.go for a self-contained boot.
+// currencyUID / walletUID / custodyUID / jtUID are the uids those rows return;
+// every dimension on EntryInput/JournalInput is referenced by uid, never by
+// the internal BIGSERIAL id (api-contract.md §3: uid is the only identifier
+// exposed anywhere, including this Go API).
 
 j, err := svc.JournalWriter().PostJournal(ctx, core.JournalInput{
-    JournalTypeID:  jtID,
+    JournalTypeUID: jtUID,
     IdempotencyKey: ledger.NewIdempotencyKey("hello"),
     Entries: []core.EntryInput{
-        {AccountHolder: -42, CurrencyID: 1, ClassificationID: clsID, EntryType: core.EntryTypeDebit,  Amount: decimal.NewFromInt(100)},
-        {AccountHolder:  42, CurrencyID: 1, ClassificationID: clsID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+        {AccountHolder: -42, CurrencyUID: currencyUID, ClassificationUID: custodyUID, EntryType: core.EntryTypeDebit,  Amount: decimal.NewFromInt(100)},
+        {AccountHolder:  42, CurrencyUID: currencyUID, ClassificationUID: walletUID,  EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
     },
     Source: "api",
 })
 
-bal, _ := svc.BalanceReader().GetBalance(ctx, 42, 1, clsID)
+bal, _ := svc.BalanceReader().GetBalance(ctx, 42, currencyUID, walletUID)
 ```
 
 ### Tier 2 — With Built-in Presets (recommended)
@@ -122,12 +126,12 @@ all idempotent on every boot.
 
 ```go
 svc, _ := ledger.New(pool)
-svc.InstallExtendedPresets(ctx)              // 9 bundles, see "Built-in Presets" below
+svc.InstallExtendedPresets(ctx)              // 8 bundles, see "Built-in Presets" below
 
 // Post a deposit confirmation by template — no entry-list assembly needed.
 _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
     HolderID:       42,
-    CurrencyID:     1,
+    CurrencyUID:    currencyUID,
     Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
     IdempotencyKey: ledger.NewIdempotencyKey("deposit-confirm"),
     Source:         "api",
@@ -137,24 +141,42 @@ _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.Templ
 booking, _ := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
     ClassificationCode: "deposit",
     AccountHolder:      42,
-    CurrencyID:         1,
+    CurrencyUID:        currencyUID,
     Amount:             decimal.NewFromInt(100),
     IdempotencyKey:     ledger.NewIdempotencyKey("deposit"),
     ChannelName:        "evm",
 })
 svc.Booker().Transition(ctx, core.TransitionInput{
-    BookingID: booking.ID,
-    ToStatus:  "confirming",
-    Source:    "api",
+    BookingUID:     booking.UID,
+    ToStatus:       "confirming",
+    Source:         "api",
+    IdempotencyKey: ledger.NewIdempotencyKey("deposit-confirming"), // REQUIRED — I-3, see docs/INVARIANTS.md
 })
 ```
 
-Background worker (rollup, expiry, reconcile, snapshots, event delivery):
+Background worker (rollup, expiry, snapshots — always on):
 
 ```go
 worker := svc.Worker(service.DefaultWorkerConfig())
 go worker.Run(ctx)
 ```
+
+`svc.Worker(cfg)` alone does **not** wire webhook event delivery or the full
+reconciliation suite — both are separate, optional `Worker` methods, and
+skipping them is silent: events sit in the `events` table unretried, with no
+error and no log line. Wire them explicitly if you need them:
+
+```go
+worker.SetEventDeliverer(delivery.NewWebhookDeliverer(
+    postgres.NewEventStore(pool),             // implements delivery.EventPoller
+    postgres.NewWebhookSubscriberStore(pool), // implements delivery.SubscriberLister
+    core.NopLogger(), nil,                    // metrics nil defaults to a no-op; logger does not
+))
+worker.SetFullReconciler(svc.FullReconciler(service.FullReconciliationConfig{}))
+```
+
+See [`examples/fullstack/backend`](examples/fullstack/backend/main.go) for
+this wired end-to-end alongside the HTTP API.
 
 Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
 
@@ -241,7 +263,7 @@ Installing a preset bundle (next section) creates all of these in one call.
 
 ## Built-in Presets
 
-The library ships nine preset bundles. Each is a self-contained set of
+The library ships eight preset bundles. Each is a self-contained set of
 classifications, journal types, and templates that wire one accounting flow
 end-to-end.
 
@@ -260,7 +282,7 @@ Two convenience installers:
 
 ```go
 svc.InstallDefaultPresets(ctx)    // Deposit + Withdrawal only
-svc.InstallExtendedPresets(ctx)   // All 9 bundles
+svc.InstallExtendedPresets(ctx)   // All 8 bundles
 ```
 
 Or install one bundle at a time:
@@ -296,11 +318,11 @@ that don't have a reusable shape.
 
 ```go
 svc.JournalWriter().PostJournal(ctx, core.JournalInput{
-    JournalTypeID:  jtID,
+    JournalTypeUID: jtUID,
     IdempotencyKey: key,
     Entries: []core.EntryInput{
-        {AccountHolder:  42, CurrencyID: 1, ClassificationID: walletID, EntryType: core.EntryTypeDebit,  Amount: amt},
-        {AccountHolder: -42, CurrencyID: 1, ClassificationID: feesID,   EntryType: core.EntryTypeCredit, Amount: amt},
+        {AccountHolder:  42, CurrencyUID: currencyUID, ClassificationUID: walletUID, EntryType: core.EntryTypeDebit,  Amount: amt},
+        {AccountHolder: -42, CurrencyUID: currencyUID, ClassificationUID: feesUID,   EntryType: core.EntryTypeCredit, Amount: amt},
     },
     ActorID: 99, Source: "api",
 })
@@ -314,7 +336,7 @@ then calls `PostJournal`. Most application code lives here.
 ```go
 svc.JournalWriter().ExecuteTemplate(ctx, "fee_charge", core.TemplateParams{
     HolderID:       42,
-    CurrencyID:     1,
+    CurrencyUID:    currencyUID,
     Amounts:        map[string]decimal.Decimal{"amount": amt},
     IdempotencyKey: key,
     Source:         "billing",
@@ -377,12 +399,12 @@ svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{
 
 ```go
 svc.Templates().CreateTemplate(ctx, core.TemplateInput{
-    Code:          "promo_grant",
-    Name:          "Promotion Grant",
-    JournalTypeID: jtID,
+    Code:           "promo_grant",
+    Name:           "Promotion Grant",
+    JournalTypeUID: jtUID,
     Lines: []core.TemplateLineInput{
-        {ClassificationID: equityID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
-        {ClassificationID: walletID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser,   AmountKey: "amount", SortOrder: 2},
+        {ClassificationUID: equityUID, EntryType: core.EntryTypeDebit,  HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 1},
+        {ClassificationUID: walletUID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleUser,   AmountKey: "amount", SortOrder: 2},
     },
 })
 ```
@@ -424,14 +446,17 @@ type StripeAdapter struct{ secret string }
 func (a *StripeAdapter) Name() string { return "stripe" }
 
 func (a *StripeAdapter) VerifySignature(h http.Header, body []byte) error {
-    // verify Stripe-Signature header...
+    // verify Stripe-Signature header against a.secret...
+    return nil
 }
 
 func (a *StripeAdapter) ParseCallback(h http.Header, body []byte) (*channel.CallbackPayload, error) {
-    // unmarshal body, return BookingID + ChannelRef + Status + ActualAmount
+    // unmarshal body, return BookingUID + ChannelRef + Status + ActualAmount
+    return &channel.CallbackPayload{BookingUID: "...", ChannelRef: "...", Status: "confirmed"}, nil
 }
 
-svc.RegisterChannel("stripe", &StripeAdapter{secret: os.Getenv("STRIPE_SECRET")})
+// RegisterChannel takes the adapter alone — Name() is what it registers under.
+svc.RegisterChannel(&StripeAdapter{secret: os.Getenv("STRIPE_SECRET")})
 ```
 
 `POST /api/v1/webhooks/stripe` will now route through your adapter.
@@ -561,6 +586,8 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.BalanceReader()` | `core.BalanceReader` | Get balance, batch balances |
 | `svc.Reserver()` | `core.Reserver` | Reserve / settle / release funds |
 | `svc.EventReader()` | `core.EventReader` | Read / list events |
+| `svc.HolderReader()` | `core.HolderReader` | Holder-scoped wallet read surface (balances, translated transactions, holds) — feeds `server.HolderHandler` or consume directly |
+| `svc.AccountPolicies()` | `core.AccountPolicyStore` | Per-account freeze/close + balance-floor overrides |
 
 ### Deposit / pending
 
@@ -568,6 +595,14 @@ All accessors return interfaces from `core/` so your application code depends on
 |--------|-----------|-------------|
 | `svc.PendingBalanceWriter()` | `core.PendingBalanceWriter` | AddPending / ConfirmPending / CancelPending |
 | `svc.PendingTimeoutSweeper()` | `core.PendingTimeoutSweeper` | Expire stale pending deposits |
+
+### Onchain (crypto deposit + sweep, optional)
+
+| Method | Interface | Description |
+|--------|-----------|-------------|
+| `svc.EnableOnchain(chains, reader, scanner, sweeper, opts...)` | `(*service.Onchain, error)` | Wires the CREATE2 deposit + sweep subsystem (docs/plans/2026-07-11-crypto-deposit-sweep-design.md); `reader`/`scanner`/`sweeper` may each be nil to disable the corresponding background job. Call once; validates the `AutoCreditCeiling` and `ReconcileFailureLimit` fences before handing back an instance — see `examples/crypto-deposit` |
+| `svc.Onchain()` | `*service.Onchain` | The subsystem `EnableOnchain` wired, or nil if it was never called |
+| `svc.InstallDevCreditPreset(ctx)` | `error` | Installs the developer-credit bundle (mint balance with no custodied asset behind it) — deliberately absent from both `InstallDefaultPresets` and `InstallExtendedPresets`, opt in explicitly |
 
 ### Analytics and audit
 
@@ -577,6 +612,8 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.Audit()` | `core.AuditQuerier` | Journal lists, booking trace, reversal chain |
 | `svc.PlatformBalanceReader()` | `core.PlatformBalanceReader` | Per-classification platform-wide balances |
 | `svc.SolvencyChecker()` | `core.SolvencyChecker` | Custodial vs user liability check |
+| `svc.PeriodCloser()` | `core.PeriodCloser` | Manages the accounting period close line |
+| `svc.TrialBalanceReader()` | `core.TrialBalanceReader` | Computes a trial balance report |
 
 ### Integrity and operations
 
@@ -585,6 +622,11 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.FullReconciler(cfg)` | `core.FullReconciler` | Full reconciliation suite |
 | `svc.SnapshotBackfiller()` | `core.SnapshotBackfiller` | Fill historical snapshot gaps |
 | `svc.Worker(cfg)` | `*service.Worker` | Background jobs (rollup, expiry, reconcile, snapshots) |
+| `svc.CheckpointIntegrity()` | `core.CheckpointIntegrityStore` | Trusted, entries-only balance API (`RecomputeBalance` / `RebuildCheckpoint`) that never consults `balance_checkpoints`. **Withdrawal / large-amount paths must call `RecomputeBalance` instead of `BalanceReader.GetBalance`** — see `core.CheckpointIntegrityStore`'s godoc |
+| `svc.VerifiedBalanceReader()` | `core.VerifiedBalanceReader` | Withdrawal-time authorization-gated balance reader. A mechanism the library offers, not a policy it imposes — nothing calls it automatically (`Reserve` does not), so a consumer that never calls this accessor sees no behavior change. Check the returned error before trusting the amount: it can report UNDEFINED |
+| `svc.AuthVerifier()` | `core.AuthVerifier` | The verifier passed to `WithAttestor`, or nil if it was never called — reach the same verifier the composition root wired in from a withdrawal gate, reconcile check, or `ledger-cli verify` |
+| `svc.AttestationService(anchor)` | `(*service.AttestationService, error)` | Batch attestation over per-journal signatures, anchored externally. Errors if `WithAttestor` was never called |
+| `svc.VerifyLedger(ctx, anchor, cfg)` | `service.VerifyReport` | Fail-closed tamper-evidence check against the attestation chain — see `examples/tamper-evident` |
 
 ### Metadata stores
 
@@ -601,8 +643,9 @@ All accessors return interfaces from `core/` so your application code depends on
 | Method / function | Description |
 |-------------------|-------------|
 | `svc.RunInTx(ctx, fn)` | Combine ledger writes + your writes in one PostgreSQL transaction |
+| `svc.RunInTxWithOptions(ctx, opts, fn)` | `RunInTx` with explicit `pgx.TxOptions` (e.g. `pgx.Serializable`) |
 | `svc.Pool()` | Underlying `*pgxpool.Pool` for custom queries |
-| `svc.RegisterChannel(name, adapter)` | Register inbound webhook channel adapter |
+| `svc.RegisterChannel(adapter)` | Register inbound webhook channel adapter (registers under `adapter.Name()`) |
 | `svc.Channels()` | Snapshot of registered adapters |
 | `svc.InstallDefaultPresets(ctx)` | Install deposit + withdrawal bundles |
 | `svc.InstallExtendedPresets(ctx)` | Install all 8 preset bundles |

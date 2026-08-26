@@ -95,12 +95,12 @@ meta := map[string]string{"quote_id": "q-123", "fx_rate": "100"}
 
 _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
     {TemplateCode: "fx_sell", Params: core.TemplateParams{
-        HolderID: userID, CurrencyID: usdtID, IdempotencyKey: key + "-sell",
+        HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: key + "-sell",
         Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("1")},
         Metadata: meta,
     }},
     {TemplateCode: "fx_buy", Params: core.TemplateParams{
-        HolderID: userID, CurrencyID: creditsID, IdempotencyKey: key + "-buy",
+        HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: key + "-buy",
         Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")},
         Metadata: meta,
     }},
@@ -165,7 +165,7 @@ _, _ = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
 
 // per top-up (the paid USDT leg is a separate fx_sell as in Recipe 1):
 _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_topup", core.TemplateParams{
-    HolderID: userID, CurrencyID: creditsID, IdempotencyKey: ledger.NewIdempotencyKey("topup"),
+    HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: ledger.NewIdempotencyKey("topup"),
     Amounts: map[string]decimal.Decimal{
         "purchased": decimal.RequireFromString("100"),
         "bonus":     decimal.RequireFromString("20"),
@@ -223,26 +223,50 @@ then capture the actual cost and release the remainder. This is the safe pattern
 for metered consumption (an AI generation run, an API call quota, etc.).
 
 `available = balance − SUM(active reservations)`. `Reserve` takes a per-(holder,
-currency) advisory lock and checks availability (TOCTOU-safe). `Settle` captures
-the actual amount and **auto-releases the remainder** atomically.
+currency) advisory lock and checks availability (TOCTOU-safe). `Settle` closes
+the hold at the actual amount and **auto-releases the unused remainder back
+into `available`** — both of those are reservation bookkeeping, atomic within
+the reservation row. Neither writes a journal entry: **`Settle` moves no
+money.** If the spend needs to hit the books, that is a separate journal you
+post yourself (next block).
 
 ```go
 // hold up to 50 credits
 rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
-    AccountHolder: userID, CurrencyID: creditsID,
+    AccountHolder: userID, CurrencyUID: creditsUID,
     Amount:        decimal.RequireFromString("50"),
     IdempotencyKey: ledger.NewIdempotencyKey("run-budget"),
     ExpiresIn:      time.Hour,
 })
 
-// run finishes; actual cost was 32 credits → 18 released automatically
-err = svc.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32"), IdempotencyKey: ledger.NewIdempotencyKey("run-settle")})
+// run finishes; actual cost was 32 credits → 18 released back into available.
+// The debit journal below is what actually charges the user -- Settle alone
+// would close the hold and charge nobody (examples/billing used to make
+// exactly this mistake; see its history if you want the full account).
+// Settle and the journal run in one RunInTx: a crash between them would
+// otherwise release the hold without the charge landing, and the ledger
+// would report success because from its side nothing failed.
+err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
+    if err := tx.Reserver().Settle(ctx, core.SettleInput{
+        ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32"),
+        IdempotencyKey: ledger.NewIdempotencyKey("run-settle"),
+    }); err != nil {
+        return err
+    }
+    _, err := tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
+        HolderID: userID, CurrencyUID: creditsUID,
+        IdempotencyKey: ledger.NewIdempotencyKey("run-spend"),
+        Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
+    })
+    return err
+})
 ```
 
 - Reserve does **not** move the balance — it's a soft lock reducing *available*.
-  Post the actual debit journal (credits leaving `main_wallet` to a `fee_revenue`
-  or consumption account) as part of your settle flow if you need the spend on
-  the books, composed in the same `RunInTx` as the `Settle`.
+  `Settle` does not move it either. Post the actual debit journal (credits
+  leaving `main_wallet` to a `fee_revenue` or consumption account) in the same
+  `RunInTx` as the `Settle` call — see `examples/credits-topup` for the
+  runnable version of the block above.
 - To abandon a hold explicitly (job never ran), call `Release(rsv.UID)`.
 
 ---
@@ -268,7 +292,7 @@ If you need to void a prior journal (bad charge, disputed purchase), post a
 `reversal_of`; the original row is never touched (append-only invariant).
 
 ```go
-rev, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalID, "customer refund #4821")
+rev, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalUID, "customer refund #4821")
 ```
 
 This is the *only* correct correction mechanism — do not `UPDATE`/`DELETE`
@@ -355,13 +379,14 @@ for you, it just posts whatever amount you give it on each leg:
 // Converting 100 USDT -> CNY at a quoted rate, rounding to CNY's own exponent.
 cnyAmount := core.ConvertAt(decimal.RequireFromString("100"), rate, cnyCurrency.Exponent, core.RoundHalfUp)
 
-_, _ = svc.Ledger().ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{
-    HolderID: userID, CurrencyID: usdtID,
-    Amounts:  map[string]string{"amount": "100"},
+key := ledger.NewIdempotencyKey("fx-convert")
+_, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{
+    HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: key + "-sell",
+    Amounts:  map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")},
 })
-_, _ = svc.Ledger().ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
-    HolderID: userID, CurrencyID: cnyID,
-    Amounts:  map[string]string{"amount": cnyAmount.String()},
+_, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
+    HolderID: userID, CurrencyUID: cnyUID, IdempotencyKey: key + "-buy",
+    Amounts:  map[string]decimal.Decimal{"amount": cnyAmount},
 })
 ```
 
@@ -399,7 +424,7 @@ to now); set it explicitly for retroactive posting:
 
 ```go
 _, err := svc.JournalWriter().PostJournal(ctx, core.JournalInput{
-    JournalTypeID:  depositJT,
+    JournalTypeUID: depositJTUID,
     IdempotencyKey: idemKey,
     EffectiveAt:    lastMonthEnd, // business date — write time (created_at) is still "now"
     Entries:        entries,
@@ -433,7 +458,7 @@ the original's), so it lands in the currently open period — then, if needed,
 post a fresh corrected journal, also dated in the open period:
 
 ```go
-_, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalID, "March closed, correcting in April")
+_, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalUID, "March closed, correcting in April")
 // then re-post the correct entries with today's date
 ```
 
@@ -456,7 +481,7 @@ close — `balanced: true` and `total_debit == total_credit` is the signal the
 books are internally consistent as of that date:
 
 ```go
-report, err := svc.TrialBalanceReader().TrialBalance(ctx, currencyID, monthEnd)
+report, err := svc.TrialBalanceReader().TrialBalance(ctx, currencyUID, monthEnd)
 if !report.Balanced {
     return fmt.Errorf("trial balance off by %s, do not close", report.TotalDebit.Sub(report.TotalCredit))
 }

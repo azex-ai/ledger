@@ -74,9 +74,11 @@ func run() error {
 		return err
 	}
 
-	// Demo-only table that the in-tx side-effect will write to. Created via
-	// the facade's DBTX() so the example needs no migration files of its own.
-	if _, err := svc.DBTX().Exec(ctx, `
+	// Demo-only table that the in-tx side-effect will write to. Created
+	// directly against the pool, not svc.DBTX() -- DBTX is scoped to running
+	// inside a RunInTx callback alongside a ledger write (see its use below);
+	// schema setup is not a ledger write and does not belong on the facade.
+	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS demo_orders (
 			id          BIGSERIAL PRIMARY KEY,
 			holder_id   BIGINT NOT NULL,
@@ -160,11 +162,28 @@ func run() error {
 		return errors.New("payment gateway: insufficient external liquidity")
 	})
 
-	// The error propagates; the journal was rolled back along with the tx.
-	if rollbackErr != nil {
-		fmt.Printf("expected rollback: %v\n", rollbackErr)
-		fmt.Println("journal was rolled back — ledger balance unchanged")
+	// The error propagates; the journal must have been rolled back along
+	// with the tx. Printing rollbackErr proves the callback returned an
+	// error -- it does not prove the transaction actually rolled back, so
+	// check the one thing that does: the journal must not exist.
+	if rollbackErr == nil {
+		return fmt.Errorf("rollback path returned nil, expected the simulated downstream failure")
 	}
+	fmt.Printf("expected rollback: %v\n", rollbackErr)
+	var journalCount int
+	if err := svc.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM journals WHERE idempotency_key = $1`, rollbackKey,
+	).Scan(&journalCount); err != nil {
+		return fmt.Errorf("verify rollback: %w", err)
+	}
+	if journalCount != 0 {
+		// A postDepositConfirmedJournal-shaped bug in RunInTx would leave this
+		// non-zero: the journal committed even though the callback returned
+		// an error. That is exactly the failure this example exists to rule
+		// out, so it fails loudly instead of just printing a claim.
+		return fmt.Errorf("journal with key %q exists after rollback (%d rows) -- RunInTx did not roll back", rollbackKey, journalCount)
+	}
+	fmt.Println("verified: journal was rolled back — no row with that idempotency key exists")
 
 	return nil
 }
@@ -174,12 +193,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
+	const exponent = int32(18)
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
 		return "", fmt.Errorf("create currency: %w", err)
 	}

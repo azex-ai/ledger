@@ -392,8 +392,12 @@ func setup(ctx context.Context, svc *ledger.Service) (currencyUID string, jt *co
 }
 
 func ensureJournalType(ctx context.Context, svc *ledger.Service, code, name string) (*core.JournalType, error) {
-	if jt, err := svc.JournalTypes().GetJournalTypeByCode(ctx, code); err == nil {
+	jt, err := svc.JournalTypes().GetJournalTypeByCode(ctx, code)
+	if err == nil {
 		return jt, nil
+	}
+	if !errors.Is(err, core.ErrNotFound) {
+		return nil, fmt.Errorf("get journal type %s: %w", code, err)
 	}
 	return svc.JournalTypes().CreateJournalType(ctx, core.JournalTypeInput{Code: code, Name: name})
 }
@@ -403,12 +407,17 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
+	const exponent = int32(18)
 	for _, c := range list {
-		if c.Code == code {
-			return c.UID, nil
+		if c.Code != code {
+			continue
 		}
+		if c.Exponent != exponent {
+			return "", fmt.Errorf("currency %s already exists with exponent %d, this example expects %d", code, c.Exponent, exponent)
+		}
+		return c.UID, nil
 	}
-	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: 18})
+	created, err := svc.Currencies().CreateCurrency(ctx, core.CurrencyInput{Code: code, Name: name, Exponent: exponent})
 	if err != nil {
 		return "", fmt.Errorf("create currency: %w", err)
 	}
@@ -417,8 +426,12 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 
 func ensureClassification(ctx context.Context, svc *ledger.Service, code, name string,
 	side core.NormalSide, system bool, role core.BalanceRole) (*core.Classification, error) {
-	if c, err := svc.Classifications().GetByCode(ctx, code); err == nil {
+	c, err := svc.Classifications().GetByCode(ctx, code)
+	if err == nil {
 		return c, nil
+	}
+	if !errors.Is(err, core.ErrNotFound) {
+		return nil, fmt.Errorf("get classification %s: %w", code, err)
 	}
 	return svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
 		Code: code, Name: name, NormalSide: side, IsSystem: system, BalanceRole: role,
