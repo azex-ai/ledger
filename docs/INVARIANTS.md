@@ -285,13 +285,13 @@ permanently invisible to `GetBalance` (its id never exceeds the watermark)
 while `SumGlobalDebitCreditByCurrency`/`reconcile.sql` counted it and saw a
 balanced total either way — the two views of the ledger diverged without
 violating any id-range invariant or tripping the global debit==credit check.
-**Migration 008 (I-43) closes this**: `ledger_app`'s INSERT on
+**Migration 008 (I-42) closes this**: `ledger_app`'s INSERT on
 `journal_entries` (every partition, derived from `pg_partition_tree`, plus
 the parent) is now column-scoped to exclude `id`, so the shared
 `journal_entries_id_seq` — one sequence for the whole partitioned table — is
 the only remaining source of a row's `id`, and any INSERT statement naming
 `id` explicitly is refused at the ACL layer (`42501`) regardless of what
-value it supplies. See I-43 for the full argument.
+value it supplies. See I-42 for the full argument.
 
 **Pinned by**:
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
@@ -299,7 +299,7 @@ value it supplies. See I-43 for the full argument.
 - `postgres.TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal`
 - `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing prerequisite,
   now a machine gate)
-- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-43's
+- `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-42's
   pin — the same forged-id attack, now asserted refused under a real
   `ledger_app` credential)
 
@@ -3036,7 +3036,7 @@ of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPri
   `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
   `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
 
-## I-43: `journal_entries.id` is sourced from the sequence alone, never an explicit value
+## I-42: `journal_entries.id` is sourced from the sequence alone, never an explicit value
 
 (board #37 / `docs/audits/2026-08-25-financial-engineering/financial-correctness.md`'s
 Minor -- "`journal_entries.id` 单独不唯一, I-5 的单调性完全依赖序列" -- schema-fact

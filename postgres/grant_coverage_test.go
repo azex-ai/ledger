@@ -137,7 +137,7 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 
 	// journal_entries is column-scoped for ledger_app's INSERT as of
 	// migration 008: id is excluded, making the shared journal_entries_id_seq
-	// the only source of a row's id (board #37 / I-43 -- a partitioned
+	// the only source of a row's id (board #37 / I-42 -- a partitioned
 	// table's composite (id, created_at) primary key only guarantees
 	// uniqueness within one partition, not across the whole table). SELECT
 	// stays table-level and unaffected (RETURNING id off the one legitimate
