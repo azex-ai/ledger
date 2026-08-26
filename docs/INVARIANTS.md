@@ -621,12 +621,23 @@ which a direct journal post bypasses entirely.
 ## I-18: uid-only external identity
 
 Every entity's externally visible identifier is its `uid` — a UUIDv7 generated
-Go-side at insert time. Internal `BIGSERIAL` ids exist only inside storage
-(primary keys, foreign keys, advisory-lock keys, keyset-pagination cursors) and
-appear in **no public contract**: not in HTTP request or response bodies, not
-in path or query parameters, and not in the library-mode Go API (`core` types
-and interfaces speak uids exclusively). Pagination cursors that encode an
-internal position are opaque base64 strings.
+Go-side at insert time. Internal `BIGSERIAL`/`IDENTITY` ids exist only inside
+storage (primary keys, foreign keys, advisory-lock keys, keyset-pagination
+cursors) and appear in **no public contract**: not in HTTP request or
+response bodies, not in path or query parameters, and not in the
+library-mode Go API (`core` types and interfaces that cross into
+`Service`-accessor return values speak uids exclusively). Pagination cursors
+that encode an internal position are opaque base64 strings.
+
+Some `core` types are internal working representations of a storage-layer
+engine (e.g. `core.BalanceCheckpoint`, keyed on `CurrencyID`/
+`ClassificationID int64` for the rollup/reconcile engine's hot path) and are
+never returned by any `Service` accessor — they do not cross the library API
+boundary, so they are not held to this invariant (see `BalanceCheckpoint`'s
+doc comment). The one place a checkpoint DOES cross that boundary —
+`CheckpointIntegrityStore.RebuildCheckpoint`, reached via
+`Service.CheckpointIntegrity()` — returns the uid-based
+`core.RebuiltCheckpoint` instead.
 
 **Why**: bigserial ids leak write ordering and table cardinality, invite
 enumeration, and weld consumers to a storage implementation detail. A single
@@ -641,10 +652,20 @@ every external reference stable across dump/restore.
 
 **Pinned by**:
 - `server.TestContract_NoInternalIDKeysInJSON` (mechanical source scan: no
-  internal-id JSON key in any handler request/response struct)
+  internal-id JSON key in any handler request/response struct — the banned-key
+  set is itself derived from `postgres/sql/migrations/*.up.sql` by
+  `bannedInternalIDKeys`, not a hand-maintained word list, so a future
+  internal-id column is caught without editing this test;
+  `TestContract_NoInternalIDKeysInJSON_CatchesSchemaColumnsMissedByOldWordList`
+  regression-pins the specific columns — `policy_id`, `entry_id`,
+  `last_entry_id` — the old hand list missed)
 - `service.TestReconcileFindings_NoInternalIDPatternsInSource` (the reconcile
   report is an API response body; its free-text Description/Detail strings
   carry uids/codes, never internal ids — per-row forensics go to server logs)
+- `postgres.TestCheckpointIntegrity_RebuildCheckpoint_ReturnsUIDsNotInternalIDs`
+  (the library-mode Go API surface: `RebuildCheckpoint`'s result echoes back
+  the same uids the caller passed in, and no field on the result type carries
+  an internal-id-shaped json tag)
 
 ---
 

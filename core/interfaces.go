@@ -140,7 +140,12 @@ type CheckpointIntegrityStore interface {
 	//
 	// Returns core.ErrRollupPending if a rollup_queue item is still pending or
 	// claimed for the dimension — see that error's doc comment.
-	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*BalanceCheckpoint, error)
+	//
+	// Returns *RebuiltCheckpoint, not *BalanceCheckpoint: this method is the
+	// one place a checkpoint crosses into the public library API, so the
+	// result speaks uids exclusively (I-18) rather than the internal ids the
+	// input currencyUID/classificationUID were resolved from.
+	RebuildCheckpoint(ctx context.Context, holder int64, currencyUID, classificationUID string, actorID int64) (*RebuiltCheckpoint, error)
 }
 
 // Reserver handles reserve/settle/lock flow.
