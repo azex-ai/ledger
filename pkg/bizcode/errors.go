@@ -83,6 +83,17 @@ var (
 	AccountFrozen       = New(14007, "account frozen")
 	AccountClosed       = New(14008, "account closed")
 	PeriodClosed        = New(14009, "accounting period is closed")
+	// UnauthorizedJournal maps core.ErrUnauthorizedJournal: a journal has no
+	// stored signature, a stored digest that does not match its recomputed
+	// canonical digest, a signature the configured AuthVerifier rejects, or
+	// (via VerifiedBalanceReader) a dimension where ANY contributing journal
+	// fails that check. This is the tamper-detection system's only signal --
+	// it must never fall through to the 19999 default, which both mislabels
+	// it as an unclassified 500 and (via Retryable's default) tells clients
+	// to retry a rejection that will never change (2026-08-26 audit
+	// remediation, see docs/plans/2026-08-26-audit-remediation-contracts.md
+	// §2).
+	UnauthorizedJournal = New(14010, "journal missing or has invalid authorization signature")
 )
 
 // --- Feature availability (18xxx, 503) ---
@@ -97,6 +108,30 @@ var (
 	// operator to enable it) looks the same as "try again later" from the
 	// client's perspective.
 	FeatureNotEnabled = New(18102, "feature not enabled")
+)
+
+// --- Transient / dependency-availability failures (18xxx, 503, retryable) ---
+//
+// Every code in this block corresponds 1:1 to a core sentinel that
+// core.IsRetryable classifies as retryable. Keeping them in the existing
+// 18100-18199 band (rather than inventing a new range) means
+// bizcode.Retryable's existing range check already returns true for them
+// with no switch-statement edit -- see
+// pkg/httpx/response_test.go TestResolveError_AgreesWithCoreIsRetryable,
+// which pins core.IsRetryable and bizcode.Retryable from disagreeing on the
+// same error.
+
+var (
+	// RollupPending maps core.ErrRollupPending: a rollup worker is
+	// mid-flight for this dimension. Retry once it drains.
+	RollupPending = New(18103, "rollup queue item pending for this dimension")
+	// AttestorUnavailable maps core.ErrAttestorUnavailable: the configured
+	// signer/KMS used to authorize a journal was momentarily unreachable.
+	AttestorUnavailable = New(18104, "authorization signer temporarily unavailable")
+	// TransientFailure maps core.ErrTransient: a momentary contention or
+	// dependency hiccup (serialization conflict, deadlock victim, connection
+	// reset, ...) an adapter wrapped rather than a business-rule outcome.
+	TransientFailure = New(18105, "temporary failure, please retry")
 )
 
 // --- Display messages ---
@@ -120,6 +155,10 @@ var displayMessages = map[int]string{
 	14007: "This account is frozen",
 	14008: "This account is closed",
 	14009: "This accounting period is closed",
+	14010: "This transaction failed a security check and could not be completed. Please contact support",
+	18103: "This request is temporarily unavailable, please try again shortly",
+	18104: "This request could not be completed right now, please try again shortly",
+	18105: "A temporary error occurred, please try again",
 	19999: "An unexpected error occurred",
 }
 

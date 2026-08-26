@@ -187,4 +187,16 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
   - `transfer_out`/`transfer_in`/`fee_charge` 的借贷方向修正 —— **消费方需要冲销既有 journal**
   - 分数冲销的聚合口径修正 —— **需要检查含重复维度的既有冲销**
   - `NewReserverStore` 签名、`journals.event_id` 的 Go 类型（更早的变更）
+  - **`pkg/httpx.Error` 对四个 `core` 哨兵的 HTTP 表现变了**（W1-C，2026-08-26）：`core.ErrUnauthorizedJournal`
+    从 `500`/code `19999` 改为 `422`/code `14010`（且 `Retryable` 从 `true` 变 `false` —— 这正是修复
+    本身：之前把篡改拒绝伪装成瞬时错误）；`core.ErrRollupPending`/`core.ErrAttestorUnavailable`
+    从 `500`/`19999` 改为 `503`/`18103`/`18104`（`Retryable` 仍是 `true`，语义不变，只是数值变了）。
+    新增 `core.ErrTransient` 哨兵（映射 `503`/`18105`），供 adapter 包装瞬时故障 —— **但本任务
+    未接线任何 postgres 侧的 SQLSTATE 检测**（`postgres/` 属另一任务的独占面）。在接线之前
+    `ErrTransient` 无任何生产包装点，真正的序列化冲突仍走 `IsRetryable` 的 `default: true` 兜底，
+    与永久性故障不可区分。接线任务见 bus #24。**消费方需要做的事**：任何按精确 code/HTTP
+    status 数值做 switch-case 的重试逻辑，如果匹配过 `19999` 来处理这四类情形，需要改为匹配新码；
+    单纯 `bizcode.Retryable(code)` 判断重试的消费方不受影响（三者的 retryable 布尔值不变，只有
+    `ErrUnauthorizedJournal` 那一个从 `true` 改成 `false`，且改对是本次修复的目的）。
+    新增库函数 `core.IsRetryable(err error) bool`（纯增量，不影响任何既有签名）。
 - Go module 与 npm 包从 0.5.0 起版本对齐，**须同发**

@@ -146,10 +146,18 @@ func resolveError(err error) *bizcode.AppError {
 		return bizcode.Wrap(14008, "account closed", err)
 	case errors.Is(err, core.ErrPeriodClosed):
 		return bizcode.Wrap(14009, "accounting period is closed", err)
+	case errors.Is(err, core.ErrUnauthorizedJournal):
+		return bizcode.Wrap(14010, "unauthorized journal", err)
 	case errors.Is(err, core.ErrInvalidInput):
 		return bizcode.Wrap(10001, "invalid input", err)
 	case errors.Is(err, core.ErrConflict):
 		return bizcode.Wrap(10901, "conflict", err)
+	case errors.Is(err, core.ErrRollupPending):
+		return bizcode.Wrap(18103, "rollup queue item pending for this dimension", err)
+	case errors.Is(err, core.ErrAttestorUnavailable):
+		return bizcode.Wrap(18104, "authorization signer temporarily unavailable", err)
+	case errors.Is(err, core.ErrTransient):
+		return bizcode.Wrap(18105, "temporary failure", err)
 	default:
 		return bizcode.Wrap(19999, "internal error", err)
 	}
