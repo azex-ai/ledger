@@ -191,6 +191,32 @@ func TestBackfill_FiveDays(t *testing.T) {
 	).Scan(&holderSnaps)
 	require.NoError(t, err)
 	assert.Equal(t, 5, holderSnaps, "5 snapshot rows expected (balance increases each day)")
+
+	// Row COUNT alone doesn't prove backfillSingleDay computed the right
+	// number -- a systematic off-by-one in its cutoff (date.AddDate(0,0,1))
+	// would still produce 5 distinct rows (the balance genuinely differs
+	// every day here), just with each row holding the WRONG day's balance.
+	// Deposits are 100, 200, 300, 400, 500 on days 0..4, so the true
+	// cumulative end-of-day balance is 100, 300, 600, 1000, 1500 --
+	// read each snapshot's stored balance back and pin those exact values.
+	wantCumulative := []int64{100, 300, 600, 1000, 1500}
+	for i, want := range wantCumulative {
+		day := baseDay.AddDate(0, 0, i)
+		snapDate := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+		var balStr string
+		err = pgpool.QueryRow(ctx,
+			`SELECT balance::text FROM balance_snapshots
+			 WHERE account_holder=$1
+			   AND currency_id=(SELECT id FROM currencies WHERE uid=$2::uuid)
+			   AND classification_id=(SELECT id FROM classifications WHERE uid=$3::uuid)
+			   AND snapshot_date=$4`,
+			holderID, currencyID, classID, snapDate,
+		).Scan(&balStr)
+		require.NoError(t, err, "day %d (%s): expected a snapshot row", i, snapDate.Format("2006-01-02"))
+		bal, err := decimal.NewFromString(balStr)
+		require.NoError(t, err)
+		assert.True(t, bal.Equal(decimal.NewFromInt(want)), "day %d (%s): want cumulative balance %d, got %s", i, snapDate.Format("2006-01-02"), want, bal)
+	}
 }
 
 // TestAdvisoryLock_SkipWhenLockHeld verifies that CreateDailySnapshot returns

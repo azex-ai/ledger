@@ -225,7 +225,12 @@ holder over-committed.
 - Reservation FSM transition table in `core/reserve.go` rejects illegal moves.
 
 **Pinned by**:
-- `postgres.TestReserverStore_Reserve_Concurrent`
+- `postgres.TestReserverStore_Reserve_Concurrent` (2 concurrent reserves that
+  together stay under the funded balance -- proves no crash/deadlock, but
+  NOT over-commit rejection; see doc comment)
+- `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (10
+  concurrent reserves that together exceed the funded balance -- the actual
+  TOCTOU claim; mutation-tested against the advisory lock)
 - `core.TestReservationStatus_AllTransitions`
 - `core.TestReservationStatus_TerminalStatesAreSticky`
 
@@ -407,6 +412,7 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent`
+- `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit`
 - `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
 - `postgres.TestGetBalanceBreakdown_RolesPlusHolds`
 - `postgres.TestReserve_AvailableBasisExcludesPendingLockedAndRoleless`
@@ -714,16 +720,21 @@ every external reference stable across dump/restore.
 **Pinned by**:
 - `server.TestContract_NoInternalIDKeysInJSON` (mechanical source scan: no
   internal-id JSON key in any handler request/response struct — the banned-key
-  set is itself derived from `postgres/sql/migrations/*.up.sql` by
-  `bannedInternalIDKeys`, not a hand-maintained word list, so a future
-  internal-id column is caught without editing this test;
+  set is derived from `postgres/sql/migrations/*.up.sql` by
+  `internal/idschema.BannedKeys`, not a hand-maintained word list, so a
+  future internal-id column is caught without editing this test;
   `TestContract_NoInternalIDKeysInJSON_CatchesSchemaColumnsMissedByOldWordList`
   regression-pins the specific columns — `policy_id`, `entry_id`,
   `last_entry_id` — the old hand list missed)
-- `core.TestNoInternalIDFieldsInCoreTypes` (same schema-derived banned-key
-  set, mirrored into `core` — scans every exported type declared in
-  `core/*.go` directly, so a `core` type carrying an internal id is caught
-  even before anyone wires it into an HTTP handler, matching this
+- `core.TestNoInternalIDFieldsInCoreTypes` (same `internal/idschema`
+  derivation, called directly by both `server` and `core`'s test packages —
+  board #28 (test-credibility.md) found this used to be an independent
+  ~55-line copy in each package, since `core` cannot import `server`'s test
+  file without a cycle; `internal/idschema` is a dependency-free package
+  neither `core` nor `server` production code imports, so both test files
+  can share the ONE implementation with no cycle — scans every exported type
+  declared in `core/*.go` directly, so a `core` type carrying an internal id
+  is caught even before anyone wires it into an HTTP handler, matching this
   invariant's "`core` types ... speak uids exclusively" clause literally
   rather than only its HTTP-wire consequence;
   `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation`
@@ -779,6 +790,10 @@ runtime validation.
 - `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
   through pending → sent → confirmed, asserting `journal_uid` stays empty at
   every step)
+- `postgres.TestSweepBooking_NeverPostsJournal_FailedAndRetryPath` (pending →
+  sent → failed → pending (revive) → sent → confirmed, asserting
+  `journal_uid` stays empty through the failed status and the retry --
+  the branch the test above doesn't reach)
 - `presets.TestInstallCryptoDepositBundle` (asserts
   `journalStore.GetJournalTypeByCode(ctx, SweepClassificationCode)` returns
   `core.ErrNotFound` after installing the full bundle)
@@ -825,15 +840,29 @@ instead of creating a duplicate.
   persisted on the booking's `Metadata` — the recheck loop needs it back to
   recompute confirmations without re-scanning the chain. To keep it from
   breaking idempotent replays, `postgres.bookingMetadataMatches`
-  (`postgres/idempotency_match.go`) deliberately excludes this one metadata
-  key from `CreateBooking`'s payload-equality check; every other field
-  (including every other `Metadata` key) is still compared exactly.
+  (`postgres/idempotency_match.go`) deliberately excludes `block_number`
+  from `CreateBooking`'s payload-equality check.
+- The same exclusion list (`bookingMetadataObservationVariantKeys`) also
+  covers `review_reason`, `reject_reason`, `approved_by`, and `rejected_by`
+  — every one of these is written onto a booking's `Metadata` by a
+  `Transition` call that happens strictly AFTER `CreateBooking`
+  (`service.Onchain`'s `routeToReview` / `ApproveReview` / `RejectReview`),
+  never present in the original `CreateBookingInput.Metadata` a rescan or
+  retried webhook delivery re-derives. Every other field (including every
+  other `Metadata` key) is still compared exactly.
 
 **Pinned by**:
 - `postgres.TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn`
   (re-ingesting the identical sighting with a DIFFERENT `block_number`,
   simulating a reorg re-mining the tx into a different block, resolves to
   the same booking — not `ErrConflict`)
+- `postgres.TestDepositBooking_IdempotencyKey_StableAcrossReviewAuditMetadata`
+  (one subtest per audit key -- `review_reason`, `approved_by`,
+  `reject_reason`+`rejected_by` -- replaying the pre-Transition
+  `CreateBookingInput` against a booking whose `Metadata` has since gained
+  that key must resolve to the same booking, not `ErrConflict`; test-credibility.md
+  flagged this as PLAUSIBLE-but-unverified since only `block_number` had a
+  dedicated test -- verified real, now covered)
 - `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
   re-observing the same sighting is a pure no-op; a second Transfer log in
   the same tx with a different `txlog_seq` does not collide)
@@ -891,7 +920,11 @@ be sitting in the user's balance by the time a human looks at the queue.
   alone would have confirmed)
 - `service.TestOnchain_ApproveReview_PostsJournalWithEventLink` (approving a
   reviewed booking transitions it to `confirmed` and posts its
-  `deposit_confirm` journal, cross-linked via `EventUID`, only at that point)
+  `deposit_confirm` journal, cross-linked via `EventUID`, only at that point
+  -- directly asserts `events.journal_id` resolves to the same journal
+  `ApproveReview` returned, not just that some journal exists;
+  test-credibility.md flagged the name as claiming this without checking it,
+  now closed)
 - `service.TestOnchain_RejectReview_NoJournal` (rejecting a reviewed booking
   transitions it to `failed` with `journal_uid` remaining empty forever)
 

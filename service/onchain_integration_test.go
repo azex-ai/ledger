@@ -232,6 +232,10 @@ type onchainHarness struct {
 	scanner     *fakeChainScanner
 	sweeper     *fakeSweeper
 	deadLetters *postgres.IngestDeadLetterStore
+
+	// pool is the raw connection, for tests that need to assert DB state no
+	// store interface exposes (e.g. events.journal_id cross-links, I-21).
+	pool *pgxpool.Pool
 }
 
 // setupOnchain wires a service.Onchain against a fresh testcontainers
@@ -285,6 +289,7 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		scanner:     scanner,
 		sweeper:     sweeper,
 		deadLetters: deadLetters,
+		pool:        pool,
 	}
 }
 
@@ -1265,6 +1270,29 @@ func TestOnchain_ApproveReview_PostsJournalWithEventLink(t *testing.T) {
 	assert.Equal(t, "ops-alice", approved.Metadata["approved_by"])
 
 	journalUID := approved.JournalUID
+
+	// The test's own name promises "PostsJournalWithEventLink" -- verify the
+	// actual cross-link (events.journal_id -> journals.id), not just that
+	// SOME journal exists. core.Booking has no EventUID field to assert this
+	// through the Go API, so read the two tables directly the same way the
+	// other pin tests in this package (e.g. authorize_pin_test.go) query
+	// journals/events raw when the store interface doesn't expose what's
+	// under test.
+	var bookingID int64
+	require.NoError(t, h.pool.QueryRow(ctx, "SELECT id FROM bookings WHERE uid=$1", approved.UID).Scan(&bookingID))
+
+	var linkedJournalID int64
+	require.NoError(t, h.pool.QueryRow(ctx,
+		`SELECT COALESCE(journal_id, 0) FROM events
+		 WHERE booking_id=$1 AND to_status='confirmed'
+		 ORDER BY id DESC LIMIT 1`,
+		bookingID,
+	).Scan(&linkedJournalID))
+	assert.NotZero(t, linkedJournalID, "the confirming event for this booking must carry a non-NULL journal_id (I-21 cross-link)")
+
+	var journalUIDFromEvent string
+	require.NoError(t, h.pool.QueryRow(ctx, "SELECT uid::text FROM journals WHERE id=$1", linkedJournalID).Scan(&journalUIDFromEvent))
+	assert.Equal(t, journalUID, journalUIDFromEvent, "events.journal_id must resolve to the SAME journal ApproveReview returned as JournalUID")
 
 	// Idempotent re-approval: no error, same booking, no second journal.
 	again, err := h.svc.ApproveReview(ctx, reviewed.UID, "ops-alice")

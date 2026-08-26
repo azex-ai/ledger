@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -36,9 +37,24 @@ func TestReserverStore_Reserve_Settle(t *testing.T) {
 	assert.Equal(t, core.ReservationStatusActive, res.Status)
 	assert.True(t, res.ReservedAmount.Equal(decimal.NewFromInt(100)))
 
-	// Settle
+	// Settle for less than the full reserved amount (95 of 100 reserved) --
+	// the unreserved remainder (5) is implicitly released, same as
+	// FinalizeSettlement's semantics.
 	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(95), IdempotencyKey: postgrestest.UniqueKey("res-settle-op")})
 	require.NoError(t, err)
+
+	// require.NoError alone proves nothing about what Settle actually did --
+	// verify the row really transitioned and really recorded 95, not (say) a
+	// no-op that silently returned nil.
+	status, settledAmount := reservationRow(t, ctx, pool, res.UID)
+	assert.Equal(t, string(core.ReservationStatusSettled), status, "reservation must transition to settled")
+	assert.True(t, settledAmount.Equal(decimal.NewFromInt(95)), "settled_amount must record the actual settled amount, want 95 got %s", settledAmount)
+
+	// A settled reservation must drop out of the holder's held total --
+	// otherwise the unused 5 (and the settled 95) would stay locked forever.
+	held, err := store.HeldAmount(ctx, 1, curID)
+	require.NoError(t, err)
+	assert.True(t, held.IsZero(), "settled reservation must no longer count toward held amount, got %s", held)
 }
 
 func TestReserverStore_Reserve_Release(t *testing.T) {
@@ -124,6 +140,16 @@ func TestReserverStore_Reserve_IdempotentPayloadMismatch(t *testing.T) {
 	assert.ErrorIs(t, err, core.ErrConflict)
 }
 
+// TestReserverStore_Reserve_Concurrent only proves two concurrent Reserve
+// calls don't crash / deadlock / collide on idempotency when their combined
+// amount (50+30=80) stays under the funded balance (100) -- both requests
+// SHOULD succeed regardless of whether the advisory lock exists, so this
+// test passes even if the lock in postgres.ReserverStore.Reserve is deleted
+// entirely (verified: see TestReserverStore_Reserve_Concurrent_RejectsOverCommit's
+// doc comment for the mutation-testing evidence). It does not exercise I-4/
+// I-11's actual TOCTOU claim ("two concurrent reserves that together exceed
+// the available balance must not both succeed") -- that is
+// TestReserverStore_Reserve_Concurrent_RejectsOverCommit below.
 func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ledger := postgres.NewLedgerStore(pool)
@@ -166,6 +192,95 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	assert.NotEqual(t, res1.UID, res2.UID)
 }
 
+// TestReserverStore_Reserve_Concurrent_RejectsOverCommit pins I-4/I-11's
+// actual claim (docs/INVARIANTS.md: "Two concurrent reserve calls can each
+// read 'balance is enough', then both insert reservations, leaving the
+// holder over-committed"): fund a holder with exactly 100, fire many
+// concurrent Reserve calls of 15 each (10 x 15 = 150, well over the funded
+// balance), and require the combined reserved amount never exceeds the
+// funded balance -- i.e. Reserve must actually serialize against itself,
+// not just avoid crashing.
+//
+// Why 10 goroutines and not 2: a 2-goroutine version of this same assertion
+// (balance=100, two concurrent Reserve(60)) was tried first and did NOT
+// reliably go red when the lock was removed -- with only two short local
+// round-trips to a real (fast, low-latency Dockerized) Postgres, the Go
+// scheduler and network timing happened to serialize the two calls often
+// enough that the race window was frequently missed by luck, not caught by
+// the code. Widening to 10 concurrent goroutines against the same balance
+// closes that gap: verified locally (see below) that with the app-level
+// advisory lock removed, 10-way concurrency overcommits every single run.
+//
+// Mutation-tested: with the pg_advisory_xact_lock acquisition in
+// postgres.ReserverStore.reserveWithQueries (the acquireBalanceLocks call)
+// temporarily replaced with `if false { ... }`, this test goes red on every
+// run (3/3 trials observed locally: successes=8/sum=120, successes=10/
+// sum=150, successes=7/sum=105 -- all exceeding the funded balance of 100).
+// Restoring the lock line makes it pass again, with the combined reserved
+// amount capped at the largest multiple of 15 that is <= 100 (i.e. 90,
+// 6 winners). TestReserverStore_Reserve_Concurrent above does NOT go red
+// under the same mutation with only 2 participants (50+30=80 never exceeds
+// the funded balance regardless of locking, and even at higher amounts 2
+// participants don't reliably hit the window) -- that gap in what a
+// concurrent test can actually prove is exactly what this test closes.
+func TestReserverStore_Reserve_Concurrent_RejectsOverCommit(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ledger := postgres.NewLedgerStore(pool)
+	store := postgres.NewReserverStore(pool, ledger, postgres.NewVerifiedBalanceStore(pool, nil))
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
+	const holder = int64(11)
+	const funded = 100
+	const perAttempt = 15
+	const attempts = 10 // 10 x 15 = 150 > funded balance of 100
+	seedReservableBalance(t, ctx, ledger, pool, holder, curID, decimal.NewFromInt(funded))
+
+	results := make([]*core.Reservation, attempts)
+	errs := make([]error, attempts)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(attempts)
+	for i := 0; i < attempts; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			<-start // align start so every goroutine races the same window
+			results[i], errs[i] = store.Reserve(ctx, core.ReserveInput{
+				AccountHolder:  holder,
+				CurrencyUID:    curID,
+				Amount:         decimal.NewFromInt(perAttempt),
+				IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("overcommit-%d", i)),
+				ExpiresIn:      10 * time.Minute,
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	sumReserved := decimal.Zero
+	for i := 0; i < attempts; i++ {
+		if errs[i] == nil {
+			successes++
+			sumReserved = sumReserved.Add(results[i].ReservedAmount)
+		} else {
+			assert.ErrorIs(t, errs[i], core.ErrInsufficientBalance, "attempt %d: the loser must fail with insufficient balance, got %v", i, errs[i])
+		}
+	}
+
+	assert.True(t, sumReserved.LessThanOrEqual(decimal.NewFromInt(funded)),
+		"combined reserved amount %s (from %d/%d successful concurrent Reserve(15) calls) must never exceed the funded balance %d",
+		sumReserved, successes, attempts, funded)
+	assert.True(t, sumReserved.Equal(decimal.NewFromInt(int64(successes*perAttempt))),
+		"sumReserved must equal successes*perAttempt exactly (no partial/corrupted reservation amounts)")
+
+	held, err := store.HeldAmount(ctx, holder, curID)
+	require.NoError(t, err)
+	assert.True(t, held.Equal(sumReserved), "held amount must match the sum of winning reservations, want %s got %s", sumReserved, held)
+}
+
 // Pins I-3 for Settle. Before this fix, SettleInput carried no idempotency
 // key at all, and this test (then named TestReserverStore_Settle_InvalidTransition)
 // asserted that calling Settle a second time with the exact same payload
@@ -203,10 +318,19 @@ func TestReserverStore_Settle_IdempotentReplay(t *testing.T) {
 	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100), IdempotencyKey: key})
 	require.NoError(t, err)
 
+	status, settledAmount := reservationRow(t, ctx, pool, res.UID)
+	assert.Equal(t, string(core.ReservationStatusSettled), status, "first Settle must actually transition the row to settled")
+	assert.True(t, settledAmount.Equal(decimal.NewFromInt(100)), "want settled_amount=100 after the first Settle, got %s", settledAmount)
+
 	// Lost-response retry: same key, same amount -- must return the
-	// original success, NOT ErrInvalidTransition.
+	// original success, NOT ErrInvalidTransition, AND must not double-apply
+	// (settled_amount must stay 100, not become 200).
 	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(100), IdempotencyKey: key})
 	require.NoError(t, err)
+
+	statusAfterReplay, settledAmountAfterReplay := reservationRow(t, ctx, pool, res.UID)
+	assert.Equal(t, string(core.ReservationStatusSettled), statusAfterReplay)
+	assert.True(t, settledAmountAfterReplay.Equal(decimal.NewFromInt(100)), "replay must be a true no-op, not re-apply -- want settled_amount still 100, got %s", settledAmountAfterReplay)
 
 	// Same key, different amount -- payload mismatch is ErrConflict.
 	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50), IdempotencyKey: key})
@@ -281,6 +405,22 @@ func seedReservableBalance(t *testing.T, ctx context.Context, ledger *postgres.L
 		Source: "test",
 	})
 	require.NoError(t, err)
+}
+
+// reservationRow reads the reservation's status and settled_amount directly
+// off the reservations table -- ReserverStore exposes no reader for this, so
+// tests that need to verify Settle's actual DB-level effect (not just its
+// error return) query the row the same way the other pin tests in this file
+// query journals/events directly via pool.
+func reservationRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, reservationUID string) (status string, settledAmount decimal.Decimal) {
+	t.Helper()
+	var settledStr string
+	require.NoError(t, pool.QueryRow(ctx,
+		"SELECT status, settled_amount FROM reservations WHERE uid=$1", reservationUID,
+	).Scan(&status, &settledStr))
+	settledAmount, err := decimal.NewFromString(settledStr)
+	require.NoError(t, err)
+	return status, settledAmount
 }
 
 func TestReserverStore_Settle_ZeroAmountRejected(t *testing.T) {
@@ -387,6 +527,14 @@ func TestReserverStore_Settle_ExactReservedAmountAccepted(t *testing.T) {
 
 	err = store.Settle(ctx, core.SettleInput{ReservationUID: res.UID, Amount: decimal.NewFromInt(50), IdempotencyKey: postgrestest.UniqueKey("settle-exact-op")})
 	require.NoError(t, err)
+
+	status, settledAmount := reservationRow(t, ctx, pool, res.UID)
+	assert.Equal(t, string(core.ReservationStatusSettled), status)
+	assert.True(t, settledAmount.Equal(decimal.NewFromInt(50)), "want settled_amount=50, got %s", settledAmount)
+
+	held, err := store.HeldAmount(ctx, 23, curID)
+	require.NoError(t, err)
+	assert.True(t, held.IsZero(), "fully settled reservation must drop out of held amount, got %s", held)
 }
 
 // Pins I-3 for Release: before ReleaseInput carried an IdempotencyKey,

@@ -450,6 +450,85 @@ func TestSweepBooking_NeverPostsJournal(t *testing.T) {
 	assert.Empty(t, confirmed.JournalUID)
 }
 
+// TestSweepBooking_NeverPostsJournal_FailedAndRetryPath closes the coverage
+// gap the test-credibility audit flagged: TestSweepBooking_NeverPostsJournal
+// above only walks pending -> sent -> confirmed, leaving the sent -> failed
+// branch and the failed -> pending retry (presets/sweep.go's SweepLifecycle
+// doc comment: "gas-bump exhaustion re-requests a fresh signer nonce... but
+// stays on this same booking UID") entirely unexercised at the postgres
+// layer -- the ONLY other test covering that branch is
+// service.TestOnchain_Sweep_NonceReuseAndNoJournal, a level up. This test
+// drives one booking through pending -> sent -> failed -> pending (retry) ->
+// sent -> confirmed, pinning JournalUID empty at every single step,
+// including the failed status and the post-retry re-attempt.
+func TestSweepBooking_NeverPostsJournal_FailedAndRetryPath(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	_, err := presets.InstallSweepClassification(ctx, classStore)
+	require.NoError(t, err)
+
+	bookingStore := postgres.NewBookingStore(pool)
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: presets.SweepClassificationCode,
+		AccountHolder:      -9_000_000_000_002, // sentinel system holder, not tied to any user
+		CurrencyUID:        postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("SWEEP-RETRY-USDT"), "Tether USD"),
+		Amount:             decimal.NewFromInt(500),
+		IdempotencyKey:     postgrestest.UniqueKey("sweep-retry-invariant"),
+		ChannelName:        "onchain",
+		Metadata:           map[string]string{"chain_id": "1", "token": "0xusdt", "nonce": "0"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, booking.JournalUID)
+
+	// pending -> sent (first attempt, nonce 0)
+	sentEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "sent", ChannelRef: "0xsweepretrytx1", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-retry-sent"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, sentEvt.JournalUID)
+
+	// sent -> failed (gas-bump exhaustion, per SweepLifecycle's doc comment)
+	failedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "failed", ChannelRef: "0xsweepretrytx1", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-retry-failed"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, failedEvt.JournalUID, "a failed sweep attempt must never carry a journal -- no money moved on a failed batch tx")
+	failed, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, failed.JournalUID)
+
+	// failed -> pending (revive with a fresh signer nonce, same booking UID)
+	revivedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "pending", ChannelRef: "", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-retry-revive"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, revivedEvt.JournalUID)
+
+	// pending -> sent (retry attempt, new nonce/tx)
+	retrySentEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "sent", ChannelRef: "0xsweepretrytx2", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-retry-sent-2"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, retrySentEvt.JournalUID)
+
+	// sent -> confirmed (retry succeeds)
+	confirmedEvt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID: booking.UID, ToStatus: "confirmed", ChannelRef: "0xsweepretrytx2", Source: "test",
+		IdempotencyKey: postgrestest.UniqueKey("sweep-retry-confirmed"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, confirmedEvt.JournalUID)
+	confirmed, err := bookingStore.GetBooking(ctx, booking.UID)
+	require.NoError(t, err)
+	assert.Empty(t, confirmed.JournalUID, "sweep must never post a journal, even after a failed attempt and a successful retry")
+}
+
 // I-20: Deposit ingestion idempotency is stable under a reorg that reassigns
 // block_number.
 //
@@ -516,4 +595,118 @@ func TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn(t *testing.T
 	// updates an existing row, it just returns it unchanged.
 	assert.Equal(t, "100", first.Metadata["block_number"])
 	assert.Equal(t, "100", second.Metadata["block_number"])
+}
+
+// TestDepositBooking_IdempotencyKey_StableAcrossReviewAuditMetadata verifies
+// the PLAUSIBLE test-credibility finding: postgres/idempotency_match.go's
+// bookingMetadataObservationVariantKeys grew from 1 key (block_number, the
+// only one with a dedicated test -- see
+// TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn above) to 5,
+// but review_reason / reject_reason / approved_by / rejected_by had none.
+// Verified PLAUSIBLE, not spurious: each of these four keys is written onto
+// a booking's Metadata by a Transition call that happens strictly AFTER
+// CreateBooking (service/onchain.go's routeToReview / ApproveReview /
+// RejectReview -- reviewReasonMetaKey/approvedByMetaKey/rejectReasonMetaKey/
+// rejectedByMetaKey), never by CreateBooking itself. A rescan or a retried
+// webhook delivery re-derives the exact same idempotency key AND the exact
+// same original CreateBookingInput.Metadata (which never had these keys).
+// Without the exclusion, bookingMetadataMatches's maps.Equal would see the
+// existing row's Metadata (now carrying the audit key) diverge from the
+// replay's input Metadata (which never had it) and reject the legitimate
+// replay with ErrConflict.
+//
+// Drives one booking per audit key through CreateBooking -> Transition
+// (mirroring the real service-layer call, at the postgres layer the same
+// way TestDepositBooking_IdempotencyKey_StableAcrossBlockNumberChurn does)
+// -> a second CreateBooking with the ORIGINAL (pre-Transition) Metadata,
+// and requires that second call to succeed and return the same booking with
+// the audit key intact -- not ErrConflict.
+func TestDepositBooking_IdempotencyKey_StableAcrossReviewAuditMetadata(t *testing.T) {
+	cases := []struct {
+		name           string
+		toStatus       core.Status
+		transitionMeta map[string]string
+	}{
+		{"review_reason", "review", map[string]string{"review_reason": "stale_price"}},
+		{"approved_by", "confirmed", map[string]string{"approved_by": "ops-alice"}}, // via review, see path below
+		{"reject_reason_and_rejected_by", "failed", map[string]string{"reject_reason": "suspected_fraud", "rejected_by": "ops-bob"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := postgrestest.SetupDB(t)
+			ctx := context.Background()
+
+			classStore := postgres.NewClassificationStore(pool)
+			_, err := presets.InstallDepositClassification(ctx, classStore)
+			require.NoError(t, err)
+
+			curUID := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("USDT"), "Tether USD")
+			bookingStore := postgres.NewBookingStore(pool)
+
+			idemKey := postgrestest.UniqueKey("deposit-review-audit-" + tc.name)
+			// The ORIGINAL CreateBookingInput a rescan/retried webhook would
+			// re-derive -- never contains any of the audit-trail keys.
+			original := core.CreateBookingInput{
+				ClassificationCode: presets.DepositClassificationCode,
+				AccountHolder:      8100,
+				CurrencyUID:        curUID,
+				Amount:             decimal.NewFromInt(100),
+				IdempotencyKey:     idemKey,
+				ChannelName:        "onchain",
+				Metadata: map[string]string{
+					"chain_id":  "1",
+					"tx_hash":   "0xreviewaudit-" + tc.name,
+					"txlog_seq": "0",
+				},
+			}
+
+			first, err := bookingStore.CreateBooking(ctx, original)
+			require.NoError(t, err)
+
+			// Walk to "review" first (DepositLifecycle: pending -> confirming -> review).
+			_, err = bookingStore.Transition(ctx, core.TransitionInput{
+				BookingUID: first.UID, ToStatus: "confirming",
+				IdempotencyKey: postgrestest.UniqueKey("deposit-review-audit-confirming-" + tc.name),
+				Source:         "test",
+			})
+			require.NoError(t, err)
+
+			var toReview core.Status = "review"
+			_, err = bookingStore.Transition(ctx, core.TransitionInput{
+				BookingUID: first.UID, ToStatus: toReview,
+				Metadata:       map[string]string{"review_reason": "stale_price"},
+				IdempotencyKey: postgrestest.UniqueKey("deposit-review-audit-toreview-" + tc.name),
+				Source:         "test",
+			})
+			require.NoError(t, err)
+
+			// For approved_by/reject_reason cases, take the final transition
+			// with the case's own metadata; the review_reason case stops here
+			// (review_reason was already set by the transition above).
+			if tc.name != "review_reason" {
+				_, err = bookingStore.Transition(ctx, core.TransitionInput{
+					BookingUID: first.UID, ToStatus: tc.toStatus,
+					Metadata:       tc.transitionMeta,
+					IdempotencyKey: postgrestest.UniqueKey("deposit-review-audit-final-" + tc.name),
+					Source:         "test",
+				})
+				require.NoError(t, err)
+			}
+
+			// A rescan / retried webhook delivery: same idempotency key, same
+			// ORIGINAL metadata (no audit keys). Must resolve to the same
+			// booking, not ErrConflict.
+			second, err := bookingStore.CreateBooking(ctx, original)
+			require.NoError(t, err, "replay with the pre-transition metadata must not ErrConflict against a booking whose Metadata has since gained an audit-trail key")
+			assert.Equal(t, first.UID, second.UID)
+
+			// The audit key(s) recorded by the Transition must have survived
+			// the replay untouched (CreateBooking's idempotent-replay path
+			// never overwrites Metadata).
+			for k, v := range tc.transitionMeta {
+				assert.Equal(t, v, second.Metadata[k], "audit key %q must survive the idempotent replay", k)
+			}
+		})
+	}
 }
