@@ -110,3 +110,55 @@ checkpoint 自己那半做完了，**任何一半单独上线都不构成修复*
 - 踩到独占面之外的文件 → **停下，`bus send team-lead`**，不要自行扩大范围
 - 发现新的失效形态 → `bus learn <me> "<经验>"`
 - 流水线而非批处理：一条完成即 review + 合并，不等同波全部完成
+
+---
+
+## 7. Wave 1.5 — 契约收紧（Aaron 2026-08-26 拍板，插在 Wave 2 之前）
+
+Wave 1 的两条改动各自弱化了一条不变式。Aaron 两条都选了**严格路线**：
+**不为排期方便软化账本契约。** 因此 Wave 2 推迟到本波合入之后。
+
+两条任务的独占面互不重叠，可并行。
+
+| 任务 | 目标 | 独占文件 |
+|---|---|---|
+| **W15-A** `Transition` 幂等键**必填** | 消掉 W1-A 给 I-3 加的例外，恢复「每个状态变更都要幂等键」的全称命题 | `core/booking.go`、`postgres/booking_store.go`、`service/onchain.go`、`service/expiration.go`、`server/handler_bookings.go`、`server/handler_webhooks.go` |
+| **W15-B** `core.BalanceCheckpoint` 去内部 id | 恢复 I-18 的原措辞：**没有任何 `core` 类型暴露内部 BIGSERIAL id** | `core/checkpoint.go`、`postgres/rollup_adapter.go`、`postgres/checkpoint_integrity_store.go`、`service/rollup.go`、`service/reconcile.go`（**仅 checkpoint 相关部分**） |
+
+### W15-A 的真正难点：键怎么派生
+
+16 个调用点，**10 个在 `service/onchain.go`**。这不是机械替换：
+
+- 按 `api-contract.md` §9，系统事件发起方必须从**源事件派生确定性 key**，禁止随机数、禁止时间戳、
+  禁止在重试路径内重新生成
+- ⚠️ **陷阱**：同一个 booking 可以合法地多次转移到同一状态 —— 提现 preset 的
+  `failed → reserved` 就是重试路径。所以 `<booking_uid>-<to_status>` **会撞**，
+  第二次合法重试会被误判成重放而静默短路。派生源必须包含区分两次合法尝试的东西
+  （源事件 id / tx hash + chain id / 尝试序号），不能只有 booking 与目标状态。
+- 每个调用点的语义不同（充值确认 / 审核通过 / 归集发出 / 重组检测 …），**逐个想**，
+  不要套一个通用公式了事
+
+### W15-B 的两条路线（自己选，但要给证据）
+
+目标是「I-18 原措辞成立」，不是「必须把字段改成 string」。两条都能达成：
+
+1. **uid 化该类型** —— 直接把 `CurrencyID`/`ClassificationID int64` 换成 uid string。
+   代价：`service/rollup.go:235` 的 per-item upsert 与 `service/reconcile.go:1345` 的
+   `map[int64]` 都要改，rollup 热路径可能新增 uid↔id 解析。
+2. **把它移出 `core`** —— 它从不经任何 `Service` 访问器（已核实），本就是 rollup/reconcile
+   引擎的工作表示而非领域类型。移到 `service`（或 postgres adapter）后，
+   「没有 `core` 类型带内部 id」自动成立，且热路径零改动。
+   顺带把 W1-B 的 `core.RebuiltCheckpoint` 收回成 `core.BalanceCheckpoint`（uid 版），
+   少一个类型。
+
+**Team Lead 倾向路线 2**（结构上更对：`core` 不该装存储引擎的工作表示）。
+但**如果你选路线 1，必须实测 rollup 热路径的成本**，不许凭感觉说「差不多」。
+
+### 两条共同的红线
+
+- **不许回滚 `395d545` / `e86147c`** —— 往前改，不要 revert。W1-B 那套 schema 派生的 I-18
+  门禁是本波最有价值的产物之一，必须原样保留并**继续通过**
+- 恢复 `docs/INVARIANTS.md` 里 I-3 / I-18 被弱化的措辞，并**删掉**当时写下的例外段落
+- 同步 `docs/audits/2026-08-25-financial-engineering/TODO.md` §10：Wave 1 记的破坏性变更条目
+  要更新成最终形态（例如「`TransitionInput` 新增**可选**字段」现在是**必填**）
+- 越界文件（`examples/` 等）**只做编译修复**，不夹带行为变更
