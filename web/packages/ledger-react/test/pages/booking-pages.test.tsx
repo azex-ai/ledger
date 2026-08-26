@@ -37,6 +37,13 @@ function classifications() {
   ];
 }
 
+/** A failing `/classifications` lookup — the M2 trigger for every gated booking page. */
+function failClassifications() {
+  return http.get(`${BASE}/api/v1/classifications`, () =>
+    HttpResponse.json({ code: 13000, message: { text: "boom" }, data: null }, { status: 500 }),
+  );
+}
+
 describe("DepositsPage", () => {
   test("renders heading and a deposit row once the classification resolves", async () => {
     server.use(
@@ -47,6 +54,16 @@ describe("DepositsPage", () => {
     expect(screen.getByRole("heading", { name: "Deposits" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("#bk-7")).toBeInTheDocument());
     expect(screen.getByText("evm")).toBeInTheDocument();
+  });
+
+  test("surfaces an error state (with Retry), not a false empty state, when /classifications fails (M2)", async () => {
+    server.use(failClassifications());
+    renderPage(<DepositsPage />);
+    await waitFor(() =>
+      expect(screen.getByText("Failed to load deposits")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/no deposits/i)).not.toBeInTheDocument();
   });
 });
 
@@ -89,6 +106,16 @@ describe("WithdrawalsPage", () => {
     // The row must still show up — the transition never happened server-side.
     expect(screen.getByText("#bk-9")).toBeInTheDocument();
     errorSpy.mockRestore();
+  });
+
+  test("surfaces an error state (with Retry), not a false empty state, when /classifications fails (M2)", async () => {
+    server.use(failClassifications());
+    renderPage(<WithdrawalsPage />);
+    await waitFor(() =>
+      expect(screen.getByText("Failed to load withdrawals")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/no withdrawals/i)).not.toBeInTheDocument();
   });
 });
 

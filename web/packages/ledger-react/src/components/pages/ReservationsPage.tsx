@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { formatAmount, validateAmount, formatUTC } from "../../lib/utils";
 import {
   useFinalizeReservationSettlement,
@@ -9,6 +9,7 @@ import {
   useSettlePartialReservation,
   useSettleReservation,
 } from "../../hooks/use-reservations";
+import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -77,16 +78,17 @@ function SettleDialog({ id }: { id: string }) {
 function SettlePartialDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
-  // Generated once per dialog open, reused across retries of this submission
-  // (api-contract.md §9) — never regenerated inside the retry path.
-  const idempotencyKeyRef = useRef("");
+  // One key per submitted amount, not per dialog open — a corrected amount
+  // after a rejection must not replay the previous amount's key (M7,
+  // 2026-08-26 web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useSettlePartialReservation();
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (next) idempotencyKeyRef.current = crypto.randomUUID();
+        if (!next) idempotencyKey.reset();
         setOpen(next);
       }}
     >
@@ -109,7 +111,7 @@ function SettlePartialDialog({ id }: { id: string }) {
                 toast.error(amountErr);
                 return;
               }
-              mutation.mutate({ id, amount, idempotencyKey: idempotencyKeyRef.current }, {
+              mutation.mutate({ id, amount, idempotencyKey: idempotencyKey.keyFor(amount) }, {
                 onSuccess: () => {
                   toast.success("Partial settlement recorded");
                   setOpen(false);

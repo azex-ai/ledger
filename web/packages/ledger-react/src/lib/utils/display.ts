@@ -54,8 +54,17 @@ function toFixed(value: bigint, places: number, commas: boolean): string {
  *
  *   formatAmount("72845.3")       → "72,845.3"
  *   formatAmount("1.23456789")    → "1.2345"
- *   formatAmount("0.000000712")   → "0.0₆712"
+ *   formatAmount("0.000000712")   → "0.0₆7120"
  *   formatAmount("0")             → "0.00"
+ *
+ * Note on the subscript branch: the 4 digits after the leading-zero count
+ * come from `significantDigits`, which reads a fixed 18-decimal-place
+ * representation rather than the value's true significant-figure count —
+ * an input with fewer than 4 meaningful digits (e.g. "0.000000712", "712"
+ * being 3 sig figs) is right-padded with zeros from that fixed width
+ * ("7120", not "712"). Documented here, not fixed — pre-existing behavior
+ * discovered while adding test coverage (M3, 2026-08-26 web audit); out of
+ * that audit's scope to change.
  */
 export function formatAmount(value: string): string {
   let raw: bigint;
@@ -85,9 +94,13 @@ export function formatAmount(value: string): string {
 /**
  * Format a signed amount for PnL / drift display.
  *
- *   formatSignedAmount("12.5")  → { text: "12.5000", isPositive: true,  isNegative: false }
- *   formatSignedAmount("-3.2")  → { text: "3.2000",  isPositive: false, isNegative: true }
- *   formatSignedAmount("0")     → { text: "0.00",    isPositive: false, isNegative: false }
+ * `text` carries its own sign (a negative value keeps its "-"). Callers may
+ * prepend "+" for positive values per `financial.md` ("正数加 +，颜色区分");
+ * they must never re-derive or strip the sign themselves.
+ *
+ *   formatSignedAmount("12.5")  → { text: "12.5000",  isPositive: true,  isNegative: false }
+ *   formatSignedAmount("-3.2")  → { text: "-3.2000",  isPositive: false, isNegative: true }
+ *   formatSignedAmount("0")     → { text: "0.00",     isPositive: false, isNegative: false }
  */
 export function formatSignedAmount(value: string): {
   text: string;
@@ -101,15 +114,8 @@ export function formatSignedAmount(value: string): {
     return { text: value, isPositive: false, isNegative: false };
   }
 
-  if (raw === 0n) {
-    return { text: "0.00", isPositive: false, isNegative: false };
-  }
-
-  const a = raw < 0n ? -raw : raw;
-  const formatted = formatAmount(formatUnits(a, 18));
-
   return {
-    text: formatted,
+    text: formatAmount(value),
     isPositive: raw > 0n,
     isNegative: raw < 0n,
   };

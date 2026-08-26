@@ -7,20 +7,26 @@ import { ledgerKeys } from "./keys";
 const WITHDRAW_CODE = "withdraw";
 
 export function useWithdrawClassificationId(): string {
-  return useClassificationIdByCode(WITHDRAW_CODE);
+  return useClassificationIdByCode(WITHDRAW_CODE).uid;
 }
 
 /**
  * Cursor-paginated withdrawal bookings. Same paging contract as useJournals:
  * flatten `data?.pages.flatMap((p) => p.list)`, page via `fetchNextPage`.
+ *
+ * Gated on the "withdraw" classification lookup — its `isLoading`/`isError`
+ * are folded into the returned `isLoading`/`isError` so a failed lookup
+ * surfaces as an error state instead of a false "no withdrawals" empty state
+ * (M2, 2026-08-26 web audit).
  */
 export function useWithdrawals(
   params: { holder?: number; status?: string },
   limit = 20,
 ) {
   const client = useLedgerClient();
-  const classificationUid = useWithdrawClassificationId();
-  return useInfiniteQuery({
+  const classification = useClassificationIdByCode(WITHDRAW_CODE);
+  const classificationUid = classification.uid;
+  const query = useInfiniteQuery({
     queryKey: ledgerKeys.bookings(WITHDRAW_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
@@ -34,6 +40,13 @@ export function useWithdrawals(
     getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
     enabled: classificationUid !== "",
   });
+
+  return {
+    ...query,
+    isLoading: classification.isLoading || query.isLoading,
+    isError: classification.isError || query.isError,
+    refetch: classification.isError ? classification.refetch : query.refetch,
+  };
 }
 
 export function useReserveWithdraw() {

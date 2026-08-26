@@ -7,21 +7,27 @@ import { ledgerKeys } from "./keys";
 const DEPOSIT_CODE = "deposit";
 
 export function useDepositClassificationId(): string {
-  return useClassificationIdByCode(DEPOSIT_CODE);
+  return useClassificationIdByCode(DEPOSIT_CODE).uid;
 }
 
 /**
  * Cursor-paginated deposit bookings. Pages carry `{list, next_cursor}` —
  * flatten with `data?.pages.flatMap((p) => p.list)` and drive "Load more"
  * from `hasNextPage`/`fetchNextPage` (same contract as useJournals).
+ *
+ * Gated on the "deposit" classification lookup — its `isLoading`/`isError`
+ * are folded into the returned `isLoading`/`isError` so a failed lookup
+ * surfaces as an error state instead of a false "no deposits" empty state
+ * (M2, 2026-08-26 web audit).
  */
 export function useDeposits(
   params: { holder?: number; status?: string },
   limit = 20,
 ) {
   const client = useLedgerClient();
-  const classificationUid = useDepositClassificationId();
-  return useInfiniteQuery({
+  const classification = useClassificationIdByCode(DEPOSIT_CODE);
+  const classificationUid = classification.uid;
+  const query = useInfiniteQuery({
     queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
@@ -35,6 +41,13 @@ export function useDeposits(
     getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
     enabled: classificationUid !== "",
   });
+
+  return {
+    ...query,
+    isLoading: classification.isLoading || query.isLoading,
+    isError: classification.isError || query.isError,
+    refetch: classification.isError ? classification.refetch : query.refetch,
+  };
 }
 
 /**

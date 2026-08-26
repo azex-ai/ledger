@@ -57,6 +57,26 @@ describe("use-deposits", () => {
     ).toBeDefined();
   });
 
+  test("useDeposits surfaces a failed classification lookup as an error, not a stuck-pending empty result (M2)", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    server.use(
+      http.get(`${BASE}/api/v1/classifications`, () =>
+        HttpResponse.json(
+          { code: 13000, message: { text: "boom" }, data: null },
+          { status: 500 },
+        ),
+      ),
+    );
+    const { result } = renderHook(() => useDeposits({ holder: 5 }), {
+      wrapper: wrapperWith(qc),
+    });
+    // Before the fix: the gated booking query is `enabled: false`, so
+    // `isLoading`/`isError` both stay `false` forever and `data` stays
+    // `undefined` — indistinguishable from "no deposits exist".
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
+
   test("useConfirmDeposit invalidates ledger bookings + balances", async () => {
     const qc = new QueryClient();
     const spy = vi.spyOn(qc, "invalidateQueries");
