@@ -112,6 +112,52 @@ func BenchmarkGetBalance_ColdCheckpoint(b *testing.B) {
 	}
 }
 
+// BenchmarkListComputedBalancesForHolders measures the batch balance query
+// (postgres/sql/queries/checkpoints.sql's ListComputedBalancesForHolders,
+// via LedgerStore.BatchGetBalances) that backs GetBalances / BatchGetBalances
+// / GetBalanceBreakdown -- this is the hot path W3-sign's normal_side sign
+// convergence (I-43) put behind ledger_signed_amount(). Uncheckpointed on
+// purpose: every holder's balance is entirely delta (no balance_checkpoints
+// row), so the SUM(ledger_signed_amount(...)) CASE-or-function-call runs
+// once per journal_entries row summed, the worst case for measuring its
+// per-row cost. See the migration 009 comment for why the function is
+// deliberately not STRICT (a STRICT LANGUAGE SQL function is never inlined
+// by the planner, which this benchmark is what caught).
+func BenchmarkListComputedBalancesForHolders(b *testing.B) {
+	pool := setupBenchPool(b)
+	store, deps := setupBenchFixture(b, pool)
+
+	const numHolders = 50
+	const entriesPerHolder = 20
+	holderIDs := make([]int64, numHolders)
+	for h := range numHolders {
+		holderID := int64(9300 + h)
+		holderIDs[h] = holderID
+		for i := range entriesPerHolder {
+			_, err := store.PostJournal(context.Background(), core.JournalInput{
+				JournalTypeUID: deps.JournalType,
+				IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("bench-batch-seed-%d-%d", h, i)),
+				Source:         "bench-seed",
+				Entries: []core.EntryInput{
+					{AccountHolder: holderID, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+					{AccountHolder: core.SystemAccountHolder(holderID), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+				},
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := store.BatchGetBalances(context.Background(), holderIDs, deps.Currency); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkReserveSettle measures the per-iteration cost of a full
 // reserve→settle cycle, the critical path for any reserve/settle billing
 // flow. Includes advisory lock + balance check + reservation FSM transition.

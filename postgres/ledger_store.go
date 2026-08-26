@@ -1220,18 +1220,12 @@ func (s *LedgerStore) getBalanceWithQueries(ctx context.Context, q *sqlcgen.Quer
 	}
 	normalSide := core.NormalSide(cls.NormalSide)
 
-	// Compute delta based on normal_side:
-	// debit-normal: balance increases with debits, decreases with credits
-	// credit-normal: balance increases with credits, decreases with debits
-	var delta decimal.Decimal
-	switch normalSide {
-	case core.NormalSideDebit:
-		delta = debitSum.Sub(creditSum)
-	case core.NormalSideCredit:
-		delta = creditSum.Sub(debitSum)
-	default:
-		// Default to debit-normal
-		delta = debitSum.Sub(creditSum)
+	// core.Delta is the sole authority for this computation (I-43). This
+	// used to default to debit-normal for any unrecognized normal_side;
+	// core.Delta refuses instead.
+	delta, err := core.Delta(normalSide, debitSum, creditSum)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: get balance: classification %d: %w", classificationID, err)
 	}
 
 	return checkpointBalance.Add(delta), nil

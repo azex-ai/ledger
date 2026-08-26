@@ -856,17 +856,29 @@ func (s *FullReconciliationService) runCheck4AccountingEquation(ctx context.Cont
 	}
 	perCurrency := make(map[int64]*currencyNet)
 	for _, r := range rows {
+		// Net delta and normal-side classification both route through
+		// core.Delta / core.NormalSide.IsValid — the sole authority for
+		// interpreting normal_side (I-43). An unknown normal_side surfaces
+		// as a failing Finding rather than silently defaulting into the
+		// credit-normal bucket.
+		ns := core.NormalSide(r.NormalSide)
+		net, err := core.Delta(ns, r.TotalDebit, r.TotalCredit)
+		if err != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("currency %s classification %s: %s",
+					s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID), err.Error()),
+			})
+			continue
+		}
 		cn := perCurrency[r.CurrencyID]
 		if cn == nil {
 			cn = &currencyNet{}
 			perCurrency[r.CurrencyID] = cn
 		}
-		var net decimal.Decimal
-		if r.NormalSide == string(core.NormalSideDebit) {
-			net = r.TotalDebit.Sub(r.TotalCredit)
+		if ns == core.NormalSideDebit {
 			cn.debitNormalNet = cn.debitNormalNet.Add(net)
 		} else {
-			net = r.TotalCredit.Sub(r.TotalDebit)
 			cn.creditNormalNet = cn.creditNormalNet.Add(net)
 		}
 	}
@@ -1069,11 +1081,17 @@ func (s *FullReconciliationService) runCheckSystemRollupIntegrity(ctx context.Co
 	}
 	expected := make(map[dimKey]decimal.Decimal, len(equationRows))
 	for _, r := range equationRows {
-		var balance decimal.Decimal
-		if r.NormalSide == string(core.NormalSideDebit) {
-			balance = r.TotalDebit.Sub(r.TotalCredit)
-		} else {
-			balance = r.TotalCredit.Sub(r.TotalDebit)
+		// core.Delta is the sole authority for this computation (I-43); an
+		// unknown normal_side surfaces as a failing Finding, not a silent
+		// credit-normal default.
+		balance, err := core.Delta(core.NormalSide(r.NormalSide), r.TotalDebit, r.TotalCredit)
+		if err != nil {
+			result.Passed = false
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("system rollup integrity: currency %s classification %s: %s",
+					s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID), err.Error()),
+			})
+			continue
 		}
 		expected[dimKey{r.CurrencyID, r.ClassificationID}] = balance
 	}
@@ -1404,15 +1422,11 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 		debit := debitByClass[classID]
 		credit := creditByClass[classID]
 
-		var expected decimal.Decimal
+		// core.Delta is the sole authority for this computation (I-43).
 		ns := normalSides[classID]
-		switch ns {
-		case core.NormalSideDebit:
-			expected = debit.Sub(credit)
-		case core.NormalSideCredit:
-			expected = credit.Sub(debit)
-		default:
-			return nil, fmt.Errorf("service: reconcile account: unknown normal_side %q for classification %d: %w", ns, classID, core.ErrInvalidInput)
+		expected, err := core.Delta(ns, debit, credit)
+		if err != nil {
+			return nil, fmt.Errorf("service: reconcile account: classification %d: %w", classID, err)
 		}
 
 		actual := decimal.Zero

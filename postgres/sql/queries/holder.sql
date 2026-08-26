@@ -56,7 +56,7 @@ SELECT
     END::text AS kind_label,
     cur.uid  AS currency_uid,
     cur.code AS currency_code,
-    SUM(CASE WHEN je.entry_type = c.normal_side THEN je.amount ELSE -je.amount END)::NUMERIC(30,18) AS net_amount,
+    SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount))::NUMERIC(30,18) AS net_amount,
     j.effective_at,
     (COALESCE(rj.uid::text, ''))::text AS reversal_of_uid,
     (COALESCE(j.metadata->>'memo', ''))::text AS memo

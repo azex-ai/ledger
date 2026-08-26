@@ -3104,6 +3104,122 @@ never lists `id` in its column list, so it is unaffected.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants/journal_entries` --
   the same shape, enumerated structurally alongside every other table's grant
   policy rather than hardcoded to this one table.
+## I-43: A classification's normal_side is interpreted in exactly one place, on each side of the language boundary, and an unrecognized value is refused rather than defaulted
+
+(2026-08-25 financial-engineering audit, `financial-correctness.md` Minor
+"同一个符号语义有 17 处独立实现"; contract
+`docs/plans/2026-08-26-audit-remediation-contracts.md` §9 W3-sign.)
+
+**Rule**: every computation that turns a `(normal_side, entry_type)` pair (or
+a classification's pre-bucketed debit/credit sums) into a signed balance
+contribution routes through exactly one function on each side of the
+Go/SQL boundary:
+
+- **Go**: `core.Sign(normalSide, entryType)` is the sole authority. Its two
+  wrappers, `core.SignedAmount` (single entry) and `core.Delta` (bucketed
+  debit/credit sums), and `core.EntryDirection` (account-policy enforcement's
+  increase/decrease classification) are all defined in terms of it. All
+  three refuse — return an error — for any `normalSide`/`entryType` outside
+  `{debit, credit}`, rather than defaulting.
+- **SQL**: `ledger_signed_amount(normal_side, entry_type, amount)` (per-row)
+  and `ledger_signed_delta(normal_side, debit_sum, credit_sum)` (bucketed),
+  installed by migration 009. Both refuse an unrecognized `normal_side` via
+  `ledger_reject_unknown_normal_side` (`RAISE EXCEPTION`,
+  `ERRCODE = invalid_parameter_value`), except that a `NULL entry_type`
+  (the LEFT JOIN placeholder row Postgres produces for "this classification
+  has zero matching journal_entries", not a real row with an unrecognized
+  value) yields `NULL`, not an error — `SUM()` ignoring that `NULL` is what
+  lets `COALESCE(SUM(...), 0)` still report a genuine zero-entries balance
+  as 0, matching what the `ELSE 0` shape below used to do for that one case.
+
+Before this collapse, 17 independent implementations existed — 7 in Go
+(`core/account_policy.go`'s `EntryDirection`, `service/rollup.go`,
+`service/reconcile.go` ×3, `postgres/ledger_store.go`,
+`postgres/trial_balance_store.go`, `postgres/reconcile_queries.go`) and 10
+SQL expressions in 3 shapes across `checkpoints.sql`,
+`integrity_checkpoint.sql`, `platform_balances.sql` (×3),
+`holder.sql`, and `reconcile.sql` — all agreeing on the four
+`(normal_side, entry_type) → sign` combinations that
+`normal_side ∈ {debit, credit}` actually reaches, but disagreeing on what to
+do with a value outside that set: `service/rollup.go` and one
+`service/reconcile.go` site errored; `postgres/ledger_store.go` and
+`postgres/trial_balance_store.go` silently defaulted to debit-normal;
+`postgres/reconcile_queries.go` and two of the three SQL fallback shapes
+silently defaulted to credit-normal; and `checkpoints.sql`'s
+`ListComputedBalancesForHolders` (`ELSE 0`) silently excluded the entry from
+the balance entirely.
+
+**Why**: `normal_side ∈ {debit, credit}` is enforced today by a `CHECK`
+constraint on both `classifications.normal_side` and
+`journal_entries.entry_type` (`001_baseline.up.sql` :169/:220/:331) plus an
+immutability trigger on `normal_side` once set — so a third value is
+unreachable in a healthy deployment, and the pre-existing 17-way disagreement
+was drift risk rather than a live bug (`docs/audits/2026-08-25-financial-engineering/financial-correctness.md`
+records it CONFIRMED-but-unreachable-today). Two properties still made it
+worth collapsing rather than leaving alone: (1) 17 independent copies means
+changing the sign rule — or fixing a bug in it — requires editing 17 places
+correctly, a `working-agreements.md` §5 "can this be made a machine check"
+smell in its own right; (2) the `ELSE 0` shape is qualitatively worse than
+the others — an entry that fails to classify does not error, does not log,
+and does not miscount at the wrong sign, it simply vanishes from the `SUM`,
+which is the one failure mode `financial.md` and `working-agreements.md` §3
+single out as unacceptable regardless of reachability: a ledger must fail
+closed, not silently drop money, even in a branch schema constraints make
+practically unreachable today.
+
+**Enforced by**: `core.Sign` / `core.SignedAmount` / `core.Delta` /
+`core.EntryDirection` (`core/account_policy.go`) — every call site in
+`service/rollup.go`, `service/reconcile.go`, `postgres/ledger_store.go`,
+`postgres/trial_balance_store.go`, `postgres/reconcile_queries.go`, and
+`postgres/account_policy_enforce.go` routes through one of these instead of
+reimplementing the comparison. `ledger_signed_amount` /
+`ledger_signed_delta` / `ledger_reject_unknown_normal_side`
+(migration `009_normal_side_sign_convergence`) — every sign expression in
+`checkpoints.sql`, `integrity_checkpoint.sql`, `platform_balances.sql`,
+`holder.sql`, and `reconcile.sql` calls one of these instead of
+reimplementing the `CASE`. `ledger_signed_amount` is deliberately not
+`STRICT` (an explicit `WHEN p_entry_type IS NULL THEN NULL` branch handles
+the LEFT JOIN placeholder case instead) because a `STRICT` `LANGUAGE sql`
+function is never inlined by the planner — see the migration's comment and
+`postgres.BenchmarkListComputedBalancesForHolders` in
+`postgres/benchmarks_test.go`, which measured ~1.4ms/op for this
+(non-`STRICT`, inlined) design against ~1.37ms/op for the pre-migration raw
+`CASE` (statistically indistinguishable) and ~3.0ms/op for an otherwise
+identical `STRICT` variant (~2.1x slower) — the `STRICT` measurement was
+taken with a throwaway benchmark during this task and is not preserved in
+the repository.
+
+**Pinned by**:
+- `core.TestSign_RejectsUnknownNormalSideAndEntryType` / `TestSign_Table` —
+  the "third value" scenario the audit's failure analysis describes, and the
+  four valid combinations every wrapper must agree on.
+- `core.TestSignedAmount_RejectsUnknownNormalSide` /
+  `TestDelta_RejectsUnknownNormalSide` /
+  `TestEntryDirection_RejectsUnknownNormalSide` — each of the three
+  documented pre-collapse fates (rollup.go's error, ledger_store.go's
+  debit-normal default, reconcile_queries.go's credit-normal default, and
+  EntryDirection's silent decrease-classification) now agree: all reject.
+- `core.TestDelta_AgreesWithSignedAmount` — pins the linearity
+  `Delta(ns, debitSum, creditSum) == SignedAmount(ns, debit, debitSum) +
+  SignedAmount(ns, credit, creditSum)`, so `Delta` cannot drift from `Sign`
+  as a second, independently-maintained copy.
+- `postgres.TestLedgerSignedAmount_AgreesWithCoreSignedAmount` /
+  `TestLedgerSignedDelta_AgreesWithCoreDelta` — the SQL functions match
+  `core.SignedAmount` / `core.Delta` bit-for-bit across all four valid
+  combinations.
+- `postgres.TestLedgerSignedAmount_RejectsUnknownNormalSide` /
+  `TestLedgerSignedDelta_RejectsUnknownNormalSide` — the SQL-side reject,
+  asserted against the exact Postgres error code
+  (`22023`/`invalid_parameter_value`).
+- `postgres.TestLedgerSignedAmount_NullEntryTypeIsNoContribution` — the LEFT
+  JOIN placeholder case is `NULL` (no contribution), not an error; this is
+  the regression the first cut of this function actually hit
+  (`TestVerifiedBalance_ZeroContributingJournalsIsDefinedZero` went red
+  against it before the `WHEN p_entry_type IS NULL` branch was added).
+- `postgres.TestNormalSideDomain_StructurallyClosedByCheckConstraints` —
+  the `CHECK` constraints that make the `ELSE` branch practically
+  unreachable are themselves verified against a real INSERT, for both
+  `classifications.normal_side` and `journal_entries.entry_type`.
 
 ## How to add a new invariant
 

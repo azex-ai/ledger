@@ -91,21 +91,96 @@ const (
 	BalanceDirectionDecrease
 )
 
-// EntryDirection reports whether entryType, posted against an account whose
-// classification has the given normal side, increases or decreases that
-// account's balance. This mirrors the delta computation used by balance
-// queries (see postgres.LedgerStore.getBalanceWithQueries):
+// Sign is the sole authority for interpreting a classification's
+// normal_side anywhere in this codebase: it reports whether entryType,
+// posted against an account whose classification has the given normal
+// side, increases (+1) or decreases (-1) that account's balance.
 //
 //	debit-normal accounts:  debit increases, credit decreases
 //	credit-normal accounts: credit increases, debit decreases
 //
-// This is the sole authority account-policy enforcement uses to classify an
-// entry as "consumption" (decrease) vs "deposit" (increase) — see I-17.
-func EntryDirection(entryType EntryType, normalSide NormalSide) BalanceDirection {
-	increases := (entryType == EntryTypeDebit && normalSide == NormalSideDebit) ||
-		(entryType == EntryTypeCredit && normalSide == NormalSideCredit)
-	if increases {
-		return BalanceDirectionIncrease
+// Equivalently: entryType == normalSide increases, anything else decreases.
+// Every other function in this file, and every balance/delta/direction
+// computation across core/, service/, postgres/ and the postgres/sql/
+// queries/*.sql sign expressions (via the ledger_signed_amount() SQL
+// function migration 009 installs, which mirrors this exact rule) must
+// route through Sign or one of its wrappers below — not reimplement the
+// comparison. See I-43.
+//
+// entryType and normalSide are both restricted to {debit, credit} by DB
+// CHECK constraints (001_baseline.up.sql), and normal_side is immutable
+// once set (the classifications_normal_side_immutable trigger), so an
+// unknown value is unreachable in a healthy deployment. Sign still refuses
+// rather than defaults on one: prior to this function, the 17 independent
+// reimplementations of this same comparison disagreed on what an unknown
+// normal_side means — some rejected it, one defaulted to debit-normal, and
+// one (checkpoints.sql's ListComputedBalancesForHolders) silently excluded
+// the entry from the balance (`ELSE 0`) instead of erring at all. A caller
+// that manages to construct an invalid value — a bug, a corrupted read, a
+// future write path that skips validation — must find out immediately, not
+// have funds silently miscounted or dropped. See
+// docs/audits/2026-08-25-financial-engineering/financial-correctness.md
+// ("同一个符号语义有 17 处独立实现").
+func Sign(normalSide NormalSide, entryType EntryType) (int, error) {
+	if !normalSide.IsValid() {
+		return 0, fmt.Errorf("core: unknown normal_side %q: %w", normalSide, ErrInvalidInput)
 	}
-	return BalanceDirectionDecrease
+	if !entryType.IsValid() {
+		return 0, fmt.Errorf("core: unknown entry_type %q: %w", entryType, ErrInvalidInput)
+	}
+	if string(entryType) == string(normalSide) {
+		return 1, nil
+	}
+	return -1, nil
+}
+
+// SignedAmount applies Sign to a single entry's amount, returning +amount
+// if the entry increases the normalSide-normal balance it targets, or
+// -amount if it decreases it.
+func SignedAmount(normalSide NormalSide, entryType EntryType, amount decimal.Decimal) (decimal.Decimal, error) {
+	sign, err := Sign(normalSide, entryType)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	if sign < 0 {
+		return amount.Neg(), nil
+	}
+	return amount, nil
+}
+
+// Delta applies Sign to a classification's pre-bucketed debit-type and
+// credit-type entry sums — the shape GetBalance, the rollup worker and the
+// reconciliation suite all consume — and returns the net balance change
+// those entries represent. It is exactly
+// SignedAmount(normalSide, EntryTypeDebit, debitSum) +
+// SignedAmount(normalSide, EntryTypeCredit, creditSum), by linearity of the
+// same sign rule Sign encodes.
+func Delta(normalSide NormalSide, debitSum, creditSum decimal.Decimal) (decimal.Decimal, error) {
+	debitPart, err := SignedAmount(normalSide, EntryTypeDebit, debitSum)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	creditPart, err := SignedAmount(normalSide, EntryTypeCredit, creditSum)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return debitPart.Add(creditPart), nil
+}
+
+// EntryDirection reports whether entryType, posted against an account whose
+// classification has the given normal side, increases or decreases that
+// account's balance. This is the sole authority account-policy enforcement
+// uses to classify an entry as "consumption" (decrease) vs "deposit"
+// (increase) — see I-17. It is a thin wrapper over Sign; see Sign's
+// documentation for the rule itself and why an unknown normal_side or
+// entry_type is refused rather than defaulted.
+func EntryDirection(entryType EntryType, normalSide NormalSide) (BalanceDirection, error) {
+	sign, err := Sign(normalSide, entryType)
+	if err != nil {
+		return 0, err
+	}
+	if sign > 0 {
+		return BalanceDirectionIncrease, nil
+	}
+	return BalanceDirectionDecrease, nil
 }

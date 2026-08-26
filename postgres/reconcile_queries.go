@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 
+	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/azex-ai/ledger/service"
 )
@@ -123,11 +123,12 @@ func (a *ReconcileAdapter) NegativeBalanceAccounts(ctx context.Context, pageLimi
 		if err != nil {
 			return nil, fmt.Errorf("postgres: reconcile: non-negative: credit convert: %w", err)
 		}
-		var balance decimal.Decimal
-		if r.NormalSide == "debit" {
-			balance = debit.Sub(credit)
-		} else {
-			balance = credit.Sub(debit)
+		// core.Delta is the sole authority for this computation (I-43). This
+		// used to default to credit-normal for any r.NormalSide != "debit";
+		// core.Delta refuses an unrecognized normal_side instead.
+		balance, err := core.Delta(core.NormalSide(r.NormalSide), debit, credit)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: non-negative: classification %d: %w", r.ClassificationID, err)
 		}
 		result[i] = service.NegativeBalanceAccount{
 			AccountHolder:    r.AccountHolder,

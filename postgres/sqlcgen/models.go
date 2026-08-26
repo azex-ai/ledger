@@ -118,6 +118,15 @@ type Classification struct {
 	DisplayLabel string      `json:"display_label"`
 }
 
+type ConfigTableChange struct {
+	ID        int64     `json:"id"`
+	TableName string    `json:"table_name"`
+	OldRow    []byte    `json:"old_row"`
+	NewRow    []byte    `json:"new_row"`
+	ChangedBy string    `json:"changed_by"`
+	ChangedAt time.Time `json:"changed_at"`
+}
+
 type Currency struct {
 	ID       int64       `json:"id"`
 	Code     string      `json:"code"`
@@ -301,6 +310,19 @@ type ReconcileScanCursor struct {
 	AfterCurrency int64     `json:"after_currency"`
 	LapDirty      bool      `json:"lap_dirty"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type ReconcileScanCursorChange struct {
+	ID               int64     `json:"id"`
+	CheckName        string    `json:"check_name"`
+	OldAfterHolder   int64     `json:"old_after_holder"`
+	OldAfterCurrency int64     `json:"old_after_currency"`
+	OldLapDirty      bool      `json:"old_lap_dirty"`
+	NewAfterHolder   int64     `json:"new_after_holder"`
+	NewAfterCurrency int64     `json:"new_after_currency"`
+	NewLapDirty      bool      `json:"new_lap_dirty"`
+	ChangedBy        string    `json:"changed_by"`
+	ChangedAt        time.Time `json:"changed_at"`
 }
 
 type RegistrationRescan struct {
