@@ -22,7 +22,7 @@ export interface Journal {
   metadata: Record<string, unknown>;
   actor_id: number;
   source: string;
-  reversal_of_uid: string;  // "" = not linked
+  reversal_of_uid?: string;  // absent/"" = not linked (server omits when empty)
 	effective_at: string;
   created_at: string;
 }

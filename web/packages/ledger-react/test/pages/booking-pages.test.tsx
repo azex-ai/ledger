@@ -1,9 +1,10 @@
 import { screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { describe, expect, test } from "vitest";
 import { DepositsPage } from "../../src/components/pages/DepositsPage";
 import { WithdrawalsPage } from "../../src/components/pages/WithdrawalsPage";
 import { ReservationsPage } from "../../src/components/pages/ReservationsPage";
-import { renderPage, server, getOk } from "./render-page";
+import { renderPage, server, getOk, BASE } from "./render-page";
 
 function booking(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -35,6 +36,13 @@ function classifications() {
   ];
 }
 
+/** A failing `/classifications` lookup — the M2 trigger for every gated booking page. */
+function failClassifications() {
+  return http.get(`${BASE}/api/v1/classifications`, () =>
+    HttpResponse.json({ code: 13000, message: { text: "boom" }, data: null }, { status: 500 }),
+  );
+}
+
 describe("DepositsPage", () => {
   test("renders heading and a deposit row once the classification resolves", async () => {
     server.use(
@@ -45,6 +53,16 @@ describe("DepositsPage", () => {
     expect(screen.getByRole("heading", { name: "Deposits" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("#bk-7")).toBeInTheDocument());
     expect(screen.getByText("evm")).toBeInTheDocument();
+  });
+
+  test("surfaces an error state (with Retry), not a false empty state, when /classifications fails (M2)", async () => {
+    server.use(failClassifications());
+    renderPage(<DepositsPage />);
+    await waitFor(() =>
+      expect(screen.getByText("Failed to load deposits")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/no deposits/i)).not.toBeInTheDocument();
   });
 });
 
@@ -57,6 +75,16 @@ describe("WithdrawalsPage", () => {
     renderPage(<WithdrawalsPage />);
     expect(screen.getByRole("heading", { name: "Withdrawals" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("#bk-9")).toBeInTheDocument());
+  });
+
+  test("surfaces an error state (with Retry), not a false empty state, when /classifications fails (M2)", async () => {
+    server.use(failClassifications());
+    renderPage(<WithdrawalsPage />);
+    await waitFor(() =>
+      expect(screen.getByText("Failed to load withdrawals")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/no withdrawals/i)).not.toBeInTheDocument();
   });
 });
 

@@ -52,4 +52,21 @@ describe("use-sweeps", () => {
       }),
     ).toBeDefined();
   });
+
+  test("useSweeps surfaces a failed classification lookup as an error, not a stuck-pending empty result (M2)", async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    server.use(
+      http.get(`${BASE}/api/v1/classifications`, () =>
+        HttpResponse.json(
+          { code: 13000, message: { text: "boom" }, data: null },
+          { status: 500 },
+        ),
+      ),
+    );
+    const { result } = renderHook(() => useSweeps(), {
+      wrapper: wrapperWith(qc),
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
 });

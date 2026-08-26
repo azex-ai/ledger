@@ -1,7 +1,8 @@
 import { screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { describe, expect, test } from "vitest";
 import { SweepMonitorPage } from "../../src/components/pages/SweepMonitorPage";
-import { renderPage, server, getOk } from "./render-page";
+import { renderPage, server, getOk, BASE } from "./render-page";
 
 function sweepBooking(over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -67,5 +68,19 @@ describe("SweepMonitorPage", () => {
     await waitFor(() =>
       expect(screen.getByText("No sweeps found")).toBeInTheDocument(),
     );
+  });
+
+  test("surfaces an error state (with Retry), not a false empty state, when /classifications fails (M2)", async () => {
+    server.use(
+      http.get(`${BASE}/api/v1/classifications`, () =>
+        HttpResponse.json({ code: 13000, message: { text: "boom" }, data: null }, { status: 500 }),
+      ),
+    );
+    renderPage(<SweepMonitorPage />);
+    await waitFor(() =>
+      expect(screen.getByText("Failed to load sweeps")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.queryByText(/no sweeps/i)).not.toBeInTheDocument();
   });
 });

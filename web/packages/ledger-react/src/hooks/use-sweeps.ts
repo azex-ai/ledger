@@ -6,7 +6,7 @@ import { ledgerKeys } from "./keys";
 const SWEEP_CODE = "sweep";
 
 export function useSweepClassificationId(): string {
-  return useClassificationIdByCode(SWEEP_CODE);
+  return useClassificationIdByCode(SWEEP_CODE).uid;
 }
 
 /**
@@ -16,11 +16,17 @@ export function useSweepClassificationId(): string {
  * real user, so there is no per-holder filter here (unlike useDeposits /
  * useWithdrawals). Same paging contract: flatten
  * `data?.pages.flatMap((p) => p.list)`, page via `fetchNextPage`.
+ *
+ * Gated on the "sweep" classification lookup — its `isLoading`/`isError`
+ * are folded into the returned `isLoading`/`isError` so a failed lookup
+ * surfaces as an error state instead of a false "no sweeps" empty state
+ * (M2, 2026-08-26 web audit).
  */
 export function useSweeps(params: { status?: string } = {}, limit = 20) {
   const client = useLedgerClient();
-  const classificationUid = useSweepClassificationId();
-  return useInfiniteQuery({
+  const classification = useClassificationIdByCode(SWEEP_CODE);
+  const classificationUid = classification.uid;
+  const query = useInfiniteQuery({
     queryKey: ledgerKeys.bookings(SWEEP_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
@@ -33,4 +39,11 @@ export function useSweeps(params: { status?: string } = {}, limit = 20) {
     getNextPageParam: (lastPage) => lastPage.next_cursor || undefined,
     enabled: classificationUid !== "",
   });
+
+  return {
+    ...query,
+    isLoading: classification.isLoading || query.isLoading,
+    isError: classification.isError || query.isError,
+    refetch: classification.isError ? classification.refetch : query.refetch,
+  };
 }
