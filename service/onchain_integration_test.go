@@ -128,16 +128,25 @@ func chainTxKey(chainID int64, txHash string) string {
 
 type fakeChainScanner struct {
 	balances map[string]decimal.Decimal
+	// unreadable lists addresses ScanBalances should report as unreadable
+	// (excluded from the returned map) rather than a genuine zero -- see
+	// TestSweepTick_UnreadableAddressDoesNotBlockReadableAddresses (m-10).
+	unreadable map[string]bool
 }
 
-func (f *fakeChainScanner) ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (map[string]decimal.Decimal, error) {
+func (f *fakeChainScanner) ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (map[string]decimal.Decimal, []string, error) {
 	out := make(map[string]decimal.Decimal)
+	var unreadable []string
 	for _, a := range addresses {
+		if f.unreadable[a] {
+			unreadable = append(unreadable, a)
+			continue
+		}
 		if b, ok := f.balances[a]; ok {
 			out[a] = b
 		}
 	}
-	return out, nil
+	return out, unreadable, nil
 }
 
 type fakeSweeper struct {
@@ -233,10 +242,31 @@ type onchainHarness struct {
 	scanner     *fakeChainScanner
 	sweeper     *fakeSweeper
 	deadLetters *postgres.IngestDeadLetterStore
+	metrics     *recordingOnchainMetrics
 
 	// pool is the raw connection, for tests that need to assert DB state no
 	// store interface exposes (e.g. events.journal_id cross-links, I-21).
 	pool *pgxpool.Pool
+}
+
+// recordingOnchainMetrics captures the onchain-specific counters this test
+// file's fixtures care about, falling through to core.NoopMetrics for
+// everything else -- see core/metrics_embed_test.go's embedding pattern.
+type recordingOnchainMetrics struct {
+	core.NoopMetrics
+	mu                     sync.Mutex
+	sweepAddressUnreadable []sweepAddressUnreadableCall
+}
+
+type sweepAddressUnreadableCall struct {
+	chainID int64
+	count   int
+}
+
+func (m *recordingOnchainMetrics) SweepAddressUnreadable(chainID int64, count int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweepAddressUnreadable = append(m.sweepAddressUnreadable, sweepAddressUnreadableCall{chainID, count})
 }
 
 // setupOnchain wires a service.Onchain against a fresh testcontainers
@@ -263,6 +293,7 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 	scanner := &fakeChainScanner{balances: make(map[string]decimal.Decimal)}
 	sweeper := &fakeSweeper{gasPrice: decimal.NewFromInt(1)}
 	deadLetters := postgres.NewIngestDeadLetterStore(pool)
+	metrics := &recordingOnchainMetrics{}
 
 	deps := service.OnchainDeps{
 		Registry:            postgres.NewDepositAddressStore(pool),
@@ -278,6 +309,7 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		DeadLetters:         deadLetters,
 		Currencies:          currencyStore,
 		Classifications:     classStore,
+		Metrics:             metrics,
 	}
 	onchain := service.NewOnchain(deps, chains, opts...)
 
@@ -290,6 +322,7 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		scanner:     scanner,
 		sweeper:     sweeper,
 		deadLetters: deadLetters,
+		metrics:     metrics,
 		pool:        pool,
 	}
 }
@@ -830,6 +863,60 @@ func TestOnchain_Sweep_TwoRevivalCycles_DoNotCollide(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("confirmed"), confirmed.Status)
 	assert.Empty(t, confirmed.JournalUID, "sweep bookings must never post a journal, even after two revivals")
+}
+
+// TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses pins m-10
+// (2026-08-26 independent review, third pass, `.local/independent-review-2026-08-26.md`):
+// before this fix, ChainScanner.ScanBalances returned a single error the
+// moment ANY address in the batch was unreadable, and sweepTick propagated
+// that error straight out of the whole round -- one broken address meant
+// zero addresses got swept that tick, no matter how many others were
+// perfectly readable. This proves the "third path" the review asked for
+// (neither treating unreadable as zero, nor aborting the whole round over
+// it): da1 is unreadable, da2 is readable and above threshold -- the round
+// must still sweep da2, and the unreadable address must be surfaced via
+// core.Metrics.SweepAddressUnreadable, not silently dropped.
+func TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-unreadable", 2)
+	h := setupOnchain(t, chains, []string{"USDT-unreadable"})
+	ctx := context.Background()
+
+	da1, err := h.svc.EnsureDepositAddress(ctx, 7601)
+	require.NoError(t, err)
+	da2, err := h.svc.EnsureDepositAddress(ctx, 7602)
+	require.NoError(t, err)
+
+	h.scanner.unreadable = map[string]bool{da1.Address: true}
+	h.scanner.balances[da2.Address] = decimal.NewFromInt(50) // above threshold
+
+	policy := core.SweepPolicy{
+		ChainID:      chainID,
+		Token:        token,
+		MinThreshold: decimal.NewFromInt(10),
+		GasCeiling:   decimal.NewFromInt(100),
+		BatchLimit:   10,
+		Interval:     time.Minute,
+	}
+
+	require.NoError(t, h.svc.RunSweepOnce(ctx, policy))
+
+	sweepUID := h.classificationUID(t, "sweep")
+	bookings, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{ClassificationUID: sweepUID, Status: "sent", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, bookings, 1, "da2's balance must still be swept even though da1 was unreadable this round")
+	b := bookings[0]
+	assert.True(t, decimal.NewFromInt(50).Equal(b.Amount))
+	assert.Equal(t, da2.Address, b.Metadata["addresses"], "the unreadable address must not appear in the swept batch")
+
+	h.metrics.mu.Lock()
+	calls := h.metrics.sweepAddressUnreadable
+	h.metrics.mu.Unlock()
+	require.Len(t, calls, 1, "the unreadable address must be surfaced via the metric, not silently dropped")
+	assert.Equal(t, sweepAddressUnreadableCall{chainID: chainID, count: 1}, calls[0])
 }
 
 func TestOnchain_Sweep_UnattributedToken(t *testing.T) {

@@ -124,7 +124,7 @@
 
 | 级别 | 条目 | 位置 | 报告 |
 |---|---|---|---|
-| Major | **`full_coverage` 永远为假** —— check #8 永久 `Complete=false` 且一票否决，`"full suite passed"` 是死代码 | `service/reconcile.go:922,434` | `operability.md` |
+| Major | **`full_coverage` 永远为假** —— check #8 永久 `Complete=false` 且一票否决，`"full suite passed"` 是死代码。**✅ 已处理**：check #8 已删除（不是修复），重新实装（需要 `journals.status` schema 字段）的后续工作项见 `README.md` §6 | `service/reconcile.go:922,434` | `operability.md` |
 | Major | **`balance_drift_units` 被喂了余额而不是漂移**，永不复位；与真正的 checkpoint 篡改探测器共用一条告警规则，**消音会把后者一起消掉** | `service/rollup.go:230`；接口声明 `core/metrics.go:58` | `operability.md` |
 | Major | **链上资金路径六个指标零 RUNBOOK 条目**（含「归集到无法归属的代币」「已入账充值在链上消失」两个偿付能力事件）—— 「零告警」那一半随 `deploy/` 删除而失效，见 §0 | `observability/prometheus.go` vs `docs/RUNBOOK.md` | `operability.md` |
 | Major | **归集的重试状态只在内存** → 卡单 + 重启 = 该链归集永久堵死，且从不去链上读那笔的 fee | `service/onchain.go:329` / `chains/evm/sweeper.go:45` | `onchain-money-path.md` |

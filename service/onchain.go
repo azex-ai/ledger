@@ -1481,9 +1481,22 @@ func (o *Onchain) sweepTick(ctx context.Context, policy core.SweepPolicy) error 
 		return nil
 	}
 
-	balances, err := o.deps.Scanner.ScanBalances(ctx, policy.ChainID, policy.Token, addrs)
+	balances, unreadable, err := o.deps.Scanner.ScanBalances(ctx, policy.ChainID, policy.Token, addrs)
 	if err != nil {
 		return fmt.Errorf("sweep: scan balances: %w", err)
+	}
+	if len(unreadable) > 0 {
+		// m-10 (2026-08-26 independent review, third pass): unreadable
+		// addresses are excluded from balances (never defaulted to zero --
+		// core.ChainScanner's fail-closed contract), but the round proceeds
+		// with whatever WAS readable rather than aborting entirely over
+		// them; they simply retry on the next tick. That "proceed anyway"
+		// must not be silent (working-agreements §3), hence both the Warn
+		// and the counter.
+		o.log().Warn("service: onchain: sweep: some addresses unreadable this round, retrying next cycle",
+			"chain_id", policy.ChainID, "token", policy.Token,
+			"unreadable_count", len(unreadable), "addresses", unreadable)
+		o.metrics().SweepAddressUnreadable(policy.ChainID, len(unreadable))
 	}
 
 	eligible := make([]string, 0, len(balances))

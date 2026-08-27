@@ -210,14 +210,42 @@ func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
 // startup instead of an absence they have to notice on their own
 // (working-agreements.md §3: a skipped optional job and a running one must
 // never look the same from the outside).
+//
+// m-7 (2026-08-26 independent review, third pass): "attestation": true only
+// ever meant "the batch chain will advance and every batch will be signed"
+// -- it says nothing about whether an anchor is wired in, and
+// Service.Worker's auto-wiring (ledger.go) always leaves anchor nil unless
+// the caller overrides it with their own SetAttestor afterward. An anchor is
+// the only thing that lets VerifyLedger detect a wholesale DB-level history
+// rewrite (service/attestation.go's own field comment); without one, the
+// chain is still internally self-consistent but has no external witness. A
+// deployment running anchorless for months would see "attestation": true at
+// every restart and have no log-level signal that the one property anchoring
+// exists to provide was never actually in force -- degraded looking
+// identical to full is the same class of gap this doc comment's own
+// parenthetical warns against. "attestation_anchor" makes that distinction
+// visible, and the Warn (mirroring DevCreditEnabled's treatment of another
+// deliberately-permitted-but-worth-flagging state) makes it noisy at every
+// startup rather than something only a careful reader of the Info line would
+// catch. VerifyLedger itself is unaffected and already correctly fail-closed
+// (service/attest_verify.go: nil anchor -> VerifyStatusNotRun) -- this only
+// changes what the operator sees before anything goes wrong.
 func (w *Worker) Run(ctx context.Context) error {
+	attestationAnchored := w.attestation != nil && w.attestation.anchor != nil
 	w.logger.Info("worker: starting",
 		"full_reconcile", w.fullReconcile != nil,
 		"event_delivery_webhook", w.eventDeliverer != nil,
 		"event_delivery_local_callback", w.localDeliverer != nil,
 		"attestation", w.attestation != nil,
+		"attestation_anchor", attestationAnchored,
 		"partition", w.partition != nil,
 	)
+	if w.attestation != nil && !attestationAnchored {
+		w.logger.Warn("worker: batch attestation is running with no anchor configured -- " +
+			"the batch chain will advance and every batch will be signed, but VerifyLedger " +
+			"cannot detect a wholesale history rewrite until an anchor is wired in via " +
+			"Worker.SetAttestor (see service/attestation.go's anchor field comment)")
+	}
 
 	g, ctx := errgroup.WithContext(ctx)
 

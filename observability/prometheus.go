@@ -95,6 +95,7 @@ type PrometheusMetrics struct {
 	// Onchain counters
 	depositReorgDetected     *prometheus.CounterVec
 	sweepUnattributed        *prometheus.CounterVec
+	sweepAddressUnreadable   *prometheus.CounterVec
 	registrationRescanFailed *prometheus.CounterVec
 	depositReviewRequired    *prometheus.CounterVec
 }
@@ -260,6 +261,11 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "sweep_unattributed_total",
 			Help:      "Total sweep batches collecting a token with no ledger attribution, labelled by chain.",
 		}, []string{"chain_id"}),
+		sweepAddressUnreadable: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "sweep_address_unreadable_total",
+			Help:      "Total addresses whose balance ChainScanner.ScanBalances could not read in a sweep round (excluded from that round, not treated as zero), labelled by chain.",
+		}, []string{"chain_id"}),
 		registrationRescanFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Name:      "registration_rescan_failed_total",
@@ -283,6 +289,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.negativeBalanceDetected, m.reconcileGap, m.reservedAmount,
 		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
+		m.sweepAddressUnreadable,
 		m.registrationRescanFailed, m.depositReviewRequired,
 	)
 
@@ -427,6 +434,12 @@ func (m *PrometheusMetrics) DepositReorgDetected(chainID int64) {
 // SweepUnattributed increments the unattributed-sweep counter.
 func (m *PrometheusMetrics) SweepUnattributed(chainID int64) {
 	m.sweepUnattributed.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// SweepAddressUnreadable increments the unreadable-sweep-address counter by
+// count.
+func (m *PrometheusMetrics) SweepAddressUnreadable(chainID int64, count int) {
+	m.sweepAddressUnreadable.WithLabelValues(int64Label(chainID)).Add(float64(count))
 }
 
 // RegistrationRescanFailed increments the registration-rescan failure counter.

@@ -169,11 +169,26 @@ func Delta(normalSide NormalSide, debitSum, creditSum decimal.Decimal) (decimal.
 
 // EntryDirection reports whether entryType, posted against an account whose
 // classification has the given normal side, increases or decreases that
-// account's balance. This is the sole authority account-policy enforcement
-// uses to classify an entry as "consumption" (decrease) vs "deposit"
-// (increase) — see I-17. It is a thin wrapper over Sign; see Sign's
+// account's balance. It is a thin wrapper over Sign; see Sign's
 // documentation for the rule itself and why an unknown normal_side or
 // entry_type is refused rather than defaulted.
+//
+// m-8 (2026-08-26 independent review, third pass) corrected this comment:
+// it used to claim EntryDirection is "the sole authority account-policy
+// enforcement uses ... see I-17". That was never true of I-17 (I-17's own
+// text never mentions EntryDirection) and stopped being true of the actual
+// enforcement code path once postgres/account_policy_enforce.go's
+// enforceAccountPolicies was written to net a decimal delta across
+// potentially several entries in one journal (core.SignedAmount summed per
+// entry, compared against 0 / min_balance) rather than classify a single
+// entry's binary direction — EntryDirection's boolean
+// increase-or-decrease has no way to represent a netted delta, so it could
+// not have done that job. grep confirms no non-test call site anywhere in
+// this module calls EntryDirection today. It is kept, not deleted, because
+// I-43 (docs/INVARIANTS.md) documents it as the fourth Sign-derived wrapper
+// whose "refuse an unrecognized normal_side/entry_type" behavior that
+// invariant's convergence proof pins alongside SignedAmount and Delta
+// (TestEntryDirection_RejectsUnknownNormalSide) — see I-43, not I-17.
 func EntryDirection(entryType EntryType, normalSide NormalSide) (BalanceDirection, error) {
 	sign, err := Sign(normalSide, entryType)
 	if err != nil {

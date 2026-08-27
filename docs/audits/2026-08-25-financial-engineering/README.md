@@ -235,3 +235,11 @@ C2 里我实测成功的那条攻击（改 `deposit_addresses.account_holder`）
   （已写入的历史快照永不失效）；Q4 找到 C7。
 - `web/` 前端、性能、容量：契约 §5 明确排除。
 - **DR 演练未实跑**：恢复流程只做静态阅读。
+- **check #8（`pending_journal_timeout`）被删除而非重新实装** —— 它等待的 `journals.status`
+  schema 字段从未添加（`TODO.md` §6「可观测与运维」原始条目所指的那个恒假信号）。移除本身是
+  正确的收口：一个结构上永远返回 `Complete=false` 的检查会一票否决 `FullCoverage`，恒假的信号
+  比没有信号更糟（`working-agreements.md` §3）。移除时的 commit message 称这是
+  "tracked in the audit remediation backlog"，但 `docs/plans/2026-08-26-audit-remediation-contracts.md`
+  与本文件都没有这一条（m-9, `.local/independent-review-2026-08-26.md`）——**这里补上**：重新实装
+  check #8 需要先给 `journals.status` 加 schema 字段（`deployment.md` expand 步骤），再对着它写一个
+  真正会跑的检查，取代当前永久移除的占位。未排期。

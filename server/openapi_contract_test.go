@@ -375,6 +375,23 @@ func TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs(t *testing.T) {
 // original defect this test would not otherwise be scoped to notice).
 // The Go-side half (PagedResponse actually serializes nil to literal null)
 // is pinned in response_test.go.
+//
+// m-5 (2026-08-26 independent review, third pass): the old version of this
+// loop derived `props` by hardcoding exactly two shapes ("data.properties"
+// or, failing that, the schema's own top-level "properties") and then did
+// `nc, ok := props["next_cursor"]; if !ok { continue }` -- a schema whose
+// next_cursor lived at any OTHER nesting was silently skipped, not flagged,
+// indistinguishable from "this schema legitimately has no next_cursor"
+// (working-agreements §3: "未运行 ≠ 通过"). findNextCursorProperties below
+// replaces the two-shape guess with a recursive walk of the schema's own
+// inline property tree -- it finds a "next_cursor" property regardless of
+// how many levels of inline `type: object` it is nested under, so a future
+// envelope's shape cannot silently defeat this check the way the old
+// derivation could. It deliberately does not follow $ref: next_cursor is
+// envelope glue, never part of a shared/$ref'd model, so refusing to cross
+// a $ref both keeps this finite (no cycles, no need for a depth bound) and
+// keeps it from wandering into an unrelated list-item schema that happens
+// to reuse the same property name.
 func TestOpenAPIContract_NextCursorIsNullable(t *testing.T) {
 	schemas := loadOpenAPISchemas(t)
 
@@ -384,24 +401,38 @@ func TestOpenAPIContract_NextCursorIsNullable(t *testing.T) {
 			continue
 		}
 		flat := flattenAllOf(t, schemas, schema)
-		dataNode, _ := flat["properties"].(map[string]any)
-		var props map[string]any
-		if dataNode != nil {
-			if data, ok := dataNode["data"].(map[string]any); ok {
-				props, _ = data["properties"].(map[string]any)
-			} else {
-				props = dataNode
+		for _, nc := range findNextCursorProperties(flat) {
+			types := nextCursorTypes(nc)
+			if !containsNull(types) {
+				t.Errorf("schema %s: next_cursor is typed %v, which cannot express JSON null -- api-contract.md §6 requires next_cursor:null when exhausted (add \"null\" to its type)", name, types)
 			}
 		}
-		nc, ok := props["next_cursor"].(map[string]any)
+	}
+}
+
+// findNextCursorProperties recursively collects every property schema
+// literally named "next_cursor" reachable from node's own "properties" map
+// by descending through inline (non-$ref) nested objects. See the m-5 note
+// on TestOpenAPIContract_NextCursorIsNullable above for why this replaces a
+// two-shape hardcoded guess.
+func findNextCursorProperties(node map[string]any) []map[string]any {
+	props, _ := node["properties"].(map[string]any)
+	var found []map[string]any
+	for key, valAny := range props {
+		val, ok := valAny.(map[string]any)
 		if !ok {
 			continue
 		}
-		types := nextCursorTypes(nc)
-		if !containsNull(types) {
-			t.Errorf("schema %s: next_cursor is typed %v, which cannot express JSON null -- api-contract.md §6 requires next_cursor:null when exhausted (add \"null\" to its type)", name, types)
+		if key == "next_cursor" {
+			found = append(found, val)
+			continue
 		}
+		if _, isRef := val["$ref"]; isRef {
+			continue
+		}
+		found = append(found, findNextCursorProperties(val)...)
 	}
+	return found
 }
 
 func nextCursorTypes(nc map[string]any) []string {
