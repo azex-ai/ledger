@@ -105,6 +105,14 @@ type Metrics interface {
 	// treasury with no corresponding user ledger balance, requiring manual
 	// reconciliation (design doc §4).
 	SweepUnattributed(chainID int64)
+	// SweepAddressUnreadable is emitted whenever ChainScanner.ScanBalances
+	// could not read one or more addresses' balance this round (count is
+	// how many). Those addresses are excluded from the round's sweep-eligible
+	// set rather than defaulted to zero (I-41 point 4), and simply retry next
+	// cycle -- this is the observability half of that fail-closed-per-address
+	// contract (m-10, `.local/independent-review-2026-08-26.md`): "proceeded
+	// with what was readable" must be visible, not just quietly true.
+	SweepAddressUnreadable(chainID int64, count int)
 	// RegistrationRescanFailed is emitted whenever EnsureDepositAddress's
 	// background historical rescan of one chain fails (design doc §5-2b):
 	// the "deposit sent before registration" gap this rescan exists to close
@@ -157,6 +165,7 @@ func (NoopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
 func (NoopMetrics) ChainCursorLag(int64, int64)         {}
 func (NoopMetrics) DepositReorgDetected(int64)          {}
 func (NoopMetrics) SweepUnattributed(int64)             {}
+func (NoopMetrics) SweepAddressUnreadable(int64, int)   {}
 func (NoopMetrics) RegistrationRescanFailed(int64)      {}
 func (NoopMetrics) DepositReviewRequired(int64, string) {}
 

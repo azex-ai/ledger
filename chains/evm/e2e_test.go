@@ -182,8 +182,9 @@ func TestE2E_WatchThenSweep(t *testing.T) {
 
 	// --- scanner side: sanity-check ScanBalances agrees post-sweep -------
 	scanner := NewScanner(clients, 0)
-	balances, err := scanner.ScanBalances(ctx, anvilChainID, usdtAddr.Hex(), []string{depositAddr})
+	balances, unreadable, err := scanner.ScanBalances(ctx, anvilChainID, usdtAddr.Hex(), []string{depositAddr})
 	require.NoError(t, err)
+	require.Empty(t, unreadable)
 	require.True(t, balances[depositAddr].IsZero())
 
 	_ = receipt // receipt only needed to confirm WaitMined succeeded above

@@ -3212,8 +3212,10 @@ stalling that chain's fund collection with no self-healing path
 `resumedLap` tracking and the `scanned == 0 && resumedLap` branch (same
 file); `service.RollupService.processItem`'s `BalanceDrift` call (`service/rollup.go`);
 `chains/evm.multicallResultsToBalances` / `chains/evm.decodeERC20BalanceOf`
-(`chains/evm/scanner.go`) both returning `evm.ErrBalanceUnreadable` instead
-of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPrice`
+(`chains/evm/scanner.go`) excluding an unreadable address from `balances`
+(see the m-10 correction below for the per-address, not per-batch, grain
+this operates at) instead of defaulting it to zero;
+`chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPrice`
 / `chains/evm.feeCapBasis` (`chains/evm/sweeper.go`); `core.Sweeper.BatchSweep`'s
 `priorTxHash` parameter (`core/interfaces.go`).
 
@@ -3230,11 +3232,62 @@ of a zero value; `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPri
 - `service.TestRollupService_DriftDetection` (asserts the reported value is
   the positive magnitude 85, not the raw balance -85) /
   `TestRollupService_DriftDetection_ClearsOnceHealthy`.
-- `chains/evm.TestMulticallResultsToBalances_FailsClosedOnUnreadableCall` /
-  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`.
+- `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` /
+  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`;
+  `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
+  (correction below).
 - `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
   `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
   `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+
+> **Correction (m-10 fix on point 4, `.local/independent-review-2026-08-26.md`,
+> third-pass independent review).** Point 4 as originally written and its
+> first implementation failed the ENTIRE `ScanBalances` call closed the
+> moment any single address in the batch was unreadable —
+> `multicallResultsToBalances` / `scanConcurrently`'s per-address failure
+> returned an error that aborted the whole batch (on the concurrent
+> fallback path, via `errgroup` cancelling every other still-in-flight
+> address's context the instant one goroutine returned non-nil). That
+> correctly avoided the original fail-open bug (unreadable treated as zero)
+> but introduced a different cost in the fail-closed direction: one broken
+> or slow-to-respond address — a single flaky RPC response, a
+> broken/malicious token contract at one specific address — meant *zero*
+> addresses got swept that round, no matter how many others were perfectly
+> readable. `sweepTick` (`service/onchain.go`) propagated that single error
+> straight out, so `service.Onchain`'s entire sweep tick for that
+> `(chain, token)` was a no-op.
+>
+> Corrected rule: `ChainScanner.ScanBalances` (`core/interfaces.go`) returns
+> `(balances, unreadable, err)`. Per-address read failures land in
+> `unreadable` and are excluded from `balances` — never defaulted to zero,
+> preserving point 4's original guarantee — but do NOT abort the batch;
+> every other address's balance is still returned. `err` is now reserved
+> for failures that invalidate the whole round (chain/token not configured,
+> the RPC client itself unreachable, a malformed `aggregate3` response —
+> things that would have failed identically for every address anyway).
+> Callers must surface `unreadable` (this is still fail-closed, not
+> fail-open: an unreadable address is excluded from this round's
+> sweep-eligible set, not swept as if its balance were 0) — `sweepTick`
+> logs a `Warn` and calls the new `core.Metrics.SweepAddressUnreadable`
+> counter, then proceeds with whatever addresses WERE readable.
+>
+> **Enforced by (correction)**: `core.ChainScanner.ScanBalances`'s
+> three-return signature (`core/interfaces.go`);
+> `chains/evm.multicallResultsToBalances` / `chains/evm.Scanner.scanConcurrently`
+> (`chains/evm/scanner.go`) collecting per-address failures into `unreadable`
+> instead of returning an error for the batch; `service.Onchain.sweepTick`'s
+> `unreadable` handling (`service/onchain.go`); `core.Metrics.SweepAddressUnreadable`
+> / `observability.PrometheusMetrics.SweepAddressUnreadable`.
+>
+> **Pinned by (correction)**:
+> `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` — the
+> renamed/rewritten form of the original pin, now asserting the OTHER,
+> readable address in the same batch still comes through instead of
+> asserting the whole batch returns nil. `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
+> — an end-to-end `sweepTick` proof: one unreadable address alongside one
+> readable, above-threshold address still produces a sweep booking for the
+> readable one, and `core.Metrics.SweepAddressUnreadable` is called with the
+> unreadable count.
 
 > **Correction (M-1 fix on point 2, `.local/independent-review-2026-08-26.md`,
 > docs/plans/2026-08-26-audit-remediation-contracts.md follow-on

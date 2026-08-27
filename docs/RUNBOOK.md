@@ -506,6 +506,44 @@ corruption):
    REVOKE INSERT ON journals, journal_entries, events, bookings FROM ledger_app;
    ```
 
+   **This alone does not freeze `journal_entries`'s partitions** (m-4,
+   `.local/independent-review-2026-08-26.md`). `REVOKE` on the parent only
+   changes the parent's own ACL entry; migration 008 additionally granted
+   column-level INSERT directly on each partition that existed at its
+   install time (`journal_entries_yYYYYmMM`, `journal_entries_default`), and
+   a `REVOKE` issued against the parent's name does not touch those
+   per-partition grants. The application's actual write path is unaffected
+   either way — it always names the parent (`postgres/sql/queries/journals.sql`'s
+   `InsertJournalEntry`), and Postgres checks a routed INSERT's privilege
+   against the table named in the statement, not the partition it lands in
+   (same rule the role table's "Operational notes" below documents for the
+   opposite, grant-time direction) — so step 2 by itself is sufficient to
+   stop the application. It is **not** sufficient to stop a leaked
+   `ledger_app` credential used to INSERT directly against a partition's own
+   name, which is the threat model migration 006/007/008 were written
+   against. To close that path too, revoke every partition individually:
+
+   ```sql
+   DO $$
+   DECLARE
+       r RECORD;
+   BEGIN
+       FOR r IN
+           SELECT c.relname
+           FROM pg_partition_tree('journal_entries'::regclass) pt
+           JOIN pg_class c ON c.oid = pt.relid
+           WHERE pt.relid <> 'journal_entries'::regclass
+       LOOP
+           EXECUTE format('REVOKE INSERT ON public.%I FROM ledger_app', r.relname);
+       END LOOP;
+   END $$;
+   ```
+
+   Restoring this at recovery time means re-running 008's own per-partition
+   GRANT loop (step 4 below already documents that loop for the parent-vs-id
+   reason; the same loop closes this one too, since it targets every
+   partition, not just the parent).
+
 3. **Verify writes have stopped**:
 
    ```sql
@@ -634,6 +672,18 @@ Operational notes:
   automatically — a migration landing without its own GRANT, or with an ACL
   that disagrees with its own trigger, fails these tests, not silently ships
   a defense-in-depth gap.
+- **`ledger_signed_amount` / `ledger_signed_delta` / `ledger_reject_unknown_normal_side`
+  (migration 009) are `REVOKE ALL ... FROM PUBLIC` and granted `EXECUTE` only
+  to `ledger_app` and `ledger_ro`** (m-11, `.local/independent-review-2026-08-26.md`).
+  This is intentionally fail-closed the same way every other grant in this
+  table is, but it means a role outside those two — a BI account, a
+  monitoring credential, a read replica's analytics role — hits `permission
+  denied for function ledger_signed_amount` if it ever queries anything that
+  calls these (`postgres/sql/queries/*.sql`'s balance/reconcile queries all
+  do). That is a function-level 42501, not the row/column-level error the
+  rest of this table describes — if a "fourth" read-only role is ever
+  introduced, it needs its own `GRANT EXECUTE` on these three functions, not
+  just table `SELECT`.
 
 ---
 

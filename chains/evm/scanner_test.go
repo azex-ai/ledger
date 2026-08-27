@@ -62,14 +62,17 @@ func mustAmount32(v int64) []byte {
 	return common.LeftPadBytes(big.NewInt(v).Bytes(), 32)
 }
 
-// TestMulticallResultsToBalances_FailsClosedOnUnreadableCall pins
-// onchain-money-path.md's Major finding for the Multicall3 path:
-// scanViaMulticall used to translate a reverted call (Success=false) or a
-// malformed return length into a balance of ZERO and continue, silently
-// dropping that address from the sweep round with no error. Before this
-// fix, this test's second assertion (balances[addr] treated as unread, not
-// zero) could not be written at all -- there was no error to check.
-func TestMulticallResultsToBalances_FailsClosedOnUnreadableCall(t *testing.T) {
+// TestMulticallResultsToBalances_FailsClosedPerAddress pins
+// onchain-money-path.md's Major finding for the Multicall3 path (a reverted
+// call or malformed return length must never become a balance of ZERO,
+// silently dropping that address from the sweep round with no signal) AND
+// m-10's correction on top of it (2026-08-26 independent review, third
+// pass): the address that could not be read must land in unreadable and be
+// excluded from balances, but every OTHER address in the same batch must
+// still come through -- the original fix over-corrected into returning an
+// error for the WHOLE batch the moment any one address failed, which this
+// test used to assert (`require.Nil(t, balances, ...)`) and no longer does.
+func TestMulticallResultsToBalances_FailsClosedPerAddress(t *testing.T) {
 	addrs := []string{
 		"0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
 		"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
@@ -80,10 +83,11 @@ func TestMulticallResultsToBalances_FailsClosedOnUnreadableCall(t *testing.T) {
 			{Success: true, ReturnData: mustAmount32(500)},
 			{Success: false, ReturnData: nil}, // reverted -- e.g. a broken/malicious token contract
 		}
-		balances, err := multicallResultsToBalances(addrs, results, 18)
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrBalanceUnreadable))
-		assert.Nil(t, balances, "a failed batch must not return a partial/zeroed balance map")
+		balances, unreadable := multicallResultsToBalances(addrs, results, 0)
+		require.Equal(t, []string{addrs[1]}, unreadable, "the reverted address must be reported unreadable, not silently dropped")
+		assert.True(t, balances[addrs[0]].Equal(decimal.NewFromInt(500)), "the OTHER, readable address must still come through -- one bad address must not cost the whole batch")
+		_, stillPresent := balances[addrs[1]]
+		assert.False(t, stillPresent, "an unreadable address must be absent from balances, never defaulted to zero")
 	})
 
 	t.Run("malformed return length", func(t *testing.T) {
@@ -91,9 +95,9 @@ func TestMulticallResultsToBalances_FailsClosedOnUnreadableCall(t *testing.T) {
 			{Success: true, ReturnData: mustAmount32(500)},
 			{Success: true, ReturnData: []byte{0x01, 0x02}}, // not 32 bytes -- malformed, not "zero"
 		}
-		_, err := multicallResultsToBalances(addrs, results, 18)
-		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrBalanceUnreadable))
+		balances, unreadable := multicallResultsToBalances(addrs, results, 0)
+		require.Equal(t, []string{addrs[1]}, unreadable)
+		assert.True(t, balances[addrs[0]].Equal(decimal.NewFromInt(500)))
 	})
 
 	t.Run("all readable", func(t *testing.T) {
@@ -101,8 +105,8 @@ func TestMulticallResultsToBalances_FailsClosedOnUnreadableCall(t *testing.T) {
 			{Success: true, ReturnData: mustAmount32(500)},
 			{Success: true, ReturnData: mustAmount32(0)}, // a GENUINE zero balance must still pass through cleanly
 		}
-		balances, err := multicallResultsToBalances(addrs, results, 0)
-		require.NoError(t, err)
+		balances, unreadable := multicallResultsToBalances(addrs, results, 0)
+		assert.Empty(t, unreadable)
 		assert.True(t, balances[addrs[0]].Equal(decimal.NewFromInt(500)))
 		assert.True(t, balances[addrs[1]].IsZero())
 	})

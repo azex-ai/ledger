@@ -492,7 +492,21 @@ type ChainScanner interface {
 	// ScanBalances returns the current balance of token (a contract address,
 	// or core.SweepNativeToken for the chain's native asset) at every
 	// address in addresses, on chainID.
-	ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (map[string]decimal.Decimal, error)
+	//
+	// unreadable lists addresses whose balance could not be read this round
+	// (a reverted call or a malformed return -- see chains/evm.ErrBalanceUnreadable)
+	// and are therefore absent from balances. This is fail-closed at the
+	// per-address grain, not the batch grain (m-10, `.local/independent-review-2026-08-26.md`,
+	// I-41 point 4 correction): an unreadable balance must never be treated
+	// as a genuine zero (the original fail-open bug), but neither should one
+	// flaky address cost every OTHER address in the batch its
+	// sweep-eligibility this cycle -- callers should surface unreadable
+	// (log/metric) and proceed with balances; the missing addresses simply
+	// retry on the next scan. err is reserved for failures that make the
+	// entire batch meaningless (chain/token not configured, the RPC client
+	// itself unreachable, a malformed aggregate3 response) -- when err is
+	// non-nil, balances and unreadable are both nil.
+	ScanBalances(ctx context.Context, chainID int64, token string, addresses []string) (balances map[string]decimal.Decimal, unreadable []string, err error)
 }
 
 // ChainReader reads chain state for the deposit watcher (service/onchain.go):
