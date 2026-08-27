@@ -35,8 +35,15 @@ func TestLockedJob_RealPool_LockReleasedAcrossRuns(t *testing.T) {
 	}
 	require.Equal(t, 5, ran, "every Run must execute fn — a skipped run means the previous release leaked the lock")
 
+	// Scoped to this session's own database and backend. Advisory locks are
+	// visible cluster-wide in pg_locks, and Migrate now takes one on the
+	// postgres database for the length of every migration (I-47), so an
+	// unfiltered count reads other packages' in-flight locks and fails for
+	// reasons that have nothing to do with LockedJob.
 	var held int
 	require.NoError(t, pool.QueryRow(ctx,
-		"SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").Scan(&held))
+		`SELECT count(*) FROM pg_locks
+		  WHERE locktype = 'advisory'
+		    AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&held))
 	assert.Zero(t, held, "no advisory lock may survive after the runs complete")
 }
