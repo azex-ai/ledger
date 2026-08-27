@@ -3835,6 +3835,57 @@ never-signed-at-all case this same function already handles per I-32).
   and never overlapping, the forged-signature tamper wording
   `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature`
   already pins.
+## I-46: A journal/attestation digest depends only on the `effective_at` instant a `TIMESTAMPTZ` column can actually store, never on sub-microsecond digits a signer's clock happened to produce
+
+(Board #51; digest-precision bug Team Lead reproduced locally 2026-08-27. CI
+had been red on `a genuinely signed journal must pass VerifyJournalAuth`
+since 2026-08-25 -- at least two days before anyone traced it to this.)
+
+**Rule**: `core.CanonicalJournalDigest` (P5, I-26) and
+`core.CanonicalBatchDigest`/`core.encodeAttestedEntry` (P6, I-27) both run
+every `effective_at` timestamp through `core.canonicalTimestamp` (UTC,
+floored -- never rounded -- to microsecond resolution) before formatting it
+into the byte layout that gets hashed. Every verifier reconstructs
+`effective_at` by reading it back from a `TIMESTAMPTZ` column, which can
+never store more than microsecond precision (pgx's binary `Timestamptz`
+encoder performs the identical floor, `ts.Time.Nanosecond()/1000`, when
+writing a Go `time.Time` to Postgres) -- so a digest computed over a
+caller's raw in-memory `time.Time`, before that floor has ever been
+applied, is not reproducible by any verifier, on any platform whose clock
+actually has sub-microsecond resolution.
+
+**Why**: macOS's `time.Now()` happens to already return microsecond-aligned
+values, so the bug was invisible in local dev. Linux (production) has
+genuine nanosecond clock resolution, so every journal signed there had its
+digest computed over an instant strictly finer than what `postJournalWithQueries`
+ever persisted -- `VerifyJournalAuth` (via `postgres.fetchJournalAuthMaterial`,
+`service.VerifyLedger`, and `RunAttestBatch`'s T4 auth-verdict cache, which
+this bug would have poisoned with false `JournalAuthVerdictUnauthorized`
+entries for every Linux-signed journal in a batch) recomputed a different
+digest from the DB-read-back value and rejected every one. This was live
+and already broken on any Linux deployment before this fix landed --
+`working-agreements.md` §3's "在被测试的地方能过、在真正运行的地方不能" is
+this bug's exact shape: `time.Now()`-based tests passed on the author's
+Mac and only failed in Linux CI.
+
+**Enforced by**: `core.canonicalTimestamp` (`core/auth.go`), called from
+`core.CanonicalJournalDigest` and `core.encodeAttestedEntry`
+(`core/attestation.go`) before every `.Format(time.RFC3339Nano)` call that
+feeds a signed digest. No new domain separator accompanies this fix --
+`canonicalTimestamp`'s doc comment lays out why: the floor is a no-op for
+any `effective_at` that was already microsecond-aligned (every instant that
+round-tripped a `TIMESTAMPTZ` column, and every instant macOS's `time.Now()`
+ever produced), so every signature that ever verified successfully keeps
+verifying byte-for-byte; the only case this fix changes was, by I-26's own
+requirement, already failing `VerifyJournalAuth` before this change existed.
+
+**Pinned by**: `core.TestCanonicalJournalDigest_MicrosecondPrecisionOnly`,
+`core.TestVerifyJournalAuth_SurvivesTimestamptzRoundTrip`,
+`core.TestCanonicalBatchDigest_MicrosecondPrecisionOnly` -- all three
+construct `effective_at` with an explicit non-zero nanosecond remainder
+(`time.Date(..., 123456789, time.UTC)`), never `time.Now()`, so they fail
+on every platform -- including macOS -- before `canonicalTimestamp` exists,
+not just in Linux CI.
 
 ## How to add a new invariant
 

@@ -166,7 +166,7 @@ type AttestedEntry struct {
 //	    BE64(entry.ClassificationID)
 //	    LP(string(entry.EntryType))
 //	    EncodeAmount(entry.Amount)          -- 16 bytes, see EncodeAmount
-//	    LP(entry.EffectiveAt.UTC().Format(RFC3339Nano))
+//	    LP(canonicalTimestamp(entry.EffectiveAt).Format(RFC3339Nano))
 //	)
 func CanonicalBatchDigest(entries []AttestedEntry) ([]byte, error) {
 	var buf bytes.Buffer
@@ -190,6 +190,20 @@ func CanonicalBatchDigest(entries []AttestedEntry) ([]byte, error) {
 // core/merkle.go's leaf hashing (P7) reuses this byte-for-byte instead of
 // inventing a second encoding of the same fields (design doc §9.3: "叶子的
 // payload 复用 P5 的 EncodeAmount 与字段顺序纪律，不要另起一套编码").
+//
+// e.EffectiveAt goes through canonicalTimestamp before encoding -- see that
+// function's doc comment (core/auth.go). In practice every AttestedEntry
+// this package's callers construct already has a microsecond-aligned
+// EffectiveAt (postgres.AttestationStore always reads it back from a
+// TIMESTAMPTZ column, both at attest-build time and at verify time), so
+// this is normally a no-op; it exists so encodeAttestedEntry never depends
+// on that being true of every caller -- e.g. cmd/ledger-cli's
+// --reference-dir localization fallback parses EffectiveAt from an
+// operator-supplied JSON dump via time.Parse(RFC3339Nano, ...), which could
+// carry whatever precision the tool that produced it happened to capture;
+// without this floor, a reference file with genuine sub-microsecond digits
+// would make LocateMismatches report a false TAMPERED verdict for an entry
+// that was never actually altered.
 func encodeAttestedEntry(e AttestedEntry) ([]byte, error) {
 	var buf bytes.Buffer
 	writeBE64(&buf, uint64(e.EntryID))
@@ -203,7 +217,7 @@ func encodeAttestedEntry(e AttestedEntry) ([]byte, error) {
 		return nil, err
 	}
 	buf.Write(amtBytes)
-	writeLenPrefixed(&buf, e.EffectiveAt.UTC().Format(time.RFC3339Nano))
+	writeLenPrefixed(&buf, canonicalTimestamp(e.EffectiveAt).Format(time.RFC3339Nano))
 	return buf.Bytes(), nil
 }
 
