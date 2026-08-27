@@ -202,7 +202,7 @@ export interface paths {
         put?: never;
         /**
          * Render a template into a journal and post it.
-         * @description Answers 403 when template_code is one of the deployment's Config.ProtectedTemplateCodes (empty by default) -- deployments that install a verified-deposit-confirmation preset should list its template codes there so a write-scope key cannot mint a journal indistinguishable from a real confirmed deposit through this generic endpoint; those codes are meant to be posted only by the deployment's own orchestration.
+         * @description Answers 403 when template_code is in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
          */
         post: {
             parameters: {
@@ -524,7 +524,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Balances for one holder × currency. */
+        /**
+         * Balances for one holder × currency.
+         * @description Per-classification breakdown for one currency, with the sum across classifications as `total` -- a different shape from GET /balances/{holder} (which lists one Balance per currency, no cross-classification sum), so it has its own envelope (BalanceByCurrencyEnvelope) rather than reusing BalancesEnvelope.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -537,13 +540,13 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Balance list. */
+                /** @description Per-classification balances for this holder × currency, plus their total. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["BalancesEnvelope"];
+                        "application/json": components["schemas"]["BalanceByCurrencyEnvelope"];
                     };
                 };
             };
@@ -1932,7 +1935,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ReconcileResult"];
+                        "application/json": components["schemas"]["ReconcileEnvelope"];
                     };
                 };
             };
@@ -1976,7 +1979,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ReconcileEnvelope"];
+                    };
                 };
             };
         };
@@ -2020,7 +2025,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ReconcileReport"];
+                        "application/json": components["schemas"]["ReconcileReportEnvelope"];
                     };
                 };
             };
@@ -2760,6 +2765,11 @@ export interface components {
         NormalSide: "debit" | "credit";
         /** @enum {string} */
         HolderRole: "user" | "system";
+        /**
+         * @description Semantic liquidity tag for a classification's balance in the holder-facing breakdown. "" excludes the classification from that view -- valid for is_system classifications, but refused by the server for a non-system classification (M-4 fix, docs/INVARIANTS.md I-37 addendum): a non-system classification must declare either a spendable bucket (available/pending/locked) or "memo" (a deliberate non-liability memo/cost account, e.g. per-user fee tracking) explicitly.
+         * @enum {string}
+         */
+        BalanceRole: "" | "available" | "pending" | "locked" | "memo";
         EntryInput: {
             /** Format: int64 */
             account_holder: number;
@@ -2845,20 +2855,20 @@ export interface components {
                 next_cursor?: string | null;
             };
         };
+        /** @description GET /journals/{uid}'s data is a Journal with entries appended as a sibling field, not journal/entries nested under separate keys (server/handler_journals.go's handleGetJournal returns a single journalResponse whose Entries field carries them). */
         JournalWithEntriesEnvelope: components["schemas"]["Envelope"] & {
-            data?: {
-                journal?: components["schemas"]["Journal"];
+            data?: components["schemas"]["Journal"] & {
                 entries?: components["schemas"]["Entry"][];
             };
         };
         Balance: {
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
+            currency_uid: string;
             /** Format: uuid */
-            classification_uid?: string;
-            balance?: components["schemas"]["Decimal"];
+            classification_uid: string;
+            balance: components["schemas"]["Decimal"];
         };
         BalancesEnvelope: components["schemas"]["Envelope"] & {
             data?: {
@@ -2867,26 +2877,33 @@ export interface components {
                 next_cursor?: string | null;
             };
         };
+        BalanceByCurrencyEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                /** @description Sum of every classification's balance for this holder × currency. */
+                total: components["schemas"]["Decimal"];
+                classifications: components["schemas"]["Balance"][];
+            };
+        };
         BalanceBreakdown: {
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
-            available?: components["schemas"]["Decimal"];
-            pending?: components["schemas"]["Decimal"];
-            locked?: components["schemas"]["Decimal"];
-            total?: components["schemas"]["Decimal"];
+            currency_uid: string;
+            available: components["schemas"]["Decimal"];
+            pending: components["schemas"]["Decimal"];
+            locked: components["schemas"]["Decimal"];
+            total: components["schemas"]["Decimal"];
         };
         BalanceBreakdownEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["BalanceBreakdown"];
         };
         SystemRollup: {
             /** Format: uuid */
-            currency_uid?: string;
+            currency_uid: string;
             /** Format: uuid */
-            classification_uid?: string;
-            total_balance?: components["schemas"]["Decimal"];
-            updated_at?: components["schemas"]["Timestamp"];
+            classification_uid: string;
+            total_balance: components["schemas"]["Decimal"];
+            updated_at: components["schemas"]["Timestamp"];
         };
         SystemRollupsEnvelope: components["schemas"]["Envelope"] & {
             data?: {
@@ -2910,26 +2927,27 @@ export interface components {
             /** @description When true, Reserve additionally refuses (422) unless every balance_role=available classification this holder has touched in currency_uid passes the tamper-evident attestation check -- on top of, not instead of, the normal balance-covers-amount check. Off by default; mechanism lives in the library, the policy of when to require it is the caller's (core.ReserveInput's doc comment). */
             require_verified_balance?: boolean;
         };
+        /** @description settled_amount and journal_uid are the only genuinely optional fields here (reservationResponse.go: `*string`/`omitempty` — the field is absent from the wire, not present-as-empty, until a settlement/journal exists). Every other field is always populated. */
         Reservation: {
             /** Format: uuid */
-            uid?: string;
+            uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
-            reserved_amount?: components["schemas"]["Decimal"];
+            currency_uid: string;
+            reserved_amount: components["schemas"]["Decimal"];
             settled_amount?: components["schemas"]["Decimal"];
             /** @enum {string} */
-            status?: "active" | "settling" | "settled" | "released";
+            status: "active" | "settling" | "settled" | "released";
             /**
              * Format: uuid
              * @description Empty when no journal linked.
              */
             journal_uid?: string;
-            idempotency_key?: string;
-            expires_at?: components["schemas"]["Timestamp"];
-            created_at?: components["schemas"]["Timestamp"];
-            updated_at?: components["schemas"]["Timestamp"];
+            idempotency_key: string;
+            expires_at: components["schemas"]["Timestamp"];
+            created_at: components["schemas"]["Timestamp"];
+            updated_at: components["schemas"]["Timestamp"];
         };
         ReservationEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Reservation"];
@@ -3008,20 +3026,21 @@ export interface components {
             /** @description Required (I-3). May instead be supplied via the Idempotency-Key header. A retried request with the same key and the same (to_status, channel_ref, amount) payload replays the original event, even after the booking has since moved on to a later status; the same key with a different payload is a conflict. */
             idempotency_key: string;
         };
+        /** @description reservation_uid and journal_uid are the only genuinely optional fields here (bookingResponse.go: `omitempty` — the field is absent from the wire, not present-as-empty, until a reservation/journal is linked). Every other field is always populated. */
         Booking: {
             /** Format: uuid */
-            uid?: string;
+            uid: string;
             /** Format: uuid */
-            classification_uid?: string;
+            classification_uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
-            amount?: components["schemas"]["Decimal"];
-            settled_amount?: components["schemas"]["Decimal"];
-            status?: string;
-            channel_name?: string;
-            channel_ref?: string;
+            currency_uid: string;
+            amount: components["schemas"]["Decimal"];
+            settled_amount: components["schemas"]["Decimal"];
+            status: string;
+            channel_name: string;
+            channel_ref: string;
             /**
              * Format: uuid
              * @description Empty when no reservation linked.
@@ -3032,13 +3051,13 @@ export interface components {
              * @description Empty when no journal linked.
              */
             journal_uid?: string;
-            idempotency_key?: string;
-            metadata?: {
+            idempotency_key: string;
+            metadata: {
                 [key: string]: unknown;
             };
-            expires_at?: components["schemas"]["Timestamp"];
-            created_at?: components["schemas"]["Timestamp"];
-            updated_at?: components["schemas"]["Timestamp"];
+            expires_at: components["schemas"]["Timestamp"];
+            created_at: components["schemas"]["Timestamp"];
+            updated_at: components["schemas"]["Timestamp"];
         };
         BookingEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Booking"];
@@ -3053,12 +3072,12 @@ export interface components {
         /** @description The CREATE2 derivation fingerprint (factory/init_hash) is an internal audit-only detail and is deliberately not part of this wire shape. */
         DepositAddress: {
             /** Format: uuid */
-            uid?: string;
+            uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** @description EIP-55 checksummed EVM address. */
-            address?: string;
-            created_at?: components["schemas"]["Timestamp"];
+            address: string;
+            created_at: components["schemas"]["Timestamp"];
         };
         DepositAddressEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["DepositAddress"];
@@ -3070,32 +3089,33 @@ export interface components {
                 next_cursor: string | null;
             };
         };
+        /** @description journal_uid is the only genuinely optional field here (eventResponse.go: `omitempty` — absent from the wire, not present-as-empty, until a journal is linked). Every other field is always populated. */
         Event: {
             /** Format: uuid */
-            uid?: string;
-            classification_code?: string;
+            uid: string;
+            classification_code: string;
             /** Format: uuid */
-            booking_uid?: string;
+            booking_uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
-            currency_uid?: string;
-            from_status?: string;
-            to_status?: string;
-            amount?: components["schemas"]["Decimal"];
-            settled_amount?: components["schemas"]["Decimal"];
+            currency_uid: string;
+            from_status: string;
+            to_status: string;
+            amount: components["schemas"]["Decimal"];
+            settled_amount: components["schemas"]["Decimal"];
             /**
              * Format: uuid
              * @description Empty when no journal linked.
              */
             journal_uid?: string;
-            metadata?: {
+            metadata: {
                 [key: string]: unknown;
             };
-            occurred_at?: components["schemas"]["Timestamp"];
+            occurred_at: components["schemas"]["Timestamp"];
             /** Format: int64 */
-            actor_id?: number;
-            source?: string;
+            actor_id: number;
+            source: string;
         };
         EventEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["Event"];
@@ -3119,6 +3139,7 @@ export interface components {
             name: string;
             normal_side: components["schemas"]["NormalSide"];
             is_system?: boolean;
+            balance_role?: components["schemas"]["BalanceRole"];
             lifecycle?: components["schemas"]["Lifecycle"];
         };
         TemplateLineInput: {
@@ -3212,21 +3233,25 @@ export interface components {
         DepositToleranceEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["DepositTolerancePlanResult"];
         };
+        /** @description handleReconcileGlobal/handleReconcileAccount (Go) have no omitempty anywhere in this struct or its nested detail rows -- details is always a real (possibly empty) array, never absent. */
         ReconcileResult: {
-            balanced?: boolean;
-            gap?: components["schemas"]["Decimal"];
-            details?: {
+            balanced: boolean;
+            gap: components["schemas"]["Decimal"];
+            details: {
                 /** Format: int64 */
-                account_holder?: number;
+                account_holder: number;
                 /** Format: uuid */
-                currency_uid?: string;
+                currency_uid: string;
                 /** Format: uuid */
-                classification_uid?: string;
-                expected?: components["schemas"]["Decimal"];
-                actual?: components["schemas"]["Decimal"];
-                drift?: components["schemas"]["Decimal"];
+                classification_uid: string;
+                expected: components["schemas"]["Decimal"];
+                actual: components["schemas"]["Decimal"];
+                drift: components["schemas"]["Decimal"];
             }[];
-            checked_at?: components["schemas"]["Timestamp"];
+            checked_at: components["schemas"]["Timestamp"];
+        };
+        ReconcileEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["ReconcileResult"];
         };
         BookingTrace: {
             booking?: components["schemas"]["Booking"];
@@ -3296,6 +3321,9 @@ export interface components {
                     detail?: string;
                 }[];
             }[];
+        };
+        ReconcileReportEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["ReconcileReport"];
         };
     };
     responses: {

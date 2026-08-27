@@ -293,3 +293,30 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
     （不再误导消费方以为需要传 `idempotency_key`/`actor_id`/`source`/`metadata`）。
   - 新增 `server.Deps` + `server.NewFromDeps(cfg, deps) (*Server, error)`，纯增量 API，
     `server.New`/`server.NewWithConfig` 签名与行为不变（仍 panic on invalid config）。
+- **bus #48（2026-08-27）：`docs/openapi.yaml` 补齐 `required:` 列表（M5 根因修复）**。
+  **Go 层未改一行**——handler 本来就一直只发出这些字段，这次只是让 spec 如实声明它们始终
+  存在。破坏性变更面纯粹在**消费方生成的类型**上：任何用 `openapi-typescript`（或其他
+  JSON-Schema-aware codegen）从 `docs/openapi.yaml` 生成类型的消费方，重新生成后以下字段会
+  从 `T | undefined`（optional）**收紧为 `T`**（required）——这是类型层面的收紧，不是 wire
+  格式变化，实际响应体从今天起也没有变过：
+  - `Balance`：`account_holder`/`currency_uid`/`classification_uid`/`balance` 全部必填
+  - `Reservation`：除 `settled_amount`/`journal_uid`（两者维持可选——`reservationResponse.go`
+    用 `*string`/`omitempty`，未关联时确实从 wire 上整体缺席）外全部必填
+  - `Booking`：除 `reservation_uid`/`journal_uid`（`bookingResponse.go`：`omitempty`，同上）
+    外全部必填
+  - `Event`：除 `journal_uid`（`eventResponse.go`：`omitempty`）外全部必填
+  - `DepositAddress`：全部必填
+  - `ReconcileResult`（含嵌套 `details[]` 每一项）：全部必填
+  - `SystemRollup`：全部必填
+  - `BalanceBreakdown`：全部必填
+  按可选字段写的消费方代码（`data.balance?.total ?? "0"` 之类）不受影响，仍能编译（收紧
+  optional→required 对读取端永远安全）；**唯一会真正编译失败的场景**是消费方此前依赖某字段
+  "可能不存在" 的类型信号做了穷尽性分支（如 `if (x.balance === undefined) { ... }`
+  这类死分支现在会被 TS 标记为不可达，或消费方自己的手写类型显式把这些字段声明为可选并期望
+  与生成类型互相赋值——两者都需要消费方自行收紧/放宽各自的手写类型；不需要改任何运行时逻辑。
+  **`@azex/ledger-react` 自身作为第一个消费方**：`web/packages/ledger-react/src/client/types.ts`
+  已同步收紧/放宽（`Reservation.settled_amount`/`.journal_uid`、`Booking.reservation_uid`/
+  `.journal_uid`、`Event.journal_uid` 改为 `?:`；`Lifecycle.terminal` 同理改为 `?:`——这一条
+  与 `required:` 缺口无关，是 `types.ts` 自身对已正确声明为 optional 的 `terminal` 的独立
+  修正），`test/client/types-conform.ts`（M5 的类型级一致性门禁）从 9 条 `@ts-expect-error`
+  压制降为 0——该文件本身就是双向门禁，多删/少删都会编译失败，已验证。
