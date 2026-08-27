@@ -30,6 +30,13 @@ type JournalTypePreset struct {
 	// DisplayLabel seeds the user-facing wording for transactions of this
 	// type (holder wallet surface). Empty = fall back to Name.
 	DisplayLabel string
+	// HolderKind tags this journal type's bucket in the holder-facing
+	// HolderTxKind vocabulary (M-7 fix, docs/INVARIANTS.md I-44). Every
+	// preset in this package declares one explicitly — see
+	// core.HolderTxKindNone's doc comment for why an empty value here would
+	// still be tolerated by the store layer but is never the right choice
+	// for a preset this package fully controls.
+	HolderKind core.HolderTxKind
 }
 
 type TemplateLinePreset struct {
@@ -87,20 +94,23 @@ var DefaultTemplateClassifications = combineClassifications(
 )
 
 var depositJournalTypes = []JournalTypePreset{
-	{Code: "deposit_pending", Name: "Deposit Pending", DisplayLabel: "Deposit"},
-	{Code: "deposit_confirm", Name: "Deposit Confirm", DisplayLabel: "Deposit"},
-	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending", DisplayLabel: "Deposit"},
-	{Code: "deposit_release_pending", Name: "Deposit Release Pending", DisplayLabel: "Deposit released"},
-	{Code: "deposit_record_overage", Name: "Deposit Record Overage", DisplayLabel: "Deposit adjustment"},
-	{Code: "deposit_resolve_overage", Name: "Deposit Resolve Overage", DisplayLabel: "Deposit adjustment"},
-	{Code: "deposit_release_overage", Name: "Deposit Release Overage", DisplayLabel: "Deposit adjustment"},
+	{Code: "deposit_pending", Name: "Deposit Pending", DisplayLabel: "Deposit", HolderKind: core.HolderTxKindDeposit},
+	{Code: "deposit_confirm", Name: "Deposit Confirm", DisplayLabel: "Deposit", HolderKind: core.HolderTxKindDeposit},
+	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending", DisplayLabel: "Deposit", HolderKind: core.HolderTxKindDeposit},
+	{Code: "deposit_release_pending", Name: "Deposit Release Pending", DisplayLabel: "Deposit released", HolderKind: core.HolderTxKindDeposit},
+	// The three overage journal types correct a previously recorded deposit
+	// amount rather than record a new one — HolderTxKindAdjustment, matching
+	// their "Deposit adjustment" DisplayLabel.
+	{Code: "deposit_record_overage", Name: "Deposit Record Overage", DisplayLabel: "Deposit adjustment", HolderKind: core.HolderTxKindAdjustment},
+	{Code: "deposit_resolve_overage", Name: "Deposit Resolve Overage", DisplayLabel: "Deposit adjustment", HolderKind: core.HolderTxKindAdjustment},
+	{Code: "deposit_release_overage", Name: "Deposit Release Overage", DisplayLabel: "Deposit adjustment", HolderKind: core.HolderTxKindAdjustment},
 }
 
 var withdrawalJournalTypes = []JournalTypePreset{
-	{Code: "lock_funds", Name: "Lock Funds", DisplayLabel: "Withdrawal"},
-	{Code: "unlock_funds", Name: "Unlock Funds", DisplayLabel: "Withdrawal canceled"},
-	{Code: "withdraw_confirm", Name: "Withdraw Confirm", DisplayLabel: "Withdrawal"},
-	{Code: "withdraw_fee", Name: "Withdraw Fee", DisplayLabel: "Fee"},
+	{Code: "lock_funds", Name: "Lock Funds", DisplayLabel: "Withdrawal", HolderKind: core.HolderTxKindWithdrawal},
+	{Code: "unlock_funds", Name: "Unlock Funds", DisplayLabel: "Withdrawal canceled", HolderKind: core.HolderTxKindWithdrawal},
+	{Code: "withdraw_confirm", Name: "Withdraw Confirm", DisplayLabel: "Withdrawal", HolderKind: core.HolderTxKindWithdrawal},
+	{Code: "withdraw_fee", Name: "Withdraw Fee", DisplayLabel: "Fee", HolderKind: core.HolderTxKindFee},
 }
 
 var DefaultTemplateJournalTypes = combineJournalTypes(depositJournalTypes, withdrawalJournalTypes)
@@ -473,6 +483,7 @@ func ensureJournalTypePreset(
 			Code:         preset.Code,
 			Name:         preset.Name,
 			DisplayLabel: preset.DisplayLabel,
+			HolderKind:   preset.HolderKind,
 		})
 	}
 	if err != nil {
@@ -488,6 +499,23 @@ func ensureJournalTypePreset(
 			return nil, fmt.Errorf("seed display_label of %q: %w", preset.Code, err)
 		}
 		journalType.DisplayLabel = preset.DisplayLabel
+	}
+	if journalType.HolderKind != preset.HolderKind {
+		// Expand-safe upgrade: rows created before holder_kind existed (or
+		// before this preset carried one) hold HolderTxKindNone and are
+		// retagged in place — mirrors ensureClassificationPreset's
+		// balance_role upgrade above. Any other divergence is a semantic
+		// conflict the operator must resolve, not silently override.
+		if journalType.HolderKind != core.HolderTxKindNone {
+			return nil, fmt.Errorf(
+				"existing journal type %q has holder_kind=%q, want %q: %w",
+				preset.Code, journalType.HolderKind, preset.HolderKind, core.ErrInvalidInput,
+			)
+		}
+		if err := journalTypes.SetHolderKind(ctx, journalType.UID, preset.HolderKind); err != nil {
+			return nil, fmt.Errorf("upgrade holder_kind of %q: %w", preset.Code, err)
+		}
+		journalType.HolderKind = preset.HolderKind
 	}
 	return journalType, nil
 }

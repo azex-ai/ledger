@@ -50,7 +50,11 @@ var devCreditJournalTypes = []JournalTypePreset{
 	// "Developer credit" — the holder view must not narrate how the balance
 	// was produced (~/.claude/rules/user-facing-surfaces.md). The internal
 	// name and the classification code carry that fact for operators.
-	{Code: DevCreditJournalTypeCode, Name: "Developer Credit", DisplayLabel: "Credit adjustment"},
+	// HolderKind is HolderTxKindAdjustment for the same reason: it credits
+	// main_wallet like a deposit would, but calling it HolderTxKindDeposit
+	// would claim a specific external-funds-arriving story this journal
+	// type does not have — "adjustment" matches the neutral DisplayLabel.
+	{Code: DevCreditJournalTypeCode, Name: "Developer Credit", DisplayLabel: "Credit adjustment", HolderKind: core.HolderTxKindAdjustment},
 }
 
 // devCreditTemplates books a simulated top-up as

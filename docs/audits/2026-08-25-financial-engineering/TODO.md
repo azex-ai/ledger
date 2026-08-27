@@ -265,11 +265,22 @@ Team Lead 倾向**先做这条**：它是 C2 的另一半，而且便宜。
     「到底」时的表现形式：以前是缺字段或 `""`，现在是 `"next_cursor": null`。按
     `!body.next_cursor` 判断到底的消费方不受影响；按 `"next_cursor" in body` 或
     `typeof next_cursor === "string"` 判断的消费方需要改为 `=== null` 判断。
-  - **`GET /holder/transactions` 的 `kind` 字段语义变化**：从 journal type 的
-    `code`（如 `"deposit_confirm"`，narrates 内部实现）改为其 `uid`（不透明字符串）——
-    `user-facing-surfaces.md` 要求 holder 面不叙述余额是怎么产生的。按字面值匹配 `kind`
-    的消费方（如 `if (tx.kind === "deposit_confirm")`）需要改为按各自创建 journal type 时
-    拿到的 `journal_type_uid` 匹配；`kind_label`（人类可读文案）字段不变。
+  - **`GET /holder/transactions` 的 `kind` 字段语义变化（M-7，2026-08-27，board #49，
+    取代本条上一版描述）**：这是该字段的第三种形态。第一种是 journal type 的 `code`
+    （如 `"deposit_confirm"`，narrates 内部实现，违反 `user-facing-surfaces.md`）；D-contract
+    批次改成了 `uid`（不叙述内部机制，但跨部署各不相同、不可写字面量，已发布的
+    `@azex/ledger-react` `kindLabels` prop 因此静默失效）；本批次（Aaron 拍板路线③）改成
+    `core.HolderTxKind`——一个小而稳定的产品级枚举 `deposit`/`withdrawal`/`transfer`/`fee`/
+    `adjustment`/`other`，跨部署恒定、可写字面量、且不叙述内部机制。未被打标的
+    journal type（`journal_types.holder_kind = ''`，包括所有在此修复前创建的行）读作
+    `"other"`，**wire 上永不出现空字符串**。按字面值匹配 `kind` 的消费方需要把匹配值改成
+    上述六选一（`if (tx.kind === "deposit")` 而不是 `"deposit_confirm"` 或某个 uid）；
+    `@azex/ledger-react` 的 `kindLabels` prop 同理，key 需要从 journal-type code/uid 改写成
+    这个枚举（如 `{ deposit: "Top up" }`，见 `CHANGELOG.md` 与
+    `web/packages/ledger-react/README.md`）；`kind_label`（人类可读文案）字段不变。
+    库使用方（非 HTTP）可用新增的 `core.JournalTypeStore.SetHolderKind` 显式给自建的
+    journal type 打标；未打标不会报错（详见 `docs/INVARIANTS.md` I-44 —— 与 `balance_role`
+    不同，这个字段没有金融正确性后果，因此创建时不强制要求，只在读路径上保证不泄漏内部状态）。
   - **新增可选字段，之前静默丢弃、现在生效**：`POST /journals` 的 `effective_at`、
     `POST /bookings/{uid}/transition` 的 `source`——两个字段此前 openapi.yaml 有文档但
     HTTP 层从未读取，现在按文档生效。若消费方过去往这两个字段塞过垃圾值指望它被忽略，

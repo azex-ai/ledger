@@ -12,9 +12,14 @@ var capitalClassifications = []ClassificationPreset{
 	{Code: "equity", Name: "Equity", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
 
+// HolderTxKindOther: both journal types only ever touch system-side
+// classifications (custodial, equity — both IsSystem), never a role-bearing
+// one, so they never actually surface in a holder's transaction view; "the
+// operator moved platform capital" doesn't fit deposit/withdrawal/transfer/
+// fee/adjustment even in principle.
 var capitalJournalTypes = []JournalTypePreset{
-	{Code: "capital_injection", Name: "Capital Injection"},
-	{Code: "capital_withdraw", Name: "Capital Withdrawal"},
+	{Code: "capital_injection", Name: "Capital Injection", HolderKind: core.HolderTxKindOther},
+	{Code: "capital_withdraw", Name: "Capital Withdrawal", HolderKind: core.HolderTxKindOther},
 }
 
 // capitalTemplates defines the two capital movement patterns:

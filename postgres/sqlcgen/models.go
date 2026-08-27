@@ -278,6 +278,7 @@ type JournalType struct {
 	CreatedAt    time.Time   `json:"created_at"`
 	Uid          pgtype.UUID `json:"uid"`
 	DisplayLabel string      `json:"display_label"`
+	HolderKind   string      `json:"holder_kind"`
 }
 
 type LedgerAttestation struct {

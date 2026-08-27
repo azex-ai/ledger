@@ -263,6 +263,7 @@ func journalTypeFromRow(row sqlcgen.JournalType) *core.JournalType {
 		Name:         row.Name,
 		IsActive:     row.IsActive,
 		DisplayLabel: row.DisplayLabel,
+		HolderKind:   core.HolderTxKind(row.HolderKind),
 		CreatedAt:    row.CreatedAt,
 	}
 }

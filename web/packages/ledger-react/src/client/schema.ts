@@ -2690,10 +2690,11 @@ export interface components {
              */
             uid: string;
             /**
-             * Format: uuid
-             * @description journal_type_uid -- a stable per-deployment key for product-side label overrides / i18n. Deliberately opaque: it does not reveal the ledger's internal journal-type code (see kind_label for the display text).
+             * @description Small, deployment-stable product vocabulary (core.HolderTxKind, M-7 fix, docs/INVARIANTS.md I-44) a host app can hardcode a label-override map against. Never the ledger's internal journal-type code or uid (see kind_label for the display text).
+             * @example deposit
+             * @enum {string}
              */
-            kind: string;
+            kind: "deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" | "other";
             /**
              * @description Library-side default display label.
              * @example Deposit
@@ -3249,6 +3250,9 @@ export interface components {
                 drift: components["schemas"]["Decimal"];
             }[];
             checked_at: components["schemas"]["Timestamp"];
+        };
+        ReconcileEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["ReconcileResult"];
         };
         ReconcileEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["ReconcileResult"];

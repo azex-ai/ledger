@@ -19,6 +19,29 @@ func TestNormalSide_IsValid(t *testing.T) {
 	assert.False(t, NormalSide("invalid").IsValid())
 }
 
+// TestHolderTxKind_IsValid pins the M-7 fix's closed vocabulary
+// (docs/INVARIANTS.md I-44): the six named values plus HolderTxKindNone
+// ("", tolerated here unlike BalanceRoleNone) are valid; anything else,
+// including the two rejected prior shapes (a journal-type code or a uid
+// string), is not.
+func TestHolderTxKind_IsValid(t *testing.T) {
+	valid := []HolderTxKind{
+		HolderTxKindNone, HolderTxKindDeposit, HolderTxKindWithdrawal,
+		HolderTxKindTransfer, HolderTxKindFee, HolderTxKindAdjustment, HolderTxKindOther,
+	}
+	for _, k := range valid {
+		assert.True(t, k.IsValid(), "%q should be valid", k)
+	}
+	invalid := []HolderTxKind{
+		"deposit_confirm",                      // the rejected journal_types.code shape (M-7)
+		"9f3a1b2c-0000-0000-0000-000000000000", // the rejected journal_types.uid shape (M-7)
+		"DEPOSIT", "Deposit", "not_a_kind",
+	}
+	for _, k := range invalid {
+		assert.False(t, k.IsValid(), "%q should be invalid", k)
+	}
+}
+
 func TestSystemAccountHolder(t *testing.T) {
 	assert.Equal(t, int64(-42), SystemAccountHolder(42))
 	assert.True(t, IsSystemAccount(-42))

@@ -210,6 +210,85 @@ func (r BalanceRole) IsValid() bool {
 	return false
 }
 
+// HolderTxKind is the small, deployment-stable product vocabulary the
+// holder-facing transaction view (HolderTransaction.Kind) is drawn from. It
+// exists to fix M-7 (`.local/independent-review-2026-08-26.md`,
+// docs/INVARIANTS.md I-44): the holder wallet surface's `kind` field
+// previously carried journal_types.code (e.g. "deposit_confirm" -- an
+// internal accounting-engine identifier that narrates *how the ledger
+// produced the balance*, a `~/.claude/rules/user-facing-surfaces.md`
+// violation), and a first attempt at fixing that switched it to
+// journal_types.uid (compliant, but opaque, per-deployment-random, and
+// unwriteable as a literal -- @azex/ledger-react's `kindLabels` prop, which
+// is keyed by a stable string a host app hardcodes, went silently dead
+// against it).
+//
+// HolderTxKind is deliberately small and coarse -- a handful of values
+// every deployment's transactions bucket into, stable across deployments,
+// writable as a literal, and describing what the transaction IS to the
+// holder rather than which internal template produced it. It is NOT meant
+// to be exhaustive: HolderTxKindOther is the explicit escape hatch for a
+// journal type that legitimately doesn't fit any bucket below, and adding a
+// new named value later is cheap (an additive, expand-safe change) --
+// changing what an existing value means is not
+// (`~/.claude/rules/deployment.md`: "field semantics are never reused").
+type HolderTxKind string
+
+const (
+	// HolderTxKindNone is JournalType.HolderKind's zero value. It means
+	// "nobody has tagged this journal type yet" -- NOT a deliberate product
+	// decision, unlike HolderTxKindOther below. Every preset this package
+	// installs (presets/templates.go and friends) declares an explicit,
+	// non-none HolderKind; this value only appears on legacy rows written
+	// before this field existed, or on a consumer's own journal type they
+	// have not yet retagged via JournalTypeStore.SetHolderKind. Unlike
+	// BalanceRoleNone (core/interfaces.go's ClassificationInput.Validate
+	// refuses it outright for a new non-system classification, because an
+	// untagged real liability is silently miscounted in
+	// SolvencyReport.Liability -- a financial-correctness failure), an
+	// untagged journal type has no financial consequence: the holder
+	// transaction view's read path (postgres/sql/queries/holder.sql) never
+	// emits "" on the wire -- it reads HolderTxKindNone as
+	// HolderTxKindOther, a legitimate, disclosed, generic bucket, not a
+	// silent miscalculation. That is why this value is validated (rejects
+	// garbage strings) but not forbidden at creation time the way
+	// BalanceRoleNone is.
+	HolderTxKindNone HolderTxKind = ""
+	// HolderTxKindDeposit marks funds arriving from outside the platform
+	// (crypto deposits, dev-mode simulated credit, merchant checkout
+	// settlement landing in the holder's spendable balance).
+	HolderTxKindDeposit HolderTxKind = "deposit"
+	// HolderTxKindWithdrawal marks funds leaving the platform to the
+	// holder's own external destination, including the lock/unlock legs of
+	// that lifecycle.
+	HolderTxKindWithdrawal HolderTxKind = "withdrawal"
+	// HolderTxKindTransfer marks a movement between two holders on the same
+	// platform (no funds cross the platform boundary).
+	HolderTxKindTransfer HolderTxKind = "transfer"
+	// HolderTxKindFee marks a charge the platform levies against the
+	// holder's balance (withdrawal fee, standalone fee charge, ...).
+	HolderTxKindFee HolderTxKind = "fee"
+	// HolderTxKindAdjustment marks a correction to a holder's balance that
+	// is not itself a new deposit, withdrawal, transfer, or fee (deposit
+	// overage record/resolve/release, simulated dev-mode credit).
+	HolderTxKindAdjustment HolderTxKind = "adjustment"
+	// HolderTxKindOther is the explicit "genuinely does not fit any bucket
+	// above" declaration -- for a journal type whose author considered the
+	// vocabulary and chose this on purpose (capital injection/withdrawal,
+	// FX conversion legs), as opposed to HolderTxKindNone's "nobody has
+	// looked at this yet". See this type's doc comment.
+	HolderTxKindOther HolderTxKind = "other"
+)
+
+func (k HolderTxKind) IsValid() bool {
+	switch k {
+	case HolderTxKindNone, HolderTxKindDeposit, HolderTxKindWithdrawal, HolderTxKindTransfer,
+		HolderTxKindFee, HolderTxKindAdjustment, HolderTxKindOther:
+		return true
+	}
+	return false
+}
+
 // Classification represents a dynamic account classification.
 // Lifecycle is nil for label-only classifications (no state machine).
 type Classification struct {
@@ -237,8 +316,15 @@ type JournalType struct {
 	// DisplayLabel is the user-facing wording for the holder transaction
 	// view's kind translation (empty = not configured; the projection falls
 	// back to Name).
-	DisplayLabel string    `json:"display_label"`
-	CreatedAt    time.Time `json:"created_at"`
+	DisplayLabel string `json:"display_label"`
+	// HolderKind is this journal type's bucket in the small, stable
+	// HolderTxKind vocabulary the holder transaction view's `kind` field is
+	// drawn from (M-7 fix, docs/INVARIANTS.md I-44). HolderTxKindNone ("")
+	// on a row read from storage means "untagged" -- see HolderTxKindNone's
+	// doc comment for why that is tolerated here where it is refused for
+	// Classification.BalanceRole.
+	HolderKind HolderTxKind `json:"holder_kind"`
+	CreatedAt  time.Time    `json:"created_at"`
 }
 
 // Balance represents a computed balance for an account dimension.

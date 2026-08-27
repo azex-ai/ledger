@@ -656,8 +656,11 @@ key, so holder A's cached balances can never be served to holder B.
 
 - `actions` is the slot for YOUR top-up / cash-out buttons — the wallet
   surface is read-only by design; write flows belong to the host product.
-- `kindLabels` overrides display labels by the stable `kind` code
-  (`{ deposit_confirm: "Top up" }`) — the product-side i18n anchor.
+- `kindLabels` overrides display labels by `kind`, a small, deployment-stable
+  vocabulary (`"deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" |
+  "other"` — `core.HolderTxKind`, docs/INVARIANTS.md I-44)
+  (`{ deposit: "Top up" }`) — the product-side i18n anchor. Not the ledger's
+  internal journal-type code or uid.
 - Every component ships loading skeletons, sanitized error states, and empty
   states; raw upstream errors go to `onError`, never the DOM.
 

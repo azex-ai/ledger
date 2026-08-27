@@ -185,18 +185,44 @@ func (s *ClassificationStore) ListClassifications(ctx context.Context, activeOnl
 	return result, nil
 }
 
-// CreateJournalType inserts a new journal type.
+// CreateJournalType inserts a new journal type. input.HolderKind may be
+// HolderTxKindNone ("") -- see core.HolderTxKindNone's doc comment for why
+// this field, unlike ClassificationInput.BalanceRole, is not required at
+// creation; any non-empty value must still be a recognized HolderTxKind.
 func (s *ClassificationStore) CreateJournalType(ctx context.Context, input core.JournalTypeInput) (*core.JournalType, error) {
+	if !input.HolderKind.IsValid() {
+		return nil, fmt.Errorf("postgres: create journal type: invalid holder kind %q: %w", input.HolderKind, core.ErrInvalidInput)
+	}
 	row, err := s.q.CreateJournalType(ctx, sqlcgen.CreateJournalTypeParams{
 		Code:         input.Code,
 		Name:         input.Name,
 		Uid:          newUID(),
 		DisplayLabel: input.DisplayLabel,
+		HolderKind:   string(input.HolderKind),
 	})
 	if err != nil {
 		return nil, wrapStoreError("postgres: create journal type", err)
 	}
 	return journalTypeFromRow(row), nil
+}
+
+// SetHolderKind retags a journal type's holder-facing kind bucket — see
+// core.JournalTypeStore.SetHolderKind's doc.
+func (s *ClassificationStore) SetHolderKind(ctx context.Context, uid string, kind core.HolderTxKind) error {
+	if !kind.IsValid() {
+		return fmt.Errorf("postgres: set journal type holder kind: invalid holder kind %q: %w", kind, core.ErrInvalidInput)
+	}
+	pgUID, err := uidToPG(uid)
+	if err != nil {
+		return err
+	}
+	if err := s.q.SetJournalTypeHolderKind(ctx, sqlcgen.SetJournalTypeHolderKindParams{
+		Uid:        pgUID,
+		HolderKind: string(kind),
+	}); err != nil {
+		return wrapStoreError("postgres: set journal type holder kind", err)
+	}
+	return nil
 }
 
 // GetJournalTypeByCode returns a journal type by its unique code.

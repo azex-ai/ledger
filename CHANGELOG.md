@@ -260,6 +260,18 @@ Two of these move real money and are worth reading before upgrading.
 
 ### @azex/ledger-react — Fixed
 
+- **Breaking**: `HolderTransaction.kind` (and `TransactionList`'s
+  `kindLabels` prop, keyed by it) is now one of a small,
+  deployment-stable vocabulary — `"deposit" | "withdrawal" | "transfer" |
+  "fee" | "adjustment" | "other"` (`core.HolderTxKind`,
+  docs/INVARIANTS.md I-44) — instead of the ledger's internal journal-type
+  UUID. If your app passes `kindLabels` keyed by that UUID (or, from before
+  this cycle, by the journal-type *code* such as `"deposit_confirm"` — both
+  prior shapes silently matched nothing once the server changed under
+  them), rewrite the keys to the vocabulary above, e.g.
+  `kindLabels={{ deposit: "Top up" }}`. No action needed if you only
+  consumed the library's default `kind_label` text. `docs/openapi.yaml`'s
+  `HolderTransaction.kind` schema is updated to a matching `enum`.
 - `ErrorState` gained a Retry action across both skins (previously a dead
   end once an error rendered).
 - `schema.ts` (OpenAPI-generated types) regenerated to match the current

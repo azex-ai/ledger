@@ -57,9 +57,9 @@ func (q *Queries) CreateClassification(ctx context.Context, arg CreateClassifica
 }
 
 const createJournalType = `-- name: CreateJournalType :one
-INSERT INTO journal_types (code, name, uid, display_label)
-VALUES ($1, $2, $3, $4)
-RETURNING id, code, name, is_active, created_at, uid, display_label
+INSERT INTO journal_types (code, name, uid, display_label, holder_kind)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, code, name, is_active, created_at, uid, display_label, holder_kind
 `
 
 type CreateJournalTypeParams struct {
@@ -67,6 +67,7 @@ type CreateJournalTypeParams struct {
 	Name         string      `json:"name"`
 	Uid          pgtype.UUID `json:"uid"`
 	DisplayLabel string      `json:"display_label"`
+	HolderKind   string      `json:"holder_kind"`
 }
 
 func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypeParams) (JournalType, error) {
@@ -75,6 +76,7 @@ func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypePa
 		arg.Name,
 		arg.Uid,
 		arg.DisplayLabel,
+		arg.HolderKind,
 	)
 	var i JournalType
 	err := row.Scan(
@@ -85,6 +87,7 @@ func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypePa
 		&i.CreatedAt,
 		&i.Uid,
 		&i.DisplayLabel,
+		&i.HolderKind,
 	)
 	return i, err
 }
@@ -154,7 +157,7 @@ func (q *Queries) GetClassificationByCode(ctx context.Context, code string) (Cla
 }
 
 const getJournalTypeByCode = `-- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at, uid, display_label
+SELECT id, code, name, is_active, created_at, uid, display_label, holder_kind
 FROM journal_types
 WHERE code = $1
 `
@@ -170,6 +173,7 @@ func (q *Queries) GetJournalTypeByCode(ctx context.Context, code string) (Journa
 		&i.CreatedAt,
 		&i.Uid,
 		&i.DisplayLabel,
+		&i.HolderKind,
 	)
 	return i, err
 }
@@ -282,7 +286,7 @@ func (q *Queries) ListJournalTypeDims(ctx context.Context) ([]ListJournalTypeDim
 }
 
 const listJournalTypes = `-- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at, uid, display_label
+SELECT id, code, name, is_active, created_at, uid, display_label, holder_kind
 FROM journal_types
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY id
@@ -305,6 +309,7 @@ func (q *Queries) ListJournalTypes(ctx context.Context, activeOnly bool) ([]Jour
 			&i.CreatedAt,
 			&i.Uid,
 			&i.DisplayLabel,
+			&i.HolderKind,
 		); err != nil {
 			return nil, err
 		}
@@ -379,5 +384,22 @@ type SetJournalTypeDisplayLabelIfEmptyParams struct {
 // See SetClassificationDisplayLabelIfEmpty.
 func (q *Queries) SetJournalTypeDisplayLabelIfEmpty(ctx context.Context, arg SetJournalTypeDisplayLabelIfEmptyParams) error {
 	_, err := q.db.Exec(ctx, setJournalTypeDisplayLabelIfEmpty, arg.Uid, arg.DisplayLabel)
+	return err
+}
+
+const setJournalTypeHolderKind = `-- name: SetJournalTypeHolderKind :exec
+UPDATE journal_types SET holder_kind = $2 WHERE uid = $1
+`
+
+type SetJournalTypeHolderKindParams struct {
+	Uid        pgtype.UUID `json:"uid"`
+	HolderKind string      `json:"holder_kind"`
+}
+
+// Retags a journal type's holder-facing kind bucket (M-7 fix,
+// docs/INVARIANTS.md I-44). Unlike balance_role's upgrade guard this is not
+// restricted to ” -> <kind> — see core.JournalTypeStore.SetHolderKind's doc.
+func (q *Queries) SetJournalTypeHolderKind(ctx context.Context, arg SetJournalTypeHolderKindParams) error {
+	_, err := q.db.Exec(ctx, setJournalTypeHolderKind, arg.Uid, arg.HolderKind)
 	return err
 }

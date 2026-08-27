@@ -40,9 +40,16 @@ import (
 // caller's responsibility — the ledger only records what was promised, not
 // where the inventory physically lives.
 
+// HolderTxKindOther: a cross-currency conversion is neither money arriving
+// from outside the platform (deposit), leaving it (withdrawal), moving
+// between two holders (transfer), a platform charge (fee), nor a correction
+// (adjustment) — it is its own thing. HolderTxKindOther is the honest
+// bucket rather than forcing a fit; a deployment that wants a dedicated
+// "exchange" kind can add one later (additive, expand-safe — see
+// core.HolderTxKind's doc comment).
 var fxJournalTypes = []JournalTypePreset{
-	{Code: "fx_sell", Name: "FX Sell Leg", DisplayLabel: "Exchange"},
-	{Code: "fx_buy", Name: "FX Buy Leg", DisplayLabel: "Exchange"},
+	{Code: "fx_sell", Name: "FX Sell Leg", DisplayLabel: "Exchange", HolderKind: core.HolderTxKindOther},
+	{Code: "fx_buy", Name: "FX Buy Leg", DisplayLabel: "Exchange", HolderKind: core.HolderTxKindOther},
 }
 
 // fx_sell — user gives up their CCY-A; platform settlement pool absorbs it.

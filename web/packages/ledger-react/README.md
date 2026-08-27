@@ -184,7 +184,7 @@ product and slot in via `actions`.
 import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
 
 <WalletProvider config={{ baseUrl: "/api/v1", getToken: fetchWalletToken }}>
-  <WalletPanel actions={<TopUpButton />} kindLabels={{ deposit_confirm: "Top up" }} />
+  <WalletPanel actions={<TopUpButton />} kindLabels={{ deposit: "Top up" }} />
 </WalletProvider>;
 ```
 
