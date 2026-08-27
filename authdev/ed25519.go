@@ -105,7 +105,13 @@ func (v *LocalVerifier) Verify(ctx context.Context, digest, signature []byte, ke
 	}
 	pub, ok := v.keys[keyID]
 	if !ok {
-		return fmt.Errorf("authdev: unknown key id %q", keyID)
+		// core.AuthVerifier's contract (I-45): this verifier not holding
+		// keyID is a coverage gap (a rotated-out or foreign key), not
+		// tamper evidence -- wrap ErrUnknownAuthKey so callers that need
+		// to tell the two apart (e.g. the unauthorized_journals reconcile
+		// check) can, without this package importing anything beyond
+		// core's sentinels.
+		return fmt.Errorf("authdev: unknown key id %q: %w", keyID, core.ErrUnknownAuthKey)
 	}
 	if !ed25519.Verify(pub, digest, signature) {
 		return fmt.Errorf("authdev: signature verification failed for key id %q", keyID)

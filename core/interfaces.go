@@ -647,6 +647,32 @@ type Attestor interface {
 // AuthVerifier needs only the public key, so verification can run entirely
 // outside the database host -- that independence is the whole point
 // (design doc §7, P5).
+//
+// Verify's returned error MUST distinguish two failure kinds (I-45):
+//   - This verifier does not hold keyID at all -- a key rotated out of
+//     service, or one that belongs to a different deployment/environment.
+//     The error MUST wrap ErrUnknownAuthKey. This is a coverage gap, not
+//     tamper evidence: a caller that only has this verifier's current key
+//     set genuinely cannot certify the signature either way.
+//   - keyID is known, but signature does not verify against digest under
+//     that key. The error MUST NOT wrap ErrUnknownAuthKey -- this is
+//     tamper evidence (the digest, signature, or key material was altered
+//     after signing).
+//
+// A caller that does not need the distinction (e.g. VerifyJournalAuth's
+// default fail-closed behavior) is unaffected either way -- both kinds
+// still produce a non-nil error and both still make the journal
+// unauthorized. The distinction exists for a caller that DOES need it,
+// e.g. service.FullReconciliationService's unauthorized_journals check,
+// which must not report "signed with a key I don't currently hold" (the
+// expected state of every pre-rotation journal after a legitimate key
+// rotation) using the same words it uses for "signature actually invalid"
+// (real tamper evidence) -- conflating the two either drowns tamper
+// evidence in rotation noise, or (if softened to fix that) creates a
+// silent bypass: a forged journal carrying a made-up keyID would look
+// identical to a rotated-out one and could evade tamper reporting
+// entirely. authdev.LocalVerifier is the reference implementation of this
+// contract.
 type AuthVerifier interface {
 	Verify(ctx context.Context, digest, signature []byte, keyID string) error
 }

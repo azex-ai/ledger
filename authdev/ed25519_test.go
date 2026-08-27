@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"testing"
+
+	"github.com/azex-ai/ledger/core"
 )
 
 func testSeed(t *testing.T) []byte {
@@ -48,8 +51,16 @@ func TestNewLocalAttestor_RejectsTamperedDigest(t *testing.T) {
 
 	tampered := append([]byte{}, digest...)
 	tampered[0] ^= 0xFF
-	if err := verifier.Verify(context.Background(), tampered, sig, keyID); err == nil {
-		t.Error("Verify with tampered digest: expected error, got nil")
+	err = verifier.Verify(context.Background(), tampered, sig, keyID)
+	if err == nil {
+		t.Fatal("Verify with tampered digest: expected error, got nil")
+	}
+	// I-45: a known key whose signature fails to verify is tamper evidence,
+	// not a coverage gap -- must NOT wrap ErrUnknownAuthKey, or a caller
+	// like the reconcile unauthorized_journals check would misreport real
+	// tampering as "just register the key".
+	if errors.Is(err, core.ErrUnknownAuthKey) {
+		t.Errorf("Verify with tampered digest under a KNOWN key must not wrap ErrUnknownAuthKey, got: %v", err)
 	}
 }
 
@@ -59,8 +70,15 @@ func TestNewLocalAttestor_RejectsUnknownKeyID(t *testing.T) {
 		t.Fatalf("NewLocalAttestor: %v", err)
 	}
 	digest := []byte("0123456789abcdef0123456789abcdef")
-	if err := verifier.Verify(context.Background(), digest, []byte("not-a-real-signature-but-64-bytes-long-so-it-doesnt-panic-abcd"), "unknown-key"); err == nil {
-		t.Error("Verify with unknown key id: expected error, got nil")
+	err = verifier.Verify(context.Background(), digest, []byte("not-a-real-signature-but-64-bytes-long-so-it-doesnt-panic-abcd"), "unknown-key")
+	if err == nil {
+		t.Fatal("Verify with unknown key id: expected error, got nil")
+	}
+	// I-45: this is a coverage gap (verifier doesn't hold the key), not
+	// tamper evidence -- callers that need to tell the two apart key off
+	// this sentinel.
+	if !errors.Is(err, core.ErrUnknownAuthKey) {
+		t.Errorf("Verify with unknown key id must wrap core.ErrUnknownAuthKey, got: %v", err)
 	}
 }
 
