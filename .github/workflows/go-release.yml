@@ -31,7 +31,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.1'
+          # Must track ci.yml, not a pinned patch: go.work sets a minimum
+          # (currently 1.26.6) and GOTOOLCHAIN=local means a runner with an
+          # older patch refuses to build rather than downloading one. A pin
+          # here silently rots the moment go.work's minimum moves -- and it
+          # only surfaces when someone cuts a tag, which is the worst moment
+          # to find out. check-latest for the same reason ci.yml gives.
+          go-version: '1.26.x'
+          check-latest: true
           cache: true
           cache-dependency-path: go.sum
       - run: go vet ./...
