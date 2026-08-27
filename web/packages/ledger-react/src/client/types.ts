@@ -55,9 +55,13 @@ export interface Reservation {
   account_holder: number;
   currency_uid: string;
   reserved_amount: string;
-  settled_amount: string;
+  // Absent (not "") until a settlement exists — reservationResponse.go
+  // uses `*string`/`omitempty`, so the field is genuinely absent from the
+  // wire, not present-as-empty.
+  settled_amount?: string;
   status: "active" | "settling" | "settled" | "released";
-  journal_uid: string;  // "" = not linked
+  // Absent (not "") until linked — reservationResponse.go: `omitempty`.
+  journal_uid?: string;
   idempotency_key: string;
   expires_at: string;
   created_at: string;
@@ -66,7 +70,10 @@ export interface Reservation {
 
 export interface Lifecycle {
   initial: string;
-  terminal: string[];
+  // Absent when the lifecycle has no terminal states (a classification can
+  // legitimately have zero) — openapi.yaml marks this optional; callers
+  // should default to [] when absent.
+  terminal?: string[];
   transitions: Record<string, string[]>;
 }
 
@@ -82,9 +89,9 @@ export interface Booking {
   status: string;
   channel_name: string;
   channel_ref: string;
-  // reservation_uid / journal_uid are empty strings until linked.
-  reservation_uid: string;  // "" = not linked
-  journal_uid: string;  // "" = not linked
+  // Absent (not "") until linked — bookingResponse.go: `omitempty` on both.
+  reservation_uid?: string;
+  journal_uid?: string;
   idempotency_key: string;
   metadata: Record<string, unknown>;
   expires_at: string;
@@ -102,7 +109,8 @@ export interface Event {
   to_status: string;
   amount: string;
   settled_amount: string;
-  journal_uid: string;  // "" = not linked
+  // Absent (not "") until linked — eventResponse.go: `omitempty`.
+  journal_uid?: string;
   metadata: Record<string, unknown>;
   occurred_at: string;
 }
