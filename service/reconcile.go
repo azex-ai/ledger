@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -1408,6 +1409,24 @@ func (s *FullReconciliationService) runCheckSnapshotIntegrity(ctx context.Contex
 // its stored fields were corrupted/edited after the fact, or it was
 // forged with a mismatched key -- both real tamper evidence.
 //
+// A SIGNED journal (non-empty auth_key_id) that fails core.VerifyJournalAuth
+// splits into the same two kinds I-45 requires AuthVerifier.Verify to
+// distinguish, and this check reports them as two different Finding
+// descriptions rather than collapsing them into one alarming message:
+//   - errors.Is(err, core.ErrUnknownAuthKey): the configured verifier does
+//     not currently hold this journal's key -- the expected, benign state
+//     of every journal signed before a legitimate key rotation. The
+//     Finding says so and tells the operator to register the retired key,
+//     not to go hunting for tampering.
+//   - anything else: the key is known but the signature does not verify --
+//     real tamper evidence, reported the same way this check always has.
+//
+// Both kinds still set Passed=false (CheckResult's own contract: Passed is
+// false whenever any Finding was detected) and are never silently dropped
+// -- collapsing an unrecognized key into a quiet skip, the same treatment
+// unsigned journals get above, would let a journal forged under a made-up
+// keyID evade this check entirely (I-45).
+//
 // If SetAuthCheck was never called (journals or verifier nil), the check
 // is skipped outright (Complete=false) -- there is nothing to verify
 // against, and reporting Passed=true would be indistinguishable from
@@ -1453,6 +1472,20 @@ func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Con
 		input := core.JournalInputFromRecord(j, entries)
 		if err := core.VerifyJournalAuth(ctx, s.verifier, input, j.EffectiveAt, j.AuthDigest, j.AuthSignature, j.AuthKeyID); err != nil {
 			result.Passed = false
+			if errors.Is(err, core.ErrUnknownAuthKey) {
+				// I-45: this verifier does not currently hold j.AuthKeyID --
+				// a rotated-out or foreign key, not tamper evidence. Flagged
+				// (never silently skipped, unlike the never-signed case
+				// above) so the fleet-wide scan cannot be evaded by signing
+				// a forged journal under a made-up key id, but worded so an
+				// operator's next move is "register the key", not "go
+				// investigate a forgery".
+				s.logger.Warn("service: reconcile: journal signed by unrecognized key", "journal_uid", j.UID, "key_id", j.AuthKeyID, "error", err)
+				result.Findings = append(result.Findings, core.Finding{
+					Description: fmt.Sprintf("journal %s: signed with key id %q that this verifier does not recognize (a rotated-out or foreign signing key) -- register the key to restore verification coverage; this is not by itself evidence of tampering", j.UID, j.AuthKeyID),
+				})
+				continue
+			}
 			s.logger.Warn("service: reconcile: unauthorized journal", "journal_uid", j.UID, "error", err)
 			result.Findings = append(result.Findings, core.Finding{
 				Description: fmt.Sprintf("journal %s: claims a signature but fails authorization verification", j.UID),

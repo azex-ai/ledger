@@ -143,6 +143,66 @@ func TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature(t *testing
 	assert.False(t, foundGenuineFlagged, "the genuinely signed journal must not be flagged: %+v", check.Findings)
 }
 
+// TestFullReconciliation_UnauthorizedJournals_FlagsUnknownKeyAsDistinctFromForgery
+// pins I-45: a journal genuinely signed under a key the configured
+// AuthVerifier does not currently hold (the state every journal is left in
+// after a legitimate key rotation retires its old key) must be flagged --
+// never silently skipped like a never-signed journal, or a forged journal
+// carrying a made-up auth_key_id could evade this check entirely -- but
+// under a Finding a reader can tell apart from real tamper evidence, so
+// on-call registers the retired key instead of chasing a forgery that was
+// never there.
+func TestFullReconciliation_UnauthorizedJournals_FlagsUnknownKeyAsDistinctFromForgery(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupAttestFixture(t, pool, ctx)
+
+	// rotatedAttestor genuinely signs a journal under a key id the
+	// reconcile check's verifier below never learns about -- simulating
+	// the fleet state right after that key was rotated out.
+	rotatedAttestor, _, err := ed25519KeyPair(t, "verify-key-uj-rotated-out")
+	require.NoError(t, err)
+	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(rotatedAttestor)
+	rotated, err := ledgerStore.PostJournal(ctx, f.journalInput(9107, postgrestest.UniqueKey("uj-rotated")))
+	require.NoError(t, err)
+
+	// currentVerifier is a genuinely different keypair (the "currently
+	// registered" key set) that never had the rotated-out key added to it
+	// -- exactly what SetAuthCheck would be wired with post-rotation.
+	_, currentVerifier, err := ed25519KeyPair(t, "verify-key-uj-current")
+	require.NoError(t, err)
+
+	rollup := postgres.NewRollupAdapter(pool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pool)
+	queries := postgres.NewQueryStore(pool)
+	engine := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, engine)
+	full.SetAuthCheck(queries, currentVerifier)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "unauthorized_journals")
+	assert.True(t, check.Complete)
+
+	const tamperPhrase = "claims a signature but fails authorization verification"
+	var foundUnknownKeyFinding bool
+	for _, finding := range check.Findings {
+		if !containsUID(finding.Description, rotated.UID) {
+			continue
+		}
+		foundUnknownKeyFinding = true
+		// Must not be silently absent (b) ...
+		assert.Contains(t, finding.Description, "does not recognize",
+			"an unknown-key journal must be flagged with its own distinct wording: %+v", finding)
+		// ... and must not be worded as tamper evidence (not conflated with (a)).
+		assert.NotContains(t, finding.Description, tamperPhrase,
+			"an unknown-key journal must not be worded as a forged/tampered signature: %+v", finding)
+	}
+	require.True(t, foundUnknownKeyFinding,
+		"a journal signed under a key this verifier does not hold must produce a finding, not be silently skipped: %+v", check.Findings)
+}
+
 func containsUID(s, uid string) bool {
 	return len(uid) > 0 && len(s) >= len(uid) && (func() bool {
 		for i := 0; i+len(uid) <= len(s); i++ {

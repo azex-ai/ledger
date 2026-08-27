@@ -30,6 +30,19 @@ var (
 	// excluding the failing journal (contracts §W2-1; see
 	// docs/INVARIANTS.md I-32).
 	ErrUnauthorizedJournal = errors.New("journal missing or has invalid authorization signature")
+	// ErrUnknownAuthKey is returned (wrapped) by an AuthVerifier
+	// implementation's Verify when it does not hold the given keyID at all
+	// -- a key that was rotated out, or belongs to a different deployment
+	// -- as opposed to a keyID it does hold whose signature simply fails to
+	// verify (see docs/INVARIANTS.md I-45). VerifyJournalAuth propagates
+	// this wrapped inside ErrUnauthorizedJournal (Go's multi-%w chaining
+	// keeps both errors.Is-able), so every existing caller that only checks
+	// ErrUnauthorizedJournal keeps its current fail-closed behavior
+	// unchanged; a caller that needs to tell "cannot verify, key unknown"
+	// apart from "verified and rejected, tampered" -- e.g.
+	// service.FullReconciliationService's unauthorized_journals check --
+	// checks for this sentinel specifically.
+	ErrUnknownAuthKey = errors.New("auth verifier does not recognize this key id")
 	// ErrRollupPending is returned by CheckpointIntegrityStore.RebuildCheckpoint
 	// when a rollup_queue item is still pending or claimed for the dimension
 	// being rebuilt (see docs/INVARIANTS.md I-23). A rollup worker may have
@@ -96,7 +109,8 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrAccountFrozen),
 		errors.Is(err, ErrAccountClosed),
 		errors.Is(err, ErrPeriodClosed),
-		errors.Is(err, ErrUnauthorizedJournal):
+		errors.Is(err, ErrUnauthorizedJournal),
+		errors.Is(err, ErrUnknownAuthKey):
 		return false
 	default:
 		return true

@@ -2185,7 +2185,11 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   `TestFullReconciliation_UnauthorizedJournals_SkipsNeverSignedJournal` /
   `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
   the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
-  evidence / page-limit-honesty behavior.
+  evidence / page-limit-honesty behavior. (A signed-but-unrecognized-key
+  journal — e.g. one signed before a key rotation — is also flagged, never
+  silently skipped like a never-signed journal, but with wording distinct
+  from tamper evidence: see I-45's
+  `TestFullReconciliation_UnauthorizedJournals_FlagsUnknownKeyAsDistinctFromForgery`.)
 
 ---
 
@@ -3729,6 +3733,108 @@ pre-existing non-empty value rather than silently overwriting it.
 > `kind: "other"` on the wire, and both b-directions (an explicitly tagged
 > journal type; one that only ever touches a role-less classification) are
 > confirmed never flagged.
+
+---
+
+## I-45: An AuthVerifier distinguishes "I don't hold this key" from "this signature is invalid", and the unauthorized_journals check reports them as different findings
+
+(Team Lead, 2026-08-27, traced from a CI red: `service`'s `-race` full-package
+run non-deterministically flagged genuinely signed journals across
+concurrent tests as tampered — because every test in the package generates
+its own ed25519 keypair, and `runCheckUnauthorizedJournals` could not tell
+"I don't have this journal's key" apart from "I have this journal's key and
+the signature is wrong".)
+
+**Rule**: `core.AuthVerifier.Verify` MUST return an error wrapping
+`core.ErrUnknownAuthKey` when it does not hold the given `keyID` at all —
+distinct from a `keyID` it does hold whose signature simply fails to
+verify, which must NOT wrap `ErrUnknownAuthKey`. `core.VerifyJournalAuth`
+propagates this through Go's multi-`%w` wrapping (`fmt.Errorf("...: %w: %w",
+err, ErrUnauthorizedJournal)`), so `errors.Is(err, core.ErrUnauthorizedJournal)`
+still succeeds for both kinds — every existing caller that only checks the
+coarse sentinel (`VerifiedBalanceReader`, I-32's fail-closed balance gate)
+keeps its current behavior with zero code change. A caller that needs the
+finer distinction checks `errors.Is(err, core.ErrUnknownAuthKey)`
+specifically.
+
+`service.FullReconciliationService`'s `unauthorized_journals` check
+(I-32) is that caller. A signed journal (non-empty `auth_key_id`) that
+fails `core.VerifyJournalAuth` produces one of two Finding shapes:
+
+- `errors.Is(err, core.ErrUnknownAuthKey)`: reported as "signed with a key
+  id this verifier does not recognize ... register the key ... not by
+  itself evidence of tampering". This is the expected, benign state of
+  every journal signed before a legitimate key rotation retired its old
+  key. It still sets `Passed=false` and is never silently dropped — see
+  Why below for why a quiet skip here would be dangerous, not merely
+  imprecise.
+- anything else: reported exactly as before — "claims a signature but
+  fails authorization verification" — real tamper evidence.
+
+Both are distinct Finding descriptions in the same `CheckResult`, never
+conflated into one alarming or one silent message.
+
+**Why**: Before this fix, `runCheckUnauthorizedJournals` treated any
+non-nil `verifier.Verify` error identically — reporting "claims a
+signature but fails authorization verification" (tamper language)
+regardless of cause. Two real deployments hit this:
+
+1. **Key rotation.** A fleet that rotates its P5 signing key leaves every
+   journal signed before the rotation permanently unverifiable by a
+   verifier that only holds the current key. Every one of those journals
+   was reported as tampered, forever, on every reconcile run. A check that
+   is always red after routine, expected maintenance gets muted by
+   operators — which is exactly how the *real* signal this check exists
+   for (I-32: actual forged/corrupted journals) dies unnoticed
+   (`working-agreements.md` §3: "a check that screams at everything gets
+   ignored").
+2. **Shared test key material.** `service`'s test package has many tests
+   that each call `ed25519KeyPair(t, someKeyID)` and post journals signed
+   under their own local keypair; when the full package runs under
+   `-race`, `runCheckUnauthorizedJournals` in one test could observe
+   journals another concurrent test posted under a key its own verifier
+   never held — the same "unknown key" shape as production key rotation,
+   misreported as tampering, and non-deterministically failing CI (`go
+   test -race ./service/...` red; any single test run in isolation green
+   — the exact "single test green, full package red" divergence that
+   originally surfaced this bug).
+
+The tempting one-line fix — treat an unknown key like a never-signed
+journal and skip it silently — trades this false positive for a worse
+false negative: an attacker who forges a journal with a fabricated
+`auth_key_id` (one that was never a real key at all, not even a
+rotated-out one) would look identical to a rotated-out key under that
+fix and evade `unauthorized_journals` entirely — the exact "误报换成漏报"
+shape `~/.claude/rules/working-agreements.md` §2 requires catching before
+adopting an evaluator's finding. The fix in this invariant keeps every
+unknown-key journal visible in `Findings` (so nothing evades the check)
+while giving it wording an operator acts on correctly (register the key)
+instead of wording that sends them chasing a forgery that was never
+there.
+
+**Enforced by**: `core.ErrUnknownAuthKey` (`core/errors.go`);
+`core.AuthVerifier`'s interface doc contract (`core/interfaces.go`);
+`authdev.LocalVerifier.Verify` (`authdev/ed25519.go`) — the reference
+implementation, wraps `ErrUnknownAuthKey` on an unrecognized `keyID`, does
+not wrap it when a known key's signature fails `ed25519.Verify`;
+`service.FullReconciliationService.runCheckUnauthorizedJournals`
+(`service/reconcile.go`) — branches on `errors.Is(err,
+core.ErrUnknownAuthKey)` to choose the Finding wording, in both cases
+still setting `Passed=false` (never a silent skip, unlike the
+never-signed-at-all case this same function already handles per I-32).
+
+**Pinned by**:
+- `authdev.TestNewLocalAttestor_RejectsUnknownKeyID` — an unrecognized
+  `keyID` wraps `core.ErrUnknownAuthKey`.
+- `authdev.TestNewLocalAttestor_RejectsTamperedDigest` — a KNOWN key's
+  failed verification does NOT wrap `core.ErrUnknownAuthKey` (the negative
+  half of the same contract).
+- `service.TestFullReconciliation_UnauthorizedJournals_FlagsUnknownKeyAsDistinctFromForgery`
+  — a journal genuinely signed under a key the check's verifier does not
+  hold is flagged (never silently skipped), with wording distinct from,
+  and never overlapping, the forged-signature tamper wording
+  `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature`
+  already pins.
 
 ## How to add a new invariant
 
