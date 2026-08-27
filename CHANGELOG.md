@@ -14,7 +14,28 @@ tags both at the same X.Y.Z (npm 0.4.0 / 0.5.0 were never published; the
 npm line jumps 0.3.0 → 0.5.1 to converge with the Go module). Entries
 below note which artifact a change affects.
 
-## [Unreleased]
+## [0.6.0] — 2026-08-27
+
+> ### ⚠️ 升级前必读：两条要改**数据**，不只是改代码
+>
+> 其余的破坏性变更编译器或测试会替你抓住。**这两条不会** —— 漏掉就是账目错误：
+>
+> 1. **`transfer_out` / `transfer_in` / `fee_charge` 的借贷方向修正。**
+>    这三个已发货 preset 的方向与 `main_wallet` 的 `normal_side` 相反：实测一笔 100 元的
+>    P2P 转账，**付款方 +100、收款方 −100**；收手续费给用户**加**钱。升级后新 journal 方向
+>    正确，但**既有的错误 journal 不会自愈** —— 你需要对它们发冲销。
+> 2. **分数冲销的聚合口径修正。**
+>    同一维度有多条 entry 时，「部分冲销后再冲销剩余全部」会静默少冲并返回成功。
+>    **请检查含重复维度的既有冲销**。
+>
+> 完整的 23 条破坏性变更、按「消费方要做什么」分类：
+> `docs/plans/2026-08-27-release-readiness.md` §3；逐条原文见
+> `docs/audits/2026-08-25-financial-engineering/TODO.md` §10。
+>
+> **本版本已知敞开项**（不是缺陷，是尚未做的工作，列出以免被绿灯的测试掩盖）：
+> 外部锚定没有生产实现（`anchordev` 是 DEV/TEST ONLY，防篡改链最外环缺失）；
+> 本库尚无真实生产消费方，全部正确性由测试而非流量验证。见评估文档 §4。
+
 
 Two release-sized bodies of work landed this cycle. **Tamper-evident ledger**
 (2026-08-21, `docs/plans/2026-08-21-tamper-evident-ledger-design.md`) answers
