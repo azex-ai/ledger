@@ -123,6 +123,48 @@ func TestCanonicalBatchDigest_DeterministicAcrossCalls(t *testing.T) {
 	}
 }
 
+// TestCanonicalBatchDigest_MicrosecondPrecisionOnly is a regression test
+// for board #51 (the same digest-precision bug core/auth_test.go's
+// TestCanonicalJournalDigest_MicrosecondPrecisionOnly pins for P5, applied
+// here to P6's batch digest -- see encodeAttestedEntry's doc comment for
+// why entry.EffectiveAt going through canonicalTimestamp matters even
+// though every in-repo caller already sources it from a TIMESTAMPTZ
+// column: the --reference-dir localization fallback in cmd/ledger-cli
+// parses EffectiveAt from an operator-supplied JSON dump, which is not
+// guaranteed to be microsecond-aligned).
+//
+// Constructed with an explicit non-zero nanosecond remainder, never via
+// time.Now(), so this is red on every platform -- including macOS, where
+// time.Now() itself only ever returns microsecond-aligned values (exactly
+// why this class of bug shipped undetected; working-agreements.md §3).
+func TestCanonicalBatchDigest_MicrosecondPrecisionOnly(t *testing.T) {
+	microAligned := time.Date(2026, 8, 21, 12, 0, 0, 123456000, time.UTC)
+	subMicroJitter := time.Date(2026, 8, 21, 12, 0, 0, 123456789, time.UTC)
+
+	entryAt := func(at time.Time) []AttestedEntry {
+		return []AttestedEntry{
+			{EntryID: 100, JournalID: 50, AccountHolder: 1001, CurrencyID: 1, ClassificationID: 2, EntryType: EntryTypeDebit, Amount: decimal.RequireFromString("100.5"), EffectiveAt: at},
+		}
+	}
+
+	d1, err := CanonicalBatchDigest(entryAt(microAligned))
+	if err != nil {
+		t.Fatalf("CanonicalBatchDigest: %v", err)
+	}
+	d2, err := CanonicalBatchDigest(entryAt(subMicroJitter))
+	if err != nil {
+		t.Fatalf("CanonicalBatchDigest: %v", err)
+	}
+	if hex.EncodeToString(d1) != hex.EncodeToString(d2) {
+		t.Errorf(
+			"CanonicalBatchDigest depends on sub-microsecond digits (micro-aligned=%x, jittered=%x) -- "+
+				"Postgres TIMESTAMPTZ cannot store them, so recomputing this digest from a persisted or "+
+				"externally-supplied EffectiveAt can never reproduce a digest built over them",
+			d1, d2,
+		)
+	}
+}
+
 func TestCanonicalBatchDigest_DifferentEntriesDifferentDigest(t *testing.T) {
 	a, err := CanonicalBatchDigest(twoEntryBatch())
 	if err != nil {

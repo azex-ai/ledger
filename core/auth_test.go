@@ -346,6 +346,87 @@ func TestCanonicalJournalDigest_DeterministicAcrossCalls(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Digest precision (board #51): CanonicalJournalDigest/VerifyJournalAuth
+// must be insensitive to sub-microsecond digits, matching the resolution
+// TIMESTAMPTZ actually stores. Root cause: the digest formatted effectiveAt
+// with time.RFC3339Nano directly, so a caller's in-memory time.Time --
+// signed BEFORE it round-trips the DB -- could carry a nanosecond remainder
+// no TIMESTAMPTZ column can ever persist; every real verifier can only
+// reconstruct effectiveAt by reading it back from that column, so the
+// recomputed digest silently diverged from what was signed. macOS's
+// time.Now() happens to already be microsecond-aligned, so a reproduction
+// using time.Now() is green there and only red on a platform with genuine
+// nanosecond clock resolution (Linux/production) -- exactly the shape
+// working-agreements.md §3 warns against ("在被测试的地方能过、在真正运行的
+// 地方不能"). Both tests below construct effectiveAt explicitly with a
+// non-zero nanosecond remainder instead, so they are red on every platform,
+// including macOS, before canonicalTimestamp exists.
+// ---------------------------------------------------------------------------
+
+// stubAcceptVerifier always accepts -- these tests are about digest
+// reconstruction, not signature cryptography (that is covered end-to-end,
+// with the real ed25519 dev Attestor/AuthVerifier pair, by
+// postgres/auth_pin_test.go).
+type stubAcceptVerifier struct{}
+
+func (stubAcceptVerifier) Verify(ctx context.Context, digest, signature []byte, keyID string) error {
+	return nil
+}
+
+func TestCanonicalJournalDigest_MicrosecondPrecisionOnly(t *testing.T) {
+	input := goldenJournalInput()
+
+	// Same instant down to the microsecond; subMicroJitter differs only in
+	// its nanosecond remainder -- exactly what a genuine nanosecond-clock
+	// platform produces and TIMESTAMPTZ can never store.
+	microAligned := time.Date(2026, 8, 21, 12, 0, 0, 123456000, time.UTC)
+	subMicroJitter := time.Date(2026, 8, 21, 12, 0, 0, 123456789, time.UTC)
+
+	d1, err := CanonicalJournalDigest(input, microAligned)
+	if err != nil {
+		t.Fatalf("CanonicalJournalDigest: %v", err)
+	}
+	d2, err := CanonicalJournalDigest(input, subMicroJitter)
+	if err != nil {
+		t.Fatalf("CanonicalJournalDigest: %v", err)
+	}
+	if hex.EncodeToString(d1) != hex.EncodeToString(d2) {
+		t.Errorf(
+			"CanonicalJournalDigest depends on sub-microsecond digits (micro-aligned=%x, jittered=%x) -- "+
+				"Postgres TIMESTAMPTZ cannot store them, so a verifier reconstructing effectiveAt from a "+
+				"persisted row can never reproduce a digest signed with them",
+			d1, d2,
+		)
+	}
+}
+
+// TestVerifyJournalAuth_SurvivesTimestamptzRoundTrip is the end-to-end shape
+// of the production bug: sign with the exact in-memory instant a
+// nanosecond-resolution clock would produce, then verify with that SAME
+// instant floored to microsecond -- what every real verifier actually gets,
+// since effectiveAt is always reconstructed by reading a TIMESTAMPTZ column
+// back (which already discarded the nanosecond remainder at INSERT time;
+// see postgres's pgx Timestamptz encoder). Before canonicalTimestamp
+// existed, this failed with ErrUnauthorizedJournal on any platform whose
+// clock could produce signedAt in the first place.
+func TestVerifyJournalAuth_SurvivesTimestamptzRoundTrip(t *testing.T) {
+	input := goldenJournalInput()
+
+	signedAt := time.Date(2026, 8, 21, 12, 0, 0, 123456789, time.UTC) // what a real clock signed with
+	storedAt := signedAt.Truncate(time.Microsecond)                   // what TIMESTAMPTZ actually persisted and a verifier reads back
+
+	digest, err := CanonicalJournalDigest(input, signedAt)
+	if err != nil {
+		t.Fatalf("CanonicalJournalDigest: %v", err)
+	}
+
+	err = VerifyJournalAuth(context.Background(), stubAcceptVerifier{}, input, storedAt, digest, []byte("sig"), "key-1")
+	if err != nil {
+		t.Errorf("VerifyJournalAuth failed after a TIMESTAMPTZ round trip: %v -- a journal signed with a real clock's nanosecond precision must still verify once effectiveAt has been persisted and re-read at microsecond precision", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // VerifyJournalAuth
 //
 // Note: there is no AuthPolicy / AttestorFailureMode / SignatureRequirement

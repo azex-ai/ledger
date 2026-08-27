@@ -119,6 +119,49 @@ func bigIntToFixedTwosComplement(v *big.Int, size int) ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical timestamp encoding
+// ---------------------------------------------------------------------------
+
+// canonicalTimestamp normalizes t to the exact instant this package's
+// digests encode AND the exact instant a TIMESTAMPTZ column can ever
+// persist: UTC, floored (never rounded) to microsecond resolution -- the
+// same floor pgx's binary Timestamptz encoder performs when writing a Go
+// time.Time to Postgres (ts.Time.Nanosecond()/1000, integer division; see
+// jackc/pgx/v5/pgtype/timestamptz.go's encodePlanTimestamptzCodecBinary).
+//
+// Without this, CanonicalJournalDigest/encodeAttestedEntry signed over
+// whatever sub-microsecond digits the caller's in-memory time.Time
+// happened to carry -- fine on macOS, where time.Now() already returns
+// microsecond-aligned values, so the bug was invisible in local dev; wrong
+// on Linux (production), which has genuine nanosecond clock resolution: a
+// digest signed over the true nanosecond instant can never match the
+// digest a verifier recomputes from that same instant AFTER it has been
+// stored in and read back from a TIMESTAMPTZ column, because storage
+// itself already discarded those digits. Every downstream verifier
+// (VerifyJournalAuth via JournalAuthMaterial, VerifyLedger, RunAttestBatch's
+// T4 verdict cache) can only ever reconstruct effectiveAt by reading it
+// back from the DB -- so on any deployment with real sub-microsecond clock
+// resolution, every signed-then-verified journal failed. Applying this
+// floor before encoding makes the digest depend only on the instant
+// Postgres actually stores, on every platform.
+//
+// No new domain separator accompanies this fix (contrast authDigestDomain's
+// V1->current bump): for any effectiveAt that was already microsecond-
+// aligned -- every instant that has round-tripped through a TIMESTAMPTZ
+// column, and every instant macOS's time.Now() ever produced -- this floor
+// is a no-op, so the digest bytes are unchanged and every signature that
+// ever verified successfully keeps verifying. For an effectiveAt with a
+// genuine nanosecond remainder (only reachable pre-fix on a platform with
+// sub-microsecond clock resolution, i.e. Linux/production), VerifyJournalAuth
+// was already failing before this change -- there is no passing verification
+// state this fix could invalidate. A domain separator exists to mark "old
+// bytes mean something different now"; here old bytes for the only case
+// that ever verified mean exactly the same thing.
+func canonicalTimestamp(t time.Time) time.Time {
+	return t.UTC().Truncate(time.Microsecond)
+}
+
+// ---------------------------------------------------------------------------
 // Canonical journal digest
 // ---------------------------------------------------------------------------
 
@@ -195,7 +238,7 @@ const authDigestDomain = byte(0x10)
 //	  LP(input.IdempotencyKey)
 //	  BE64(input.ActorID)                         -- bit pattern of the int64
 //	  LP(input.Source)
-//	  LP(effectiveAt.UTC().Format(RFC3339Nano))
+//	  LP(canonicalTimestamp(effectiveAt).Format(RFC3339Nano))
 //	  LP(input.ReversalOfUID)                      -- "" for original journals
 //	  BE64(len(entries))
 //	  for each entry, sorted by (AccountHolder, CurrencyUID,
@@ -224,7 +267,7 @@ func CanonicalJournalDigest(input JournalInput, effectiveAt time.Time) ([]byte, 
 	writeLenPrefixed(&buf, input.IdempotencyKey)
 	writeBE64(&buf, uint64(input.ActorID))
 	writeLenPrefixed(&buf, input.Source)
-	writeLenPrefixed(&buf, effectiveAt.UTC().Format(time.RFC3339Nano))
+	writeLenPrefixed(&buf, canonicalTimestamp(effectiveAt).Format(time.RFC3339Nano))
 	writeLenPrefixed(&buf, input.ReversalOfUID)
 
 	entries := make([]EntryInput, len(input.Entries))
