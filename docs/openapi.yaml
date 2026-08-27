@@ -1459,7 +1459,7 @@ components:
       required: [uid, kind, kind_label, direction, amount, currency_uid, currency_code, occurred_at, reversal_of_uid, memo]
       properties:
         uid: { type: string, format: uuid, description: "Journal uid — trace anchor, safe to display." }
-        kind: { type: string, format: uuid, description: "journal_type_uid -- a stable per-deployment key for product-side label overrides / i18n. Deliberately opaque: it does not reveal the ledger's internal journal-type code (see kind_label for the display text)." }
+        kind: { type: string, enum: [deposit, withdrawal, transfer, fee, adjustment, other], example: "deposit", description: "Small, deployment-stable product vocabulary (core.HolderTxKind, M-7 fix, docs/INVARIANTS.md I-44) a host app can hardcode a label-override map against. Never the ledger's internal journal-type code or uid (see kind_label for the display text)." }
         kind_label: { type: string, example: "Deposit", description: "Library-side default display label." }
         direction: { type: string, enum: [in, out] }
         amount: { $ref: "#/components/schemas/Decimal", description: "Absolute net amount for this (journal, currency)." }

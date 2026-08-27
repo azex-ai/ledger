@@ -187,11 +187,12 @@ func (s *fakeJournalTypeStore) CreateJournalType(_ context.Context, input core.J
 		return existing, nil
 	}
 	journalType := &core.JournalType{
-		UID:       fmt.Sprintf("jt-%d", s.nextUID),
-		Code:      input.Code,
-		Name:      input.Name,
-		IsActive:  true,
-		CreatedAt: time.Now(),
+		UID:        fmt.Sprintf("jt-%d", s.nextUID),
+		Code:       input.Code,
+		Name:       input.Name,
+		IsActive:   true,
+		HolderKind: input.HolderKind,
+		CreatedAt:  time.Now(),
 	}
 	s.nextUID++
 	s.journalTypes[input.Code] = journalType
@@ -212,6 +213,16 @@ func (s *fakeJournalTypeStore) SetDisplayLabelIfEmpty(_ context.Context, uid str
 			if jt.DisplayLabel == "" {
 				jt.DisplayLabel = label
 			}
+			return nil
+		}
+	}
+	return core.ErrNotFound
+}
+
+func (s *fakeJournalTypeStore) SetHolderKind(_ context.Context, uid string, kind core.HolderTxKind) error {
+	for _, jt := range s.journalTypes {
+		if jt.UID == uid {
+			jt.HolderKind = kind
 			return nil
 		}
 	}

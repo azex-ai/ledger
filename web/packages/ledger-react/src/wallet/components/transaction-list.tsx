@@ -18,9 +18,17 @@ import { useWalletTransactions } from "../hooks";
 
 export interface TransactionListProps {
   /**
-   * Label overrides keyed by the stable `kind` code — the product-side
-   * i18n/wording anchor (e.g. `{ deposit_confirm: "Top up" }`). Falls back
-   * to the library's `kind_label`.
+   * Label overrides keyed by `kind`, a small, deployment-stable vocabulary
+   * (`"deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" |
+   * "other"` — see `core.HolderTxKind`, docs/INVARIANTS.md I-44) —
+   * the product-side i18n/wording anchor (e.g. `{ deposit: "Top up" }`).
+   * Falls back to the library's `kind_label`.
+   *
+   * `kind` was previously the ledger's internal journal-type UUID (a
+   * different, opaque value per deployment) — a `kindLabels` map keyed by
+   * that shape can never match anything under this version and must be
+   * rewritten to the vocabulary above. See this package's CHANGELOG for the
+   * migration note.
    */
   kindLabels?: Record<string, string>;
   /** Full-row custom renderer (escape hatch); the default row otherwise. */

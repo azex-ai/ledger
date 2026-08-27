@@ -296,6 +296,10 @@ func (m *mockJournalTypeStore) SetDisplayLabelIfEmpty(ctx context.Context, uid s
 	return nil
 }
 
+func (m *mockJournalTypeStore) SetHolderKind(ctx context.Context, uid string, kind core.HolderTxKind) error {
+	return nil
+}
+
 func (m *mockJournalTypeStore) DeactivateJournalType(ctx context.Context, uid string) error {
 	return nil
 }

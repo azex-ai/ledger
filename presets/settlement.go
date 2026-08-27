@@ -10,8 +10,12 @@ import (
 // The "settlement" classification is defined in transfer.go because it is
 // also used by the transfer bundle; importing it here would create a duplicate.
 // Both bundles share the same classification declaration via combineClassifications.
+// HolderTxKindDeposit: from the receiving holder's perspective this is
+// external funds landing in their spendable balance, the same shape as a
+// deposit — DisplayLabel ("Payment") carries the more specific product
+// wording; HolderKind carries the coarse bucket.
 var settlementJournalTypes = []JournalTypePreset{
-	{Code: "checkout_settlement", Name: "Checkout Settlement", DisplayLabel: "Payment"},
+	{Code: "checkout_settlement", Name: "Checkout Settlement", DisplayLabel: "Payment", HolderKind: core.HolderTxKindDeposit},
 }
 
 // settlementTemplates: merchant settlement with optional fee leg.

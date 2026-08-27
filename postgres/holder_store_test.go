@@ -28,8 +28,9 @@ type holderFixture struct {
 	holder  int64
 	usdUID  string
 	eurUID  string
-	jtUID   string // journal type WITH display_label "Deposit"
-	jtPlain string // journal type WITHOUT display_label
+	jtUID   string // journal type WITH display_label "Deposit", untagged holder_kind
+	jtPlain string // journal type WITHOUT display_label, untagged holder_kind
+	jtWD    string // journal type tagged holder_kind "withdrawal"
 	wallet  string // available role
 	locked  string // locked role
 	pending string // pending role
@@ -51,6 +52,7 @@ func seedHolderFixture(t *testing.T) (holderFixture, context.Context) {
 		eurUID:  postgrestest.SeedCurrency(t, pool, "EUR", "Euro"),
 		jtUID:   postgrestest.SeedJournalType(t, pool, "ht_deposit", "Holder Deposit"),
 		jtPlain: postgrestest.SeedJournalType(t, pool, "ht_misc", "Misc Operation"),
+		jtWD:    postgrestest.SeedJournalTypeWithHolderKind(t, pool, "ht_withdraw", "Holder Withdraw", "withdrawal"),
 		wallet:  postgrestest.SeedClassificationWithRole(t, pool, "main_wallet", "Main Wallet", "debit", false, "available"),
 		locked:  postgrestest.SeedClassificationWithRole(t, pool, "locked", "Locked", "debit", false, "locked"),
 		pending: postgrestest.SeedClassificationWithRole(t, pool, "pending", "Pending", "credit", false, "pending"),
@@ -146,19 +148,43 @@ func TestHolderTransactionsProjection(t *testing.T) {
 	assert.Equal(t, jDeposit.UID, items[4].UID)
 	assert.Equal(t, core.HolderTransactionIn, items[4].Direction)
 	assert.Equal(t, "Deposit", items[4].KindLabel, "journal type display_label wins")
-	// Kind is the journal type's uid, not its code -- the code
-	// ("ht_deposit") narrates how the ledger produced the balance, which the
-	// holder-facing surface must not do (~/.claude/rules/user-facing-surfaces.md;
-	// see server/openapi_contract_test.go / postgres/sql/queries/holder.sql
-	// for the fix this pins).
-	assert.Equal(t, f.jtUID, items[4].Kind)
+	// Kind is the journal type's holder_kind (M-7 fix, docs/INVARIANTS.md
+	// I-44), never its code ("ht_deposit" narrates how the ledger produced
+	// the balance -- ~/.claude/rules/user-facing-surfaces.md) and never its
+	// uid (opaque and per-deployment-random -- unwriteable as a literal in a
+	// host app's kindLabels map, the defect this fix closes). f.jtUID was
+	// seeded via SeedJournalType with holder_kind left untagged (''), and
+	// the read path must never let that leak onto the wire as an empty
+	// string -- it reads as the disclosed generic bucket instead.
+	assert.Equal(t, "other", items[4].Kind, "untagged holder_kind reads as the disclosed 'other' bucket, not '' and not the journal type's uid")
 	assert.Empty(t, items[4].ReversalOfUID)
 
 	// User-facing surface guard: no internal vocabulary leaks through fields.
 	for _, it := range items {
 		assert.NotContains(t, it.KindLabel, "debit")
 		assert.NotContains(t, it.KindLabel, "credit")
+		assert.NotEqual(t, "", it.Kind, "kind must never be the empty string on the wire")
+		assert.NotEqual(t, f.jtUID, it.Kind, "kind must never be the journal type's internal uid")
 	}
+}
+
+// TestHolderTransactionsKindIsExplicitVocabulary pins the other half of the
+// M-7 fix: a journal type that DOES declare a holder_kind must have that
+// exact value pass through untouched -- proving the 'other' fallback above
+// is specific to untagged rows, not a blanket rewrite.
+func TestHolderTransactionsKindIsExplicitVocabulary(t *testing.T) {
+	f, ctx := seedHolderFixture(t)
+
+	j := f.post(t, ctx, f.jtWD, "ht-kind-wd", []core.EntryInput{
+		{AccountHolder: f.holder, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(9)},
+		{AccountHolder: -f.holder, CurrencyUID: f.usdUID, ClassificationUID: f.system, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(9)},
+	})
+
+	items, _, err := f.ledger.ListHolderTransactions(ctx, f.holder, "", 10)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, j.UID, items[0].UID)
+	assert.Equal(t, "withdrawal", items[0].Kind, "an explicitly tagged journal type's holder_kind passes through unchanged")
 }
 
 func TestHolderTransactionsCursor(t *testing.T) {

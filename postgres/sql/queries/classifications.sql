@@ -36,16 +36,22 @@ WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;
 
 -- name: CreateJournalType :one
-INSERT INTO journal_types (code, name, uid, display_label)
-VALUES ($1, $2, $3, $4)
-RETURNING id, code, name, is_active, created_at, uid, display_label;
+INSERT INTO journal_types (code, name, uid, display_label, holder_kind)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, code, name, is_active, created_at, uid, display_label, holder_kind;
 
 -- name: SetJournalTypeDisplayLabelIfEmpty :exec
 -- See SetClassificationDisplayLabelIfEmpty.
 UPDATE journal_types SET display_label = $2 WHERE uid = $1 AND display_label = '';
 
+-- name: SetJournalTypeHolderKind :exec
+-- Retags a journal type's holder-facing kind bucket (M-7 fix,
+-- docs/INVARIANTS.md I-44). Unlike balance_role's upgrade guard this is not
+-- restricted to '' -> <kind> — see core.JournalTypeStore.SetHolderKind's doc.
+UPDATE journal_types SET holder_kind = $2 WHERE uid = $1;
+
 -- name: GetJournalTypeByCode :one
-SELECT id, code, name, is_active, created_at, uid, display_label
+SELECT id, code, name, is_active, created_at, uid, display_label, holder_kind
 FROM journal_types
 WHERE code = $1;
 
@@ -53,7 +59,7 @@ WHERE code = $1;
 UPDATE journal_types SET is_active = false WHERE uid = $1;
 
 -- name: ListJournalTypes :many
-SELECT id, code, name, is_active, created_at, uid, display_label
+SELECT id, code, name, is_active, created_at, uid, display_label, holder_kind
 FROM journal_types
 WHERE (sqlc.arg(active_only)::boolean = false OR is_active = true)
 ORDER BY id;

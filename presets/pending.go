@@ -21,9 +21,9 @@ var pendingOnlyClassifications = []ClassificationPreset{
 // pending pattern.  deposit_record_overage / deposit_resolve_overage are NOT
 // included here — they belong to the tolerance plan, not the core pending API.
 var pendingBundleJournalTypes = []JournalTypePreset{
-	{Code: "deposit_pending", Name: "Deposit Pending", DisplayLabel: "Deposit"},
-	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending", DisplayLabel: "Deposit"},
-	{Code: "deposit_release_pending", Name: "Deposit Release Pending", DisplayLabel: "Deposit released"},
+	{Code: "deposit_pending", Name: "Deposit Pending", DisplayLabel: "Deposit", HolderKind: core.HolderTxKindDeposit},
+	{Code: "deposit_confirm_pending", Name: "Deposit Confirm Pending", DisplayLabel: "Deposit", HolderKind: core.HolderTxKindDeposit},
+	{Code: "deposit_release_pending", Name: "Deposit Release Pending", DisplayLabel: "Deposit released", HolderKind: core.HolderTxKindDeposit},
 }
 
 // pendingBundleTemplates defines the three entry templates that drive the

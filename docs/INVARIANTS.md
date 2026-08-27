@@ -3539,6 +3539,107 @@ the repository.
   unreachable are themselves verified against a real INSERT, for both
   `classifications.normal_side` and `journal_entries.entry_type`.
 
+## I-44: The holder transaction view's `kind` is drawn from a small, deployment-stable product vocabulary — never an internal accounting identifier, and never a value that conflates "untagged" with a declared meaning
+
+(M-7, `.local/independent-review-2026-08-26.md`;
+`docs/plans/2026-08-26-audit-remediation-contracts.md` follow-on fix-m7-kind
+batch, board #49, Aaron 2026-08-27 route ③.)
+
+**Rule**: `HolderTransaction.Kind` (`core/holder.go`) is one of
+`core.HolderTxKind`'s seven values —
+`""`/`deposit`/`withdrawal`/`transfer`/`fee`/`adjustment`/`other` as stored
+on `journal_types.holder_kind`, but **never `""` on the wire**: the read
+path (`ListHolderTransactionRows`, `postgres/sql/queries/holder.sql`)
+`COALESCE(NULLIF(jt.holder_kind, ''), 'other')`s every row, so an untagged
+journal type reads as the disclosed `other` bucket rather than leaking the
+internal "nobody has tagged this yet" state onto the wire as an empty
+string that is not itself a member of the enum a consumer switches on.
+
+This is the third shape this field has had:
+
+1. `journal_types.code` (e.g. `"deposit_confirm"`) — an internal
+   accounting-engine identifier an operator names when configuring their own
+   journal types, narrating *how the ledger produced the balance*, which
+   `~/.claude/rules/user-facing-surfaces.md` forbids on a holder-facing
+   surface.
+2. `journal_types.uid` — compliant (opaque, reveals nothing about the
+   engine's internal taxonomy), but per-deployment-random: unwriteable as a
+   literal, so `@azex/ledger-react`'s `kindLabels` prop (keyed by a stable
+   string a host app hardcodes, e.g. `{ deposit: "Top up" }`) could never
+   match it and silently fell back to `kind_label` on every deployment.
+3. `core.HolderTxKind` (this invariant) — small, coarse, and
+   **deployment-stable**: every deployment's transactions bucket into the
+   same six named values (plus the untagged-reads-as-`other` fallback
+   above), so a host app's `kindLabels` map, keyed by these literals, works
+   identically across every deployment. `HolderTxKindOther` is the explicit
+   "a journal type author considered the vocabulary and this genuinely
+   doesn't fit" declaration; it is a different thing from `""` ("nobody has
+   looked at this yet") even though both currently read as `other` on the
+   wire — see the next paragraph for why collapsing them on the *wire* does
+   not collapse them in the *store*.
+
+**Why this is not the same shape as the M-4 bug it deliberately does not
+copy**: M-4 (I-37's addendum) found that letting `""` on
+`classifications.balance_role` mean both "a deliberate memo account" and
+"nobody tagged this yet" was dangerous because
+`core.ClassificationInput.Validate` and `SolvencyReport.Liability` could not
+tell the two apart — a real liability that fell through the cracks was
+**silently miscounted**, a financial-correctness failure. `holder_kind` has
+no such consumer: nothing computes a number from it, and its only downstream
+use is display. `core.JournalTypeInput.Validate` is therefore **not**
+required to refuse `HolderTxKindNone` at creation the way
+`ClassificationInput.Validate` refuses `BalanceRoleNone` for a non-system
+classification — doing so would have required hardening `CreateJournalType`
+against every caller across this repository's test scaffolding, the
+`examples/` package, and the `POST /journal-types` HTTP handler, none of
+which touch a financial computation, for a field whose worst-case failure
+mode is an honest, disclosed generic label instead of a silently wrong
+balance sheet. The distinction this invariant actually enforces is narrower
+and cheaper: the *store* keeps `""` (untagged) and `other` (explicitly "none
+of the above") as different values — a deployer can always find and retag
+the former via `SetHolderKind` — while the *wire* never emits the internal
+`""` state as literal text a client would have to special-case alongside
+the six real vocabulary values.
+
+**Enforced by**: `core.HolderTxKind` + `.IsValid()` (`core/types.go`) —
+accepts the seven values above, rejects everything else, including the two
+rejected prior shapes (a journal-type code or a uid string).
+`core.JournalTypeInput.HolderKind` / `core.JournalTypeStore.SetHolderKind`
+(`core/interfaces.go`). `postgres.ClassificationStore.CreateJournalType` /
+`.SetHolderKind` (`postgres/classification_store.go`) both call
+`HolderTxKind.IsValid()` before writing. `journal_types.holder_kind`
+(migration `012_journal_type_holder_kind`) is `NOT NULL DEFAULT ''` with a
+`CHECK` constraint enumerating the same seven values as the Go-side
+`IsValid()` — the DB layer cannot accept a value the Go layer would refuse,
+or vice versa. `postgres/sql/queries/holder.sql`'s
+`ListHolderTransactionRows` is the sole place the `COALESCE(NULLIF(...),
+'other')` read-time fallback is applied. `presets.JournalTypePreset.HolderKind`
+(`presets/templates.go` and every other `presets/*.go` bundle file) —
+every preset journal type this package installs declares one explicitly;
+`presets.ensureJournalTypePreset`'s expand-safe upgrade (mirroring
+`ensureClassificationPreset`'s `balance_role` upgrade) retags a
+pre-migration-012 row in place on re-install and rejects a conflicting
+pre-existing non-empty value rather than silently overwriting it.
+
+**Pinned by**:
+- `core.TestHolderTxKind_IsValid` — the closed vocabulary, including the two
+  explicitly rejected prior shapes.
+- `postgres.TestJournalTypeStore_HolderKind` — untagged creation accepted,
+  a recognized value round-trips, a garbage string refused at both creation
+  and `SetHolderKind`, and `SetHolderKind` can move a row in either
+  direction (not upgrade-only, unlike `SetBalanceRole`).
+- `postgres.TestHolderTransactionsProjection` — the untagged-row wire
+  behavior: an untagged journal type's transactions read `kind: "other"`,
+  never `""` and never the journal type's internal uid.
+- `postgres.TestHolderTransactionsKindIsExplicitVocabulary` — the other
+  half: an explicitly tagged journal type's `kind` passes through unchanged,
+  proving the `other` fallback is specific to untagged rows.
+- `postgres.TestInstallPresets_HolderKindUpgradeAndConflict` /
+  `TestInstallPresets_HolderKindConflictAtCreation` — the preset
+  expand-safe-upgrade-or-reject-on-conflict behavior, mirroring
+  `TestInstallPresets_BalanceRoleUpgradeAndConflict` /
+  `_BalanceRoleConflictAtCreation` for `balance_role`.
+
 ## How to add a new invariant
 
 ---

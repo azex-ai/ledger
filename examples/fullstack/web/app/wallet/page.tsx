@@ -32,7 +32,7 @@ export default function WalletPage() {
       <main className="mx-auto max-w-3xl p-6">
         <h1 className="mb-6 text-xl font-semibold">My wallet</h1>
         <WalletPanel
-          kindLabels={{ deposit_confirm: "Top up" }}
+          kindLabels={{ deposit: "Top up" }}
           actions={
             <button
               type="button"

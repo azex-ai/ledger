@@ -202,7 +202,7 @@ export interface paths {
         put?: never;
         /**
          * Render a template into a journal and post it.
-         * @description Answers 403 when template_code is one of the deployment's Config.ProtectedTemplateCodes (empty by default) -- deployments that install a verified-deposit-confirmation preset should list its template codes there so a write-scope key cannot mint a journal indistinguishable from a real confirmed deposit through this generic endpoint; those codes are meant to be posted only by the deployment's own orchestration.
+         * @description Answers 403 when template_code is in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
          */
         post: {
             parameters: {
@@ -524,7 +524,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Balances for one holder × currency. */
+        /**
+         * Balances for one holder × currency.
+         * @description Per-classification breakdown for one currency, with the sum across classifications as `total` -- a different shape from GET /balances/{holder} (which lists one Balance per currency, no cross-classification sum), so it has its own envelope (BalanceByCurrencyEnvelope) rather than reusing BalancesEnvelope.
+         */
         get: {
             parameters: {
                 query?: never;
@@ -537,13 +540,13 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Balance list. */
+                /** @description Per-classification balances for this holder × currency, plus their total. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["BalancesEnvelope"];
+                        "application/json": components["schemas"]["BalanceByCurrencyEnvelope"];
                     };
                 };
             };
@@ -1932,7 +1935,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ReconcileResult"];
+                        "application/json": components["schemas"]["ReconcileEnvelope"];
                     };
                 };
             };
@@ -1976,7 +1979,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ReconcileEnvelope"];
+                    };
                 };
             };
         };
@@ -2020,7 +2025,7 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["ReconcileReport"];
+                        "application/json": components["schemas"]["ReconcileReportEnvelope"];
                     };
                 };
             };
@@ -2685,10 +2690,11 @@ export interface components {
              */
             uid: string;
             /**
-             * Format: uuid
-             * @description journal_type_uid -- a stable per-deployment key for product-side label overrides / i18n. Deliberately opaque: it does not reveal the ledger's internal journal-type code (see kind_label for the display text).
+             * @description Small, deployment-stable product vocabulary (core.HolderTxKind, M-7 fix, docs/INVARIANTS.md I-44) a host app can hardcode a label-override map against. Never the ledger's internal journal-type code or uid (see kind_label for the display text).
+             * @example deposit
+             * @enum {string}
              */
-            kind: string;
+            kind: "deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" | "other";
             /**
              * @description Library-side default display label.
              * @example Deposit
@@ -2760,6 +2766,11 @@ export interface components {
         NormalSide: "debit" | "credit";
         /** @enum {string} */
         HolderRole: "user" | "system";
+        /**
+         * @description Semantic liquidity tag for a classification's balance in the holder-facing breakdown. "" excludes the classification from that view -- valid for is_system classifications, but refused by the server for a non-system classification (M-4 fix, docs/INVARIANTS.md I-37 addendum): a non-system classification must declare either a spendable bucket (available/pending/locked) or "memo" (a deliberate non-liability memo/cost account, e.g. per-user fee tracking) explicitly.
+         * @enum {string}
+         */
+        BalanceRole: "" | "available" | "pending" | "locked" | "memo";
         EntryInput: {
             /** Format: int64 */
             account_holder: number;
@@ -2845,9 +2856,9 @@ export interface components {
                 next_cursor?: string | null;
             };
         };
+        /** @description GET /journals/{uid}'s data is a Journal with entries appended as a sibling field, not journal/entries nested under separate keys (server/handler_journals.go's handleGetJournal returns a single journalResponse whose Entries field carries them). */
         JournalWithEntriesEnvelope: components["schemas"]["Envelope"] & {
-            data?: {
-                journal?: components["schemas"]["Journal"];
+            data?: components["schemas"]["Journal"] & {
                 entries?: components["schemas"]["Entry"][];
             };
         };
@@ -2865,6 +2876,13 @@ export interface components {
                 list?: components["schemas"]["Balance"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
                 next_cursor?: string | null;
+            };
+        };
+        BalanceByCurrencyEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                /** @description Sum of every classification's balance for this holder × currency. */
+                total: components["schemas"]["Decimal"];
+                classifications: components["schemas"]["Balance"][];
             };
         };
         BalanceBreakdown: {
@@ -3119,6 +3137,7 @@ export interface components {
             name: string;
             normal_side: components["schemas"]["NormalSide"];
             is_system?: boolean;
+            balance_role?: components["schemas"]["BalanceRole"];
             lifecycle?: components["schemas"]["Lifecycle"];
         };
         TemplateLineInput: {
@@ -3228,6 +3247,9 @@ export interface components {
             }[];
             checked_at?: components["schemas"]["Timestamp"];
         };
+        ReconcileEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["ReconcileResult"];
+        };
         BookingTrace: {
             booking?: components["schemas"]["Booking"];
             events?: components["schemas"]["Event"][];
@@ -3296,6 +3318,9 @@ export interface components {
                     detail?: string;
                 }[];
             }[];
+        };
+        ReconcileReportEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["ReconcileReport"];
         };
     };
     responses: {

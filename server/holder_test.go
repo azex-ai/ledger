@@ -42,7 +42,7 @@ func (s *stubHolderReader) ListHolderTransactions(_ context.Context, holder int6
 	s.lastHolder = holder
 	return []core.HolderTransaction{{
 		UID:          "j-uid-1",
-		Kind:         "deposit_confirm",
+		Kind:         "deposit", // core.HolderTxKindDeposit (M-7 fix) -- see holder.go's Kind doc comment
 		KindLabel:    "Deposit",
 		Direction:    core.HolderTransactionIn,
 		Amount:       decimal.NewFromInt(100),

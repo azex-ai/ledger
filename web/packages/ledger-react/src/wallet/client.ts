@@ -51,8 +51,12 @@ export interface WalletBalance {
 export interface WalletTransaction {
   /** Journal uid — trace anchor, safe to display. */
   uid: string;
-  /** Stable code — the anchor for product-side label overrides / i18n. */
-  kind: string;
+  /**
+   * Small, deployment-stable vocabulary — the anchor for product-side label
+   * overrides / i18n (see `TransactionList`'s `kindLabels` prop). Never the
+   * ledger's internal journal-type code or uid.
+   */
+  kind: "deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" | "other";
   /** Library-side default display label. */
   kind_label: string;
   direction: "in" | "out";

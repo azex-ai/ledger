@@ -38,17 +38,34 @@ WITH page_journals AS (
 SELECT
     j.id   AS journal_id,
     j.uid  AS journal_uid,
-    -- kind is journal_types.uid, not journal_types.code: the code is an
-    -- internal accounting-engine identifier an operator names when
-    -- configuring their own journal types (e.g. "deposit_confirm",
-    -- "dev_credit") -- it narrates *how the ledger produced the balance*,
-    -- which the holder-facing surface must not do
-    -- (~/.claude/rules/user-facing-surfaces.md; the same principle
-    -- presets/devcredit.go documents for kind_label's DisplayLabel choice).
-    -- The uid is an equally stable per-deployment key a product can map to
-    -- its own icon/i18n label, but is opaque -- it encodes nothing about the
-    -- engine's internal taxonomy.
-    jt.uid::text AS kind,
+    -- kind is journal_types.holder_kind (M-7 fix, docs/INVARIANTS.md I-44) —
+    -- the third shape this field has had. It started as journal_types.code
+    -- (e.g. "deposit_confirm"), an internal accounting-engine identifier an
+    -- operator names when configuring their own journal types -- narrating
+    -- *how the ledger produced the balance*, which the holder-facing
+    -- surface must not do (~/.claude/rules/user-facing-surfaces.md; the
+    -- same principle presets/devcredit.go documents for kind_label's
+    -- DisplayLabel choice). A first fix switched it to journal_types.uid:
+    -- compliant, but opaque and per-deployment-random, so a host app's
+    -- kindLabels map (keyed by a literal it hardcodes) could never match
+    -- it. holder_kind is a small, stable, deployment-independent product
+    -- vocabulary (core.HolderTxKind: deposit/withdrawal/transfer/fee/
+    -- adjustment/other) a journal type declares itself under once, that a
+    -- host app CAN hardcode a kindLabels map against.
+    --
+    -- COALESCE(NULLIF(holder_kind, ''), 'other'): holder_kind is NOT NULL
+    -- DEFAULT '' (migration 012) and '' is a legitimate stored value
+    -- meaning "nobody has tagged this journal type yet" (see
+    -- core.HolderTxKindNone's doc comment for why that is tolerated here,
+    -- unlike classifications.balance_role after the M-4 fix). This read
+    -- path never lets that internal "untagged" state leak onto the wire as
+    -- an empty string, which is not a member of the HolderTxKind
+    -- enum @azex/ledger-react's consumers switch on — an untagged journal
+    -- type instead reads as the same 'other' bucket a journal type author
+    -- who explicitly chose "none of the above" would produce. This is a
+    -- disclosed, documented fallback, not a silent one — see this
+    -- migration's header comment and docs/INVARIANTS.md I-44.
+    COALESCE(NULLIF(jt.holder_kind, ''), 'other')::text AS kind,
     CASE
         WHEN COUNT(DISTINCT c.id) = 1 AND MAX(c.display_label) <> '' THEN MAX(c.display_label)
         WHEN jt.display_label <> '' THEN jt.display_label

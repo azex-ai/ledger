@@ -634,3 +634,61 @@ func TestInstallPresets_BalanceRoleConflictAtCreation(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 }
+
+// TestInstallPresets_HolderKindUpgradeAndConflict pins the M-7 fix
+// (docs/INVARIANTS.md I-44): a pre-existing, untagged journal type row is
+// retagged in place on install (expand-safe upgrade, mirroring
+// BalanceRole's), and a pre-existing row whose holder_kind already
+// disagrees with the preset is rejected rather than silently overwritten.
+func TestInstallPresets_HolderKindUpgradeAndConflict(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+
+	// Pre-existing row without a holder_kind (pre-012 install). Seeded via
+	// raw SQL, not classStore.CreateJournalType with an explicit kind --
+	// simulating data that predates this column, exactly like the
+	// BalanceRole upgrade test above simulates pre-032 classifications.
+	postgrestest.SeedJournalType(t, pool, "deposit_confirm", "Deposit Confirm")
+	preexisting, err := classStore.GetJournalTypeByCode(ctx, "deposit_confirm")
+	require.NoError(t, err)
+	require.Equal(t, core.HolderTxKindNone, preexisting.HolderKind)
+
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+
+	upgraded, err := classStore.GetJournalTypeByCode(ctx, "deposit_confirm")
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindDeposit, upgraded.HolderKind)
+
+	withdrawFee, err := classStore.GetJournalTypeByCode(ctx, "withdraw_fee")
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindFee, withdrawFee.HolderKind)
+
+	// Re-install is a no-op (kinds already match).
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
+}
+
+// A pre-existing journal type whose holder_kind is already non-empty and
+// DIFFERENT from what the preset wants must be rejected, not silently
+// re-tagged -- the journal-type counterpart of
+// TestInstallPresets_BalanceRoleConflictAtCreation above.
+func TestInstallPresets_HolderKindConflictAtCreation(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+
+	preexisting, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{
+		Code: "deposit_confirm", Name: "Deposit Confirm",
+		HolderKind: core.HolderTxKindOther, // preset wants 'deposit'
+	})
+	require.NoError(t, err)
+	require.Equal(t, core.HolderTxKindOther, preexisting.HolderKind)
+
+	err = presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}

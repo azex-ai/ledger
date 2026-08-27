@@ -191,12 +191,30 @@ func SeedClassificationWithRole(t *testing.T, pool *pgxpool.Pool, code, name, no
 }
 
 // SeedJournalType creates a test journal_type row and returns its uid.
+// holder_kind is left at its default (”, untagged) -- use
+// SeedJournalTypeWithHolderKind for tests that need a specific
+// core.HolderTxKind.
 func SeedJournalType(t *testing.T, pool *pgxpool.Pool, code, name string) string {
 	t.Helper()
 	var uid string
 	err := pool.QueryRow(context.Background(),
 		"INSERT INTO journal_types (uid, code, name) VALUES (gen_random_uuid(), $1, $2) RETURNING uid::text",
 		code, name,
+	).Scan(&uid)
+	require.NoError(t, err)
+	return uid
+}
+
+// SeedJournalTypeWithHolderKind creates a test journal_type row tagged with
+// an explicit core.HolderTxKind (M-7 fix, docs/INVARIANTS.md I-44) and
+// returns its uid. holderKind must be one of core.HolderTxKind's named
+// string values (e.g. "deposit") or "" for untagged.
+func SeedJournalTypeWithHolderKind(t *testing.T, pool *pgxpool.Pool, code, name, holderKind string) string {
+	t.Helper()
+	var uid string
+	err := pool.QueryRow(context.Background(),
+		"INSERT INTO journal_types (uid, code, name, holder_kind) VALUES (gen_random_uuid(), $1, $2, $3) RETURNING uid::text",
+		code, name, holderKind,
 	).Scan(&uid)
 	require.NoError(t, err)
 	return uid

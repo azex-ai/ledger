@@ -340,12 +340,29 @@ type JournalTypeStore interface {
 	// SetDisplayLabelIfEmpty sets the user-facing display label only when the
 	// current label is '' (see ClassificationStore.SetDisplayLabelIfEmpty).
 	SetDisplayLabelIfEmpty(ctx context.Context, uid string, label string) error
+	// SetHolderKind retags a journal type's HolderTxKind (M-7 fix,
+	// docs/INVARIANTS.md I-44). Unlike SetDisplayLabelIfEmpty this is not
+	// guarded to "only when currently unset": a consumer who created their
+	// own journal type before this field existed (or before they had picked
+	// a bucket for it) has no other way to move it off HolderTxKindNone, and
+	// re-tagging a journal type's product-facing category, unlike a
+	// classification's balance_role (core.ClassificationStore.SetBalanceRole's
+	// doc), does not re-bucket any already-computed balance -- it only
+	// changes future reads of HolderTransaction.Kind for that journal type's
+	// existing and future rows alike.
+	SetHolderKind(ctx context.Context, uid string, kind HolderTxKind) error
 }
 
 type JournalTypeInput struct {
 	Code         string
 	Name         string
 	DisplayLabel string
+	// HolderKind is this journal type's bucket in the HolderTxKind
+	// vocabulary (M-7 fix). Optional: HolderTxKindNone ("", the zero value)
+	// is accepted at creation -- see HolderTxKindNone's doc comment for why
+	// this field, unlike ClassificationInput.BalanceRole, is not required.
+	// Any non-empty value must be one of HolderTxKind's named values.
+	HolderKind HolderTxKind
 }
 
 // HolderReader serves the holder-scoped wallet read surface: balances,

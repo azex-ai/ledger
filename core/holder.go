@@ -26,12 +26,17 @@ const (
 type HolderTransaction struct {
 	// UID is the journal uid — the idempotent trace anchor, safe to display.
 	UID string `json:"uid"`
-	// Kind is the journal type's uid: a stable per-deployment key for
-	// product-side i18n / label overrides. Deliberately not the journal
-	// type's code -- that names the ledger's own accounting rule (e.g.
-	// "deposit_confirm") and the holder-facing surface must not narrate how
-	// a balance was produced (~/.claude/rules/user-facing-surfaces.md; see
-	// presets/devcredit.go's DisplayLabel choice for the same principle).
+	// Kind is the journal type's HolderTxKind (M-7 fix, docs/INVARIANTS.md
+	// I-44): a small, deployment-STABLE product vocabulary
+	// (deposit/withdrawal/transfer/fee/adjustment/other) a host app can
+	// hardcode a label-override map against. Two prior shapes were tried and
+	// rejected: journal_types.code (e.g. "deposit_confirm") names the
+	// ledger's own internal accounting rule, and the holder-facing surface
+	// must not narrate how a balance was produced
+	// (~/.claude/rules/user-facing-surfaces.md; see presets/devcredit.go's
+	// DisplayLabel choice for the same principle); journal_types.uid is
+	// compliant but per-deployment-random, so it cannot be hardcoded as a
+	// literal in a host app's label-override map the way this field can.
 	Kind string `json:"kind"`
 	// KindLabel is the library-side default display label (see
 	// Classification.DisplayLabel / JournalType.DisplayLabel fallback chain).

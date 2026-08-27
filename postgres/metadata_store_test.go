@@ -111,6 +111,59 @@ func TestJournalTypeStore_CRUD(t *testing.T) {
 	assert.Len(t, list, 1)
 }
 
+// TestJournalTypeStore_HolderKind pins the M-7 fix (docs/INVARIANTS.md
+// I-44): HolderTxKindNone is tolerated at creation (unlike
+// ClassificationInput.BalanceRole, refused for non-system classifications
+// since the M-4 fix — see core.HolderTxKindNone's doc comment for why the
+// two fields are validated differently), a garbage string is refused, an
+// explicit vocabulary value round-trips, and SetHolderKind can retag a
+// journal type off HolderTxKindNone (not restricted to that direction only,
+// unlike SetBalanceRole).
+func TestJournalTypeStore_HolderKind(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewClassificationStore(pool)
+	ctx := context.Background()
+
+	// Untagged creation is accepted — no financial computation depends on
+	// this field, unlike balance_role.
+	untagged, err := store.CreateJournalType(ctx, core.JournalTypeInput{Code: "ht_none", Name: "Untagged"})
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindNone, untagged.HolderKind)
+
+	// A recognized value round-trips.
+	tagged, err := store.CreateJournalType(ctx, core.JournalTypeInput{
+		Code: "ht_fee", Name: "Fee", HolderKind: core.HolderTxKindFee,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindFee, tagged.HolderKind)
+
+	// A garbage string is refused — the CHECK constraint and the Go-side
+	// IsValid() gate agree on the same closed vocabulary.
+	_, err = store.CreateJournalType(ctx, core.JournalTypeInput{
+		Code: "ht_bad", Name: "Bad", HolderKind: core.HolderTxKind("not_a_real_kind"),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// SetHolderKind retags an untagged row — not restricted to '' -> <kind>
+	// only, unlike SetBalanceRole's expand-only upgrade guard.
+	require.NoError(t, store.SetHolderKind(ctx, untagged.UID, core.HolderTxKindAdjustment))
+	got, err := store.GetJournalTypeByCode(ctx, "ht_none")
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindAdjustment, got.HolderKind)
+
+	// And it can retag an already-tagged row too.
+	require.NoError(t, store.SetHolderKind(ctx, got.UID, core.HolderTxKindWithdrawal))
+	got2, err := store.GetJournalTypeByCode(ctx, "ht_none")
+	require.NoError(t, err)
+	assert.Equal(t, core.HolderTxKindWithdrawal, got2.HolderKind)
+
+	// SetHolderKind refuses a garbage value the same way creation does.
+	err = store.SetHolderKind(ctx, got2.UID, core.HolderTxKind("still_not_real"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInvalidInput)
+}
+
 func TestCurrencyStore_CRUD(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	store := postgres.NewCurrencyStore(pool)
