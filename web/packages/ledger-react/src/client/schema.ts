@@ -1630,6 +1630,11 @@ export interface paths {
                     "application/json": {
                         code: string;
                         name: string;
+                        /**
+                         * @description Optional (M-7 fix, docs/INVARIANTS.md I-44). Unlike ClassificationInput.balance_role this is never required -- omit to leave it untagged ('').
+                         * @enum {string}
+                         */
+                        holder_kind?: "" | "deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" | "other";
                     };
                 };
             };

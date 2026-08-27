@@ -84,6 +84,19 @@ type RoleLessLiability struct {
 	Balance          decimal.Decimal
 }
 
+// UntaggedHolderKindJournalType is a journal type that shows up in the
+// holder-facing transaction view (M-7 fix, docs/INVARIANTS.md I-44) but has
+// never been tagged with a core.HolderTxKind -- its transactions read as
+// the generic 'other' bucket. UID/Code/Name are the public-safe fields the
+// query itself already selects (no internal id, I-18) -- see
+// runCheckUntaggedHolderKind's doc for why this is detection, not a
+// financial-correctness signal.
+type UntaggedHolderKindJournalType struct {
+	UID  string
+	Code string
+	Name string
+}
+
 // OrphanReservation is a reservation whose journal_id does not resolve.
 type OrphanReservation struct {
 	ID            int64
@@ -179,6 +192,11 @@ type ReconcileQuerier interface {
 	// excluded from SolvencyReport.Liability. Not scoped to credit-normal;
 	// see RoleLessLiability's doc for why.
 	RoleLessLiabilities(ctx context.Context, pageLimit int) ([]RoleLessLiability, error)
+	// untagged_holder_kind (M-7 follow-up, Team Lead 2026-08-27, board #49):
+	// journal types visible in the holder transaction view but never tagged
+	// with a core.HolderTxKind -- detection only, see
+	// UntaggedHolderKindJournalType's doc.
+	UntaggedHolderKindJournalTypes(ctx context.Context, pageLimit int) ([]UntaggedHolderKindJournalType, error)
 	// Check #7
 	OrphanReservations(ctx context.Context) ([]OrphanReservation, error)
 	// Check #9
@@ -286,6 +304,14 @@ type FullReconciliationConfig struct {
 	// silently rescan the same oldest slice forever without SAYING that is
 	// what happened.
 	UnauthorizedJournalsPageLimit int
+
+	// UntaggedHolderKindPageLimit caps the number of untagged journal types
+	// fetched per run for the untagged_holder_kind check (M-7 follow-up,
+	// default 200, mirroring NegativeBalancePageLimit). This is a
+	// cardinality bound on distinct journal types, not on journals or
+	// entries -- deployments rarely have more than a few dozen -- so
+	// reaching the cap is not expected in practice.
+	UntaggedHolderKindPageLimit int
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -316,6 +342,9 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	}
 	if out.UnauthorizedJournalsPageLimit == 0 {
 		out.UnauthorizedJournalsPageLimit = 2000
+	}
+	if out.UntaggedHolderKindPageLimit == 0 {
+		out.UntaggedHolderKindPageLimit = 200
 	}
 	return out
 }
@@ -418,7 +447,7 @@ func NewFullReconciliationService(
 // failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 14)
+	checks := make([]core.CheckResult, 0, 15)
 
 	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))
@@ -443,6 +472,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- role_less_liability: user-side credit-normal classification missing balance_role (M-4 fix) ---
 	checks = append(checks, s.runCheckRoleLessLiability(ctx))
+
+	// --- untagged_holder_kind: journal type visible to holders but never tagged (M-7 follow-up) ---
+	checks = append(checks, s.runCheckUntaggedHolderKind(ctx))
 
 	// --- Check #7: Orphan reservations ---
 	checks = append(checks, s.runCheck7OrphanReservations(ctx))
@@ -1098,6 +1130,46 @@ func (s *FullReconciliationService) runCheckRoleLessLiability(ctx context.Contex
 			Description: fmt.Sprintf("holder %d currency %s classification %s is user-side and non-system, but carries no balance_role",
 				r.AccountHolder, s.externalCurrencyRef(ctx, r.CurrencyID), s.externalClassificationRef(ctx, r.ClassificationID)),
 			Detail: fmt.Sprintf("balance=%s (normal_side=%s) is excluded from SolvencyReport.Liability by GetTotalUserSideBalance's balance_role filter -- tag this classification's balance_role (available/pending/locked if it is a real liability, memo if it is a deliberate non-liability memo/cost account) or confirm it should be is_system", r.Balance, r.NormalSide),
+		})
+	}
+	return result
+}
+
+// runCheckUntaggedHolderKind surfaces journal types visible in the holder
+// transaction view that were never tagged with a core.HolderTxKind (M-7
+// follow-up, Team Lead 2026-08-27, board #49, docs/INVARIANTS.md I-44).
+//
+// This is NOT the same shape as role_less_liability above: an untagged
+// holder_kind has no financial consequence (the read path already falls
+// back to the disclosed 'other' bucket, never a raw internal identifier
+// and never a silently wrong number), so core.JournalTypeInput.Validate
+// deliberately does not refuse it at creation the way ClassificationInput.Validate
+// refuses an empty balance_role. What was still missing is visibility: a
+// deployer who forgets to tag their own journal type has no way to
+// discover that fact other than a user noticing "other" in their
+// transaction list. This check closes that gap -- detection only, exactly
+// like role_less_liability; it does not change what `kind` resolves to on
+// the wire, and the fix for a Finding here is a
+// JournalTypeStore.SetHolderKind call, not a migration.
+func (s *FullReconciliationService) runCheckUntaggedHolderKind(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "untagged_holder_kind", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rows, err := s.querier.UntaggedHolderKindJournalTypes(ctx, s.cfg.UntaggedHolderKindPageLimit)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "untagged holder_kind scan failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	for _, r := range rows {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("journal type %q (%s) appears in the holder transaction view but has no holder_kind",
+				r.Code, r.UID),
+			Detail: "its transactions currently read kind=\"other\" (the disclosed fallback, docs/INVARIANTS.md I-44) -- tag it via JournalTypeStore.SetHolderKind if a more specific kind applies, or leave it if \"other\" is correct",
 		})
 	}
 	return result

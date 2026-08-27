@@ -30,9 +30,11 @@ type mockReconcileQuerier struct {
 	negativeAccounts []NegativeBalanceAccount
 	// roleLessLiabilities drives the role_less_liability check (M-4 fix).
 	roleLessLiabilities []RoleLessLiability
-	orphanReservs       []OrphanReservation
-	staleItems          []StaleRollupItem
-	dupeKeys            []DuplicateIdempotencyKey
+	// untaggedHolderKind drives the untagged_holder_kind check (M-7 follow-up).
+	untaggedHolderKind []UntaggedHolderKindJournalType
+	orphanReservs      []OrphanReservation
+	staleItems         []StaleRollupItem
+	dupeKeys           []DuplicateIdempotencyKey
 
 	// checkpointAccounts must be pre-sorted ascending by (AccountHolder,
 	// CurrencyID) — ListCheckpointAccountsPage paginates over it using the
@@ -71,6 +73,7 @@ type mockReconcileQuerier struct {
 	errSettlement          error
 	errNegBal              error
 	errRoleLessLiabilities error
+	errUntaggedHolderKind  error
 	errOrphanReservs       error
 	errDupeKeys            error
 	errStaleItems          error
@@ -100,6 +103,9 @@ func (m *mockReconcileQuerier) NegativeBalanceAccounts(_ context.Context, _ int)
 }
 func (m *mockReconcileQuerier) RoleLessLiabilities(_ context.Context, _ int) ([]RoleLessLiability, error) {
 	return m.roleLessLiabilities, m.errRoleLessLiabilities
+}
+func (m *mockReconcileQuerier) UntaggedHolderKindJournalTypes(_ context.Context, _ int) ([]UntaggedHolderKindJournalType, error) {
+	return m.untaggedHolderKind, m.errUntaggedHolderKind
 }
 func (m *mockReconcileQuerier) OrphanReservations(_ context.Context) ([]OrphanReservation, error) {
 	return m.orphanReservs, m.errOrphanReservs
@@ -219,7 +225,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 14, "should run exactly 14 checks (M-4 fix added role_less_liability)")
+	assert.Len(t, report.Checks, 15, "should run exactly 15 checks (M-4 added role_less_liability, M-7 added untagged_holder_kind)")
 
 	// OverallPassed reports violations found; it is NOT a clean bill of
 	// health. unauthorized_journals is skipped (buildFullSvc never calls
@@ -553,6 +559,49 @@ func TestRoleLessLiability_QueryError(t *testing.T) {
 
 	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
 	result := svc.runCheckRoleLessLiability(context.Background())
+	assert.False(t, result.Passed)
+	assert.Contains(t, result.Findings[0].Detail, "scan failed")
+}
+
+// ---------------------------------------------------------------------------
+// untagged_holder_kind — journal type visible to holders but never tagged
+// with a core.HolderTxKind (M-7 follow-up)
+// ---------------------------------------------------------------------------
+
+func TestUntaggedHolderKind_Clean(t *testing.T) {
+	svc := buildFullSvc(t, nil, cleanQuerier(), FullReconciliationConfig{})
+	result := svc.runCheckUntaggedHolderKind(context.Background())
+	assert.True(t, result.Passed)
+	assert.True(t, result.Complete)
+}
+
+// TestUntaggedHolderKind_Violation pins the visibility gap Team Lead asked
+// for: a journal type visible in the holder transaction view but never
+// tagged must surface as a Finding, not stay invisible until a user
+// notices "other" in their transaction list.
+func TestUntaggedHolderKind_Violation(t *testing.T) {
+	q := cleanQuerier()
+	q.untaggedHolderKind = []UntaggedHolderKindJournalType{
+		{UID: "jt-uid-1", Code: "custom_payout", Name: "Custom Payout"},
+	}
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckUntaggedHolderKind(context.Background())
+	assert.False(t, result.Passed)
+	require.Len(t, result.Findings, 1)
+	assert.Contains(t, result.Findings[0].Description, "custom_payout")
+	assert.Contains(t, result.Findings[0].Description, "jt-uid-1")
+	assert.Contains(t, result.Findings[0].Description, "no holder_kind")
+	assert.Contains(t, result.Findings[0].Detail, "other")
+	assert.Contains(t, result.Findings[0].Detail, "SetHolderKind")
+}
+
+func TestUntaggedHolderKind_QueryError(t *testing.T) {
+	q := cleanQuerier()
+	q.errUntaggedHolderKind = errors.New("scan failed")
+
+	svc := buildFullSvc(t, nil, q, FullReconciliationConfig{})
+	result := svc.runCheckUntaggedHolderKind(context.Background())
 	assert.False(t, result.Passed)
 	assert.Contains(t, result.Findings[0].Detail, "scan failed")
 }

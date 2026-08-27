@@ -564,6 +564,58 @@ func (q *Queries) ReconcileStaleRollupItems(ctx context.Context, thresholdMinute
 	return items, nil
 }
 
+const reconcileUntaggedHolderKindJournalTypes = `-- name: ReconcileUntaggedHolderKindJournalTypes :many
+SELECT DISTINCT jt.uid, jt.code, jt.name
+FROM journal_types jt
+JOIN journals j ON j.journal_type_id = jt.id
+JOIN journal_entries je ON je.journal_id = j.id
+JOIN classifications c ON c.id = je.classification_id
+WHERE jt.holder_kind = ''
+  AND je.account_holder > 0
+  AND c.balance_role <> ''
+ORDER BY jt.uid
+LIMIT $1::int
+`
+
+type ReconcileUntaggedHolderKindJournalTypesRow struct {
+	Uid  pgtype.UUID `json:"uid"`
+	Code string      `json:"code"`
+	Name string      `json:"name"`
+}
+
+// M-7 follow-up (Team Lead, 2026-08-27, board #49, docs/INVARIANTS.md I-44):
+// a journal type visible in the holder-facing transaction view (the same
+// population holder.sql's ListHolderTransactionRows draws from -- a
+// journal entry posted for a user holder against a role-bearing
+// classification) but not tagged with a core.HolderTxKind reads as the
+// generic 'other' bucket on the wire. That fallback is safe (never a
+// financial miscalculation, never a raw internal identifier) but
+// INVISIBLE: nothing tells a deployer they forgot to tag a journal type
+// until a user notices their transaction list shows "other" instead of a
+// specific label. This check surfaces it as a Finding -- detection, not
+// prevention; it does not change what `kind` resolves to on the wire, and
+// fixing a Finding here is a JournalTypeStore.SetHolderKind call, not a
+// migration.
+func (q *Queries) ReconcileUntaggedHolderKindJournalTypes(ctx context.Context, pageLimit int32) ([]ReconcileUntaggedHolderKindJournalTypesRow, error) {
+	rows, err := q.db.Query(ctx, reconcileUntaggedHolderKindJournalTypes, pageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReconcileUntaggedHolderKindJournalTypesRow{}
+	for rows.Next() {
+		var i ReconcileUntaggedHolderKindJournalTypesRow
+		if err := rows.Scan(&i.Uid, &i.Code, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertReconcileScanCursor = `-- name: UpsertReconcileScanCursor :exec
 INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty, lap_scanned, updated_at)
 VALUES ($1::text, $2::bigint, $3::bigint, $4::boolean, $5::bigint, now())

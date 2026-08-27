@@ -180,6 +180,27 @@ func (a *ReconcileAdapter) RoleLessLiabilities(ctx context.Context, pageLimit in
 	return result, nil
 }
 
+// UntaggedHolderKindJournalTypes returns journal types visible in the
+// holder-facing transaction view that have never been tagged with a
+// core.HolderTxKind (M-7 follow-up, docs/INVARIANTS.md I-44). UID/Code/Name
+// are already public-safe (I-18) -- no id resolution needed, unlike
+// RoleLessLiabilities above.
+func (a *ReconcileAdapter) UntaggedHolderKindJournalTypes(ctx context.Context, pageLimit int) ([]service.UntaggedHolderKindJournalType, error) {
+	rows, err := a.q.ReconcileUntaggedHolderKindJournalTypes(ctx, int32(pageLimit)) //nolint:gosec
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: untagged holder_kind journal types: %w", err)
+	}
+	result := make([]service.UntaggedHolderKindJournalType, len(rows))
+	for i, r := range rows {
+		result[i] = service.UntaggedHolderKindJournalType{
+			UID:  pgToUID(r.Uid),
+			Code: r.Code,
+			Name: r.Name,
+		}
+	}
+	return result, nil
+}
+
 // OrphanReservations returns reservations whose journal_id (non-zero) does not
 // resolve to any journals row.
 func (a *ReconcileAdapter) OrphanReservations(ctx context.Context) ([]service.OrphanReservation, error) {

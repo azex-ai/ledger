@@ -222,3 +222,28 @@ DO UPDATE SET after_holder = EXCLUDED.after_holder, after_currency = EXCLUDED.af
 -- is trusted as full coverage.
 SELECT COUNT(*)::bigint AS total
 FROM (SELECT DISTINCT account_holder, currency_id FROM balance_checkpoints) pairs;
+
+-- name: ReconcileUntaggedHolderKindJournalTypes :many
+-- M-7 follow-up (Team Lead, 2026-08-27, board #49, docs/INVARIANTS.md I-44):
+-- a journal type visible in the holder-facing transaction view (the same
+-- population holder.sql's ListHolderTransactionRows draws from -- a
+-- journal entry posted for a user holder against a role-bearing
+-- classification) but not tagged with a core.HolderTxKind reads as the
+-- generic 'other' bucket on the wire. That fallback is safe (never a
+-- financial miscalculation, never a raw internal identifier) but
+-- INVISIBLE: nothing tells a deployer they forgot to tag a journal type
+-- until a user notices their transaction list shows "other" instead of a
+-- specific label. This check surfaces it as a Finding -- detection, not
+-- prevention; it does not change what `kind` resolves to on the wire, and
+-- fixing a Finding here is a JournalTypeStore.SetHolderKind call, not a
+-- migration.
+SELECT DISTINCT jt.uid, jt.code, jt.name
+FROM journal_types jt
+JOIN journals j ON j.journal_type_id = jt.id
+JOIN journal_entries je ON je.journal_id = j.id
+JOIN classifications c ON c.id = je.classification_id
+WHERE jt.holder_kind = ''
+  AND je.account_holder > 0
+  AND c.balance_role <> ''
+ORDER BY jt.uid
+LIMIT sqlc.arg(page_limit)::int;

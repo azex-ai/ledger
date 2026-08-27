@@ -246,6 +246,12 @@ Two of these move real money and are worth reading before upgrading.
 - `PendingStore` dropped an unread cached set of classification IDs.
 - Assorted ledger-correctness and event-delivery hardening fixes surfaced
   during the integrity-hardening review pass.
+- New `JournalTypeStore.SetHolderKind` and reconcile check
+  `untagged_holder_kind` (M-7 follow-up, docs/INVARIANTS.md I-44): a journal
+  type visible in a holder's transaction list without a `holder_kind` had no
+  way to be discovered other than a user noticing `"other"` where a
+  specific label was expected. Pure addition, no behavior change to what
+  `kind` resolves to on the wire.
 
 ### @azex/ledger-react — Added
 
