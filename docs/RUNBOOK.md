@@ -649,6 +649,19 @@ Operational notes:
   install-time prerequisite for a fresh database (README "Quick Start").
   Every migration after `001` runs as `ledger_owner` and needs no elevated
   privilege beyond what it already holds.
+- **`Migrate()` also needs `CONNECT` on the cluster's `postgres` maintenance
+  database** (`docs/INVARIANTS.md` I-47) — it takes a `pg_advisory_lock`
+  there before touching the target database, to serialize against every
+  other `Migrate()` call on the same cluster. `001_baseline`'s
+  `CREATE ROLE`/role-membership statements and `007`'s `ALTER ROLE`
+  statements write cluster-wide shared catalog rows (`pg_authid`,
+  `pg_auth_members`), not database-local ones, so two installs running at
+  once on the same cluster — Aaron's shared local `dev-postgres`
+  (`infra.md`), CI's shared Postgres service container, or a
+  multi-replica deployment migrating from more than one pod — race those
+  rows unless something outside the target database serializes them.
+  `CONNECT` on `postgres` is granted to `PUBLIC` by default; if your
+  cluster revokes it, grant it back to whichever role runs `Migrate()`.
 - **No passwords are set by any of these migrations.** Set them out-of-band
   (`ALTER ROLE ledger_app WITH PASSWORD '...'`) through whatever secrets
   pipeline you already use for `DATABASE_URL` — never commit one to a
