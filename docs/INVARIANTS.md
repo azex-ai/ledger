@@ -3887,6 +3887,79 @@ construct `effective_at` with an explicit non-zero nanosecond remainder
 on every platform -- including macOS -- before `canonicalTimestamp` exists,
 not just in Linux CI.
 
+## I-47: `Migrate()` serializes against every other `Migrate()` call on the same Postgres cluster, not just against callers targeting the same database
+
+(Board #52; CI's `test` job failed 17 tests at once, all tracing to
+`internal/postgrestest/postgrestest.go:128`'s `Migrate` call.)
+
+**Rule**: `postgres.Migrate` takes a session-level `pg_advisory_lock` on the
+cluster's `postgres` maintenance database, before opening golang-migrate's
+own connection to the target database, and holds it for the entire `Up()`
+run. `acquireClusterLock` (`postgres/migrate.go`) is the sole place this
+happens; no SQL migration file changes.
+
+**Why**: `001_baseline` and
+`007_role_hardening_and_partition_security_definer` between them issue 8
+statements against `ledger_owner`/`ledger_app`/`ledger_ro` — 3×
+`CREATE ROLE IF NOT EXISTS`, `GRANT ledger_owner TO %I WITH INHERIT TRUE` +
+`REVOKE ledger_owner FROM %I` (both in `001_baseline`), and 3× `ALTER ROLE`
+(`007`). Every one of those writes a row in a cluster-wide shared system
+catalog — `pg_authid` for the role itself, `pg_auth_members` for role
+membership — that exists once per *cluster*, not once per *database*.
+`013_partition_function_hardening` and every other migration were checked
+and carry no equivalent statement; their `GRANT`/`REVOKE` target tables and
+functions, whose ACLs (`pg_class.relacl`, `pg_proc.proacl`) are ordinary
+per-database catalog rows and need no lock.
+
+Two `Migrate()` calls installing into two *different* databases on the same
+cluster used to run those 8 statements concurrently. PostgreSQL does not
+block the loser and let it proceed once the winner commits — it raises
+`tuple concurrently updated` (the `ALTER ROLE` shape) or a
+`pg_authid_rolname_index` unique-constraint violation (the `CREATE ROLE`
+shape, when the role does not exist yet on either side of the race) and
+aborts that caller's whole migration transaction. This is invisible in
+local dev (`internal/postgrestest.SetupDB` starts one Postgres container per
+Go test *package*, so nothing shares a cluster) and was invisible in CI
+before board #52 introduced `DATABASE_URL`, because that env var is what
+first made every test package in the `test` job share one Postgres service
+container.
+
+golang-migrate's own advisory lock
+(`github.com/golang-migrate/migrate/v4/database/pgx/v5`, `Postgres.Lock`)
+does not close this gap: its key is `GenerateAdvisoryLockId(databaseName,
+schema, table)`, and PostgreSQL's `pg_advisory_lock` is itself scoped to
+the database of the connection that took it — two sessions connected to
+two different databases on one cluster never contend for the same
+advisory-lock key, confirmed empirically (session B acquires a key
+instantly while session A, connected to a different database, still holds
+it). No lock taken against the database being migrated — golang-migrate's
+or a naively-added one — can ever serialize two callers targeting two
+different databases. The lock has to come from a database every caller can
+reach regardless of which database it is about to migrate: `postgres`, the
+maintenance database every cluster creates at `initdb` time. This is an
+additional install prerequisite (`CONNECT` on `postgres`, granted to
+`PUBLIC` by default) — see `docs/RUNBOOK.md`'s "Database roles" operational
+notes.
+
+Serializing CI back onto one goroutine (`go test -p 1`) was rejected as a
+fix: that changes when CI happens to run tests relative to each other, not
+whether two `Migrate()` callers on one real cluster can collide — the exact
+shape Aaron's own local dev setup uses (`infra.md`'s shared `dev-postgres`,
+one cluster, one database per project) and any multi-replica deployment
+that runs its migration job from more than one pod at once.
+
+**Enforced by**: `postgres.acquireClusterLock` and
+`postgres.maintenanceDatabaseURL` (`postgres/migrate.go`), called from
+`postgres.Migrate` before `migrate.NewWithSourceInstance`.
+
+**Pinned by**: `postgres.TestMigrate_ConcurrentAcrossDatabases` — installs
+into 8 freshly created databases on one cluster concurrently (after a
+sequential warm-up `Migrate()` call so every racer hits `007`'s
+unconditional `ALTER ROLE` rather than racing `001`'s
+`CREATE ROLE IF NOT EXISTS` instead); fails reliably before this fix
+(`tuple concurrently updated` / `pg_authid_rolname_index` violation
+depending on timing) and passes reliably after it.
+
 ## How to add a new invariant
 
 ---
