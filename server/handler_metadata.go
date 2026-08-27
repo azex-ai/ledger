@@ -53,23 +53,29 @@ func toClassificationResponse(c *core.Classification) classificationResponse {
 type createJournalTypeRequest struct {
 	Code string `json:"code"`
 	Name string `json:"name"`
+	// HolderKind is optional (core.HolderTxKindNone if omitted) -- M-7 fix,
+	// docs/INVARIANTS.md I-44. Unlike ClassificationInput.BalanceRole this
+	// is never required: see core.HolderTxKindNone's doc comment.
+	HolderKind string `json:"holder_kind"`
 }
 
 type journalTypeResponse struct {
-	UID       string    `json:"uid"`
-	Code      string    `json:"code"`
-	Name      string    `json:"name"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	UID        string    `json:"uid"`
+	Code       string    `json:"code"`
+	Name       string    `json:"name"`
+	IsActive   bool      `json:"is_active"`
+	HolderKind string    `json:"holder_kind"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 func toJournalTypeResponse(jt *core.JournalType) journalTypeResponse {
 	return journalTypeResponse{
-		UID:       jt.UID,
-		Code:      jt.Code,
-		Name:      jt.Name,
-		IsActive:  jt.IsActive,
-		CreatedAt: jt.CreatedAt,
+		UID:        jt.UID,
+		Code:       jt.Code,
+		Name:       jt.Name,
+		IsActive:   jt.IsActive,
+		HolderKind: string(jt.HolderKind),
+		CreatedAt:  jt.CreatedAt,
 	}
 }
 
@@ -245,8 +251,9 @@ func (s *Server) handleCreateJournalType(w http.ResponseWriter, r *http.Request)
 	}
 
 	jt, err := s.journalTypes.CreateJournalType(r.Context(), core.JournalTypeInput{
-		Code: req.Code,
-		Name: req.Name,
+		Code:       req.Code,
+		Name:       req.Name,
+		HolderKind: core.HolderTxKind(req.HolderKind),
 	})
 	if err != nil {
 		httpx.Error(w, err)

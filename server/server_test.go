@@ -285,7 +285,7 @@ func (m *mockClassificationStore) ListClassifications(ctx context.Context, activ
 type mockJournalTypeStore struct{}
 
 func (m *mockJournalTypeStore) CreateJournalType(ctx context.Context, input core.JournalTypeInput) (*core.JournalType, error) {
-	return &core.JournalType{UID: "jt-1", Code: input.Code, Name: input.Name, IsActive: true, CreatedAt: time.Now()}, nil
+	return &core.JournalType{UID: "jt-1", Code: input.Code, Name: input.Name, IsActive: true, HolderKind: input.HolderKind, CreatedAt: time.Now()}, nil
 }
 
 func (m *mockJournalTypeStore) GetJournalTypeByCode(ctx context.Context, code string) (*core.JournalType, error) {
@@ -1121,6 +1121,27 @@ func TestJournalTypeCRUD(t *testing.T) {
 
 	w = doRequest(srv, http.MethodGet, "/api/v1/journal-types", nil)
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestCreateJournalType_HolderKindRoundTrips pins the M-7 fix's HTTP
+// surface (docs/INVARIANTS.md I-44): holder_kind round-trips through
+// POST /journal-types, and -- unlike balance_role on POST /classifications
+// -- omitting it entirely is accepted (never required at creation, see
+// core.HolderTxKindNone's doc comment).
+func TestCreateJournalType_HolderKindRoundTrips(t *testing.T) {
+	srv := newTestServer()
+
+	for _, kind := range []string{"deposit", "other", ""} {
+		body := map[string]any{"code": "jt_" + kind + "_hk", "name": "JT " + kind}
+		if kind != "" {
+			body["holder_kind"] = kind
+		}
+		w := doRequest(srv, http.MethodPost, "/api/v1/journal-types", body)
+		require.Equal(t, http.StatusCreated, w.Code, "kind=%q: %s", kind, w.Body.String())
+
+		data := parseEnvelope(t, w.Body.Bytes())
+		assert.Equal(t, kind, data["holder_kind"], "kind=%q", kind)
+	}
 }
 
 func TestTemplateCRUD(t *testing.T) {

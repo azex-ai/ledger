@@ -3693,6 +3693,43 @@ pre-existing non-empty value rather than silently overwriting it.
   `TestInstallPresets_BalanceRoleUpgradeAndConflict` /
   `_BalanceRoleConflictAtCreation` for `balance_role`.
 
+> **Addendum (M-7 follow-up, Team Lead review, same batch).** The rule above
+> is correct as far as it goes — an untagged journal type never leaks `""`
+> onto the wire — but leaves the "untagged" state itself with no path to
+> discovery: a deployer who forgets to call `JournalTypeStore.SetHolderKind`
+> on their own journal type has no way to learn that fact other than a user
+> noticing `"other"` where a specific label was expected. This is the same
+> `working-agreements.md` §3 shape the M-4 addendum above closes for
+> `balance_role`, at a lower severity (display, not solvency) — and the fix
+> follows the same pattern: a reconcile check, detection only, that does not
+> change what `kind` resolves to on the wire.
+>
+> A new reconcile check, `untagged_holder_kind`, flags any journal type that
+> appears in the holder transaction view's population (a journal entry
+> posted for a user holder against a role-bearing classification —
+> `postgres/sql/queries/holder.sql`'s own `WHERE` clause) but carries
+> `holder_kind = ''`. A journal type that never touches a role-bearing
+> classification never surfaces in the holder view at all, so it is never
+> flagged regardless of its `holder_kind` — matching the population the
+> fallback in the main rule above actually applies to, not a blanket "every
+> untagged row" scan.
+>
+> **Enforced by (addendum)**: `postgres/sql/queries/reconcile.sql`'s
+> `ReconcileUntaggedHolderKindJournalTypes`;
+> `service.FullReconciliationService.runCheckUntaggedHolderKind`
+> (`service/reconcile.go`), wired into the check suite as
+> `untagged_holder_kind`.
+>
+> **Pinned by (addendum)**: `service.TestUntaggedHolderKind_Clean` /
+> `_Violation` / `_QueryError` (mock-backed, mirroring the
+> `role_less_liability` unit tests) /
+> `service.TestFullReconciliation_UntaggedHolderKind_DetectsAndDoesNotFalsePositive`
+> — the DB-backed pin, which also asserts the actual consequence directly:
+> the untagged journal type's holder transactions really do read
+> `kind: "other"` on the wire, and both b-directions (an explicitly tagged
+> journal type; one that only ever touches a role-less classification) are
+> confirmed never flagged.
+
 ## How to add a new invariant
 
 ---

@@ -665,3 +665,82 @@ func TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged(t *te
 	assert.True(t, solvency.Liability.IsZero(),
 		"Liability must stay blind to the untagged debit-normal balance -- this is the invisible understatement the check now surfaces: got %s", solvency.Liability)
 }
+
+// TestFullReconciliation_UntaggedHolderKind_DetectsAndDoesNotFalsePositive
+// pins the M-7 follow-up (Team Lead, 2026-08-27, board #49): a journal type
+// visible in the holder transaction view (posted against a role-bearing
+// classification for a user holder) but never tagged with a core.HolderTxKind
+// must surface as a Finding -- and, the b-direction, an explicitly tagged
+// journal type and one that only ever touches role-less classifications
+// must never be flagged.
+func TestFullReconciliation_UntaggedHolderKind_DetectsAndDoesNotFalsePositive(t *testing.T) {
+	pgpool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	rollup := postgres.NewRollupAdapter(pgpool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pgpool)
+
+	currencyUID := postgrestest.SeedCurrency(t, pgpool, "USDT", "Tether M7")
+	walletUID := postgrestest.SeedClassificationWithRole(t, pgpool, "main_wallet_m7", "Main Wallet M7", "debit", false, "available")
+	custodialUID := postgrestest.SeedClassification(t, pgpool, "custodial_m7", "Custodial M7", "credit", true)
+	// Genuinely role-LESS (balance_role='', not BalanceRoleMemo): seeded via
+	// plain SeedClassification (the column default), the unambiguous shape
+	// holder.sql's `balance_role <> ''` filter excludes -- unlike this
+	// package's own fee_expense preset, which (M-4 fix) carries the
+	// non-empty BalanceRoleMemo rather than an empty role.
+	roleLessUID := postgrestest.SeedClassification(t, pgpool, "roleless_m7", "Roleless M7", "debit", false)
+
+	// (a) The shape this check exists to catch: untagged, posted against a
+	// role-bearing classification for a user holder.
+	untaggedUID := postgrestest.SeedJournalType(t, pgpool, "m7_untagged", "M7 Untagged")
+	holderA := int64(9800)
+	seedJournal(t, pgpool, untaggedUID, holderA, currencyUID, walletUID, custodialUID, decimal.NewFromInt(50), time.Now(), postgrestest.UniqueKey("m7-untagged"))
+
+	// (b) b-direction: explicitly tagged -- must never be flagged even
+	// though it is posted against the same role-bearing classification.
+	taggedUID := postgrestest.SeedJournalTypeWithHolderKind(t, pgpool, "m7_tagged", "M7 Tagged", "deposit")
+	holderB := int64(9801)
+	seedJournal(t, pgpool, taggedUID, holderB, currencyUID, walletUID, custodialUID, decimal.NewFromInt(60), time.Now(), postgrestest.UniqueKey("m7-tagged"))
+
+	// (c) b-direction: untagged, but only ever posted against a role-LESS
+	// classification -- never appears in the holder transaction view at all
+	// (holder.sql's own WHERE clause), so must never be flagged regardless
+	// of its holder_kind.
+	roleLessOnlyUID := postgrestest.SeedJournalType(t, pgpool, "m7_untagged_roleless", "M7 Untagged Roleless")
+	holderC := int64(9802)
+	seedJournal(t, pgpool, roleLessOnlyUID, holderC, currencyUID, roleLessUID, custodialUID, decimal.NewFromInt(5), time.Now(), postgrestest.UniqueKey("m7-roleless"))
+
+	eng := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, eng)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, eng)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "untagged_holder_kind")
+	assert.False(t, check.Passed, "the untagged journal type visible to holders must be caught")
+
+	var flaggedUntagged, flaggedTagged, flaggedRoleLess bool
+	for _, f := range check.Findings {
+		if strings.Contains(f.Description, "m7_untagged\"") {
+			flaggedUntagged = true
+			assert.Contains(t, f.Detail, "SetHolderKind")
+		}
+		if strings.Contains(f.Description, "m7_tagged") {
+			flaggedTagged = true
+		}
+		if strings.Contains(f.Description, "m7_untagged_roleless") {
+			flaggedRoleLess = true
+		}
+	}
+	assert.True(t, flaggedUntagged, "got: %+v", check.Findings)
+	assert.False(t, flaggedTagged, "an explicitly tagged journal type must never be flagged: got %+v", check.Findings)
+	assert.False(t, flaggedRoleLess, "a journal type that never touches a role-bearing classification must never be flagged (it never surfaces in the holder view at all): got %+v", check.Findings)
+
+	// The actual consequence this check makes visible: holderA's
+	// transactions currently read kind="other" on the wire.
+	ledgerStore := postgres.NewLedgerStore(pgpool)
+	items, _, err := ledgerStore.ListHolderTransactions(ctx, holderA, "", 10)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "other", items[0].Kind, "the untagged journal type's transactions read the disclosed 'other' fallback -- exactly what the Finding above points a deployer at fixing")
+}

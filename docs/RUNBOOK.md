@@ -70,6 +70,7 @@ proof of the count):
 | `settlement_netting` | settlement classification cleanly nets to zero outside the grace window |
 | `non_negative_balances` | no holder > 0 has balance < 0 |
 | `role_less_liability` | no user-side (holder > 0), non-system classification with a nonzero balance is missing a `balance_role` (M-4/I-37) — such a balance is silently excluded from `SolvencyReport.Liability`. Not limited to credit-normal: `main_wallet`, the canonical real liability, is debit-normal |
+| `untagged_holder_kind` | no journal type visible in the holder transaction view (posted against a role-bearing classification for a user holder) is missing a `holder_kind` (M-7 follow-up/I-44) — no financial consequence (its transactions already read the disclosed `kind: "other"` fallback), but nothing else surfaces the gap |
 | `orphan_reservations` | reservations with no matching journal |
 | `idempotency_uniqueness` | duplicate `idempotency_key` (should be 0; UNIQUE index prevents) |
 | `stale_rollup_queue` | rollup queue items unclaimed for too long |
@@ -115,6 +116,17 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   cost/memo account (the `fee_expense` shape) — or confirm it should have
   been `is_system` instead (recreate/relabel per your migration process —
   this library never mutates `is_system` after creation).
+- **`untagged_holder_kind`** (M-7 follow-up, I-44) — a journal type that
+  shows up in a holder's transaction list has no `holder_kind`. Not a
+  correctness bug — the finding's journal type code and uid are real, and
+  its transactions already render `kind: "other"` on the wire, the same
+  disclosed fallback a deliberately-untyped journal type would produce — the
+  gap is purely visibility: nothing else tells you this happened. Fix by
+  tagging it via `JournalTypeStore.SetHolderKind` with whichever
+  `core.HolderTxKind` fits (`deposit`/`withdrawal`/`transfer`/`fee`/
+  `adjustment`), or leave it untagged if `other` genuinely is the right
+  bucket — this check will keep re-flagging it either way until you call
+  `SetHolderKind` once, even if `other` was the deliberate answer.
 - **`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity`
   (checkpoint / system_rollups / balance_snapshots drift, I-23)** —
   **do not** just re-run reconcile and move on: these three all mean a
