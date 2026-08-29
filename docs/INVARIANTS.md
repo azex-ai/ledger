@@ -3960,6 +3960,86 @@ unconditional `ALTER ROLE` rather than racing `001`'s
 (`tuple concurrently updated` / `pg_authid_rolname_index` violation
 depending on timing) and passes reliably after it.
 
+## I-48: Every `core.Anchor` implementation is provably conformant, not just documented as such
+
+(Board #53. `core.Anchor`'s contract — P6's external anchor, design doc
+§8.3 — previously lived only in its doc comment's prose; nothing forced a
+consumer's production carrier, or a future change to `anchordev`'s dev
+implementation, to actually satisfy it.)
+
+**Rule**: `anchortest.RunConformance(t, newAnchor)` (`anchortest/conformance.go`)
+is a reusable suite any `core.Anchor` implementation can run against
+itself. It checks exactly what `core.Anchor`'s doc comment
+(`core/interfaces.go`) promises, in order, as one scenario:
+
+1. `Head` on an anchor nothing has been published to returns `(0, nil,
+   nil)` — never an error.
+2. `Publish` followed by `Head` reflects what was published, and `Head`
+   tracks the *highest* seq across multiple publishes, not merely "a"
+   published seq.
+3. Re-publishing the same seq with identical bytes succeeds (idempotent
+   replay).
+4. Re-publishing the same seq with different bytes returns an error, and —
+   inferred from what "must return an error" has to mean for the guarantee
+   to matter, not spelled out verbatim — does not corrupt the previously
+   recorded state.
+5. A second, independently constructed client (standing in for a separate
+   verifier process against the same carrier) sees what an earlier client
+   published — not just because it happens to be the same Go value.
+
+Two things adjacent to the contract are deliberately left unenforced by
+this suite, documented in its package comment so the distinction between
+"the port requires this" and "one implementation added extra strictness"
+stays visible: seq ordering other than an exact replay (`anchordev`'s
+`LocalFileAnchor` chooses to reject anything but `Head()+1`; that is its
+own added strictness, not something every `core.Anchor` must do), and
+concurrency safety of `Publish` (design doc §8.3's intended caller is a
+single local retry queue — serialized by construction — so the port makes
+no promise about concurrent calls; `LocalFileAnchor` happens to provide it
+via an internal mutex anyway, pinned by its own package's tests).
+
+**Why**: a contract that exists only as prose in a doc comment gets out of
+sync with implementations silently — a future edit to `LocalFileAnchor`,
+or a consumer's first production carrier (an object-lock bucket, a public
+chain), has no machine-checkable way to prove it still satisfies what
+`core.Anchor` promises, short of re-reading the doc comment and manually
+re-deriving every edge case. `RunConformance` turns that prose into a
+single reusable suite so both the library's own dev implementation and
+every consumer-supplied carrier are held to the identical, explicit bar —
+and so a check that could never fail (an unfalsifiable "conformance
+suite") is not mistaken for one that actually verifies something (see
+`anchortest`'s own tests, next).
+
+**Enforced by**: `anchortest.Check` / `anchortest.RunConformance`
+(`anchortest/conformance.go`) — `Check` is the pure, `*testing.T`-free
+form; `RunConformance` is a thin adapter that reports the same result as
+named `t.Run` subtests.
+
+**Pinned by**:
+- `anchortest.TestCheck_CatchesIgnoresByteMismatch` /
+  `TestCheck_CatchesHeadAlwaysZero` / `TestCheck_CatchesHeadErrorsOnEmpty` /
+  `TestCheck_CatchesInMemoryOnlyFake` (`anchortest/conformance_test.go`) —
+  four deliberately broken fake `core.Anchor` implementations, one per
+  documented requirement above, each proving `Check` reports the specific
+  violation it exists to catch. (These assert on `Check`'s returned
+  `[]Violation` value rather than nesting a failing `RunConformance` call
+  under `t.Run`: Go's `testing` package marks every ancestor test as
+  failed the moment any subtest fails, regardless of what the parent does
+  with `t.Run`'s returned bool afterward, so there is no way to make "this
+  correctly caught the bug" itself report `PASS` while nesting the failure
+  — `Check`'s `*testing.T`-free design exists specifically to make that
+  assertion possible.)
+- `anchortest.TestCheck_PassesWellBehavedImplementation` /
+  `TestRunConformance_PassesWellBehavedImplementation` — a minimal correct
+  reference implementation proves the suite is not unconditionally red.
+- `anchordev.TestLocalFileAnchor_Conformance`
+  (`anchordev/conformance_test.go`) — the library's own dev implementation
+  run through the same suite a consumer's production carrier would use,
+  passing on the first attempt (a second look for a suite that's too
+  lenient, not evidence it is — see the two "deliberately left
+  unenforced" items above, which is where that leniency actually is, and
+  is documented as intentional rather than an oversight).
+
 ## How to add a new invariant
 
 ---
