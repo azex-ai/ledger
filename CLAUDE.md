@@ -132,6 +132,9 @@ go test ./postgres/ -run TestName -race -count=1
 | `postgres/event_store.go` | EventReader + delivery polling |
 | `postgres/invariants_test.go` | Postgres-backed pins for I-2 / I-3 / I-12 / I-13 |
 | `postgres/benchmarks_test.go` | Bench: PostJournal / GetBalance / Reserve+Settle |
+| `anchortest/conformance.go` | Reusable conformance suite for `core.Anchor` implementations — any anchor self-tests in one line (I-48) |
+| `anchordev/local_file.go` | Local-file Anchor. **Dev/test only** — same machine as the database it must be independent of |
+| `anchors/r2/` | Cloudflare R2 + Object Lock anchor. **Separate Go module** so its S3 SDK stays out of the root `go.mod` (same reason as `chains/evm`) |
 | `observability/prometheus.go` | core.Metrics impl on prometheus/client_golang |
 | `server/routes.go` | All endpoint definitions |
 | `server/handler_bookings.go` | Unified booking endpoints |
