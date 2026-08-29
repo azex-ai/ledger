@@ -891,6 +891,83 @@ dependency of ledger availability). `ledger-cli verify` treats an
 unreachable anchor as `NOT_RUN`, fail-closed — never `VERIFIED` (design doc
 §8.4).
 
+### Deploying the R2 carrier (`anchors/r2`, board #55)
+
+`anchors/r2` (import path `github.com/azex-ai/ledger/anchors/r2`) is a
+production `core.Anchor` carrier on Cloudflare R2 + Object Lock, chosen
+(2026-08-29) because every project's domains already sit in Cloudflare, R2
+supports Object Lock natively, and a second Cloudflare account is pure
+configuration — no new vendor to onboard. It is a separate Go module from
+the root `github.com/azex-ai/ledger` module (mirroring `chains/evm`'s split
+for go-ethereum): the AWS SDK it depends on never enters the root module's
+`go.mod`/`go.sum`, so importing this library does not pull the AWS SDK into
+a consumer who uses a different carrier (or none at all). Only a consumer
+that explicitly imports `anchors/r2` compiles against it.
+
+It speaks the plain S3 API (`github.com/aws/aws-sdk-go-v2/service/s3`), so
+it is exercised in this repo's own test suite against a local MinIO
+container (`anchors/r2/r2_test.go`, via `testcontainers-go`) rather than
+real R2 — the carrier's actual reachability, credentials, and Object Lock
+configuration on the real bucket are verified by the deployer, per point 1
+of the four carrier properties above (not something a black-box Go test
+run in CI can prove).
+
+**What a deployer must set up, before wiring `r2.New` into the
+composition root:**
+
+1. **A separate Cloudflare account** from the one that runs the ledger's
+   own deployment (property 1 above — the same credential leak that
+   exposes `DATABASE_URL` must not also unlock the anchor). This is the
+   account that owns the bucket, not just a different R2 API token in the
+   same account.
+2. **A bucket with Object Lock enabled**, created with a **default
+   compliance-mode retention period** (Cloudflare R2 dashboard or API, at
+   bucket-creation time — Object Lock cannot be enabled on an
+   already-created bucket). Choose the retention period to comfortably
+   outlive how long a compromise could plausibly go undetected; compliance
+   mode means **not even the account root** can shorten it or delete a
+   locked object version early (that is the point — see property 2 above).
+   Object Lock requires bucket versioning, which R2 enables automatically
+   alongside it.
+3. **Two separate R2 API tokens, scoped to exactly the permissions each
+   side needs — never one token shared by both:**
+   - **Ledger-side token** (the one `r2.Config.AccessKeyID` /
+     `SecretAccessKey` holds in the ledger's own deployment, driving
+     `Publish`): scope to `GetObject` + `PutObject` on the anchor's bucket
+     — ideally further restricted to the single object key
+     `r2.Config.Key` names, via the bucket's object-key prefix if the R2
+     token UI/API supports it. `GetObject` is required alongside
+     `PutObject` because `Publish` reads the current head **before**
+     writing (see `anchors/r2/r2.go`'s `Publish` doc comment) — under
+     Object Lock a bad write cannot be undone, so the mismatch check has
+     to happen on the read side, never discovered after the fact. This
+     token must never carry `DeleteObject`, `PutBucketPolicy`, or any
+     other administrative scope; Object Lock's retention already blocks
+     overwriting a past version regardless of what the IAM policy says,
+     but the token should not rely on that alone.
+   - **Verification-side token** (whatever reads the anchor independently
+     — `ledger-cli verify`, an auditor's own tooling, design doc §8.4):
+     **read-only** — `GetObject` (and `ListBucket`/`ListObjectVersions` if
+     your verification tooling wants to enumerate history rather than
+     just the current head). This token must never carry `PutObject`.
+4. **Wire `r2.Config`** in the consumer's composition root with the
+   ledger-side token's credentials, the bucket name, the R2 endpoint
+   (`https://<account-id>.r2.cloudflarestorage.com`), and the single
+   object key to publish to — then pass the constructed `*r2.Anchor` as
+   the `core.Anchor` the P6 worker publishes through. Nothing in
+   `anchors/r2` reads the environment itself (mirrors `chains/evm`'s
+   `ClientSet` — see that package's doc comment); all of the above is
+   explicit `r2.Config` fields the composition root supplies.
+
+`anchors/r2` stores only the **current** `(seq, head)` pair, as one JSON
+object at `r2.Config.Key` — not one object per `seq`. This is enough to
+satisfy `core.Anchor`'s full contract (`anchortest.RunConformance` proves
+it, `anchors/r2/r2_test.go`): the bucket's versioning (mandatory alongside
+Object Lock) keeps every past version of that key retained and
+un-overwritable even though only the latest version is ever read by
+`Head`, so the audit trail survives without this package needing to
+enumerate history itself.
+
 ---
 
 ## 11. Partition management & archival
