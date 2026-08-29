@@ -631,7 +631,7 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.CheckpointIntegrity()` | `core.CheckpointIntegrityStore` | Trusted, entries-only balance API (`RecomputeBalance` / `RebuildCheckpoint`) that never consults `balance_checkpoints`. **Withdrawal / large-amount paths must call `RecomputeBalance` instead of `BalanceReader.GetBalance`** — see `core.CheckpointIntegrityStore`'s godoc |
 | `svc.VerifiedBalanceReader()` | `core.VerifiedBalanceReader` | Withdrawal-time authorization-gated balance reader. A mechanism the library offers, not a policy it imposes — nothing calls it automatically (`Reserve` does not), so a consumer that never calls this accessor sees no behavior change. Check the returned error before trusting the amount: it can report UNDEFINED |
 | `svc.AuthVerifier()` | `core.AuthVerifier` | The verifier passed to `WithAttestor`, or nil if it was never called — reach the same verifier the composition root wired in from a withdrawal gate, reconcile check, or `ledger-cli verify` |
-| `svc.AttestationService(anchor)` | `(*service.AttestationService, error)` | Batch attestation over per-journal signatures, anchored externally. Errors if `WithAttestor` was never called |
+| `svc.AttestationService(anchor)` | `(*service.AttestationService, error)` | Batch attestation over per-journal signatures, anchored externally. Errors if `WithAttestor` was never called. For `anchor`, see [Anchoring in production](#anchoring-in-production) |
 | `svc.VerifyLedger(ctx, anchor, cfg)` | `service.VerifyReport` | Fail-closed tamper-evidence check against the attestation chain — see `examples/tamper-evident` |
 
 ### Metadata stores
@@ -794,7 +794,53 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**tamper-evident**](examples/tamper-evident/) -- Per-journal signing, batch attestation to an external anchor, and the
   `RequireVerifiedBalance` withdrawal gate. Forges a balanced journal by direct SQL -- the way a stolen `DATABASE_URL`
   would -- and shows the gate refusing to pay it out while an ungated reserve happily does. Expects an empty database.
+  It anchors to `anchordev`, a local file, which is **not** tamper-evident storage -- see
+  [Anchoring in production](#anchoring-in-production) for what to swap it for.
 - [**tx-compose**](examples/tx-compose/) -- Transactional composition: ledger journal + caller's own DB write in one PostgreSQL transaction; rollback on error.
+
+## Anchoring in production
+
+`core.Anchor` is the outermost link of the tamper-evidence chain: it publishes
+each attestation head somewhere this ledger's own database credentials cannot
+reach. Everything below it -- per-journal signatures, batch attestation, the
+`RequireVerifiedBalance` gate -- is verified *against* the anchor, so an anchor
+the attacker can also rewrite makes the rest decorative.
+
+**What ships:**
+
+| Package | Use |
+|---|---|
+| `anchordev` | Local file. **Dev and tests only** -- same machine, same user as the database it is supposed to be independent of. |
+| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. |
+
+**Writing your own.** Object storage with a compliance-mode retention lock, a
+public chain, an RFC 3161 timestamp authority and an append-only database in a
+different failure domain are all defensible carriers; they differ in whether
+they can also prove your books to a third party, and in what they cost per
+publish. `docs/RUNBOOK.md` ("Choosing an Anchor carrier") lists the four
+properties any carrier must have. Whatever you pick, it has to hold under one
+question: *if the attacker holds the ledger's database credentials, can they
+also alter what has already been published?* If yes, it is not an anchor.
+
+**Verify it before you trust it.** The contract -- idempotent publish per seq,
+mismatched bytes rejected, `Head` read from the carrier and never from the
+ledger database -- is machine-checkable, and any implementation can self-test
+in one line:
+
+```go
+func TestMyAnchorConformance(t *testing.T) {
+    // The factory must hand out fresh clients pointed at ONE carrier -- the
+    // suite constructs a second client to check that what the first published
+    // is really on the carrier and not in its memory. Resolve the bucket (or
+    // path, or table) once, outside the closure.
+    bucket := newTestBucket(t)
+    anchortest.RunConformance(t, func() core.Anchor { return newMyAnchor(bucket) })
+}
+```
+
+`anchors/r2` runs it against a real Object-Lock bucket in its own tests. An
+anchor that has not passed it is an unverified assumption sitting at the point
+the whole chain terminates.
 
 ## SemVer / Stability Policy
 
