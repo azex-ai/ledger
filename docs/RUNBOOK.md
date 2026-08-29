@@ -823,6 +823,74 @@ Treat it the same as any other exposed-data incident:
    from unexpected sources during the exposure window.
 3. File a postmortem — this is a P1, not a shrug.
 
+### Choosing an Anchor carrier (P6 external anchor)
+
+`core.Anchor` (`core/interfaces.go`) publishes the P6 batch-attestation head
+somewhere the ledger's own database credentials cannot reach (design doc
+§8.3). This library ships only `anchordev.LocalFileAnchor` — a dev/test
+implementation that is explicitly not a production carrier (a file on the
+same host as the ledger's own DB is not an equivalent simplification here;
+see that package's doc comment). **Which carrier to use in production is a
+deployment decision this library does not make for you** — the design doc
+is deliberate about this: the anchor's carrier is "a real, unresolved
+deployment choice, not deferred out of laziness."
+
+What follows are the properties any carrier must have, not a
+recommendation of which one. `anchortest.RunConformance` (see that
+package's doc comment) machine-checks the parts of this that are
+observable through `core.Anchor`'s method set; the rest has to be verified
+by reading your own adapter and its deployment wiring, not by a test.
+
+A conformant production carrier must be:
+
+1. **Somewhere the ledger's DB credentials cannot reach.** The same
+   credential leak that exposes `DATABASE_URL` must not also hand the
+   attacker write access to the anchor — otherwise they can rewrite both
+   sides of the check the anchor exists to make possible. This rules out
+   another table in the same database, and any storage the ledger's own
+   service credentials can write to. In practice: a separate cloud
+   account/tenant at minimum, ideally with its own separate credential
+   material never issued to the ledger's own deployment. **Not machine
+   checkable** — `anchortest` has no DB handle to compare against; this
+   has to be verified by reading your composition root's wiring (which
+   credentials construct the `core.Anchor` adapter vs. which construct the
+   `pgxpool.Pool`).
+2. **Append-only / immutable once written.** A carrier that lets anyone
+   (including your own ledger's operators) overwrite a previously
+   published `(seq, head)` pair defeats P6's purpose — an attacker who
+   compromises the DB and can also freely rewrite the anchor can make
+   their tampering self-consistent. Object-lock / WORM modes, a
+   write-once bucket policy, or a public chain's own immutability are the
+   usual shapes. `anchortest.RunConformance`'s
+   `MismatchedReplayErrorsAndDoesNotCorrupt` phase checks the half of this
+   that's observable through `Publish` (it refuses a different value for
+   an already-published seq) — it cannot prove nothing else (an admin
+   console, a bucket-policy change, a second credential) can still mutate
+   the underlying bytes out of band.
+3. **Independently readable without going through the ledger's own
+   service.** `ledger-cli verify` (design doc §8.4) must be able to fetch
+   the trusted head even if the ledger's application and database are
+   both compromised or unreachable — otherwise the anchor only ever
+   confirms what the (possibly-compromised) ledger already claims about
+   itself. `anchortest.RunConformance`'s
+   `IndependentlyConstructedClientSeesSameState` phase checks exactly
+   this: a second, freshly constructed client must see what an earlier
+   one published.
+4. **Cheap enough to sustain the attestation cadence.** `AttestInterval`
+   defaults to 60s (`service.DefaultWorkerConfig`); the P6 job publishes
+   on that cadence indefinitely for the life of the deployment (roughly
+   1,440 publishes/day, each a few dozen bytes — design doc §8.3: "内容
+   （几十字节）"). Whatever the per-write cost of your chosen carrier is,
+   multiply it out at that frequency before committing to it, and again
+   if you shorten the interval.
+
+Failure handling is the caller's responsibility, not the carrier's: design
+doc §8.3 requires a local retry queue + alerting in front of `Publish`, and
+that `Publish` failures never block journal writes (P6 is a sidecar, not a
+dependency of ledger availability). `ledger-cli verify` treats an
+unreachable anchor as `NOT_RUN`, fail-closed — never `VERIFIED` (design doc
+§8.4).
+
 ---
 
 ## 11. Partition management & archival

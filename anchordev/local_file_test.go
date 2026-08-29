@@ -3,6 +3,7 @@ package anchordev
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -98,5 +99,56 @@ func TestLocalFileAnchor_RejectsNonSequentialSeq(t *testing.T) {
 	// only seq 1 (curSeq+1 where curSeq=0) is accepted first.
 	if err := a.Publish(ctx, 5, head); err == nil {
 		t.Error("expected error for out-of-order seq, got nil")
+	}
+}
+
+// TestLocalFileAnchor_ConcurrentIdenticalReplayIsSafe pins a guarantee
+// that is LocalFileAnchor's own, not part of core.Anchor's documented
+// contract or anchortest's generic conformance suite: design doc §8.3
+// describes the intended caller as a single local retry queue (Publish
+// calls serialized by construction), so core.Anchor makes no promise
+// about concurrent Publish calls at all. anchortest deliberately does not
+// require thread-safety of every implementation (see its package doc).
+//
+// LocalFileAnchor happens to provide it anyway via mu -- worth pinning
+// here specifically because a retry queue that got parallelized by a
+// future refactor (or a caller that doesn't honor the "one queue" design)
+// should not corrupt this dev tool's single-file state under a race.
+func TestLocalFileAnchor_ConcurrentIdenticalReplayIsSafe(t *testing.T) {
+	dir := t.TempDir()
+	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	ctx := context.Background()
+
+	head := make([]byte, 32)
+	head[0] = 0xFF
+	if err := a.Publish(ctx, 1, head); err != nil {
+		t.Fatalf("Publish(1): %v", err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			errs[i] = a.Publish(ctx, 1, head) // identical replay, concurrently
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("concurrent identical replay [%d]: unexpected error: %v", i, err)
+		}
+	}
+
+	seq, gotHead, err := a.Head(ctx)
+	if err != nil {
+		t.Fatalf("Head: %v", err)
+	}
+	if seq != 1 || string(gotHead) != string(head) {
+		t.Errorf("Head after concurrent identical replays = (%d, %x), want (1, %x)", seq, gotHead, head)
 	}
 }
