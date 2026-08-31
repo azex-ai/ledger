@@ -29,7 +29,7 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # Must track ci.yml, not a pinned patch: go.work sets a minimum
           # (currently 1.26.6) and GOTOOLCHAIN=local means a runner with an
