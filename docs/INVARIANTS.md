@@ -442,6 +442,36 @@ The same role sums power `BalanceReader.GetBalanceBreakdown`
 
 so the `available` a consumer reads is exactly the figure Reserve enforces.
 
+**Scope — holds bind Reserve, and only Reserve.** The subtraction above
+happens in exactly one place: `Reserve`'s own availability check. A direct
+journal post (`PostJournal`, `ExecuteTemplate`, any preset template such as
+`lock_funds` or `transfer_out`) is **not** constrained by outstanding holds —
+and neither is I-17's `min_balance` check, which reads the raw dimension
+balance without netting out active reservations. So "reserved" means
+"protected from other reservations", not "protected from spending": a caller
+that reserves 100 and then posts a 100 journal on the same dimension will
+succeed (or, with `min_balance = 0`, will drive the later settlement journal
+into `ErrInsufficientBalance`, wedging the reservation until it expires).
+Consumers that need reserved funds to be unspendable must route *all*
+consumption through Reserve→Settle, or park held funds on a `role=locked`
+classification via a journal.
+
+**Why min_balance is deliberately NOT netted against holds** (considered and
+rejected, 2026-08-29 review W-3): the obvious "fix" — subtract outstanding
+holds inside the account-policy `min_balance` check so a direct journal can't
+spend reserved funds — would break settlement itself. The charge a `Settle`
+posts *is* a direct journal against the same dimension, spending exactly the
+funds the reservation holds; a hold-netting min_balance would reject that
+charge (its own reservation's hold is still outstanding at the moment it
+posts), wedging every settlement. A direct `PostJournal` carries no reference
+to "which reservation, if any, this relates to", so the check cannot exempt
+the settling reservation. Netting holds is therefore not a safe default or a
+safe opt-in at this layer — it trades a documented, bounded gap for a
+money-path regression. The correct boundary stays: holds bind Reserve; direct
+journals are bounded by `min_balance` on the raw balance; unspendability is
+achieved by routing consumption through Reserve→Settle or a `role=locked`
+parking journal, both above.
+
 **Why**: the obvious one — overdraft prevention. The non-obvious part: this
 must be checked **inside** the advisory lock (see I-4), not before.
 
@@ -714,6 +744,11 @@ the most specific match wins — `(holder,currency,classification)` >
   positive = dust floor), evaluated once against the *net* delta across every
   entry the journal posts to that exact dimension — not per-entry, so an
   intermediate debit within a net-positive journal is not falsely rejected.
+  The balance it evaluates is the **raw** dimension balance — active
+  reservations are NOT subtracted. `min_balance = 0` therefore does not stop
+  a journal from spending funds that a reservation is holding; it only stops
+  the balance itself going below zero. See I-11's scope note for what holds
+  do and do not protect against.
 
 **Why**: without this, any direct `PostJournal` call could push a frozen or
 closed account's balance around, or drive any account arbitrarily negative —
@@ -2737,6 +2772,29 @@ renamed; update this doc.
    default now includes the library's own codes; `AllowGenericTemplatePost`
    is the new opt-out for a deployment with a reviewed reason to post one of
    them through this endpoint anyway.
+
+3. `POST /journals` (the handwritten-entry endpoint) refuses, by default, any
+   entry that touches a classification flagged `is_system` (custodial,
+   suspense, equity, …). This is the handwritten-path counterpart to (2),
+   added in the 2026-08-29 review (M-2): without it a `write`-scope key could
+   reproduce a deposit confirmation's exact double entry
+   (`DR main_wallet(user) / CR custodial(system)`) by hand and mint spendable
+   user balance, straight past the template blacklist. The guard reads the
+   live `is_system` flag from the classification store (not a hand-maintained
+   list), so a new system classification is covered the moment it exists. The
+   library's own system-side flows (deposit/transfer/fx/capital) go through
+   templates or server-side orchestration, not this endpoint, so the default
+   does not constrain them. `Config.AllowSystemClassificationPost` opts a
+   deployment out after a reviewed decision (and logs a startup warning when
+   set), for the case where an operator legitimately hand-posts system-side
+   journals over HTTP.
+
+   Together (2) and (3) mean a leaked or over-scoped `write`-scope key can no
+   longer mint deposit-shaped accounting through *either* the template or the
+   handwritten endpoint under default configuration — the guarantee this
+   invariant claims. Enforced by `handlePostJournal`'s
+   `rejectSystemClassificationEntries` (`server/handler_journals.go`), pinned by
+   `TestPostJournal_RejectsSystemClassificationByDefault`.
 
 **Why**: Before (1), a client following `docs/openapi.yaml` literally (e.g.
 checking `data.next_cursor === null` to know when to stop paging, or sending

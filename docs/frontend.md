@@ -228,10 +228,18 @@ that would mask the dependency.
 ## Theming
 
 The provider (and `<LedgerAdmin/>`) render a `<div className="ledger-root">`
-wrapper. All design tokens are scoped under `.ledger-root` (default **dark**;
-add `.light` for the light variant) so importing the stylesheet never leaks
-tokens into the host app. The bundled CSS is preflight-free — package and host
-styles coexist.
+wrapper. The package's business design tokens (`--primary`, `--background`,
+`--chart-*`, …) are scoped under `.ledger-root`, so importing the stylesheet
+never overrides the host app's own theme. (Tailwind v4's standard theme layer —
+`--color-*`, `--spacing`, `--text-*`, … — is emitted globally by Tailwind's
+engine, inherent to v4 and carrying no host-affecting resets; a build-time gate
+asserts no business token leaks with it. If your host customizes Tailwind's
+theme, import your stylesheet after this package's.) The default
+appearance follows the OS: a bare `.ledger-root` is **light**, `.ledger-root.dark`
+forces dark, and `.ledger-root.system` (the provider default) follows
+`prefers-color-scheme` — there is no `.light` class. The bundled CSS ships its
+own `.ledger-root`-scoped preflight (fonts, resets, table borders), so it renders
+correctly even in a host with no Tailwind setup.
 
 Re-theme by overriding the CSS custom properties:
 

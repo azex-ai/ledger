@@ -906,11 +906,27 @@ that explicitly imports `anchors/r2` compiles against it.
 
 It speaks the plain S3 API (`github.com/aws/aws-sdk-go-v2/service/s3`), so
 it is exercised in this repo's own test suite against a local MinIO
-container (`anchors/r2/r2_test.go`, via `testcontainers-go`) rather than
-real R2 — the carrier's actual reachability, credentials, and Object Lock
-configuration on the real bucket are verified by the deployer, per point 1
-of the four carrier properties above (not something a black-box Go test
-run in CI can prove).
+container rather than real R2 — the carrier's actual reachability,
+credentials, and Object Lock configuration on the real bucket are verified
+by the deployer, per point 1 of the four carrier properties above (not
+something a black-box Go test run in CI can prove). The MinIO
+testcontainers dependency lives in a test-only sibling module,
+`anchors/r2/internal/miniotest`, so it is not a direct dependency of
+`anchors/r2` itself and does not reach a consumer's dependency graph (MJ-6,
+2026-08-29 review; the same split `internal/postgrestest` uses for the root
+module — see the root CLAUDE.md "go.work" gotcha for the exact SBOM/lockfile
+semantics).
+
+**Consuming the submodule today (MJ-7, not yet closed).** `anchors/r2` and
+`chains/evm` pin the root module with a local `replace ... => ../..` for
+in-repo development, and the release workflow does not yet rewrite that
+`replace`/`require` to a published version or push a submodule-scoped tag
+(`anchors/r2/vX.Y.Z`). Go ignores a dependency's own `replace` directives,
+so `go get github.com/azex-ai/ledger/anchors/r2@<tag>` from an external
+module does **not** resolve as-is. Until the release CI is extended to
+version the submodules, consume them from a local checkout via a
+parent-directory `go.work` (see the README's "Local Development with
+go.work"), not `go get`. Tracked as a release-engineering follow-up.
 
 **What a deployer must set up, before wiring `r2.New` into the
 composition root:**
