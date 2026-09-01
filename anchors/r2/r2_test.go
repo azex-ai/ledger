@@ -3,52 +3,17 @@ package r2_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/azex-ai/ledger/anchors/r2"
+	"github.com/azex-ai/ledger/anchors/r2/internal/miniotest"
 	"github.com/azex-ai/ledger/anchortest"
 	"github.com/azex-ai/ledger/core"
 )
-
-// minioFixture is a real S3-compatible endpoint (MinIO, via testcontainers)
-// standing in for the production Cloudflare R2 bucket -- R2's own account
-// setup is deployment-time (docs/RUNBOOK.md "Choosing an Anchor carrier");
-// what this test proves is that r2.Anchor's Publish/Head implementation
-// correctly satisfies core.Anchor's contract against a real S3 API, not
-// that R2 itself works (that connectivity is verified by the deployer per
-// the RUNBOOK, same as any other carrier).
-func minioFixture(t *testing.T) (endpoint, accessKey, secret string) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("short mode: skipping MinIO-backed integration test")
-	}
-
-	ctx := context.Background()
-	container, err := tcminio.Run(ctx, "minio/minio:RELEASE.2024-01-16T16-07-38Z")
-	if err != nil {
-		if strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
-			t.Skip("Docker daemon not running, skipping integration test")
-		}
-		t.Fatalf("start minio container: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Logf("terminate minio container: %v", err)
-		}
-	})
-
-	endpoint, err = container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("minio connection string: %v", err)
-	}
-	return "http://" + endpoint, container.Username, container.Password
-}
 
 // createLockedBucket creates bucket with Object Lock enabled -- the same
 // bucket-level configuration docs/RUNBOOK.md asks a production deployer to
@@ -75,7 +40,7 @@ func createLockedBucket(t *testing.T, endpoint, accessKey, secret, bucket string
 }
 
 func TestAnchor_Conformance(t *testing.T) {
-	endpoint, accessKey, secret := minioFixture(t)
+	endpoint, accessKey, secret := miniotest.Fixture(t)
 	const bucket = "ledger-anchor-conformance"
 	createLockedBucket(t, endpoint, accessKey, secret, bucket)
 
@@ -133,7 +98,7 @@ func TestNew_ValidatesConfig(t *testing.T) {
 // a seq older than the current head, rather than silently corrupting
 // Head's "highest seq" guarantee.
 func TestAnchor_PublishRejectsOlderSeq(t *testing.T) {
-	endpoint, accessKey, secret := minioFixture(t)
+	endpoint, accessKey, secret := miniotest.Fixture(t)
 	const bucket = "ledger-anchor-older-seq"
 	createLockedBucket(t, endpoint, accessKey, secret, bucket)
 

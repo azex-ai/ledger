@@ -133,6 +133,14 @@ func New(cfg Config) (*Anchor, error) {
 // under Object Lock, a wrongly-written version cannot be taken back, so the
 // mismatch check has to happen on the read side, never discovered after
 // the fact by comparing a write that already landed.
+//
+// The read-then-write here is not atomic, which is safe under core.Anchor's
+// single-publisher assumption (the attestation job is leader-elected, so no
+// two Publish calls race). If this anchor were ever driven by genuinely
+// concurrent publishers, this would need a conditional PutObject (If-Match on
+// the ETag returned by Head's GetObject, If-None-Match:"*" for the first
+// write) to stop a slower writer from overwriting a newer head — see the
+// interface doc.
 func (a *Anchor) Publish(ctx context.Context, seq int64, headBytes []byte) error {
 	curSeq, curHead, err := a.Head(ctx)
 	if err != nil {
