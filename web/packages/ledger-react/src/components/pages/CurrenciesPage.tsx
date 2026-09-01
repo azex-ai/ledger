@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useCurrencies,
@@ -59,7 +60,7 @@ function CreateDialog() {
               toast.success("Currency created");
               setOpen(false);
             },
-            onError: () => toast.error("Failed to create currency"),
+            onError: (err) => toast.error(errorText(err, "Failed to create currency")),
           })} disabled={mutation.isPending || !form.code || !form.name || form.exponent.trim() === "" || Number.isNaN(Number(form.exponent)) || Number(form.exponent) < 0 || Number(form.exponent) > 18}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -92,7 +93,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Currency deactivated");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to deactivate currency"),
+              onError: (err) => toast.error(errorText(err, "Failed to deactivate currency")),
             })}
             disabled={mutation.isPending}
           >
@@ -125,10 +126,10 @@ export function CurrenciesPage() {
         />
       ) : (
         <>
-        <Table>
+        <Table className="min-w-[720px]">
           <TableHeader>
             <TableRow>
-              <TableHead>ID</TableHead>
+              <TableHead className="w-[220px]">ID</TableHead>
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Active</TableHead>
@@ -138,7 +139,9 @@ export function CurrenciesPage() {
           <TableBody>
             {pageItems.map((c) => (
               <TableRow key={c.uid}>
-                <TableCell>{c.uid}</TableCell>
+                <TableCell className="max-w-[220px]">
+                  <span className="block truncate font-mono text-xs" title={c.uid}>{c.uid}</span>
+                </TableCell>
                 <TableCell className="font-mono">{c.code}</TableCell>
                 <TableCell>{c.name}</TableCell>
                 <TableCell><StatusBadge status={c.is_active ? "active" : "inactive"} /></TableCell>

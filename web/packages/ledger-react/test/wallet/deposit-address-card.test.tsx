@@ -63,7 +63,7 @@ describe.each([
 ])("DepositAddressCard (%s)", (_skin, Card) => {
   test("renders the address, a QR code, and no internal vocabulary", async () => {
     server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
-    const { container } = render(wrap(<Card />));
+    const { container } = render(wrap(<Card network="Ethereum" assets={["USDC"]} />));
 
     await waitFor(() =>
       expect(screen.getByText("Your deposit address")).toBeInTheDocument(),
@@ -77,9 +77,28 @@ describe.each([
     }
   });
 
+  // M5 (web audit): the network and accepted assets are injected by the host,
+  // never hardcoded — a CREATE2 address is chain-specific and sending on the
+  // wrong network is unrecoverable. Pin that both reach the safety line.
+  test("names the injected network and assets, and warns about other networks", async () => {
+    server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
+    render(wrap(<Card network="Base" assets={["USDC", "DAI"]} />));
+
+    await waitFor(() =>
+      expect(screen.getByText("Your deposit address")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/USDC or DAI/, { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Base")).toBeInTheDocument();
+    expect(
+      screen.getByText(/cannot be recovered/, { exact: false }),
+    ).toBeInTheDocument();
+  });
+
   test("copying the address writes it to the clipboard", async () => {
     server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
-    render(wrap(<Card />));
+    render(wrap(<Card network="Ethereum" assets={["USDC"]} />));
 
     await waitFor(() => expect(screen.getByTitle(ADDRESS)).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Copy address" }));
@@ -98,7 +117,7 @@ describe.each([
         ),
       ),
     );
-    render(wrap(<Card />));
+    render(wrap(<Card network="Ethereum" assets={["USDC"]} />));
 
     await waitFor(() =>
       expect(screen.getByText("Generate an address to deposit funds.")).toBeInTheDocument(),
@@ -124,7 +143,7 @@ describe.each([
       configurable: true,
     });
     server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
-    render(wrap(<Card />));
+    render(wrap(<Card network="Ethereum" assets={["USDC"]} />));
 
     await waitFor(() => expect(screen.getByTitle(ADDRESS)).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Copy address" }));
@@ -147,7 +166,7 @@ describe.each([
         ),
       ),
     );
-    const { container } = render(wrap(<Card />));
+    const { container } = render(wrap(<Card network="Ethereum" assets={["USDC"]} />));
 
     await waitFor(() =>
       expect(

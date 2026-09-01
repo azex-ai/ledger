@@ -26,6 +26,12 @@ export type LinkComponent = ComponentType<{
   href: string;
   className?: string;
   children: ReactNode;
+  /**
+   * Optional click side-effect (e.g. close the mobile nav drawer after a
+   * navigation). Backward-compatible: hosts whose adapter ignores it simply
+   * don't get the side-effect. Host adapters (next-link.tsx) should forward it.
+   */
+  onClick?: () => void;
 }>;
 
 export type LedgerNavItem =
@@ -52,8 +58,8 @@ export const LEDGER_NAV_ITEMS: readonly LedgerNavItem[] = [
 ];
 
 /** Default link renderer — plain anchor, works without a host router. */
-export const DefaultLink: LinkComponent = ({ href, className, children }) => (
-  <a href={href} className={className}>
+export const DefaultLink: LinkComponent = ({ href, className, children, onClick }) => (
+  <a href={href} className={className} onClick={onClick}>
     {children}
   </a>
 );

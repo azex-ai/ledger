@@ -31,6 +31,32 @@ function readStyles(): string {
   }
 }
 
+// --- C2a (decision B) global-token gates ---------------------------------
+
+// Tailwind v4's standard theme + utility namespaces. These are global by
+// design; a custom property under the bare :root/:host that is NOT one of
+// these is an unexpected leak worth failing on.
+const GLOBAL_TOKEN_ALLOWLIST =
+  /^--(?:color|font|font-weight|spacing|container|text|leading|tracking|radius|ease|animate|blur|default)-?/;
+
+// Business design tokens the package themes under `.ledger-root`. None of
+// these may ever appear in the global :root/:host scope.
+const BUSINESS_TOKEN_RE =
+  /^--(?:primary|secondary|background|foreground|accent|muted|border|card|popover|ring|input|destructive|chart|sidebar|success|warning|danger|info)\b/;
+
+// globalScopeTokens returns every custom property declared under a bare
+// `:root` or `:host` selector (NOT `.ledger-root`, which is the package's own
+// scoped block and legitimately carries business tokens).
+function globalScopeTokens(css: string): string[] {
+  const tokens: string[] = [];
+  const blockRe = /(?:^|[},])\s*(:root|:host)[^{]*\{([^}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(css)) !== null) {
+    for (const p of m[2].matchAll(/(--[a-z0-9-]+)\s*:/g)) tokens.push(p[1]);
+  }
+  return tokens;
+}
+
 describe("dist/styles.css", () => {
   const css = readStyles();
 
@@ -92,7 +118,45 @@ describe("dist/styles.css", () => {
     expect(css).not.toMatch(/(^|[^a-zA-Z._#-])html\s*\{/);
     expect(css).not.toContain("body{margin:0");
     expect(css).not.toMatch(/(^|[},])(h1|h2|h3|h4|h5|h6|p|blockquote)[^{]*\{margin:0/);
-    expect(css).not.toMatch(/(^|[},])\*\s*[,{]/); // bare universal selector
+  });
+
+  // C2a (decision B, 2026-09-01): Tailwind v4's theme layer (`--color-*`,
+  // `--spacing`, `--text-*`, …) and utility layer (`--tw-*` initializers) are
+  // global by design and cannot be scoped without abandoning Tailwind's own
+  // machinery — option A (scope the theme layer) was rejected as a risky
+  // rework of a UI-convenience package with no ledger-correctness stake. What
+  // matters, and what these gates enforce, is that the leak is confined to
+  // Tailwind's OWN standard namespaces and never carries a BUSINESS token
+  // (`--primary`, `--background`, `--chart-*`, …) or a host-affecting reset
+  // into the global scope. The business tokens stay `.ledger-root`-scoped
+  // (asserted separately below). These assertions fail the moment a business
+  // token or an unexpected global custom property appears.
+  it("global :root/:host declares only Tailwind standard theme tokens", () => {
+    for (const tok of globalScopeTokens(css)) {
+      expect(tok).toMatch(GLOBAL_TOKEN_ALLOWLIST);
+    }
+  });
+
+  it("never leaks a business design token into the global scope", () => {
+    for (const tok of globalScopeTokens(css)) {
+      expect(tok).not.toMatch(BUSINESS_TOKEN_RE);
+    }
+  });
+
+  it("the global universal-selector rule initializes only Tailwind --tw-* vars, never resets host elements", () => {
+    // Tailwind's utility layer emits a global `*,:before,:after{…}` that seeds
+    // its own `--tw-*` custom properties. That is inert for the host (it only
+    // defines unused variables). A real reset here (margin/padding/box-sizing
+    // on a bare `*`) WOULD reach the host's elements and must never appear.
+    const universal = css.match(/\*,:before,:after[^{]*\{([^}]*)\}/);
+    if (universal) {
+      // Property names starting with a letter are real CSS resets; `--tw-*`
+      // custom-property initializers (which start with `-`) are excluded.
+      const realResets = [...universal[1].matchAll(/(?:^|;)\s*([a-z][a-z-]*)\s*:/g)].map(
+        (m) => m[1],
+      );
+      expect(realResets).toEqual([]);
+    }
   });
 
   it("paints its own base: font, background, foreground on .ledger-root", () => {
@@ -128,5 +192,20 @@ describe("dist/heroui.css", () => {
     expect(css).not.toContain("body{margin:0");
     // …and no .ledger-root token block — theming belongs to @heroui/styles.
     expect(css).not.toMatch(/\.ledger-root[^{]*\{[^}]*--primary:/);
+  });
+
+  // C2a (decision B): the heroui bundle emits the same global Tailwind theme
+  // layer. Same gates as the shadcn bundle — Tailwind's own namespaces are
+  // allowed global, business tokens are not.
+  it("global :root/:host declares only Tailwind standard theme tokens", () => {
+    for (const tok of globalScopeTokens(css)) {
+      expect(tok).toMatch(GLOBAL_TOKEN_ALLOWLIST);
+    }
+  });
+
+  it("never leaks a business design token into the global scope", () => {
+    for (const tok of globalScopeTokens(css)) {
+      expect(tok).not.toMatch(BUSINESS_TOKEN_RE);
+    }
   });
 });

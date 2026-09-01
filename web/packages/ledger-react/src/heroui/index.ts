@@ -14,11 +14,21 @@
  *   - Wrap the app in <LedgerProvider> (re-exported here for convenience).
  */
 
+// Headless core (client + provider + hooks) — same as the root barrel does,
+// so a HeroUI host gets every hook from one import instead of also reaching
+// into `@azex/ledger-react/headless` (N10, web audit).
+export * from "../headless";
+
 export { LedgerProvider } from "../provider/provider";
 export type { LedgerProviderConfig } from "../provider/provider";
 
 // Shell (all-in-one, internal section switching — no host router needed)
 export { LedgerAdmin } from "./LedgerAdmin";
+
+// Navigation — the HeroUI Sidebar (desktop only; no mobile drawer, by design —
+// see heroui/sidebar.tsx). Exported so a HeroUI host wiring its own routes can
+// use the sidebar without pulling in the whole LedgerAdmin shell.
+export { Sidebar } from "./sidebar";
 
 // Shared presentational primitives
 export { PageHeader, EmptyState, ErrorState, StatusChip, TableSkeleton } from "./shared";
@@ -27,7 +37,6 @@ export { PageHeader, EmptyState, ErrorState, StatusChip, TableSkeleton } from ".
 // shadcn skin's pages (linkComponent injection; JournalDetailPage takes `id`).
 export { JournalsPage } from "./pages/JournalsPage";
 export { JournalDetailPage } from "./pages/JournalDetailPage";
-export { BalancesPage } from "./pages/BalancesPage";
 export { ReservationsPage } from "./pages/ReservationsPage";
 export { DepositsPage } from "./pages/DepositsPage";
 export { DepositReviewsPage } from "./pages/DepositReviewsPage";
@@ -39,4 +48,8 @@ export { CurrenciesPage } from "./pages/CurrenciesPage";
 export { ReconciliationPage } from "./pages/ReconciliationPage";
 export { SnapshotsPage } from "./pages/SnapshotsPage";
 export { SweepMonitorPage } from "./pages/SweepMonitorPage";
-export { DashboardPage } from "./pages/DashboardPage";
+
+// Chart-bearing pages (DashboardPage, BalancesPage) live on the
+// `@azex/ledger-react/heroui/charts` subpath instead — they statically import
+// recharts, so keeping them off this barrel keeps recharts out of
+// dist/heroui.js (N9, web audit). Mirrors the root `./charts` split.

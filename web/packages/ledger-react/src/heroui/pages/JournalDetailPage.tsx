@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import { Button, Card, Chip, Input, Label, Modal, Skeleton, Table, TextField, toast } from "@heroui/react";
 import { formatAmount, formatUTC } from "../../lib/utils";
@@ -119,7 +120,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
                         toast.success("Journal reversed");
                         setOpen(false);
                       },
-                      onError: () => toast.danger("Failed to reverse journal"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to reverse journal")),
                     },
                   )
                 }

@@ -145,22 +145,35 @@ describe("skin parity (M6 gate)", () => {
     }
   });
 
-  // Informational only (not a failure) — pins the current state of the
-  // broader hardening gap (aria-label / truncate / min-w-0) so a future
-  // audit can see at a glance whether it's closing or widening, without
-  // this gate blocking on a full accessibility/overflow pass across every
-  // page (out of scope for this fix batch; tracked separately).
-  it("logs the current aria-label / truncate / min-w-0 census (no assertion)", () => {
-    const tokens = ["aria-label", "truncate", "min-w-0"];
-    for (const skin of [SHADCN_DIR, HEROUI_DIR]) {
-      let total = 0;
-      for (const f of tsxFilesIn(skin)) {
-        const text = readFileSync(path.join(skin, f), "utf8");
-        for (const t of tokens) total += (text.match(new RegExp(t, "g")) ?? []).length;
+  // Hardening ratchet (M3, web audit): the aria-label / truncate / min-w-0
+  // census per skin can only go UP. The shadcn (default) skin was the
+  // less-hardened one; the M3 pass raised it from 8 to the baseline below.
+  // These are floors, not targets — RAISE a baseline when a page adds more
+  // hardening, NEVER lower one to make a regression pass. (Full shadcn↔heroui
+  // token equality is still a longer-term goal; this gate just stops backslide.)
+  const HARDENING_TOKENS = ["aria-label", "truncate", "min-w-0"];
+  const CENSUS_BASELINE: Record<string, number> = {
+    "src/components/pages": 21,
+    "src/heroui/pages": 63,
+  };
+
+  function censusFor(dir: string): number {
+    let total = 0;
+    for (const f of tsxFilesIn(dir)) {
+      const text = readFileSync(path.join(dir, f), "utf8");
+      for (const t of HARDENING_TOKENS) {
+        total += (text.match(new RegExp(t, "g")) ?? []).length;
       }
-      // eslint-disable-next-line no-console
-      console.log(`[skin-parity census] ${path.basename(path.dirname(skin))}/${path.basename(skin)}: ${total}`);
     }
-    expect(true).toBe(true);
+    return total;
+  }
+
+  it("hardening census only ratchets up (aria-label / truncate / min-w-0)", () => {
+    expect(censusFor(SHADCN_DIR)).toBeGreaterThanOrEqual(
+      CENSUS_BASELINE["src/components/pages"],
+    );
+    expect(censusFor(HEROUI_DIR)).toBeGreaterThanOrEqual(
+      CENSUS_BASELINE["src/heroui/pages"],
+    );
   });
 });

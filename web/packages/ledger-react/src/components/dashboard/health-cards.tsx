@@ -21,8 +21,8 @@ interface HealthBadge {
 export function HealthCards() {
   const { data, isLoading, isError, refetch } = useHealth();
 
-  const rollupDepth = data ? Number(data.rollup_queue_depth) : undefined;
-  const checkpointAge = data ? Number(data.checkpoint_max_age_seconds) : undefined;
+  const rollupDepth = data?.rollup_queue_depth;
+  const checkpointAge = data?.checkpoint_max_age_seconds;
 
   const cards: { title: string; value: string | number; icon: typeof Activity; desc: string; badge?: HealthBadge }[] = [
     {

@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
   AlertDialog,
@@ -21,7 +22,8 @@ import {
   useSettleReservation,
 } from "../../hooks/use-reservations";
 import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
-import { formatAmount, formatUTC, validateAmount } from "../../lib/utils";
+import { formatAmount, formatUTC, validateAmount, isZeroAmount } from "../../lib/utils";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
 import { LoadMoreBar } from "../pagination-bar";
 
@@ -30,7 +32,16 @@ const STATUS_OPTIONS = ["all", "active", "settling", "settled", "released"] as c
 function SettleModal({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
+  // One key per submitted amount — settle's receipt matches on the amount, so a
+  // corrected amount after a rejection must not replay the previous amount's key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useSettleReservation();
+
+  const openModal = () => {
+    idempotencyKey.reset();
+    setOpen(true);
+  };
 
   const submit = () => {
     const amountErr = validateAmount(amount);
@@ -39,21 +50,21 @@ function SettleModal({ id }: { id: string }) {
       return;
     }
     mutation.mutate(
-      { id, actualAmount: amount },
+      { id, actualAmount: amount, idempotencyKey: idempotencyKey.keyFor(amount) },
       {
         onSuccess: () => {
           toast.success("Reservation settled");
           setOpen(false);
           setAmount("");
         },
-        onError: () => toast.danger("Failed to settle reservation"),
+        onError: (err) => toast.danger(errorText(err, "Failed to settle reservation")),
       },
     );
   };
 
   return (
     <>
-      <Button size="sm" variant="secondary" onPress={() => setOpen(true)}>
+      <Button size="sm" variant="secondary" onPress={openModal}>
         Settle
       </Button>
       <Modal.Backdrop isOpen={open} onOpenChange={setOpen}>
@@ -115,7 +126,7 @@ function SettlePartialModal({ id }: { id: string }) {
           setOpen(false);
           setAmount("");
         },
-        onError: () => toast.danger("Failed to record partial settlement"),
+        onError: (err) => toast.danger(errorText(err, "Failed to record partial settlement")),
       },
     );
   };
@@ -195,7 +206,7 @@ function FinalizeConfirm({ id }: { id: string }) {
                       toast.success("Reservation finalized");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to finalize reservation"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to finalize reservation")),
                   })
                 }
               >
@@ -249,7 +260,7 @@ function ReleaseConfirm({ id }: { id: string }) {
                       toast.success("Reservation released");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to release reservation"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to release reservation")),
                   })
                 }
               >
@@ -270,6 +281,7 @@ export function ReservationsPage() {
   const params = useMemo(() => ({ status: statusFilter || undefined }), [statusFilter]);
   const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useReservations(params);
+  const { currencyCode } = useUidCodeLookups();
   const reservations = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
@@ -330,12 +342,12 @@ export function ReservationsPage() {
                   <Table.Row id={r.uid}>
                     <Table.Cell className="max-w-32"><span className="block truncate" title={r.uid}>#{r.uid}</span></Table.Cell>
                     <Table.Cell>{r.account_holder}</Table.Cell>
-                    <Table.Cell>{r.currency_uid}</Table.Cell>
+                    <Table.Cell><span title={r.currency_uid}>{currencyCode(r.currency_uid)}</span></Table.Cell>
                     <Table.Cell className="text-end font-mono tabular-nums">
                       {formatAmount(r.reserved_amount)}
                     </Table.Cell>
                     <Table.Cell className="text-end font-mono tabular-nums">
-                      {r.settled_amount && r.settled_amount !== "0"
+                      {r.settled_amount && !isZeroAmount(r.settled_amount)
                         ? formatAmount(r.settled_amount)
                         : "—"}
                     </Table.Cell>

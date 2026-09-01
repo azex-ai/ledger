@@ -38,6 +38,10 @@
       "types": "./dist/heroui.d.ts",
       "default": "./dist/heroui.js"
     },
+    "./heroui/charts": {
+      "types": "./dist/heroui-charts.d.ts",
+      "default": "./dist/heroui-charts.js"
+    },
     "./styles.css": "./dist/styles.css",
     "./heroui.css": "./dist/heroui.css"
   },

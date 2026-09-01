@@ -94,7 +94,7 @@ export function LedgerAdmin() {
   // of navigating. Stable identity via useMemo so child memoization holds.
   const linkComponent = useMemo<LinkComponent>(
     () =>
-      function InternalLink({ href, className, children }) {
+      function InternalLink({ href, className, children, onClick }) {
         return (
           <a
             href={href}
@@ -102,6 +102,10 @@ export function LedgerAdmin() {
             onClick={(e) => {
               e.preventDefault();
               setPathname(href);
+              // Forward the LinkComponent side-effect (e.g. close the mobile
+              // nav drawer) — internal routing doesn't unmount the drawer, so
+              // without this it stays open over the new section.
+              onClick?.();
             }}
           >
             {children}

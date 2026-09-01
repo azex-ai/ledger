@@ -85,4 +85,5 @@ export const ledgerKeyPrefix = {
   templates: ["ledger", "templates"] as const,
   currencies: ["ledger", "currencies"] as const,
   reservations: ["ledger", "reservations"] as const,
+  depositReviews: ["ledger", "deposit-reviews"] as const,
 } as const;

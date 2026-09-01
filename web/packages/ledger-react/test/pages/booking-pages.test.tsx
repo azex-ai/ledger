@@ -102,7 +102,9 @@ describe("WithdrawalsPage", () => {
     const dialog = dialogHeading.closest('[role="alertdialog"]') as HTMLElement;
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("Failed to approve withdrawal"));
+    // M1: the toast now surfaces the server's error text (message.text), not a
+    // generic "Failed to …" fallback. See src/lib/error-message.ts.
+    await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("internal error"));
     // The row must still show up — the transition never happened server-side.
     expect(screen.getByText("#bk-9")).toBeInTheDocument();
     errorSpy.mockRestore();

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatAmount, formatSignedAmount, formatUTC, cn } from "../../lib/utils";
 import { useReconcileGlobal, useReconcileAccount } from "../../hooks/use-system";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -13,10 +14,12 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "../ui/table";
 import { AlertCircle } from "lucide-react";
+import { toast } from "sonner";
 
 export function ReconciliationPage() {
   const globalMutation = useReconcileGlobal();
   const accountMutation = useReconcileAccount();
+  const { classCode, currencyCode } = useUidCodeLookups();
   const [holder, setHolder] = useState("");
   const [currencyId, setCurrencyId] = useState("");
 
@@ -50,7 +53,7 @@ export function ReconciliationPage() {
                 <div className="flex items-center gap-2">
                   <StatusBadge status={globalResult.balanced ? "confirmed" : "failed"} />
                   <span className="text-sm">
-                    {globalResult.balanced ? "Balanced" : `Unbalanced (gap: ${globalResult.gap})`}
+                    {globalResult.balanced ? "Balanced" : `Unbalanced (gap: ${formatAmount(globalResult.gap)})`}
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -83,7 +86,10 @@ export function ReconciliationPage() {
                   onClick={() => {
                     const h = parseInt(holder, 10);
                     const c = currencyId.trim();
-                    if (isNaN(h) || c === "") return;
+                    if (isNaN(h) || c === "") {
+                      toast.error("Enter both a holder and a currency to run the check.");
+                      return;
+                    }
                     accountMutation.mutate({ holder: h, currencyUid: c });
                   }}
                   disabled={accountMutation.isPending || !holder || !currencyId}
@@ -103,7 +109,7 @@ export function ReconciliationPage() {
                 <div className="flex items-center gap-2">
                   <StatusBadge status={accountResult.balanced ? "confirmed" : "failed"} />
                   <span className="text-sm">
-                    {accountResult.balanced ? "Balanced" : `Drift detected (gap: ${accountResult.gap})`}
+                    {accountResult.balanced ? "Balanced" : `Drift detected (gap: ${formatAmount(accountResult.gap)})`}
                   </span>
                 </div>
                 {accountResult.details && accountResult.details.length > 0 && (
@@ -122,8 +128,8 @@ export function ReconciliationPage() {
                       {accountResult.details.map((d) => (
                         <TableRow key={`${d.account_holder}-${d.currency_uid}-${d.classification_uid}`}>
                           <TableCell>{d.account_holder}</TableCell>
-                          <TableCell>{d.currency_uid}</TableCell>
-                          <TableCell>{d.classification_uid}</TableCell>
+                          <TableCell title={d.currency_uid}>{currencyCode(d.currency_uid)}</TableCell>
+                          <TableCell title={d.classification_uid}>{classCode(d.classification_uid)}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatAmount(d.expected)}</TableCell>
                           <TableCell className="text-right tabular-nums">{formatAmount(d.actual)}</TableCell>
                           <TableCell className="text-right tabular-nums">

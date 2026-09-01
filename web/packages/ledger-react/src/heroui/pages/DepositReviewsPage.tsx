@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   AlertDialog,
@@ -16,7 +17,7 @@ import {
   useRejectDepositReview,
 } from "../../hooks/use-deposit-reviews";
 import { formatAmount, formatUTC } from "../../lib/utils";
-import { shortenAddress } from "../../lib/utils/address";
+import { shortenHash } from "../../lib/utils/address";
 import type { Booking } from "../../client/types";
 import { EmptyState, ErrorState, PageHeader, TableSkeleton } from "../shared";
 import { LoadMoreBar } from "../pagination-bar";
@@ -45,7 +46,7 @@ function OnchainCell({ metadata }: { metadata: Record<string, unknown> }) {
   if (!txHash) return <span className="text-muted">—</span>;
   return (
     <div className="flex flex-col gap-0.5 text-xs">
-      <span className="font-mono" title={txHash}>{shortenAddress(txHash, 6)}</span>
+      <span className="font-mono" title={txHash}>{shortenHash(txHash, 6)}</span>
       {chainId && <span className="text-muted">Chain {chainId}</span>}
     </div>
   );
@@ -91,7 +92,7 @@ function ApproveConfirm({ booking }: { booking: Booking }) {
                       toast.success("Deposit approved and credited");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to approve deposit"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to approve deposit")),
                   })
                 }
               >
@@ -159,7 +160,7 @@ function RejectModal({ booking }: { booking: Booking }) {
                         setOpen(false);
                         setReason("");
                       },
-                      onError: () => toast.danger("Failed to reject deposit"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to reject deposit")),
                     },
                   )
                 }

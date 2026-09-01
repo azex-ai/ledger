@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
@@ -170,7 +171,7 @@ function CreateTemplateModal() {
           toast.success("Template created");
           resetAndClose();
         },
-        onError: () => toast.danger("Failed to create template"),
+        onError: (err) => toast.danger(errorText(err, "Failed to create template")),
       },
     );
   }
@@ -351,7 +352,7 @@ function DeactivateTemplateDialog({ id, name }: { id: string; name: string }) {
                     toast.success("Template deactivated");
                     setOpen(false);
                   },
-                  onError: () => toast.danger("Failed to deactivate template"),
+                  onError: (err) => toast.danger(errorText(err, "Failed to deactivate template")),
                 })}
               >
                 Deactivate

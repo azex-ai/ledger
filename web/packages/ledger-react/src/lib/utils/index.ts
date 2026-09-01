@@ -27,6 +27,7 @@ export {
   isAddress,
   isAddressEqual,
   shortenAddress,
+  shortenHash,
 } from "./address";
 
 // ─── Clipboard ──────────────────────────────────────────────────────

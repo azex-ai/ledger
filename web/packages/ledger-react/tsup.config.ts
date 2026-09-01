@@ -76,6 +76,7 @@ export default defineConfig({
     charts: "src/charts.ts",
     headless: "src/headless.ts",
     heroui: "src/heroui/index.ts",
+    "heroui-charts": "src/heroui-charts.ts",
     "wallet-headless": "src/wallet-headless.ts",
     wallet: "src/wallet.ts",
     "wallet-heroui": "src/wallet-heroui.ts",

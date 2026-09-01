@@ -100,8 +100,12 @@ export function BalancesPage() {
                   <TableBody>
                     {balances.map((b) => (
                       <TableRow key={`${b.currency_uid}-${b.classification_uid}`}>
-                        <TableCell>{b.currency_uid}</TableCell>
-                        <TableCell>{b.classification_uid}</TableCell>
+                        <TableCell className="max-w-40">
+                          <span className="block truncate font-mono text-xs" title={b.currency_uid}>{b.currency_uid}</span>
+                        </TableCell>
+                        <TableCell className="max-w-40">
+                          <span className="block truncate font-mono text-xs" title={b.classification_uid}>{b.classification_uid}</span>
+                        </TableCell>
                         <TableCell className="text-right tabular-nums">{formatAmount(b.balance)}</TableCell>
                       </TableRow>
                     ))}

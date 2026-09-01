@@ -77,8 +77,20 @@ export function useReviewWithdraw() {
 
 export function useProcessWithdraw() {
   const client = useLedgerClient();
+  // Payload-keyed idempotency (caller supplies the key via variables). The
+  // transition receipt matches on channel_ref (postgres/booking_store.go:362),
+  // so an auto-key held across a retry after a client timeout would ErrConflict
+  // once the operator corrects the channel ref — key on it (M2, web audit).
   return useLedgerMutation(
-    ({ id, channelRef }: { id: string; channelRef: string }, idempotencyKey) =>
+    ({
+      id,
+      channelRef,
+      idempotencyKey,
+    }: {
+      id: string;
+      channelRef: string;
+      idempotencyKey: string;
+    }) =>
       client.transitionBooking(
         id,
         { to_status: "processing", channel_ref: channelRef },

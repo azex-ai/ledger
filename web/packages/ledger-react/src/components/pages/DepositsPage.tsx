@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import { formatAmount, validateAmount } from "../../lib/utils";
 import {
@@ -8,6 +9,7 @@ import {
   useConfirmDeposit,
   useFailDeposit,
 } from "../../hooks/use-deposits";
+import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -60,10 +62,20 @@ function DepositStepper({ status }: { status: string }) {
 function ConfirmingDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted channel ref — the transition receipt matches on
+  // channel_ref, so a corrected ref after a rejection must mint a fresh key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useConfirmingDeposit();
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) idempotencyKey.reset();
+        setOpen(next);
+      }}
+    >
       <DialogTrigger render={<Button size="sm" variant="outline" />}>Confirming</DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -77,13 +89,16 @@ function ConfirmingDialog({ id }: { id: string }) {
         </div>
         <DialogFooter>
           <Button
-            onClick={() => mutation.mutate({ id, channelRef: channelRef || "manual" }, {
-              onSuccess: () => {
-                toast.success("Deposit moved to confirming");
-                setOpen(false);
-              },
-              onError: () => toast.error("Failed to update deposit"),
-            })}
+            onClick={() => {
+              const ref = channelRef || "manual";
+              mutation.mutate({ id, channelRef: ref, idempotencyKey: idempotencyKey.keyFor(ref) }, {
+                onSuccess: () => {
+                  toast.success("Deposit moved to confirming");
+                  setOpen(false);
+                },
+                onError: (err) => toast.error(errorText(err, "Failed to update deposit")),
+              });
+            }}
             disabled={mutation.isPending}
           >
             {mutation.isPending ? "Updating..." : "Confirm"}
@@ -98,10 +113,20 @@ function ConfirmDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted (amount, channel_ref) — the transition receipt matches
+  // on both, so a corrected value after a rejection must mint a fresh key (M2,
+  // web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useConfirmDeposit();
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) idempotencyKey.reset();
+        setOpen(next);
+      }}
+    >
       <DialogTrigger render={<Button size="sm" variant="outline" />}>Confirm</DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -125,12 +150,12 @@ function ConfirmDialog({ id }: { id: string }) {
                 toast.error(amountErr);
                 return;
               }
-              mutation.mutate({ id, actual_amount: amount, channel_ref: channelRef }, {
+              mutation.mutate({ id, actual_amount: amount, channel_ref: channelRef, idempotencyKey: idempotencyKey.keyFor(`${amount}|${channelRef}`) }, {
                 onSuccess: () => {
                   toast.success("Deposit confirmed");
                   setOpen(false);
                 },
-                onError: () => toast.error("Failed to confirm deposit"),
+                onError: (err) => toast.error(errorText(err, "Failed to confirm deposit")),
               });
             }}
             disabled={mutation.isPending || !amount || !channelRef}
@@ -180,7 +205,7 @@ function FailDialog({ id }: { id: string }) {
                 toast.success("Deposit marked as failed");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to mark deposit as failed"),
+              onError: (err) => toast.error(errorText(err, "Failed to mark deposit as failed")),
             })}
             disabled={mutation.isPending}
           >
@@ -237,10 +262,10 @@ export function DepositsPage() {
         />
       ) : (
         <>
-          <Table>
+          <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
-                <TableHead>ID</TableHead>
+                <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
                 <TableHead>Channel</TableHead>
                 <TableHead className="text-right">Expected</TableHead>
@@ -253,7 +278,9 @@ export function DepositsPage() {
             <TableBody>
               {deposits.map((d) => (
                 <TableRow key={d.uid}>
-                  <TableCell>#{d.uid}</TableCell>
+                  <TableCell className="max-w-[220px]">
+                    <span className="block truncate font-mono text-xs" title={d.uid}>#{d.uid}</span>
+                  </TableCell>
                   <TableCell>{d.account_holder}</TableCell>
                   <TableCell>{d.channel_name}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(d.amount)}</TableCell>

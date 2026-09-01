@@ -88,7 +88,7 @@ describe("use-deposits", () => {
     const { result } = renderHook(() => useConfirmDeposit(), {
       wrapper: wrapperWith(qc),
     });
-    result.current.mutate({ id: "uid-1", actual_amount: "10", channel_ref: "tx" });
+    result.current.mutate({ id: "uid-1", actual_amount: "10", channel_ref: "tx", idempotencyKey: "idem-1" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
     expect(keys).toContainEqual(["ledger", "bookings"]);

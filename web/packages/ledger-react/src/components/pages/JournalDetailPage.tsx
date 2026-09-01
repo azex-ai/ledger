@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { useJournal, useReverseJournal } from "../../hooks/use-journals";
@@ -107,7 +108,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
                 toast.success("Journal reversed");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to reverse journal"),
+              onError: (err) => toast.error(errorText(err, "Failed to reverse journal")),
             })}
             disabled={mutation.isPending || !reason}
           >
@@ -193,9 +194,9 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
           <CardTitle className="text-sm font-medium">Details</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Idempotency Key</span>
-            <span className="font-mono">{j.idempotency_key}</span>
+          <div className="flex justify-between gap-2">
+            <span className="text-muted-foreground shrink-0">Idempotency Key</span>
+            <span className="font-mono truncate min-w-0 text-right" title={j.idempotency_key}>{j.idempotency_key}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Created At</span>
@@ -225,7 +226,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
           <CardTitle className="text-sm font-medium">Entries</CardTitle>
         </CardHeader>
         <CardContent>
-          <Table>
+          <Table className="min-w-[720px]">
             <TableHeader>
               <TableRow>
                 <TableHead>ID</TableHead>
@@ -241,8 +242,12 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
                 <TableRow key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`}>
                   <TableCell>{e.entry_type}</TableCell>
                   <TableCell>{e.account_holder}</TableCell>
-                  <TableCell>{e.currency_uid}</TableCell>
-                  <TableCell>{e.classification_uid}</TableCell>
+                  <TableCell className="max-w-40">
+                    <span className="block truncate font-mono text-xs" title={e.currency_uid}>{e.currency_uid}</span>
+                  </TableCell>
+                  <TableCell className="max-w-40">
+                    <span className="block truncate font-mono text-xs" title={e.classification_uid}>{e.classification_uid}</span>
+                  </TableCell>
                   <TableCell>
                     <StatusBadge status={e.entry_type} />
                   </TableCell>

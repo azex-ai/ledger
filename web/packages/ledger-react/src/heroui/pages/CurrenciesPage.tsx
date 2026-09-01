@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useCurrencies,
@@ -44,7 +45,7 @@ function CreateCurrencyModal() {
           setOpen(false);
           setForm({ code: "", name: "", exponent: "" });
         },
-        onError: () => toast.danger("Failed to create currency"),
+        onError: (err) => toast.danger(errorText(err, "Failed to create currency")),
       },
     );
   }
@@ -127,7 +128,7 @@ function DeactivateCurrencyDialog({ id, name }: { id: string; name: string }) {
                     toast.success("Currency deactivated");
                     setOpen(false);
                   },
-                  onError: () => toast.danger("Failed to deactivate currency"),
+                  onError: (err) => toast.danger(errorText(err, "Failed to deactivate currency")),
                 })}
               >
                 Deactivate

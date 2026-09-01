@@ -26,7 +26,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["HealthEnvelope"];
+                    };
                 };
                 /** @description DB unreachable. Envelope, same as every other error response. */
                 503: {
@@ -69,7 +71,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "ready";
+                            };
+                        };
+                    };
                 };
                 /** @description Not ready yet. Envelope, same as every other error response. */
                 503: {
@@ -179,6 +188,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["JournalEnvelope"];
+                    };
+                };
+                /** @description An entry targets an is_system classification and AllowSystemClassificationPost is off. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
                 409: components["responses"]["DomainError"];
@@ -361,7 +379,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["JournalEnvelope"];
+                    };
                 };
                 404: components["responses"]["NotFound"];
                 /** @description Already reversed. */
@@ -419,7 +439,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["JournalEnvelope"];
+                    };
                 };
                 404: components["responses"]["NotFound"];
                 /** @description Cumulative reversal would exceed the original. */
@@ -628,12 +650,24 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Map of holder → balances. */
+                /** @description List of holder → balances (server/handler_balances.go's handleBatchBalances returns a function-local `holderBalances` struct, not a named package-level type -- inline here rather than a $ref'd component, same reasoning as the requestBody schemas this suite deliberately leaves unregistered). */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                list?: {
+                                    /** Format: int64 */
+                                    holder_id: number;
+                                    balances: components["schemas"]["Balance"][];
+                                }[];
+                                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                                next_cursor?: string | null;
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -744,7 +778,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "settled";
+                            };
+                        };
+                    };
                 };
                 422: components["responses"]["DomainError"];
             };
@@ -793,7 +834,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "settling";
+                            };
+                        };
+                    };
                 };
                 422: components["responses"]["DomainError"];
             };
@@ -840,7 +888,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "settled";
+                            };
+                        };
+                    };
                 };
                 422: components["responses"]["DomainError"];
             };
@@ -884,7 +939,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "released";
+                            };
+                        };
+                    };
                 };
                 422: components["responses"]["DomainError"];
             };
@@ -962,7 +1024,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["AccountPolicyListEnvelope"];
+                    };
                 };
             };
         };
@@ -1462,12 +1526,19 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). */
+                /** @description Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). Three distinct Go response types (bookingToResponse / eventToResponse / depositSightingIgnoredResponse in server/handler_webhooks.go) share this one operation, hence oneOf rather than a single $ref -- deliberately inline, not a named component, so it stays outside the by-name completeness registry the same way an inline requestBody schema does (see server/openapi_contract_test.go). */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["BookingEnvelope"] | components["schemas"]["EventEnvelope"] | (components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "ignored";
+                            };
+                        });
+                    };
                 };
                 /** @description HMAC verification failed. */
                 401: {
@@ -1520,7 +1591,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ClassificationListEnvelope"];
+                    };
                 };
             };
         };
@@ -1544,7 +1617,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["ClassificationEnvelope"];
+                    };
                 };
             };
         };
@@ -1580,7 +1655,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "deactivated";
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -1612,7 +1694,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["JournalTypeListEnvelope"];
+                    };
                 };
             };
         };
@@ -1644,7 +1728,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["JournalTypeEnvelope"];
+                    };
                 };
             };
         };
@@ -1679,7 +1765,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "deactivated";
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -1711,7 +1804,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["TemplateListEnvelope"];
+                    };
                 };
             };
         };
@@ -1735,7 +1830,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["TemplateEnvelope"];
+                    };
                 };
             };
         };
@@ -1775,7 +1872,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["TemplatePreviewResultEnvelope"];
+                    };
                 };
             };
         };
@@ -1810,7 +1909,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "deactivated";
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -1841,7 +1947,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["CurrencyListEnvelope"];
+                    };
                 };
             };
         };
@@ -1869,7 +1977,9 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["CurrencyEnvelope"];
+                    };
                 };
             };
         };
@@ -1905,7 +2015,14 @@ export interface paths {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                /** @enum {string} */
+                                status: "deactivated";
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -2063,12 +2180,30 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Snapshots. */
+                /** @description Snapshots. server/handler_system.go's handleListSnapshots returns a function-local `snapshotResp` struct, not a named package-level type -- inline here rather than a $ref'd component, same reasoning as POST /balances/batch above. */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
-                    content?: never;
+                    content: {
+                        "application/json": components["schemas"]["Envelope"] & {
+                            data?: {
+                                list?: {
+                                    /** Format: int64 */
+                                    account_holder: number;
+                                    /** Format: uuid */
+                                    currency_uid: string;
+                                    /** Format: uuid */
+                                    classification_uid: string;
+                                    /** Format: date */
+                                    snapshot_date: string;
+                                    balance: components["schemas"]["Decimal"];
+                                }[];
+                                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                                next_cursor?: string | null;
+                            };
+                        };
+                    };
                 };
             };
         };
@@ -2651,6 +2786,126 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/periods/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Close an accounting period (hard write barrier before close_before). */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["ClosePeriodRequest"];
+                };
+            };
+            responses: {
+                /** @description Period close recorded. */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PeriodCloseEnvelope"];
+                    };
+                };
+                409: components["responses"]["DomainError"];
+                422: components["responses"]["DomainError"];
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/periods/closes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List period closes (most recent first). */
+        get: {
+            parameters: {
+                query?: {
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Period closes. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PeriodCloseListEnvelope"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/reports/trial-balance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trial balance for one currency as of a point in time. */
+        get: {
+            parameters: {
+                query: {
+                    currency_uid: string;
+                    as_of?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Trial balance. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["TrialBalanceEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2867,6 +3122,66 @@ export interface components {
                 entries?: components["schemas"]["Entry"][];
             };
         };
+        HealthStatus: {
+            status: string;
+            db: string;
+            /** Format: int64 */
+            rollup_queue_depth: number;
+            checkpoint_max_age_seconds: number;
+            /** Format: int64 */
+            active_reservations: number;
+        };
+        HealthEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["HealthStatus"];
+        };
+        ClosePeriodRequest: {
+            close_before: components["schemas"]["Timestamp"];
+            note?: string;
+            /** Format: int64 */
+            actor_id?: number;
+        };
+        PeriodClose: {
+            /** Format: uuid */
+            uid: string;
+            close_before: components["schemas"]["Timestamp"];
+            note: string;
+            /** Format: int64 */
+            actor_id: number;
+            created_at: components["schemas"]["Timestamp"];
+        };
+        PeriodCloseEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["PeriodClose"];
+        };
+        PeriodCloseListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["PeriodClose"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
+        };
+        TrialBalanceRow: {
+            /** Format: uuid */
+            classification_uid: string;
+            classification_code: string;
+            classification_name: string;
+            /** @enum {string} */
+            normal_side: "debit" | "credit";
+            total_debit: components["schemas"]["Decimal"];
+            total_credit: components["schemas"]["Decimal"];
+            net: components["schemas"]["Decimal"];
+        };
+        TrialBalance: {
+            /** Format: uuid */
+            currency_uid: string;
+            as_of: components["schemas"]["Timestamp"];
+            rows: components["schemas"]["TrialBalanceRow"][];
+            total_debit: components["schemas"]["Decimal"];
+            total_credit: components["schemas"]["Decimal"];
+            balanced: boolean;
+        };
+        TrialBalanceEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["TrialBalance"];
+        };
         Balance: {
             /** Format: int64 */
             account_holder: number;
@@ -3004,6 +3319,13 @@ export interface components {
         };
         AccountPolicyEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["AccountPolicy"];
+        };
+        AccountPolicyListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["AccountPolicy"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
         };
         CreateBookingInput: {
             classification_code: string;
@@ -3148,6 +3470,52 @@ export interface components {
             balance_role?: components["schemas"]["BalanceRole"];
             lifecycle?: components["schemas"]["Lifecycle"];
         };
+        /** @description lifecycle is the only genuinely optional field here (classificationResponse.go: `omitempty` — absent from the wire, not present-as-empty, for a label-only classification with no lifecycle). Every other field is always populated. */
+        Classification: {
+            /** Format: uuid */
+            uid: string;
+            code: string;
+            name: string;
+            normal_side: components["schemas"]["NormalSide"];
+            is_system: boolean;
+            is_active: boolean;
+            balance_role: components["schemas"]["BalanceRole"];
+            lifecycle?: components["schemas"]["Lifecycle"];
+            created_at: components["schemas"]["Timestamp"];
+        };
+        ClassificationEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["Classification"];
+        };
+        ClassificationListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Classification"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
+        };
+        JournalType: {
+            /** Format: uuid */
+            uid: string;
+            code: string;
+            name: string;
+            is_active: boolean;
+            /**
+             * @description '' when untagged (M-7 fix, docs/INVARIANTS.md I-44).
+             * @enum {string}
+             */
+            holder_kind: "" | "deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" | "other";
+            created_at: components["schemas"]["Timestamp"];
+        };
+        JournalTypeEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["JournalType"];
+        };
+        JournalTypeListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["JournalType"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
+        };
         TemplateLineInput: {
             /** Format: uuid */
             classification_uid: string;
@@ -3162,6 +3530,53 @@ export interface components {
             /** Format: uuid */
             journal_type_uid: string;
             lines: components["schemas"]["TemplateLineInput"][];
+        };
+        TemplateLine: {
+            /** Format: uuid */
+            classification_uid: string;
+            entry_type: components["schemas"]["EntryType"];
+            holder_role: components["schemas"]["HolderRole"];
+            amount_key: string;
+            sort_order: number;
+        };
+        Template: {
+            /** Format: uuid */
+            uid: string;
+            code: string;
+            name: string;
+            /** Format: uuid */
+            journal_type_uid: string;
+            is_active: boolean;
+            lines: components["schemas"]["TemplateLine"][];
+            created_at: components["schemas"]["Timestamp"];
+        };
+        TemplateEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["Template"];
+        };
+        TemplateListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Template"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
+        };
+        Currency: {
+            /** Format: uuid */
+            uid: string;
+            code: string;
+            name: string;
+            is_active: boolean;
+            exponent: number;
+        };
+        CurrencyEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["Currency"];
+        };
+        CurrencyListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list?: components["schemas"]["Currency"][];
+                /** @description Always null -- this endpoint returns its full result set (not paginated). */
+                next_cursor?: string | null;
+            };
         };
         TemplateParams: {
             /** Format: int64 */
@@ -3190,6 +3605,23 @@ export interface components {
             amounts: {
                 [key: string]: components["schemas"]["Decimal"];
             };
+        };
+        PreviewEntry: {
+            /** Format: int64 */
+            account_holder: number;
+            /** Format: uuid */
+            currency_uid: string;
+            /** Format: uuid */
+            classification_uid: string;
+            entry_type: components["schemas"]["EntryType"];
+            amount: components["schemas"]["Decimal"];
+        };
+        /** @description The rendered core.JournalInput a matching POST /journals/template call would post -- unposted, hence "entries" rather than a full Journal (no uid/created_at/etc exist yet). */
+        TemplatePreviewResult: {
+            entries: components["schemas"]["PreviewEntry"][];
+        };
+        TemplatePreviewResultEnvelope: components["schemas"]["Envelope"] & {
+            data?: components["schemas"]["TemplatePreviewResult"];
         };
         TemplateExecutionRequest: {
             template_code: string;

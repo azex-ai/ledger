@@ -36,11 +36,14 @@ export function useClassifications(activeOnly?: boolean) {
 export function useCreateClassification() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
     mutationFn: (body: Parameters<LedgerClient["createClassification"]>[0]) =>
-      client.createClassification(body),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications }),
+      client.createClassification(body, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.classifications });
+    },
   });
 }
 
@@ -70,11 +73,14 @@ export function useJournalTypes(activeOnly?: boolean) {
 export function useCreateJournalType() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
     mutationFn: (body: Parameters<LedgerClient["createJournalType"]>[0]) =>
-      client.createJournalType(body),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes }),
+      client.createJournalType(body, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journalTypes });
+    },
   });
 }
 
@@ -104,11 +110,14 @@ export function useTemplates(activeOnly?: boolean) {
 export function useCreateTemplate() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
     mutationFn: (body: Parameters<LedgerClient["createTemplate"]>[0]) =>
-      client.createTemplate(body),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates }),
+      client.createTemplate(body, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.templates });
+    },
   });
 }
 
@@ -155,11 +164,14 @@ export function useCurrencies(activeOnly?: boolean) {
 export function useCreateCurrency() {
   const client = useLedgerClient();
   const qc = useQueryClient();
+  const idempotency = useIdempotencyKey();
   return useMutation({
     mutationFn: (body: Parameters<LedgerClient["createCurrency"]>[0]) =>
-      client.createCurrency(body),
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies }),
+      client.createCurrency(body, idempotency.get()),
+    onSuccess: () => {
+      idempotency.clear();
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.currencies });
+    },
   });
 }
 

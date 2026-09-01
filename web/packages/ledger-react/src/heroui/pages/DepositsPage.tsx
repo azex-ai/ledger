@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
   Button,
@@ -19,6 +20,7 @@ import {
   useDeposits,
   useFailDeposit,
 } from "../../hooks/use-deposits";
+import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { formatAmount, validateAmount } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
 import { LoadMoreBar } from "../pagination-bar";
@@ -55,11 +57,20 @@ function DepositStepper({ status }: { status: string }) {
 function ConfirmingModal({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted channel ref — the transition receipt matches on
+  // channel_ref, so a corrected ref after a rejection must mint a fresh key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useConfirmingDeposit();
+
+  const openModal = () => {
+    idempotencyKey.reset();
+    setOpen(true);
+  };
 
   return (
     <>
-      <Button size="sm" variant="secondary" onPress={() => setOpen(true)}>
+      <Button size="sm" variant="secondary" onPress={openModal}>
         Confirming
       </Button>
       <Modal.Backdrop isOpen={open} onOpenChange={setOpen}>
@@ -84,19 +95,20 @@ function ConfirmingModal({ id }: { id: string }) {
               </Button>
               <Button
                 isPending={mutation.isPending}
-                onPress={() =>
+                onPress={() => {
+                  const ref = channelRef || "manual";
                   mutation.mutate(
-                    { id, channelRef: channelRef || "manual" },
+                    { id, channelRef: ref, idempotencyKey: idempotencyKey.keyFor(ref) },
                     {
                       onSuccess: () => {
                         toast.success("Deposit moved to confirming");
                         setOpen(false);
                         setChannelRef("");
                       },
-                      onError: () => toast.danger("Failed to update deposit"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to update deposit")),
                     },
-                  )
-                }
+                  );
+                }}
               >
                 Confirm
               </Button>
@@ -112,7 +124,16 @@ function ConfirmModal({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted (amount, channel_ref) — the transition receipt matches
+  // on both, so a corrected value after a rejection must mint a fresh key (M2,
+  // web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useConfirmDeposit();
+
+  const openModal = () => {
+    idempotencyKey.reset();
+    setOpen(true);
+  };
 
   const submit = () => {
     const amountErr = validateAmount(amount);
@@ -121,7 +142,7 @@ function ConfirmModal({ id }: { id: string }) {
       return;
     }
     mutation.mutate(
-      { id, actual_amount: amount, channel_ref: channelRef },
+      { id, actual_amount: amount, channel_ref: channelRef, idempotencyKey: idempotencyKey.keyFor(`${amount}|${channelRef}`) },
       {
         onSuccess: () => {
           toast.success("Deposit confirmed");
@@ -129,14 +150,14 @@ function ConfirmModal({ id }: { id: string }) {
           setAmount("");
           setChannelRef("");
         },
-        onError: () => toast.danger("Failed to confirm deposit"),
+        onError: (err) => toast.danger(errorText(err, "Failed to confirm deposit")),
       },
     );
   };
 
   return (
     <>
-      <Button size="sm" variant="secondary" onPress={() => setOpen(true)}>
+      <Button size="sm" variant="secondary" onPress={openModal}>
         Confirm
       </Button>
       <Modal.Backdrop isOpen={open} onOpenChange={setOpen}>
@@ -222,7 +243,7 @@ function FailModal({ id }: { id: string }) {
                         setOpen(false);
                         setReason("");
                       },
-                      onError: () => toast.danger("Failed to update deposit"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to update deposit")),
                     },
                   )
                 }

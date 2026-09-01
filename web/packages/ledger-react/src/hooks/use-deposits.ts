@@ -56,8 +56,21 @@ export function useDeposits(
  */
 export function useConfirmingDeposit() {
   const client = useLedgerClient();
+  // Payload-keyed idempotency (caller supplies the key via variables). The
+  // transition receipt matches on channel_ref (postgres/booking_store.go:362),
+  // so a key held across a retry after a client timeout would ErrConflict once
+  // the operator corrects the channel ref — key on it so a corrected ref mints
+  // a fresh key (M2, web audit).
   return useLedgerMutation(
-    ({ id, channelRef }: { id: string; channelRef: string }, idempotencyKey) =>
+    ({
+      id,
+      channelRef,
+      idempotencyKey,
+    }: {
+      id: string;
+      channelRef: string;
+      idempotencyKey: string;
+    }) =>
       client.transitionBooking(
         id,
         { to_status: "confirming", channel_ref: channelRef },
@@ -73,16 +86,23 @@ export function useConfirmingDeposit() {
  */
 export function useConfirmDeposit() {
   const client = useLedgerClient();
+  // Payload-keyed idempotency (caller supplies the key via variables). The
+  // transition receipt matches on both amount and channel_ref
+  // (postgres/booking_store.go:362,369), so an auto-key held across a retry
+  // after a client timeout would ErrConflict once the operator corrects either
+  // — key on both so a corrected payload mints a fresh key (M2, web audit).
   return useLedgerMutation(
     ({
       id,
       actual_amount,
       channel_ref,
+      idempotencyKey,
     }: {
       id: string;
       actual_amount: string;
       channel_ref: string;
-    }, idempotencyKey) =>
+      idempotencyKey: string;
+    }) =>
       client.transitionBooking(
         id,
         { to_status: "confirmed", amount: actual_amount, channel_ref },

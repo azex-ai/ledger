@@ -87,9 +87,26 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  --font-sans: var(--font-sans);
-  --font-heading: var(--font-heading);
-  --font-mono: var(--font-mono);
+  /*
+   * Font tokens source the underlying host/system font vars directly, NOT the
+   * same-named runtime var. `--font-sans: var(--font-sans)` is a self-reference
+   * (the @theme inline key `--font-sans` is also Tailwind's font-namespace
+   * token) — invalid at computed-value time, and at the host's global :root it
+   * silently drops text to the browser default serif. Mirrors theme.css's
+   * fallback stacks; the .ledger-root paint (preflight.css) still resolves the
+   * scoped runtime vars from theme.css.
+   *
+   * C2a (decision B, 2026-09-01): the Tailwind theme + utility layers ARE
+   * emitted to the global :root,:host (Tailwind v4 `@import
+   * "tailwindcss/theme.css"`), so these font tokens — like the rest of the
+   * default theme — land in the host's :root. This is accepted as inherent to
+   * Tailwind v4 (option B), not scoped away (option A was rejected). The
+   * global-token gate in test/styles.test.ts enforces that ONLY Tailwind's own
+   * standard namespaces reach the global scope and no business token does.
+   */
+  --font-sans: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
+  --font-heading: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
+  --font-mono: var(--font-geist-mono, ui-monospace, monospace);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);

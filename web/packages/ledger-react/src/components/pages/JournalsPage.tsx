@@ -1,5 +1,7 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
+import { validateEntries } from "../../lib/validate-entries";
 import { useState } from "react";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { useJournals, usePostJournal, usePostTemplateJournal } from "../../hooks/use-journals";
@@ -36,52 +38,6 @@ export interface JournalsPageProps {
   linkComponent?: LinkComponent;
 }
 
-interface RawEntry {
-  account_holder?: unknown;
-  currency_uid?: unknown;
-  classification_uid?: unknown;
-  entry_type?: unknown;
-  amount?: unknown;
-}
-
-type ValidEntry = {
-  account_holder: number;
-  currency_uid: string;
-  classification_uid: string;
-  entry_type: "debit" | "credit";
-  amount: string;
-};
-
-function validateEntries(input: unknown): ValidEntry[] | string {
-  if (!Array.isArray(input)) {
-    return "Entries must be a JSON array";
-  }
-  if (input.length === 0) {
-    return "Entries array must not be empty";
-  }
-  const out: ValidEntry[] = [];
-  for (let i = 0; i < input.length; i++) {
-    const e = input[i] as RawEntry;
-    if (!e || typeof e !== "object") return `Entry ${i}: must be an object`;
-    if (typeof e.account_holder !== "number") return `Entry ${i}: account_holder must be a number`;
-    if (typeof e.currency_uid !== "string" || e.currency_uid === "") return `Entry ${i}: currency_uid must be a non-empty string`;
-    if (typeof e.classification_uid !== "string" || e.classification_uid === "") return `Entry ${i}: classification_uid must be a non-empty string`;
-    if (e.entry_type !== "debit" && e.entry_type !== "credit") {
-      return `Entry ${i}: entry_type must be "debit" or "credit"`;
-    }
-    if (typeof e.amount !== "string" || e.amount === "") {
-      return `Entry ${i}: amount must be a non-empty string`;
-    }
-    out.push({
-      account_holder: e.account_holder,
-      currency_uid: e.currency_uid,
-      classification_uid: e.classification_uid,
-      entry_type: e.entry_type,
-      amount: e.amount,
-    });
-  }
-  return out;
-}
 
 function PostJournalDialog() {
   const [open, setOpen] = useState(false);
@@ -124,7 +80,7 @@ function PostJournalDialog() {
           toast.success("Journal posted");
           setOpen(false);
         },
-        onError: () => toast.error("Failed to post journal"),
+        onError: (err) => toast.error(errorText(err, "Failed to post journal")),
       },
     );
   }
@@ -169,7 +125,7 @@ function PostJournalDialog() {
               onChange={(e) => setForm({ ...form, entries: e.target.value })}
               rows={6}
               className="font-mono text-xs"
-              placeholder={`[{"account_holder":1001,"currency_uid":1,"classification_uid":1,"entry_type":"debit","amount":"100.00"},{"account_holder":-1001,"currency_uid":1,"classification_uid":2,"entry_type":"credit","amount":"100.00"}]`}
+              placeholder={`[{"account_holder":1001,"currency_uid":"<currency-uid>","classification_uid":"<classification-uid>","entry_type":"debit","amount":"100.00"},{"account_holder":-1001,"currency_uid":"<currency-uid>","classification_uid":"<classification-uid>","entry_type":"credit","amount":"100.00"}]`}
             />
           </div>
         </div>
@@ -239,7 +195,7 @@ function TemplateJournalDialog() {
           toast.success("Template journal posted");
           setOpen(false);
         },
-        onError: () => toast.error("Failed to post template journal"),
+        onError: (err) => toast.error(errorText(err, "Failed to post template journal")),
       },
     );
   }
@@ -349,10 +305,10 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
         />
       ) : (
         <>
-          <Table>
+          <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-16">ID</TableHead>
+                <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Idempotency Key</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Source</TableHead>
@@ -365,12 +321,12 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
             <TableBody>
               {journals.map((j) => (
                 <TableRow key={j.uid}>
-                  <TableCell>
-                    <Link href={`/journals/${j.uid}`} className="text-primary underline-offset-4 hover:underline">
-                      #{j.uid}
+                  <TableCell className="max-w-[220px]">
+                    <Link href={`/journals/${j.uid}`} className="block text-primary underline-offset-4 hover:underline">
+                      <span className="block truncate" title={j.uid}>#{j.uid}</span>
                     </Link>
                   </TableCell>
-                  <TableCell className="font-mono text-xs max-w-[180px] truncate">{j.idempotency_key}</TableCell>
+                  <TableCell className="font-mono text-xs max-w-[180px] truncate" title={j.idempotency_key}>{j.idempotency_key}</TableCell>
                   <TableCell>{typeName(j.journal_type_uid)}</TableCell>
                   <TableCell>{j.source}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>

@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useJournalTypes,
@@ -53,7 +54,7 @@ function CreateDialog() {
               toast.success("Journal type created");
               setOpen(false);
             },
-            onError: () => toast.error("Failed to create journal type"),
+            onError: (err) => toast.error(errorText(err, "Failed to create journal type")),
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -86,7 +87,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Journal type deactivated");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to deactivate journal type"),
+              onError: (err) => toast.error(errorText(err, "Failed to deactivate journal type")),
             })}
             disabled={mutation.isPending}
           >
@@ -119,10 +120,10 @@ export function JournalTypesPage() {
         />
       ) : (
         <>
-        <Table>
+        <Table className="min-w-[820px]">
           <TableHeader>
             <TableRow>
-              <TableHead>ID</TableHead>
+              <TableHead className="w-[220px]">ID</TableHead>
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Active</TableHead>
@@ -133,7 +134,9 @@ export function JournalTypesPage() {
           <TableBody>
             {pageItems.map((t) => (
               <TableRow key={t.uid}>
-                <TableCell>{t.uid}</TableCell>
+                <TableCell className="max-w-[220px]">
+                  <span className="block truncate font-mono text-xs" title={t.uid}>{t.uid}</span>
+                </TableCell>
                 <TableCell className="font-mono text-xs">{t.code}</TableCell>
                 <TableCell>{t.name}</TableCell>
                 <TableCell><StatusBadge status={t.is_active ? "active" : "inactive"} /></TableCell>

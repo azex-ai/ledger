@@ -24,9 +24,22 @@ export function useReservations(params: {
 
 export function useSettleReservation() {
   const client = useLedgerClient();
+  // Payload-keyed idempotency (caller supplies the key via variables, same as
+  // useSettlePartialReservation). settle's server-side receipt matches on the
+  // amount (postgres/reserver_store.go:457,361), so the auto-minted key held
+  // across a retry after a client timeout would ErrConflict the moment the
+  // operator corrects the amount — a dead end. keyed on the amount, a corrected
+  // amount mints a fresh key (M2, web audit; see use-idempotency-key.ts).
   return useLedgerMutation(
-    ({ id, actualAmount }: { id: string; actualAmount: string }, idempotencyKey) =>
-      client.settleReservation(id, actualAmount, idempotencyKey),
+    ({
+      id,
+      actualAmount,
+      idempotencyKey,
+    }: {
+      id: string;
+      actualAmount: string;
+      idempotencyKey: string;
+    }) => client.settleReservation(id, actualAmount, idempotencyKey),
     ["reservations"],
   );
 }

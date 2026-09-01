@@ -1,7 +1,8 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
-import { formatAmount, validateAmount, formatUTC } from "../../lib/utils";
+import { formatAmount, validateAmount, formatUTC, isZeroAmount } from "../../lib/utils";
 import {
   useFinalizeReservationSettlement,
   useReservations,
@@ -9,6 +10,7 @@ import {
   useSettlePartialReservation,
   useSettleReservation,
 } from "../../hooks/use-reservations";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -34,10 +36,20 @@ import { LoadMoreBar } from "../pagination-bar";
 function SettleDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("");
+  // One key per submitted amount — settle's receipt matches on the amount, so a
+  // corrected amount after a rejection must not replay the previous amount's key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useSettleReservation();
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) idempotencyKey.reset();
+        setOpen(next);
+      }}
+    >
       <DialogTrigger render={<Button size="sm" variant="outline" />}>Settle</DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -57,12 +69,12 @@ function SettleDialog({ id }: { id: string }) {
                 toast.error(amountErr);
                 return;
               }
-              mutation.mutate({ id, actualAmount: amount }, {
+              mutation.mutate({ id, actualAmount: amount, idempotencyKey: idempotencyKey.keyFor(amount) }, {
                 onSuccess: () => {
                   toast.success("Reservation settled");
                   setOpen(false);
                 },
-                onError: () => toast.error("Failed to settle reservation"),
+                onError: (err) => toast.error(errorText(err, "Failed to settle reservation")),
               });
             }}
             disabled={mutation.isPending || !amount}
@@ -117,7 +129,7 @@ function SettlePartialDialog({ id }: { id: string }) {
                   setOpen(false);
                   setAmount("");
                 },
-                onError: () => toast.error("Failed to record partial settlement"),
+                onError: (err) => toast.error(errorText(err, "Failed to record partial settlement")),
               });
             }}
             disabled={mutation.isPending || !amount}
@@ -152,7 +164,7 @@ function FinalizeConfirmDialog({ id }: { id: string }) {
                 toast.success("Reservation finalized");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to finalize reservation"),
+              onError: (err) => toast.error(errorText(err, "Failed to finalize reservation")),
             })}
             disabled={mutation.isPending}
           >
@@ -187,7 +199,7 @@ function ReleaseConfirmDialog({ id }: { id: string }) {
                 toast.success("Reservation released");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to release reservation"),
+              onError: (err) => toast.error(errorText(err, "Failed to release reservation")),
             })}
             disabled={mutation.isPending}
           >
@@ -209,6 +221,7 @@ export function ReservationsPage() {
   );
   const { data, isLoading, isError, refetch, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useReservations(params);
+  const { currencyCode } = useUidCodeLookups();
   const reservations = data?.pages.flatMap((p) => p.list) ?? [];
 
   return (
@@ -245,10 +258,10 @@ export function ReservationsPage() {
         />
       ) : (
         <>
-          <Table>
+          <Table className="min-w-[900px]">
             <TableHeader>
               <TableRow>
-                <TableHead>ID</TableHead>
+                <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
                 <TableHead>Currency</TableHead>
                 <TableHead className="text-right">Reserved</TableHead>
@@ -261,11 +274,13 @@ export function ReservationsPage() {
             <TableBody>
               {reservations.map((r) => (
                 <TableRow key={r.uid}>
-                  <TableCell>#{r.uid}</TableCell>
+                  <TableCell className="max-w-[220px]">
+                    <span className="block truncate font-mono text-xs" title={r.uid}>#{r.uid}</span>
+                  </TableCell>
                   <TableCell>{r.account_holder}</TableCell>
-                  <TableCell>{r.currency_uid}</TableCell>
+                  <TableCell title={r.currency_uid}>{currencyCode(r.currency_uid)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(r.reserved_amount)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.settled_amount && r.settled_amount !== "0" ? formatAmount(r.settled_amount) : "-"}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.settled_amount && !isZeroAmount(r.settled_amount) ? formatAmount(r.settled_amount) : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatUTC(r.expires_at)}

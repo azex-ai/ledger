@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
   useWithdrawals,
@@ -10,6 +11,7 @@ import {
   useFailWithdraw,
   useRetryWithdraw,
 } from "../../hooks/use-withdrawals";
+import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -42,10 +44,20 @@ const WITHDRAW_STATES = ["locked", "reserved", "reviewing", "processing", "confi
 function ProcessDialog({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted channel ref — the transition receipt matches on
+  // channel_ref, so a corrected ref after a rejection must mint a fresh key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useProcessWithdraw();
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) idempotencyKey.reset();
+        setOpen(next);
+      }}
+    >
       <DialogTrigger render={<Button size="sm" variant="outline" />}>Process</DialogTrigger>
       <DialogContent>
         <DialogHeader>
@@ -59,12 +71,12 @@ function ProcessDialog({ id }: { id: string }) {
         </div>
         <DialogFooter>
           <Button
-            onClick={() => mutation.mutate({ id, channelRef }, {
+            onClick={() => mutation.mutate({ id, channelRef, idempotencyKey: idempotencyKey.keyFor(channelRef) }, {
               onSuccess: () => {
                 toast.success("Withdrawal processing");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to process withdrawal"),
+              onError: (err) => toast.error(errorText(err, "Failed to process withdrawal")),
             })}
             disabled={mutation.isPending || !channelRef}
             title={
@@ -113,7 +125,7 @@ function FailDialog({ id }: { id: string }) {
                 toast.success("Withdrawal marked as failed");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to mark withdrawal as failed"),
+              onError: (err) => toast.error(errorText(err, "Failed to mark withdrawal as failed")),
             })}
             disabled={mutation.isPending}
           >
@@ -143,7 +155,7 @@ function ReserveButton({ id }: { id: string }) {
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={() => mutation.mutate(id, {
             onSuccess: () => toast.success("Withdrawal reserved"),
-            onError: () => toast.error("Failed to reserve withdrawal"),
+            onError: (err) => toast.error(errorText(err, "Failed to reserve withdrawal")),
           })}>
             Reserve
           </AlertDialogAction>
@@ -172,7 +184,7 @@ function ReviewButtons({ id }: { id: string }) {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => mutation.mutate({ id, approved: true }, {
               onSuccess: () => toast.success("Withdrawal approved"),
-              onError: () => toast.error("Failed to approve withdrawal"),
+              onError: (err) => toast.error(errorText(err, "Failed to approve withdrawal")),
             })}>
               Approve
             </AlertDialogAction>
@@ -194,7 +206,7 @@ function ReviewButtons({ id }: { id: string }) {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={() => mutation.mutate({ id, approved: false }, {
               onSuccess: () => toast.success("Withdrawal rejected"),
-              onError: () => toast.error("Failed to reject withdrawal"),
+              onError: (err) => toast.error(errorText(err, "Failed to reject withdrawal")),
             })}>
               Reject
             </AlertDialogAction>
@@ -223,7 +235,7 @@ function ConfirmButton({ id }: { id: string }) {
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={() => mutation.mutate(id, {
             onSuccess: () => toast.success("Withdrawal confirmed"),
-            onError: () => toast.error("Failed to confirm withdrawal"),
+            onError: (err) => toast.error(errorText(err, "Failed to confirm withdrawal")),
           })}>
             Confirm
           </AlertDialogAction>
@@ -251,7 +263,7 @@ function RetryButton({ id }: { id: string }) {
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={() => mutation.mutate(id, {
             onSuccess: () => toast.success("Withdrawal retrying"),
-            onError: () => toast.error("Failed to retry withdrawal"),
+            onError: (err) => toast.error(errorText(err, "Failed to retry withdrawal")),
           })}>
             Retry
           </AlertDialogAction>
@@ -306,10 +318,10 @@ export function WithdrawalsPage() {
         />
       ) : (
         <>
-          <Table>
+          <Table className="min-w-[960px]">
             <TableHeader>
               <TableRow>
-                <TableHead>ID</TableHead>
+                <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
                 <TableHead>Channel</TableHead>
                 <TableHead className="text-right">Amount</TableHead>
@@ -322,12 +334,14 @@ export function WithdrawalsPage() {
             <TableBody>
               {withdrawals.map((w) => (
                 <TableRow key={w.uid}>
-                  <TableCell>#{w.uid}</TableCell>
+                  <TableCell className="max-w-[220px]">
+                    <span className="block truncate font-mono text-xs" title={w.uid}>#{w.uid}</span>
+                  </TableCell>
                   <TableCell>{w.account_holder}</TableCell>
                   <TableCell>{w.channel_name}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatAmount(w.amount)}</TableCell>
                   <TableCell><StatusBadge status={w.status} /></TableCell>
-                  <TableCell className="font-mono text-xs max-w-[160px] truncate">
+                  <TableCell className="font-mono text-xs max-w-[160px] truncate" title={w.channel_ref || undefined}>
                     {w.channel_ref || "—"}
                   </TableCell>
                   <TableCell className="text-right text-xs text-muted-foreground">

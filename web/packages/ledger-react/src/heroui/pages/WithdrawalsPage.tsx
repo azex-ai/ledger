@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
   AlertDialog,
@@ -22,6 +23,7 @@ import {
   useReviewWithdraw,
   useWithdrawals,
 } from "../../hooks/use-withdrawals";
+import { usePayloadIdempotencyKey } from "../../hooks/use-idempotency-key";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, StatusChip, TableSkeleton } from "../shared";
 import { LoadMoreBar } from "../pagination-bar";
@@ -39,11 +41,20 @@ const WITHDRAW_STATES = [
 function ProcessModal({ id }: { id: string }) {
   const [open, setOpen] = useState(false);
   const [channelRef, setChannelRef] = useState("");
+  // One key per submitted channel ref — the transition receipt matches on
+  // channel_ref, so a corrected ref after a rejection must mint a fresh key
+  // (M2, web audit). See use-idempotency-key.ts.
+  const idempotencyKey = usePayloadIdempotencyKey();
   const mutation = useProcessWithdraw();
+
+  const openModal = () => {
+    idempotencyKey.reset();
+    setOpen(true);
+  };
 
   return (
     <>
-      <Button size="sm" variant="secondary" onPress={() => setOpen(true)}>
+      <Button size="sm" variant="secondary" onPress={openModal}>
         Process
       </Button>
       <Modal.Backdrop isOpen={open} onOpenChange={setOpen}>
@@ -71,14 +82,14 @@ function ProcessModal({ id }: { id: string }) {
                 isDisabled={!channelRef}
                 onPress={() =>
                   mutation.mutate(
-                    { id, channelRef },
+                    { id, channelRef, idempotencyKey: idempotencyKey.keyFor(channelRef) },
                     {
                       onSuccess: () => {
                         toast.success("Withdrawal processing");
                         setOpen(false);
                         setChannelRef("");
                       },
-                      onError: () => toast.danger("Failed to process withdrawal"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to process withdrawal")),
                     },
                   )
                 }
@@ -138,7 +149,7 @@ function FailModal({ id }: { id: string }) {
                         setOpen(false);
                         setReason("");
                       },
-                      onError: () => toast.danger("Failed to update withdrawal"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to update withdrawal")),
                     },
                   )
                 }
@@ -192,7 +203,7 @@ function ReserveConfirm({ id }: { id: string }) {
                       toast.success("Withdrawal reserved");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to reserve withdrawal"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to reserve withdrawal")),
                   })
                 }
               >
@@ -245,7 +256,7 @@ function ReviewButtons({ id }: { id: string }) {
                         toast.success("Withdrawal approved");
                         setApproveOpen(false);
                       },
-                      onError: () => toast.danger("Failed to approve withdrawal"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to approve withdrawal")),
                     },
                   )
                 }
@@ -290,7 +301,7 @@ function ReviewButtons({ id }: { id: string }) {
                         toast.success("Withdrawal rejected");
                         setRejectOpen(false);
                       },
-                      onError: () => toast.danger("Failed to reject withdrawal"),
+                      onError: (err) => toast.danger(errorText(err, "Failed to reject withdrawal")),
                     },
                   )
                 }
@@ -341,7 +352,7 @@ function ConfirmConfirm({ id }: { id: string }) {
                       toast.success("Withdrawal confirmed");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to confirm withdrawal"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to confirm withdrawal")),
                   })
                 }
               >
@@ -391,7 +402,7 @@ function RetryConfirm({ id }: { id: string }) {
                       toast.success("Withdrawal retrying");
                       setOpen(false);
                     },
-                    onError: () => toast.danger("Failed to retry withdrawal"),
+                    onError: (err) => toast.danger(errorText(err, "Failed to retry withdrawal")),
                   })
                 }
               >

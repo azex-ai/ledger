@@ -20,3 +20,4 @@ export type { TransactionListProps } from "./wallet/components/transaction-list"
 export { WalletPanel } from "./wallet/components/wallet-panel";
 export type { WalletPanelProps } from "./wallet/components/wallet-panel";
 export { DepositAddressCard } from "./wallet/components/deposit-address-card";
+export type { DepositAddressCardProps } from "./wallet/components/deposit-address-card";

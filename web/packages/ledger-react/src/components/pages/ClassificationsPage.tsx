@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useClassifications,
@@ -66,7 +67,7 @@ function CreateDialog() {
               toast.success("Classification created");
               setOpen(false);
             },
-            onError: () => toast.error("Failed to create classification"),
+            onError: (err) => toast.error(errorText(err, "Failed to create classification")),
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -99,7 +100,7 @@ function DeactivateDialog({ id, name }: { id: string; name: string }) {
                 toast.success("Classification deactivated");
                 setOpen(false);
               },
-              onError: () => toast.error("Failed to deactivate classification"),
+              onError: (err) => toast.error(errorText(err, "Failed to deactivate classification")),
             })}
             disabled={mutation.isPending}
           >
@@ -132,10 +133,10 @@ export function ClassificationsPage() {
         />
       ) : (
         <>
-        <Table>
+        <Table className="min-w-[820px]">
           <TableHeader>
             <TableRow>
-              <TableHead>ID</TableHead>
+              <TableHead className="w-[220px]">ID</TableHead>
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Normal Side</TableHead>
@@ -147,7 +148,9 @@ export function ClassificationsPage() {
           <TableBody>
             {pageItems.map((c) => (
               <TableRow key={c.uid}>
-                <TableCell>{c.uid}</TableCell>
+                <TableCell className="max-w-[220px]">
+                  <span className="block truncate font-mono text-xs" title={c.uid}>{c.uid}</span>
+                </TableCell>
                 <TableCell className="font-mono text-xs">{c.code}</TableCell>
                 <TableCell>{c.name}</TableCell>
                 <TableCell><StatusBadge status={c.normal_side} /></TableCell>

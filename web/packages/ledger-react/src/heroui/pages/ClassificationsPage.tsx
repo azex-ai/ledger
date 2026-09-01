@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useClassifications,
@@ -35,7 +36,7 @@ function CreateClassificationModal() {
         setOpen(false);
         setForm({ code: "", name: "", normal_side: "debit", is_system: false });
       },
-      onError: () => toast.danger("Failed to create classification"),
+      onError: (err) => toast.danger(errorText(err, "Failed to create classification")),
     });
   }
 
@@ -129,7 +130,7 @@ function DeactivateClassificationDialog({ id, name }: { id: string; name: string
                     toast.success("Classification deactivated");
                     setOpen(false);
                   },
-                  onError: () => toast.danger("Failed to deactivate classification"),
+                  onError: (err) => toast.danger(errorText(err, "Failed to deactivate classification")),
                 })}
               >
                 Deactivate

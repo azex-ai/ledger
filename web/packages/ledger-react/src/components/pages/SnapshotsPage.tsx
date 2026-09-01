@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatAmount } from "../../lib/utils";
 import { useSnapshots } from "../../hooks/use-system";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { ErrorState } from "../error-state";
 import { TableSkeleton } from "../loading-skeleton";
 import { PaginationBar } from "../pagination-bar";
@@ -35,6 +36,7 @@ export function SnapshotsPage() {
   const [query, setQuery] = useState<SnapshotQuery>({});
 
   const { data, isLoading, isError, refetch } = useSnapshots(query);
+  const { classCode, currencyCode } = useUidCodeLookups();
   const snapshots = data ?? [];
   const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
 
@@ -53,20 +55,20 @@ export function SnapshotsPage() {
 
       <div className="flex flex-wrap gap-3 items-end">
         <div className="grid gap-1">
-          <Label className="text-xs">Holder</Label>
-          <Input value={form.holder} onChange={(e) => setForm({ ...form, holder: e.target.value })} placeholder="1001" className="w-28" />
+          <Label htmlFor="snap-holder" className="text-xs">Holder</Label>
+          <Input id="snap-holder" value={form.holder} onChange={(e) => setForm({ ...form, holder: e.target.value })} placeholder="1001" className="w-28" />
         </div>
         <div className="grid gap-1">
-          <Label className="text-xs">Currency</Label>
-          <Input value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" className="w-28" />
+          <Label htmlFor="snap-currency" className="text-xs">Currency</Label>
+          <Input id="snap-currency" value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" className="w-28" />
         </div>
         <div className="grid gap-1">
-          <Label className="text-xs">Start Date</Label>
-          <Input type="date" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className="w-40" />
+          <Label htmlFor="snap-start" className="text-xs">Start Date</Label>
+          <Input id="snap-start" type="date" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className="w-40" />
         </div>
         <div className="grid gap-1">
-          <Label className="text-xs">End Date</Label>
-          <Input type="date" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} className="w-40" />
+          <Label htmlFor="snap-end" className="text-xs">End Date</Label>
+          <Input id="snap-end" type="date" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} className="w-40" />
         </div>
         <Button onClick={handleSearch}>Search</Button>
       </div>
@@ -96,8 +98,8 @@ export function SnapshotsPage() {
               <TableRow key={`${s.snapshot_date}-${s.account_holder}-${s.currency_uid}-${s.classification_uid}`}>
                 <TableCell>{s.snapshot_date}</TableCell>
                 <TableCell>{s.account_holder}</TableCell>
-                <TableCell>{s.currency_uid}</TableCell>
-                <TableCell>{s.classification_uid}</TableCell>
+                <TableCell title={s.currency_uid}>{currencyCode(s.currency_uid)}</TableCell>
+                <TableCell title={s.classification_uid}>{classCode(s.classification_uid)}</TableCell>
                 <TableCell className="text-right tabular-nums">{formatAmount(s.balance)}</TableCell>
               </TableRow>
             ))}

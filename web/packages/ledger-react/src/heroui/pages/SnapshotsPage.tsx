@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button, Input, Label, Table, TextField } from "@heroui/react";
 import { useSnapshots } from "../../hooks/use-system";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { formatAmount } from "../../lib/utils";
 import { EmptyState, ErrorState, PageHeader, TableSkeleton } from "../shared";
 import { PaginationBar } from "../pagination-bar";
@@ -28,6 +29,7 @@ export function SnapshotsPage() {
   const [query, setQuery] = useState<SnapshotQuery>({});
 
   const { data, isLoading, isError, refetch } = useSnapshots(query);
+  const { classCode, currencyCode } = useUidCodeLookups();
   const snapshots = data ?? [];
   const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
   const hasSearched = Object.keys(query).length > 0;
@@ -109,8 +111,8 @@ export function SnapshotsPage() {
                     <Table.Row key={rowId} id={rowId}>
                       <Table.Cell>{s.snapshot_date}</Table.Cell>
                       <Table.Cell>{s.account_holder}</Table.Cell>
-                      <Table.Cell>{s.currency_uid}</Table.Cell>
-                      <Table.Cell>{s.classification_uid}</Table.Cell>
+                      <Table.Cell><span title={s.currency_uid}>{currencyCode(s.currency_uid)}</span></Table.Cell>
+                      <Table.Cell><span title={s.classification_uid}>{classCode(s.classification_uid)}</span></Table.Cell>
                       <Table.Cell className="text-end font-mono">
                         {formatAmount(s.balance)}
                       </Table.Cell>

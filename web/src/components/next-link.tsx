@@ -12,13 +12,15 @@ export function NextLink({
   href,
   className,
   children,
+  onClick,
 }: {
   href: string;
   className?: string;
   children: ReactNode;
+  onClick?: () => void;
 }) {
   return (
-    <Link href={href} className={className}>
+    <Link href={href} className={className} onClick={onClick}>
       {children}
     </Link>
   );

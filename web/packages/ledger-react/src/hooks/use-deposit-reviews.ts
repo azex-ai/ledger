@@ -41,10 +41,10 @@ function optimisticallyRemoveFromQueue(
   uid: string,
 ) {
   const previous = qc.getQueriesData<ReviewQueueData>({
-    queryKey: ["ledger", "deposit-reviews"],
+    queryKey: ledgerKeyPrefix.depositReviews,
   });
   qc.setQueriesData<ReviewQueueData>(
-    { queryKey: ["ledger", "deposit-reviews"] },
+    { queryKey: ledgerKeyPrefix.depositReviews },
     (data) =>
       data && {
         ...data,
@@ -65,7 +65,7 @@ function rollback(
 }
 
 function invalidateReviewQueue(qc: ReturnType<typeof useQueryClient>) {
-  qc.invalidateQueries({ queryKey: ["ledger", "deposit-reviews"] });
+  qc.invalidateQueries({ queryKey: ledgerKeyPrefix.depositReviews });
   qc.invalidateQueries({ queryKey: ledgerKeyPrefix.bookings });
   qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances });
   qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
@@ -88,7 +88,7 @@ export function useApproveDepositReview() {
       return client.approveDepositReview(uid, idempotencyKeyRef.current);
     },
     onMutate: async (uid) => {
-      await qc.cancelQueries({ queryKey: ["ledger", "deposit-reviews"] });
+      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews });
       return { previous: optimisticallyRemoveFromQueue(qc, uid) };
     },
     onError: (_err, _uid, context) => {
@@ -111,7 +111,7 @@ export function useRejectDepositReview() {
       return client.rejectDepositReview(uid, reason, idempotencyKeyRef.current);
     },
     onMutate: async ({ uid }) => {
-      await qc.cancelQueries({ queryKey: ["ledger", "deposit-reviews"] });
+      await qc.cancelQueries({ queryKey: ledgerKeyPrefix.depositReviews });
       return { previous: optimisticallyRemoveFromQueue(qc, uid) };
     },
     onError: (_err, _vars, context) => {

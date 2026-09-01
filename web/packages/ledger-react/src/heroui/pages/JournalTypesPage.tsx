@@ -1,5 +1,6 @@
 "use client";
 
+import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useJournalTypes,
@@ -33,7 +34,7 @@ function CreateJournalTypeModal() {
         setOpen(false);
         setForm({ code: "", name: "" });
       },
-      onError: () => toast.danger("Failed to create journal type"),
+      onError: (err) => toast.danger(errorText(err, "Failed to create journal type")),
     });
   }
 
@@ -104,7 +105,7 @@ function DeactivateJournalTypeDialog({ id, name }: { id: string; name: string })
                     toast.success("Journal type deactivated");
                     setOpen(false);
                   },
-                  onError: () => toast.danger("Failed to deactivate journal type"),
+                  onError: (err) => toast.danger(errorText(err, "Failed to deactivate journal type")),
                 })}
               >
                 Deactivate

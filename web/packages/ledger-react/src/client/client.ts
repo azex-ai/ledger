@@ -344,15 +344,19 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/classifications${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createClassification: (body: {
-      code: string;
-      name: string;
-      normal_side: "debit" | "credit";
-      is_system: boolean;
-    }) =>
+    createClassification: (
+      body: {
+        code: string;
+        name: string;
+        normal_side: "debit" | "credit";
+        is_system: boolean;
+      },
+      idempotencyKey?: string,
+    ) =>
       request<Classification>("/api/v1/classifications", {
         method: "POST",
         body: JSON.stringify(body),
+        ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       }),
 
     deactivateClassification: (id: string, idempotencyKey: string) =>
@@ -367,10 +371,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/journal-types${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createJournalType: (body: { code: string; name: string }) =>
+    createJournalType: (body: { code: string; name: string }, idempotencyKey?: string) =>
       request<JournalType>("/api/v1/journal-types", {
         method: "POST",
         body: JSON.stringify(body),
+        ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       }),
 
     deactivateJournalType: (id: string, idempotencyKey: string) =>
@@ -396,10 +401,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
         amount_key: string;
         sort_order: number;
       }>;
-    }) =>
+    }, idempotencyKey?: string) =>
       request<EntryTemplate>("/api/v1/templates", {
         method: "POST",
         body: JSON.stringify(body),
+        ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       }),
 
     deactivateTemplate: (id: string, idempotencyKey: string) =>
@@ -426,10 +432,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/currencies${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createCurrency: (body: { code: string; name: string; exponent: number }) =>
+    createCurrency: (body: { code: string; name: string; exponent: number }, idempotencyKey?: string) =>
       request<Currency>("/api/v1/currencies", {
         method: "POST",
         body: JSON.stringify(body),
+        ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
       }),
 
     deactivateCurrency: (id: string, idempotencyKey: string) =>

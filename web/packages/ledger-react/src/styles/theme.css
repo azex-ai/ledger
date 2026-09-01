@@ -2,9 +2,13 @@
  * Scoped design tokens for @azex/ledger-react.
  *
  * Ported from web/src/app/globals.css but scoped under `.ledger-root` instead
- * of `:root` so importing the package's styles never leaks tokens into the
- * host app. The Provider/LedgerAdmin render a `<div className="ledger-root">`
- * wrapper, so every component inside resolves these variables.
+ * of `:root` so these BUSINESS tokens never override the host app's own theme.
+ * (Tailwind v4's standard theme layer — --color-*, --spacing, --text-*, … —
+ * is still emitted globally by Tailwind's engine; that is inherent to v4 and
+ * carries no host-affecting resets. See the package README "Theming" and the
+ * global-token gate in test/styles.test.ts.) The Provider/LedgerAdmin render a
+ * `<div className="ledger-root">` wrapper, so every component inside resolves
+ * these variables.
  *
  * Every token is written ONCE via `light-dark(light, dark)`; the appearance
  * classes only flip `color-scheme`, which selects the branch:

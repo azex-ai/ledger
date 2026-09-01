@@ -58,12 +58,31 @@ function CopyAddressButton({ address }: { address: string }) {
   );
 }
 
+export interface DepositAddressCardProps {
+  /**
+   * Network display name the address lives on, e.g. "Ethereum" / "Base".
+   * REQUIRED — this is a CREATE2 address derived per chain, and the package
+   * cannot know which chain the host deployed it on. Sending on the wrong
+   * network is unrecoverable loss, so a missing network name must be a compile
+   * error, never a silent omission (working-agreements.md §5).
+   */
+  network: string;
+  /**
+   * Asset codes accepted at this address, e.g. ["USDC"] or ["USDT", "USDC"].
+   * REQUIRED — the deployment's currencies come from the host (its currency
+   * config / an admin `useCurrencies()` lookup), never a hardcoded guess. The
+   * package is a generic ledger surface and does not know which assets a given
+   * deployment accepts.
+   */
+  assets: string[];
+}
+
 /**
  * Shows the token-bound holder's crypto deposit address with a QR code, or a
  * "Generate address" CTA on first use. Read-only about the address itself —
  * generating one is the only write in this otherwise read-only wallet surface.
  */
-export function DepositAddressCard() {
+export function DepositAddressCard({ network, assets }: DepositAddressCardProps) {
   const { data, isLoading, isError, error, refetch } = useWalletDepositAddress();
   const ensure = useEnsureWalletDepositAddress();
 
@@ -122,7 +141,8 @@ export function DepositAddressCard() {
           <CopyAddressButton address={data.address} />
         </div>
         <p className="text-muted text-center text-xs">
-          Send USDT or USDC to this address to complete your deposit.
+          Only send {assets.join(" or ")} on <strong>{network}</strong> to this
+          address. Funds sent on any other network cannot be recovered.
         </p>
       </Card.Content>
     </Card>

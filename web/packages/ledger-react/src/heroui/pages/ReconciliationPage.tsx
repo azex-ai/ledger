@@ -3,12 +3,14 @@
 import { useState } from "react";
 import { Button, Card, Input, Label, Table, TextField, toast } from "@heroui/react";
 import { useReconcileAccount, useReconcileGlobal } from "../../hooks/use-system";
+import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { cn, formatAmount, formatSignedAmount, formatUTC } from "../../lib/utils";
 import { PageHeader, StatusChip } from "../shared";
 
 export function ReconciliationPage() {
   const globalMutation = useReconcileGlobal();
   const accountMutation = useReconcileAccount();
+  const { classCode, currencyCode } = useUidCodeLookups();
   const [holder, setHolder] = useState("");
   const [currencyId, setCurrencyId] = useState("");
 
@@ -19,7 +21,7 @@ export function ReconciliationPage() {
     toast.promise(globalMutation.mutateAsync(), {
       loading: "Running global check…",
       success: (result) =>
-        result.balanced ? "Ledger is balanced" : `Unbalanced — gap: ${result.gap}`,
+        result.balanced ? "Ledger is balanced" : `Unbalanced — gap: ${formatAmount(result.gap)}`,
       error: "Reconciliation failed. Check the API logs.",
     });
   }
@@ -34,7 +36,7 @@ export function ReconciliationPage() {
     toast.promise(accountMutation.mutateAsync({ holder: h, currencyUid: c }), {
       loading: "Checking account…",
       success: (result) =>
-        result.balanced ? "Account is balanced" : `Drift detected — gap: ${result.gap}`,
+        result.balanced ? "Account is balanced" : `Drift detected — gap: ${formatAmount(result.gap)}`,
       error: "Account check failed.",
     });
   }
@@ -60,7 +62,7 @@ export function ReconciliationPage() {
                 <div className="flex items-center gap-2">
                   <StatusChip status={globalResult.balanced ? "confirmed" : "failed"} />
                   <span className="text-sm">
-                    {globalResult.balanced ? "Balanced" : `Unbalanced (gap: ${globalResult.gap})`}
+                    {globalResult.balanced ? "Balanced" : `Unbalanced (gap: ${formatAmount(globalResult.gap)})`}
                   </span>
                 </div>
                 <p className="text-xs text-muted">
@@ -99,7 +101,7 @@ export function ReconciliationPage() {
                   <span className="text-sm">
                     {accountResult.balanced
                       ? "Balanced"
-                      : `Drift detected (gap: ${accountResult.gap})`}
+                      : `Drift detected (gap: ${formatAmount(accountResult.gap)})`}
                   </span>
                 </div>
                 {accountResult.details && accountResult.details.length > 0 ? (
@@ -121,8 +123,8 @@ export function ReconciliationPage() {
                             return (
                               <Table.Row key={rowId} id={rowId}>
                                 <Table.Cell>{d.account_holder}</Table.Cell>
-                                <Table.Cell>{d.currency_uid}</Table.Cell>
-                                <Table.Cell>{d.classification_uid}</Table.Cell>
+                                <Table.Cell><span title={d.currency_uid}>{currencyCode(d.currency_uid)}</span></Table.Cell>
+                                <Table.Cell><span title={d.classification_uid}>{classCode(d.classification_uid)}</span></Table.Cell>
                                 <Table.Cell className="text-end font-mono">
                                   {formatAmount(d.expected)}
                                 </Table.Cell>

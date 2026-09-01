@@ -198,11 +198,21 @@ UI-free core (client + hooks) at `@azex/ledger-react/wallet/headless`.
 ## Theming
 
 The Provider (and `<LedgerAdmin/>`) render a `<div className="ledger-root">`
-wrapper. All design tokens are scoped under `.ledger-root` so importing the
-stylesheet never leaks tokens into your host app — and the stylesheet is
+wrapper. The package's **business design tokens** (`--primary`, `--background`,
+`--chart-*`, …) are scoped under `.ledger-root`, so importing the stylesheet
+never overrides your host app's own theme. The stylesheet is also
 **self-contained**: it ships its own `.ledger-root`-scoped preflight (fonts,
 resets, table borders), so it renders correctly even in a host with no
 Tailwind setup at all.
+
+One caveat inherent to Tailwind v4: the **standard Tailwind theme layer**
+(`--color-*`, `--spacing`, `--text-*`, `--radius-*`, …) and utility-layer
+`--tw-*` initializers are emitted to the global `:root`/`:host`, not scoped —
+Tailwind's utility engine depends on them being global. They carry no
+host-affecting resets, but if your host also customizes Tailwind's theme,
+import your own stylesheet **after** this package's so your values win. (A
+build-time gate asserts only Tailwind's own namespaces reach the global scope
+and no business token ever does — see `test/styles.test.ts`.)
 
 Default appearance is **system** (follows the OS via
 `prefers-color-scheme`); pass `appearance: "dark"` or `"light"` to force a
