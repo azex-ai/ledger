@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/server"
-	"github.com/azex-ai/ledger/service"
 )
 
 // depsFromMocks builds a server.Deps with the same mock set newTestServer
@@ -26,8 +25,6 @@ func depsFromMocks() server.Deps {
 		Templates:        &mockTemplateStore{},
 		Currencies:       &mockCurrencyStore{},
 		Reconciler:       &mockReconciler{},
-		Snapshotter:      &mockSnapshotter{},
-		SystemRollup:     (*service.SystemRollupService)(nil),
 		Queries:          &mockQueryProvider{},
 		Audit:            &mockAuditQuerier{},
 		PlatformBalances: &mockPlatformBalanceReader{},
@@ -74,7 +71,7 @@ func TestNewWithConfig_InvalidConfigStillPanics(t *testing.T) {
 			&mockBooker{}, &mockBookingReader{}, &mockEventReader{},
 			&mockClassificationStore{}, &mockJournalTypeStore{}, &mockTemplateStore{},
 			&mockCurrencyStore{}, nil,
-			&mockReconciler{}, &mockSnapshotter{}, nil, &mockQueryProvider{},
+			&mockReconciler{}, &mockQueryProvider{},
 			&mockAuditQuerier{}, &mockPlatformBalanceReader{}, &mockSolvencyChecker{},
 			&mockBalanceTrendReader{}, &mockFullReconciler{}, &mockAccountPolicyStore{},
 			&mockPeriodCloser{}, &mockTrialBalanceReader{},

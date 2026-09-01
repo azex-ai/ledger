@@ -76,13 +76,17 @@ func (s *AuditStore) ListJournalsByAccount(ctx context.Context, filter core.Audi
 		}
 		classificationID = d.ID
 	}
+	cursorID, err := decodeAuditCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.q.ListJournalsByAccount(ctx, sqlcgen.ListJournalsByAccountParams{
 		Holder:           filter.AccountHolder,
 		CurrencyID:       currencyID,
 		ClassificationID: classificationID,
 		Since:            sinceOrEpoch(filter.Since),
 		Until:            sinceOrEpoch(filter.Until),
-		CursorID:         decodeAuditCursor(filter.Cursor),
+		CursorID:         cursorID,
 		PageLimit:        limit,
 	})
 	if err != nil {
@@ -131,10 +135,14 @@ func (s *AuditStore) ListJournalsByTimeRange(ctx context.Context, filter core.Au
 		limit = 50
 	}
 
+	cursorID, err := decodeAuditCursor(filter.Cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.q.ListJournalsByTimeRange(ctx, sqlcgen.ListJournalsByTimeRangeParams{
 		Since:     sinceOrEpoch(filter.Since),
 		Until:     sinceOrEpoch(filter.Until),
-		CursorID:  decodeAuditCursor(filter.Cursor),
+		CursorID:  cursorID,
 		PageLimit: limit,
 	})
 	if err != nil {
@@ -245,13 +253,12 @@ func nextAuditCursor(rows []sqlcgen.Journal, limit int32) string {
 // decodeAuditCursor turns the opaque cursor string back into the internal
 // keyset position. "" (or garbage) starts from the beginning — an invalid
 // cursor can't leak anything, it just restarts the scan.
-func decodeAuditCursor(cursor string) int64 {
-	if cursor == "" {
-		return 0
-	}
+func decodeAuditCursor(cursor string) (int64, error) {
 	v, err := decodeCursorString(cursor)
 	if err != nil {
-		return 0
+		// Same rule as ListBookings: a malformed cursor surfaces instead of
+		// silently restarting pagination at page one.
+		return 0, fmt.Errorf("postgres: audit: %w", err)
 	}
-	return v
+	return v, nil
 }

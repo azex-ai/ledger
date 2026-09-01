@@ -64,6 +64,9 @@ paths:
       responses:
         "200":
           description: Service is up.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthEnvelope" }
         "503":
           description: DB unreachable. Envelope, same as every other error response.
           content:
@@ -77,6 +80,18 @@ paths:
       responses:
         "200":
           description: Ready.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [ready] }
         "503":
           description: Not ready yet. Envelope, same as every other error response.
           content:
@@ -124,6 +139,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/JournalEnvelope" }
+        "403":
+          description: An entry targets an is_system classification and AllowSystemClassificationPost is off.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "409":
           $ref: "#/components/responses/DomainError"
         "422":
@@ -218,7 +238,11 @@ paths:
                 reason: { type: string }
                 idempotency_key: { type: string }
       responses:
-        "201": { description: Reversal posted. }
+        "201":
+          description: Reversal posted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
           description: Already reversed.
@@ -250,7 +274,11 @@ paths:
                 reason: { type: string }
                 idempotency_key: { type: string }
       responses:
-        "201": { description: Partial reversal posted. }
+        "201":
+          description: Partial reversal posted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalEnvelope" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { description: Cumulative reversal would exceed the original. }
         "422": { $ref: "#/components/responses/DomainError" }
@@ -365,7 +393,35 @@ paths:
                 currency_uid: { type: string, format: uuid }
       responses:
         "200":
-          description: Map of holder → balances.
+          description: >-
+            List of holder → balances (server/handler_balances.go's
+            handleBatchBalances returns a function-local `holderBalances`
+            struct, not a named package-level type -- inline here rather
+            than a $ref'd component, same reasoning as the requestBody
+            schemas this suite deliberately leaves unregistered).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          list:
+                            type: array
+                            items:
+                              type: object
+                              required: [holder_id, balances]
+                              properties:
+                                holder_id: { type: integer, format: int64 }
+                                balances:
+                                  type: array
+                                  items: { $ref: "#/components/schemas/Balance" }
+                          next_cursor:
+                            type: [string, "null"]
+                            description: Always null -- this endpoint returns its full result set (not paginated).
 
   /reservations:
     get:
@@ -433,7 +489,20 @@ paths:
                     original success, same key + different amount is a
                     conflict.
       responses:
-        "200": { description: Settled. }
+        "200":
+          description: Settled.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [settled] }
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/settle-partial:
     post:
@@ -466,7 +535,20 @@ paths:
                     same key + same amount succeeds without effect, same key +
                     different amount is a conflict.
       responses:
-        "200": { description: Partial settlement recorded. }
+        "200":
+          description: Partial settlement recorded.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [settling] }
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/finalize:
     post:
@@ -495,7 +577,20 @@ paths:
                     success, same key against a different reservation is a
                     conflict.
       responses:
-        "200": { description: Finalized. }
+        "200":
+          description: Finalized.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [settled] }
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/release:
     post:
@@ -523,7 +618,20 @@ paths:
                     success, same key against a different reservation is a
                     conflict.
       responses:
-        "200": { description: Released. }
+        "200":
+          description: Released.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [released] }
         "422": { $ref: "#/components/responses/DomainError" }
 
   /accounts/{holder}/policy:
@@ -557,7 +665,11 @@ paths:
           required: true
           schema: { type: integer, format: int64 }
       responses:
-        "200": { description: Policies. }
+        "200":
+          description: Policies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountPolicyListEnvelope" }
 
   /holders/{holder}/deposit-address:
     post:
@@ -830,7 +942,23 @@ paths:
           required: true
           schema: { type: string, enum: [evm, btc, custom] }
       responses:
-        "200": { description: 'Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path).' }
+        "200":
+          description: 'Accepted -- returns the ingested booking (evm sighting path), a `{status: "ignored"}` no-op body (evm sighting path with nothing to book), or the transition event (legacy path). Three distinct Go response types (bookingToResponse / eventToResponse / depositSightingIgnoredResponse in server/handler_webhooks.go) share this one operation, hence oneOf rather than a single $ref -- deliberately inline, not a named component, so it stays outside the by-name completeness registry the same way an inline requestBody schema does (see server/openapi_contract_test.go).'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BookingEnvelope"
+                  - $ref: "#/components/schemas/EventEnvelope"
+                  - allOf:
+                      - $ref: "#/components/schemas/Envelope"
+                      - type: object
+                        properties:
+                          data:
+                            type: object
+                            required: [status]
+                            properties:
+                              status: { type: string, enum: [ignored] }
         "401": { description: HMAC verification failed. }
         "403": { description: Channel/classification mismatch (design doc §5-5). }
         "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
@@ -840,7 +968,11 @@ paths:
       tags: [Metadata]
       summary: List classifications.
       responses:
-        "200": { description: Classifications. }
+        "200":
+          description: Classifications.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClassificationListEnvelope" }
     post:
       tags: [Metadata]
       summary: Create a classification (with optional lifecycle).
@@ -850,7 +982,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/ClassificationInput" }
       responses:
-        "201": { description: Created. }
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClassificationEnvelope" }
   /classifications/{uid}/deactivate:
     post:
       tags: [Metadata]
@@ -861,14 +997,31 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200": { description: Deactivated. }
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [deactivated] }
 
   /journal-types:
     get:
       tags: [Metadata]
       summary: List journal types.
       responses:
-        "200": { description: Journal types. }
+        "200":
+          description: Journal types.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalTypeListEnvelope" }
     post:
       tags: [Metadata]
       summary: Create a journal type.
@@ -884,7 +1037,11 @@ paths:
                 name: { type: string }
                 holder_kind: { type: string, enum: ["", deposit, withdrawal, transfer, fee, adjustment, other], description: "Optional (M-7 fix, docs/INVARIANTS.md I-44). Unlike ClassificationInput.balance_role this is never required -- omit to leave it untagged ('')." }
       responses:
-        "201": { description: Created. }
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JournalTypeEnvelope" }
   /journal-types/{uid}/deactivate:
     post:
       tags: [Metadata]
@@ -894,14 +1051,31 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200": { description: Deactivated. }
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [deactivated] }
 
   /templates:
     get:
       tags: [Metadata]
       summary: List entry templates.
       responses:
-        "200": { description: Templates. }
+        "200":
+          description: Templates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateListEnvelope" }
     post:
       tags: [Metadata]
       summary: Create an entry template.
@@ -911,7 +1085,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/TemplateInput" }
       responses:
-        "201": { description: Created. }
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplateEnvelope" }
   /templates/{code}/preview:
     post:
       tags: [Metadata]
@@ -927,7 +1105,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/TemplatePreviewRequest" }
       responses:
-        "200": { description: Rendered JournalInput. }
+        "200":
+          description: Rendered JournalInput.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemplatePreviewResultEnvelope" }
   /templates/{uid}/deactivate:
     post:
       tags: [Metadata]
@@ -937,13 +1119,30 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200": { description: Deactivated. }
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [deactivated] }
 
   /currencies:
     get:
       tags: [Metadata]
       responses:
-        "200": { description: Currencies. }
+        "200":
+          description: Currencies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrencyListEnvelope" }
     post:
       tags: [Metadata]
       requestBody:
@@ -965,7 +1164,11 @@ paths:
                     (JPY=0, USD=2, USDT=6, wei=18). Required — 0 is a legal
                     value, so it cannot be defaulted.
       responses:
-        "201": { description: Created. }
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CurrencyEnvelope" }
   /currencies/{uid}/deactivate:
     post:
       tags: [Metadata]
@@ -976,7 +1179,20 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
-        "200": { description: Deactivated. }
+        "200":
+          description: Deactivated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [status]
+                        properties:
+                          status: { type: string, enum: [deactivated] }
 
   /reconcile:
     post:
@@ -1047,7 +1263,36 @@ paths:
           name: to
           schema: { type: string, format: date }
       responses:
-        "200": { description: Snapshots. }
+        "200":
+          description: >-
+            Snapshots. server/handler_system.go's handleListSnapshots
+            returns a function-local `snapshotResp` struct, not a named
+            package-level type -- inline here rather than a $ref'd
+            component, same reasoning as POST /balances/batch above.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          list:
+                            type: array
+                            items:
+                              type: object
+                              required: [account_holder, currency_uid, classification_uid, snapshot_date, balance]
+                              properties:
+                                account_holder: { type: integer, format: int64 }
+                                currency_uid: { type: string, format: uuid }
+                                classification_uid: { type: string, format: uuid }
+                                snapshot_date: { type: string, format: date }
+                                balance: { $ref: "#/components/schemas/Decimal" }
+                          next_cursor:
+                            type: [string, "null"]
+                            description: Always null -- this endpoint returns its full result set (not paginated).
 
   /audit/journals:
     get:
@@ -1369,6 +1614,60 @@ paths:
           $ref: "#/components/responses/DomainError"
         "503": { description: Developer credit not enabled on this server. }
 
+  /periods/close:
+    post:
+      tags: [Periods]
+      summary: Close an accounting period (hard write barrier before close_before).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClosePeriodRequest" }
+      responses:
+        "201":
+          description: Period close recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeriodCloseEnvelope" }
+        "409":
+          $ref: "#/components/responses/DomainError"
+        "422":
+          $ref: "#/components/responses/DomainError"
+  /periods/closes:
+    get:
+      tags: [Periods]
+      summary: List period closes (most recent first).
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Period closes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeriodCloseListEnvelope" }
+  /reports/trial-balance:
+    get:
+      tags: [Reports]
+      summary: Trial balance for one currency as of a point in time.
+      parameters:
+        - in: query
+          name: currency_uid
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: as_of
+          schema: { type: string, format: date-time, description: "RFC3339; defaults to now when omitted." }
+      responses:
+        "200":
+          description: Trial balance.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrialBalanceEnvelope" }
+        "400":
+          $ref: "#/components/responses/DomainError"
+
 components:
   securitySchemes:
     holderToken:
@@ -1674,6 +1973,87 @@ components:
                       type: array
                       items: { $ref: "#/components/schemas/Entry" }
 
+    HealthStatus:
+      type: object
+      required: [status, db, rollup_queue_depth, checkpoint_max_age_seconds, active_reservations]
+      properties:
+        status: { type: string }
+        db: { type: string }
+        rollup_queue_depth: { type: integer, format: int64 }
+        checkpoint_max_age_seconds: { type: integer }
+        active_reservations: { type: integer, format: int64 }
+    HealthEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/HealthStatus" }
+    ClosePeriodRequest:
+      type: object
+      required: [close_before]
+      properties:
+        close_before: { $ref: "#/components/schemas/Timestamp" }
+        note: { type: string }
+        actor_id: { type: integer, format: int64 }
+    PeriodClose:
+      type: object
+      required: [uid, close_before, note, actor_id, created_at]
+      properties:
+        uid: { type: string, format: uuid }
+        close_before: { $ref: "#/components/schemas/Timestamp" }
+        note: { type: string }
+        actor_id: { type: integer, format: int64 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    PeriodCloseEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/PeriodClose" }
+    PeriodCloseListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/PeriodClose" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
+    TrialBalanceRow:
+      type: object
+      required: [classification_uid, classification_code, classification_name, normal_side, total_debit, total_credit, net]
+      properties:
+        classification_uid: { type: string, format: uuid }
+        classification_code: { type: string }
+        classification_name: { type: string }
+        normal_side: { type: string, enum: [debit, credit] }
+        total_debit: { $ref: "#/components/schemas/Decimal" }
+        total_credit: { $ref: "#/components/schemas/Decimal" }
+        net: { $ref: "#/components/schemas/Decimal" }
+    TrialBalance:
+      type: object
+      required: [currency_uid, as_of, rows, total_debit, total_credit, balanced]
+      properties:
+        currency_uid: { type: string, format: uuid }
+        as_of: { $ref: "#/components/schemas/Timestamp" }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/TrialBalanceRow" }
+        total_debit: { $ref: "#/components/schemas/Decimal" }
+        total_credit: { $ref: "#/components/schemas/Decimal" }
+        balanced: { type: boolean }
+    TrialBalanceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/TrialBalance" }
+
     Balance:
       type: object
       required: [account_holder, currency_uid, classification_uid, balance]
@@ -1847,6 +2227,20 @@ components:
         - type: object
           properties:
             data: { $ref: "#/components/schemas/AccountPolicy" }
+    AccountPolicyListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/AccountPolicy" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     CreateBookingInput:
       type: object
@@ -2031,6 +2425,75 @@ components:
         is_system: { type: boolean }
         balance_role: { $ref: "#/components/schemas/BalanceRole" }
         lifecycle: { $ref: "#/components/schemas/Lifecycle" }
+    Classification:
+      type: object
+      description: >-
+        lifecycle is the only genuinely optional field here
+        (classificationResponse.go: `omitempty` — absent from the wire, not
+        present-as-empty, for a label-only classification with no
+        lifecycle). Every other field is always populated.
+      required: [uid, code, name, normal_side, is_system, is_active, balance_role, created_at]
+      properties:
+        uid: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        normal_side: { $ref: "#/components/schemas/NormalSide" }
+        is_system: { type: boolean }
+        is_active: { type: boolean }
+        balance_role: { $ref: "#/components/schemas/BalanceRole" }
+        lifecycle: { $ref: "#/components/schemas/Lifecycle" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    ClassificationEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Classification" }
+    ClassificationListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Classification" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
+
+    JournalType:
+      type: object
+      required: [uid, code, name, is_active, holder_kind, created_at]
+      properties:
+        uid: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        is_active: { type: boolean }
+        holder_kind: { type: string, enum: ["", deposit, withdrawal, transfer, fee, adjustment, other], description: "'' when untagged (M-7 fix, docs/INVARIANTS.md I-44)." }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    JournalTypeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/JournalType" }
+    JournalTypeListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/JournalType" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     TemplateLineInput:
       type: object
@@ -2052,6 +2515,78 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/TemplateLineInput" }
+    TemplateLine:
+      type: object
+      required: [classification_uid, entry_type, holder_role, amount_key, sort_order]
+      properties:
+        classification_uid: { type: string, format: uuid }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        holder_role: { $ref: "#/components/schemas/HolderRole" }
+        amount_key: { type: string }
+        sort_order: { type: integer }
+    Template:
+      type: object
+      required: [uid, code, name, journal_type_uid, is_active, lines, created_at]
+      properties:
+        uid: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        journal_type_uid: { type: string, format: uuid }
+        is_active: { type: boolean }
+        lines:
+          type: array
+          items: { $ref: "#/components/schemas/TemplateLine" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    TemplateEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Template" }
+    TemplateListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Template" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
+
+    Currency:
+      type: object
+      required: [uid, code, name, is_active, exponent]
+      properties:
+        uid: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        is_active: { type: boolean }
+        exponent: { type: integer, minimum: 0, maximum: 18 }
+    CurrencyEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/Currency" }
+    CurrencyListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/Currency" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: Always null -- this endpoint returns its full result set (not paginated).
 
     TemplateParams:
       type: object
@@ -2084,6 +2619,32 @@ components:
         amounts:
           type: object
           additionalProperties: { $ref: "#/components/schemas/Decimal" }
+    PreviewEntry:
+      type: object
+      required: [account_holder, currency_uid, classification_uid, entry_type, amount]
+      properties:
+        account_holder: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        classification_uid: { type: string, format: uuid }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        amount: { $ref: "#/components/schemas/Decimal" }
+    TemplatePreviewResult:
+      type: object
+      description: >-
+        The rendered core.JournalInput a matching POST /journals/template
+        call would post -- unposted, hence "entries" rather than a full
+        Journal (no uid/created_at/etc exist yet).
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/PreviewEntry" }
+    TemplatePreviewResultEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data: { $ref: "#/components/schemas/TemplatePreviewResult" }
     TemplateExecutionRequest:
       type: object
       required: [template_code, holder_id, currency_uid, idempotency_key, amounts]

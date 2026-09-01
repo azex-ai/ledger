@@ -1,6 +1,9 @@
 package bizcode
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // AppError is a structured business error with a numeric code.
 type AppError struct {
@@ -136,6 +139,12 @@ var (
 
 // --- Display messages ---
 
+// displayMessagesMu guards displayMessages: RegisterDisplayMessage can be
+// called by a consumer at any time (e.g. lazy registration of custom codes),
+// and a concurrent DisplayMessage read against a bare map write is a Go
+// concurrent map access -> process panic. A RWMutex keeps reads cheap.
+var displayMessagesMu sync.RWMutex
+
 var displayMessages = map[int]string{
 	10001: "Please check your input and try again",
 	10101: "Authentication required",
@@ -164,7 +173,10 @@ var displayMessages = map[int]string{
 
 // DisplayMessage returns the user-facing message for a code.
 func DisplayMessage(code int) string {
-	if msg, ok := displayMessages[code]; ok {
+	displayMessagesMu.RLock()
+	msg, ok := displayMessages[code]
+	displayMessagesMu.RUnlock()
+	if ok {
 		return msg
 	}
 	return "An unexpected error occurred"
@@ -210,5 +222,7 @@ func Retryable(code int) bool {
 
 // RegisterDisplayMessage registers a display message for a code.
 func RegisterDisplayMessage(code int, msg string) {
+	displayMessagesMu.Lock()
 	displayMessages[code] = msg
+	displayMessagesMu.Unlock()
 }

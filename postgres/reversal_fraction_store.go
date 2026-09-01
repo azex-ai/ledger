@@ -362,6 +362,38 @@ func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries
 		}
 	}
 
+	// Overshoot check. alreadyReversed is keyed per DIMENSION, so both sides
+	// of the comparison must be aggregated to that same grain: this reversal's
+	// shares and the original amounts. Comparing the dimension-wide cumulative
+	// against a single entry's original amount rejected legal reversals on
+	// journals carrying two entries on one dimension (60 + 40 debits, reversed
+	// half then a second legal half: already=50 + share 30 > 60 — a phantom
+	// excess). Same aggregation, same reason as the num==den branch above (C8);
+	// this check only rejects, it never changes the derived entries, so the
+	// digest determinism AuthorizeReversal relies on is untouched.
+	newByDim := make(map[entryDimKey]decimal.Decimal, len(entries))
+	originalByDim := make(map[entryDimKey]decimal.Decimal, len(entries))
+	dimOrder := make([]entryDimKey, 0, len(entries))
+	for i, e := range entries {
+		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: core.EntryType(e.EntryType)}
+		if _, seen := originalByDim[key]; !seen {
+			dimOrder = append(dimOrder, key)
+		}
+		originalByDim[key] = originalByDim[key].Add(mustNumericToDecimal(e.Amount))
+		if reversedAmounts[i].IsPositive() {
+			newByDim[key] = newByDim[key].Add(reversedAmounts[i])
+		}
+	}
+	for _, key := range dimOrder {
+		already := alreadyReversed[key]
+		if already.Add(newByDim[key]).GreaterThan(originalByDim[key]) {
+			return nil, fmt.Errorf(
+				"postgres: reverse journal fraction: dimension (holder %d, currency %d, classification %d, %s): cumulative reversed %s + this reversal's %s would exceed original amount %s: %w",
+				key.holder, key.currencyID, key.classificationID, key.entryType, already, newByDim[key], originalByDim[key], core.ErrConflict,
+			)
+		}
+	}
+
 	reversedEntries := make([]core.EntryInput, 0, len(entries))
 	for i, e := range entries {
 		newAmount := reversedAmounts[i]
@@ -373,17 +405,7 @@ func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries
 			continue
 		}
 
-		originalAmount := mustNumericToDecimal(e.Amount)
 		originalType := core.EntryType(e.EntryType)
-		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: originalType}
-		already := alreadyReversed[key]
-		if already.Add(newAmount).GreaterThan(originalAmount) {
-			return nil, fmt.Errorf(
-				"postgres: reverse journal fraction: entry %d: cumulative reversed %s + this reversal's %s would exceed original amount %s: %w",
-				e.ID, already, newAmount, originalAmount, core.ErrConflict,
-			)
-		}
-
 		flipped := core.EntryTypeCredit
 		if originalType == core.EntryTypeCredit {
 			flipped = core.EntryTypeDebit

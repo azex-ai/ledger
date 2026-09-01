@@ -28,7 +28,10 @@ var transferJournalTypes = []JournalTypePreset{
 // Note: In the ledger template model, HolderRoleUser resolves to the HolderID
 // supplied at execution time. Both sender and receiver legs must therefore be
 // executed as two separate template calls, one per user, with amount_key
-// "amount" on each side.
+// "amount" on each side. ATOMICITY: those two calls MUST share one
+// transaction — ExecuteTemplateBatch, or two ExecuteTemplate calls inside
+// one RunInTx (docs/COOKBOOK.md) — or a failure between them leaves the
+// sender debited with nothing credited to the receiver.
 //
 // Alternatively, callers may use PostJournal directly with all four entries
 // when they need to express both legs atomically in a single journal. The
@@ -48,8 +51,14 @@ var transferJournalTypes = []JournalTypePreset{
 //
 //	CR settlement (system derived from receiver)  DR main_wallet (user=receiver)
 //
-// settlement is the transit account and nets to zero once both legs land: the
-// sender's leg debits it, the receiver's credits it back.
+// settlement is the transit account and nets to zero once both legs land —
+// zero when AGGREGATED BY CLASSIFICATION, not per system holder: HolderRoleSystem
+// resolves to SystemAccountHolder(sender) on one leg and
+// SystemAccountHolder(receiver) on the other (core/template.go), two distinct
+// account_holders. -sender keeps a standing debit balance and -receiver a
+// standing credit; only the classification-level sum
+// (AggregateCheckpointsByClassification) is zero. Reconciling a single
+// system holder against zero here is a misread, not a discrepancy.
 var transferTemplates = []TemplatePreset{
 	{
 		Code:            "transfer_out",

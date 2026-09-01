@@ -38,6 +38,15 @@ func normalizeStoreError(err error) error {
 		return fmt.Errorf("check constraint %q violated: %w", pgErr.ConstraintName, core.ErrInvalidInput)
 	case "23503", "23502", "22P02":
 		return fmt.Errorf("invalid database input: %w", core.ErrInvalidInput)
+	case "22003", "22001":
+		// 22003 numeric_value_out_of_range / 22001 string_data_right_truncation:
+		// the VALUE does not fit the column (NUMERIC(30,18) caps the integer
+		// part at 12 digits). Permanent for this input — without this case it
+		// fell through to `default: return err` and core.IsRetryable's
+		// `default: true`, so an over-range amount (high-supply token units,
+		// exponent misconfigured to 0) was retried forever instead of surfacing
+		// as a permanently invalid request.
+		return fmt.Errorf("value out of range for column (%s): %w", pgErr.Code, core.ErrInvalidInput)
 	case "40001", "40P01":
 		// SQLSTATE class 40 (transaction rollback): 40001 serialization_failure
 		// (SERIALIZABLE/REPEATABLE READ conflict) and 40P01 deadlock_detected

@@ -92,6 +92,15 @@ var _ core.AuthVerifier = (*LocalVerifier)(nil)
 // NewLocalVerifier builds a LocalVerifier from a single public key/keyID
 // pair. Use this directly (instead of NewLocalAttestor) in a process that
 // only needs to verify, never sign.
+//
+// KEY ROTATION CAVEAT: this verifier has no notion of key validity windows or
+// revocation — a keyID it holds verifies any digest, forever. Because old
+// public keys must stay registered to verify historical journals, rotating a
+// COMPROMISED private key out does NOT reduce that key's power: it can still
+// sign a newly-forged journal that this verifier will accept. If your threat
+// model needs rotation to shrink a leaked key's blast radius, verify against
+// the journal's effective_at with a per-key NotAfter — this dev implementation
+// deliberately does not, and a production verifier should.
 func NewLocalVerifier(pub ed25519.PublicKey, keyID string) *LocalVerifier {
 	return &LocalVerifier{keys: map[string]ed25519.PublicKey{keyID: pub}}
 }

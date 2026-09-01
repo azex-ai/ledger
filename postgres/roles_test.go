@@ -106,20 +106,39 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 
 	// --- ledger_app can still do its actual job --------------------------
 	//
-	// webhook_subscribers rather than currencies: migration 003 gave
-	// currencies a column guard, so it is no longer an ordinary table and
-	// updating its name is now refused on purpose. This subtest exists to
-	// prove the refusals above are not vacuous -- a role granted nothing at
-	// all would also fail every forbidden operation -- so it has to use a
-	// table where a plain UPDATE really is allowed.
-	t.Run("can SELECT/INSERT/UPDATE an ordinary table", func(t *testing.T) {
-		_, err := appPool.Exec(ctx, "INSERT INTO webhook_subscribers (url, name) VALUES ('https://example.test/hook', 'RoleTest1')")
+	// webhook_subscribers is column-scoped for ledger_app's write as of
+	// migration 014 (security review M-3): it may UPDATE only the three
+	// delivery-status columns RecordDeliveryStatus writes, and may NOT INSERT
+	// a subscriber or touch url/secret. This subtest proves the refusals above
+	// are not vacuous -- the allowed status UPDATE really does succeed -- while
+	// the next one pins the M-3 boundary.
+	t.Run("can UPDATE its own delivery-status columns", func(t *testing.T) {
+		var id int64
+		require.NoError(t, pool.QueryRow(ctx,
+			"INSERT INTO webhook_subscribers (url, name, secret) VALUES ('https://example.test/hook', 'RoleTest1', 's3cr3t') RETURNING id").Scan(&id))
+		_, err := appPool.Exec(ctx, "UPDATE webhook_subscribers SET last_status_code = 200, last_error = '' WHERE id = $1", id)
 		require.NoError(t, err)
-		_, err = appPool.Exec(ctx, "UPDATE webhook_subscribers SET name = 'RoleTest1x' WHERE name = 'RoleTest1'")
-		require.NoError(t, err)
-		var name string
-		require.NoError(t, appPool.QueryRow(ctx, "SELECT name FROM webhook_subscribers WHERE url = 'https://example.test/hook'").Scan(&name))
-		assert.Equal(t, "RoleTest1x", name)
+		var code int
+		require.NoError(t, appPool.QueryRow(ctx, "SELECT last_status_code FROM webhook_subscribers WHERE id = $1", id).Scan(&code))
+		assert.Equal(t, 200, code)
+	})
+
+	// M-3: a leaked ledger_app credential must not be able to redirect the
+	// event stream to its own URL, blank a subscriber's signing secret, or
+	// create a subscriber at all. Subscriber lifecycle belongs to ledger_owner.
+	t.Run("cannot forge or tamper with webhook subscribers", func(t *testing.T) {
+		var id int64
+		require.NoError(t, pool.QueryRow(ctx,
+			"INSERT INTO webhook_subscribers (url, name, secret) VALUES ('https://legit.test/hook', 'RoleTestM3', 'realsecret') RETURNING id").Scan(&id))
+
+		_, err := appPool.Exec(ctx, "INSERT INTO webhook_subscribers (url, name) VALUES ('https://attacker.tld/e', 'evil')")
+		assertPermissionDenied(t, err)
+
+		_, err = appPool.Exec(ctx, "UPDATE webhook_subscribers SET secret = '' WHERE id = $1", id)
+		assertPermissionDenied(t, err)
+
+		_, err = appPool.Exec(ctx, "UPDATE webhook_subscribers SET url = 'https://attacker.tld/e' WHERE id = $1", id)
+		assertPermissionDenied(t, err)
 	})
 
 	// The guard migration 003 put on the configuration tables, checked from

@@ -77,7 +77,15 @@ func TestWebhookDeliverer_ProcessBatch_NilSubscriberLister(t *testing.T) {
 	assert.Contains(t, err.Error(), "subscriber lister is nil")
 }
 
-func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T) {
+// INVERTED (2026-08-29 review): this test used to assert the opposite — that
+// an empty subscriber table marked the whole batch delivered. That behavior
+// silently laundered every event fired while nobody was subscribed (fresh
+// environment, operator toggled is_active off, migration window) into
+// delivery_status='delivered', indistinguishable from success and never
+// retried once a subscriber appeared — the same shape the 2026-08-25 audit
+// pinned for Worker.Subscribe/LocalDispatcher. The batch must stay pending so
+// the claim lease expires and it is re-polled.
+func TestWebhookDeliverer_ProcessBatch_NoSubscribersLeavesPending(t *testing.T) {
 	poller := &mockEventPoller{
 		events: []PendingEvent{{InternalID: 42, Event: core.Event{UID: "evt-42", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
@@ -86,10 +94,10 @@ func TestWebhookDeliverer_ProcessBatch_NoSubscribersMarksDelivered(t *testing.T)
 
 	delivered, err := deliverer.ProcessBatch(context.Background(), 10)
 	require.NoError(t, err)
-	assert.Equal(t, 1, delivered)
-	assert.Equal(t, []int64{42}, poller.delivered)
+	assert.Equal(t, 0, delivered, "no subscribers means nothing was delivered")
+	assert.Empty(t, poller.delivered, "events must NOT be marked delivered when nobody was notified")
 	assert.Empty(t, poller.retried)
-	assert.Equal(t, 1, metrics.delivered, "EventDelivered must be emitted")
+	assert.Equal(t, 0, metrics.delivered, "EventDelivered must not be emitted")
 }
 
 func TestWebhookDeliverer_ProcessBatch_NilMetricsDefaultsToNop(t *testing.T) {
@@ -110,7 +118,7 @@ func TestWebhookDeliverer_DeliverEvent_SubscriberFailureEmitsFailedMetric(t *tes
 	}
 	// A subscriber whose URL will fail to dial — sendHTTP returns an error.
 	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
-		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", IsActive: true},
+		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", Secret: "sec", IsActive: true},
 	}}
 	metrics := &recordingMetrics{}
 	deliverer := NewWebhookDeliverer(poller, subs, core.NopLogger(), metrics)
@@ -127,7 +135,7 @@ func TestWebhookDeliverer_DeliverEvent_LastAttemptEmitsDeadMetric(t *testing.T) 
 		events: []PendingEvent{{InternalID: 8, Event: core.Event{UID: "evt-8", ClassificationCode: "deposit", ToStatus: "confirmed", Attempts: 9, MaxAttempts: 10}}},
 	}
 	subs := &mockSubscriberLister{subs: []WebhookSubscriber{
-		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", IsActive: true},
+		{ID: 1, Name: "unreachable", URL: "http://127.0.0.1:0/webhook", Secret: "sec", IsActive: true},
 	}}
 	metrics := &recordingMetrics{}
 	deliverer := NewWebhookDeliverer(poller, subs, core.NopLogger(), metrics)
@@ -147,7 +155,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsSuccessStatus(t *testing.T) {
 	poller := &mockEventPoller{
 		events: []PendingEvent{{InternalID: 1, Event: core.Event{UID: "evt-1", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
-	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 7, Name: "sub", URL: srv.URL}}}
+	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 7, Name: "sub", URL: srv.URL, Secret: "sec"}}}
 	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
 
 	delivered, err := deliverer.ProcessBatch(context.Background(), 10)
@@ -168,7 +176,7 @@ func TestWebhookDeliverer_ProcessBatch_RecordsFailureStatus(t *testing.T) {
 	poller := &mockEventPoller{
 		events: []PendingEvent{{InternalID: 2, Event: core.Event{UID: "evt-2", ClassificationCode: "deposit", ToStatus: "confirmed"}}},
 	}
-	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 9, Name: "sub", URL: srv.URL}}}
+	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 9, Name: "sub", URL: srv.URL, Secret: "sec"}}}
 	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
 
 	_, err := deliverer.ProcessBatch(context.Background(), 10)
@@ -178,6 +186,32 @@ func TestWebhookDeliverer_ProcessBatch_RecordsFailureStatus(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, lister.recordedStatuses[0].statusCode)
 	assert.Contains(t, lister.recordedStatuses[0].errMsg, "http status 500")
 	assert.Equal(t, []int64{2}, poller.retried)
+}
+
+// TestWebhookDeliverer_EmptySecretRefusedNotDeliveredUnsigned is the m-3
+// regression: a subscriber with no signing secret must NOT receive an unsigned
+// POST. Delivery fails (retried, visible in last_error) instead of silently
+// sending something a receiver cannot authenticate.
+func TestWebhookDeliverer_EmptySecretRefusedNotDeliveredUnsigned(t *testing.T) {
+	var gotRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		gotRequest = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	poller := &mockEventPoller{
+		events: []PendingEvent{{InternalID: 3, Event: core.Event{UID: "evt-3", ClassificationCode: "deposit", ToStatus: "confirmed", MaxAttempts: 10}}},
+	}
+	lister := &mockSubscriberLister{subs: []WebhookSubscriber{{ID: 11, Name: "no-secret", URL: srv.URL}}}
+	deliverer := NewWebhookDeliverer(poller, lister, core.NopLogger(), core.NopMetrics())
+
+	_, err := deliverer.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.False(t, gotRequest, "an unsigned POST must never be sent to a secret-less subscriber")
+	assert.Equal(t, []int64{3}, poller.retried, "delivery must be retried, not marked delivered")
+	require.Len(t, lister.recordedStatuses, 1)
+	assert.Contains(t, lister.recordedStatuses[0].errMsg, "no signing secret")
 }
 
 func TestRetryDelay(t *testing.T) {

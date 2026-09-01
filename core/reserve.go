@@ -116,6 +116,16 @@ func (i ReserveInput) Validate() error {
 // Now Settle correctly short-circuits to success, and the charge's own key is
 // the only thing left standing between a retry and a double charge. Generate
 // both keys outside the retry, not inside it.
+//
+// A second composition trap: a hold binds only OTHER RESERVATIONS (I-11). A
+// direct journal on the same dimension — lock_funds, transfer_out, any
+// template — can spend the reserved funds out from under an active
+// reservation, and account_policies' min_balance check does not net out
+// holds either. If that happens, the settlement journal posted alongside
+// this Settle either drives the balance negative (no min_balance policy) or
+// is rejected with ErrInsufficientBalance, rolling back the whole RunInTx
+// and wedging the reservation until it expires. Consumers that need reserved
+// funds to be unspendable must route all consumption through Reserve→Settle.
 type SettleInput struct {
 	ReservationUID string          `json:"reservation_uid"`
 	Amount         decimal.Decimal `json:"amount"`

@@ -135,7 +135,9 @@ func (s *EventStore) ListEvents(ctx context.Context, filter core.EventFilter) ([
 	}
 	cursorID, err := decodeCursorString(filter.Cursor)
 	if err != nil {
-		cursorID = 0
+		// Same rule as ListBookings: a malformed cursor surfaces instead of
+		// silently restarting pagination at page one.
+		return nil, "", fmt.Errorf("postgres: list events: %w", err)
 	}
 	rows, err := s.q.ListEventsByFilter(ctx, sqlcgen.ListEventsByFilterParams{
 		ClassificationCode: filter.ClassificationCode,

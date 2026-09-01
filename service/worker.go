@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -96,6 +97,12 @@ type Worker struct {
 	pool          *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
 	config        WorkerConfig
 	logger        core.Logger
+	// running is set by Run and never cleared: Run reads localDeliverer once
+	// at startup to decide whether the event_callback loop exists at all, so
+	// a first Subscribe after Run registers a handler nothing will ever
+	// invoke. Subscribe uses this to make that mistake loud instead of
+	// silent.
+	running atomic.Bool
 }
 
 // NewWorker creates a new Worker.
@@ -180,8 +187,19 @@ func (w *Worker) SetPool(pool *pgxpool.Pool) {
 // Subscribe wires a delivery.LocalDispatcher the first time it is called,
 // using the poller already set by SetLocalPoller. ledger.Service.Worker sets
 // one, so a library consumer does not have to.
+//
+// ORDERING: the first Subscribe must happen BEFORE Run. Run reads
+// localDeliverer once at startup to decide whether the event_callback loop
+// exists at all — a first Subscribe after Run registers a handler that
+// nothing will ever invoke, with no error anywhere: events simply stay
+// pending. Subscribe logs an Error when it detects this, but cannot return
+// one (the signature predates the check); treat that log line as a wiring
+// bug, not a warning.
 func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) {
 	if w.localDeliverer == nil {
+		if w.running.Load() {
+			w.logger.Error("worker: Subscribe called after Run: the event_callback loop was not started and this handler will never be invoked — subscribe before starting the worker")
+		}
 		w.localDeliverer = delivery.NewLocalDispatcher(w.localPoller, w.logger)
 	}
 	w.localDeliverer.OnEvent(handler)
@@ -231,6 +249,7 @@ func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
 // (service/attest_verify.go: nil anchor -> VerifyStatusNotRun) -- this only
 // changes what the operator sees before anything goes wrong.
 func (w *Worker) Run(ctx context.Context) error {
+	w.running.Store(true)
 	attestationAnchored := w.attestation != nil && w.attestation.anchor != nil
 	w.logger.Info("worker: starting",
 		"full_reconcile", w.fullReconcile != nil,

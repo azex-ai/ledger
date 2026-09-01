@@ -87,7 +87,7 @@ func depositAddressToResponse(a *core.DepositAddress) depositAddressResponse {
 		UID:           a.UID,
 		AccountHolder: a.AccountHolder,
 		Address:       a.Address,
-		CreatedAt:     a.CreatedAt.Format(time.RFC3339),
+		CreatedAt:     a.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

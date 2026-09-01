@@ -38,8 +38,6 @@ func newProtectedTemplateServer(protected, allowed []string, journals core.Journ
 		&mockCurrencyStore{},
 		nil,
 		&mockReconciler{},
-		&mockSnapshotter{},
-		nil,
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},

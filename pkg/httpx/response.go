@@ -4,19 +4,94 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
+	"time"
+	"unicode"
+	"unsafe"
 
 	jsoniter "github.com/json-iterator/go"
-	"github.com/json-iterator/go/extra"
+	"github.com/modern-go/reflect2"
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/bizcode"
 )
 
-func init() {
-	extra.SetNamingStrategy(snakeCase)
+// json is a PRIVATE jsoniter API with the snake_case naming strategy scoped to
+// this package. It must never be the global registry: extra.SetNamingStrategy
+// calls jsoniter.RegisterExtension, whose extension list is a process-wide var
+// shared by EVERY jsoniter Config in the process. Importing this package
+// (transitively, via server) would then silently rename every un-tagged
+// exported field in the CONSUMER's own structs to snake_case — an invisible
+// side effect on the host process (abstractions.md: a library must not mutate
+// global state). Registering the extension on this one frozen API keeps the
+// behavior identical for our responses and invisible to everyone else.
+var json = func() jsoniter.API {
+	// Same options as ConfigCompatibleWithStandardLibrary, but a distinct
+	// frozen instance so RegisterExtension below stays local to it.
+	cfg := jsoniter.Config{
+		EscapeHTML:             true,
+		SortMapKeys:            true,
+		ValidateJsonRawMessage: true,
+	}.Froze()
+	cfg.RegisterExtension(&snakeCaseExtension{})
+	cfg.RegisterExtension(&utcTimeExtension{})
+	return cfg
+}()
+
+// utcTimeExtension forces every time.Time in a response to serialize as
+// RFC3339 in UTC (api-contract.md §5, working-agreements.md §6: the wire is
+// always `...Z`, never a local offset). Without it the output depended on the
+// process TZ: pgx v5 decodes timestamptz into time.Local, and the default
+// time.Time marshaler keeps that offset — so a deployment with TZ=Asia/Singapore
+// would silently emit `+08:00` on every _at field. Enforcing it here, once, is
+// structural: no handler has to remember to call .UTC() on each field.
+type utcTimeExtension struct {
+	jsoniter.DummyExtension
 }
 
-var json = jsoniter.ConfigCompatibleWithStandardLibrary
+var timeType = reflect2.TypeOf(time.Time{})
+
+func (e *utcTimeExtension) CreateEncoder(typ reflect2.Type) jsoniter.ValEncoder {
+	if typ == timeType {
+		return utcTimeEncoder{}
+	}
+	return nil
+}
+
+type utcTimeEncoder struct{}
+
+func (utcTimeEncoder) IsEmpty(ptr unsafe.Pointer) bool {
+	return (*time.Time)(ptr).IsZero()
+}
+
+func (utcTimeEncoder) Encode(ptr unsafe.Pointer, stream *jsoniter.Stream) {
+	stream.WriteString((*time.Time)(ptr).UTC().Format(time.RFC3339))
+}
+
+// snakeCaseExtension applies snakeCase to any exported field that has no
+// explicit json name — a package-scoped reimplementation of
+// extra.SetNamingStrategy's extension that we register on our private API
+// instead of the global one.
+type snakeCaseExtension struct {
+	jsoniter.DummyExtension
+}
+
+func (e *snakeCaseExtension) UpdateStructDescriptor(desc *jsoniter.StructDescriptor) {
+	for _, binding := range desc.Fields {
+		name := binding.Field.Name()
+		if unicode.IsLower(rune(name[0])) || name[0] == '_' {
+			continue
+		}
+		if tag, ok := binding.Field.Tag().Lookup("json"); ok {
+			first := strings.Split(tag, ",")[0]
+			if first == "-" || first != "" {
+				continue // hidden or explicitly named
+			}
+		}
+		binding.ToNames = []string{snakeCase(name)}
+		binding.FromNames = []string{snakeCase(name)}
+	}
+}
 
 // snakeCase converts Go PascalCase field names to snake_case,
 // correctly handling consecutive uppercase runs like "ID", "URL", "HTTP".

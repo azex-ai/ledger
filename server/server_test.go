@@ -17,7 +17,6 @@ import (
 	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/server"
-	"github.com/azex-ai/ledger/service"
 )
 
 // --- Mock implementations ---
@@ -399,13 +398,6 @@ func (m *mockFullReconciler) RunFullReconciliation(ctx context.Context) (*core.R
 	return &core.ReconcileReport{OverallPassed: true, RunAt: time.Now()}, nil
 }
 
-type mockSnapshotter struct{}
-
-func (m *mockSnapshotter) CreateDailySnapshot(ctx context.Context, date time.Time) error { return nil }
-func (m *mockSnapshotter) GetSnapshotBalance(ctx context.Context, holder int64, currencyUID string, date time.Time) ([]core.Balance, error) {
-	return nil, nil
-}
-
 type mockAuditQuerier struct {
 	listByAccountFn   func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error)
 	listByTimeRangeFn func(ctx context.Context, filter core.AuditFilter) ([]core.Journal, string, error)
@@ -593,8 +585,6 @@ func newTestServer() *server.Server {
 		&mockCurrencyStore{},
 		nil, // channels
 		&mockReconciler{},
-		&mockSnapshotter{},
-		(*service.SystemRollupService)(nil), // not used directly
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},
@@ -610,6 +600,7 @@ func newTestServer() *server.Server {
 // newTestServerWith creates a test server with custom overrides.
 func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 	o := &testServerOpts{
+		config:           &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024},
 		journals:         &mockJournalWriter{},
 		balances:         &mockBalanceReader{},
 		reserver:         &mockReserver{},
@@ -622,7 +613,6 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 		currencies:       &mockCurrencyStore{},
 		reconciler:       &mockReconciler{},
 		fullReconciler:   &mockFullReconciler{},
-		snapshotter:      &mockSnapshotter{},
 		queries:          &mockQueryProvider{},
 		audit:            &mockAuditQuerier{},
 		platformBalances: &mockPlatformBalanceReader{},
@@ -635,12 +625,12 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 	for _, fn := range opts {
 		fn(o)
 	}
-	return server.NewWithConfig(&server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024},
+	return server.NewWithConfig(o.config,
 		o.journals, o.balances, o.reserver,
 		o.booker, o.bookingReader, o.eventReader,
 		o.classifications, o.journalTypes, o.templates, o.currencies,
 		o.channels,
-		o.reconciler, o.snapshotter, nil, o.queries,
+		o.reconciler, o.queries,
 		o.audit, o.platformBalances, o.solvency, o.balanceTrends,
 		o.fullReconciler, o.accountPolicies,
 		o.periodCloser, o.trialBalance,
@@ -648,6 +638,7 @@ func newTestServerWith(opts ...func(*testServerOpts)) *server.Server {
 }
 
 type testServerOpts struct {
+	config           *server.Config
 	journals         core.JournalWriter
 	balances         core.BalanceReader
 	reserver         core.Reserver
@@ -661,7 +652,6 @@ type testServerOpts struct {
 	channels         map[string]channel.Adapter
 	reconciler       core.Reconciler
 	fullReconciler   core.FullReconciler
-	snapshotter      core.Snapshotter
 	queries          core.QueryProvider
 	audit            core.AuditQuerier
 	platformBalances core.PlatformBalanceReader
@@ -729,6 +719,62 @@ func TestPostJournal(t *testing.T) {
 	}
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
 	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+// systemClassificationStore embeds the ordinary mock but lists one classification
+// (uid "cls-sys") flagged is_system, for the M-2 deposit-forgery guard test.
+type systemClassificationStore struct{ mockClassificationStore }
+
+func (*systemClassificationStore) ListClassifications(context.Context, bool) ([]core.Classification, error) {
+	return []core.Classification{
+		{UID: "cls-user", Code: "main_wallet", Name: "Main Wallet", NormalSide: core.NormalSideDebit, IsActive: true},
+		{UID: "cls-sys", Code: "custodial", Name: "Custodial", NormalSide: core.NormalSideCredit, IsActive: true, IsSystem: true},
+	}, nil
+}
+
+// TestPostJournal_RejectsSystemClassificationByDefault is the M-2 regression:
+// a handwritten journal that credits a system classification (the shape of a
+// forged deposit confirmation, DR main_wallet(user) / CR custodial(system))
+// must be refused on POST /journals by default — the handwritten-path
+// counterpart to the template blacklist. The opt-out re-permits it.
+func TestPostJournal_RejectsSystemClassificationByDefault(t *testing.T) {
+	forged := map[string]any{
+		"journal_type_uid": "jt-1",
+		"idempotency_key":  "forge-1",
+		"entries": []map[string]any{
+			{"account_holder": 42, "currency_uid": "cur-1", "classification_uid": "cls-user", "entry_type": "debit", "amount": "1000"},
+			{"account_holder": -1, "currency_uid": "cur-1", "classification_uid": "cls-sys", "entry_type": "credit", "amount": "1000"},
+		},
+	}
+
+	t.Run("rejected by default", func(t *testing.T) {
+		srv := newTestServerWith(func(o *testServerOpts) { o.classifications = &systemClassificationStore{} })
+		w := doRequest(srv, http.MethodPost, "/api/v1/journals", forged)
+		assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	})
+
+	t.Run("a purely non-system journal still passes", func(t *testing.T) {
+		srv := newTestServerWith(func(o *testServerOpts) { o.classifications = &systemClassificationStore{} })
+		clean := map[string]any{
+			"journal_type_uid": "jt-1",
+			"idempotency_key":  "clean-1",
+			"entries": []map[string]any{
+				{"account_holder": 42, "currency_uid": "cur-1", "classification_uid": "cls-user", "entry_type": "debit", "amount": "10"},
+				{"account_holder": 43, "currency_uid": "cur-1", "classification_uid": "cls-user", "entry_type": "credit", "amount": "10"},
+			},
+		}
+		w := doRequest(srv, http.MethodPost, "/api/v1/journals", clean)
+		assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	})
+
+	t.Run("opt-out re-permits it", func(t *testing.T) {
+		srv := newTestServerWith(func(o *testServerOpts) {
+			o.classifications = &systemClassificationStore{}
+			o.config = &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024, AllowSystemClassificationPost: true}
+		})
+		w := doRequest(srv, http.MethodPost, "/api/v1/journals", forged)
+		assert.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	})
 }
 
 func TestPostJournal_PassesEventID(t *testing.T) {
@@ -1791,8 +1837,6 @@ func TestAuth_ReadsRequireKeyWhenConfigured(t *testing.T) {
 		&mockCurrencyStore{},
 		nil,
 		&mockReconciler{},
-		&mockSnapshotter{},
-		(*service.SystemRollupService)(nil),
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},
@@ -1842,8 +1886,6 @@ func TestAuth_WebhookPathExemptFromBearerAuth(t *testing.T) {
 		&mockCurrencyStore{},
 		nil,
 		&mockReconciler{},
-		&mockSnapshotter{},
-		(*service.SystemRollupService)(nil),
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},
@@ -1876,8 +1918,6 @@ func newScopedTestServer(keys ...server.APIKey) *server.Server {
 		&mockCurrencyStore{},
 		nil,
 		&mockReconciler{},
-		&mockSnapshotter{},
-		(*service.SystemRollupService)(nil),
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},

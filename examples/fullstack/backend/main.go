@@ -171,7 +171,7 @@ func run() error {
 		json.NewEncoder(w).Encode(map[string]string{"token": token})
 	})
 
-	ledgerAPI := newLedgerAPI(svc, pool)
+	ledgerAPI := newLedgerAPI(svc)
 	rlStop := make(chan struct{})
 	ledgerAPI.StartRateLimiterGC(rlStop) // reaps idle per-IP rate-limit buckets
 	defer close(rlStop)
@@ -206,20 +206,17 @@ func run() error {
 	return nil
 }
 
-// newLedgerAPI wires the ledger's HTTP server from the facade. Everything
-// comes off svc accessors except the three stateless read-side services that
-// share one rollup adapter.
-func newLedgerAPI(svc *ledger.Service, pool *pgxpool.Pool) *server.Server {
-	engine := core.NewEngine()
-	rollup := postgres.NewRollupAdapter(pool)
-	reconcile := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
-	snapshot := service.NewSnapshotService(rollup, rollup, engine)
-	systemRollup := service.NewSystemRollupService(rollup, rollup, engine)
-
+// newLedgerAPI wires the ledger's HTTP server entirely from svc.* accessors --
+// no direct postgres/service dependency.
+func newLedgerAPI(svc *ledger.Service) *server.Server {
 	// Dev config: wildcard CORS, no API keys (auth disabled). For production
 	// use server.LoadConfig() and set API_KEYS + CORS_ALLOWED_ORIGIN.
 	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024}
 
+	// The HTTP layer is assembled entirely from svc.* accessors -- no direct
+	// postgres/service dependency (MJ-5, 2026-08-29 review). The snapshot and
+	// system-rollup services the server used to take are Worker concerns, not
+	// HTTP ones, and are wired into the Worker separately.
 	srv := server.NewWithConfig(cfg,
 		svc.JournalWriter(),
 		svc.BalanceReader(),
@@ -232,9 +229,7 @@ func newLedgerAPI(svc *ledger.Service, pool *pgxpool.Pool) *server.Server {
 		svc.Templates(),
 		svc.Currencies(),
 		svc.Channels(),
-		reconcile,
-		snapshot,
-		systemRollup,
+		svc.Reconciler(),
 		svc.Queries(),
 		svc.Audit(),
 		svc.PlatformBalanceReader(),

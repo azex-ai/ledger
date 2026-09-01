@@ -16,6 +16,6 @@
 --
 -- 001_baseline's CHECK is unnamed in its CREATE TABLE, so Postgres assigned
 -- it the standard <table>_<column>_check name.
-ALTER TABLE classifications DROP CONSTRAINT classifications_balance_role_check;
+ALTER TABLE classifications DROP CONSTRAINT IF EXISTS classifications_balance_role_check;
 ALTER TABLE classifications ADD CONSTRAINT classifications_balance_role_check
     CHECK (balance_role IN ('', 'available', 'pending', 'locked', 'memo'));

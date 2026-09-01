@@ -591,6 +591,32 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	// (already-held) locks -- a no-op under Postgres's reentrant advisory
 	// xact locks -- so a lone-journal caller (ExecuteTemplate, which never
 	// goes through this batch path) is unaffected.
+	// Lock ORDER across lock kinds must also match the single-journal path,
+	// which takes idempotency → balance (postJournalWithQueries; Reserve is
+	// the same). This batch used to enter balance locks first and re-take
+	// each journal's idempotency lock later — the reverse. A concurrent
+	// single-journal retry of one of this batch's keys could then hold
+	// idem:K while waiting for bal:H held here, while this transaction held
+	// bal:H waiting for idem:K: ABBA, SQLSTATE 40P01. Postgres resolves it
+	// (ErrTransient, retry succeeds), so it was noise rather than
+	// corruption — but one canonical order costs nothing. Keys are sorted so
+	// two batches sharing keys agree with each other too.
+	idemKeys := make([]string, 0, len(inputs))
+	seenIdemKeys := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		if _, ok := seenIdemKeys[input.IdempotencyKey]; ok {
+			continue
+		}
+		seenIdemKeys[input.IdempotencyKey] = struct{}{}
+		idemKeys = append(idemKeys, input.IdempotencyKey)
+	}
+	sort.Strings(idemKeys)
+	for _, key := range idemKeys {
+		if err := acquireIdempotencyLock(ctx, qtx, key); err != nil {
+			return nil, fmt.Errorf("postgres: execute template batch: %w", err)
+		}
+	}
+
 	var allPairs []balancePair
 	for i, input := range inputs {
 		resolved, err := s.resolveEntries(ctx, qtx, input.Entries)

@@ -625,6 +625,7 @@ All accessors return interfaces from `core/` so your application code depends on
 
 | Method | Interface | Description |
 |--------|-----------|-------------|
+| `svc.Reconciler()` | `core.Reconciler` | Basic accounting-equation / per-account checks (backs the HTTP reconcile endpoints) |
 | `svc.FullReconciler(cfg)` | `core.FullReconciler` | Full reconciliation suite |
 | `svc.SnapshotBackfiller()` | `core.SnapshotBackfiller` | Fill historical snapshot gaps |
 | `svc.Worker(cfg)` | `*service.Worker` | Background jobs (rollup, expiry, reconcile, snapshots) |
@@ -882,7 +883,8 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 - **Body size**: every request is capped at `MAX_BODY_BYTES`; webhooks have an additional 1 MB cap enforced in the handler.
 - **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected.
 - **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure; `/api/v1/system/ready` returns 503 until migrations + worker have booted.
-- **⚠️ GET endpoints are unauthenticated by design.** `authMiddleware` only enforces the bearer key on `POST`/`PUT`/`PATCH`/`DELETE` (see `server/middleware_auth.go`); every `GET` -- including balances, journals, audit trails, and the platform-wide `/platform/balances` / `/platform/solvency` endpoints -- is open to anyone who can reach the port. Per-key holder scoping for reads is a future item, not implemented today. **You must run standalone-service deployments behind a private network or a gateway that authenticates/authorizes reads** (VPC-only, mTLS, or an API gateway in front) -- do not expose the HTTP port directly to the public internet. This does not apply to library-mode consumption, where your own application owns the auth boundary.
+- **`write` scope and system classifications.** `POST /journals` accepts handwritten, per-currency-balanced entries, but by default **refuses any entry touching an `is_system` classification** (custodial, suspense, equity, …) — the handwritten-path counterpart to the protected-template guard, so a leaked `write`-scope key cannot mint deposit-shaped accounting through either endpoint (`docs/INVARIANTS.md` I-38). A deployment that legitimately hand-posts system-side journals over HTTP sets `Config.AllowSystemClassificationPost` (logs a startup warning). Non-system journals are unaffected. `write` scope still grants broad authority — don't issue it to a party that shouldn't record accounting.
+- **Authentication scope.** When `API_KEYS` is set, `authMiddleware` requires a valid bearer key on **every** endpoint regardless of HTTP method -- reads included (`server/middleware_auth.go`). The only exemptions are the unauthenticated probe paths (`/system/health`, `/system/ready`) and the inbound webhook paths (which authenticate via their channel's HMAC signature instead). The holder-token surface (`/holder/*`) authenticates with a minted holder token rather than an API key. Per-key holder scoping for the platform-wide read endpoints (`/platform/balances` / `/platform/solvency`) is not implemented -- any valid `read`-scope key can call them -- so still front standalone deployments with a network boundary you control. When `API_KEYS` is empty the server logs a startup warning and serves every endpoint unauthenticated; never run that way in production. This does not apply to library-mode consumption, where your own application owns the auth boundary.
 
 ## Testing
 

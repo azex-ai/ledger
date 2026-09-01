@@ -479,6 +479,41 @@ func TestOnchain_IngestDeposit_FullLifecycle(t *testing.T) {
 	assert.NotEmpty(t, confirmed.JournalUID)
 }
 
+// TestOnchain_IngestDeposit_TxHashCaseIsNormalized is the M-4 regression: the
+// watcher path emits lowercase tx hashes, but a webhook producer may push the
+// same transfer with a mixed/upper-case hash. Both must resolve to the same
+// booking. Before tx_hash was normalized at the boundary (like Token and To),
+// "0xAB…" and "0xab…" derived different idempotency keys and the same on-chain
+// transfer booked twice.
+func TestOnchain_IngestDeposit_TxHashCaseIsNormalized(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+	)
+	chains := chainSetWithToken(chainID, token, "USDT-txcase", 2)
+	h := setupOnchain(t, chains, []string{"USDT-txcase"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, 7301)
+	require.NoError(t, err)
+
+	lower := core.DepositSighting{
+		ChainID: chainID, TxHash: "0xabcdef0123456789", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"), BlockNumber: 300,
+	}
+	first, err := h.svc.IngestDeposit(ctx, lower)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// Same transfer, tx hash upper-cased (as a different producer might emit).
+	upper := lower
+	upper.TxHash = "0xABCDEF0123456789"
+	second, err := h.svc.IngestDeposit(ctx, upper)
+	require.NoError(t, err, "an upper-cased tx hash for the same transfer must not ErrConflict")
+	require.NotNil(t, second)
+	assert.Equal(t, first.UID, second.UID, "the same transfer must not book twice under different tx_hash casing")
+}
+
 func TestOnchain_IngestDeposit_ConflictingPayloadIsDeadLettered(t *testing.T) {
 	const (
 		chainID = int64(1)

@@ -15,6 +15,13 @@ import (
 //	1. Execute fx_sell with currency_id=CCY-A, amounts={"amount": <CCY-A qty>}
 //	2. Execute fx_buy  with currency_id=CCY-B, amounts={"amount": <CCY-B qty>}
 //
+// ATOMICITY: the two legs MUST land in one transaction — pass both to
+// ExecuteTemplateBatch, or run two ExecuteTemplate calls inside one RunInTx
+// (docs/COOKBOOK.md "FX"). Executed as two independent calls, a failure
+// after the first leg leaves the user's CCY-A gone with no CCY-B credited
+// and only a dangling settlement balance to show for it — and there is no
+// repair API other than manually reversing the surviving leg.
+//
 // Both calls share the same metadata (e.g. fx_rate, quote_id, request_uid)
 // and ideally the same idempotency-key root (with -sell / -buy suffixes), so
 // audit can stitch the two legs back together.

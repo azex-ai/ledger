@@ -150,6 +150,19 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// ledger_app-credentialed attack) and the column-level check below.
 	appInsertColumnScoped := map[string]bool{"journal_entries": true}
 
+	// webhook_subscribers is column-scoped for ledger_app's write as of
+	// migration 014 (2026-08-29 security review M-3): INSERT is revoked (no
+	// production caller creates subscribers -- that is ledger_owner's job) and
+	// UPDATE is narrowed to the three delivery-status columns
+	// RecordDeliveryStatus writes, so a leaked ledger_app credential can no
+	// longer INSERT an attacker's URL or blank a subscriber's signing secret.
+	// SELECT stays table-level (outbound delivery must read url + secret to
+	// sign). Same information_schema blind spot as appInsertColumnScoped: a
+	// column-level UPDATE does not appear in role_table_grants, so the plain
+	// wantApp expectation is SELECT only, and the real assertion is the
+	// column-level check below plus TestLedgerAppCannotForgeWebhookSubscriber.
+	appUpdateColumnScoped := map[string]bool{"webhook_subscribers": true}
+
 	// ####  threat-model.md Major: "no gate can discover a missing guard"  ####
 	//
 	// Before this, any table not in appendOnly/updateRevoked silently fell
@@ -225,6 +238,9 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 			if appInsertColumnScoped[table] {
 				wantApp = []string{"SELECT"}
 			}
+			if appUpdateColumnScoped[table] {
+				wantApp = []string{"SELECT"}
+			}
 			if deleteAllowed[table] {
 				wantApp = append(wantApp, "DELETE")
 			}
@@ -233,6 +249,12 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 			if appInsertColumnScoped[table] {
 				assertColumnPrivilegeExists(t, pool, "ledger_app", table, "journal_id", "INSERT")
 				assertColumnPrivilegeAbsent(t, pool, "ledger_app", table, "id", "INSERT")
+			}
+
+			if appUpdateColumnScoped[table] {
+				assertColumnPrivilegeExists(t, pool, "ledger_app", table, "last_status_code", "UPDATE")
+				assertColumnPrivilegeAbsent(t, pool, "ledger_app", table, "secret", "UPDATE")
+				assertColumnPrivilegeAbsent(t, pool, "ledger_app", table, "url", "UPDATE")
 			}
 
 			if roColumnScoped[table] {

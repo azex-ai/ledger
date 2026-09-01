@@ -86,7 +86,10 @@ func (s *QueryStore) GetJournal(ctx context.Context, uid string) (*core.Journal,
 }
 
 func (s *QueryStore) ListJournals(ctx context.Context, cursor string, limit int32) ([]core.Journal, string, error) {
-	cursorID := decodeAuditCursor(cursor)
+	cursorID, err := decodeAuditCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.q.ListJournalsCursor(ctx, sqlcgen.ListJournalsCursorParams{
 		CursorID:  cursorID,
 		PageLimit: limit,
@@ -112,10 +115,14 @@ func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder int64, cur
 	if err != nil {
 		return nil, "", err
 	}
+	cursorID, err := decodeAuditCursor(cursor)
+	if err != nil {
+		return nil, "", err
+	}
 	rows, err := s.q.ListEntriesByAccount(ctx, sqlcgen.ListEntriesByAccountParams{
 		AccountHolder: holder,
 		CurrencyID:    cur.ID,
-		CursorID:      decodeAuditCursor(cursor),
+		CursorID:      cursorID,
 		PageLimit:     limit,
 	})
 	if err != nil {

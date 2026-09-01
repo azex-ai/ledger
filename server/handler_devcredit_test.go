@@ -37,8 +37,6 @@ func newDevCreditServer(enabled bool, journals core.JournalWriter) *server.Serve
 		&mockCurrencyStore{},
 		nil,
 		&mockReconciler{},
-		&mockSnapshotter{},
-		nil,
 		&mockQueryProvider{},
 		&mockAuditQuerier{},
 		&mockPlatformBalanceReader{},

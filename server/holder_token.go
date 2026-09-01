@@ -54,8 +54,13 @@ func MintHolderToken(secret []byte, holder int64, ttl time.Duration, now time.Ti
 	if len(secret) < minHolderSecretLen {
 		return "", fmt.Errorf("server: holder token secret must be at least %d bytes", minHolderSecretLen)
 	}
-	if holder == 0 {
-		return "", fmt.Errorf("server: holder token requires a non-zero holder")
+	// Holder tokens are issued to end users to read their OWN data; a negative
+	// holder is a system counterpart account (platform custody/revenue). Minting
+	// a token bound to one would let a user id pipeline that produced a negative
+	// value (signed parse, id overflow, raw passthrough) read system balances.
+	// Defense in depth — minting already requires write scope.
+	if holder <= 0 {
+		return "", fmt.Errorf("server: holder token must be bound to a positive (user) holder, got %d", holder)
 	}
 	if ttl <= 0 {
 		ttl = defaultHolderTokenTTL

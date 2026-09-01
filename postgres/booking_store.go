@@ -463,7 +463,10 @@ func (s *BookingStore) ListBookings(ctx context.Context, filter core.BookingFilt
 	}
 	cursorID, err := decodeCursorString(filter.Cursor)
 	if err != nil {
-		cursorID = 0
+		// A malformed cursor must surface, not silently restart pagination at
+		// page one — a caller looping on next_cursor would re-consume from the
+		// top and never terminate (discipline.md §6: errors are data).
+		return nil, "", fmt.Errorf("postgres: list bookings: %w", err)
 	}
 	rows, err := s.q.ListBookingsByFilter(ctx, sqlcgen.ListBookingsByFilterParams{
 		AccountHolder:    filter.AccountHolder,

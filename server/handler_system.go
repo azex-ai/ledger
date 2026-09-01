@@ -76,7 +76,7 @@ func (s *Server) handleSystemBalances(w http.ResponseWriter, r *http.Request) {
 			CurrencyUID:       r.CurrencyUID,
 			ClassificationUID: r.ClassificationUID,
 			TotalBalance:      r.TotalBalance.String(),
-			UpdatedAt:         r.UpdatedAt.Format(time.RFC3339),
+			UpdatedAt:         r.UpdatedAt.UTC().Format(time.RFC3339),
 		}
 	}
 	httpx.OK(w, PagedResponse[systemRollupResponse]{List: data})

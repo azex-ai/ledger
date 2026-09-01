@@ -133,8 +133,8 @@ func TestWebhookDeliverer_RecordsDeliveryStatus_EndToEnd(t *testing.T) {
 
 		var subID int64
 		require.NoError(t, pool.QueryRow(ctx,
-			`INSERT INTO webhook_subscribers (name, url) VALUES ($1, $2) RETURNING id`,
-			"sub-success", srv.URL,
+			`INSERT INTO webhook_subscribers (name, url, secret) VALUES ($1, $2, $3) RETURNING id`,
+			"sub-success", srv.URL, "e2e-secret",
 		).Scan(&subID))
 
 		seedPendingEvent(t, pool, "webhook_e2e_success")
@@ -166,8 +166,8 @@ func TestWebhookDeliverer_RecordsDeliveryStatus_EndToEnd(t *testing.T) {
 
 		var subID int64
 		require.NoError(t, pool.QueryRow(ctx,
-			`INSERT INTO webhook_subscribers (name, url) VALUES ($1, $2) RETURNING id`,
-			"sub-failure", srv.URL,
+			`INSERT INTO webhook_subscribers (name, url, secret) VALUES ($1, $2, $3) RETURNING id`,
+			"sub-failure", srv.URL, "e2e-secret",
 		).Scan(&subID))
 
 		seedPendingEvent(t, pool, "webhook_e2e_failure")

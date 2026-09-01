@@ -400,6 +400,21 @@ func (s *Service) VerifyLedger(ctx context.Context, anchor core.Anchor, cfg serv
 	return service.VerifyLedger(ctx, store, anchor, s.authVerifier, s.queryStore, cfg)
 }
 
+// Reconciler returns a core.Reconciler for the basic accounting-equation and
+// per-account checks the HTTP reconcile endpoints expose. Provided so an
+// HTTP-mode composition root can wire server.NewWithConfig entirely from
+// svc.* accessors without importing the postgres adapter directly (the
+// facade's contract; MJ-5, 2026-08-29 review). Honors an in-flight RunInTx
+// transaction, like the other accessors.
+func (s *Service) Reconciler() core.Reconciler {
+	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
+	rollupAdapter := postgres.NewRollupAdapter(s.pool)
+	if s.tx != nil {
+		rollupAdapter = rollupAdapter.WithDB(s.tx)
+	}
+	return service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
+}
+
 // FullReconciler returns a core.FullReconciler that runs the full
 // reconciliation suite. cfg is optional; zero-value uses sensible defaults.
 func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.FullReconciler {
@@ -427,7 +442,10 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 // then propagated unchanged to preserve the caller's panic semantics.
 //
 // The *Service passed to fn is valid only for the duration of fn — do not
-// store it or use it after fn returns.
+// store it or use it after fn returns. It is also NOT safe for concurrent
+// use: every store on the clone shares one pgx.Tx, and pgx transactions do
+// not support concurrent statements — do not spawn goroutines inside fn that
+// call the clone in parallel.
 //
 // Use RunInTxWithOptions when a specific isolation or access mode is required.
 //

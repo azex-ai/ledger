@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azex-ai/ledger/core"
 )
@@ -81,9 +82,19 @@ func NewWebhookDeliverer(poller EventPoller, subscribers SubscriberLister, logge
 	return &WebhookDeliverer{
 		poller:      poller,
 		subscribers: subscribers,
-		client:      &http.Client{Timeout: 30 * time.Second},
-		logger:      logger,
-		metrics:     metrics,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			// Do not follow redirects: subscriber URLs come from the database
+			// (writable by ledger_app under the threat model), and following a
+			// 302 would re-send the signed X-Ledger-Signature + event payload
+			// to the redirect target — a blind SSRF that can reach internal
+			// addresses (e.g. cloud metadata). Treat the 3xx as the response.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		logger:  logger,
+		metrics: metrics,
 	}
 }
 
@@ -130,15 +141,18 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 		return 0, fmt.Errorf("delivery: webhook: list subscribers: %w", err)
 	}
 	if len(subs) == 0 {
-		// No subscribers — mark all as delivered (nobody to notify).
-		for _, evt := range events {
-			if err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken); err != nil {
-				d.logger.Error("delivery: webhook: mark delivered (no subscribers)", "event_id", evt.InternalID, "error", err)
-			} else {
-				d.metrics.EventDelivered()
-			}
-		}
-		return len(events), nil
+		// No active subscribers. Do NOT mark the batch delivered: "nobody was
+		// listening" must stay distinguishable from "everyone was notified".
+		// Marking here silently laundered every event that fired while the
+		// subscriber table was empty (fresh environment, operator toggled
+		// is_active off, migration window) into delivered — indistinguishable
+		// from success, never retried once a subscriber appeared. Leaving the
+		// claim untouched lets the lease expire and the batch re-poll.
+		// (matchSubscribers returning empty for an event is different: a
+		// subscriber existed and its filter chose not to receive it — that IS
+		// a completed delivery decision, and deliverEvent marks it.)
+		d.logger.Warn("delivery: webhook: no active subscribers; leaving batch pending for redelivery", "batch", len(events))
+		return 0, nil
 	}
 
 	delivered := 0
@@ -234,10 +248,16 @@ func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt PendingEvent, sub W
 	req.Header.Set("X-Ledger-Event-UID", evt.UID)
 	req.Header.Set("X-Ledger-Timestamp", timestamp)
 
-	if sub.Secret != "" {
-		sig := computeSignature(payload, timestamp, sub.Secret)
-		req.Header.Set("X-Ledger-Signature", fmt.Sprintf("t=%s,v1=%s", timestamp, sig))
+	if sub.Secret == "" {
+		// Fail closed rather than deliver unsigned. A subscriber with an empty
+		// secret means the receiver cannot verify authenticity, and a receiver
+		// that only checks "if a signature is present" would accept forged
+		// events. Surface it as a delivery error (retried, and visible in
+		// last_error) instead of silently sending an unsigned POST.
+		return 0, fmt.Errorf("delivery: webhook: subscriber %d has no signing secret; refusing to deliver unsigned: %w", sub.ID, core.ErrInvalidInput)
 	}
+	sig := computeSignature(payload, timestamp, sub.Secret)
+	req.Header.Set("X-Ledger-Signature", fmt.Sprintf("t=%s,v1=%s", timestamp, sig))
 
 	resp, err := d.client.Do(req)
 	if err != nil {
@@ -260,10 +280,17 @@ func computeSignature(payload []byte, timestamp, secret string) string {
 }
 
 // truncateError bounds an error string to at most max bytes so a verbose
-// upstream error can't bloat the recorded delivery status.
+// upstream error can't bloat the recorded delivery status. The cut backs up
+// to a rune boundary: slicing mid-rune would persist invalid UTF-8, which
+// Postgres text columns reject — turning a long error message into a failed
+// status write.
 func truncateError(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

@@ -555,9 +555,16 @@ func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) {
 			defer cancel()
 			if err := o.processRegistrationRescan(jobCtx, job); err != nil {
 				delay := time.Second << min(int(job.Attempts), 6)
-				if retryErr := o.deps.RegistrationRescans.RetryRegistrationRescan(ctx, job.UID, err.Error(), time.Now().Add(delay), job.Attempts); retryErr != nil {
+				// Persist the retry on a context detached from the parent's
+				// cancellation: during shutdown ctx is already cancelled and
+				// the retry record would be lost, leaving the job to be
+				// recovered only by lease expiry. Same shape as rollup.go's
+				// claim-release paths. See cleanupContext.
+				cleanupCtx, cleanupCancel := cleanupContext(ctx)
+				if retryErr := o.deps.RegistrationRescans.RetryRegistrationRescan(cleanupCtx, job.UID, err.Error(), time.Now().Add(delay), job.Attempts); retryErr != nil {
 					o.log().Error("service: onchain: persist registration rescan retry failed", "uid", job.UID, "error", retryErr)
 				}
+				cleanupCancel()
 				o.log().Error("service: onchain: registration rescan failed", "chain_id", job.ChainID, "address", job.Address, "error", err)
 				o.metrics().RegistrationRescanFailed(job.ChainID)
 			}
@@ -619,10 +626,18 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 	if err != nil {
 		return nil, fmt.Errorf("service: onchain: ingest deposit: %w", err)
 	}
+	// Normalize tx_hash at the boundary, exactly once, like Token (ToLower)
+	// and To (ChecksumAddress) just above. EVM hashes are case-insensitive but
+	// stored verbatim: the watcher path emits lowercase (chains/evm reader) but
+	// a webhook producer may send mixed/upper case. Without this, "0xAB…" and
+	// "0xab…" derive different idempotency keys and channel refs, so the same
+	// on-chain transfer would book twice (golang.md: external identifiers are
+	// normalized once, at the boundary — Token and To already are).
+	txHash := strings.ToLower(s.TxHash)
 	da, err := o.deps.Registry.GetByAddress(ctx, addr)
 	if err != nil {
 		if errors.Is(err, core.ErrNotFound) {
-			o.log().Warn("service: onchain: ingest deposit: sighting to unregistered address, ignoring", "chain_id", s.ChainID, "to", addr, "tx_hash", s.TxHash)
+			o.log().Warn("service: onchain: ingest deposit: sighting to unregistered address, ignoring", "chain_id", s.ChainID, "to", addr, "tx_hash", txHash)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("service: onchain: ingest deposit: %w", err)
@@ -633,7 +648,7 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 		return nil, fmt.Errorf("service: onchain: ingest deposit: %w", err)
 	}
 
-	idemKey := depositIdempotencyKey(s.ChainID, s.TxHash, s.TxLogSeq)
+	idemKey := depositIdempotencyKey(s.ChainID, txHash, s.TxLogSeq)
 	booking, err := o.deps.Booker.CreateBooking(ctx, core.CreateBookingInput{
 		ClassificationCode: presets.DepositClassificationCode,
 		AccountHolder:      da.AccountHolder,
@@ -661,7 +676,7 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 		// everything else here is still compared exactly.
 		Metadata: map[string]string{
 			"chain_id":     strconv.FormatInt(s.ChainID, 10),
-			"tx_hash":      s.TxHash,
+			"tx_hash":      txHash,
 			"txlog_seq":    strconv.FormatInt(int64(s.TxLogSeq), 10),
 			"token":        tokenKey,
 			"block_number": strconv.FormatInt(s.BlockNumber, 10),
@@ -676,7 +691,7 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 		return nil, fmt.Errorf("service: onchain: ingest deposit: create booking: %w", err)
 	}
 
-	return o.advanceConfirmation(ctx, booking, s.Confirmations, depositChannelRef(s.TxHash, s.TxLogSeq), cfg)
+	return o.advanceConfirmation(ctx, booking, s.Confirmations, depositChannelRef(txHash, s.TxLogSeq), cfg)
 }
 
 func depositIdempotencyKey(chainID int64, txHash string, txLogSeq int32) string {

@@ -96,15 +96,13 @@ func metadataToJSON(m map[string]string) []byte {
 	return b
 }
 
+// jsonToMetadata shares jsonToStringMetadata's tolerant parse: a historical
+// row carrying non-string metadata values must round-trip to SOMETHING stable
+// rather than degrade to nil — this map feeds ensureJournalMatchesInput's
+// idempotency payload comparison, where a nil left-hand side turned a
+// legitimate replay into ErrConflict.
 func jsonToMetadata(b []byte) map[string]string {
-	if len(b) == 0 {
-		return nil
-	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil {
-		slog.Warn("postgres: jsonToMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
-	}
-	return m
+	return jsonToStringMetadata(b)
 }
 
 // anyToDecimal converts the any value returned by COALESCE(SUM(...), 0) to decimal.
@@ -535,6 +533,13 @@ func encodeCursorString(id int64) string {
 }
 
 func decodeCursorString(cursor string) (int64, error) {
+	// Empty cursor means "first page" — a legal request, not a malformed
+	// cursor. (Callers used to swallow the decode error, which hid the fact
+	// that "" reached ParseInt and failed; now that a bad cursor surfaces as
+	// ErrInvalidInput, the first-page case must be explicit.)
+	if cursor == "" {
+		return 0, nil
+	}
 	raw, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: invalid cursor: %w", core.ErrInvalidInput)

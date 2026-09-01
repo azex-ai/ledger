@@ -34,12 +34,14 @@
 package server
 
 import (
+	"net/http"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
@@ -273,6 +275,7 @@ var requestBodySchemaCases = []struct {
 	{"ClassificationInput", createClassificationRequest{}},
 	{"TemplateInput", createTemplateRequest{}},
 	{"DepositToleranceRequest", postDepositToleranceRequest{}},
+	{"ClosePeriodRequest", closePeriodRequest{}},
 }
 
 func TestOpenAPIContract_RequestBodiesMatchGoStructs(t *testing.T) {
@@ -311,6 +314,14 @@ var responseEnvelopeCases = []struct {
 	{"SolvencyEnvelope", solvencyResponse{}},
 	{"ReconcileEnvelope", reconcileResponse{}},
 	{"ReconcileReportEnvelope", core.ReconcileReport{}},
+	{"PeriodCloseEnvelope", periodCloseResponse{}},
+	{"TrialBalanceEnvelope", trialBalanceResponse{}},
+	{"HealthEnvelope", healthResponse{}},
+	{"ClassificationEnvelope", classificationResponse{}},
+	{"JournalTypeEnvelope", journalTypeResponse{}},
+	{"TemplateEnvelope", templateResponse{}},
+	{"CurrencyEnvelope", currencyResponse{}},
+	{"TemplatePreviewResultEnvelope", previewTemplateResponse{}},
 }
 
 func TestOpenAPIContract_ResponseEnvelopesMatchGoStructs(t *testing.T) {
@@ -348,6 +359,12 @@ var listEnvelopeCases = []struct {
 	{"BalancesEnvelope", balanceResponse{}},
 	{"SystemRollupsEnvelope", systemRollupResponse{}},
 	{"BalanceTrendListEnvelope", balanceTrendPointResponse{}},
+	{"PeriodCloseListEnvelope", periodCloseResponse{}},
+	{"AccountPolicyListEnvelope", accountPolicyResponse{}},
+	{"ClassificationListEnvelope", classificationResponse{}},
+	{"JournalTypeListEnvelope", journalTypeResponse{}},
+	{"TemplateListEnvelope", templateResponse{}},
+	{"CurrencyListEnvelope", currencyResponse{}},
 }
 
 func TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs(t *testing.T) {
@@ -646,5 +663,157 @@ func TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered(t *testing.T) {
 	if len(missing) > 0 {
 		t.Fatalf("response schema(s) %v are referenced by docs/openapi.yaml's paths under a 2xx status but not registered in responseEnvelopeCases or listEnvelopeCases -- "+
 			"a new response schema defaults to unchecked, not to verified; add it to whichever of the two matches its shape, with its matching Go response struct", missing)
+	}
+}
+
+// TestOpenAPIContract_Every2xxHasSchema is MJ-2's own completeness pin: a
+// 2xx response with a prose `description` and no `content` produces nothing
+// for openapi-typescript to generate a type from, so the frontend hand-copies
+// the shape from Go source instead of consuming a generated type -- and a
+// Go wire struct renaming a field drifts silently, because the field-level
+// checks above (TestOpenAPIContract_ResponseEnvelopesMatchGoStructs /
+// TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs) only run against
+// schemas someone already thought to register, and
+// TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered only catches a
+// missing registration for a schema that is already $ref'd -- neither one
+// looks at a response with no schema at all. This walks every operation's
+// 2xx responses directly (not derived from any registry) and asserts each
+// carries a content.application/json.schema, $ref'd or inline -- inline is
+// accepted deliberately, same as requestBody/response schemas the
+// completeness gates above leave unregistered by design (e.g. POST
+// /balances/batch, GET /snapshots: their Go response types are
+// function-local, so there is no addressable struct a by-name registry
+// could check them against; an inline schema is still real enough for
+// codegen to produce a type from, which is this test's actual concern).
+func TestOpenAPIContract_Every2xxHasSchema(t *testing.T) {
+	paths := loadOpenAPIPaths(t)
+
+	var missing []string
+	for pathKey, methodsAny := range paths {
+		methods, ok := methodsAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		for method, opAny := range methods {
+			switch strings.ToUpper(method) {
+			case "GET", "POST", "PUT", "PATCH", "DELETE":
+			default:
+				continue
+			}
+			op, ok := opAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			responses, ok := op["responses"].(map[string]any)
+			if !ok {
+				continue
+			}
+			for code, respAny := range responses {
+				if len(code) == 0 || code[0] != '2' {
+					continue
+				}
+				resp, ok := respAny.(map[string]any)
+				if !ok {
+					// A bare $ref to #/components/responses/X. No 2xx
+					// response in this spec is shaped that way today (every
+					// $ref'd shared response -- DomainError, NotFound -- is
+					// used only for error statuses), so this branch is
+					// unreached in practice; it exists so a future one fails
+					// loudly here instead of panicking on the type assertion
+					// below, rather than being silently treated as covered.
+					missing = append(missing, method+" "+pathKey+" ["+code+"] (unresolved $ref response)")
+					continue
+				}
+				content, _ := resp["content"].(map[string]any)
+				appJSON, _ := content["application/json"].(map[string]any)
+				if _, ok := appJSON["schema"]; !ok {
+					missing = append(missing, strings.ToUpper(method)+" "+pathKey+" ["+code+"]")
+				}
+			}
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("2xx response(s) %v have a prose description but no application/json schema -- "+
+			"a response defaults to an undocumented shape, not to a generated type; add "+
+			"content.application/json.schema ($ref an existing/new component when the Go response "+
+			"struct is addressable, or an inline schema when it is not, e.g. a function-local response type)",
+			missing)
+	}
+}
+
+// enumerateRoutes builds a Server with just a router (handlers are registered
+// as method values and never invoked, so nil deps are fine) and walks the chi
+// tree, returning every "METHOD /path" the server actually serves, with the
+// /api/v1 prefix stripped so it lines up with openapi.yaml's server-relative
+// path keys. Probe/webhook/metrics paths that are intentionally undocumented
+// are excluded.
+func enumerateRoutes(t *testing.T) map[string]bool {
+	t.Helper()
+	s := &Server{router: chi.NewRouter()}
+	s.setupRoutes()
+
+	// Paths served but intentionally not part of the documented REST surface.
+	undocumented := map[string]bool{
+		"GET /system/health": true,
+		"GET /system/ready":  true,
+	}
+
+	routes := map[string]bool{}
+	err := chi.Walk(s.router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		route = strings.TrimPrefix(route, "/api/v1")
+		// chi appends a trailing slash for subrouter mounts; normalize it away.
+		if len(route) > 1 {
+			route = strings.TrimSuffix(route, "/")
+		}
+		key := method + " " + route
+		if undocumented[key] {
+			return nil
+		}
+		routes[key] = true
+		return nil
+	})
+	require.NoError(t, err, "walk chi routes")
+	return routes
+}
+
+// TestOpenAPIContract_EveryRouteIsDocumented closes the endpoint-level gap the
+// spec->Go completeness tests above cannot see: those all walk openapi.yaml
+// and check Go has what the spec names, so an endpoint that exists in the chi
+// router but was never added to openapi.yaml (GET /periods/closes,
+// GET /reports/trial-balance, POST /periods/close were all missing) is
+// invisible to them. This walks the OTHER direction -- every registered route
+// must have a matching method+path in the spec -- so a new handler that skips
+// the spec goes red on its own PR, not years later. Same "derive from the
+// artifact, not a hand-maintained list" discipline as the grant-coverage gate.
+func TestOpenAPIContract_EveryRouteIsDocumented(t *testing.T) {
+	specPaths := loadOpenAPIPaths(t)
+
+	// Build the set of documented "METHOD /path" pairs from the spec.
+	documented := map[string]bool{}
+	for pathKey, methodsAny := range specPaths {
+		methods, ok := methodsAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		for method := range methods {
+			m := strings.ToUpper(method)
+			switch m {
+			case "GET", "POST", "PUT", "PATCH", "DELETE":
+				documented[m+" "+pathKey] = true
+			}
+		}
+	}
+
+	var missing []string
+	for route := range enumerateRoutes(t) {
+		if !documented[route] {
+			missing = append(missing, route)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("route(s) %v are served by the chi router but absent from docs/openapi.yaml -- "+
+			"a new endpoint defaults to undocumented, invisible to every spec->Go check; add it to openapi.yaml (or to enumerateRoutes' undocumented set if it is deliberately not part of the REST surface)", missing)
 	}
 }

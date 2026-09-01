@@ -725,9 +725,19 @@ type VerifiedBalanceReader interface {
 // signing key, the whole point of an anchor is living somewhere the
 // ledger's own DB credentials cannot reach, so "just use a local key" is
 // not an equivalent simplification here).
+//
+// SINGLE PUBLISHER. Publish may assume it is never called concurrently with
+// another Publish against the same anchor. The batch-attestation job that
+// drives it is leader-elected (service.NewLockedJob("attestation") — only one
+// replica advances the chain per tick), so at most one publisher is ever live.
+// Implementations therefore need not make the read-current-head-then-write
+// sequence atomic; a store shared by genuinely concurrent writers (not this
+// library's deployment model) would need a conditional write (e.g. S3
+// If-Match on the read ETag) to preserve Head's "highest seq" guarantee.
 type Anchor interface {
 	// Publish is idempotent per seq: re-publishing the same seq with identical
-	// bytes must succeed, with different bytes must return an error.
+	// bytes must succeed, with different bytes must return an error. See the
+	// single-publisher assumption above.
 	Publish(ctx context.Context, seq int64, head []byte) error
 	// Head returns the highest seq the anchor knows about, or 0 if empty.
 	// It must read from the anchor, never from the ledger database.

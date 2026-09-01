@@ -27,9 +27,25 @@ type EVMAdapter struct {
 	now        func() time.Time // injectable for tests
 }
 
-// New creates an EVMAdapter with the given HMAC signing key.
-func New(signingKey []byte) *EVMAdapter {
-	return &EVMAdapter{signingKey: signingKey, now: time.Now}
+// minSigningKeyLen is the floor for the inbound webhook HMAC key. The webhook
+// path is the one write path exempt from bearer auth (server rejects it in
+// middleware_auth), so this key is its ONLY authentication — an empty or weak
+// key means anyone who can reach POST /webhooks/{channel} can forge a signed
+// deposit sighting and mint balance. 32 bytes matches SHA-256's block/output
+// size; anything shorter is refused here rather than silently accepted.
+const minSigningKeyLen = 32
+
+// New creates an EVMAdapter with the given HMAC signing key. It rejects a key
+// shorter than minSigningKeyLen so that a misconfigured (empty/short) secret
+// makes the channel fail to construct — the caller's channel map never gets
+// an entry, and the route 404s — instead of coming up fail-open with a
+// guessable key. This is the enforcement behind the README's "channel
+// disabled when the secret is empty" promise.
+func New(signingKey []byte) (*EVMAdapter, error) {
+	if len(signingKey) < minSigningKeyLen {
+		return nil, fmt.Errorf("channel: evm: signing key must be at least %d bytes, got %d: %w", minSigningKeyLen, len(signingKey), core.ErrInvalidInput)
+	}
+	return &EVMAdapter{signingKey: signingKey, now: time.Now}, nil
 }
 
 func (a *EVMAdapter) Name() string { return "evm" }

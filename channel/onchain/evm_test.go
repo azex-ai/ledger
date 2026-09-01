@@ -14,7 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var testKey = []byte("test-signing-key")
+var testKey = []byte("test-signing-key-0123456789abcdef") // >= minSigningKeyLen
+
+// newTestAdapter constructs an adapter with testKey, failing the test if the
+// key is somehow rejected.
+func newTestAdapter(t *testing.T) *EVMAdapter {
+	t.Helper()
+	a, err := New(testKey)
+	require.NoError(t, err)
+	return a
+}
 
 // computeHMAC mirrors the production signature: HMAC-SHA256 over
 // "<timestamp>.<body>".
@@ -27,12 +36,38 @@ func computeHMAC(key []byte, ts string, body []byte) string {
 }
 
 func TestEVMAdapter_Name(t *testing.T) {
-	a := New(testKey)
+	a := newTestAdapter(t)
 	assert.Equal(t, "evm", a.Name())
 }
 
+func TestNew_RejectsShortKey(t *testing.T) {
+	// The webhook HMAC key is the only authentication on the bearer-exempt
+	// deposit path; an empty/short key must make construction fail so the
+	// channel simply does not exist, rather than coming up fail-open.
+	for _, tc := range []struct {
+		name string
+		key  []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte("")},
+		{"31 bytes", []byte("0123456789abcdef0123456789abcde")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := New(tc.key)
+			require.Error(t, err)
+			assert.Nil(t, a)
+		})
+	}
+
+	t.Run("exactly 32 bytes accepted", func(t *testing.T) {
+		a, err := New([]byte("0123456789abcdef0123456789abcdef"))
+		require.NoError(t, err)
+		assert.NotNil(t, a)
+	})
+}
+
 func TestEVMAdapter_VerifySignature(t *testing.T) {
-	a := New(testKey)
+	a := newTestAdapter(t)
 	body := []byte(`{"tx_hash":"0xabc","booking_uid":"bk-1","amount":"100.5","confirmations":12,"status":"confirmed"}`)
 	now := time.Unix(1_700_000_000, 0)
 	a.now = func() time.Time { return now }
@@ -115,7 +150,7 @@ func TestEVMAdapter_VerifySignature(t *testing.T) {
 }
 
 func TestEVMAdapter_ParseCallback(t *testing.T) {
-	a := New(testKey)
+	a := newTestAdapter(t)
 
 	t.Run("valid JSON", func(t *testing.T) {
 		body := []byte(`{"tx_hash":"0xabc123","booking_uid":"bk-42","amount":"1.5","confirmations":12,"status":"confirmed"}`)
@@ -151,7 +186,7 @@ func TestEVMAdapter_ParseCallback(t *testing.T) {
 }
 
 func TestEVMAdapter_ParseSighting(t *testing.T) {
-	a := New(testKey)
+	a := newTestAdapter(t)
 
 	t.Run("valid JSON", func(t *testing.T) {
 		body := []byte(`{"chain_id":1,"tx_hash":"0xabc123","txlog_seq":2,"token":"0xusdt","from":"0xfrom","to":"0xTo1234","amount":"12.5","confirmations":6,"block_number":1000}`)

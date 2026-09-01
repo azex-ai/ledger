@@ -93,10 +93,10 @@ func bookingToResponse(op *core.Booking) bookingResponse {
 		Metadata:          op.Metadata,
 	}
 	if !op.ExpiresAt.IsZero() {
-		resp.ExpiresAt = op.ExpiresAt.Format(time.RFC3339)
+		resp.ExpiresAt = op.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	resp.CreatedAt = op.CreatedAt.Format(time.RFC3339)
-	resp.UpdatedAt = op.UpdatedAt.Format(time.RFC3339)
+	resp.CreatedAt = op.CreatedAt.UTC().Format(time.RFC3339)
+	resp.UpdatedAt = op.UpdatedAt.UTC().Format(time.RFC3339)
 	return resp
 }
 
@@ -113,7 +113,7 @@ func eventToResponse(evt *core.Event) eventResponse {
 		SettledAmount:      evt.SettledAmount.String(),
 		JournalUID:         evt.JournalUID,
 		Metadata:           evt.Metadata,
-		OccurredAt:         evt.OccurredAt.Format(time.RFC3339),
+		OccurredAt:         evt.OccurredAt.UTC().Format(time.RFC3339),
 		ActorID:            evt.ActorID,
 		Source:             evt.Source,
 	}

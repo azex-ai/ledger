@@ -23,6 +23,15 @@ import (
 
 var webhookTestKey = []byte("test-webhook-signing-key-0123456789")
 
+// newWebhookEVMAdapter builds the evm channel adapter for tests, failing fast
+// if the (sufficiently long) test key is rejected.
+func newWebhookEVMAdapter(t *testing.T) channel.Adapter {
+	t.Helper()
+	a, err := chanOnchain.New(webhookTestKey)
+	require.NoError(t, err)
+	return a
+}
+
 // signedWebhookRequest builds a POST /api/v1/webhooks/{channel} request
 // carrying a valid HMAC signature over "<timestamp>.<body>" -- mirrors
 // channel/onchain.EVMAdapter.VerifySignature.
@@ -105,7 +114,7 @@ func TestWebhookOnchain_RoutesToSightingIngestion(t *testing.T) {
 	}}
 
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.channels = map[string]channel.Adapter{"evm": chanOnchain.New(webhookTestKey)}
+		o.channels = map[string]channel.Adapter{"evm": newWebhookEVMAdapter(t)}
 		o.booker = rec
 	})
 	srv.SetDepositIngester(ingester)
@@ -138,7 +147,7 @@ func TestWebhookOnchain_UnregisteredAddress_ReturnsNoOp(t *testing.T) {
 		return nil, nil // unregistered address -- IngestDeposit's contract for "nothing to do"
 	}}
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.channels = map[string]channel.Adapter{"evm": chanOnchain.New(webhookTestKey)}
+		o.channels = map[string]channel.Adapter{"evm": newWebhookEVMAdapter(t)}
 		o.booker = rec
 	})
 	srv.SetDepositIngester(ingester)
@@ -158,7 +167,7 @@ func TestWebhookOnchain_UnregisteredAddress_ReturnsNoOp(t *testing.T) {
 func TestWebhookOnchain_NotEnabledWithoutIngester(t *testing.T) {
 	rec := &recordingBooker{}
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.channels = map[string]channel.Adapter{"evm": chanOnchain.New(webhookTestKey)}
+		o.channels = map[string]channel.Adapter{"evm": newWebhookEVMAdapter(t)}
 		o.booker = rec
 	})
 	// SetDepositIngester intentionally never called.
@@ -177,7 +186,7 @@ func TestWebhookOnchain_InvalidSightingBody(t *testing.T) {
 		return nil, nil
 	}}
 	srv := newTestServerWith(func(o *testServerOpts) {
-		o.channels = map[string]channel.Adapter{"evm": chanOnchain.New(webhookTestKey)}
+		o.channels = map[string]channel.Adapter{"evm": newWebhookEVMAdapter(t)}
 		o.booker = rec
 	})
 	srv.SetDepositIngester(ingester)

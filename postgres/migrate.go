@@ -159,7 +159,10 @@ func acquireClusterLock(databaseURL string) (unlock func(), err error) {
 func maintenanceDatabaseURL(databaseURL string) (string, error) {
 	u, err := url.Parse(strings.Replace(databaseURL, "pgx5://", "postgres://", 1))
 	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
+		// Do NOT wrap err: net/url.Error.Error() echoes the raw URL, password
+		// and all. A malformed DATABASE_URL must not spill its credentials into
+		// logs.
+		return "", fmt.Errorf("parse database url: malformed")
 	}
 	u.Path = "/postgres"
 	return u.String(), nil

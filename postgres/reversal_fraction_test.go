@@ -305,3 +305,62 @@ func TestReverseJournalFraction_RepeatedDimensionCompletesFully(t *testing.T) {
 	require.True(t, balance().IsZero(),
 		"reversing the rest must leave nothing, got %s -- a non-zero balance here means the remainder was computed per entry against a per-dimension total again, and the caller was told the journal was fully reversed while it was not", balance())
 }
+
+// TestReverseJournalFraction_RepeatedDimensionFractionalSteps pins the
+// fractional-branch half of the same repeated-dimension defect the test above
+// pins for the remainder branch: the overshoot check compared the DIMENSION's
+// cumulative reversed total against each individual entry's ORIGINAL amount.
+// On 60 + 40 debits sharing one dimension, a legal second 1/2 reversal saw
+// already=50 (dimension-wide) + 30 (this entry's share) > 60 (that one
+// entry's original) and returned ErrConflict for an overshoot that does not
+// exist. Fail-closed, so no money was ever lost -- but a legitimate partial
+// reversal was permanently rejected with an error message pointing at a
+// phantom excess.
+func TestReverseJournalFraction_RepeatedDimensionFractionalSteps(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	store := postgres.NewLedgerStore(pool)
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "RPF", "Repeat Fraction Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(4402)
+	d := decimal.RequireFromString
+
+	j, err := store.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("repeat-dim-frac"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("60")},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("40")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("60")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("40")},
+		},
+	})
+	require.NoError(t, err)
+
+	balance := func() decimal.Decimal {
+		t.Helper()
+		b, err := store.GetBalance(ctx, holder, curID, wallet)
+		require.NoError(t, err)
+		return b
+	}
+	require.True(t, balance().Equal(d("100")), "fixture must start at 100, got %s", balance())
+
+	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 2, "first half", postgrestest.UniqueKey("rev-frac-h1"))
+	require.NoError(t, err)
+	require.True(t, balance().Equal(d("50")), "half of 100 must leave 50, got %s", balance())
+
+	// The second legal half. With the per-entry comparison this was rejected
+	// as ErrConflict (50 dimension-wide + 30 share > 60 single-entry original).
+	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 2, "second half", postgrestest.UniqueKey("rev-frac-h2"))
+	require.NoError(t, err,
+		"a second 1/2 reversal of a half-reversed journal is legal; ErrConflict here means the overshoot check compared a per-dimension cumulative against a single entry's original amount")
+	require.True(t, balance().IsZero(), "two halves must leave nothing, got %s", balance())
+
+	// A third half now genuinely overshoots and must still be rejected.
+	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 2, "over", postgrestest.UniqueKey("rev-frac-h3"))
+	require.ErrorIs(t, err, core.ErrConflict, "reversing beyond the original must stay rejected")
+}

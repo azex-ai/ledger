@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,6 +190,29 @@ func TestOK(t *testing.T) {
 	require.NoError(t, stdjson.Unmarshal(env.Data, &data))
 	assert.Equal(t, 1, data.ID)
 	assert.Equal(t, "test", data.Name)
+}
+
+// TestOK_TimeSerializesAsUTCRFC3339 pins MJ-3: every time.Time in a response
+// serializes as RFC3339 in UTC (trailing Z), regardless of the time's own
+// Location. Without the utcTimeExtension, a value in a +08:00 zone would emit
+// a +08:00 offset, and the process TZ would leak into the wire contract.
+func TestOK_TimeSerializesAsUTCRFC3339(t *testing.T) {
+	type payload struct {
+		CreatedAt time.Time `json:"created_at"`
+	}
+	// A time carrying a non-UTC offset -- the exact shape pgx hands back when
+	// the process runs in Asia/Singapore.
+	sgt := time.FixedZone("SGT", 8*3600)
+	ts := time.Date(2026, 4, 29, 18, 0, 0, 0, sgt)
+
+	w := httptest.NewRecorder()
+	OK(w, payload{CreatedAt: ts})
+
+	body, err := io.ReadAll(w.Result().Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"created_at":"2026-04-29T10:00:00Z"`,
+		"time must serialize as UTC RFC3339 (Z), never a local offset; got %s", body)
+	assert.NotContains(t, string(body), "+08:00", "no local offset may reach the wire")
 }
 
 func TestCreated(t *testing.T) {

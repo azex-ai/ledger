@@ -16,7 +16,6 @@ import (
 	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/presets"
-	"github.com/azex-ai/ledger/service"
 )
 
 // Server is the HTTP API server for the ledger.
@@ -50,8 +49,6 @@ type Server struct {
 	// Services (injected)
 	reconciler     core.Reconciler
 	fullReconciler core.FullReconciler
-	snapshotter    core.Snapshotter
-	systemRollup   *service.SystemRollupService
 
 	// Query helpers (direct sqlcgen access for list queries)
 	queries core.QueryProvider
@@ -103,11 +100,24 @@ type Server struct {
 	// indexed for O(1) lookup by handlePostTemplate. See those fields' doc
 	// comments.
 	protectedTemplateCodes map[string]bool
+
+	// allowSystemClassificationPost mirrors Config.AllowSystemClassificationPost:
+	// when false (the default), handlePostJournal refuses a handwritten journal
+	// that touches an is_system classification.
+	allowSystemClassificationPost bool
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
 // for any GET on /metrics, completely bypassing auth and rate-limit
 // middleware. Pass nil to disable.
+//
+// SECURITY: because /metrics skips the middleware chain, the handler you pass
+// is exposed with NO authentication or rate limiting. The exported series
+// (checkpoint_age, balance_drift, reserved_amount by currency, chain_cursor_lag,
+// …) are aggregate operational intelligence with no per-holder dimension, but
+// they are still business intelligence. If this port is reachable by anyone
+// beyond your Prometheus scraper, wrap the handler with your own auth before
+// passing it here (or keep /metrics on a network the scraper alone can reach).
 func (s *Server) SetMetricsHandler(h http.Handler) { s.metricsHandler = h }
 
 // Config holds server configuration loaded from environment.
@@ -172,6 +182,23 @@ type Config struct {
 	// defaults land closed, and only a deployment that explicitly names a
 	// code here weakens that.
 	AllowGenericTemplatePost []string
+	// AllowSystemClassificationPost (ALLOW_SYSTEM_CLASSIFICATION_POST) opts a
+	// deployment out of the default guard on POST /journals: by default the
+	// handwritten-journal endpoint refuses any entry that touches a
+	// classification flagged is_system (custodial, suspense, equity, ...).
+	//
+	// This is the handwritten-path counterpart to ProtectedTemplateCodes
+	// (M-2, 2026-08-29 review). Without it, a leaked or over-scoped write-scope
+	// key could hand-post `DR main_wallet(user) / CR custodial(system)` -- a
+	// journal byte-for-byte identical to a verified on-chain deposit -- while
+	// the template blacklist only guards the named-template endpoint. Because
+	// the ledger exists to control who can mint accounting after a DB breach,
+	// this guard lands closed by default; a deployment whose own flows legitimately
+	// hand-post system-side journals over HTTP (rather than through a template
+	// or server-side orchestration) sets this true after a reviewed decision.
+	// The library's own deposit/transfer/fx/capital flows go through templates,
+	// not this endpoint, so the default does not constrain them.
+	AllowSystemClassificationPost bool
 }
 
 // Validate rejects configurations that would expose a production server or
@@ -296,8 +323,6 @@ func New(
 	currencies core.CurrencyStore,
 	channels map[string]channel.Adapter,
 	reconciler core.Reconciler,
-	snapshotter core.Snapshotter,
-	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
 	audit core.AuditQuerier,
 	platformBalances core.PlatformBalanceReader,
@@ -314,7 +339,7 @@ func New(
 	}
 	return NewWithConfig(cfg, journals, balances, reserver, booker, bookingReader,
 		eventReader, classifications, journalTypes, templates, currencies, channels,
-		reconciler, snapshotter, systemRollup, queries,
+		reconciler, queries,
 		audit, platformBalances, solvency, balanceTrends, fullReconciler,
 		accountPolicies, periodCloser, trialBalance)
 }
@@ -334,8 +359,6 @@ func NewWithConfig(
 	currencies core.CurrencyStore,
 	channels map[string]channel.Adapter,
 	reconciler core.Reconciler,
-	snapshotter core.Snapshotter,
-	systemRollup *service.SystemRollupService,
 	queries core.QueryProvider,
 	audit core.AuditQuerier,
 	platformBalances core.PlatformBalanceReader,
@@ -359,8 +382,6 @@ func NewWithConfig(
 		Currencies:       currencies,
 		Channels:         channels,
 		Reconciler:       reconciler,
-		Snapshotter:      snapshotter,
-		SystemRollup:     systemRollup,
 		Queries:          queries,
 		Audit:            audit,
 		PlatformBalances: platformBalances,
@@ -378,12 +399,15 @@ func NewWithConfig(
 }
 
 // Deps bundles every dependency NewWithConfig/New take as positional
-// parameters. Prefer NewFromDeps(cfg, deps) for new composition roots:
-// twenty-three same-shaped interface parameters in a fixed positional order
-// (New/NewWithConfig, unchanged for backward compatibility) has no compiler
-// help catching an accidental transposition -- interfaces don't carry field
-// names, so two swapped arguments of matching interface shape compile clean
-// and fail at runtime instead (structure.md's Minor).
+// parameters. Prefer NewFromDeps(cfg, deps) for new composition roots: the
+// twenty-one same-shaped interface parameters in a fixed positional order
+// (New/NewWithConfig) have no compiler help catching an accidental
+// transposition -- interfaces don't carry field names, so two swapped
+// arguments of matching interface shape compile clean and fail at runtime
+// instead (structure.md's Minor). The server does not consume a Snapshotter
+// or SystemRollup service (those drive the background Worker, assembled
+// separately); they were dropped from these constructors in the 2026-08-29
+// review (MJ-5) so the HTTP layer depends only on core interfaces.
 type Deps struct {
 	Journals         core.JournalWriter
 	Balances         core.BalanceReader
@@ -397,8 +421,6 @@ type Deps struct {
 	Currencies       core.CurrencyStore
 	Channels         map[string]channel.Adapter
 	Reconciler       core.Reconciler
-	Snapshotter      core.Snapshotter
-	SystemRollup     *service.SystemRollupService
 	Queries          core.QueryProvider
 	Audit            core.AuditQuerier
 	PlatformBalances core.PlatformBalanceReader
@@ -458,17 +480,26 @@ func newServer(cfg *Config, deps Deps) *Server {
 		trialBalance:           deps.TrialBalance,
 		reconciler:             deps.Reconciler,
 		fullReconciler:         deps.FullReconciler,
-		snapshotter:            deps.Snapshotter,
-		systemRollup:           deps.SystemRollup,
 		queries:                deps.Queries,
 		ready:                  &atomic.Bool{},
 		rateLimiter:            newRateLimiter(defaultRateLimiterConfig()),
 		authEnabled:            len(cfg.APIKeys) > 0,
 		devCreditEnabled:       cfg.DevCreditEnabled,
 		protectedTemplateCodes: protectedTemplateCodes,
+
+		allowSystemClassificationPost: cfg.AllowSystemClassificationPost,
 	}
 	if cfg.DevCreditEnabled {
 		slog.Warn("server: developer credit endpoint is ENABLED — POST /api/v1/dev/credits mints holder balance with no custodied asset behind it")
+	}
+	if cfg.AllowSystemClassificationPost {
+		slog.Warn("server: POST /journals may post to is_system classifications — the deposit-forgery guard is OPTED OUT (Config.AllowSystemClassificationPost)")
+	}
+	if !s.authEnabled {
+		slog.Warn("server: API key authentication is DISABLED — every endpoint is open to any caller that can reach this port (set Config.APIKeys to require a bearer key)")
+	}
+	if cfg.CORSAllowOrigin == "" || cfg.CORSAllowOrigin == "*" {
+		slog.Warn("server: CORS is wide open (Access-Control-Allow-Origin: *) — set Config.CORSAllowOrigin to a specific origin in production")
 	}
 
 	r := chi.NewRouter()
@@ -489,12 +520,19 @@ func newServer(cfg *Config, deps Deps) *Server {
 	r.Use(requestLoggerMiddleware)
 	r.Use(corsMiddleware(cfg))
 	r.Use(bodyLimitMiddleware(cfg.MaxBodyBytes))
-	r.Use(idempotencyHeaderAliasMiddleware)
 	r.Use(rateLimitMiddleware(s.rateLimiter))
 
 	if len(cfg.APIKeys) > 0 {
 		r.Use(authMiddleware(cfg.APIKeys))
 	}
+
+	// After auth, not before: the alias reads the whole body, unmarshals and
+	// re-marshals it to lift Idempotency-Key into the payload. That is business
+	// work on an authenticated request, not hostile-traffic triage, so it must
+	// sit behind rate-limit + auth (the webhook path stays exempt inside the
+	// middleware itself). Placing it before auth let an unauthenticated caller
+	// force a full parse/re-serialize on every POST.
+	r.Use(idempotencyHeaderAliasMiddleware)
 
 	s.router = r
 	s.setupRoutes()

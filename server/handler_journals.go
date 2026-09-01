@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -161,6 +162,20 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Deposit-forgery guard (I-38, M-2): a handwritten journal must not touch
+	// an is_system classification unless the deployment has opted out. This is
+	// the handwritten-path counterpart to handlePostTemplate's protected-code
+	// check — without it a write-scope key could post
+	// `DR main_wallet(user) / CR custodial(system)`, indistinguishable from a
+	// verified deposit, straight past the template blacklist. The library's own
+	// system-side flows go through templates/orchestration, not this endpoint.
+	if !s.allowSystemClassificationPost {
+		if err := s.rejectSystemClassificationEntries(r.Context(), entries); err != nil {
+			httpx.Error(w, err)
+			return
+		}
+	}
+
 	var effectiveAt time.Time
 	if req.EffectiveAt != "" {
 		effectiveAt, err = time.Parse(time.RFC3339, req.EffectiveAt)
@@ -187,6 +202,29 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.Created(w, toJournalResponse(journal))
+}
+
+// rejectSystemClassificationEntries returns a 403 error if any entry targets a
+// classification flagged is_system. It resolves system-ness from the
+// classification store (which the postgres adapter caches), keyed by uid, so it
+// reflects the live is_system flag rather than a hand-maintained code list.
+func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries []core.EntryInput) error {
+	all, err := s.classifications.ListClassifications(ctx, false)
+	if err != nil {
+		return err
+	}
+	systemUIDs := make(map[string]bool, len(all))
+	for _, c := range all {
+		if c.IsSystem {
+			systemUIDs[c.UID] = true
+		}
+	}
+	for _, e := range entries {
+		if systemUIDs[e.ClassificationUID] {
+			return httpx.ErrForbidden("classification " + e.ClassificationUID + " is system-managed and cannot be posted through the generic journal endpoint; use its dedicated template/orchestration, or set AllowSystemClassificationPost after review")
+		}
+	}
+	return nil
 }
 
 func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
