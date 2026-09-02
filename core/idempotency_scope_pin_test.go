@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -61,15 +61,22 @@ var exemptInputs = map[string]string{
 // than inheriting an answer by accident.
 func TestIdempotencyKeyScopeMatchesInvariantI3(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(info fs.FileInfo) bool {
-		return !strings.HasSuffix(info.Name(), "_test.go")
-	}, 0)
+	names, err := filepath.Glob("*.go")
 	require.NoError(t, err)
-	pkg, ok := pkgs["core"]
-	require.True(t, ok, "package core not found in .")
+
+	files := make([]*ast.File, 0, len(names))
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, parseErr, name)
+		files = append(files, file)
+	}
+	require.NotEmpty(t, files, "no non-test .go files found in package core")
 
 	withKey := map[string]bool{}
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		ast.Inspect(file, func(n ast.Node) bool {
 			ts, ok := n.(*ast.TypeSpec)
 			if !ok {
