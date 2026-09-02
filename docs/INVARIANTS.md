@@ -150,8 +150,10 @@ such hazard: there is no amount to apply twice.
 - `UNIQUE` constraint on `booking_transition_receipts.idempotency_key`
   (migration `005`) — see the `Transition` paragraph below.
 - Each `Validate()` method rejects empty idempotency keys at the Go boundary.
-- The scope boundary itself is machine-checked, not maintained by hand: see
-  the AST gate in **Pinned by** below.
+- The scope boundary itself is machine-checked, not maintained by hand: the
+  AST gate cited among this section's pins below
+  (`TestIdempotencyKeyScopeMatchesInvariantI3`) requires every `*Input` type
+  in `core` to be classified one way or the other.
 - The store layer re-reads the persisted row after a `23505` race:
   if payload matches, it returns the original record; if payload diverges,
   it returns `ErrConflict`.
