@@ -71,7 +71,13 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 				"attempts", evt.Attempts,
 				"error", invokeErr,
 			)
-			if retryErr := d.poller.MarkRetry(ctx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts))); retryErr != nil {
+			// Detached ctx: the handler already ran, so its outcome must be
+			// recorded even if the parent was cancelled mid-batch. See
+			// cleanupContext.
+			markCtx, cancel := cleanupContext(ctx)
+			retryErr := d.poller.MarkRetry(markCtx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts)))
+			cancel()
+			if retryErr != nil {
 				d.logger.Error("delivery: local: mark retry failed",
 					"event_id", evt.InternalID,
 					"error", retryErr,
@@ -79,7 +85,10 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 			}
 			continue
 		}
-		if markErr := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken); markErr != nil {
+		markCtx, cancel := cleanupContext(ctx)
+		markErr := d.poller.MarkDelivered(markCtx, evt.InternalID, evt.ClaimToken)
+		cancel()
+		if markErr != nil {
 			d.logger.Error("delivery: local: mark delivered failed",
 				"event_id", evt.InternalID,
 				"error", markErr,
