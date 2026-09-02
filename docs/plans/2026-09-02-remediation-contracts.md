@@ -126,7 +126,7 @@
 | 7.6 提现闸的金额语义 | I-32 明写「不是更严的金额检查」（C-C1） | **改规则**：`RequireVerifiedBalance=true` 时，可预留额 = `VerifiedBalance` 的 entries-only 重算值之和 − 活跃预留，**不读 checkpoint**。I-32 措辞相应改写；这是「规则本身错了」那一类 | W1-gate |
 | 7.7 锚回退 / 为空的判定 | DRIFT 视为良性（C-M3） | `anchorSeq==0 && maxSeqSeen>0` → **NOT_RUN**（fail-closed）；相对上次观测值回退 → **TAMPERED**（上次观测值落库，新增表归 D-tamper 的 migration 号段）；`anchortest` 加 head 非回退 phase | D-tamper |
 | 7.8 `ReversalOfUID` 输入门 | 零校验（A-C2） | `PostJournal` 带 `ReversalOfUID` 时：被引用 journal 不得本身是冲销；本 journal 的 entries 必须是被引用 journal entries 的**同维度反向子集**（逐维度 ≤ 剩余可冲销额）；非反向子集 → `ErrInvalidInput`，累计超额 → `ErrConflict`（与 `reversalEntriesFor` 既有 overshoot 检查对称）。等价于把冲销链完整性提升为不变式（I-51） | W1-ledgerstore |
-| 7.9 `TxLogSeq` 的定义 | 依赖查询地址集（G-C2） | 改为 **tx 内全局 log index**（`lg.Index`，receipt 级唯一）而非结果集内序号；I-20 措辞同步 | W1-onchain |
+| 7.9 `TxLogSeq` 的定义 | 依赖查询地址集（G-C2） | 改为 **receipt 内的零基位置**（同一 tx 的 Transfer 日志按 `lg.Index` 排序后的序号，reorg 重挖后稳定；不是块级 `lg.Index` 本身——lead 原措辞有误，w1-onchain 按括号意图落地）而非结果集内序号；I-20 措辞同步 | W1-onchain |
 | 7.10 扫链失败的游标语义 | ingest 失败仍推进（G-C1） | **任何 ingest 失败都不推进游标**（与 rescan 对齐）；非 `ErrConflict` 失败进死信并计指标；连续失败 N 次后停止推进并告警，不做「跳过这一笔」 | W1-onchain |
 
 以上每条在对应任务 `bus done` 时由 lead 在审计 README「处置状态」里登记为「已按 7.x 口径修复，待 Aaron 确认」。
