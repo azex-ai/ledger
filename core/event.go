@@ -8,6 +8,15 @@ import (
 
 // Event is an atomic record of a state transition on a booking.
 // Events are the cause of journal postings.
+//
+// This type's json tags ARE an outbound wire contract, not just internal
+// serialization: service/delivery marshals an Event directly as the body of
+// every outbound webhook POST. Renaming or removing a tag here breaks every
+// subscriber (docs/openapi.yaml's OutboundEvent schema describes this shape;
+// server/openapi_types_test.go's
+// TestOpenAPIContract_OutboundEventMatchesCoreEvent holds the two together,
+// in both directions). Fields that must NOT reach a subscriber carry
+// `json:"-"` -- the delivery bookkeeping below is the reason that matters.
 type Event struct {
 	UID                string          `json:"uid"`
 	ClassificationCode string          `json:"classification_code"`

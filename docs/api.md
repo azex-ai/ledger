@@ -84,6 +84,21 @@ Error (4xx/5xx):
 
 `code` is an integer business code; the HTTP status is derived from it. Clients determine retry behavior from the code table below and must reuse the same idempotency key.
 
+**`message.fields`** (optional) carries per-field validation messages when the rejection is attributable to named request fields. Keys are the request body's own snake_case field names, values are text written for a person to read — map them onto form inputs:
+
+```json
+{
+  "code": 10001,
+  "message": {
+    "text": "Please check your input and try again",
+    "fields": { "amount": "is not a valid decimal amount" }
+  },
+  "data": null
+}
+```
+
+`message.text` is the per-code display string and is always present; `fields` is **absent** (not an empty object) when no single field is at fault. Field messages never contain driver, storage or upstream error text — those stay in the server's logs, correlated by request id.
+
 ### Error handling contract
 
 | Code range | HTTP status | Meaning | Retryable |
@@ -117,6 +132,7 @@ Common business codes you may see:
 | `14005` | Reservation expired | No |
 | `14009` | Accounting period is closed | No |
 | `14010` | Journal failed tamper-detection authorization check | No |
+| `14011` | Authorization key not recognized (rotated out, or from another deployment) | No |
 | `18103` | Rollup queue item pending for this dimension | Yes |
 | `18104` | Authorization signer temporarily unavailable | Yes |
 | `18105` | Temporary failure (adapter-classified transient error) | Yes |
@@ -330,6 +346,41 @@ Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel a
 Body cap: 1 MB regardless of `MAX_BODY_BYTES`.
 
 Auth: bearer token enforced by the platform middleware **in addition to** HMAC; tooling generating callbacks must include both.
+
+### Outbound event delivery (webhook push)
+
+The other direction: when a consumer registers a webhook subscriber, the delivery worker POSTs each event to that URL. This is the ledger's main outbound contract and its schema is `OutboundEvent` in [`openapi.yaml`](openapi.yaml) — deliberately a **different** schema from `Event`, which is the REST surface's shape (`GET /events`). Two Go types are involved: the pushed body is the domain event's own json shape.
+
+The body is the bare event object, **not** the `{code, message, data}` envelope (`api-contract.md` §1 exempts pushed payloads). Every field rule still applies: snake_case names, amounts as strings, timestamps as RFC3339 **UTC** (`...Z`).
+
+```json
+{
+  "uid": "evt-01J...",
+  "classification_code": "deposit",
+  "booking_uid": "bkg-01J...",
+  "account_holder": 1001,
+  "currency_uid": "cur-01J...",
+  "from_status": "pending",
+  "to_status": "confirmed",
+  "amount": "500.00",
+  "settled_amount": "0",
+  "journal_uid": "jnl-01J...",
+  "metadata": { "tx_hash": "0xabc" },
+  "occurred_at": "2026-09-02T04:00:00Z",
+  "actor_id": 0,
+  "source": "worker"
+}
+```
+
+| Header | Value |
+|--------|-------|
+| `X-Ledger-Event-UID` | The event uid. Delivery is **at-least-once** — deduplicate on this. |
+| `X-Ledger-Timestamp` | Unix seconds at send time; covered by the signature. |
+| `X-Ledger-Signature` | `t=<timestamp>,v1=<hex>` where `<hex>` is `HMAC-SHA256(subscriber_secret, "<timestamp>.<raw body>")` |
+
+Verify the signature over the **raw** body bytes, before any re-serialization. A subscriber registered without a secret is never delivered to (delivery fails and is retried) rather than delivered to unsigned.
+
+Receivers must tolerate unknown fields (`api-contract.md` §8): this payload mirrors a domain type, so a field added there appears here. `journal_uid` is absent until a journal is linked to the event.
 
 ---
 

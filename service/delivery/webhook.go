@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -15,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/wirejson"
 )
 
 // WebhookSubscriber represents a registered webhook endpoint.
@@ -261,7 +261,13 @@ func (d *WebhookDeliverer) matchSubscribers(evt PendingEvent, subs []WebhookSubs
 // sendHTTP delivers evt to sub and returns the HTTP status code received
 // (0 if none, e.g. a connection error) alongside any error.
 func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt PendingEvent, sub WebhookSubscriber) (int, error) {
-	payload, err := json.Marshal(evt.Event)
+	// wirejson, not encoding/json (H-M4): the outbound payload must obey the
+	// same wire rules as an HTTP response -- above all RFC3339 UTC on every
+	// _at field. With encoding/json a TZ=Asia/Singapore deployment sent
+	// `occurred_at: ...+08:00` to subscribers while serving `...Z` over HTTP
+	// for the very same event, because pgx decodes timestamptz into
+	// time.Local and the stdlib marshaller preserves that offset.
+	payload, err := wirejson.Marshal(evt.Event)
 	if err != nil {
 		return 0, fmt.Errorf("delivery: webhook: marshal: %w", err)
 	}

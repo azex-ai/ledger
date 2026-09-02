@@ -32,6 +32,7 @@
 package server
 
 import (
+	stdjson "encoding/json"
 	"fmt"
 	"os"
 	"reflect"
@@ -43,6 +44,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/azex-ai/ledger/core"
 )
 
 var timeType = reflect.TypeOf(time.Time{})
@@ -328,8 +331,15 @@ func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string
 			}
 			return
 		}
-		if typ.Kind() != reflect.String {
-			t.Errorf("%s: spec says string (format %q), Go type is %s", path, format, typ)
+		// A type with its own MarshalJSON that emits a JSON string satisfies
+		// `type: string` even though its Kind is not String -- decimal.Decimal
+		// is the case that matters (financial.md: amounts cross the wire as
+		// strings, and this is how they do it on the paths that hand a
+		// decimal.Decimal straight to the encoder, e.g. the outbound event
+		// payload). Decided by marshalling the zero value rather than by a
+		// hardcoded type list, so any future wire type answers for itself.
+		if typ.Kind() != reflect.String && !marshalsToJSONString(typ) {
+			t.Errorf("%s: spec says string (format %q), Go type is %s and does not marshal to a JSON string", path, format, typ)
 		}
 
 	case specType == "integer":
@@ -348,6 +358,14 @@ func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string
 			t.Errorf("%s: spec says boolean, Go type is %s", path, typ)
 		}
 	}
+}
+
+// marshalsToJSONString reports whether typ's zero value serializes as a JSON
+// string (i.e. it has a MarshalJSON that quotes itself).
+func marshalsToJSONString(typ reflect.Type) bool {
+	zero := reflect.New(typ).Elem().Interface()
+	data, err := stdjson.Marshal(zero)
+	return err == nil && len(data) > 0 && data[0] == '"'
 }
 
 func canBeJSONNull(typ reflect.Type) bool {
@@ -568,4 +586,35 @@ func TestOpenAPIContract_NoOpenAPI30OnlyKeywords(t *testing.T) {
 		findings = append(findings, fmt.Sprintf("docs/openapi.yaml:%d: %q -- %s", i+1, key, hint))
 	}
 	require.Empty(t, findings, "OpenAPI 3.0-only keyword(s) in a 3.1.0 spec: generators silently ignore them, so the declaration promises nothing while reading as if it did")
+}
+
+// TestOpenAPIContract_OutboundEventMatchesCoreEvent is H-M4's schema half.
+//
+// The outbound webhook payload is core.Event's own json shape, and it had no
+// machine-checkable description anywhere: not in openapi.yaml, not in a JSON
+// Schema, nowhere. It is one of this library's most important outbound
+// contracts (a subscriber parses it on every state transition), and adding a
+// json tag to core.Event silently changed it.
+//
+// The schema is components.schemas.OutboundEvent, deliberately separate from
+// Event (which is server's eventResponse, reached over REST). This check
+// lives in the server package because that is where the spec-vs-Go
+// comparison machinery lives; the type it checks is core's.
+func TestOpenAPIContract_OutboundEventMatchesCoreEvent(t *testing.T) {
+	schemas := loadOpenAPISchemas(t)
+	sn := resolveNode(t, schemas, namedSchema(t, schemas, "OutboundEvent"))
+	assertSchemaMatchesGoType(t, schemas, "OutboundEvent", sn, reflect.TypeOf(core.Event{}),
+		compareOpts{bidirectional: true})
+
+	// The decimal amounts must be declared as strings, not numbers
+	// (financial.md): a subscriber that parses them as JSON numbers loses
+	// precision, and this payload is the only place the amounts arrive
+	// without an HTTP handler having stringified them first.
+	props, _ := sn.node["properties"].(map[string]any)
+	for _, field := range []string{"amount", "settled_amount"} {
+		prop, ok := props[field].(map[string]any)
+		require.True(t, ok, "OutboundEvent has no %s property", field)
+		require.Equal(t, "string", primaryType(resolveNode(t, schemas, prop).node),
+			"%s must cross the wire as a string", field)
+	}
 }

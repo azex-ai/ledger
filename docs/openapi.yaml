@@ -2449,6 +2449,72 @@ components:
                   items: { $ref: "#/components/schemas/Booking" }
                 next_cursor: { type: [string, "null"], description: "Null when exhausted." }
 
+    OutboundEvent:
+      description: >-
+        The body of an outbound webhook POST (service/delivery's
+        WebhookDeliverer), which is core.Event's own json shape -- NOT the
+        Event schema above, which is server/handler_bookings.go's
+        eventResponse and reaches consumers through the REST surface.
+
+
+        Two different Go types serialize to these two schemas, so they are
+        documented separately rather than shared: core.Event.occurred_at is
+        a time.Time and its amounts are decimal.Decimal, while
+        eventResponse's are pre-formatted strings. api-contract.md §1
+        exempts pushed payloads from the {code, message, data} envelope --
+        this body is the bare event -- but every field rule still applies:
+        snake_case names, string amounts, RFC3339 UTC timestamps.
+
+
+        Delivery headers: `X-Ledger-Event-UID` (the event uid, for
+        receiver-side deduplication -- delivery is at-least-once),
+        `X-Ledger-Timestamp` (unix seconds, covered by the signature) and
+        `X-Ledger-Signature` (`t=<timestamp>,v1=<hex hmac-sha256>` over
+        `<timestamp>.<raw body>` with the subscriber's secret). A subscriber
+        with no secret is never delivered to, rather than delivered to
+        unsigned.
+
+
+        Consumers must tolerate unknown fields (api-contract.md §8): this
+        payload is the shape of a domain type, so a field added there
+        appears here.
+      type: object
+      required:
+        - uid
+        - classification_code
+        - booking_uid
+        - account_holder
+        - currency_uid
+        - from_status
+        - to_status
+        - amount
+        - settled_amount
+        - metadata
+        - occurred_at
+        - actor_id
+        - source
+      properties:
+        uid: { type: string, format: uuid }
+        classification_code: { type: string }
+        booking_uid: { type: string, format: uuid }
+        account_holder: { type: integer, format: int64 }
+        currency_uid: { type: string, format: uuid }
+        from_status: { type: string }
+        to_status: { type: string }
+        amount: { $ref: "#/components/schemas/Decimal" }
+        settled_amount: { $ref: "#/components/schemas/Decimal" }
+        journal_uid:
+          type: string
+          format: uuid
+          description: Absent from the wire until a journal is linked to the event.
+        metadata:
+          type: object
+          description: Free-form string tags; values are strings, never nested JSON.
+          additionalProperties: { type: string }
+        occurred_at: { $ref: "#/components/schemas/Timestamp" }
+        actor_id: { type: integer, format: int64 }
+        source: { type: string }
+
     Event:
       type: object
       description: >-
