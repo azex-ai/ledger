@@ -117,3 +117,5 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | W1-ledgerstore | `63fb592`（+ EventUID 补修进行中） | 拆回基线三文件：7 条 pin 全红（含两个真 40P01）；postgres -race 绿 | 待合（等 I-50） | 兄弟扫描挖出 `EventUID` 同形，并入 I-51 |
 | W1-facade | `4eaa335` | 整文件回退无法编译（新 API 被测试引用），改单点 mutation：`Worker()` 的 `s.tx` 守卫置 false → `RefusedOnTxBoundClone` + `SubscribeAfterRunIsAnError` 红；恢复后根包 + service -race 绿 | 待合（排 I-54，最后） | 一次 `go test . -run Worker` 出现过一次未定位的 FAIL，重跑全 PASS，合并时再跑全量核 flake |
 | W1-ledgerstore（补） | `46386e7` | EventUID 维度检查单点置 false → `TestPostJournal_EventUID_RejectsUnrelatedJournal` 红；恢复后绿 | 待合（等 I-50） | I-51 rule 4。lead 失误：这行三次被误提交到 worker 分支（shell cwd 停在 worktree），已全部 reset；教训：跨 worktree 操作每段命令显式 `cd` |
+| W1-sign | `2f7bd1e` `c705e12` `ea54bd7`（rebase 后）+ `edbd994`（lead 改号 I-49→I-50） | 拆回基线 presets/*.go + balance_trends.sql + holder.sql：presets 5 条 + solvency 全模板 pin + 符号 gate 红；rebase 后 make vet/lint/test 17 包全绿 | ff 至 `edbd994` | 关 A-C1 及 A 全部 Major/Minor；migration 016；I-50。§7.2 §7.3 有偏离（已接受，见 worker 回执）；equity 改 debit-normal 待 Aaron 确认 |
+| W1-ledgerstore | `63fb592` + `46386e7` | 见上两行 | merge commit（无冲突） | I-51（含 EventUID rule 4） |
