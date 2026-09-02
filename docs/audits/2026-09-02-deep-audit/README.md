@@ -38,6 +38,17 @@ Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径�
 | D-contract | ✅ | openapi 参数改名 → `ParamsMatchGoHandlers` 红 | openapi 参数 / 类型 / inline / required / 出站 Event 全部进门禁；Go 导出面破坏性快照门禁；余额读路径 loose index scan（9,600→102 行）；`message.fields` 真写入；reverse 键服务端派生 |
 | D-ops | ✅ | worker `recover()` 分支置 false → panic pin 红 | postgres 层接 `core.Metrics`（32→41 方法，4 个签名改 uid）；job 家族指标；panic 兜底（I-60）；metrics 调用点完整性门禁（I-61）；RUNBOOK/DR/CAPACITY 逐条核到代码；`ledger-cli` 不再自称只读、加 `config-history` |
 
+**Wave 3（收口 + 对抗式复审）**
+
+两名只读复审员（`w3-review/money-path.md`、`w3-review/gates.md`）对整改后的 main 做了证伪：
+
+| 复审 | 结果 | 处置 |
+|---|---|---|
+| money-path（8 个攻击面） | 3 攻破 1 部分。**Critical：I-49 修了 `min(V,E)`，但被减掉的 hold 项读 `reservations` 可写列，一条 UPDATE 让闸对 1000 授权 2000**；另 `SolvencyCheck` / `enforce_min_balance` / `ConfirmPending` 仍读 checkpoint、未覆盖伪造 journal 自称 tx_mode 只 DRIFT、默认全关无 Warning、`unauthorized_journals` 一页一条签名即跳过其余、`Migrate` 窗口角色级、`event_uid` 冒领锁死无解除 | W3-holds ✅（闸内 hold = Σ 未过期 `reserved_amount`，不读任何结算声明；`Settle` 拒过期）；W3-fixes ✅（SolvencyCheck entries-only、未覆盖 entry 不看自称、StartupReport 五条 Warning、Complete = 全核、custodial scope 逐 code、`anchor_observations` owner 写入且拒超链高）；W3-fixes-2 进行中（M-3 owner-only 解除、M-5 文档层）；M-1 / ConfirmPending / M-5 机制层 / 签名 receipt → Aaron |
+| gates（34 次 mutation） | 23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿 / 恒 skip | W3-citations ✅（白名单清空）；W3-gates-fixes 进行中 |
+
+方法教训（进本 README 的正文）：契约 §0 的兄弟扫描仍被**形态描述**框住——C-1 的兄弟被写成「读了 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」，`reservations` 是第二项、receipt 表是第三项。下一轮的扫描要按「谁能写这张表」列算式的每一项，而不是按上一处 bug 的表名。
+
 **待 Aaron 确认的语义口径**（契约 §7，已按推荐落地，可回退）：equity 改 debit-normal；`checkout_settlement` 语义（custodial 装欠用户净额、平台自赚进 fees）；托管资产口径改注入式 `CustodialClassCodes`；`Worker.Run` 对 NopLogger fail-closed。
 
 ## 0. 一句话结论
