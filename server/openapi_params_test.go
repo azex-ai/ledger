@@ -39,6 +39,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -104,14 +105,37 @@ func specParamNames(params []specParam, in string) map[string]bool {
 // --- Go side ---
 
 // handlerParams is what a handler function reads out of the request line.
+//
+// required and goType are M-8 (W3 adversarial review of the gates): the
+// parameter gate compared NAME SETS only. The reviewer flipped
+// GET /snapshots' currency_uid from required to optional and retyped it from
+// {string, uuid} to {integer, int64} -- the spec's `required` field was
+// parsed into specParam and then never asserted on, and
+// EveryParamHasTypedSchema only checked that SOME type key was present. A
+// client generated from that spec omits a parameter the handler refuses
+// without, and sends an integer where it reads a uuid string: exactly the
+// user-visible failure H-M1 was about, reachable again from the other side.
 type handlerParams struct {
 	query map[string]bool
 	path  map[string]bool
 	calls map[string]bool
+	// required holds the parameters the handler itself refuses to proceed
+	// without: it tests the value and answers ErrBadRequest.
+	required map[string]bool
+	// goType maps a parameter to the JSON Schema type its Go parse implies
+	// ("integer" for strconv.ParseInt, "number" for ParseFloat, "boolean"
+	// for ParseBool, "string" otherwise).
+	goType map[string]string
 }
 
 func newHandlerParams() *handlerParams {
-	return &handlerParams{query: map[string]bool{}, path: map[string]bool{}, calls: map[string]bool{}}
+	return &handlerParams{
+		query:    map[string]bool{},
+		path:     map[string]bool{},
+		calls:    map[string]bool{},
+		required: map[string]bool{},
+		goType:   map[string]string{},
+	}
 }
 
 // parsePackageFiles parses every non-test .go file in the server package.
@@ -151,6 +175,7 @@ func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
 // request parameters at all.
 func funcRequestParams(t *testing.T, files []*ast.File) map[string]*handlerParams {
 	t.Helper()
+	helpers := parseHelperTypes(files)
 	out := map[string]*handlerParams{}
 	for _, f := range files {
 		for _, decl := range f.Decls {
@@ -161,7 +186,7 @@ func funcRequestParams(t *testing.T, files []*ast.File) map[string]*handlerParam
 			key := qualifiedFuncName(fn)
 			_, dup := out[key]
 			require.False(t, dup, "server package declares %q twice", key)
-			out[key] = collectRequestParams(fn.Body)
+			out[key] = collectRequestParams(fn.Body, helpers)
 		}
 	}
 	return out
@@ -202,7 +227,7 @@ func bareName(key string) string {
 // `...Query()` call (`q := r.URL.Query()`), which is how most handlers here
 // spell it. That receiver test is what keeps http.Header's identically
 // named Get out of the result.
-func collectRequestParams(body *ast.BlockStmt) *handlerParams {
+func collectRequestParams(body *ast.BlockStmt, helpers map[string]string) *handlerParams {
 	hp := newHandlerParams()
 	valuesIdents := map[string]bool{}
 
@@ -256,7 +281,273 @@ func collectRequestParams(body *ast.BlockStmt) *handlerParams {
 		}
 		return true
 	})
+
+	// Pass 3: bind identifiers to the parameter they were read from, so a
+	// later test of that identifier can be attributed back to the parameter.
+	// Both shapes this package uses are covered:
+	//   uid := q.Get("currency_uid")
+	//   holder, err := strconv.ParseInt(q.Get("holder"), 10, 64)
+	paramOfIdent := map[string]string{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) == 0 || len(assign.Rhs) != 1 {
+			return true
+		}
+		names := paramNamesIn(assign.Rhs[0], valuesIdents)
+		if len(names) != 1 {
+			return true
+		}
+		if id, ok := assign.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+			paramOfIdent[id.Name] = names[0]
+		}
+		return true
+	})
+
+	// Pass 4: a parameter is REQUIRED when the handler tests it for ABSENCE
+	// and directly refuses.
+	//
+	// Both halves are load-bearing, and getting either wrong reads a handler
+	// backwards:
+	//
+	//   - absence, not validity. `if h := q.Get("holder"); h != "" { ...
+	//     ErrBadRequest ... }` (handleListReservations) refuses an
+	//     unparseable holder while treating a missing one as "no filter" --
+	//     an optional parameter with a validated value, not a required one.
+	//     So only an equality against "" or 0 counts, never a `!=` presence
+	//     test.
+	//   - directly, meaning the refusal is a statement of that if's own
+	//     block rather than nested in a further condition, which is what
+	//     keeps the outer `if present { if invalid { refuse } }` shape from
+	//     reading as a rejection of absence.
+	//   - and only at the handler's TOP level. handleListAuditJournals
+	//     refuses `holder == 0 || currencyUID == ""` inside a switch case
+	//     that already established one of them was supplied -- "provide both
+	//     or neither", which makes each one optional on its own. A nested
+	//     rejection reads as "not required" here, and goes red against a
+	//     spec that marks it required: the direction that asks a human.
+	for _, stmt := range body.List {
+		ifStmt, ok := stmt.(*ast.IfStmt)
+		if !ok || !directlyRefusesWithBadRequest(ifStmt.Body) {
+			continue
+		}
+		for _, name := range absenceTestedParams(ifStmt.Cond, valuesIdents, paramOfIdent) {
+			hp.required[name] = true
+		}
+	}
+
+	// Pass 5: the JSON Schema type each parameter's Go parse implies --
+	// directly (strconv), through a package-local parse helper
+	// (parseIDParam, which is how every {holder} path parameter is read),
+	// or through a comparison against "true"/"false" (how this package
+	// spells a boolean query flag).
+	assign := func(arg ast.Expr, jsonType string) {
+		for _, name := range paramNamesIn(arg, valuesIdents) {
+			hp.goType[name] = jsonType
+		}
+		if id, ok := arg.(*ast.Ident); ok {
+			if param, ok := paramOfIdent[id.Name]; ok {
+				hp.goType[param] = jsonType
+			}
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.CallExpr:
+			jsonType := ""
+			switch fun := v.Fun.(type) {
+			case *ast.SelectorExpr:
+				if pkg, ok := fun.X.(*ast.Ident); ok && pkg.Name == "strconv" {
+					jsonType = strconvJSONType(fun.Sel.Name)
+				}
+			case *ast.Ident:
+				jsonType = helpers[fun.Name]
+			}
+			if jsonType == "" || len(v.Args) == 0 {
+				return true
+			}
+			for _, arg := range v.Args {
+				assign(arg, jsonType)
+			}
+		case *ast.BinaryExpr:
+			if v.Op != token.EQL && v.Op != token.NEQ {
+				return true
+			}
+			for _, pair := range [][2]ast.Expr{{v.X, v.Y}, {v.Y, v.X}} {
+				if lit, ok := stringLit(pair[1]); ok && (lit == "true" || lit == "false") {
+					assign(pair[0], "boolean")
+				}
+			}
+		}
+		return true
+	})
 	return hp
+}
+
+func strconvJSONType(fn string) string {
+	switch fn {
+	case "ParseInt", "ParseUint", "Atoi":
+		return "integer"
+	case "ParseFloat":
+		return "number"
+	case "ParseBool":
+		return "boolean"
+	default:
+		return ""
+	}
+}
+
+// parseHelperTypes maps a package-local function to the JSON Schema type its
+// own body's strconv call implies, so `parseIDParam(chi.URLParam(r,
+// "holder"))` types `holder` as integer the same way an inline
+// strconv.ParseInt would. Derived, not listed: a second parse helper needs
+// no edit here.
+func parseHelperTypes(files []*ast.File) map[string]string {
+	out := map[string]string{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Recv != nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "strconv" {
+					if jsonType := strconvJSONType(sel.Sel.Name); jsonType != "" {
+						out[fn.Name.Name] = jsonType
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// paramNamesIn returns the request-parameter names read anywhere inside expr
+// (`q.Get("x")`, `r.URL.Query().Get("x")`, `chi.URLParam(r, "x")`).
+func paramNamesIn(node ast.Node, valuesIdents map[string]bool) []string {
+	var out []string
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Get":
+			if len(call.Args) == 1 && (isQueryCall(sel.X) || isIdentIn(sel.X, valuesIdents)) {
+				if lit, ok := stringLit(call.Args[0]); ok {
+					out = append(out, lit)
+				}
+			}
+		case "URLParam":
+			if len(call.Args) == 2 {
+				if lit, ok := stringLit(call.Args[1]); ok {
+					out = append(out, lit)
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// directlyRefusesWithBadRequest reports whether a block answers a 4xx as one
+// of its OWN statements -- the shape every parameter rejection in this
+// package takes:
+//
+//	if uid == "" {
+//	    httpx.Error(w, httpx.ErrBadRequest("currency_uid is required"))
+//	    return
+//	}
+//
+// Nested statements do not count: see pass 4's note.
+func directlyRefusesWithBadRequest(block *ast.BlockStmt) bool {
+	if block == nil {
+		return false
+	}
+	for _, stmt := range block.List {
+		expr, ok := stmt.(*ast.ExprStmt)
+		if !ok {
+			continue
+		}
+		call, ok := expr.X.(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "httpx" {
+			switch sel.Sel.Name {
+			case "ErrBadRequest", "Error":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// absenceTestedParams returns the parameters an if-condition tests for
+// ABSENCE: `p == ""`, `p == 0` for a value parsed out of one (a holder of 0
+// is how this package spells "not supplied", since 0 is not a valid account
+// holder), or `p.IsZero()` for a time parsed out of one.
+func absenceTestedParams(cond ast.Expr, valuesIdents map[string]bool, paramOfIdent map[string]string) []string {
+	var out []string
+	add := func(e ast.Expr) {
+		out = append(out, paramNamesIn(e, valuesIdents)...)
+		if id, ok := e.(*ast.Ident); ok {
+			if param, ok := paramOfIdent[id.Name]; ok {
+				out = append(out, param)
+			}
+		}
+	}
+	ast.Inspect(cond, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.BinaryExpr:
+			if v.Op != token.EQL {
+				return true
+			}
+			for _, pair := range [][2]ast.Expr{{v.X, v.Y}, {v.Y, v.X}} {
+				if isEmptyStringOrZero(pair[1]) {
+					add(pair[0])
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := v.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "IsZero" && len(v.Args) == 0 {
+				add(sel.X)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+func isEmptyStringOrZero(e ast.Expr) bool {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok {
+		return false
+	}
+	switch lit.Kind {
+	case token.STRING:
+		s, err := strconv.Unquote(lit.Value)
+		return err == nil && s == ""
+	case token.INT:
+		return lit.Value == "0"
+	default:
+		return false
+	}
 }
 
 func isQueryCall(e ast.Expr) bool {
@@ -288,7 +579,14 @@ func stringLit(e ast.Expr) (string, bool) {
 // resolveParams returns the transitive closure of a function's request
 // parameter reads over package-local calls.
 func resolveParams(fns map[string]*handlerParams, name string) (query, path map[string]bool) {
-	query, path = map[string]bool{}, map[string]bool{}
+	resolved := resolveHandlerParams(fns, name)
+	return resolved.query, resolved.path
+}
+
+// resolveHandlerParams is resolveParams plus the required set and the
+// implied types, unioned over the same transitive closure.
+func resolveHandlerParams(fns map[string]*handlerParams, name string) *handlerParams {
+	out := newHandlerParams()
 	seen := map[string]bool{}
 	var walk func(string)
 	walk = func(n string) {
@@ -301,10 +599,16 @@ func resolveParams(fns map[string]*handlerParams, name string) (query, path map[
 				continue
 			}
 			for k := range hp.query {
-				query[k] = true
+				out.query[k] = true
 			}
 			for k := range hp.path {
-				path[k] = true
+				out.path[k] = true
+			}
+			for k := range hp.required {
+				out.required[k] = true
+			}
+			for k, v := range hp.goType {
+				out.goType[k] = v
 			}
 			for callee := range hp.calls {
 				walk(callee)
@@ -312,7 +616,7 @@ func resolveParams(fns map[string]*handlerParams, name string) (query, path map[
 		}
 	}
 	walk(name)
-	return query, path
+	return out
 }
 
 // --- route table, derived from setupRoutes' AST ---
@@ -530,4 +834,104 @@ func TestOpenAPIContract_EveryParamHasTypedSchema(t *testing.T) {
 	}
 	sort.Strings(bad)
 	require.Empty(t, bad, "parameter(s) declared without a usable schema type")
+}
+
+// TestOpenAPIContract_ParamRequirednessMatchesHandlers is M-8's first half:
+// `required` was parsed out of the spec and never asserted on.
+//
+// A parameter the handler refuses to proceed without must be `required: true`
+// in the spec (a generated client that omits it gets 400 on every call), and
+// one the handler treats as optional must not be marked required (a client
+// that cannot omit it, and a reader who believes a default does not exist).
+// The handler side is derived from the AST: a parameter is required when the
+// handler tests it and answers ErrBadRequest.
+func TestOpenAPIContract_ParamRequirednessMatchesHandlers(t *testing.T) {
+	_, files := parsePackageFiles(t)
+	fns := funcRequestParams(t, files)
+	routes := routeHandlerNames(t, files)
+	params := operationParams(t, loadOpenAPIPaths(t))
+
+	for key, handler := range routes {
+		specList, ok := params[key]
+		if !ok {
+			continue // EveryRouteIsDocumented owns that failure
+		}
+		resolved := resolveHandlerParams(fns, handler)
+
+		t.Run(key, func(t *testing.T) {
+			for _, p := range specList {
+				switch p.in {
+				case "path":
+					// OpenAPI requires path parameters to be required, and a
+					// handler cannot route without them.
+					assert.Truef(t, p.required,
+						"%s: path parameter %q must be `required: true` -- OpenAPI has no optional path parameters, and the route does not match without it",
+						key, p.name)
+				case "query":
+					assert.Equalf(t, resolved.required[p.name], p.required,
+						"%s: docs/openapi.yaml says query parameter %q is required=%v, but handler %s %s.\n"+
+							"A spec-generated client omits what the spec calls optional; if the handler answers 400 without it, every call fails "+
+							"(H-M1's user-visible shape). Fix whichever side is wrong -- they are one contract",
+						key, p.name, p.required, handler,
+						map[bool]string{true: "refuses the request without it", false: "does not require it"}[resolved.required[p.name]])
+				}
+			}
+		})
+	}
+}
+
+// TestOpenAPIContract_ParamSchemaTypesMatchHandlers is M-8's second half.
+// EveryParamHasTypedSchema only asks whether a `type` key exists; it never
+// compares that type with what the Go handler does with the value. The
+// reviewer retyped a uuid-string parameter to {integer, int64} and it passed.
+//
+// The Go side is derived from the parse: strconv.ParseInt/Atoi implies
+// integer, ParseFloat number, ParseBool boolean, and anything the handler
+// uses as-is is a string.
+func TestOpenAPIContract_ParamSchemaTypesMatchHandlers(t *testing.T) {
+	_, files := parsePackageFiles(t)
+	fns := funcRequestParams(t, files)
+	routes := routeHandlerNames(t, files)
+	params := operationParams(t, loadOpenAPIPaths(t))
+	schemas := loadOpenAPISchemas(t)
+
+	for key, handler := range routes {
+		specList, ok := params[key]
+		if !ok {
+			continue
+		}
+		resolved := resolveHandlerParams(fns, handler)
+
+		t.Run(key, func(t *testing.T) {
+			for _, p := range specList {
+				if p.in != "query" && p.in != "path" {
+					continue
+				}
+				node := p.schema
+				if node == nil {
+					continue // EveryParamHasTypedSchema owns that failure
+				}
+				if ref, ok := node["$ref"].(string); ok {
+					target, ok := schemas[refName(ref)].(map[string]any)
+					if !ok {
+						continue // EveryParamHasTypedSchema owns it
+					}
+					node = target
+				}
+				specType, _ := node["type"].(string)
+				if specType == "" {
+					continue
+				}
+				want := resolved.goType[p.name]
+				if want == "" {
+					want = "string" // read and used as-is
+				}
+				assert.Equalf(t, want, specType,
+					"%s: docs/openapi.yaml types %s parameter %q as %q, but handler %s reads it as %q.\n"+
+						"A client generated from the spec serializes the documented type: an integer where the handler expects a uuid string "+
+						"is a 400 on every call (H-M1), and the reverse silently truncates",
+					key, p.in, p.name, specType, handler, want)
+			}
+		})
+	}
 }

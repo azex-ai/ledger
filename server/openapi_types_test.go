@@ -331,6 +331,38 @@ func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string
 			}
 			return
 		}
+		// M-9 (W3 adversarial review of the gates): the format check above
+		// runs only when the GO type is time.Time, so the other direction --
+		// a spec promising a format the Go type can never produce -- went
+		// unchecked. The reviewer put `format: date-time` on Currency.code
+		// (a plain string) and it passed, which is H-M2's original shape
+		// (Booking.expires_at) able to regress silently. Each format the
+		// spec uses is a claim about the value, so each has a Go
+		// counterpart:
+		switch format {
+		case "date-time", "date":
+			// A Go string can serialize any format, so the type alone cannot
+			// answer this direction. The repo's own convention can: a wire
+			// timestamp's field name ends in `_at` (api-contract.md §5), so a
+			// date format on a field that is not a timestamp is a promise
+			// nothing produces, and it is exactly the mutation the reviewer
+			// used (format: date-time on Currency.code).
+			field := lastPathSegment(path)
+			if !strings.HasSuffix(field, "_at") && !dateFormatFieldExceptions[field] {
+				t.Errorf("%s: the spec declares format %q -- a promise that this field is an RFC3339 timestamp -- but %q is not a timestamp field name "+
+					"(api-contract.md §5: timestamps end in `_at`). Either the format is wrong, or the field belongs in dateFormatFieldExceptions with a reason",
+					path, format, field)
+			}
+		case "uuid":
+			if typ.Kind() != reflect.String {
+				t.Errorf("%s: the spec declares format uuid but the Go type is %s (uids cross this API as strings, api-contract.md §3)", path, typ)
+			}
+		case "":
+			// A plain string: nothing further to claim.
+		default:
+			t.Errorf("%s: the spec declares an unrecognized string format %q. Add it to this switch with the Go property it implies -- "+
+				"an unknown format is a promise to clients that nothing here checks", path, format)
+		}
 		// A type with its own MarshalJSON that emits a JSON string satisfies
 		// `type: string` even though its Kind is not String -- decimal.Decimal
 		// is the case that matters (financial.md: amounts cross the wire as
@@ -357,7 +389,61 @@ func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string
 		if typ.Kind() != reflect.Bool {
 			t.Errorf("%s: spec says boolean, Go type is %s", path, typ)
 		}
+
+	default:
+		// M-9: a node with no `type`, no `properties`, and nothing else to
+		// descend into used to fall through every case above and be checked
+		// by nothing at all -- neither "spec documents a field Go drops" nor
+		// "types disagree" can fire on a property whose shape the spec never
+		// states. The reviewer deleted `type: string` from Currency.name,
+		// leaving only its description, and the whole suite passed. The
+		// parameters side has had EveryParamHasTypedSchema for exactly this;
+		// this is its counterpart for schema properties.
+		if !hasFreeFormObjectShape(sn.node) {
+			t.Errorf("%s: the spec declares no `type` for this property (and no properties/items/$ref/allOf/oneOf to descend into), "+
+				"so every spec-vs-Go check above skips it and a generated client gets an `unknown`-typed field. Declare its type", path)
+		}
 	}
+}
+
+// dateFormatFieldExceptions are the wire fields that carry a date/date-time
+// format without the `_at` suffix, and why. Each is an INPUT naming a
+// boundary rather than a recorded instant, which is why it reads as a
+// preposition instead.
+var dateFormatFieldExceptions = map[string]bool{
+	"close_before":  true, // POST /periods/close: the exclusive upper bound of the period being closed
+	"snapshot_date": true, // GET /snapshots: the calendar day a snapshot covers (format: date, not an instant)
+	"as_of":         true, // GET /reports/trial-balance: the instant to evaluate balances at
+	"start":         true, // GET /snapshots range bounds (format: date)
+	"end":           true,
+	"date":          true, // GET /balances/trends: the calendar day a trend point covers (format: date)
+}
+
+// lastPathSegment returns the field name from a check path like
+// "BookingListEnvelope.data.list[].created_at".
+func lastPathSegment(path string) string {
+	seg := path
+	if i := strings.LastIndex(seg, "."); i >= 0 {
+		seg = seg[i+1:]
+	}
+	return strings.TrimSuffix(seg, "[]")
+}
+
+// hasFreeFormObjectShape reports whether a node with no `type` is
+// nevertheless a deliberate free-form object: `data: {}` on the Envelope
+// base (each concrete envelope overlays the real shape), or a map with
+// additionalProperties.
+func hasFreeFormObjectShape(node map[string]any) bool {
+	if _, ok := node["additionalProperties"]; ok {
+		return true
+	}
+	// A LITERALLY empty node (`data: {}` on the Envelope base, which each
+	// concrete envelope overlays with the real shape) is the only free-form
+	// case. `{description: ...}` is NOT: prose is not a type, and a property
+	// documented in words with no declared shape is precisely M-9's mutation
+	// -- every spec-vs-Go check skips it and a generated client gets
+	// `unknown`.
+	return len(node) == 0
 }
 
 // marshalsToJSONString reports whether typ's zero value serializes as a JSON
