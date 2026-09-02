@@ -109,3 +109,94 @@ func TestPartitionFunctions_SearchPathIncludesPgTemp(t *testing.T) {
 		})
 	}
 }
+
+// TestLedgerRebalanceDefaultPartition_RejectsUnboundedRange pins D-m1
+// (2026-09-02 deep audit) and migration 021.
+//
+// Migration 013 hardened this function's sibling because "EXECUTE on the
+// function is itself a ledger_app-reachable capability", and stopped at the
+// one function in front of it. The same sentence is true of the date range
+// here, and nothing checked it. Measured as ledger_app before 021:
+//
+//	SELECT array_length(ledger_rebalance_default_partition('2020-01-01','2021-12-01'), 1);
+//	-- 24, i.e. 24 new partition tables and 96 dependent index/constraint relations
+//
+// ledger_app cannot DROP any of them (they are owner-gated), so it is a
+// one-way availability defect requiring a DBA -- 013's own words about the
+// sibling -- and each call takes ACCESS EXCLUSIVE on journal_entries for the
+// DETACH/ATTACH dance, so a loop of them is a write-path outage.
+func TestLedgerRebalanceDefaultPartition_RejectsUnboundedRange(t *testing.T) {
+	ctx := context.Background()
+	pool := postgrestest.SetupDB(t)
+	appPool := newAppPool(t, pool, "partition-rebalance-range-not-a-real-secret") //nolint:gosec
+
+	cases := []struct {
+		name        string
+		first, last string
+		why         string
+	}{
+		{"three centuries of partitions", "1900-01-01", "2200-12-01",
+			"the measured attack: 3600 months of DDL from one statement"},
+		{"range that ends before it starts", "2030-06-01", "2030-01-01",
+			"a caller cannot express this legitimately and the loop silently does nothing, which reads as success"},
+		{"mid-month boundaries", "2030-01-15", "2030-03-01",
+			"partitions are monthly; a range that is not month-aligned describes partitions this function cannot name"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := appPool.Exec(ctx, "SELECT ledger_rebalance_default_partition($1::date, $2::date)", tc.first, tc.last)
+			require.Error(t, err, tc.why)
+
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			assert.Equal(t, "22023", pgErr.Code, "expected invalid_parameter_value, got %s: %s", pgErr.Code, pgErr.Message)
+		})
+	}
+
+	// The refusals are not vacuous: partition_store.go's own call shape -- a
+	// month-aligned pair spanning PartitionConfig.MonthsAhead -- still works.
+	t.Run("the legitimate caller's range still works", func(t *testing.T) {
+		var created []string
+		require.NoError(t, appPool.QueryRow(ctx,
+			"SELECT ledger_rebalance_default_partition('2041-01-01'::date, '2041-04-01'::date)").Scan(&created))
+		assert.Len(t, created, 4, "January through April inclusive")
+	})
+}
+
+// TestPartitionFunctions_OwnedByLedgerOwner is I-35's missing assertion,
+// stated where the other two partition-function pins live.
+//
+// I-35 has said since migration 007 that "both functions are owned by
+// ledger_owner and run with its privileges regardless of the caller". Its
+// three existing pins check that the functions can be called, that the name
+// argument is validated, and that search_path includes pg_temp -- none of them
+// checks the owner, which was the bootstrap credential in every deployment
+// until migration 019/021. TestObjectOwnership_... enforces this across the
+// whole catalogue; this states it for the two functions the invariant names.
+func TestPartitionFunctions_OwnedByLedgerOwner(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	for _, fn := range []string{
+		"ledger_create_monthly_partition",
+		"ledger_rebalance_default_partition",
+	} {
+		fn := fn
+		t.Run(fn, func(t *testing.T) {
+			var owner string
+			var secdef bool
+			require.NoError(t, pool.QueryRow(ctx, `
+				SELECT pg_get_userbyid(p.proowner), p.prosecdef
+				FROM pg_proc p
+				JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE n.nspname = 'public' AND p.proname = $1
+			`, fn).Scan(&owner, &secdef))
+
+			require.True(t, secdef, "sanity: %s is SECURITY DEFINER, which is what makes its owner load-bearing", fn)
+			assert.Equal(t, "ledger_owner", owner,
+				"%s runs with its owner's privileges and ledger_app holds EXECUTE on it; owned by the bootstrap credential, that is an entry point into far more than I-35 claims", fn)
+		})
+	}
+}

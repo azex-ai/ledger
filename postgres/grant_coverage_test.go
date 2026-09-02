@@ -122,6 +122,48 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// see migration 006's header for why they have no legitimate UPDATE.
 	updateRevoked := map[string]bool{"entry_template_lines": true}
 
+	// Tables ledger_app may read but not write at all. Two distinct reasons,
+	// both from the 2026-09-02 deep audit:
+	//
+	// config_table_changes / reconcile_scan_cursor_changes (D-M4) are the
+	// forensic trail for "who changed the rule that decides where money goes".
+	// Migration 006 granted ledger_app INSERT because its trigger functions
+	// ran with invoker rights; that also let the credential the trail is ABOUT
+	// append rows attributing its own changes to another role at another time
+	// (measured: changed_by='ledger_owner', changed_at 30 days back). 020 makes
+	// the two trigger functions SECURITY DEFINER so the legitimate write no
+	// longer needs the invoker's grant, and takes the grant away.
+	//
+	// deposits / withdrawals (D-m7) predate the unified booking model and are
+	// dead: their generated sqlc methods had no caller, and 021's companion
+	// commit deletes their query files. Nothing reads them, so tampering
+	// changes no behavior today -- but they are the two tables in this schema
+	// whose names most look like money, they mislead an incident responder
+	// reading the schema, and the day someone wires one into a read path it
+	// would have arrived pre-granted, unguarded and unaudited. This is
+	// deployment.md's migrate stage; the DROP is a later release.
+	insertRevoked := map[string]bool{
+		"config_table_changes":          true,
+		"reconcile_scan_cursor_changes": true,
+		"deposits":                      true,
+		"withdrawals":                   true,
+	}
+
+	// Column-name patterns that make a table's contents a credential rather
+	// than data. Migration 007 took webhook_subscribers away from ledger_ro
+	// with the reasoning that reading the secret "does not just disclose data,
+	// it hands a read-only credential the ability to forge signed event
+	// deliveries to any subscriber" -- and then this test kept requiring
+	// table-level SELECT for ledger_ro on every OTHER table, so the next table
+	// to carry a signing key or a channel credential would have gone red until
+	// its author granted ledger_ro the key along with everything else.
+	//
+	// Derived from information_schema.columns rather than restated as a list:
+	// a table matching the pattern must be in roColumnScoped below and must
+	// prove the matching column is not readable. Default direction flips from
+	// open to closed.
+	secretColumnPattern := `(^|_)(secret|password|passwd|token|private_key|seed|hmac|credential)($|_)`
+
 	// webhook_subscribers is column-scoped for ledger_ro as of migration
 	// 007: it holds every outbound webhook's HMAC secret
 	// (webhook_subscribers.secret), which a blanket SELECT ON ALL TABLES
@@ -188,8 +230,7 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// trigger logic, not by the ACL -- their ACL shape genuinely is ordinary
 	// SELECT/INSERT/UPDATE, and mutation_guards_test.go / roles_test.go pin
 	// the trigger behavior directly. The rest (balance_checkpoints,
-	// balance_snapshots, chain_cursors, deposits/withdrawals (history,
-	// nothing reads or writes them), ingest_dead_letters,
+	// balance_snapshots, chain_cursors, ingest_dead_letters,
 	// reconcile_scan_cursors (mutable by design -- see
 	// TestReconcileScanCursorChangesAudited), registration_rescans,
 	// rollup_queue, system_rollups, webhook_nonces, webhook_subscribers)
@@ -219,7 +260,6 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 		"currencies":             true,
 		"deposit_addresses":      true,
 		"deposit_reorgs":         true,
-		"deposits":               true,
 		"entry_templates":        true,
 		"events":                 true,
 		"ingest_dead_letters":    true,
@@ -232,15 +272,14 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 		"system_rollups":         true,
 		"webhook_nonces":         true,
 		"webhook_subscribers":    true,
-		"withdrawals":            true,
 	}
 
 	for _, table := range tables {
 		table := table
 		t.Run(table, func(t *testing.T) {
-			if !appendOnly[table] && !updateRevoked[table] && !reviewed[table] {
-				t.Fatalf("table %q is not classified in grant_coverage_test.go (append-only / update-revoked / reviewed-ordinary) -- "+
-					"a new table defaults to nothing, not to full access; decide its mutation policy and add it to one of the three sets", table)
+			if !appendOnly[table] && !updateRevoked[table] && !insertRevoked[table] && !reviewed[table] {
+				t.Fatalf("table %q is not classified in grant_coverage_test.go (append-only / update-revoked / insert-revoked / reviewed-ordinary) -- "+
+					"a new table defaults to nothing, not to full access; decide its mutation policy and add it to one of the four sets", table)
 			}
 
 			wantApp := []string{"SELECT", "INSERT", "UPDATE"}
@@ -249,6 +288,9 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 			}
 			if updateRevoked[table] {
 				wantApp = []string{"SELECT", "INSERT"}
+			}
+			if insertRevoked[table] {
+				wantApp = []string{"SELECT"}
 			}
 			if appInsertColumnScoped[table] {
 				wantApp = []string{"SELECT"}
@@ -272,15 +314,56 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 				assertColumnPrivilegeAbsent(t, pool, "ledger_app", table, "url", "UPDATE")
 			}
 
+			// D-m3: whether ledger_ro's SELECT may be table-level is derived
+			// from the table's own columns, not assumed. A table carrying a
+			// credential-shaped column has to be column-scoped and has to
+			// prove that column is unreadable; every other table keeps the
+			// plain table-level grant.
+			secretColumns := queryColumnsMatching(t, pool, table, secretColumnPattern)
+			if len(secretColumns) > 0 && !roColumnScoped[table] {
+				t.Fatalf("table %q carries credential-shaped column(s) %v, so ledger_ro must hold a column-level SELECT that excludes them, "+
+					"not the table-level SELECT this test would otherwise require -- add it to roColumnScoped and column-scope the grant in its migration "+
+					"(migration 007 did this for webhook_subscribers.secret: reading it hands a read-only credential the ability to forge signed deliveries)",
+					table, secretColumns)
+			}
+
 			if roColumnScoped[table] {
 				assertGrants(t, pool, "ledger_ro", table, nil)
 				assertColumnPrivilegeExists(t, pool, "ledger_ro", table, "name", "SELECT")
-				assertColumnPrivilegeAbsent(t, pool, "ledger_ro", table, "secret", "SELECT")
+				require.NotEmpty(t, secretColumns, "roColumnScoped is for tables with a credential-shaped column; %q has none, so the exemption hides nothing and should go", table)
+				for _, col := range secretColumns {
+					assertColumnPrivilegeAbsent(t, pool, "ledger_ro", table, col, "SELECT")
+				}
 				return
 			}
 			assertGrants(t, pool, "ledger_ro", table, []string{"SELECT"})
 		})
 	}
+}
+
+// queryColumnsMatching returns the columns of `table` whose name matches the
+// given POSIX regex. Used to decide, from the catalogue rather than from a
+// maintained list, whether a table holds something that is a credential rather
+// than data -- see secretColumnPattern's comment.
+func queryColumnsMatching(t *testing.T, pool *pgxpool.Pool, table, pattern string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = $1 AND column_name ~ $2
+		ORDER BY column_name
+	`, table, pattern)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var cols []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		cols = append(cols, name)
+	}
+	require.NoError(t, rows.Err())
+	return cols
 }
 
 // assertColumnPrivilegeExists confirms grantee holds a column-level grant of
@@ -391,10 +474,25 @@ func TestGrantCoverage_EverySequenceHasExpectedGrants(t *testing.T) {
 	rows.Close()
 	require.NotEmpty(t, sequences, "sanity: expected at least one BIGSERIAL-backed sequence to exist")
 
+	// The two forensic tables' sequences, revoked alongside their INSERT by
+	// migration 020 (D-M4). Their rows are drawn by a SECURITY DEFINER trigger
+	// running as ledger_owner, so ledger_app has no legitimate nextval() on
+	// them; leaving USAGE behind would have made the INSERT revoke a narrowing
+	// on paper only. Named here rather than loosening the assertion, same
+	// contract as deleteAllowed above.
+	appSequenceRevoked := map[string]bool{
+		"config_table_changes_id_seq":          true,
+		"reconcile_scan_cursor_changes_id_seq": true,
+	}
+
 	for _, seq := range sequences {
 		seq := seq
 		t.Run(seq, func(t *testing.T) {
-			assertSequenceGrants(t, pool, "ledger_app", seq, []string{"USAGE", "SELECT"})
+			wantApp := []string{"USAGE", "SELECT"}
+			if appSequenceRevoked[seq] {
+				wantApp = nil
+			}
+			assertSequenceGrants(t, pool, "ledger_app", seq, wantApp)
 			assertSequenceGrants(t, pool, "ledger_ro", seq, []string{"SELECT"})
 		})
 	}

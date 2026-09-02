@@ -15,9 +15,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -86,6 +88,39 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 
 	t.Run("cannot CREATE TABLE (no DDL of any kind)", func(t *testing.T) {
 		_, err := appPool.Exec(ctx, "CREATE TABLE evil (id INT)")
+		assertPermissionDenied(t, err)
+	})
+
+	// D-m2 (2026-09-02 deep audit): the four subtests above try bare DDL
+	// statements, and I-22 used to read that result back as "ledger_app cannot
+	// create any object, anywhere in the schema". Migration 007 falsified that
+	// -- it granted EXECUTE on two SECURITY DEFINER functions, one of which
+	// issues CREATE TABLE and one of which issues TRUNCATE -- and nothing here
+	// noticed, because "cannot do X directly" and "cannot do X" differ by a
+	// dimension these statements do not probe. I-22's wording now names the
+	// controlled exception; these two subtests are what make the naming
+	// checkable from both sides.
+	t.Run("CAN create a partition, but only through the controlled function", func(t *testing.T) {
+		var created bool
+		require.NoError(t, appPool.QueryRow(ctx,
+			"SELECT ledger_create_monthly_partition('journal_entries_y2039m07', '2039-07-01', '2039-08-01')").Scan(&created))
+		assert.True(t, created, "I-35's whole point: partition maintenance without a ledger_owner connection")
+
+		var owner string
+		require.NoError(t, pool.QueryRow(ctx,
+			"SELECT pg_get_userbyid(relowner) FROM pg_class WHERE relname = 'journal_entries_y2039m07'").Scan(&owner))
+		assert.Equal(t, "ledger_owner", owner,
+			"a partition created through the SECURITY DEFINER function belongs to the function's owner; if that were the bootstrap credential, ledger_app would be creating objects it could then not be denied on")
+	})
+
+	t.Run("cannot reach a guard function directly", func(t *testing.T) {
+		// Not exploitable (ledger_block_mutation always raises), but the ACL
+		// is the layer that is supposed to answer "what can this credential
+		// call". Before migration 021 the answer was "every function in the
+		// schema", by PUBLIC default, which is how the two grants above sat
+		// unexamined for two audit rounds. TestFunctionExecuteACL_... asserts
+		// the whole set; this asserts the refusal is real over a socket.
+		_, err := appPool.Exec(ctx, "SELECT ledger_resweep_ownership()")
 		assertPermissionDenied(t, err)
 	})
 
@@ -796,33 +831,72 @@ func TestLedgerRoCannotReadWebhookSecret(t *testing.T) {
 // fix for the Minor finding that CREATE ROLE IF NOT EXISTS trusts whatever a
 // shared cluster already has under these names: it simulates installing onto
 // a cluster where ledger_app was previously (by another tenant, a manual
-// grant, an old install) made SUPERUSER/CREATEROLE, and confirms the
-// migration's unconditional ALTER ROLE resets it regardless.
+// grant, an old install) made SUPERUSER/CREATEROLE, and confirms a fresh
+// install takes the attributes back away.
+//
+// Two things about this test's shape, both from the 2026-09-02 deep audit:
+//
+// F-M7: it used to Exec migration 007's ALTER ROLE statement itself, from the
+// testcontainers superuser pool. Two problems. (a) That proves the statement
+// works when a superuser sends it, which is not the claim -- docs/RUNBOOK.md
+// sanctions a CREATEROLE, non-superuser bootstrap, and three of the five
+// clauses 007 used to issue are ones only a superuser may write. (b) `ALTER
+// ROLE ledger_app SUPERUSER` mutates pg_authid, which is cluster-wide;
+// postgrestest isolates by database, so under `go test ./...` a package
+// running concurrently could observe ledger_app as SUPERUSER (every
+// permission-denied assertion it makes then fails) or could run its own
+// Migrate and reset the attribute out from under the sanity check below.
+//
+// Both are fixed by driving the real migration set and by holding the same
+// cluster-wide advisory lock Migrate holds for its whole run (I-47), which
+// makes this test and every concurrent Migrate mutually exclusive. The
+// migration is driven through golang-migrate directly rather than through
+// postgres.Migrate for exactly one reason: postgres.Migrate would try to take
+// that same lock and deadlock against this test's own hold.
 func TestRoleAttributeHardeningResetsPreExistingPrivileges(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	_, err := pool.Exec(ctx, "ALTER ROLE ledger_app SUPERUSER CREATEROLE CREATEDB REPLICATION")
+	unlock, err := postgres.AcquireClusterLockForTest(pool.Config().ConnString())
+	require.NoError(t, err, "role attributes are cluster-wide; this test must not race a concurrent Migrate")
+	defer unlock()
+
+	_, err = pool.Exec(ctx, "ALTER ROLE ledger_app SUPERUSER CREATEROLE CREATEDB REPLICATION BYPASSRLS")
 	require.NoError(t, err, "simulating a role this install did not create with elevated attributes already set")
+	t.Cleanup(func() {
+		// Belt and braces: if the assertions below fail, the role must still
+		// not be left SUPERUSER for whatever runs next on this cluster.
+		_, _ = pool.Exec(context.Background(), "ALTER ROLE ledger_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+	})
 
-	var super, createRole, createDB, replication bool
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname = 'ledger_app'
-	`).Scan(&super, &createRole, &createDB, &replication))
-	require.True(t, super && createRole && createDB && replication, "sanity: the simulated over-privileged state must actually be in place")
+	attrs := func() (super, createRole, createDB, replication, bypassRLS bool) {
+		require.NoError(t, pool.QueryRow(ctx, `
+			SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+			FROM pg_roles WHERE rolname = 'ledger_app'
+		`).Scan(&super, &createRole, &createDB, &replication, &bypassRLS))
+		return
+	}
 
-	// This is migration 007's own statement, re-applied -- what a fresh
-	// install onto this already-populated cluster would run.
-	_, err = pool.Exec(ctx, "ALTER ROLE ledger_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
+	super, createRole, createDB, replication, bypassRLS := attrs()
+	require.True(t, super && createRole && createDB && replication && bypassRLS,
+		"sanity: the simulated over-privileged state must actually be in place")
+
+	// A real install onto this already-populated cluster: a fresh database,
+	// the whole migration set, the actual statements in 007.
+	raw := postgrestest.SetupRawDB(t)
+	src, err := postgres.NewMigrationSource()
 	require.NoError(t, err)
+	m, err := migrate.NewWithSourceInstance("iofs", src, strings.Replace(raw, "postgres://", "pgx5://", 1))
+	require.NoError(t, err)
+	defer m.Close()
+	require.NoError(t, m.Up())
 
-	require.NoError(t, pool.QueryRow(ctx, `
-		SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication FROM pg_roles WHERE rolname = 'ledger_app'
-	`).Scan(&super, &createRole, &createDB, &replication))
+	super, createRole, createDB, replication, bypassRLS = attrs()
 	assert.False(t, super, "I-22 must hold even on a cluster where ledger_app pre-existed with SUPERUSER")
 	assert.False(t, createRole)
 	assert.False(t, createDB)
 	assert.False(t, replication)
+	assert.False(t, bypassRLS)
 }
 
 // TestPartitionMaintenanceRejectsUnshapedPartitionNames pins

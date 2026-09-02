@@ -20,9 +20,88 @@
 -- alone: all three roles need it for their documented workflows (ledger_app
 -- and ledger_ro for serving connections, ledger_owner for the migration job
 -- docs/RUNBOOK.md:510 runs directly against it), so this does not touch it.
-ALTER ROLE ledger_owner NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-ALTER ROLE ledger_app   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-ALTER ROLE ledger_ro    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+--
+-- ⚠️ AMENDED 2026-09-02 (deep audit D-M2). This section originally issued
+-- three unconditional statements:
+--
+--     ALTER ROLE ledger_owner NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+--     ALTER ROLE ledger_app   ... (same)
+--     ALTER ROLE ledger_ro    ... (same)
+--
+-- and no bootstrap credential short of a full SUPERUSER could run them.
+-- Postgres gates each role attribute on the *altering* role holding that
+-- same attribute, and it makes the check on whether the clause was written
+-- at all -- not on whether it changes anything. Measured on postgres:17.10,
+-- as a `CREATEROLE CREATEDB` role holding ADMIN OPTION on the target, every
+-- clause issued against a role that already had the attribute cleared:
+--
+--     NOSUPERUSER   ERROR  Only roles with the SUPERUSER attribute may change ...
+--     NOCREATEDB    ok
+--     NOCREATEROLE  ok
+--     NOREPLICATION ERROR  Only roles with the REPLICATION attribute may change ...
+--     NOBYPASSRLS   ERROR  Only roles with the BYPASSRLS attribute may change ...
+--
+-- and as a CREATEROLE-only role (no CREATEDB), `NOCREATEDB` fails too. So
+-- three of the five clauses -- four for the narrowest bootstrap -- are
+-- unreachable for the credential docs/RUNBOOK.md sanctions ("superuser, or a
+-- role with the CREATEROLE attribute"), which is the standard shape on RDS,
+-- Cloud SQL, Neon and Supabase. Such an install died here with SQLSTATE
+-- 42501, golang-migrate marked the database dirty at 007, and 008 onward
+-- never ran: the ledger_ro secret revoke below, 008's journal_entries.id
+-- column-level narrowing and 014's webhook_subscribers write narrowing were
+-- all silently absent from exactly the deployments that followed the runbook.
+--
+-- Editing a migration that is already merged is otherwise forbidden
+-- (deployment.md). It is the only option here: the failure is inside 007, so
+-- no later migration can reach past it. golang-migrate does not checksum
+-- migration files, so a database that already applied 007 will not re-run it
+-- and is unaffected -- this changes only what a fresh install does.
+--
+-- The replacement issues an ALTER only for an attribute a role actually
+-- holds. On a clean install (001 just created all three with none of them)
+-- that is zero statements, so any bootstrap credential can run it. On the
+-- shared cluster this section exists for, the attribute is really set and
+-- really has to go: the ALTER is attempted, and if the bootstrap lacks the
+-- authority to strip it the install stops with an actionable message instead
+-- of continuing on a ledger_app that is SUPERUSER. That is strictly stronger
+-- than what this file used to do -- the original blanket ALTER, when it did
+-- work, silently repaired the one situation an operator most needs told
+-- about -- and it is fail-closed in the sense working-agreements §3 asks for.
+--
+-- The attribute list is the complete set of role-level privilege attributes
+-- Postgres 17 exposes on pg_authid. It is a hardcoded list, which this
+-- schema otherwise avoids (see section 14 on deriving from the catalogue),
+-- because there is no catalogue view of "attributes that grant privilege"
+-- to derive from: pg_roles also carries rolinherit/rolcanlogin/
+-- rolconnlimit/rolvaliduntil, which are configuration, not privilege.
+-- postgres/roles_test.go asserts all five are false on all three roles, so a
+-- future Postgres attribute that is left out of this list is caught there
+-- rather than here.
+DO $$
+DECLARE
+    -- pg_authid column, and the ALTER ROLE clause that clears it.
+    attrs   CONSTANT text[] := ARRAY['rolsuper',    'rolcreatedb', 'rolcreaterole', 'rolreplication', 'rolbypassrls'];
+    clauses CONSTANT text[] := ARRAY['NOSUPERUSER', 'NOCREATEDB',  'NOCREATEROLE',  'NOREPLICATION',  'NOBYPASSRLS'];
+    role_name text;
+    i int;
+    held boolean;
+BEGIN
+    FOREACH role_name IN ARRAY ARRAY['ledger_owner', 'ledger_app', 'ledger_ro'] LOOP
+        FOR i IN 1 .. array_length(attrs, 1) LOOP
+            EXECUTE format('SELECT %I FROM pg_roles WHERE rolname = %L', attrs[i], role_name) INTO held;
+            CONTINUE WHEN held IS NOT TRUE;
+
+            BEGIN
+                EXECUTE format('ALTER ROLE %I %s', role_name, clauses[i]);
+            EXCEPTION WHEN insufficient_privilege THEN
+                RAISE EXCEPTION
+                    'ledger: role % already exists on this cluster with the % attribute and this migration credential cannot remove it. This install would run on a % that holds a privilege I-22 assumes it does not. Strip it with a superuser connection (ALTER ROLE % %) and re-run the migration, or install into a cluster that does not already own these role names.',
+                    role_name, clauses[i], role_name, role_name, clauses[i]
+                    USING ERRCODE = 'insufficient_privilege';
+            END;
+        END LOOP;
+    END LOOP;
+END $$;
 
 -- ####  2. Major: ledger_ro can read every outbound webhook's HMAC secret  ####
 --
