@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -269,7 +270,17 @@ type StartupReport struct {
 	// Attestation && !AttestationAnchor is the shape ledger.Service.Worker
 	// auto-wires by default.
 	AttestationAnchor bool `json:"attestation_anchor"`
-	Partition         bool `json:"partition"`
+	// AttestationAnchorType is the Go type of the configured anchor
+	// ("*anchordev.LocalFileAnchor", "*r2.Anchor", ...), or "" when there is
+	// none. The boolean above cannot distinguish a production carrier from
+	// anchordev's local file, and that file is on the same host as the
+	// database it exists to be independent of -- so "anchored" was reported
+	// identically for a real external witness and for no witness at all
+	// (2026-09-02 audit, tamper-evident.md m-1). Reported as a type name
+	// rather than a category so it stays true for carriers this library has
+	// never heard of.
+	AttestationAnchorType string `json:"attestation_anchor_type"`
+	Partition             bool   `json:"partition"`
 	// LeaderElection reports whether a *pgxpool.Pool was attached (SetPool),
 	// which is what makes every LockedJob single-runner across replicas.
 	// False means all six locked jobs run on every replica each tick.
@@ -292,6 +303,7 @@ func (w *Worker) StartupReport() StartupReport {
 		EventDeliveryLocalCallback: localDeliverer != nil,
 		Attestation:                w.attestation != nil,
 		AttestationAnchor:          w.attestation != nil && w.attestation.anchor != nil,
+		AttestationAnchorType:      attestationAnchorTypeName(w),
 		Partition:                  w.partition != nil,
 		LeaderElection:             w.pool != nil,
 	}
@@ -301,8 +313,34 @@ func (w *Worker) StartupReport() StartupReport {
 	if !r.LeaderElection {
 		r.Warnings = append(r.Warnings, noLeaderElectionWarning)
 	}
+	if strings.HasPrefix(r.AttestationAnchorType, devAnchorTypePrefix) {
+		r.Warnings = append(r.Warnings, developmentAnchorWarning+r.AttestationAnchorType)
+	}
 	return r
 }
+
+// attestationAnchorTypeName reports the configured anchor's Go type, or ""
+// when no anchor is configured.
+func attestationAnchorTypeName(w *Worker) string {
+	if w.attestation == nil || w.attestation.anchor == nil {
+		return ""
+	}
+	return fmt.Sprintf("%T", w.attestation.anchor)
+}
+
+// devAnchorTypePrefix recognises this library's own dev-only anchor by type
+// NAME rather than by importing it: service is a domain package and must not
+// depend on a dev adapter (abstractions.md -- the dependency would also be
+// backwards, since anchordev is one of core.Anchor's implementations). A
+// string prefix is a weak coupling, and deliberately so: if anchordev is ever
+// renamed this check silently stops matching, which costs a warning, whereas
+// the import would cost the layering.
+const devAnchorTypePrefix = "*anchordev."
+
+const developmentAnchorWarning = "worker: the configured attestation anchor is this library's DEV-ONLY " +
+	"local-file anchor -- it lives on the same host as the ledger's own database, so it cannot " +
+	"witness a history rewrite performed by whoever holds that database (design doc §8.3 point 1). " +
+	"Production needs a carrier the database credentials cannot reach. Anchor type: "
 
 const anchorlessAttestationWarning = "worker: batch attestation is running with no anchor configured -- " +
 	"the batch chain will advance and every batch will be signed, but VerifyLedger " +
@@ -373,6 +411,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		"event_delivery_local_callback", report.EventDeliveryLocalCallback,
 		"attestation", report.Attestation,
 		"attestation_anchor", report.AttestationAnchor,
+		"attestation_anchor_type", report.AttestationAnchorType,
 		"partition", report.Partition,
 		"leader_election", report.LeaderElection,
 	)

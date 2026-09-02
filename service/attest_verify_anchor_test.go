@@ -39,7 +39,7 @@ func TestVerifyLedger_FlagsUncoveredUnsignedEntry(t *testing.T) {
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchorPath := filepath.Join(t.TempDir(), "anchor.txt")
-	anchor := anchordev.NewLocalFileAnchor(anchorPath)
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(anchorPath)
 	attestSvc := service.NewAttestationService(attestStore, attestor, verifier, anchor, core.NewEngine())
 
 	_, err = ledgerStore.PostJournal(ctx, f.journalInput(4001, postgrestest.UniqueKey("verify-uncovered-legit")))
@@ -87,7 +87,7 @@ func TestVerifyLedger_UncoveredButLegitimateEntriesAreDriftNotVerified(t *testin
 
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, verifier, anchor, core.NewEngine())
 
 	_, err = ledgerStore.PostJournal(ctx, f.journalInput(4101, postgrestest.UniqueKey("verify-backlog-1")))
@@ -122,7 +122,7 @@ func TestVerifyLedger_EmptyAnchorWithNonEmptyChainIsNotRun(t *testing.T) {
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchorPath := filepath.Join(t.TempDir(), "anchor.txt")
-	anchor := anchordev.NewLocalFileAnchor(anchorPath)
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(anchorPath)
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	_, _, err = attestSvc.RunAttestBatch(ctx, 100) // seq 1, published to the anchor
@@ -172,7 +172,7 @@ func TestVerifyLedger_EmptyAnchorWithNoPriorObservationIsNotRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, seq, "precondition: no anchor observation recorded")
 
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt")) // empty
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt")) // empty
 	queries := postgres.NewQueryStore(pool)
 	report := service.VerifyLedger(ctx, attestStore, anchor, verifier, queries, service.VerifyConfig{})
 	require.Equal(t, service.VerifyStatusNotRun, report.Status, "report: %+v", report)
@@ -193,7 +193,7 @@ func TestVerifyLedger_DriftOnlyWhenAnchorHasPublishedButLags(t *testing.T) {
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchorPath := filepath.Join(t.TempDir(), "anchor.txt")
-	anchor := anchordev.NewLocalFileAnchor(anchorPath)
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(anchorPath)
 
 	// First batch WITH an anchor: seq 1 gets published.
 	withAnchor := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
@@ -229,7 +229,7 @@ func TestVerifyLedger_AnchorRollbackToAnOlderSeqIsTampered(t *testing.T) {
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
 	anchorPath := filepath.Join(t.TempDir(), "anchor.txt")
-	anchor := anchordev.NewLocalFileAnchor(anchorPath)
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(anchorPath)
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	_, seq1, err := attestSvc.RunAttestBatch(ctx, 100)

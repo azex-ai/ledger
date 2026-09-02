@@ -120,7 +120,7 @@ func run() error {
 		return fmt.Errorf("anchor dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(anchorDir) }()
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(anchorDir, "head.json"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(anchorDir, "head.json"))
 
 	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier))
 	if err != nil {

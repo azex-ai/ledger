@@ -386,7 +386,7 @@ func TestAttestationService_PublishesToAnchor(t *testing.T) {
 
 	attestor := newTestAttestor(t, "attest-key-4")
 	store := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	svc := service.NewAttestationService(store, attestor, nil, anchor, core.NewEngine())
 
 	_, seq, err := svc.RunAttestBatch(ctx, 100)
@@ -411,7 +411,7 @@ func TestAttestationService_CatchesUpAnchorAfterTransientFailure(t *testing.T) {
 
 	attestor := newTestAttestor(t, "attest-key-5")
 	store := postgres.NewAttestationStore(pool)
-	realAnchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	realAnchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	flaky := &failingAnchor{inner: realAnchor, failCount: 1}
 	svc := service.NewAttestationService(store, attestor, nil, flaky, core.NewEngine())
 

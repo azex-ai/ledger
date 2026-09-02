@@ -456,7 +456,7 @@ func TestService_VerifyLedger_NotRunOnTxBoundClone(t *testing.T) {
 	require.NoError(t, err)
 	attestor, verifier, err := authdev.NewLocalAttestor(priv.Seed(), "verify-tx-escape-test-key")
 	require.NoError(t, err)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 
 	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier))
 	require.NoError(t, err)

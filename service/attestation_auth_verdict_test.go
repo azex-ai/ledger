@@ -153,7 +153,7 @@ func TestVerifyLedger_DetectsAuthVerdictDrift(t *testing.T) {
 	require.NoError(t, err)
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, verifier, anchor, core.NewEngine())
 
 	journal, err := ledgerStore.PostJournal(ctx, f.journalInput(9931, postgrestest.UniqueKey("auth-verdict-drift")))

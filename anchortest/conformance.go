@@ -42,18 +42,22 @@
 // Two things adjacent to core.Anchor's contract are left untested rather
 // than silently baked in as if the port required them:
 //
-//   - Ordering of a seq other than an exact replay. core.Anchor's doc
-//     comment only specifies behavior for re-publishing the SAME seq
-//     (idempotent replay if the bytes match, an error if they don't). It
-//     says nothing about what Publish must do for a seq that is neither
-//     the current head nor an exact replay of it -- e.g. one smaller than
-//     the current head, or one that skips ahead. anchordev.LocalFileAnchor
-//     chooses to reject anything other than Head()+1 or an exact replay;
-//     that is documented there as its OWN added strictness (a dev tool
-//     that lied about ordering would be worse than one that refused), not
-//     something every conformant Anchor must do. A production adapter
-//     that instead accepts out-of-order seqs is not thereby non-conformant
-//     -- this suite takes no position on that choice and does not test it.
+//   - Whether Publish ACCEPTS a seq that skips ahead of the current head
+//     (e.g. publishing 7 when Head is 2). core.Anchor takes no position:
+//     anchordev.LocalFileAnchor rejects anything but Head()+1 or an exact
+//     replay, while an adapter that stores one object per seq can accept
+//     gaps harmlessly. Either is conformant.
+//
+//     What this suite DOES check, since the 2026-09-02 audit, is that Head
+//     never goes BACKWARDS -- see HeadNeverRegressesOnAnOlderPublish below.
+//     That is not a matter of taste: service.VerifyLedger relies on it to
+//     tell a benign anchor backlog from a rollback, so an implementation
+//     that let Head regress would make an erased anchor read as "catch-up
+//     pending" (tamper-evident.md M-3/M-4). This package previously
+//     declared the whole area out of scope, which is how an adapter whose
+//     Head read a single mutable object's current version passed
+//     conformance.
+//
 //   - Concurrency safety of Publish. Design doc §8.3 describes the
 //     intended caller as a local retry queue -- i.e. Publish calls
 //     serialized by construction. core.Anchor's doc comment makes no
@@ -75,15 +79,25 @@
 //     prove this; it has to be verified by reading the adapter's own
 //     composition-root wiring. See docs/RUNBOOK.md's "Choosing an Anchor
 //     carrier" section for the judgment call this leaves to the deployer.
+//
 //  2. "Written content cannot be changed" (append-only / immutable). This
 //     suite's MismatchedReplayErrorsAndDoesNotCorrupt phase verifies the
 //     half of this that IS observable through the interface (Publish
 //     itself refuses to accept a different value for a seq already
-//     recorded). It cannot prove that nothing else -- an out-of-band admin
-//     console, a bucket-policy change, a second set of credentials --
-//     could mutate the underlying bytes without ever calling Publish.
-//     That is a deployment-configuration property, not something this
-//     interface's method set can expose.
+//     recorded). It cannot prove, from the interface alone, that nothing
+//     else -- an out-of-band admin console, a bucket-policy change, a
+//     second set of credentials -- could mutate the underlying bytes
+//     without ever calling Publish.
+//
+//     An implementation that CAN reach its own carrier out of band (every
+//     real one can: it holds the client) may hand that ability to this
+//     suite via WithOutOfBandWrite, which unlocks the
+//     HeadNeverRegressesAfterAnOutOfBandOlderWrite phase -- the one that
+//     actually exercises the attack the audit found (a plain PutObject
+//     with the ledger's own token, bypassing Publish entirely). Without
+//     the hook that phase is SKIPPED, and reported as skipped: not
+//     silently passed (working-agreements.md §3).
+//
 //  3. "Independently readable, without going through the ledger's own
 //     service" -- THIS one the suite exercises directly: see
 //     IndependentlyConstructedClientSeesSameState below.
@@ -92,6 +106,7 @@ package anchortest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -111,18 +126,61 @@ type Violation struct {
 func (v Violation) String() string { return v.Phase + ": " + v.Message }
 
 // phase is one ordered step of the scenario. run returns nil if the
-// implementation under test satisfied it, or a descriptive error if not.
+// implementation under test satisfied it, errSkipped if the suite was not
+// given what that phase needs, or a descriptive error if the implementation
+// violated the contract.
 type phase struct {
 	name string
 	run  func() error
 }
 
+// errSkipped is a phase reporting "I could not run", which is neither a pass
+// nor a violation. RunConformance surfaces it as a t.Skip (visible in test
+// output) and Check omits it from the violation list -- what it must never
+// become is an absent, silently-green phase (working-agreements.md §3:
+// "didn't run" and "ran and passed" must stay distinguishable).
+var errSkipped = errors.New("anchortest: phase skipped")
+
+// options collects the optional capabilities a caller can lend the suite.
+type options struct {
+	outOfBandWrite func(seq int64, head []byte) error
+}
+
+// Option configures RunConformance / Check.
+type Option func(*options)
+
+// WithOutOfBandWrite lends the suite the ability to write the carrier
+// WITHOUT going through Publish -- exactly what an attacker holding the
+// ledger's own storage credential has, and what core.Anchor's method set
+// cannot express (the 2026-09-02 audit's M-4: the R2 adapter's Publish
+// carefully refused an older seq, and a plain s3.PutObject with the same
+// token rolled the head back anyway).
+//
+// The function must write (seq, head) to the same backing store newAnchor
+// points at, using the implementation's native client, in the same encoding
+// Publish would produce -- e.g. for an S3-backed anchor, a raw PutObject of
+// the object body for that seq. It must NOT call Publish (that would test
+// nothing new: HeadNeverRegressesOnAnOlderPublish already covers the Publish
+// path).
+//
+// Supplying it unlocks HeadNeverRegressesAfterAnOutOfBandOlderWrite. An
+// implementation whose carrier genuinely cannot be written except through
+// Publish may omit it; the phase then reports as skipped.
+func WithOutOfBandWrite(write func(seq int64, head []byte) error) Option {
+	return func(o *options) { o.outOfBandWrite = write }
+}
+
 // phases builds the ordered scenario against a fresh newAnchor() instance.
 // Both Check and RunConformance iterate the same list, so there is exactly
 // one place the actual assertions live.
-func phases(newAnchor func() core.Anchor) []phase {
+func phases(newAnchor func() core.Anchor, opts ...Option) []phase {
 	a := newAnchor()
 	ctx := context.Background()
+
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 
 	head1 := fixture(0xA1)
 	head2 := fixture(0xB2)
@@ -258,7 +316,84 @@ func phases(newAnchor func() core.Anchor) []phase {
 				return nil
 			},
 		},
+		{
+			// core.Anchor doc: "Head MUST NEVER REGRESS. Once Head has
+			// returned seq N, no later call may return a seq lower than
+			// N." The half of that observable through Publish: offering an
+			// OLDER seq than the current head must not move Head back.
+			//
+			// Distinct from MismatchedReplayErrorsAndDoesNotCorrupt above,
+			// which covers the same seq with different bytes. This one is
+			// a DIFFERENT seq -- and it is the property
+			// service.VerifyLedger uses to separate "the anchor is behind,
+			// catch-up pending" (benign) from "the anchor went backwards"
+			// (tamper evidence). An Anchor that let Head regress would make
+			// an erased or rolled-back anchor look benign, which is the
+			// 2026-09-02 audit's M-3.
+			//
+			// Whether Publish returns an error or accepts the older seq as
+			// a no-op is left to the implementation; what it may not do is
+			// let the older value become Head's answer.
+			name: "HeadNeverRegressesOnAnOlderPublish",
+			run: func() error {
+				// Deliberately different bytes for seq 1 than the ones
+				// published earlier: an implementation that stores one
+				// object per seq should refuse this as a mismatched replay,
+				// and one that keeps a single head should refuse it as
+				// out-of-order. Either way Head must still be 2.
+				_ = a.Publish(ctx, 1, head2Different)
+				seq, head, err := a.Head(ctx)
+				if err != nil {
+					return fmt.Errorf("head after an older Publish attempt: unexpected error: %w", err)
+				}
+				if seq != 2 || !bytes.Equal(head, head2) {
+					return fmt.Errorf("head after Publish(1, ...) with the current head at seq 2 = (%d, %x), want unchanged (2, %x) -- "+
+						"Head must report the HIGHEST seq ever published, not the value of the last write",
+						seq, head, head2)
+				}
+				return nil
+			},
+		},
+		{
+			// The same guarantee against the attack that does not use
+			// Publish at all (2026-09-02 audit, tamper-evident.md M-4): a
+			// raw write to the carrier with the ledger's own credential.
+			// Requires WithOutOfBandWrite; skipped, and reported as
+			// skipped, without it.
+			name: "HeadNeverRegressesAfterAnOutOfBandOlderWrite",
+			run: func() error {
+				if o.outOfBandWrite == nil {
+					return errSkipped
+				}
+				if err := o.outOfBandWrite(1, head2Different); err != nil {
+					return fmt.Errorf("the supplied out-of-band write failed, so this phase could not test anything: %w", err)
+				}
+				seq, head, err := o.headFrom(newAnchor, ctx)
+				if err != nil {
+					return err
+				}
+				if seq != 2 || !bytes.Equal(head, head2) {
+					return fmt.Errorf("head after an out-of-band write of an OLDER seq = (%d, %x), want unchanged (2, %x) -- "+
+						"a party holding the carrier's write credential must not be able to roll the published head "+
+						"backwards; Head has to resolve the highest seq ever published, not the latest write",
+						seq, head, head2)
+				}
+				return nil
+			},
+		},
 	}
+}
+
+// headFrom reads Head through a FRESHLY constructed client. After an
+// out-of-band write, a client that has been caching (legitimately or not)
+// would otherwise answer from its own memory of its own writes, and the
+// phase would pass without testing the carrier.
+func (o options) headFrom(newAnchor func() core.Anchor, ctx context.Context) (int64, []byte, error) {
+	seq, head, err := newAnchor().Head(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("head from a freshly constructed client: unexpected error: %w", err)
+	}
+	return seq, head, nil
 }
 
 // Check runs the full ordered scenario against newAnchor and returns every
@@ -274,14 +409,30 @@ func phases(newAnchor func() core.Anchor) []phase {
 // Most callers should use RunConformance instead; Check is exposed for
 // programmatic use (e.g. a health-check endpoint) and for this package's
 // self-tests.
-func Check(newAnchor func() core.Anchor) []Violation {
+func Check(newAnchor func() core.Anchor, opts ...Option) []Violation {
 	var violations []Violation
-	for _, p := range phases(newAnchor) {
-		if err := p.run(); err != nil {
-			violations = append(violations, Violation{Phase: p.name, Message: err.Error()})
+	for _, p := range phases(newAnchor, opts...) {
+		err := p.run()
+		if err == nil || errors.Is(err, errSkipped) {
+			continue
 		}
+		violations = append(violations, Violation{Phase: p.name, Message: err.Error()})
 	}
 	return violations
+}
+
+// Skipped reports which phases could not run against newAnchor with the
+// given options -- the counterpart to Check for a caller that needs to know
+// what was NOT covered (a health endpoint reporting "conformant" should not
+// do so on the strength of phases that never executed).
+func Skipped(newAnchor func() core.Anchor, opts ...Option) []string {
+	var skipped []string
+	for _, p := range phases(newAnchor, opts...) {
+		if err := p.run(); errors.Is(err, errSkipped) {
+			skipped = append(skipped, p.name)
+		}
+	}
+	return skipped
 }
 
 // RunConformance runs the anchortest conformance suite against a
@@ -290,12 +441,17 @@ func Check(newAnchor func() core.Anchor) []Violation {
 // other Go test does). See the package doc for newAnchor's contract (same
 // backing store across calls, empty at the start) and for what is and is
 // not covered.
-func RunConformance(t *testing.T, newAnchor func() core.Anchor) {
+func RunConformance(t *testing.T, newAnchor func() core.Anchor, opts ...Option) {
 	t.Helper()
-	for _, p := range phases(newAnchor) {
+	for _, p := range phases(newAnchor, opts...) {
 		p := p
 		t.Run(p.name, func(t *testing.T) {
-			if err := p.run(); err != nil {
+			err := p.run()
+			switch {
+			case err == nil:
+			case errors.Is(err, errSkipped):
+				t.Skip("this phase needs a capability the caller did not supply (see anchortest's Option functions)")
+			default:
 				t.Error(err)
 			}
 		})

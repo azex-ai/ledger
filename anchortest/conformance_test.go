@@ -225,6 +225,15 @@ func (a *correctSharedAnchor) Publish(_ context.Context, seq int64, head []byte)
 		}
 		return nil
 	}
+	// core.Anchor's Head contract ("MUST NEVER REGRESS"): an older seq is
+	// refused rather than allowed to become the new head. This fake used to
+	// overwrite unconditionally, and the suite's own
+	// HeadNeverRegressesOnAnOlderPublish phase caught it the moment that
+	// phase existed -- a small demonstration that the phase is not
+	// vacuous.
+	if seq < a.seq {
+		return errors.New("correctSharedAnchor: refusing a seq older than the current head")
+	}
 	a.seq, a.head = seq, append([]byte(nil), head...)
 	return nil
 }
@@ -233,6 +242,81 @@ func (a *correctSharedAnchor) Head(_ context.Context) (int64, []byte, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.seq, a.head, nil
+}
+
+// -----------------------------------------------------------------------
+// fakeLetsHeadRegress: violates core.Anchor's "Head MUST NEVER REGRESS".
+// It is the shape of this library's own R2 adapter before the 2026-09-02
+// audit -- Head read a single mutable location's CURRENT value, so writing
+// an older seq moved the answer backwards, which made an erased or
+// rolled-back anchor indistinguishable from one that is merely behind
+// (tamper-evident.md M-3/M-4).
+// -----------------------------------------------------------------------
+
+type fakeLetsHeadRegress struct {
+	mu   sync.Mutex
+	seq  int64
+	head []byte
+}
+
+func (f *fakeLetsHeadRegress) Publish(_ context.Context, seq int64, head []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.seq != 0 && seq == f.seq && !bytes.Equal(f.head, head) {
+		return errors.New("fakeLetsHeadRegress: mismatched replay")
+	}
+	// BUG: whatever was written last becomes the head, older seq included.
+	f.seq, f.head = seq, append([]byte(nil), head...)
+	return nil
+}
+
+func (f *fakeLetsHeadRegress) Head(_ context.Context) (int64, []byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.seq, f.head, nil
+}
+
+func TestCheck_CatchesHeadRegression(t *testing.T) {
+	shared := &fakeLetsHeadRegress{}
+	violations := anchortest.Check(func() core.Anchor { return shared })
+	mustFindViolation(t, violations, "HeadNeverRegressesOnAnOlderPublish")
+}
+
+// TestCheck_OutOfBandPhaseIsSkippedNotPassedWithoutTheHook pins the
+// working-agreements.md §3 half of the new phase: an implementation that
+// does not lend the suite an out-of-band writer must see the phase reported
+// as SKIPPED, never counted as a pass. A conformance suite that silently
+// drops a phase it cannot run is how "we check immutability" became true on
+// paper and false in fact.
+func TestCheck_OutOfBandPhaseIsSkippedNotPassedWithoutTheHook(t *testing.T) {
+	shared := &correctSharedAnchor{}
+	skipped := anchortest.Skipped(func() core.Anchor { return shared })
+	found := false
+	for _, name := range skipped {
+		if name == "HeadNeverRegressesAfterAnOutOfBandOlderWrite" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("without WithOutOfBandWrite the out-of-band phase must report as skipped; skipped = %v", skipped)
+	}
+}
+
+// TestCheck_CatchesOutOfBandHeadRegression proves the out-of-band phase is
+// not vacuous when the hook IS supplied: a carrier whose stored head can be
+// rewritten behind Publish's back is caught.
+func TestCheck_CatchesOutOfBandHeadRegression(t *testing.T) {
+	shared := &fakeLetsHeadRegress{}
+	violations := anchortest.Check(
+		func() core.Anchor { return shared },
+		anchortest.WithOutOfBandWrite(func(seq int64, head []byte) error {
+			shared.mu.Lock()
+			defer shared.mu.Unlock()
+			shared.seq, shared.head = seq, append([]byte(nil), head...)
+			return nil
+		}),
+	)
+	mustFindViolation(t, violations, "HeadNeverRegressesAfterAnOutOfBandOlderWrite")
 }
 
 func TestCheck_PassesWellBehavedImplementation(t *testing.T) {

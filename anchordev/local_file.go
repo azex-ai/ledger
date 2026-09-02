@@ -42,10 +42,23 @@ type LocalFileAnchor struct {
 
 var _ core.Anchor = (*LocalFileAnchor)(nil)
 
-// NewLocalFileAnchor returns a LocalFileAnchor persisting to path. The
-// parent directory must already exist; the file itself is created on the
-// first Publish call.
-func NewLocalFileAnchor(path string) *LocalFileAnchor {
+// NewLocalFileAnchorForDevelopment returns a LocalFileAnchor persisting to
+// path. The parent directory must already exist; the file itself is created
+// on the first Publish call.
+//
+// The name is the gate (2026-09-02 audit, tamper-evident.md m-1 / C-m1).
+// This package's prose has always said DEV/TEST ONLY, and prose is not a
+// gate: a composition root wiring `anchordev.NewLocalFileAnchor(path)` into
+// production read like any other adapter, and the worker's startup log
+// reported `attestation_anchor: true` for it exactly as it did for a real
+// external carrier. Every other dev-only feature in this library requires
+// the deployer to say so out loud (dev_credit needs ENV=dev plus
+// DEV_CREDIT_ENABLED plus an explicit preset install), so this one does too
+// -- here, by making the words "ForDevelopment" appear at the call site,
+// which cannot be forgotten silently the way a comment can. The runtime half
+// is service.StartupReport.AttestationAnchorType, which now names the
+// anchor's type and warns when it is this one.
+func NewLocalFileAnchorForDevelopment(path string) *LocalFileAnchor {
 	return &LocalFileAnchor{path: path}
 }
 

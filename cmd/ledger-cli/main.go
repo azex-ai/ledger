@@ -334,7 +334,7 @@ func cmdVerify(ctx context.Context, pool *pgxpool.Pool, svc *ledger.Service, arg
 		return fmt.Errorf("--pubkey-hex must decode to %d bytes, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
 	}
 
-	anchor := anchordev.NewLocalFileAnchor(*anchorFile)
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(*anchorFile)
 	verifier := authdev.NewLocalVerifier(ed25519.PublicKey(pubkeyBytes), *keyID)
 	store := postgres.NewAttestationStore(pool)
 

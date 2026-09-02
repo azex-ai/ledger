@@ -90,7 +90,7 @@ func TestVerifyLedger_TamperedMerkleRootAlone(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-1")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-merkle-alone"))
@@ -139,7 +139,7 @@ func TestVerifyLedger_TamperedLeafHashAlone(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-5")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-leaf-alone"))
@@ -202,7 +202,7 @@ func TestVerifyLedger_MerkleRootCheckSkippedForLegacyEmptySentinel(t *testing.T)
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-2")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 
 	entries, err := attestStore.UncoveredEntries(ctx, 100)
 	require.NoError(t, err)
@@ -245,7 +245,7 @@ func TestVerifyLedger_LocalizesTamperedEntry_SelfContainedNoReferenceNeeded(t *t
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-3")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-merkle-localize"))
@@ -293,7 +293,7 @@ func TestVerifyLedger_LocalizesTamperedEntryWithReference(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-4")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-merkle-ref-fallback"))
 	tx := beginWithCleanup(t, ctx, pool)
@@ -351,7 +351,7 @@ func TestVerifyLedger_NoLocalizationWithoutReference(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-merkle-key-6")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-merkle-no-ref"))
 	tx := beginWithCleanup(t, ctx, pool)

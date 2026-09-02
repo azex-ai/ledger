@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"sort"
 
 	"github.com/azex-ai/ledger/core"
 )
@@ -83,6 +84,8 @@ func (a *LocalAttestor) Sign(ctx context.Context, digest []byte) ([]byte, string
 // holds only public keys, so it can run in a process that never has
 // access to the private signing key at all (core.AuthVerifier's doc
 // comment: "verification can run entirely outside the database host").
+// Immutable after construction (there is no Register method), which is why
+// Verify reads keys without a lock.
 type LocalVerifier struct {
 	keys map[string]ed25519.PublicKey
 }
@@ -90,8 +93,10 @@ type LocalVerifier struct {
 var _ core.AuthVerifier = (*LocalVerifier)(nil)
 
 // NewLocalVerifier builds a LocalVerifier from a single public key/keyID
-// pair. Use this directly (instead of NewLocalAttestor) in a process that
-// only needs to verify, never sign.
+// pair -- the convenience constructor for a deployment that has never
+// rotated. Use this directly (instead of NewLocalAttestor) in a process
+// that only needs to verify, never sign. To verify across a rotation, use
+// NewLocalVerifierSet.
 //
 // KEY ROTATION CAVEAT: this verifier has no notion of key validity windows or
 // revocation — a keyID it holds verifies any digest, forever. Because old
@@ -103,6 +108,64 @@ var _ core.AuthVerifier = (*LocalVerifier)(nil)
 // deliberately does not, and a production verifier should.
 func NewLocalVerifier(pub ed25519.PublicKey, keyID string) *LocalVerifier {
 	return &LocalVerifier{keys: map[string]ed25519.PublicKey{keyID: pub}}
+}
+
+// NewLocalVerifierSet builds a LocalVerifier holding SEVERAL key
+// generations at once -- what a deployment that has rotated its P5 signing
+// key needs, and what this package could not express at all before the
+// 2026-09-02 audit (tamper-evident.md M-5 / C-M5).
+//
+// Why it matters more than it looks: journals are append-only and each one
+// carries the key id it was signed with. A verifier that holds only the
+// CURRENT key answers ErrUnknownAuthKey for every journal signed under the
+// previous one, which core.VerifyJournalAuth wraps as
+// ErrUnauthorizedJournal, which makes postgres.VerifiedBalanceStore report
+// that dimension UNDEFINED -- so with RequireVerifiedBalance=true, a
+// routine rotation refuses withdrawals for every holder with history. I-45
+// already told operators to "register the retired key to restore
+// verification coverage"; until this constructor existed, the library
+// shipped no way to do it.
+//
+// keys maps key id -> public key and is COPIED: the returned verifier is
+// immutable, so Verify needs no lock and no caller can widen the trusted
+// set after construction (deliberately no Register method -- a verifier
+// whose trusted keys can change at runtime is a different, larger security
+// surface than this package is willing to own).
+//
+// Rotation procedure, plus why rotating a LEAKED key does not shrink its
+// power, are in docs/RUNBOOK.md's "P5 signing key rotation" section. The
+// caveat on NewLocalVerifier applies here identically -- once registered,
+// a key id verifies any digest, forever.
+func NewLocalVerifierSet(keys map[string]ed25519.PublicKey) (*LocalVerifier, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("authdev: verifier needs at least one public key: %w", core.ErrInvalidInput)
+	}
+	copied := make(map[string]ed25519.PublicKey, len(keys))
+	for keyID, pub := range keys {
+		if keyID == "" {
+			return nil, fmt.Errorf("authdev: key id must not be empty: %w", core.ErrInvalidInput)
+		}
+		if len(pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("authdev: public key for key id %q must be %d bytes, got %d: %w",
+				keyID, ed25519.PublicKeySize, len(pub), core.ErrInvalidInput)
+		}
+		copied[keyID] = pub
+	}
+	return &LocalVerifier{keys: copied}, nil
+}
+
+// KeyIDs returns the key ids this verifier trusts, for an operator-facing
+// startup log or health endpoint ("which generations can this process
+// verify?"). Public keys are deliberately not returned: nothing needs them
+// back out, and an accessor invites callers to treat this verifier as a key
+// store.
+func (v *LocalVerifier) KeyIDs() []string {
+	out := make([]string, 0, len(v.keys))
+	for keyID := range v.keys {
+		out = append(out, keyID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Verify implements core.AuthVerifier.

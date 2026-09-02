@@ -139,3 +139,93 @@ func TestNewLocalVerifier_StandaloneFromPublicKey(t *testing.T) {
 		t.Errorf("Verify: unexpected error: %v", err)
 	}
 }
+
+// TestLocalVerifier_MultiKeyVerifiesBothGenerations pins C-M5's unit half
+// (2026-09-02 audit, tamper-evident.md M-5): a verifier must be able to hold
+// more than one key generation, because journals signed under a retired key
+// stay in the ledger forever (append-only) and still have to verify.
+//
+// The end-to-end consequence -- a rotation refusing withdrawals for every
+// holder with history -- is pinned at the facade in
+// TestService_KeyRotation_OldGenerationMustStayRegistered.
+func TestLocalVerifier_MultiKeyVerifiesBothGenerations(t *testing.T) {
+	oldAttestor, oldPub := keyGeneration(t, "gen-old")
+	newAttestor, newPub := keyGeneration(t, "gen-new")
+
+	digest := []byte("a 32-byte-ish canonical digest..")
+	oldSig, oldKeyID, err := oldAttestor.Sign(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("sign with the old key: %v", err)
+	}
+	newSig, newKeyID, err := newAttestor.Sign(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("sign with the new key: %v", err)
+	}
+
+	both, err := NewLocalVerifierSet(map[string]ed25519.PublicKey{
+		"gen-old": oldPub,
+		"gen-new": newPub,
+	})
+	if err != nil {
+		t.Fatalf("NewLocalVerifierSet: %v", err)
+	}
+	if err := both.Verify(context.Background(), digest, oldSig, oldKeyID); err != nil {
+		t.Fatalf("the retired generation must still verify: %v", err)
+	}
+	if err := both.Verify(context.Background(), digest, newSig, newKeyID); err != nil {
+		t.Fatalf("the current generation must verify: %v", err)
+	}
+	if got := both.KeyIDs(); len(got) != 2 || got[0] != "gen-new" || got[1] != "gen-old" {
+		t.Fatalf("KeyIDs() = %v, want both generations sorted", got)
+	}
+
+	// The new-key-only verifier is what a naive rotation produces: the
+	// retired generation becomes unknown, which core.VerifyJournalAuth turns
+	// into ErrUnauthorizedJournal and the withdrawal gate turns into a
+	// refusal for every holder with history.
+	newOnly, err := NewLocalVerifierSet(map[string]ed25519.PublicKey{"gen-new": newPub})
+	if err != nil {
+		t.Fatalf("NewLocalVerifierSet: %v", err)
+	}
+	err = newOnly.Verify(context.Background(), digest, oldSig, oldKeyID)
+	if !errors.Is(err, core.ErrUnknownAuthKey) {
+		t.Fatalf("dropping the retired key must report ErrUnknownAuthKey (a coverage gap, not tamper evidence), got %v", err)
+	}
+}
+
+// TestNewLocalVerifierSet_RejectsUnusableKeyMaterial pins the constructor's
+// fail-at-construction contract: a verifier that silently accepted an empty
+// set, an empty key id, or a wrong-length public key would fail later, inside
+// the ledger, as "unauthorized journal" -- indistinguishable from tampering.
+func TestNewLocalVerifierSet_RejectsUnusableKeyMaterial(t *testing.T) {
+	_, pub := keyGeneration(t, "gen-1")
+
+	cases := map[string]map[string]ed25519.PublicKey{
+		"empty set":       {},
+		"empty key id":    {"": pub},
+		"short publickey": {"gen-1": ed25519.PublicKey([]byte{1, 2, 3})},
+	}
+	for name, keys := range cases {
+		if _, err := NewLocalVerifierSet(keys); !errors.Is(err, core.ErrInvalidInput) {
+			t.Fatalf("%s: expected ErrInvalidInput, got %v", name, err)
+		}
+	}
+}
+
+// keyGeneration returns an Attestor plus the public half of the same key.
+func keyGeneration(t *testing.T, keyID string) (core.Attestor, ed25519.PublicKey) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	attestor, _, err := NewLocalAttestor(priv.Seed(), keyID)
+	if err != nil {
+		t.Fatalf("NewLocalAttestor: %v", err)
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("unexpected public key type %T", priv.Public())
+	}
+	return attestor, pub
+}

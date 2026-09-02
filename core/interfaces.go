@@ -785,5 +785,25 @@ type Anchor interface {
 	Publish(ctx context.Context, seq int64, head []byte) error
 	// Head returns the highest seq the anchor knows about, or 0 if empty.
 	// It must read from the anchor, never from the ledger database.
+	//
+	// MUST NEVER REGRESS. Once Head has returned seq N, no later call may
+	// return a seq lower than N. "The highest seq ever published" is the
+	// contract; "the value of the last write" is not. The distinction is
+	// load-bearing and was violated by this library's own R2 adapter, which
+	// read a single mutable object's CURRENT version -- so one out-of-band
+	// PutObject with the ledger's own credential rolled the answer
+	// backwards, and the Object-Lock-protected older versions that held the
+	// truth were read by nothing (2026-09-02 audit, tamper-evident.md M-4).
+	// An implementation stores one object per seq, or resolves versions and
+	// takes the maximum; it does not simply read whatever was written last.
+	//
+	// service.VerifyLedger depends on exactly this property to tell a
+	// benign, self-healing backlog (anchor behind the DB chain) from a
+	// rollback (anchor reporting less than a recorded prior observation):
+	// with a regressing Head, the second is indistinguishable from the
+	// first, and an erased anchor reads as "catch-up pending".
+	// anchortest's HeadNeverRegressesOnAnOlderPublish phase checks the half
+	// of this observable through Publish; the out-of-band half needs the
+	// implementation's own client (see anchortest.WithOutOfBandWrite).
 	Head(ctx context.Context) (seq int64, head []byte, err error)
 }

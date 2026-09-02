@@ -27,7 +27,7 @@ func TestVerifyLedger_VerifiedOnAHealthyChain(t *testing.T) {
 
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(seedAttestor)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, seedAttestor, nil, anchor, core.NewEngine())
 
 	// Post a couple of real, signed journals through the normal write
@@ -65,7 +65,7 @@ func TestVerifyLedger_NotRunWithoutVerifier(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestStore := postgres.NewAttestationStore(pool)
 	queries := postgres.NewQueryStore(pool)
 
@@ -115,7 +115,7 @@ func TestVerifyLedger_TamperedOnBrokenChainLink(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-key-4")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	_, _, err = attestSvc.RunAttestBatch(ctx, 100) // seq 1
@@ -150,7 +150,7 @@ func TestVerifyLedger_TamperedOnDeletedEntry(t *testing.T) {
 	attestor, verifier, err := ed25519KeyPair(t, "verify-key-5")
 	require.NoError(t, err)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	// A balanced pair (P3's migration 044 deferred constraint trigger now
@@ -215,7 +215,7 @@ func TestVerifyLedger_EmptyAnchorIsNotRunNotDrift(t *testing.T) {
 	_, _, err = attestSvc.RunAttestBatch(ctx, 100)
 	require.NoError(t, err)
 
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt")) // empty
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt")) // empty
 	queries := postgres.NewQueryStore(pool)
 	report := service.VerifyLedger(ctx, attestStore, anchor, verifier, queries, service.VerifyConfig{})
 	require.Equal(t, service.VerifyStatusNotRun, report.Status, "report: %+v", report)

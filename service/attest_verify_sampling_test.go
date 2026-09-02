@@ -42,7 +42,7 @@ func TestVerifyLedger_SamplesTheNewestJournalsNotTheOldest(t *testing.T) {
 
 	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
 	attestStore := postgres.NewAttestationStore(pool)
-	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt"))
+	anchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
 	attestSvc := service.NewAttestationService(attestStore, attestor, nil, anchor, core.NewEngine())
 
 	// 25 > the default sample size of 20, so the oldest page and the newest

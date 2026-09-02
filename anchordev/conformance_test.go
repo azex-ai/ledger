@@ -26,6 +26,6 @@ import (
 func TestLocalFileAnchor_Conformance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "anchor.txt")
 	anchortest.RunConformance(t, func() core.Anchor {
-		return anchordev.NewLocalFileAnchor(path)
+		return anchordev.NewLocalFileAnchorForDevelopment(path)
 	})
 }

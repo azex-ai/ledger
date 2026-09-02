@@ -9,7 +9,7 @@ import (
 
 func TestLocalFileAnchor_HeadOnEmptyFile(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 
 	seq, head, err := a.Head(context.Background())
 	if err != nil {
@@ -22,7 +22,7 @@ func TestLocalFileAnchor_HeadOnEmptyFile(t *testing.T) {
 
 func TestLocalFileAnchor_PublishAndHead(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 	ctx := context.Background()
 
 	head1 := make([]byte, 32)
@@ -57,7 +57,7 @@ func TestLocalFileAnchor_PublishAndHead(t *testing.T) {
 
 func TestLocalFileAnchor_IdempotentReplay(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 	ctx := context.Background()
 
 	head1 := make([]byte, 32)
@@ -73,7 +73,7 @@ func TestLocalFileAnchor_IdempotentReplay(t *testing.T) {
 
 func TestLocalFileAnchor_RejectsMismatchedReplay(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 	ctx := context.Background()
 
 	head1 := make([]byte, 32)
@@ -91,7 +91,7 @@ func TestLocalFileAnchor_RejectsMismatchedReplay(t *testing.T) {
 
 func TestLocalFileAnchor_RejectsNonSequentialSeq(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 	ctx := context.Background()
 
 	head := make([]byte, 32)
@@ -116,7 +116,7 @@ func TestLocalFileAnchor_RejectsNonSequentialSeq(t *testing.T) {
 // should not corrupt this dev tool's single-file state under a race.
 func TestLocalFileAnchor_ConcurrentIdenticalReplayIsSafe(t *testing.T) {
 	dir := t.TempDir()
-	a := NewLocalFileAnchor(filepath.Join(dir, "anchor.txt"))
+	a := NewLocalFileAnchorForDevelopment(filepath.Join(dir, "anchor.txt"))
 	ctx := context.Background()
 
 	head := make([]byte, 32)
