@@ -78,27 +78,18 @@
 -- ledger_block_mutation(), a uid for external reference, and no UPDATE grant.
 
 ------------------------------------------------------------------------------
--- 0. Temporary ownership membership.
---
--- Every table altered below is owned by ledger_owner (001 §14 transferred
--- them), and ALTER TABLE ... ADD CONSTRAINT is an owner-gated action. 001
--- deliberately REVOKEs the runner's ledger_owner membership when it finishes,
--- so a later migration has to re-take it for the length of its own
--- transaction -- the same "keepsake" shape 001 uses for its schema_migrations
--- re-grant. The membership is dropped again at the end of this file.
---
--- Migration 016 got away with a bare `ALTER TABLE ... DISABLE TRIGGER` only
--- because the runner in our own test and dev setups happens to be a
--- superuser; that is exactly the assumption threat-model.md flags as
--- untested. Taking the membership explicitly makes this file work under a
--- NOSUPERUSER bootstrap credential too.
+-- 0. (Removed 2026-09-03.) This file originally took and then REVOKEd a
+-- temporary ledger_owner membership for the runner, copying 001's keepsake
+-- shape. That REVOKE also tore down the membership postgres.Migrate now holds
+-- for every migration after 001 (D-M2, 2026-09-02 audit) -- with only one
+-- grantor row, Postgres cannot tell the two grants apart -- and a NOSUPERUSER
+-- bootstrap credential died at 020 as a result. Migrate provides the
+-- elevation window; migrations must not manage their own membership. The
+-- static gate postgres.TestMigrationsDoNotManageLedgerOwnerMembership
+-- refuses any recurrence. Deliberately edited after merge under the same
+-- exception as 007 (remediation contract §8): golang-migrate does not
+-- checksum files, and installed databases are unaffected.
 ------------------------------------------------------------------------------
-
-DO $$
-DECLARE runner text := current_user;
-BEGIN
-    EXECUTE format('GRANT ledger_owner TO %I WITH INHERIT TRUE', runner);
-END $$;
 
 ------------------------------------------------------------------------------
 -- 1. NaN rejection
@@ -251,12 +242,3 @@ GRANT SELECT ON public.anchor_observations_id_seq TO ledger_ro;
 ALTER TABLE    public.anchor_observations        OWNER TO ledger_owner;
 ALTER SEQUENCE public.anchor_observations_id_seq OWNER TO ledger_owner;
 
-------------------------------------------------------------------------------
--- 3. Drop the temporary membership taken in section 0.
-------------------------------------------------------------------------------
-
-DO $$
-DECLARE runner text := current_user;
-BEGIN
-    EXECUTE format('REVOKE ledger_owner FROM %I', runner);
-END $$;
