@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { formatAmount, formatSignedAmount } from "../../src/lib/utils/display";
+import { formatAmount, formatSignedAmount, formatCompact } from "../../src/lib/utils/display";
 
 /**
  * Pins `formatAmount`/`formatSignedAmount` against the `financial-display`
@@ -64,6 +64,49 @@ describe("formatAmount — financial-display banding table", () => {
 
   test("negative zero displays as the unsigned zero form", () => {
     expect(formatAmount("-0")).toBe("0.00");
+  });
+
+  // J-11 (2026-09-02 web audit): an absent amount and a real zero were both
+  // "0.00" — indistinguishable on screen. `parseUnits("", 18)` parses to
+  // `0n`, so this must be checked ahead of the zero branch.
+  test("empty / whitespace-only string -> \"—\" (missing), distinct from a real zero", () => {
+    expect(formatAmount("")).toBe("—");
+    expect(formatAmount("   ")).toBe("—");
+    expect(formatAmount("0")).not.toBe(formatAmount(""));
+  });
+});
+
+describe("formatCompact — dashboard-scale K/M/B notation", () => {
+  test("< 1000 falls back to formatAmount, not the docstring's stale '999'", () => {
+    // M3's docstring claimed formatCompact("999") -> "999"; actual behavior
+    // (falls back to formatAmount's >= 1 band, 4 decimals) is "999.0000".
+    expect(formatCompact("999")).toBe("999.0000");
+  });
+
+  test("K / M / B bands", () => {
+    expect(formatCompact("45678")).toBe("45.7K");
+    expect(formatCompact("1234567.89")).toBe("1.23M");
+    expect(formatCompact("1500000000")).toBe("1.50B");
+  });
+
+  test("negative values keep the sign in every band", () => {
+    expect(formatCompact("-45678")).toBe("-45.7K");
+    expect(formatCompact("-1234567.89")).toBe("-1.23M");
+  });
+
+  test("zero -> \"0\"", () => {
+    expect(formatCompact("0")).toBe("0");
+  });
+
+  // J-10 (2026-09-02 web audit): the docstring said "callers must clamp
+  // first" but had zero callers doing so — the function now clamps itself
+  // near Number.MAX_SAFE_INTEGER before the lossy Number conversion, so an
+  // absurdly large value degrades to the B band's ceiling instead of
+  // overflowing into NaN/Infinity.
+  test("values far beyond the Number-safe range clamp instead of overflowing", () => {
+    const huge = formatCompact("999999999999999999"); // 1e18ish
+    expect(huge.endsWith("B")).toBe(true);
+    expect(huge).not.toMatch(/NaN|Infinity/);
   });
 });
 

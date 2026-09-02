@@ -151,7 +151,8 @@ function SystemBalancesCard() {
 
   const chartData = (data ?? []).map((b) => ({
     label: `${classCode(b.classification_uid)} · ${currencyCode(b.currency_uid)}`,
-    balance: parseFloat(b.total_balance), // chart display only — intentional lossy conversion
+    balance: parseFloat(b.total_balance), // chart geometry only — intentional lossy conversion
+    balanceRaw: b.total_balance, // tooltip/axis formatter reads this, never `balance` (J-5)
   }));
 
   return (
@@ -185,6 +186,7 @@ function SystemBalancesCard() {
                 axisLine={false}
                 tickLine={false}
                 width={60}
+                tickFormatter={(v) => formatAmount(String(v))}
               />
               <Tooltip
                 cursor={{ fill: "color-mix(in oklch, var(--muted) 20%, transparent)" }}
@@ -195,6 +197,10 @@ function SystemBalancesCard() {
                   color: "var(--foreground)",
                   fontSize: "12px",
                   boxShadow: "0 4px 12px oklch(0 0 0 / 0.15)",
+                }}
+                formatter={(value, name, entry) => {
+                  const payload = entry?.payload as { balanceRaw?: string } | undefined;
+                  return [formatAmount(payload?.balanceRaw ?? String(value)), name];
                 }}
               />
               <Bar dataKey="balance" fill="var(--accent)" radius={[6, 6, 0, 0]} />

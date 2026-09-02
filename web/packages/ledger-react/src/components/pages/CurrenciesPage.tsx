@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useCurrencies,
@@ -31,6 +31,8 @@ function CreateDialog() {
   // exponent kept as string while typing so the field can be empty; "0" is a
   // legal value (JPY) and must stay distinguishable from "not filled in".
   const [form, setForm] = useState({ code: "", name: "", exponent: "" });
+  // J-8 (2026-09-02 web audit): see ClassificationsPage's matching comment.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateCurrency();
 
   return (
@@ -43,15 +45,36 @@ function CreateDialog() {
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
             <Label htmlFor="cur-code">Code</Label>
-            <Input id="cur-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="USDT" />
+            <Input
+              id="cur-code"
+              value={form.code}
+              onChange={(e) => {
+                setForm({ ...form, code: e.target.value });
+                setFieldErrors(({ code: _code, ...rest }) => rest);
+              }}
+              placeholder="USDT"
+              aria-invalid={fieldErrors.code ? true : undefined}
+            />
+            {fieldErrors.code && <p className="text-xs text-destructive">{fieldErrors.code}</p>}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="cur-name">Name</Label>
-            <Input id="cur-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Tether USD" />
+            <Input
+              id="cur-name"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setFieldErrors(({ name: _name, ...rest }) => rest);
+              }}
+              placeholder="Tether USD"
+              aria-invalid={fieldErrors.name ? true : undefined}
+            />
+            {fieldErrors.name && <p className="text-xs text-destructive">{fieldErrors.name}</p>}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="cur-exponent">Decimal places (0-18)</Label>
             <Input id="cur-exponent" type="number" min={0} max={18} step={1} value={form.exponent} onChange={(e) => setForm({ ...form, exponent: e.target.value })} placeholder="e.g. 2 for USD, 0 for JPY, 18 for wei" />
+            {fieldErrors.exponent && <p className="text-xs text-destructive">{fieldErrors.exponent}</p>}
           </div>
         </div>
         <DialogFooter>
@@ -60,7 +83,14 @@ function CreateDialog() {
               toast.success("Currency created");
               setOpen(false);
             },
-            onError: (err) => toast.error(errorText(err, "Failed to create currency")),
+            onError: (err) => {
+              const fields = apiFieldErrors(err);
+              if (Object.keys(fields).length > 0) {
+                setFieldErrors(fields);
+              } else {
+                toast.error(errorText(err, "Failed to create currency"));
+              }
+            },
           })} disabled={mutation.isPending || !form.code || !form.name || form.exponent.trim() === "" || Number.isNaN(Number(form.exponent)) || Number(form.exponent) < 0 || Number(form.exponent) > 18}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -126,7 +156,7 @@ export function CurrenciesPage() {
         />
       ) : (
         <>
-        <Table className="min-w-[720px]">
+        <Table aria-label="Currencies" className="min-w-[720px]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[220px]">ID</TableHead>

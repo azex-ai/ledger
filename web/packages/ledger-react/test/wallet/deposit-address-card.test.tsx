@@ -96,6 +96,24 @@ describe.each([
     ).toBeInTheDocument();
   });
 
+  // J-22 (2026-09-02 web audit): assets is now a compile-time non-empty
+  // tuple (see ./deposit-address-card-types.ts), but a JS caller not
+  // type-checked by this package's tsc can still pass `[]` — the runtime
+  // guard below must never render the empty-list warning
+  // ("Only send  on Ethereum") that was the actual bug.
+  test("a runtime-bypassed empty assets array never renders the blank warning", async () => {
+    server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
+    render(wrap(<Card network="Ethereum" assets={[] as unknown as [string, ...string[]]} />));
+
+    await waitFor(() =>
+      expect(screen.getByText("Your deposit address")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/Only send\s+on/, { exact: false })).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/contact support/, { exact: false }),
+    ).toBeInTheDocument();
+  });
+
   test("copying the address writes it to the clipboard", async () => {
     server.use(http.get(`${BASE}/holder/deposit-address`, () => ok(depositAddress())));
     render(wrap(<Card network="Ethereum" assets={["USDC"]} />));

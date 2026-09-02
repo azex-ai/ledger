@@ -1,10 +1,57 @@
-import { screen, waitFor } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { describe, expect, test, vi } from "vitest";
+import { toast } from "sonner";
+import { toast as herouiToast } from "@heroui/react";
 import { CurrenciesPage } from "../../src/components/pages/CurrenciesPage";
 import { ClassificationsPage } from "../../src/components/pages/ClassificationsPage";
+import { ClassificationsPage as HerouiClassificationsPage } from "../../src/heroui/pages/ClassificationsPage";
 import { JournalTypesPage } from "../../src/components/pages/JournalTypesPage";
 import { TemplatesPage } from "../../src/components/pages/TemplatesPage";
-import { renderPage, server, getOk } from "./render-page";
+import { renderPage, server, getOk, BASE } from "./render-page";
+
+// J-8 (2026-09-02 web audit): server-side field-level validation errors
+// (api-contract.md §1's message.fields) used to collapse into the same
+// generic toast as any other error — no page read `err.apiError.fields`.
+// Pin: a create failure with `fields` renders the field-specific message
+// inline (not a toast), on both skins.
+describe.each([
+  ["shadcn", ClassificationsPage],
+  ["heroui", HerouiClassificationsPage],
+])("ClassificationsPage (%s) — create field errors", (_skin, Page) => {
+  test("a 'code already exists' field error renders inline, not as a toast", async () => {
+    const errorSpy = vi.spyOn(toast, "error").mockImplementation(() => "" as never);
+    const dangerSpy = vi.spyOn(herouiToast, "danger").mockImplementation(() => "" as never);
+    server.use(
+      getOk("/api/v1/classifications", []),
+      http.post(`${BASE}/api/v1/classifications`, () =>
+        HttpResponse.json(
+          {
+            code: 12003,
+            message: { text: "invalid input", fields: { code: "a classification with this code already exists" } },
+            data: null,
+          },
+          { status: 400 },
+        ),
+      ),
+    );
+    renderPage(<Page />);
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const codeInput = await screen.findByPlaceholderText("main_wallet");
+    fireEvent.change(codeInput, { target: { value: "main_wallet" } });
+    fireEvent.change(screen.getByPlaceholderText("Main Wallet"), { target: { value: "Main Wallet" } });
+    const submitButtons = await screen.findAllByRole("button", { name: "Create" });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("a classification with this code already exists"),
+      ).toBeInTheDocument(),
+    );
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(dangerSpy).not.toHaveBeenCalled();
+  });
+});
 
 describe("CurrenciesPage", () => {
   test("renders heading and currency rows with a Deactivate action", async () => {

@@ -2,8 +2,11 @@
  * Decimal primitives — re-exports viem's battle-tested BigInt ↔ string
  * conversion, plus ledger-specific display helpers that viem doesn't have.
  *
- * Consumer code should prefer viem-style usage:
- *   import { parseUnits, formatUnits } from "@azex/ledger-react";
+ * Consumer code should prefer viem-style usage. `parseUnits`/`formatUnits`
+ * are re-exported from every package entry (root, `./headless`, `./heroui`,
+ * `./wallet*` — J-9, 2026-09-02 web audit); pick the subpath you're already
+ * importing the rest of your ledger-react API from, e.g.:
+ *   import { parseUnits, formatUnits } from "@azex/ledger-react/headless";
  *   const wei = parseUnits("1.5", 18);
  */
 

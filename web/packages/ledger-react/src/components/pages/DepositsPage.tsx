@@ -262,7 +262,7 @@ export function DepositsPage() {
         />
       ) : (
         <>
-          <Table className="min-w-[900px]">
+          <Table aria-label="Deposits" className="min-w-[900px]">
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[220px]">ID</TableHead>

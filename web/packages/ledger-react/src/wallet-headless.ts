@@ -33,3 +33,34 @@ export {
   useEnsureWalletDepositAddress,
 } from "./wallet/use-deposit-address";
 export { walletKeys, walletKeyPrefix } from "./wallet/keys";
+
+// Display / decimal utilities (J-9, 2026-09-02 web audit) — same rationale
+// as the root headless.ts: a host building its own UI on WalletBalance /
+// WalletTransaction / WalletHold's NUMERIC(30,18) strings needs these to
+// avoid reimplementing financial.md's banding table.
+export {
+  formatAmount,
+  formatSignedAmount,
+  formatCompact,
+  validateAmount,
+  formatUTC,
+  formatDateUTC,
+  parseUnits,
+  formatUnits,
+  parseEther,
+  formatEther,
+  parseGwei,
+  formatGwei,
+  leadingZeros,
+  significantDigits,
+  addAmounts,
+  subAmounts,
+  gtAmount,
+  gteAmount,
+  isZeroAmount,
+  getAddress,
+  isAddress,
+  isAddressEqual,
+  shortenAddress,
+  shortenHash,
+} from "./lib/utils";

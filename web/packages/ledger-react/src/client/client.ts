@@ -86,7 +86,23 @@ function qs(
 }
 
 export function createLedgerClient(config: LedgerClientConfig) {
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  async function request<T>(
+    path: string,
+    init?: RequestInit & {
+      /**
+       * Skip the automatic `Idempotency-Key` header entirely. For the rare
+       * endpoint that derives its own key server-side and 400s if one is
+       * supplied (`POST /journals/{uid}/reverse` — J-15, 2026-09-02 web
+       * audit): `idempotencyHeaderAliasMiddleware` aliases ANY
+       * `Idempotency-Key` header into the request body's `idempotency_key`
+       * field, so the usual "omit it from the body and let the default
+       * per-attempt header apply" path still reaches the server as a
+       * non-empty body field and gets rejected. Only this flag — not
+       * omitting the header value — actually suppresses it.
+       */
+      skipIdempotencyKey?: boolean;
+    },
+  ): Promise<T> {
     // Resolve the fetch implementation per call: an explicit override wins,
     // otherwise the ambient globalThis.fetch (read lazily so test doubles /
     // MSW installed after client construction are still picked up).
@@ -104,13 +120,15 @@ export function createLedgerClient(config: LedgerClientConfig) {
     const method = (init?.method ?? "GET").toUpperCase();
     if (
       !["GET", "HEAD", "OPTIONS"].includes(method) &&
-      !headers["Idempotency-Key"]
+      !headers["Idempotency-Key"] &&
+      !init?.skipIdempotencyKey
     ) {
       headers["Idempotency-Key"] = idempotencyKeyFromBody(init?.body);
     }
 
+    const { skipIdempotencyKey: _skipIdempotencyKey, ...fetchInit } = init ?? {};
     const res = await fetchImpl(`${config.baseUrl}${path}`, {
-      ...init,
+      ...fetchInit,
       headers,
       signal: init?.signal ?? AbortSignal.timeout(15_000),
     });
@@ -178,10 +196,19 @@ export function createLedgerClient(config: LedgerClientConfig) {
         body: JSON.stringify(body),
       }),
 
+    // No idempotency key: the server derives it from the journal uid +
+    // reason and 400s if the client supplies one (J-15, 2026-09-02 web
+    // audit — server/handler_journals.go's handleReverseJournal). Duplicate
+    // reversal attempts are still deduped, via journals.reversal_of's
+    // partial unique index, not a client-chosen key. (The server also
+    // exposes POST /journals/{uid}/reverse-partial, which DOES take an
+    // explicit idempotency_key for num=den=1 full reversals — not wired up
+    // to this client, out of this fix's scope.)
     reverseJournal: (id: string, reason: string) =>
       request<Journal>(`/api/v1/journals/${id}/reverse`, {
         method: "POST",
         body: JSON.stringify({ reason }),
+        skipIdempotencyKey: true,
       }),
 
     // Entries

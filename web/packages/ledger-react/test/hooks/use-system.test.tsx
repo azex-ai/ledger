@@ -60,13 +60,38 @@ describe("use-system", () => {
         HttpResponse.json({ code: 200, message: null, data: { list: [] } }),
       ),
     );
-    const params = { holder: 9 };
+    const params = { holder: 9, currency_uid: "cur-1", start: "2026-01-01", end: "2026-01-31" };
     const { result } = renderHook(() => useSnapshots(params), {
       wrapper: wrapperWith(qc),
     });
+    expect(result.current.isDisabled).toBe(false);
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(
       qc.getQueryCache().find({ queryKey: ["ledger", "snapshots", params] }),
     ).toBeDefined();
+  });
+
+  // J-1 / J-18 (2026-09-02 web audit): currency_uid/start/end are just as
+  // hard-required server-side as holder (server/handler_system.go 400s on
+  // any one missing) — the query must stay disabled, not fire a
+  // guaranteed-400 request, when any one of them is absent.
+  test("useSnapshots stays disabled (no request) when currency_uid is missing", async () => {
+    const qc = new QueryClient();
+    let requested = false;
+    server.use(
+      http.get(`${BASE}/api/v1/snapshots`, () => {
+        requested = true;
+        return HttpResponse.json({ code: 200, message: null, data: { list: [] } });
+      }),
+    );
+    const { result } = renderHook(
+      () => useSnapshots({ holder: 9, start: "2026-01-01", end: "2026-01-31" }),
+      { wrapper: wrapperWith(qc) },
+    );
+    expect(result.current.isDisabled).toBe(true);
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.isError).toBe(false);
+    expect(result.current.data).toBeUndefined();
+    expect(requested).toBe(false);
   });
 });

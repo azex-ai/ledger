@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useJournalTypes,
@@ -25,6 +25,8 @@ import { useClientPage } from "../../lib/use-client-page";
 function CreateJournalTypeModal() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ code: "", name: "" });
+  // J-8 (2026-09-02 web audit): see ClassificationsPage's matching comment.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateJournalType();
 
   function handleSubmit() {
@@ -34,7 +36,14 @@ function CreateJournalTypeModal() {
         setOpen(false);
         setForm({ code: "", name: "" });
       },
-      onError: (err) => toast.danger(errorText(err, "Failed to create journal type")),
+      onError: (err) => {
+        const fields = apiFieldErrors(err);
+        if (Object.keys(fields).length > 0) {
+          setFieldErrors(fields);
+        } else {
+          toast.danger(errorText(err, "Failed to create journal type"));
+        }
+      },
     });
   }
 
@@ -49,13 +58,31 @@ function CreateJournalTypeModal() {
               <Modal.Heading>Create Journal Type</Modal.Heading>
             </Modal.Header>
             <Modal.Body className="flex flex-col gap-4">
-              <TextField fullWidth name="code" value={form.code} onChange={(v) => setForm({ ...form, code: v })}>
+              <TextField
+                fullWidth
+                name="code"
+                value={form.code}
+                onChange={(v) => {
+                  setForm({ ...form, code: v });
+                  setFieldErrors(({ code: _code, ...rest }) => rest);
+                }}
+              >
                 <Label>Code</Label>
                 <Input placeholder="deposit" />
+                {fieldErrors.code && <p className="text-danger text-xs">{fieldErrors.code}</p>}
               </TextField>
-              <TextField fullWidth name="name" value={form.name} onChange={(v) => setForm({ ...form, name: v })}>
+              <TextField
+                fullWidth
+                name="name"
+                value={form.name}
+                onChange={(v) => {
+                  setForm({ ...form, name: v });
+                  setFieldErrors(({ name: _name, ...rest }) => rest);
+                }}
+              >
                 <Label>Name</Label>
                 <Input placeholder="Deposit Confirmation" />
+                {fieldErrors.name && <p className="text-danger text-xs">{fieldErrors.name}</p>}
               </TextField>
             </Modal.Body>
             <Modal.Footer>

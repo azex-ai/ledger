@@ -61,7 +61,7 @@ export function RecentJournals({
             <span className="text-sm text-muted-foreground">No journals yet</span>
           </div>
         ) : (
-          <Table>
+          <Table aria-label="Recent journals">
             <TableHeader>
               <TableRow>
                 <TableHead className="w-16">ID</TableHead>

@@ -258,7 +258,7 @@ export function ReservationsPage() {
         />
       ) : (
         <>
-          <Table className="min-w-[900px]">
+          <Table aria-label="Reservations" className="min-w-[900px]">
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[220px]">ID</TableHead>

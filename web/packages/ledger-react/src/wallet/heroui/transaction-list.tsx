@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Button, Card, Chip, Skeleton, cn } from "@heroui/react";
 import { ReceiptText } from "lucide-react";
 import { EmptyState, ErrorState } from "../../heroui/shared";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
 
@@ -52,7 +52,15 @@ function ListSkeleton() {
 }
 
 function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
-  const isIn = tx.direction === "in";
+  // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
+  // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
+  // at the call site — display.ts's contract is that callers never re-derive
+  // or strip the sign themselves. Server contract: `amount` is an absolute
+  // value (`postgres/holder_store.go`'s `net.Abs()`), so `direction ===
+  // "out"` is the only place the minus sign can legitimately come from.
+  const { text, isNegative } = formatSignedAmount(
+    tx.direction === "out" ? `-${tx.amount}` : tx.amount,
+  );
   return (
     <li className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0">
@@ -72,11 +80,11 @@ function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
       <p
         className={cn(
           "shrink-0 text-sm font-medium tabular-nums",
-          isIn ? "text-success" : "text-danger",
+          isNegative ? "text-danger" : "text-success",
         )}
       >
-        {isIn ? "+" : "-"}
-        {formatAmount(tx.amount)}{" "}
+        {isNegative ? "" : "+"}
+        {text}{" "}
         <span className="text-muted font-normal">{tx.currency_code}</span>
       </p>
     </li>

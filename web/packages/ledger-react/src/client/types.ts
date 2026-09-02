@@ -122,7 +122,13 @@ export interface Classification {
   normal_side: "debit" | "credit";
   is_system: boolean;
   is_active: boolean;
-  lifecycle: Lifecycle | null;
+  // Absent (not present as `null`) for a label-only classification with no
+  // lifecycle — classificationResponse.go: `*core.Lifecycle` with
+  // `omitempty`, so Go's own JSON encoding drops the key entirely rather
+  // than emitting `"lifecycle":null` (J-7, 2026-09-02 web audit — no
+  // current consumer reads this field, caught while adding the
+  // types-conform.ts pin for this schema).
+  lifecycle?: Lifecycle;
   created_at: string;
 }
 
@@ -233,8 +239,13 @@ export interface PreviewResult {
     entry_type: "debit" | "credit";
     amount: string;
   }>;
-  total_debit: string;
-  total_credit: string;
+  // NOTE (J-7, 2026-09-02 web audit): there is no total_debit/total_credit
+  // on the wire — `server/handler_metadata.go`'s previewTemplateResponse has
+  // only `entries`. This type used to claim both as required strings, so
+  // every consumer reading them got `undefined` at runtime despite the
+  // compiler's confidence. Callers that want totals sum `entries` by
+  // `entry_type` themselves (see TemplatesPage's PreviewSection for the
+  // pattern, using `addAmounts`).
 }
 
 export interface CreateBookingBody {

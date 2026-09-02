@@ -65,8 +65,11 @@ function ProcessDialog({ id }: { id: string }) {
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label>Channel Ref</Label>
-            <Input value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xdef..." />
+            {/* J-12 (2026-09-02 web audit): this Label had no htmlFor — visually
+                adjacent but not programmatically associated with the input, so
+                a screen reader announced an unlabeled text field. */}
+            <Label htmlFor={`wd-process-ref-${id}`}>Channel Ref</Label>
+            <Input id={`wd-process-ref-${id}`} value={channelRef} onChange={(e) => setChannelRef(e.target.value)} placeholder="0xdef..." />
           </div>
         </div>
         <DialogFooter>
@@ -112,8 +115,11 @@ function FailDialog({ id }: { id: string }) {
             This will mark the withdrawal as failed. You can retry from the failed state.
           </p>
           <div className="grid gap-2">
-            <Label>Reason</Label>
-            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Insufficient gas, timeout, etc." />
+            {/* J-12 (2026-09-02 web audit): this Label had no htmlFor — visually
+                adjacent but not programmatically associated with the input, so
+                a screen reader announced an unlabeled text field. */}
+            <Label htmlFor={`wd-fail-reason-${id}`}>Reason</Label>
+            <Input id={`wd-fail-reason-${id}`} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Insufficient gas, timeout, etc." />
           </div>
         </div>
         <DialogFooter>
@@ -318,7 +324,7 @@ export function WithdrawalsPage() {
         />
       ) : (
         <>
-          <Table className="min-w-[960px]">
+          <Table aria-label="Withdrawals" className="min-w-[960px]">
             <TableHeader>
               <TableRow>
                 <TableHead className="w-[220px]">ID</TableHead>

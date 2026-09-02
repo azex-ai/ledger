@@ -118,4 +118,39 @@ describe("use-deposit-reviews", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(capturedBody).toEqual({ reason: "amount mismatch" });
   });
+
+  // J-13 (2026-09-02 web audit): this hook is page-scoped — one instance
+  // backs every row's Approve button — so a failed attempt on one uid must
+  // not hand its idempotency key to a later attempt on a DIFFERENT uid
+  // (the server's three-state semantics would then permanently fail the
+  // second uid: same key + different payload -> ErrConflict).
+  test("a failed approve on one uid does not poison the key for a different uid", async () => {
+    const qc = new QueryClient();
+    const keysByUid: Record<string, string[]> = { "bk-1": [], "bk-2": [] };
+    server.use(
+      http.post(`${BASE}/api/v1/deposits/bk-1/review/approve`, ({ request }) => {
+        keysByUid["bk-1"].push(request.headers.get("idempotency-key") ?? "");
+        return HttpResponse.json(
+          { code: 40900, message: { text: "Conflict" }, data: null },
+          { status: 409 },
+        );
+      }),
+      http.post(`${BASE}/api/v1/deposits/bk-2/review/approve`, ({ request }) => {
+        keysByUid["bk-2"].push(request.headers.get("idempotency-key") ?? "");
+        return HttpResponse.json({ code: 200, message: null, data: { uid: "bk-2", status: "confirmed" } });
+      }),
+    );
+    const { result } = renderHook(() => useApproveDepositReview(), {
+      wrapper: wrapperWith(qc),
+    });
+
+    result.current.mutate("bk-1");
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(keysByUid["bk-1"]).toHaveLength(1);
+
+    result.current.mutate("bk-2");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(keysByUid["bk-2"]).toHaveLength(1);
+    expect(keysByUid["bk-2"][0]).not.toBe(keysByUid["bk-1"][0]);
+  });
 });

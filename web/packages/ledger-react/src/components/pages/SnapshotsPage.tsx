@@ -1,9 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { toast } from "sonner";
 import { formatAmount } from "../../lib/utils";
 import { useSnapshots } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { errorText } from "../../lib/error-message";
 import { ErrorState } from "../error-state";
 import { TableSkeleton } from "../loading-skeleton";
 import { PaginationBar } from "../pagination-bar";
@@ -34,19 +36,39 @@ export function SnapshotsPage() {
   // only changes identity when handleSearch runs (setQuery), so it stays stable
   // across unrelated re-renders — no inline-object refetch storm.
   const [query, setQuery] = useState<SnapshotQuery>({});
+  // Explicit "did a real search run" flag (J-2, 2026-09-02 web audit) — NOT
+  // derived from Object.keys(query).length, which is 4 the instant
+  // handleSearch has ever run once (every key is always written, some just
+  // undefined), so it can never distinguish "never searched" from "searched
+  // with holder missing".
+  const [searched, setSearched] = useState(false);
 
-  const { data, isLoading, isError, refetch } = useSnapshots(query);
+  const { data, isLoading, isError, error, refetch } = useSnapshots(query);
   const { classCode, currencyCode } = useUidCodeLookups();
   const snapshots = data ?? [];
   const { pageItems, page, pageCount, setPage } = useClientPage(snapshots);
 
+  // holder/currency_uid/start/end are ALL hard-required by the server
+  // (server/handler_system.go's handleListSnapshots 400s on any one missing).
+  // Validate client-side before ever writing `query` — previously a
+  // holder-less search silently produced zero requests and rendered "No
+  // snapshots found", indistinguishable from a real empty result (J-2).
   function handleSearch() {
-    setQuery({
-      holder: form.holder ? parseInt(form.holder, 10) : undefined,
-      currency_uid: form.currency_uid ? form.currency_uid.trim() : undefined,
-      start: form.start || undefined,
-      end: form.end || undefined,
-    });
+    const holder = form.holder ? parseInt(form.holder, 10) : undefined;
+    if (!holder) {
+      toast.error("Holder is required");
+      return;
+    }
+    if (!form.currency_uid.trim()) {
+      toast.error("Currency is required");
+      return;
+    }
+    if (!form.start || !form.end) {
+      toast.error("Start and end date are required");
+      return;
+    }
+    setQuery({ holder, currency_uid: form.currency_uid.trim(), start: form.start, end: form.end });
+    setSearched(true);
   }
 
   return (
@@ -76,14 +98,14 @@ export function SnapshotsPage() {
       {isLoading ? (
         <TableSkeleton rows={5} />
       ) : isError ? (
-        <ErrorState message="Failed to load snapshots" onRetry={refetch} />
+        <ErrorState message={errorText(error, "Failed to load snapshots")} onRetry={refetch} />
       ) : snapshots.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          {Object.keys(query).length === 0 ? "Enter search criteria to view snapshots" : "No snapshots found"}
+          {searched ? "No snapshots found" : "Enter search criteria to view snapshots"}
         </p>
       ) : (
         <>
-        <Table>
+        <Table aria-label="Balance snapshots">
           <TableHeader>
             <TableRow>
               <TableHead>Date</TableHead>

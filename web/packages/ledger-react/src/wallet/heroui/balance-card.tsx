@@ -8,6 +8,8 @@ import { formatAmount, formatUTC } from "../../lib/utils";
 import type { WalletBalance, WalletHold } from "../client";
 import { useWalletBalance, useWalletHolds } from "../hooks";
 
+type HoldsQuery = ReturnType<typeof useWalletHolds>;
+
 /*
  * Wallet balance surfaces (HeroUI skin). Page logic mirrors the shadcn skin
  * (src/wallet/components/balance-card.tsx) — keep in sync.
@@ -28,13 +30,41 @@ function BalanceCardSkeleton() {
   );
 }
 
-function HoldsDetail({ holds }: { holds: WalletHold[] }) {
-  if (holds.length === 0) {
+// J-3 (2026-09-02 web audit): the holds query's own isLoading/isError were
+// never read here, so a failed /holder/holds request rendered the SAME
+// "Nothing is on hold right now." as a genuinely empty result — directly
+// contradicting a non-zero `locked` figure shown one row up on the same
+// card. Four states now: loading → error (with Retry) → empty → data.
+function HoldsDetail({
+  list,
+  isLoading,
+  isError,
+  onRetry,
+}: {
+  list: WalletHold[];
+  isLoading: boolean;
+  isError: boolean;
+  onRetry: () => void;
+}) {
+  if (isLoading) {
+    return <Skeleton className="my-1 h-4 w-full rounded" />;
+  }
+  if (isError) {
+    return (
+      <div className="text-danger flex items-center justify-between gap-2 py-1 text-xs">
+        <span>Couldn&apos;t load hold details.</span>
+        <Button variant="ghost" size="sm" className="h-6 px-2" onPress={onRetry}>
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (list.length === 0) {
     return <p className="text-muted py-1 text-xs">Nothing is on hold right now.</p>;
   }
   return (
     <ul className="flex flex-col gap-1 py-1">
-      {holds.map((h) => (
+      {list.map((h) => (
         <li key={h.uid} className="text-muted flex items-center justify-between text-xs">
           <span>
             On hold until <time dateTime={h.expires_at}>{formatUTC(h.expires_at)}</time>
@@ -54,11 +84,11 @@ function BalanceCardView({
   actions,
 }: {
   balance: WalletBalance;
-  holds: WalletHold[];
+  holds: HoldsQuery;
   actions?: ReactNode;
 }) {
   const [showHolds, setShowHolds] = useState(false);
-  const currencyHolds = holds.filter(
+  const currencyHolds = (holds.data ?? []).filter(
     (h) => h.currency_uid === balance.currency_uid,
   );
   const rows = [
@@ -107,7 +137,14 @@ function BalanceCardView({
             </dt>
             <dd className="tabular-nums">{formatAmount(balance.locked)}</dd>
           </div>
-          {showHolds && <HoldsDetail holds={currencyHolds} />}
+          {showHolds && (
+            <HoldsDetail
+              list={currencyHolds}
+              isLoading={holds.isLoading}
+              isError={holds.isError}
+              onRetry={() => holds.refetch()}
+            />
+          )}
         </dl>
       </Card.Content>
     </Card>
@@ -139,7 +176,7 @@ export function WalletBalanceCard({ currencyUid, actions }: WalletBalanceCardPro
     );
   }
   return (
-    <BalanceCardView balance={balance} holds={holds.data ?? []} actions={actions} />
+    <BalanceCardView balance={balance} holds={holds} actions={actions} />
   );
 }
 
@@ -177,7 +214,7 @@ export function WalletBalances({ actions }: WalletBalancesProps) {
         <BalanceCardView
           key={b.currency_uid}
           balance={b}
-          holds={holds.data ?? []}
+          holds={holds}
           actions={actions}
         />
       ))}

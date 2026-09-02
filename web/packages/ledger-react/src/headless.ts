@@ -12,6 +12,42 @@ export { ApiRequestError, createLedgerClient } from "./client/client";
 export type { LedgerClient, LedgerClientConfig } from "./client/client";
 export type * from "./client/types";
 
+// Display / decimal utilities (J-9, 2026-09-02 web audit): hosts building
+// their own UI on this headless surface get raw NUMERIC(30,18) strings from
+// every hook/client method — without these, they have no way to reach
+// financial.md's banding table except reimplementing it, which is exactly
+// the drift `display.ts` exists to prevent. Every non-DOM helper from
+// lib/utils; deliberately excludes `cn` (a Tailwind class-merge helper with
+// no place in a UI-free surface) and `useCopyToClipboard` (a DOM hook, not a
+// pure formatter — headless consumers building their own copy button should
+// use their own clipboard integration).
+export {
+  formatAmount,
+  formatSignedAmount,
+  formatCompact,
+  validateAmount,
+  formatUTC,
+  formatDateUTC,
+  parseUnits,
+  formatUnits,
+  parseEther,
+  formatEther,
+  parseGwei,
+  formatGwei,
+  leadingZeros,
+  significantDigits,
+  addAmounts,
+  subAmounts,
+  gtAmount,
+  gteAmount,
+  isZeroAmount,
+  getAddress,
+  isAddress,
+  isAddressEqual,
+  shortenAddress,
+  shortenHash,
+} from "./lib/utils";
+
 export { LedgerProvider } from "./provider/provider";
 export type { LedgerProviderConfig } from "./provider/provider";
 export { useLedgerClient, useLedgerAppearance } from "./provider/context";

@@ -1,6 +1,7 @@
 "use client";
 
 import { errorText } from "../../lib/error-message";
+import { addAmounts, formatAmount } from "../../lib/utils";
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
@@ -44,7 +45,9 @@ function CreateTemplateDialog() {
     { _id: crypto.randomUUID(), classification_uid: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
   ]);
   const mutation = useCreateTemplate();
+  // query-consumption-allow: populates the journal-type/classification <Select>s below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes(true);
+  // query-consumption-allow: same as journalTypes above.
   const { data: classifications } = useClassifications(true);
 
   function addLine() {
@@ -159,7 +162,8 @@ function CreateTemplateDialog() {
                           <SelectItem value="system">System</SelectItem>
                         </SelectContent>
                       </Select>
-                      <Input placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="flex-1" />
+                      {/* J-12 (2026-09-02 web audit): unlabeled input — mirrors HeroUI's `aria-label="Amount key"`. */}
+                      <Input aria-label="Amount key" placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 flex-1" />
                       <Button size="sm" variant="ghost" onClick={() => removeLine(idx)} aria-label="Remove line">&times;</Button>
                     </div>
                   </div>
@@ -185,7 +189,8 @@ function CreateTemplateDialog() {
                           <SelectItem value="system">System</SelectItem>
                         </SelectContent>
                       </Select>
-                      <Input placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="flex-1" />
+                      {/* J-12 (2026-09-02 web audit): unlabeled input — mirrors HeroUI's `aria-label="Amount key"`. */}
+                      <Input aria-label="Amount key" placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 flex-1" />
                       <Button size="sm" variant="ghost" onClick={() => removeLine(idx)} aria-label="Remove line">&times;</Button>
                     </div>
                   </div>
@@ -243,12 +248,14 @@ function PreviewSection({ code }: { code: string }) {
   const [params, setParams] = useState({ holder_id: "", currency_uid: "", amount: "" });
   const previewMutation = usePreviewTemplate();
   const preview = previewMutation.data as PreviewResult | undefined;
+  // query-consumption-allow: populates the currency <Select> below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: currencies } = useCurrencies(true);
 
   return (
     <div className="space-y-2 mt-2">
       <div className="flex gap-2">
-        <Input placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
+        {/* J-12 (2026-09-02 web audit): unlabeled inputs — mirrors HeroUI's `aria-label`s on the same fields. */}
+        <Input aria-label="Holder ID" placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
         <Select value={params.currency_uid === "" ? null : params.currency_uid} onValueChange={(v) => { if (typeof v === "string") setParams({ ...params, currency_uid: v }); }}>
           <SelectTrigger className="w-28"><SelectValue placeholder="Currency" /></SelectTrigger>
           <SelectContent>
@@ -257,11 +264,12 @@ function PreviewSection({ code }: { code: string }) {
             ))}
           </SelectContent>
         </Select>
-        <Input placeholder="Amount" value={params.amount} onChange={(e) => setParams({ ...params, amount: e.target.value })} className="w-28" />
+        <Input aria-label="Amount" placeholder="Amount" value={params.amount} onChange={(e) => setParams({ ...params, amount: e.target.value })} className="w-28" />
         <Button
           size="sm"
           variant="outline"
           onClick={() =>
+            // mutation-feedback-allow: inline isError rendered below (J-20)
             previewMutation.mutate({
               code,
               holder_id: parseInt(params.holder_id, 10),
@@ -274,9 +282,36 @@ function PreviewSection({ code }: { code: string }) {
           Preview
         </Button>
       </div>
+      {previewMutation.isError && (
+        // J-20 (2026-09-02 web audit): this mutation had no onError and no
+        // inline isError check at all — a failed preview left the button
+        // simply re-enabled, no feedback that anything went wrong.
+        <p className="text-xs text-destructive">
+          {errorText(previewMutation.error, "Failed to preview template")}
+        </p>
+      )}
       {preview && (
         <div className="rounded bg-muted p-3 text-xs font-mono">
-          <p>Total Debit: {preview.total_debit} | Total Credit: {preview.total_credit}</p>
+          {/*
+           * J-7 (2026-09-02 web audit): the server never sends
+           * total_debit/total_credit (server/handler_metadata.go's
+           * previewTemplateResponse has only `entries`) — PreviewResult used
+           * to claim both as required strings, so this line rendered
+           * "Total Debit: undefined | Total Credit: undefined" for every
+           * preview. Summed client-side from entries instead.
+           */}
+          <p>
+            Total Debit: {formatAmount(
+              preview.entries
+                .filter((e) => e.entry_type === "debit")
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
+            )}{" "}
+            | Total Credit: {formatAmount(
+              preview.entries
+                .filter((e) => e.entry_type === "credit")
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
+            )}
+          </p>
           {preview.entries.map((e, i) => (
             <p key={i}>
               {e.entry_type.toUpperCase()} holder={e.account_holder} class={e.classification_uid} cur={e.currency_uid} amt={e.amount}
@@ -315,13 +350,20 @@ export function TemplatesPage() {
           {pageItems.map((t) => (
             <Card key={t.uid}>
               <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <CardTitle className="text-base">{t.name}</CardTitle>
-                    <span className="font-mono text-xs text-muted-foreground">{t.code}</span>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  {/*
+                   * J-12 (2026-09-02 web audit): `min-w-0` on the flex child
+                   * + `truncate` on the title — without both, a long
+                   * template name silently overflows the card instead of
+                   * eliding (nextjs.md "内容溢出"). Mirrors the HeroUI skin,
+                   * which already had this (`src/heroui/pages/TemplatesPage.tsx`).
+                   */}
+                  <div className="flex min-w-0 items-center gap-3">
+                    <CardTitle className="truncate text-base">{t.name}</CardTitle>
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">{t.code}</span>
                     <StatusBadge status={t.is_active ? "active" : "inactive"} />
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex shrink-0 gap-2">
                     <Button size="sm" variant="outline" onClick={() => setExpandedId(expandedId === t.uid ? null : t.uid)}>
                       {expandedId === t.uid ? "Collapse" : "Preview"}
                     </Button>
@@ -331,18 +373,22 @@ export function TemplatesPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
+                  {/* J-12: min-w-0 on each grid column + truncate on the line
+                      text — a long classification code/holder_role/amount_key
+                      combination would otherwise overflow the column instead
+                      of eliding. Mirrors the HeroUI skin. */}
+                  <div className="min-w-0">
                     <p className="text-xs font-medium text-green-400 mb-1">DEBIT</p>
                     {t.lines.filter((l) => l.entry_type === "debit").map((l) => (
-                      <div key={l.sort_order} className="text-xs text-muted-foreground">
+                      <div key={l.sort_order} className="truncate text-xs text-muted-foreground">
                         {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs font-medium text-red-400 mb-1">CREDIT</p>
                     {t.lines.filter((l) => l.entry_type === "credit").map((l) => (
-                      <div key={l.sort_order} className="text-xs text-muted-foreground">
+                      <div key={l.sort_order} className="truncate text-xs text-muted-foreground">
                         {classCode(l.classification_uid)} / {l.holder_role} / key: {l.amount_key}
                       </div>
                     ))}

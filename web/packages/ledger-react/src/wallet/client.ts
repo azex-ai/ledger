@@ -60,6 +60,14 @@ export interface WalletTransaction {
   /** Library-side default display label. */
   kind_label: string;
   direction: "in" | "out";
+  /**
+   * ALWAYS an absolute value (`postgres/holder_store.go`'s `net.Abs()`) —
+   * `direction` carries the sign, never a leading "-" here. Consumers must
+   * derive sign/color from `direction` via `formatSignedAmount` (fold it
+   * into a signed string first, e.g. `direction === "out" ? "-"+amount :
+   * amount`), never assume this string itself can be negative
+   * (J-21, 2026-09-02 web audit).
+   */
   amount: string;
   currency_uid: string;
   currency_code: string;

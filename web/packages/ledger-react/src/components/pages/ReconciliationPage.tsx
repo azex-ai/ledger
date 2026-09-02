@@ -4,6 +4,7 @@ import { useState } from "react";
 import { formatAmount, formatSignedAmount, formatUTC, cn } from "../../lib/utils";
 import { useReconcileGlobal, useReconcileAccount } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { errorText } from "../../lib/error-message";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -39,13 +40,17 @@ export function ReconciliationPage() {
             <p className="text-xs text-muted-foreground">
               Verifies SUM(all debits) == SUM(all credits) across the entire ledger.
             </p>
+            {/* mutation-feedback-allow: inline isError below, not onSuccess/onError options (J-20) */}
             <Button onClick={() => globalMutation.mutate()} disabled={globalMutation.isPending}>
               {globalMutation.isPending ? "Running..." : "Run Global Check"}
             </Button>
             {globalMutation.isError && (
               <div className="flex items-center gap-2 text-sm text-destructive">
                 <AlertCircle className="h-4 w-4" />
-                Reconciliation failed. Check the API logs.
+                {errorText(
+                  globalMutation.error,
+                  "Reconciliation didn't complete. Please retry; if it keeps failing, contact support.",
+                )}
               </div>
             )}
             {globalResult && (
@@ -90,6 +95,7 @@ export function ReconciliationPage() {
                       toast.error("Enter both a holder and a currency to run the check.");
                       return;
                     }
+                    // mutation-feedback-allow: inline isError below, not onSuccess/onError options (J-20)
                     accountMutation.mutate({ holder: h, currencyUid: c });
                   }}
                   disabled={accountMutation.isPending || !holder || !currencyId}
@@ -101,7 +107,10 @@ export function ReconciliationPage() {
             {accountMutation.isError && (
               <div className="flex items-center gap-2 text-sm text-destructive">
                 <AlertCircle className="h-4 w-4" />
-                Account check failed.
+                {errorText(
+                  accountMutation.error,
+                  "Account check didn't complete. Please retry; if it keeps failing, contact support.",
+                )}
               </div>
             )}
             {accountResult && (
@@ -113,7 +122,7 @@ export function ReconciliationPage() {
                   </span>
                 </div>
                 {accountResult.details && accountResult.details.length > 0 && (
-                  <Table>
+                  <Table aria-label="Account drift details">
                     <TableHeader>
                       <TableRow>
                         <TableHead>Holder</TableHead>

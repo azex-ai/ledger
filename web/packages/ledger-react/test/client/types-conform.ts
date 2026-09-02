@@ -34,6 +34,32 @@
 // Every line below is now a bare assignment: the hand type and the
 // generated schema agree today. If they ever disagree again, this file
 // fails to compile — that is the point.
+//
+// J-7 (2026-09-02 web audit): six more schemas existed in `docs/openapi.yaml`
+// by this pass but were never pinned here — the file's own trailing "no
+// generated schema counterpart" note (below) had gone stale for
+// Classification/JournalType/Template/Currency/HealthStatus/
+// TemplatePreviewResult, all six of which the spec had grown since M5.
+// Added below. Two of the six caught REAL drift while being added (fixed at
+// the SOURCE, not by loosening the assertion — see the referenced fixes):
+//   - `HealthStatus`/`Classification`/`JournalType` schemas each require a
+//     field (`db`/`balance_role`/`holder_kind`) that `types.ts`'s hand
+//     type doesn't declare at all. This is the exact one-directional blind
+//     spot noted below (assigning a WIDER source to a narrower target
+//     compiles fine) — not fixed here (each is a real but separate gap;
+//     nothing in this package currently reads any of the three, so there is
+//     no live bug to point to the way there was for PreviewResult below).
+//   - `TemplatePreviewResult` has ONLY `entries` — no total_debit/
+//     total_credit. `types.ts`'s `PreviewResult` used to declare both as
+//     required, which this assertion caught immediately (assigning a
+//     NARROWER source, missing fields, to that wider required type is a
+//     compile error) — traced to a real bug (TemplatesPage's preview
+//     rendered "Total Debit: undefined | Total Credit: undefined" on every
+//     currently-shipped build) and fixed by removing the phantom fields
+//     from `PreviewResult` and summing `entries` client-side instead. THIS
+//     is the direction this gate is actually good at: a hand type that
+//     over-promises a field the wire never carries.
+// The four still-missing-schema entities from the note below are unchanged.
 
 import type { components } from "../../src/client/schema";
 import type {
@@ -48,6 +74,12 @@ import type {
   SystemBalance,
   BalanceBreakdown,
   Lifecycle,
+  Classification,
+  JournalType,
+  EntryTemplate,
+  Currency,
+  HealthStatus,
+  PreviewResult,
 } from "../../src/client/types";
 
 const _journal: Journal = {} as components["schemas"]["Journal"];
@@ -68,6 +100,14 @@ const _systemBalance: SystemBalance = {} as components["schemas"]["SystemRollup"
 const _balanceBreakdown: BalanceBreakdown = {} as components["schemas"]["BalanceBreakdown"];
 const _lifecycle: Lifecycle = {} as components["schemas"]["Lifecycle"];
 
+// J-7 additions (2026-09-02 web audit) — see the file-header note above.
+const _classification: Classification = {} as components["schemas"]["Classification"];
+const _journalType: JournalType = {} as components["schemas"]["JournalType"];
+const _entryTemplate: EntryTemplate = {} as components["schemas"]["Template"];
+const _currency: Currency = {} as components["schemas"]["Currency"];
+const _healthStatus: HealthStatus = {} as components["schemas"]["HealthStatus"];
+const _previewResult: PreviewResult = {} as components["schemas"]["TemplatePreviewResult"];
+
 void _journal;
 void _entry;
 void _balance;
@@ -79,15 +119,25 @@ void _reconcile;
 void _systemBalance;
 void _balanceBreakdown;
 void _lifecycle;
+void _classification;
+void _journalType;
+void _entryTemplate;
+void _currency;
+void _healthStatus;
+void _previewResult;
 
 // --- Entities with NO generated schema counterpart at all ------------------
 //
 // docs/openapi.yaml has no schema for these response shapes at all — not a
 // `required:` gap but a missing schema entirely, so there is nothing here to
-// assert against. Discovered while writing this file; out of M5's assigned
-// scope (fixing it means authoring new OpenAPI schemas, a spec-authoring
-// task, not a type-conformance test) — flagged to team-lead separately:
-//   Classification, JournalType, EntryTemplate, Currency, HealthStatus,
-//   Snapshot, PreviewResult, HolderBalances, BalanceByCurrency,
+// assert against. Out of scope for a type-conformance test (fixing it means
+// authoring new OpenAPI schemas, a spec-authoring task) — flagged to
+// team-lead separately. Re-verified current as of J-7 (2026-09-02 web
+// audit); six other entities that were on this list at M5 time
+// (Classification, JournalType, EntryTemplate/Template, Currency,
+// HealthStatus, PreviewResult/TemplatePreviewResult) have since grown a spec
+// schema and are asserted above instead — this list is exactly the
+// remainder still missing one:
+//   Snapshot, HolderBalances, BalanceByCurrency,
 //   JournalWithEntries (standalone; only nested inside
 //   JournalWithEntriesEnvelope.data in the spec).

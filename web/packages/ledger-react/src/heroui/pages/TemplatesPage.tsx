@@ -1,6 +1,7 @@
 "use client";
 
 import { errorText } from "../../lib/error-message";
+import { addAmounts, formatAmount } from "../../lib/utils";
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
@@ -114,7 +115,9 @@ function CreateTemplateModal() {
     { _id: crypto.randomUUID(), classification_uid: "", entry_type: "credit", holder_role: "system", amount_key: "amount", sort_order: 2 },
   ]);
   const mutation = useCreateTemplate();
+  // query-consumption-allow: populates the journal-type/classification <Select>s below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes(true);
+  // query-consumption-allow: same as journalTypes above.
   const { data: classifications } = useClassifications(true);
 
   function addLine() {
@@ -369,6 +372,7 @@ function PreviewSection({ code }: { code: string }) {
   const [params, setParams] = useState({ holder_id: "", currency_uid: "", amount: "" });
   const previewMutation = usePreviewTemplate();
   const preview = previewMutation.data as PreviewResult | undefined;
+  // query-consumption-allow: populates the currency <Select> below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: currencies } = useCurrencies(true);
 
   return (
@@ -417,6 +421,7 @@ function PreviewSection({ code }: { code: string }) {
           variant="outline"
           isPending={previewMutation.isPending}
           onPress={() =>
+            // mutation-feedback-allow: inline isError rendered below (J-20)
             previewMutation.mutate({
               code,
               holder_id: parseInt(params.holder_id, 10),
@@ -428,9 +433,36 @@ function PreviewSection({ code }: { code: string }) {
           Preview
         </Button>
       </div>
+      {previewMutation.isError && (
+        // J-20 (2026-09-02 web audit): this mutation had no onError and no
+        // inline isError check at all — a failed preview left the button
+        // simply re-enabled, no feedback that anything went wrong.
+        <p className="text-danger text-xs">
+          {errorText(previewMutation.error, "Failed to preview template")}
+        </p>
+      )}
       {preview && (
         <div className="rounded-lg bg-surface-secondary p-3 font-mono text-xs">
-          <p>Total Debit: {preview.total_debit} | Total Credit: {preview.total_credit}</p>
+          {/*
+           * J-7 (2026-09-02 web audit): the server never sends
+           * total_debit/total_credit (server/handler_metadata.go's
+           * previewTemplateResponse has only `entries`) — PreviewResult used
+           * to claim both as required strings, so this line rendered
+           * "Total Debit: undefined | Total Credit: undefined" for every
+           * preview. Summed client-side from entries instead.
+           */}
+          <p>
+            Total Debit: {formatAmount(
+              preview.entries
+                .filter((e) => e.entry_type === "debit")
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
+            )}{" "}
+            | Total Credit: {formatAmount(
+              preview.entries
+                .filter((e) => e.entry_type === "credit")
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
+            )}
+          </p>
           {preview.entries.map((e, i) => (
             <p key={i} className="truncate">
               {e.entry_type.toUpperCase()} holder={e.account_holder} class={e.classification_uid} cur={e.currency_uid} amt={e.amount}

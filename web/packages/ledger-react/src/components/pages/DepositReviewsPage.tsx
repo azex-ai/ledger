@@ -179,7 +179,7 @@ export function DepositReviewsPage() {
         />
       ) : (
         <>
-          <Table>
+          <Table aria-label="Deposit reviews">
             <TableHeader>
               <TableRow>
                 <TableHead>UID</TableHead>

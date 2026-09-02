@@ -12,12 +12,40 @@ export function ok<T>(data: T) {
   return HttpResponse.json({ code: 200, message: null, data });
 }
 
-/** A GET handler returning the success envelope for a fixed body. */
-export function getOk<T>(path: string, data: T) {
+/** The business envelope for a 400 "missing required query param" error. */
+function missingParamError(param: string) {
+  return HttpResponse.json(
+    { code: 12003, message: { text: `${param} is required` }, data: null },
+    { status: 400 },
+  );
+}
+
+/**
+ * A GET handler returning the success envelope for a fixed body.
+ *
+ * `requiredQuery` mirrors real handlers that hard-require query params (e.g.
+ * `server/handler_system.go`'s `/snapshots` — holder/currency_uid/start/end)
+ * (J-17, 2026-09-02 web audit): without this, a page requesting a URL that
+ * omits a required param got 200 in tests but 400 for real, so a broken
+ * request looked passing. Missing params return the same 400 envelope shape
+ * a real handler would.
+ */
+export function getOk<T>(
+  path: string,
+  data: T,
+  opts?: { requiredQuery?: string[] },
+) {
   // List endpoints wrap their payload as {list} (api-contract §6); object
   // payloads pass through unchanged.
   const payload = Array.isArray(data) ? { list: data } : data;
-  return http.get(`${BASE}${path}`, () => ok(payload));
+  return http.get(`${BASE}${path}`, ({ request }) => {
+    const url = new URL(request.url);
+    for (const param of opts?.requiredQuery ?? []) {
+      const value = url.searchParams.get(param);
+      if (value === null || value === "") return missingParamError(param);
+    }
+    return ok(payload);
+  });
 }
 
 /** A POST handler returning the success envelope for a fixed body. */

@@ -137,6 +137,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
 
 export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: JournalDetailPageProps) {
   const { data, isLoading, isError, refetch } = useJournal(id);
+  // query-consumption-allow: uid→name resolver, falls back to the raw uid via `??` below (incl. on fetch failure) — the fallback IS the degraded state, not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes();
 
   if (isLoading) {

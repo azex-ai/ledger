@@ -5,10 +5,13 @@ import { Button, Card, Input, Label, Table, TextField, toast } from "@heroui/rea
 import { useReconcileAccount, useReconcileGlobal } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { cn, formatAmount, formatSignedAmount, formatUTC } from "../../lib/utils";
+import { errorText } from "../../lib/error-message";
 import { PageHeader, StatusChip } from "../shared";
 
 export function ReconciliationPage() {
+  // query-consumption-allow: mutation, not a query — the failure callback (below) surfaces it via toast.danger, not a read of the error flag (J-16).
   const globalMutation = useReconcileGlobal();
+  // query-consumption-allow: same as globalMutation above.
   const accountMutation = useReconcileAccount();
   const { classCode, currencyCode } = useUidCodeLookups();
   const [holder, setHolder] = useState("");
@@ -17,12 +20,22 @@ export function ReconciliationPage() {
   const globalResult = globalMutation.data;
   const accountResult = accountMutation.data;
 
+  // J-16 (2026-09-02 web audit): toast.promise's `success` callback always
+  // renders the sonner/HeroUI SUCCESS style (green check) no matter what
+  // string it returns — `balanced: false` is a resolved promise, so
+  // "Unbalanced" was rendering with a success look. Branch success/danger
+  // explicitly instead of leaning on the promise's fulfilled/rejected axis,
+  // which doesn't line up with the domain's balanced/unbalanced axis.
   function runGlobalCheck() {
-    toast.promise(globalMutation.mutateAsync(), {
-      loading: "Running global check…",
-      success: (result) =>
-        result.balanced ? "Ledger is balanced" : `Unbalanced — gap: ${formatAmount(result.gap)}`,
-      error: "Reconciliation failed. Check the API logs.",
+    globalMutation.mutate(undefined, {
+      onSuccess: (result) => {
+        if (result.balanced) toast.success("Ledger is balanced");
+        else toast.danger(`Unbalanced — gap: ${formatAmount(result.gap)}`);
+      },
+      onError: (err) =>
+        toast.danger(
+          errorText(err, "Reconciliation didn't complete. Please retry; if it keeps failing, contact support."),
+        ),
     });
   }
 
@@ -33,12 +46,19 @@ export function ReconciliationPage() {
       toast.danger("Enter both a holder and a currency to run the check.");
       return;
     }
-    toast.promise(accountMutation.mutateAsync({ holder: h, currencyUid: c }), {
-      loading: "Checking account…",
-      success: (result) =>
-        result.balanced ? "Account is balanced" : `Drift detected — gap: ${formatAmount(result.gap)}`,
-      error: "Account check failed.",
-    });
+    accountMutation.mutate(
+      { holder: h, currencyUid: c },
+      {
+        onSuccess: (result) => {
+          if (result.balanced) toast.success("Account is balanced");
+          else toast.danger(`Drift detected — gap: ${formatAmount(result.gap)}`);
+        },
+        onError: (err) =>
+          toast.danger(
+            errorText(err, "Account check didn't complete. Please retry; if it keeps failing, contact support."),
+          ),
+      },
+    );
   }
 
   return (

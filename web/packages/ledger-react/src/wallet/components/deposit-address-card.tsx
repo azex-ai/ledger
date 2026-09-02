@@ -75,12 +75,16 @@ export interface DepositAddressCardProps {
   network: string;
   /**
    * Asset codes accepted at this address, e.g. ["USDC"] or ["USDT", "USDC"].
-   * REQUIRED — the deployment's currencies come from the host (its currency
-   * config / an admin `useCurrencies()` lookup), never a hardcoded guess. The
-   * package is a generic ledger surface and does not know which assets a given
-   * deployment accepts.
+   * REQUIRED and non-empty — the deployment's currencies come from the host
+   * (its currency config / an admin `useCurrencies()` lookup), never a
+   * hardcoded guess. The package is a generic ledger surface and does not
+   * know which assets a given deployment accepts. Typed as a non-empty
+   * tuple (J-22, 2026-09-02 web audit) so passing `[]` is a compile error —
+   * this warning is the one thing standing between a user and unrecoverable
+   * loss, same severity class as `network` above, and `[].join(" or ")`
+   * silently produced "Only send  on Ethereum" (empty asset list, no error).
    */
-  assets: string[];
+  assets: [string, ...string[]];
 }
 
 /**
@@ -152,8 +156,18 @@ export function DepositAddressCard({ network, assets }: DepositAddressCardProps)
           <CopyAddressButton address={data.address} />
         </div>
         <p className="text-center text-xs text-muted-foreground">
-          Only send {assets.join(" or ")} on <strong>{network}</strong> to this
-          address. Funds sent on any other network cannot be recovered.
+          {assets.length > 0 ? (
+            <>
+              Only send {assets.join(" or ")} on <strong>{network}</strong> to
+              this address. Funds sent on any other network cannot be
+              recovered.
+            </>
+          ) : (
+            // Runtime guard for a JS (non-TS-checked) caller bypassing the
+            // non-empty-tuple type above — never silently render an assets-less
+            // warning (J-22).
+            "Please contact support to confirm which assets you can deposit before sending funds."
+          )}
         </p>
       </CardContent>
     </Card>

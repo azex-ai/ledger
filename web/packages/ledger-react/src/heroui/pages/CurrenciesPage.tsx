@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useCurrencies,
@@ -28,6 +28,8 @@ function CreateCurrencyModal() {
   // exponent kept as string while typing so the field can be empty; "0" is a
   // legal value (JPY) and must stay distinguishable from "not filled in".
   const [form, setForm] = useState({ code: "", name: "", exponent: "" });
+  // J-8 (2026-09-02 web audit): see ClassificationsPage's matching comment.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateCurrency();
 
   const exponentInvalid =
@@ -45,7 +47,14 @@ function CreateCurrencyModal() {
           setOpen(false);
           setForm({ code: "", name: "", exponent: "" });
         },
-        onError: (err) => toast.danger(errorText(err, "Failed to create currency")),
+        onError: (err) => {
+          const fields = apiFieldErrors(err);
+          if (Object.keys(fields).length > 0) {
+            setFieldErrors(fields);
+          } else {
+            toast.danger(errorText(err, "Failed to create currency"));
+          }
+        },
       },
     );
   }
@@ -61,13 +70,31 @@ function CreateCurrencyModal() {
               <Modal.Heading>Create Currency</Modal.Heading>
             </Modal.Header>
             <Modal.Body className="flex flex-col gap-4">
-              <TextField fullWidth name="code" value={form.code} onChange={(v) => setForm({ ...form, code: v })}>
+              <TextField
+                fullWidth
+                name="code"
+                value={form.code}
+                onChange={(v) => {
+                  setForm({ ...form, code: v });
+                  setFieldErrors(({ code: _code, ...rest }) => rest);
+                }}
+              >
                 <Label>Code</Label>
                 <Input placeholder="USDT" />
+                {fieldErrors.code && <p className="text-danger text-xs">{fieldErrors.code}</p>}
               </TextField>
-              <TextField fullWidth name="name" value={form.name} onChange={(v) => setForm({ ...form, name: v })}>
+              <TextField
+                fullWidth
+                name="name"
+                value={form.name}
+                onChange={(v) => {
+                  setForm({ ...form, name: v });
+                  setFieldErrors(({ name: _name, ...rest }) => rest);
+                }}
+              >
                 <Label>Name</Label>
                 <Input placeholder="Tether USD" />
+                {fieldErrors.name && <p className="text-danger text-xs">{fieldErrors.name}</p>}
               </TextField>
               <TextField
                 fullWidth
@@ -79,6 +106,7 @@ function CreateCurrencyModal() {
                 <Label>Decimal places (0-18)</Label>
                 <Input min={0} max={18} step={1} placeholder="e.g. 2 for USD, 0 for JPY, 18 for wei" />
                 <Description>Number of decimal places this currency tracks.</Description>
+                {fieldErrors.exponent && <p className="text-danger text-xs">{fieldErrors.exponent}</p>}
               </TextField>
             </Modal.Body>
             <Modal.Footer>

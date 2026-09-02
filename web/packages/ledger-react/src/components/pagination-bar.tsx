@@ -19,7 +19,11 @@ export function PaginationBar({
 }) {
   if (pageCount <= 1) return null;
   return (
-    <div className="flex items-center justify-end gap-3 pt-2">
+    <div
+      role="navigation"
+      aria-label="Table pagination"
+      className="flex items-center justify-end gap-3 pt-2"
+    >
       <span className="text-xs text-muted-foreground tabular-nums">
         Page {page} of {pageCount}
       </span>

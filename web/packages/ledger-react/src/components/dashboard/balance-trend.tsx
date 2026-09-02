@@ -2,6 +2,7 @@
 
 import { useSystemBalances } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { formatAmount } from "../../lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
 import {
   ResponsiveContainer,
@@ -21,7 +22,8 @@ export function BalanceTrend() {
 
   const chartData = (data ?? []).map((b) => ({
     label: `${classCode(b.classification_uid)} · ${currencyCode(b.currency_uid)}`,
-    balance: parseFloat(b.total_balance), // chart display only — intentional lossy conversion
+    balance: parseFloat(b.total_balance), // chart geometry only — intentional lossy conversion
+    balanceRaw: b.total_balance, // tooltip/axis formatter reads this, never `balance` (J-5)
   }));
 
   return (
@@ -61,6 +63,7 @@ export function BalanceTrend() {
                 axisLine={false}
                 tickLine={false}
                 width={60}
+                tickFormatter={(v) => formatAmount(String(v))}
               />
               <Tooltip
                 cursor={{ fill: "color-mix(in oklch, var(--muted) 50%, transparent)" }}
@@ -71,6 +74,10 @@ export function BalanceTrend() {
                   color: "var(--popover-foreground)",
                   fontSize: "12px",
                   boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                }}
+                formatter={(value, name, entry) => {
+                  const payload = entry?.payload as { balanceRaw?: string } | undefined;
+                  return [formatAmount(payload?.balanceRaw ?? String(value)), name];
                 }}
               />
               <Bar dataKey="balance" fill="var(--chart-1)" radius={[6, 6, 0, 0]} />

@@ -14,6 +14,7 @@ import {
 import { useBalances } from "../../hooks/use-balances";
 import { useSnapshots } from "../../hooks/use-system";
 import { formatAmount } from "../../lib/utils";
+import { errorText } from "../../lib/error-message";
 import { EmptyState, ErrorState, PageHeader, TableSkeleton } from "../shared";
 
 // Self-contained placeholder palette: the HeroUI skin ships no design tokens
@@ -47,20 +48,42 @@ export function BalancesPage() {
         .slice(0, 10),
     };
   }, []);
+  // Snapshots require a single currency_uid (J-1, 2026-09-02 web audit): the
+  // server hard-requires it and there's no per-currency aggregate endpoint,
+  // so the trend charts the first currency the balance table returned. Until
+  // balances load there is no currency to chart, so the query stays disabled
+  // (useSnapshots' own isDisabled) rather than firing a guaranteed-400
+  // request with currency_uid missing.
+  const primaryCurrencyUid = balances[0]?.currency_uid;
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
   const snapParams = useMemo(
-    () => ({ holder: holder || undefined, start: thirtyDaysAgo, end: today }),
-    [holder, thirtyDaysAgo, today],
+    () => ({
+      holder: holder || undefined,
+      currency_uid: primaryCurrencyUid,
+      start: thirtyDaysAgo,
+      end: today,
+    }),
+    [holder, primaryCurrencyUid, thirtyDaysAgo, today],
   );
-  const { data: snapData } = useSnapshots(snapParams);
+  const {
+    data: snapData,
+    isLoading: snapLoading,
+    isError: snapIsError,
+    error: snapError,
+    refetch: snapRefetch,
+  } = useSnapshots(snapParams);
   const snapshots = snapData ?? [];
 
+  // chartData keeps both the lossy Number (geometry only) AND the original
+  // decimal string (raw*, for the tooltip/axis formatter — J-5) so no
+  // display path reads the parseFloat value directly.
   const chartData = snapshots.reduce<Record<string, Record<string, string | number>>>(
     (acc, s) => {
       if (!acc[s.snapshot_date]) acc[s.snapshot_date] = { date: s.snapshot_date };
-      // chart display only — intentional lossy conversion
-      acc[s.snapshot_date][`c${s.classification_uid}`] = parseFloat(s.balance);
+      const key = `c${s.classification_uid}`;
+      acc[s.snapshot_date][key] = parseFloat(s.balance); // chart geometry only — intentional lossy conversion
+      acc[s.snapshot_date][`${key}Raw`] = s.balance;
       return acc;
     },
     {},
@@ -137,40 +160,56 @@ export function BalancesPage() {
             </Card>
           )}
 
-          {chartArray.length > 0 && (
+          {balances.length > 0 && (
             <Card>
               <Card.Header>
                 <Card.Title>Balance Trend (30 days)</Card.Title>
               </Card.Header>
               <Card.Content>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={chartArray}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis
-                      dataKey="date"
-                      tick={{ fontSize: 11, fill: "var(--muted)" }}
-                    />
-                    <YAxis tick={{ fontSize: 11, fill: "var(--muted)" }} />
-                    <RechartsTooltip
-                      contentStyle={{
-                        backgroundColor: "var(--surface)",
-                        border: "1px solid var(--border)",
-                        borderRadius: "8px",
-                        color: "var(--foreground)",
-                      }}
-                    />
-                    {classIds.map((cid, i) => (
-                      <Line
-                        key={cid}
-                        type="monotone"
-                        dataKey={`c${cid}`}
-                        stroke={CHART_COLORS[i % CHART_COLORS.length]}
-                        dot={false}
-                        name={`Classification ${cid}`}
+                {snapLoading ? (
+                  <TableSkeleton rows={4} />
+                ) : snapIsError ? (
+                  <ErrorState message={errorText(snapError, "Failed to load balance trend")} onRetry={snapRefetch} />
+                ) : chartArray.length === 0 ? (
+                  <EmptyState title="No historical snapshots in the last 30 days" />
+                ) : (
+                  <ResponsiveContainer width="100%" height={300}>
+                    <LineChart data={chartArray}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                      <XAxis
+                        dataKey="date"
+                        tick={{ fontSize: 11, fill: "var(--muted)" }}
                       />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
+                      <YAxis
+                        tick={{ fontSize: 11, fill: "var(--muted)" }}
+                        tickFormatter={(v) => formatAmount(String(v))}
+                      />
+                      <RechartsTooltip
+                        contentStyle={{
+                          backgroundColor: "var(--surface)",
+                          border: "1px solid var(--border)",
+                          borderRadius: "8px",
+                          color: "var(--foreground)",
+                        }}
+                        formatter={(value, name, entry) => {
+                          const payload = entry?.payload as Record<string, string | number> | undefined;
+                          const raw = payload?.[`${entry?.dataKey}Raw`];
+                          return [formatAmount(typeof raw === "string" ? raw : String(value)), name];
+                        }}
+                      />
+                      {classIds.map((cid, i) => (
+                        <Line
+                          key={cid}
+                          type="monotone"
+                          dataKey={`c${cid}`}
+                          stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                          dot={false}
+                          name={`Classification ${cid}`}
+                        />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
               </Card.Content>
             </Card>
           )}

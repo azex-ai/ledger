@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useClassifications,
@@ -27,6 +27,11 @@ import { useClientPage } from "../../lib/use-client-page";
 function CreateClassificationModal() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean }>({ code: "", name: "", normal_side: "debit", is_system: false });
+  // J-8 (2026-09-02 web audit): see ClassificationsPage (shadcn skin)'s
+  // matching comment — server-side field-level errors (api-contract.md §1's
+  // message.fields) used to collapse into the same generic toast as any
+  // other error.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateClassification();
 
   function handleSubmit() {
@@ -36,7 +41,14 @@ function CreateClassificationModal() {
         setOpen(false);
         setForm({ code: "", name: "", normal_side: "debit", is_system: false });
       },
-      onError: (err) => toast.danger(errorText(err, "Failed to create classification")),
+      onError: (err) => {
+        const fields = apiFieldErrors(err);
+        if (Object.keys(fields).length > 0) {
+          setFieldErrors(fields);
+        } else {
+          toast.danger(errorText(err, "Failed to create classification"));
+        }
+      },
     });
   }
 
@@ -51,13 +63,31 @@ function CreateClassificationModal() {
               <Modal.Heading>Create Classification</Modal.Heading>
             </Modal.Header>
             <Modal.Body className="flex flex-col gap-4">
-              <TextField fullWidth name="code" value={form.code} onChange={(v) => setForm({ ...form, code: v })}>
+              <TextField
+                fullWidth
+                name="code"
+                value={form.code}
+                onChange={(v) => {
+                  setForm({ ...form, code: v });
+                  setFieldErrors(({ code: _code, ...rest }) => rest);
+                }}
+              >
                 <Label>Code</Label>
                 <Input placeholder="main_wallet" />
+                {fieldErrors.code && <p className="text-danger text-xs">{fieldErrors.code}</p>}
               </TextField>
-              <TextField fullWidth name="name" value={form.name} onChange={(v) => setForm({ ...form, name: v })}>
+              <TextField
+                fullWidth
+                name="name"
+                value={form.name}
+                onChange={(v) => {
+                  setForm({ ...form, name: v });
+                  setFieldErrors(({ name: _name, ...rest }) => rest);
+                }}
+              >
                 <Label>Name</Label>
                 <Input placeholder="Main Wallet" />
+                {fieldErrors.name && <p className="text-danger text-xs">{fieldErrors.name}</p>}
               </TextField>
               <Select
                 fullWidth

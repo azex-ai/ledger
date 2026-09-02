@@ -34,33 +34,53 @@ type LedgerMutationFn<TData, TVariables> = (
  * key, misses the receipt, hits the resulting state-transition guard, and
  * reports failure for an operation that already happened.
  *
- * The key is minted lazily on the first attempt, reused across every retry
- * that follows a failure, and cleared on success — so the NEXT distinct
- * click (a new logical operation) gets a fresh identity. This is the same
+ * The key is scoped per PAYLOAD, not per hook instance (J-13, 2026-09-02 web
+ * audit): a single `useRef<string | null>` keyed the whole hook instance to
+ * one in-flight key, which is only safe when every call site happens to be
+ * a per-row component (`{ id }`) — a hook instance shared across multiple
+ * entities (e.g. a page-scoped approve/reject action) would, after a failed
+ * attempt on entity A, hand that SAME key to a later attempt on entity B;
+ * the server's three-state idempotency semantics (same key + different
+ * payload -> `ErrConflict`, `CLAUDE.md`) then permanently fail every
+ * subsequent entity, because the stale key never gets cleared for a payload
+ * it doesn't belong to (only a retry of A would clear it).
+ *
+ * `keyOf` derives a payload identity (defaults to `JSON.stringify`); a
+ * `Map<payloadKey, uuid>` replaces the single ref so each payload's key is
+ * independent — a failure on A no longer poisons a later attempt on B, and
+ * only A's own entry is deleted on A's success. This generalizes the
  * pattern already used by hand at the call site for settle-partial
- * (ReservationsPage) generalized into the shared wrapper so every mutation
- * gets it automatically, with zero call-site changes required.
+ * (ReservationsPage's `usePayloadIdempotencyKey`) into the shared wrapper so
+ * every mutation gets it automatically, with zero call-site changes
+ * required for the common per-row case (default `keyOf` already
+ * distinguishes different variables).
  *
  *   const mutation = useLedgerMutation((body) => client.postJournal(body), ["journals"]);
  *   const mutation = useLedgerMutation((id, idempotencyKey) => client.settleX(id, idempotencyKey), ["reservations"]);
+ *   const mutation = useLedgerMutation(fn, ["reviews"], (uid) => uid); // custom payload identity
  */
 export function useLedgerMutation<TData, TVariables>(
   mutationFn: LedgerMutationFn<TData, TVariables>,
   invalidateKeys: string[],
+  keyOf: (variables: TVariables) => string = (variables) => JSON.stringify(variables),
 ) {
   const qc = useQueryClient();
-  const idempotencyKeyRef = useRef<string | null>(null);
+  const keysRef = useRef(new Map<string, string>());
   return useMutation({
     mutationFn: (variables: TVariables) => {
-      if (!idempotencyKeyRef.current) {
-        idempotencyKeyRef.current = crypto.randomUUID();
+      const payloadKey = keyOf(variables);
+      let idempotencyKey = keysRef.current.get(payloadKey);
+      if (!idempotencyKey) {
+        idempotencyKey = crypto.randomUUID();
+        keysRef.current.set(payloadKey, idempotencyKey);
       }
-      return mutationFn(variables, idempotencyKeyRef.current);
+      return mutationFn(variables, idempotencyKey);
     },
-    onSuccess: () => {
-      // Ready for the next distinct action — a fresh click after a success
-      // must not reuse a key an already-completed operation owns.
-      idempotencyKeyRef.current = null;
+    onSuccess: (_data, variables) => {
+      // Ready for the next distinct action on THIS payload — a fresh click
+      // after a success must not reuse a key an already-completed operation
+      // owns. Other in-flight/failed payloads' keys are untouched.
+      keysRef.current.delete(keyOf(variables));
       for (const key of invalidateKeys) {
         // Namespace each caller-passed bare segment under the package root
         // prefix; no raw "ledger" literal lives here.
@@ -69,7 +89,8 @@ export function useLedgerMutation<TData, TVariables>(
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances });
       qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
     },
-    // onError intentionally does NOT clear idempotencyKeyRef — a retried
-    // .mutate() call after a failure reuses the same key by design.
+    // onError intentionally does NOT delete the payload's key — a retried
+    // .mutate() call with the SAME payload after a failure reuses it by
+    // design.
   });
 }

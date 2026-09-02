@@ -67,6 +67,14 @@ function toFixed(value: bigint, places: number, commas: boolean): string {
  * that audit's scope to change.
  */
 export function formatAmount(value: string): string {
+  // J-11 (2026-09-02 web audit): an absent amount and a real zero amount are
+  // different facts — collapsing both to "0.00" makes them indistinguishable
+  // on screen. `parseUnits("", 18)` happily returns `0n`, so this check must
+  // come first, before the raw === 0n branch below. "—" matches the
+  // existing missing-value convention already used across these pages
+  // (DepositsPage/WithdrawalsPage/SweepMonitorPage's channel_ref/settled_amount).
+  if (value.trim() === "") return "—";
+
   let raw: bigint;
   try {
     raw = parseUnits(value, 18);
@@ -107,6 +115,9 @@ export function formatSignedAmount(value: string): {
   isPositive: boolean;
   isNegative: boolean;
 } {
+  // J-11: same missing-vs-zero distinction as formatAmount above.
+  if (value.trim() === "") return { text: "—", isPositive: false, isNegative: false };
+
   let raw: bigint;
   try {
     raw = parseUnits(value, 18);
@@ -121,13 +132,25 @@ export function formatSignedAmount(value: string): {
   };
 }
 
+// Number.MAX_SAFE_INTEGER ≈ 9.007e15; clamp comfortably under that so the
+// lossy Number conversion below never silently overflows.
+const FORMAT_COMPACT_MAX = 1_000_000_000_000_000; // 1e15
+
 /**
- * Compact notation for large numbers.
+ * Compact notation for large numbers — dashboard-scale display only, not a
+ * `financial.md`-banded precise amount (see `formatAmount` for that).
  *
  *   formatCompact("1234567.89")  → "1.23M"
  *   formatCompact("45678")       → "45.7K"
- *   formatCompact("999")         → "999"
+ *   formatCompact("999")         → "999.0000"   (< 1000 falls back to formatAmount)
  *   formatCompact("1500000000")  → "1.50B"
+ *
+ * J-10 (2026-09-02 web audit): the function itself clamps values beyond
+ * `FORMAT_COMPACT_MAX` (≈1e15) to that ceiling before the lossy Number
+ * conversion, rather than relying on callers to clamp first — this is a
+ * previously zero-caller, zero-test export, so there is no established
+ * calling convention to preserve, and "the function protects itself" is
+ * safer than a docstring-only contract nothing enforces.
  */
 export function formatCompact(value: string): string {
   let raw: bigint;
@@ -138,13 +161,16 @@ export function formatCompact(value: string): string {
   }
   if (raw === 0n) return "0";
 
-  // For compact notation, lossy Number conversion is acceptable
-  // (we're reducing to 3 significant digits anyway).
-  //
-  // Cap: values up to ~$1e15 (Number.MAX_SAFE_INTEGER ≈ 9e15) are safe.
-  // Beyond that the Number conversion overflows; callers must clamp first.
-  const num = Number(formatUnits(raw < 0n ? -raw : raw, 18));
-  const prefix = raw < 0n ? "-" : "";
+  const neg = raw < 0n;
+  const abs = neg ? -raw : raw;
+  const capped = abs > parseUnits(String(FORMAT_COMPACT_MAX), 18)
+    ? parseUnits(String(FORMAT_COMPACT_MAX), 18)
+    : abs;
+
+  // For compact notation, lossy Number conversion is acceptable (reducing to
+  // 3 significant digits anyway) now that `capped` guarantees it's in range.
+  const num = Number(formatUnits(capped, 18));
+  const prefix = neg ? "-" : "";
 
   if (num >= 1_000_000_000) return prefix + (num / 1_000_000_000).toFixed(2) + "B";
   if (num >= 1_000_000) return prefix + (num / 1_000_000).toFixed(2) + "M";

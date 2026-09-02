@@ -42,6 +42,7 @@ function PostJournalDialog() {
     entries: "",
   });
   const mutation = usePostJournal();
+  // query-consumption-allow: populates the journal-type <Select> below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes(true);
 
   function handleSubmit() {
@@ -171,7 +172,9 @@ function TemplateJournalDialog() {
     source: "",
   });
   const mutation = usePostTemplateJournal();
+  // query-consumption-allow: populates the template/currency <Select>s below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: templates } = useTemplates(true);
+  // query-consumption-allow: same as templates above.
   const { data: currencies } = useCurrencies(true);
 
   function handleSubmit() {
@@ -333,6 +336,7 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
   const journals = data?.pages.flatMap((p) => p.list) ?? [];
   // uid → human name for the Type column; falls back to the uid while the
   // (small, cached) journal-type list loads.
+  // query-consumption-allow: falls back to the raw uid via `??` below (incl. on fetch failure) — the fallback IS the degraded state, not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes();
   const typeName = (uid: string) =>
     journalTypes?.find((t) => t.uid === uid)?.name ?? uid;

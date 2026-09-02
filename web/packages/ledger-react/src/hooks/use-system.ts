@@ -45,6 +45,18 @@ export function useReconcileAccount() {
   });
 }
 
+/**
+ * `GET /api/v1/snapshots` — ALL FOUR params are hard-required server-side
+ * (`server/handler_system.go`'s `handleListSnapshots` 400s if any one is
+ * missing): `holder`, `currency_uid`, `start`, `end`. Missing any of them
+ * disables the query rather than firing a request that's guaranteed to 400.
+ *
+ * `isDisabled` (J-18, 2026-09-02 web audit) makes that gating explicit to
+ * callers — without it, a missing param produces the exact same
+ * `isLoading: false, isError: false, data: undefined` shape as "the request
+ * ran and found nothing", which every gated query in this package silently
+ * collapsed into before this fix.
+ */
 export function useSnapshots(params: {
   holder?: number;
   currency_uid?: string;
@@ -52,10 +64,17 @@ export function useSnapshots(params: {
   end?: string;
 }) {
   const client = useLedgerClient();
-  return useQuery({
+  // Negative holders (system accounts) are valid; only 0/undefined disables.
+  const isDisabled =
+    params.holder === undefined ||
+    params.holder === 0 ||
+    !params.currency_uid ||
+    !params.start ||
+    !params.end;
+  const query = useQuery({
     queryKey: ledgerKeys.snapshots(params),
     queryFn: () => client.listSnapshots(params),
-    // Negative holders (system accounts) are valid; only 0/undefined disables.
-    enabled: params.holder !== undefined && params.holder !== 0,
+    enabled: !isDisabled,
   });
+  return { ...query, isDisabled };
 }

@@ -6,9 +6,21 @@ import { ledgerKeys, ledgerKeyPrefix } from "./keys";
 
 /**
  * Idempotency key stable across retries of one attempt sequence, cleared on
- * success (api-contract.md §9 — same lifecycle as useLedgerMutation). Used
- * directly here (rather than useLedgerMutation) because these mutations only
- * need a plain invalidate-on-success, one line each.
+ * success — the SAME client-side lifecycle useLedgerMutation gives every
+ * other mutation (api-contract.md §9). Used directly here (rather than
+ * useLedgerMutation) because these mutations only need a plain
+ * invalidate-on-success, one line each.
+ *
+ * J-14 (2026-09-02 web audit): unlike most mutations, the metadata
+ * create/deactivate handlers this key is sent to (`server/handler_metadata.go`)
+ * do NOT read `Idempotency-Key` at all — `middleware_idempotency.go` aliases
+ * the header into the request body, but nothing in these handlers looks at
+ * that field, so it's silently dropped server-side. A retried create after a
+ * client-side timeout is therefore deduped by each resource's unique `code`
+ * constraint (a second attempt gets a constraint-violation error, not a
+ * replayed success), NOT by this key. This is documented here because a
+ * server-side change to start honoring the key would be the natural place
+ * to also update this comment — see the TODO note in the same audit.
  */
 function useIdempotencyKey() {
   const ref = useRef<string | null>(null);

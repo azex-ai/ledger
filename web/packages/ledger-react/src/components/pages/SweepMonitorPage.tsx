@@ -74,7 +74,7 @@ export function SweepMonitorPage() {
         />
       ) : (
         <>
-          <Table>
+          <Table aria-label="Sweeps">
             <TableHeader>
               <TableRow>
                 <TableHead>UID</TableHead>

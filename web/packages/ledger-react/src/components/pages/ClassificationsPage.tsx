@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useClassifications,
@@ -32,6 +32,13 @@ import { useClientPage } from "../../lib/use-client-page";
 function CreateDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean }>({ code: "", name: "", normal_side: "debit", is_system: false });
+  // J-8 (2026-09-02 web audit): server-side field-level validation errors
+  // (api-contract.md §1's message.fields — e.g. a duplicate `code`) used to
+  // collapse into the same generic toast as any other error. No
+  // react-hook-form in this codebase, so a sibling useState carries them;
+  // cleared per-field on the next edit so a stale error doesn't linger next
+  // to a since-corrected value.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateClassification();
 
   return (
@@ -44,11 +51,31 @@ function CreateDialog() {
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
             <Label htmlFor="cls-code">Code</Label>
-            <Input id="cls-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="main_wallet" />
+            <Input
+              id="cls-code"
+              value={form.code}
+              onChange={(e) => {
+                setForm({ ...form, code: e.target.value });
+                setFieldErrors(({ code: _code, ...rest }) => rest);
+              }}
+              placeholder="main_wallet"
+              aria-invalid={fieldErrors.code ? true : undefined}
+            />
+            {fieldErrors.code && <p className="text-xs text-destructive">{fieldErrors.code}</p>}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="cls-name">Name</Label>
-            <Input id="cls-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Main Wallet" />
+            <Input
+              id="cls-name"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setFieldErrors(({ name: _name, ...rest }) => rest);
+              }}
+              placeholder="Main Wallet"
+              aria-invalid={fieldErrors.name ? true : undefined}
+            />
+            {fieldErrors.name && <p className="text-xs text-destructive">{fieldErrors.name}</p>}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="cls-normal-side">Normal Side</Label>
@@ -67,7 +94,14 @@ function CreateDialog() {
               toast.success("Classification created");
               setOpen(false);
             },
-            onError: (err) => toast.error(errorText(err, "Failed to create classification")),
+            onError: (err) => {
+              const fields = apiFieldErrors(err);
+              if (Object.keys(fields).length > 0) {
+                setFieldErrors(fields);
+              } else {
+                toast.error(errorText(err, "Failed to create classification"));
+              }
+            },
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -133,7 +167,7 @@ export function ClassificationsPage() {
         />
       ) : (
         <>
-        <Table className="min-w-[820px]">
+        <Table aria-label="Classifications" className="min-w-[820px]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[220px]">ID</TableHead>

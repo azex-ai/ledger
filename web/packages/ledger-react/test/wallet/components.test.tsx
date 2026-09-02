@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
 import type { ReactNode } from "react";
@@ -171,5 +171,113 @@ describe.each([
     // The raw upstream error never reaches the DOM.
     expect(container.textContent).not.toContain("deadlock");
     expect(container.textContent).not.toContain("journal_entries");
+  });
+
+  // J-3 (2026-09-02 web audit): the holds query's isLoading/isError were
+  // never read, so a failed /holder/holds request rendered the same
+  // "Nothing is on hold right now." as a genuinely empty result —
+  // contradicting the non-zero `locked` figure shown one row up on the same
+  // card (a real balance, real holds request, real failure).
+  test("shows an error state (not a false empty state) when holds fails while locked > 0", async () => {
+    server.use(
+      http.get(`${BASE}/holder/balances`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: null,
+          data: {
+            list: [
+              {
+                currency_uid: "cur-1",
+                currency_code: "CREDITS",
+                available: "75.5",
+                pending: "40",
+                locked: "25",
+                total: "140.5",
+              },
+            ],
+          },
+        }),
+      ),
+      http.get(`${BASE}/holder/transactions`, () =>
+        HttpResponse.json({ code: 200, message: null, data: { list: [], next_cursor: "" } }),
+      ),
+      http.get(`${BASE}/holder/holds`, () =>
+        HttpResponse.json({ code: 19999, message: { text: "boom" }, data: null }, { status: 500 }),
+      ),
+    );
+    render(wrap(<Panel />));
+    await waitFor(() =>
+      expect(screen.getByText("CREDITS balance")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /On hold/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/Couldn.t load hold details/i)).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText("Nothing is on hold right now."),
+    ).not.toBeInTheDocument();
+  });
+
+  // J-21 (2026-09-02 web audit): the row used to hardcode "+"/"-" at the call
+  // site from `direction` instead of going through `formatSignedAmount` (the
+  // package's single sign/color authority everywhere else, e.g.
+  // ReconciliationPage's drift cell). This wasn't just a structural
+  // inconsistency: a zero-amount "out" transaction hardcoded to "-0.00" is a
+  // genuine display bug against display.ts's own pinned convention ("negative
+  // zero displays as the unsigned zero form", test/lib/display.test.ts) — the
+  // row had two different zero conventions depending on `direction`.
+  test("a zero-amount direction=out row renders the unsigned zero form, not a hardcoded minus", async () => {
+    server.use(
+      http.get(`${BASE}/holder/balances`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: null,
+          data: {
+            list: [
+              {
+                currency_uid: "cur-1",
+                currency_code: "CREDITS",
+                available: "75.5",
+                pending: "40",
+                locked: "25",
+                total: "140.5",
+              },
+            ],
+          },
+        }),
+      ),
+      http.get(`${BASE}/holder/transactions`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: null,
+          data: {
+            list: [
+              {
+                uid: "j-9",
+                kind: "withdrawal",
+                kind_label: "Withdrawal",
+                direction: "out",
+                amount: "0", // absolute value per contract — direction carries the sign
+                currency_uid: "cur-1",
+                currency_code: "CREDITS",
+                occurred_at: "2026-07-08T02:00:00Z",
+                reversal_of_uid: "",
+                memo: "",
+              },
+            ],
+            next_cursor: "",
+          },
+        }),
+      ),
+      http.get(`${BASE}/holder/holds`, () =>
+        HttpResponse.json({ code: 200, message: null, data: { list: [] } }),
+      ),
+    );
+    const { container } = render(wrap(<Panel />));
+    await waitFor(() =>
+      expect(screen.getByText("CREDITS balance")).toBeInTheDocument(),
+    );
+    expect(container.textContent).toContain("+0.00");
+    expect(container.textContent).not.toContain("-0.00");
   });
 });

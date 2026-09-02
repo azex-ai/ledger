@@ -6,7 +6,7 @@ import { Card, CardContent } from "../../components/ui/card";
 import { EmptyState } from "../../components/empty-state";
 import { ErrorState } from "../../components/error-state";
 import { LoadMoreBar } from "../../components/pagination-bar";
-import { cn, formatAmount, formatUTC } from "../../lib/utils";
+import { cn, formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
 
@@ -59,7 +59,17 @@ function DefaultRow({
   tx: WalletTransaction;
   label: string;
 }) {
-  const isIn = tx.direction === "in";
+  // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
+  // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
+  // at the call site — display.ts's contract is that callers never re-derive
+  // or strip the sign themselves (this is exactly the M1 bug class, just
+  // with `direction` standing in for the ledger's own debit/credit side).
+  // Server contract: `amount` is an absolute value (`postgres/holder_store.go`'s
+  // `net.Abs()`), so `direction === "out"` is the only place the minus sign
+  // can legitimately come from.
+  const { text, isNegative } = formatSignedAmount(
+    tx.direction === "out" ? `-${tx.amount}` : tx.amount,
+  );
   return (
     <li className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0">
@@ -79,13 +89,13 @@ function DefaultRow({
       <p
         className={cn(
           "shrink-0 text-sm font-medium tabular-nums",
-          isIn
-            ? "text-emerald-600 dark:text-emerald-400"
-            : "text-red-600 dark:text-red-400",
+          isNegative
+            ? "text-red-600 dark:text-red-400"
+            : "text-emerald-600 dark:text-emerald-400",
         )}
       >
-        {isIn ? "+" : "-"}
-        {formatAmount(tx.amount)}{" "}
+        {isNegative ? "" : "+"}
+        {text}{" "}
         <span className="text-muted-foreground font-normal">
           {tx.currency_code}
         </span>

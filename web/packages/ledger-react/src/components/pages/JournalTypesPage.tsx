@@ -1,6 +1,6 @@
 "use client";
 
-import { errorText } from "../../lib/error-message";
+import { errorText, apiFieldErrors } from "../../lib/error-message";
 import { useState } from "react";
 import {
   useJournalTypes,
@@ -29,6 +29,8 @@ import { useClientPage } from "../../lib/use-client-page";
 function CreateDialog() {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ code: "", name: "" });
+  // J-8 (2026-09-02 web audit): see ClassificationsPage's matching comment.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const mutation = useCreateJournalType();
 
   return (
@@ -41,11 +43,31 @@ function CreateDialog() {
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
             <Label htmlFor="jt-code">Code</Label>
-            <Input id="jt-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit" />
+            <Input
+              id="jt-code"
+              value={form.code}
+              onChange={(e) => {
+                setForm({ ...form, code: e.target.value });
+                setFieldErrors(({ code: _code, ...rest }) => rest);
+              }}
+              placeholder="deposit"
+              aria-invalid={fieldErrors.code ? true : undefined}
+            />
+            {fieldErrors.code && <p className="text-xs text-destructive">{fieldErrors.code}</p>}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="jt-name">Name</Label>
-            <Input id="jt-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Deposit Confirmation" />
+            <Input
+              id="jt-name"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setFieldErrors(({ name: _name, ...rest }) => rest);
+              }}
+              placeholder="Deposit Confirmation"
+              aria-invalid={fieldErrors.name ? true : undefined}
+            />
+            {fieldErrors.name && <p className="text-xs text-destructive">{fieldErrors.name}</p>}
           </div>
         </div>
         <DialogFooter>
@@ -54,7 +76,14 @@ function CreateDialog() {
               toast.success("Journal type created");
               setOpen(false);
             },
-            onError: (err) => toast.error(errorText(err, "Failed to create journal type")),
+            onError: (err) => {
+              const fields = apiFieldErrors(err);
+              if (Object.keys(fields).length > 0) {
+                setFieldErrors(fields);
+              } else {
+                toast.error(errorText(err, "Failed to create journal type"));
+              }
+            },
           })} disabled={mutation.isPending || !form.code || !form.name}>
             {mutation.isPending ? "Creating..." : "Create"}
           </Button>
@@ -120,7 +149,7 @@ export function JournalTypesPage() {
         />
       ) : (
         <>
-        <Table className="min-w-[820px]">
+        <Table aria-label="Journal types" className="min-w-[820px]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[220px]">ID</TableHead>

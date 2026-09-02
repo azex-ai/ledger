@@ -1,6 +1,39 @@
 import { useRef } from "react";
 
 /**
+ * Like `usePayloadIdempotencyKey` below, but for a hook instance shared
+ * across MULTIPLE concurrent entities (J-13, 2026-09-02 web audit) — e.g. a
+ * page-scoped approve/reject action where the operator can act on several
+ * queue rows without waiting for each to settle. A single-payload tracker
+ * (`usePayloadIdempotencyKey`) would hand entity B the key an in-flight or
+ * failed attempt on entity A still owns, and the server's three-state
+ * idempotency semantics (same key + different payload -> `ErrConflict`,
+ * `CLAUDE.md`) would then permanently fail B.
+ *
+ * `keyFor(payloadKey)` mints lazily and reuses across retries of that exact
+ * payload; `clear(payloadKey)` removes only that entry (call on success).
+ */
+export function useKeyedIdempotencyKeys(): {
+  keyFor: (payloadKey: string) => string;
+  clear: (payloadKey: string) => void;
+} {
+  const keysRef = useRef(new Map<string, string>());
+  return {
+    keyFor: (payloadKey: string) => {
+      let key = keysRef.current.get(payloadKey);
+      if (!key) {
+        key = crypto.randomUUID();
+        keysRef.current.set(payloadKey, key);
+      }
+      return key;
+    },
+    clear: (payloadKey: string) => {
+      keysRef.current.delete(payloadKey);
+    },
+  };
+}
+
+/**
  * One idempotency key per submitted payload, not per dialog lifetime.
  *
  * `crypto.randomUUID()` is minted once per distinct payload and reused

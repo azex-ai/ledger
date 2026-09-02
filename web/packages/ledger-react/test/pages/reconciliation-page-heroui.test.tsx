@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { toast } from "@heroui/react";
 import { http, HttpResponse } from "msw";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { ReconciliationPage } from "../../src/heroui/pages/ReconciliationPage";
 import { renderPage, server, BASE } from "./render-page";
 
@@ -36,5 +37,49 @@ describe("ReconciliationPage (heroui) — guards optional details (M5)", () => {
     await waitFor(() => expect(screen.getByText("Balanced")).toBeInTheDocument());
     // No details table, no thrown error — the page is still on screen.
     expect(screen.getByRole("heading", { name: "Reconciliation" })).toBeInTheDocument();
+  });
+});
+
+// J-16 (2026-09-02 web audit): toast.promise's `success` callback rendered
+// the SUCCESS style (green check) even when the resolved value said
+// `balanced: false` — a promise fulfilling and a ledger balancing are two
+// different axes. Pin: an unbalanced result must never reach toast.success.
+describe("ReconciliationPage (heroui) — unbalanced result never toasts success (J-16)", () => {
+  test("global check", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockImplementation(() => "" as never);
+    const dangerSpy = vi.spyOn(toast, "danger").mockImplementation(() => "" as never);
+    server.use(
+      http.post(`${BASE}/api/v1/reconcile`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: null,
+          data: { balanced: false, gap: "3.2", checked_at: "2026-01-01T00:00:00Z" },
+        }),
+      ),
+    );
+    renderPage(<ReconciliationPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Run Global Check" }));
+    await waitFor(() => expect(dangerSpy).toHaveBeenCalled());
+    expect(successSpy).not.toHaveBeenCalled();
+  });
+
+  test("account check", async () => {
+    const successSpy = vi.spyOn(toast, "success").mockImplementation(() => "" as never);
+    const dangerSpy = vi.spyOn(toast, "danger").mockImplementation(() => "" as never);
+    server.use(
+      http.post(`${BASE}/api/v1/reconcile/account`, () =>
+        HttpResponse.json({
+          code: 200,
+          message: null,
+          data: { balanced: false, gap: "1.5", checked_at: "2026-01-01T00:00:00Z" },
+        }),
+      ),
+    );
+    renderPage(<ReconciliationPage />);
+    fireEvent.change(screen.getByLabelText("Holder"), { target: { value: "1001" } });
+    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "cur-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(dangerSpy).toHaveBeenCalled());
+    expect(successSpy).not.toHaveBeenCalled();
   });
 });

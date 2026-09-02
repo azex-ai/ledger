@@ -105,11 +105,18 @@ describe("journals + entries", () => {
     expect(i.captured()?.auth).toBe(`Bearer ${API_KEY}`);
   });
 
-  test("reverseJournal", async () => {
+  // J-15 (2026-09-02 web audit): server/handler_journals.go's
+  // handleReverseJournal 400s if ANY Idempotency-Key reaches it (header or
+  // body) — the server derives its own key from the journal uid + reason.
+  // Before this fix the client's default per-attempt header would have been
+  // aliased into the body by idempotencyHeaderAliasMiddleware, 400ing every
+  // real reversal despite this exact same MSW-body-only assertion passing.
+  test("reverseJournal sends no Idempotency-Key (header or body) — the server derives its own", async () => {
     const i = intercept("post", "/api/v1/journals/uid-5/reverse", {});
     await client.reverseJournal("uid-5", "oops");
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/uid-5/reverse`);
     expect(i.captured()?.body).toEqual({ reason: "oops" });
+    expect(i.captured()?.idempotencyKey).toBeNull();
   });
 
   test("listEntries", async () => {
@@ -293,10 +300,12 @@ describe("templates", () => {
     expect(d.captured()?.method).toBe("POST");
     expect(d.captured()?.idempotencyKey).toBe("deactivate-key");
 
+    // J-7 (2026-09-02 web audit): the real server response has only
+    // `entries` (server/handler_metadata.go's previewTemplateResponse) — no
+    // total_debit/total_credit. This fixture used to include both, silently
+    // perpetuating a false assumption fixed on the PreviewResult type.
     const p = intercept("post", "/api/v1/templates/dep/preview", {
       entries: [],
-      total_debit: "0",
-      total_credit: "0",
     });
     await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1" });
     expect(p.captured()?.url).toBe(`${BASE}/api/v1/templates/dep/preview`);

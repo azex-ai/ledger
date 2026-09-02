@@ -81,4 +81,48 @@ describe("useLedgerMutation", () => {
     expect(keys).toHaveLength(4);
     expect(keys[3]).not.toBe(keys[0]);
   });
+
+  // J-13 (2026-09-02 web audit): the single `useRef<string | null>` scoped
+  // the whole HOOK INSTANCE to one key — safe only by coincidence (every
+  // call site happened to be a per-row component). A hook instance shared
+  // across entities (the shape this test drives directly, bypassing that
+  // coincidence) must give a failed attempt on entity A's payload and a
+  // fresh attempt on entity B's payload independent keys — the old
+  // behavior would hand B the key A's failure still owned.
+  test("a failure on one payload does not poison the key for a DIFFERENT payload", async () => {
+    const qc = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+        {children}
+      </LedgerProvider>
+    );
+
+    const keysByVariable: Record<string, string[]> = { A: [], B: [] };
+    const { result } = renderHook(
+      () =>
+        useLedgerMutation<string, string>((variables, idempotencyKey) => {
+          keysByVariable[variables].push(idempotencyKey);
+          if (variables === "A") return Promise.reject(new Error("boom"));
+          return Promise.resolve("done");
+        }, []),
+      { wrapper },
+    );
+
+    // A fails.
+    result.current.mutate("A");
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(keysByVariable.A).toHaveLength(1);
+
+    // B — a DIFFERENT payload — must get its own key, not A's.
+    result.current.mutate("B");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(keysByVariable.B).toHaveLength(1);
+    expect(keysByVariable.B[0]).not.toBe(keysByVariable.A[0]);
+
+    // A retried afterward still reuses A's own original key.
+    result.current.mutate("A");
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(keysByVariable.A).toHaveLength(2);
+    expect(keysByVariable.A[1]).toBe(keysByVariable.A[0]);
+  });
 });
