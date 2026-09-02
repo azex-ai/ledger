@@ -173,6 +173,16 @@ components:
 import { LedgerProvider, useJournals } from "@azex/ledger-react/headless";
 ```
 
+Every amount on the wire is a raw `NUMERIC(30,18)` string (`financial.md` —
+never parse it as a `number` yourself). This entry also re-exports the same
+formatting helpers the shipped UI uses, so a headless host's own components
+stay on the same banding table instead of reimplementing it:
+`formatAmount`, `formatSignedAmount`, `formatCompact`, `validateAmount`,
+`formatUTC`, `formatDateUTC`, `shortenAddress`, `shortenHash`, viem's
+`parseUnits`/`formatUnits` (and friends), plus the amount-string arithmetic
+helpers (`addAmounts`, `subAmounts`, `gtAmount`, `gteAmount`, `isZeroAmount`).
+Full reference: [`docs/frontend.md`](../../../docs/frontend.md#display--decimal-utilities).
+
 ## End-user wallet — `@azex/ledger-react/wallet`
 
 The holder-scoped wallet surface for YOUR users (not operators): balances
@@ -212,7 +222,12 @@ Tailwind's utility engine depends on them being global. They carry no
 host-affecting resets, but if your host also customizes Tailwind's theme,
 import your own stylesheet **after** this package's so your values win. (A
 build-time gate asserts only Tailwind's own namespaces reach the global scope
-and no business token ever does — see `test/styles.test.ts`.)
+and no business token ever does — see `test/styles.test.ts`.) Font tokens
+(`--font-sans`, `--font-mono`) are part of that global layer too, but this
+package never overrides their *value* there — the global scope keeps
+Tailwind's own default font stacks, so your host's own `font-sans`/`font-mono`
+utility classes are never repainted with this package's Geist-aware fallback
+chain. That chain is scoped to `.ledger-root` only.
 
 Default appearance is **system** (follows the OS via
 `prefers-color-scheme`); pass `appearance: "dark"` or `"light"` to force a

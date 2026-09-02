@@ -88,13 +88,24 @@
   --color-sidebar-ring: var(--sidebar-ring);
 
   /*
-   * Font tokens source the underlying host/system font vars directly, NOT the
-   * same-named runtime var. `--font-sans: var(--font-sans)` is a self-reference
-   * (the @theme inline key `--font-sans` is also Tailwind's font-namespace
-   * token) — invalid at computed-value time, and at the host's global :root it
-   * silently drops text to the browser default serif. Mirrors theme.css's
-   * fallback stacks; the .ledger-root paint (preflight.css) still resolves the
-   * scoped runtime vars from theme.css.
+   * `--font-heading` is a package-private namespace extension (no such
+   * Tailwind token exists), so it's safe to map here to make `.font-heading`
+   * generate — nothing in a host app can be relying on Tailwind's own
+   * "--font-heading" semantics, because there isn't one.
+   *
+   * `--font-sans` / `--font-mono` are deliberately NOT mapped here (J-4,
+   * 2026-09-02 web audit): those ARE real Tailwind font-namespace tokens, so
+   * overriding them in `@theme inline` — which is global, per C2a below —
+   * would silently repaint the HOST app's own `.font-sans`/`.font-mono`
+   * utility classes with this package's Geist-aware fallback chain the
+   * moment this stylesheet loads before the host's. Leaving them unmapped
+   * means the global scope keeps Tailwind's own default stacks (verified
+   * against `dist/heroui.css`, which never had this override), while
+   * `.ledger-root`'s own font-family (preflight.css) still resolves the
+   * Geist-aware chain from theme.css's `.ledger-root`-scoped declaration —
+   * a property declared directly on an element always wins over one merely
+   * inherited from a global ancestor, so the package's own Geist-detection
+   * paint is unaffected by this change.
    *
    * C2a (decision B, 2026-09-01): the Tailwind theme + utility layers ARE
    * emitted to the global :root,:host (Tailwind v4 `@import
@@ -102,11 +113,10 @@
    * default theme — land in the host's :root. This is accepted as inherent to
    * Tailwind v4 (option B), not scoped away (option A was rejected). The
    * global-token gate in test/styles.test.ts enforces that ONLY Tailwind's own
-   * standard namespaces reach the global scope and no business token does.
+   * standard namespaces reach the global scope and no business token does,
+   * and (as of J-4) that font-sans/font-mono keep Tailwind's own values there.
    */
-  --font-sans: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
   --font-heading: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
-  --font-mono: var(--font-geist-mono, ui-monospace, monospace);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);

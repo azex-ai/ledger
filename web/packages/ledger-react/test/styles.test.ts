@@ -143,6 +143,30 @@ describe("dist/styles.css", () => {
     }
   });
 
+  // J-4 (2026-09-02 web audit): --font-sans/--font-mono ARE real Tailwind
+  // font-namespace tokens (unlike --font-heading, a package-private
+  // extension), so overriding their VALUE in the global :root/:host would
+  // silently repaint the host app's own font-sans/font-mono utility classes
+  // with this package's Geist-aware fallback chain. They may legitimately
+  // appear in the global scope (Tailwind's own theme layer defines them
+  // there inherently, C2a decision B) but only with Tailwind's own default
+  // stack — never this package's --font-geist-* chain.
+  it("keeps Tailwind's own font-sans/font-mono values in the global scope, never this package's Geist-aware override", () => {
+    const grabGlobal = (name: string) => {
+      const blockRe = /(?:^|[},])\s*(:root|:host)[^{]*\{([^}]*)\}/g;
+      let m: RegExpExecArray | null;
+      const values: string[] = [];
+      while ((m = blockRe.exec(css)) !== null) {
+        const decl = new RegExp(`--${name}:([^;]*);`).exec(m[2]);
+        if (decl) values.push(decl[1]);
+      }
+      return values;
+    };
+    for (const value of [...grabGlobal("font-sans"), ...grabGlobal("font-mono")]) {
+      expect(value).not.toContain("--font-geist-");
+    }
+  });
+
   it("the global universal-selector rule initializes only Tailwind --tw-* vars, never resets host elements", () => {
     // Tailwind's utility layer emits a global `*,:before,:after{…}` that seeds
     // its own `--tw-*` custom properties. That is inert for the host (it only
