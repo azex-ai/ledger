@@ -1761,3 +1761,5 @@
 | d-web | 根 `CLAUDE.md`「page logic must stay mirrored」补 a11y 标注写法可不同的例外注记 | W3-lead |
 | d-web | J-23 的 CI 步骤 `npm audit --omit=dev --audit-level=high` 加进 `.github/workflows/ledger-react.yml` | W3-lead（D-tests 已合入） |
 | d-web | d-contract 改 openapi 后 `web/packages/ledger-react` 需 `codegen` 再生成 `schema.ts` 并过 `codegen:check` | W3-lead（d-contract 合入后） |
+| d-threat 接手 | migration 018 尾部照抄 001 的 `REVOKE ledger_owner FROM <runner>` 会撤掉 `Migrate` 的提权窗口（非 superuser 安装死在 020）；`Migrate` 已改逐 migration 开窗口绕过。需：清掉 018 那段 + 静态门禁「001 之外不得出现 `REVOKE ledger_owner FROM`」 | W3-lead |
+| d-threat 接手 | `docs/RUNBOOK.md` 安装前提（CREATE ROLE + public CREATE；`postgres` 库 CONNECT；superuser / ledger_owner 本人 / 对 ledger_owner 的 ADMIN OPTION 三者之一）落后于 `Migrate` godoc | D-ops |
