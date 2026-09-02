@@ -101,6 +101,13 @@ type Server struct {
 	// comments.
 	protectedTemplateCodes map[string]bool
 
+	// allowGenericTemplatePost indexes Config.AllowGenericTemplatePost as
+	// given, before it is subtracted from protectedTemplateCodes above. It is
+	// kept separately because it is also the opt-out for handlePostTemplate's
+	// structural is_system-leg rule, which has no code list to subtract from
+	// (D-C1).
+	allowGenericTemplatePost map[string]bool
+
 	// allowSystemClassificationPost mirrors Config.AllowSystemClassificationPost:
 	// when false (the default), handlePostJournal refuses a handwritten journal
 	// that touches an is_system classification.
@@ -153,11 +160,23 @@ type Config struct {
 	// journal indistinguishable from a real verified deposit by naming its
 	// template code directly.
 	//
+	// This list is the SECOND of that endpoint's two layers, not its primary
+	// guard: the endpoint also refuses, structurally, any template with a leg
+	// on an is_system classification, whoever defined it (D-C1, 2026-09-02
+	// audit — the four-code list left dev_credit reachable, and covered no
+	// deployment-defined system-side template at all). A name list is still
+	// worth keeping alongside it because it answers before the template table
+	// is read, and therefore also when that table cannot be read or the rows
+	// do not exist yet. Both layers share AllowGenericTemplatePost as their
+	// only opt-out.
+	//
 	// The effective protected set is presets.ProtectedTemplateCodes()
 	// (deposit_confirm, deposit_confirm_pending, deposit_release_pending,
 	// deposit_record_overage — every template a deployment's own
 	// verified-deposit orchestration posts via PostAuthorized, never over
-	// this endpoint) PLUS this field, MINUS AllowGenericTemplatePost below.
+	// this endpoint — plus dev_credit, which mints spendable balance with
+	// nothing behind it) PLUS this field, MINUS AllowGenericTemplatePost
+	// below.
 	// This field is additive: list a deployment's own system-only template
 	// codes here, on top of the library default — it does not need to (and
 	// should not need to) repeat the library's own codes to get them
@@ -174,13 +193,15 @@ type Config struct {
 	// omission.
 	ProtectedTemplateCodes []string
 	// AllowGenericTemplatePost (ALLOW_GENERIC_TEMPLATE_POST, comma-separated)
-	// removes codes from the effective protected set computed above --
-	// applied last, so it can opt a library-default code (e.g.
-	// "deposit_confirm") back into POST /journals/template for a deployment
-	// that has its own reason to allow it there (e.g. a reviewed,
-	// admin-scope-only internal tool). Empty by default: the library
-	// defaults land closed, and only a deployment that explicitly names a
-	// code here weakens that.
+	// is the single, per-code opt-out for BOTH of POST /journals/template's
+	// guards: it removes codes from the effective protected set computed
+	// above (applied last, so it can opt a library-default code such as
+	// "deposit_confirm" back in), and it exempts the named code from the
+	// structural is_system-leg rule. A deployment with its own reason to
+	// post one of these through the generic endpoint (e.g. a reviewed,
+	// admin-scope-only internal tool) names it here. Empty by default: the
+	// library defaults land closed, and only a deployment that explicitly
+	// names a code here weakens that.
 	AllowGenericTemplatePost []string
 	// AllowSystemClassificationPost (ALLOW_SYSTEM_CLASSIFICATION_POST) opts a
 	// deployment out of the default guard on POST /journals: by default the
@@ -456,36 +477,39 @@ func newServer(cfg *Config, deps Deps) *Server {
 	for _, code := range cfg.ProtectedTemplateCodes {
 		protectedTemplateCodes[code] = true
 	}
+	allowGenericTemplatePost := make(map[string]bool, len(cfg.AllowGenericTemplatePost))
 	for _, code := range cfg.AllowGenericTemplatePost {
+		allowGenericTemplatePost[code] = true
 		delete(protectedTemplateCodes, code)
 	}
 	s := &Server{
-		journals:               deps.Journals,
-		balances:               deps.Balances,
-		reserver:               deps.Reserver,
-		booker:                 deps.Booker,
-		bookingReader:          deps.BookingReader,
-		eventReader:            deps.EventReader,
-		classifications:        deps.Classifications,
-		journalTypes:           deps.JournalTypes,
-		templates:              deps.Templates,
-		currencies:             deps.Currencies,
-		accountPolicies:        deps.AccountPolicies,
-		channels:               deps.Channels,
-		audit:                  deps.Audit,
-		platformBalances:       deps.PlatformBalances,
-		solvency:               deps.Solvency,
-		balanceTrends:          deps.BalanceTrends,
-		periodCloser:           deps.PeriodCloser,
-		trialBalance:           deps.TrialBalance,
-		reconciler:             deps.Reconciler,
-		fullReconciler:         deps.FullReconciler,
-		queries:                deps.Queries,
-		ready:                  &atomic.Bool{},
-		rateLimiter:            newRateLimiter(defaultRateLimiterConfig()),
-		authEnabled:            len(cfg.APIKeys) > 0,
-		devCreditEnabled:       cfg.DevCreditEnabled,
-		protectedTemplateCodes: protectedTemplateCodes,
+		journals:                 deps.Journals,
+		balances:                 deps.Balances,
+		reserver:                 deps.Reserver,
+		booker:                   deps.Booker,
+		bookingReader:            deps.BookingReader,
+		eventReader:              deps.EventReader,
+		classifications:          deps.Classifications,
+		journalTypes:             deps.JournalTypes,
+		templates:                deps.Templates,
+		currencies:               deps.Currencies,
+		accountPolicies:          deps.AccountPolicies,
+		channels:                 deps.Channels,
+		audit:                    deps.Audit,
+		platformBalances:         deps.PlatformBalances,
+		solvency:                 deps.Solvency,
+		balanceTrends:            deps.BalanceTrends,
+		periodCloser:             deps.PeriodCloser,
+		trialBalance:             deps.TrialBalance,
+		reconciler:               deps.Reconciler,
+		fullReconciler:           deps.FullReconciler,
+		queries:                  deps.Queries,
+		ready:                    &atomic.Bool{},
+		rateLimiter:              newRateLimiter(defaultRateLimiterConfig()),
+		authEnabled:              len(cfg.APIKeys) > 0,
+		devCreditEnabled:         cfg.DevCreditEnabled,
+		protectedTemplateCodes:   protectedTemplateCodes,
+		allowGenericTemplatePost: allowGenericTemplatePost,
 
 		allowSystemClassificationPost: cfg.AllowSystemClassificationPost,
 	}

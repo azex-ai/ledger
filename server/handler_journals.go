@@ -49,6 +49,15 @@ type postTemplateRequest struct {
 
 type reverseJournalRequest struct {
 	Reason string `json:"reason"`
+	// IdempotencyKey is read only to refuse it (H-M3): a full reversal's key
+	// is derived server-side from the journal uid and the reason, so a
+	// client-supplied key has no effect on the replay scope of the write.
+	// The field used to be absent from this struct while docs/openapi.yaml
+	// listed it as required, which meant a caller's key -- including one
+	// lifted out of the Idempotency-Key header by
+	// idempotencyHeaderAliasMiddleware -- was parsed away in silence. See
+	// handleReverseJournal.
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type reverseJournalFractionRequest struct {
@@ -204,14 +213,14 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 	httpx.Created(w, toJournalResponse(journal))
 }
 
-// rejectSystemClassificationEntries returns a 403 error if any entry targets a
-// classification flagged is_system. It resolves system-ness from the
-// classification store (which the postgres adapter caches), keyed by uid, so it
-// reflects the live is_system flag rather than a hand-maintained code list.
-func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries []core.EntryInput) error {
+// systemClassificationUIDs resolves the set of classifications flagged
+// is_system from the classification store (which the postgres adapter caches),
+// keyed by uid, so both guards below reflect the live is_system flag rather
+// than a hand-maintained code list.
+func (s *Server) systemClassificationUIDs(ctx context.Context) (map[string]bool, error) {
 	all, err := s.classifications.ListClassifications(ctx, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	systemUIDs := make(map[string]bool, len(all))
 	for _, c := range all {
@@ -219,9 +228,54 @@ func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries 
 			systemUIDs[c.UID] = true
 		}
 	}
+	return systemUIDs, nil
+}
+
+// rejectSystemClassificationEntries returns a 403 error if any entry targets a
+// classification flagged is_system.
+func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries []core.EntryInput) error {
+	systemUIDs, err := s.systemClassificationUIDs(ctx)
+	if err != nil {
+		return err
+	}
 	for _, e := range entries {
 		if systemUIDs[e.ClassificationUID] {
 			return httpx.ErrForbidden("classification " + e.ClassificationUID + " is system-managed and cannot be posted through the generic journal endpoint; use its dedicated template/orchestration, or set AllowSystemClassificationPost after review")
+		}
+	}
+	return nil
+}
+
+// rejectSystemClassificationTemplate is handlePostTemplate's structural
+// counterpart to handlePostJournal's rejectSystemClassificationEntries, and
+// the primary guard on that endpoint (D-C1): it resolves the named template's
+// own legs and refuses the request if any of them posts to an is_system
+// classification, exactly as the handwritten path refuses the same entries
+// spelled out by hand.
+//
+// It derives the verdict rather than consulting a list, because a list only
+// covers what somebody remembered to name: dev_credit -- the one template in
+// this library whose doc comment says it mints balance with nothing behind it
+// -- was reachable here for as long as the four hardcoded deposit codes were
+// the only check, in any ENV, for any write-scope key. Deployment-defined
+// system-side templates were never covered at all.
+//
+// A template that cannot be resolved fails closed: the error propagates
+// (404 for an unknown code) and ExecuteTemplate is never reached, so "the
+// check could not run" never reads as "the check passed"
+// (working-agreements.md §3).
+func (s *Server) rejectSystemClassificationTemplate(ctx context.Context, code string) error {
+	tmpl, err := s.templates.GetTemplate(ctx, code)
+	if err != nil {
+		return err
+	}
+	systemUIDs, err := s.systemClassificationUIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, line := range tmpl.Lines {
+		if systemUIDs[line.ClassificationUID] {
+			return httpx.ErrForbidden("template_code " + code + " posts to system-managed classification " + line.ClassificationUID + " and cannot be executed through this generic endpoint; post it through its dedicated orchestration, or name it in AllowGenericTemplatePost after review")
 		}
 	}
 	return nil
@@ -234,16 +288,30 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// s.protectedTemplateCodes defaults to presets.ProtectedTemplateCodes()
-	// (deposit_confirm and friends) plus whatever Config.ProtectedTemplateCodes
-	// adds, minus Config.AllowGenericTemplatePost -- see server.go's Config
-	// doc comments. This endpoint refuses those codes no matter how the
-	// caller got a write-scope key, same as POST /dev/credits being
-	// hardcoded to a single narrow template rather than accepting an
-	// arbitrary code (handler_devcredit.go).
+	// Two layers, both defaulting closed, with Config.AllowGenericTemplatePost
+	// as the single opt-out for either (contract §7.5):
+	//
+	//  1. s.protectedTemplateCodes -- presets.ProtectedTemplateCodes() plus
+	//     whatever Config.ProtectedTemplateCodes adds. A name list, which
+	//     therefore still answers when the template table cannot be read at
+	//     all, and covers a code before its rows exist.
+	//  2. rejectSystemClassificationTemplate -- the structural rule: any
+	//     template with a leg on an is_system classification is refused,
+	//     whether this library shipped it or the deployment defined it.
+	//
+	// This endpoint refuses those templates no matter how the caller got a
+	// write-scope key, same as POST /dev/credits being hardcoded to a single
+	// narrow template rather than accepting an arbitrary code
+	// (handler_devcredit.go).
 	if s.protectedTemplateCodes[req.TemplateCode] {
 		httpx.Error(w, httpx.ErrForbidden("template_code "+req.TemplateCode+" is protected: post it through its dedicated orchestration, not this generic endpoint"))
 		return
+	}
+	if !s.allowGenericTemplatePost[req.TemplateCode] {
+		if err := s.rejectSystemClassificationTemplate(r.Context(), req.TemplateCode); err != nil {
+			httpx.Error(w, err)
+			return
+		}
 	}
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
@@ -348,6 +416,17 @@ func (s *Server) handleReverseJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Reason == "" {
 		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
+		return
+	}
+	// Fail loudly rather than accept-and-ignore (working-agreements.md §3):
+	// this endpoint's idempotency key is derived server-side, so honoring a
+	// caller-supplied one is not possible here and pretending to would leave
+	// the caller believing it scoped a money-correcting write it did not.
+	// Callers that need to choose the key use POST
+	// /journals/{uid}/reverse-partial with num == den ("1/1"), which takes
+	// idempotency_key as an explicit parameter.
+	if req.IdempotencyKey != "" {
+		httpx.Error(w, httpx.ErrBadRequest("idempotency_key must not be supplied for a full reversal: the key is derived from the journal uid and reason; use reverse-partial with num=den=1 to choose your own key"))
 		return
 	}
 

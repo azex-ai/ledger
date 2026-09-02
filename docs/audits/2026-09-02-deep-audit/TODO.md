@@ -1682,4 +1682,6 @@
 
 | 条目 | 变更 | 消费方需要做什么 |
 |---|---|---|
-| （空） | | |
+| D-C1（W1-templates） | `POST /journals/template` 现在**结构派生**地拒绝任何一条腿落在 `is_system` 分类上的模板（403），不再只拒四个 deposit code。实测受影响的已发货 preset 模板：`dev_credit` `capital_injection` `capital_withdraw` `fee_charge` `checkout_settlement_gross` `checkout_settlement_net` `fx_buy` `fx_sell` `transfer_in` `transfer_out` `withdraw_confirm` `withdraw_fee` `deposit_pending` `deposit_resolve_overage` `deposit_release_overage`（前四个由本轮新增拦截，其余同批）。仅 `lock_funds` / `unlock_funds` 仍可经该端点执行 | 这些账务改走各自的专用编排 / 服务端流程（库自己的流程本就不走这个端点）；确有评审过的理由要保留某个 code 时，逐个列入 `ALLOW_GENERIC_TEMPLATE_POST` / `Config.AllowGenericTemplatePost`——它现在同时是名单层与结构层的唯一放行口 |
+| D-C1（W1-templates） | `presets.ProtectedTemplateCodes()` 从 4 个 code 变为 5 个（新增 `dev_credit`） | 硬编码该集合长度或元素的代码需更新；把它当「额外硬编码名单」使用的部署无需改动 |
+| H-M3 Go 侧（W1-templates） | `POST /journals/{uid}/reverse` 现在拒绝请求体里的 `idempotency_key`（400），`Idempotency-Key` header 别名同样被拒——此前该字段被静默丢弃，而 openapi 把它标为 required | 全额冲销不要再带 key（键由服务端从 journal uid + reason 派生）；需要自选幂等键的调用改用 `POST /journals/{uid}/reverse-partial` 并传 `num=den=1`（等价全额冲销，且该端点本就接受 `idempotency_key`）。`docs/openapi.yaml` 的 `required` 与 description 由 D-contract 同步 |
