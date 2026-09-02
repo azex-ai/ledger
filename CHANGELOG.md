@@ -14,6 +14,243 @@ tags both at the same X.Y.Z (npm 0.4.0 / 0.5.0 were never published; the
 npm line jumps 0.3.0 → 0.5.1 to converge with the Go module). Entries
 below note which artifact a change affects.
 
+## [Unreleased]
+
+Second-round audit remediation (2026-09-02,
+[`docs/plans/2026-09-02-remediation-contracts.md`](docs/plans/2026-09-02-remediation-contracts.md)):
+six Critical findings, all merged to main (Wave 1); Major/Minor findings
+(Wave 2) in progress. Same no-compat premise as the first round (Aaron's
+2026-09-02 ruling, carried from `61177f9`): breaking changes ship directly,
+no compatibility shims, no dual-read — every one below says what a consumer
+needs to do. Full detail for any entry:
+[`docs/audits/2026-09-02-deep-audit/TODO.md`](docs/audits/2026-09-02-deep-audit/TODO.md)
+(each finding's `file:line`, minimal repro, and fix) and that TODO's own
+"破坏性变更清单" / "Lead 追加" tables, which this section transcribes.
+
+Also landed since `[0.6.0]`, not previously logged: `anchors/r2` (Cloudflare
+R2 + Object Lock `core.Anchor`) and `anchortest.RunConformance` (I-48) — see
+the **anchors/r2** entry near the bottom of this section. `[0.6.0]`'s "known
+open items" note above is now partially closed by this; that note is left as
+written because it was true when `[0.6.0]` shipped.
+
+### Go module — Breaking
+
+- **`capital_injection` / `capital_withdraw` sign correction** (A-C1,
+  migration 016): `equity` changed from credit-normal to debit-normal, and
+  both templates' legs reversed (injecting capital is now CR custodial + DR
+  equity). Migration 016 runs as owner, disables the mutation guard for the
+  one statement, and forces a full rollup/snapshot recompute for `equity`.
+  **If your deployment has posted through these two templates before
+  upgrading**: those journals are append-only and read with the OLD
+  polarity after the migration — reverse them and re-post under the new
+  templates. Amount keys are unchanged. Deployments that never used these
+  two templates need no action.
+- **`checkout_settlement_gross` / `_net` sign correction** (A-M2):
+  `checkout_settlement_gross` legs reversed (merchant `main_wallet` is now
+  DR +gross / `custodial` CR +gross). `checkout_settlement_net` grew from 3
+  legs to 4 and **no longer accepts `gross_amount`** — it now takes only
+  `net_amount` + `fee_amount` (gross is the derived sum), and posts a new
+  `fee_expense` (memo) leg plus a `fees` leg. `SettlementBundle()` now also
+  installs the `fee_expense` classification. A caller passing only
+  `gross_amount` now gets `missing amount key`; one already passing
+  `net_amount`/`fee_amount` is unaffected by the signature (only by the
+  polarity fix).
+- **`fee_charge` sign correction** (A-M4): grew from 2 legs to 4
+  (`fee_expense` DR / `custodial` DR / `main_wallet` CR / `fees` CR).
+  `FeeBundle()` now also installs `fee_expense`. Amount key (`amount`)
+  unchanged. Deployments that already posted through `fee_charge`: the
+  `fees` account's historical balance reads with the opposite sign —
+  reverse and re-post.
+- **`SolvencyCheck` custodial-asset scope is now injectable** (A-M6 /
+  A-N3): replaces the hardcoded `code='custodial'` test with a
+  classification-code set, default `{custodial, settlement}`. If none of
+  your classifications match the configured set, `SolvencyChecker` now
+  returns `core.ErrInvalidInput` instead of silently reporting
+  `Custodial=0`. Deployments whose custodial classification isn't named
+  `custodial` (or that relied on `settlement` being excluded from the
+  asset side): pass `ledger.WithCustodialClassCodes(...)`.
+- **Holder-facing balance/transaction scope widened** (A-M3 / A-N4): the
+  four `balance_role <> ''` predicates across `holder.sql` / `reconcile.sql`
+  changed to `NOT IN ('', 'memo')`. Withdrawal fees (posted to a
+  `balance_role=memo` account) now appear in `ListHolderTransactions`; a
+  currency with only memo-role postings no longer appears in
+  `ListHolderBalances`. No API signature change.
+- **Balance-trend inflow/outflow is now `normal_side`-aware** (A-M1): `GET
+  /holders/{h}/trends` (and `BalanceTrendReader`) used to report the raw
+  credit total as inflow and debit total as outflow regardless of the
+  classification's polarity. For debit-normal classifications
+  (`main_wallet`, `locked`) the two columns are now swapped to their correct
+  economic sense — a correction, not a regression, but any dashboard
+  graphing these columns will see a sign flip on upgrade.
+- **`RequireVerifiedBalance` now sizes the reservation from entries alone**
+  (C-C1, I-49): the verified withdrawal gate's ceiling is the live
+  entries-only recomputation under the balance lock, never
+  `balance_checkpoints` — I-32's prior wording ("not a stricter amount
+  check") was itself wrong and is corrected. A deployment using
+  `RequireVerifiedBalance: true` may see reservations refused that a
+  corrupted or stale checkpoint previously allowed to through; that is the
+  fix, not a regression.
+- **`ReversalOfUID` and `EventUID` are now verified, not just recorded**
+  (A-C2, I-51): `PostJournal` with `ReversalOfUID` set now rejects (a)
+  reversing an already-reversed journal, (b) an entry set that is not a
+  same-dimension reversal subset of the referenced journal within its
+  remaining reversible amount (`ErrInvalidInput`), and (c) cumulative
+  over-reversal (`ErrConflict`). `EventUID` is now verified to reference a
+  real, previously-unlinked event (was existence-only). A caller
+  constructing well-formed-but-semantically-wrong values now gets an error
+  instead of a silently accepted mislinked or partial reversal.
+- **Protected-template gate is now structural** (D-C1): `POST
+  /journals/template` refuses any template with a leg on an `is_system`
+  classification (403), not just a fixed four-code list. Newly caught:
+  `dev_credit`, `capital_injection`, `capital_withdraw`, `fee_charge`,
+  `checkout_settlement_gross`, `checkout_settlement_net`, `fx_buy`,
+  `fx_sell`, `transfer_in`, `transfer_out`, `withdraw_confirm`,
+  `withdraw_fee`, `deposit_pending`, `deposit_resolve_overage`,
+  `deposit_release_overage` (only `lock_funds`/`unlock_funds` still post
+  through this endpoint by default). `presets.ProtectedTemplateCodes()` grew
+  from 4 codes to 5 (added `dev_credit`). Deployments that legitimately post
+  one of these over HTTP: add it to `Config.AllowGenericTemplatePost` /
+  `ALLOW_GENERIC_TEMPLATE_POST` — the single, structural-plus-named place
+  that grants the exception.
+- **`POST /journals/deposit-tolerance` moved to admin scope and now
+  default-403's** (contract §7.11, same mechanism as above): every model it
+  can execute passes through the same protected-template gate, so with the
+  default config it refuses all four deposit codes — a `write`-scope key can
+  no longer post an arbitrary tolerance/actual pair to mint a full deposit
+  through this endpoint. Deployments relying on it: either list the
+  specific deposit codes in `ALLOW_GENERIC_TEMPLATE_POST` and call with an
+  **admin** key, or switch to the in-process
+  `presets.BuildDepositTolerancePlan` + `ExecuteDepositTolerancePlan` (no
+  HTTP hop).
+- **`POST /journals/{uid}/reverse` no longer accepts a client-supplied
+  idempotency key** (H-M3 Go side): the field (and its `Idempotency-Key`
+  header alias) is now rejected with 400 — the key is derived server-side
+  from journal uid + reason. It used to be silently ignored despite
+  `docs/openapi.yaml` marking it required. Callers needing a self-chosen key
+  should use `POST /journals/{uid}/reverse-partial` with `num=den=1`
+  (equivalent full reversal; that endpoint does accept `idempotency_key`).
+- **`(*ledger.Service).Worker(cfg)` now returns `(*service.Worker, error)`**
+  (E-M5 / B-M6), was `*service.Worker`: `worker := svc.Worker(cfg)` →
+  `worker, err := svc.Worker(cfg)`. The only case that errors is calling it
+  from inside a `RunInTx` callback (previously silently built a
+  half-tx-bound worker).
+- **`(*service.Worker).Subscribe(handler)` now returns `error`** (E-M1),
+  was `void`: check it. The only case that errors is subscribing after
+  `Run` has started (previously only logged, and the default logger drops
+  it).
+- **`(*service.Worker).Run` now refuses to start when its logger is
+  `core.NopLogger`** (E-M1 / I-M11) — a **runtime behavior change**, not a
+  signature change: a consumer wired per the old README Quick Start (no
+  `WithLogger`) previously ran with zero output and events stuck in
+  `pending` forever; it now fails fast at `Run` instead. Fix: pass
+  `ledger.WithLogger(...)` (recommended), or opt into the old silent
+  behavior explicitly with `ledger.WithSilentWorker()` /
+  `(*service.Worker).AllowSilent()`.
+- **`(*ledger.Service).Worker` now auto-wires `SetFullReconciler`**
+  (I-M11): a consumer that already called `SetFullReconciler` themselves is
+  unaffected (the later call wins); one that didn't now gets the full
+  15-check reconciliation suite running on `FullReconcileInterval` by
+  default — new DB read load and a new alerting surface where there was
+  previously silence.
+- **`(*ledger.Service).RegisterChannel` now errors on a `RunInTx` clone**
+  (E-M3), was silent success + drop: move the call to the top-level
+  `Service`, before `svc.Channels()` is evaluated.
+- **`core.DepositSighting.TxLogSeq` redefined** (G-C2): was "position
+  within the log query's result set" (the watcher and webhook ingestion
+  could compute different values for the same transfer), now "zero-based
+  position of the Transfer log within its own tx receipt" (stable across
+  reorg re-mining, identical regardless of which query found it). No-compat:
+  existing `bookings.metadata.txlog_seq` values are not migrated — old keys
+  stay unique, just no longer equal to what a re-observation under the new
+  definition would compute. **External scanners feeding `channel/onchain`
+  webhooks must switch to the same definition.** Confirm zero in-flight
+  (`pending`/`confirming`) deposit bookings before upgrading.
+- **`service.Onchain.Run` now requires a `ReorgRecorder` when a
+  `ChainReader` is configured** (G-M8): previously a configured watcher with
+  no reorg recorder ran anyway, and any deep-reorg detection above the
+  recheck window vanished with no trace. Pass
+  `service.WithReorgRecorder(postgres.NewDepositReorgStore(pool))` (or the
+  equivalent `EnableOnchain` option). Webhook-only deployments (no
+  `ChainReader`) are unaffected.
+- **`core.SweepPolicy.GasCeiling` unit corrected from wei to gwei** (G-M3):
+  the field was always compared as gwei in code despite being documented as
+  wei; `Validate()` now rejects values above 1e6 gwei. A deployment
+  configured in wei (e.g. `50000000000` meaning 50 gwei) must switch to the
+  gwei number (`50`) or fail to boot — this turns a silently
+  10⁹×-too-permissive gas ceiling into a startup-time error.
+- **`core.TokenConfig.Validate()` added and enforced at startup** (G-M7):
+  `Decimals < 0` or `> 36` now refuses to boot (`service.Onchain.Run` /
+  `EnableOnchain`). Fix misconfigured decimals; consider also calling the
+  new `(*evm.ClientSet).VerifyTokenDecimals(ctx)` against the live contract.
+- **`core.Sweeper` gained a new required method** —
+  `ReplacementGasPrice(ctx, chainID, signerNonce, priorTxHash)
+  (decimal.Decimal, error)` (G-M4): a hand-written `core.Sweeper`
+  implementation will not compile until it adds this, deliberately — a
+  silent fallback to the old `GasPrice()` semantics would mean the gas-bump
+  ceiling continues to not apply. `chains/evm.Sweeper` already implements
+  it.
+- **Shallow reorg no longer flips a deposit to `failed` on one
+  `TxIncluded=false`** (G-M1): now requires 3 consecutive misses by default
+  (`service.WithShallowReorgMisses`). No action needed; pass `1` to restore
+  the old immediate-failure behavior (not recommended).
+- **`SetChainCursor` gained monotonic protection** (B-m7): writing the
+  cursor backward is now a no-op instead of silently regressing it. No
+  action needed for facade consumers — `EnableOnchain` now passes
+  `service.WithPool(pool)` automatically so the per-chain advisory lock
+  actually takes effect (it silently didn't before). Consumers calling
+  `service.NewOnchain` directly (not through the facade) must pass
+  `service.WithPool(pool)` themselves.
+- **Sweep now verifies nonce on-chain before replaying a pending booking**
+  (G-M5): on finding the nonce already spent by the signer's own EOA, sweep
+  returns `core.ErrConflict` and stops that (chain,token)'s collection until
+  an operator resolves it (RUNBOOK §15) — replaces blindly replaying, which
+  either stalled forever on "nonce too low" or underpriced-replaced a real
+  transaction.
+- **`service.Onchain.Run` now refuses to start on a cyclic deposit
+  lifecycle** (F-m10): the one startup check that reads the database. A
+  deployment using the shipped `presets.DepositLifecycle` (acyclic by
+  construction) is unaffected.
+
+### Go module — Fixed
+
+- Claim-lost warnings inside `EventStore` now go through the injected
+  `core.Logger` (via `SetLogger`, wired automatically by `ledger.New` and
+  `(*Service).Worker`) instead of `slog.Default()` (I-R1 / B-m1). If you
+  scrape these three log lines from `slog.Default()`'s output specifically,
+  update your log pipeline.
+- `(*ledger.Service).Onchain()` called on a `RunInTx` clone no longer
+  returns `nil` when the top-level `Service` has `EnableOnchain`'d — it now
+  returns the real subsystem (E-M4). `EnableOnchain` itself is still
+  rejected on a clone.
+- `Ping()` on a `RunInTx` clone that escaped its callback now reports
+  through the transaction, so it fails the same way every other read on
+  that clone does, instead of reporting healthy through the pool (E-m14).
+
+### Go module — Added
+
+- `ledger.WithCustodialClassCodes(codes ...string)` — see the
+  `SolvencyCheck` entry above.
+- `ledger.RetryIdempotent(ctx, scope, attempts, fn)` — retries `fn` with the
+  same idempotency key on every attempt, closing the other half of the
+  library-mode retry contract (`core.IsRetryable` shipped in `[0.6.0]`; this
+  is the "reuse the same key" half — see README's "Retrying a failed write").
+- New invariants **I-49 through I-54** in `docs/INVARIANTS.md` pin the
+  Critical fixes above.
+- New migrations **016** (`preset_sign_correction`, owner-run polarity
+  correction + forced rollup/snapshot recompute) and **017**
+  (`deposit_reorgs`, durable reorg-anomaly table + monotonic scan cursor).
+
+### anchors/r2 (separate Go module)
+
+- `anchors/r2` (Cloudflare R2 + Object Lock `core.Anchor`) and
+  `anchortest.RunConformance` (I-48, a reusable conformance suite any
+  `core.Anchor` implementation can self-test against in one line) shipped
+  after `[0.6.0]` — see `docs/RUNBOOK.md` ("Choosing an Anchor carrier") for
+  deployment steps and the two credential scopes it needs. **Not yet
+  independently `go get`-able** — see `docs/RUNBOOK.md`'s "Consuming the
+  submodule today" and the corresponding README note; consume it via a
+  local `go.work` checkout for now.
+
 ## [0.6.0] — 2026-08-27
 
 > **本版本已知敞开项**（不是缺陷，是尚未做的工作，列出以免被绿灯的测试掩盖）：
@@ -234,6 +471,31 @@ Two of these move real money and are worth reading before upgrading.
   difference. Migration numbers referenced anywhere else in these notes are
   historical: the released artifact contains `001_baseline` plus `002`
   through `004`, the three this release adds on top of it, and nothing else.
+- **Breaking (Go API)**: `core.Reserver.Release` changed from
+  `Release(ctx, reservationUID string) error` to `Release(ctx, input
+  ReleaseInput) error`.
+- **Breaking (Go API)**: `core.Reserver.FinalizeSettlement` changed from
+  `(ctx, reservationUID string) error` to `(ctx, input
+  FinalizeSettlementInput) error`.
+- **Breaking (Go API)**: `core.SettleInput` gained a required
+  `IdempotencyKey` field — `Validate()` now rejects an empty one.
+- **Breaking (Go API)**: `core.TransitionInput` gained a required
+  `IdempotencyKey` field (I-3) — `Validate()` now rejects an empty one.
+- **Breaking (Go API)**: `core.RollupQueueItem` moved out of `core` into
+  `service` — it was never part of the consumer-facing domain surface, only
+  the rollup worker's internal queue item shape.
+- **Breaking (Go API)**: `core.BalanceCheckpoint`'s `CurrencyID` /
+  `ClassificationID int64` fields became `CurrencyUID` / `ClassificationUID
+  string`, and `LastEntryID` was removed (superseded by `LastEntryAt`).
+  Consistent with the uid-only identity contract (see `[0.4.0]` below); this
+  struct had been missed in that pass.
+
+  The six entries above landed with this release but were not called out in
+  it at the time — 26-09-02 correction. The full 23-item breaking-change
+  list, organized by what a consumer needs to do (not by which commit
+  introduced it), is
+  [`docs/plans/2026-08-27-release-readiness.md`](docs/plans/2026-08-27-release-readiness.md)
+  §3.
 
 ### Go module — Fixed
 
@@ -633,6 +895,12 @@ between minor versions while under active development (see SemVer policy in
   `./styles.css`.
 - Published to the public npm registry.
 
-[Unreleased]: https://github.com/azex-ai/ledger/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/azex-ai/ledger/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/azex-ai/ledger/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/azex-ai/ledger/compare/v0.4.1...v0.5.1
+[0.4.1]: https://github.com/azex-ai/ledger/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/azex-ai/ledger/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/azex-ai/ledger/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/azex-ai/ledger/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/azex-ai/ledger/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/azex-ai/ledger/releases/tag/v0.1.0

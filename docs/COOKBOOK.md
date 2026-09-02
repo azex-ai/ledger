@@ -267,7 +267,23 @@ err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
   leaving `main_wallet` to a `fee_revenue` or consumption account) in the same
   `RunInTx` as the `Settle` call — see `examples/credits-topup` for the
   runnable version of the block above.
-- To abandon a hold explicitly (job never ran), call `Release(rsv.UID)`.
+- `ExecuteTemplate` called directly inside `RunInTx` (as above) always posts
+  `auth_status=unsigned_tx_mode` — there is no point inside an already-open
+  transaction where calling out to a configured `Attestor` would not itself
+  be the "external call inside a DB transaction" `financial.md` forbids. If
+  this service was constructed `WithAttestor` and something downstream calls
+  `RequireVerifiedBalance` on this dimension, that gate refuses to pay it
+  out. The fix is `svc.AuthorizeTemplate` **before** `RunInTx` opens, then
+  `tx.JournalWriter().PostAuthorized(...)` inside it instead of
+  `ExecuteTemplate` — see `examples/tamper-evident`'s appendix for a
+  runnable, asserted demonstration of both paths side by side.
+- To abandon a hold explicitly (job never ran):
+  ```go
+  svc.Reserver().Release(ctx, core.ReleaseInput{
+      ReservationUID: rsv.UID,
+      IdempotencyKey: ledger.NewIdempotencyKey("run-abandon"),
+  })
+  ```
 
 ---
 
@@ -284,6 +300,22 @@ Same atomic two-leg as Recipe 1, currencies swapped. The user's credits balance
 drops by 100, USDT rises by 1. `settlement(credits)` debit reduces outstanding
 credit liability. (Real USDT payout to an external wallet is a separate
 withdrawal against `custodial`.)
+
+**The withdrawal path itself should do two things a "just move some USDT"
+recipe wouldn't need:**
+
+1. Check the balance via `svc.CheckpointIntegrity().RecomputeBalance(...)`,
+   not `BalanceReader.GetBalance` — the latter may consult
+   `balance_checkpoints`, an untrusted cache a DB-write credential can
+   corrupt; the former is the entries-only, always-trustworthy read.
+2. If this service was constructed `ledger.WithAttestor(...)`, reserve with
+   `ReserveInput.RequireVerifiedBalance: true` — the reservation ceiling is
+   then computed only from signed/authorized journals, so a forged or
+   unsigned credit on this dimension cannot fund the payout even if it's
+   balanced and passes every other check.
+
+See [`examples/tamper-evident`](../examples/tamper-evident/) for a complete,
+runnable demonstration of what (2) refuses and why.
 
 ### Refunding a specific charge — use a reversal, never a hand-written "undo"
 

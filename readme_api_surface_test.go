@@ -48,12 +48,28 @@ import (
 // this file only ever needed: a flat, non-recursive directory listing).
 // os.ReadDir + parser.ParseFile per file is the un-deprecated equivalent for
 // that narrower need.
+//
+// E-m12 (2026-09-02 deep audit) closed two more gaps in this same check:
+//  1. It used to match “ `svc.X(` “ ANYWHERE in README.md -- true of all
+//     45 methods today, but a method could be moved out of the "## API
+//     Surface" table into Quick Start prose and this test would stay green.
+//     It now matches only within that section (readmeSection below).
+//  2. It only ever looked at *Service methods. The package-level surface --
+//     top-level exported funcs (New, Migrate, NewIdempotencyKey) and the
+//     Option constructors (WithLogger, WithMetrics, WithAttestor, ...) --
+//     had no check at all. WithAttestor is the sole entry point to the
+//     entire P5 per-journal signing system; it had silently dropped out of
+//     README once. Package-level names are checked against the WHOLE
+//     README (not just the API Surface table), since several of them are
+//     documented in prose sections (Observability, Tamper-evident signing)
+//     rather than a table row.
 func TestREADMEDocumentsEveryExportedServiceMethod(t *testing.T) {
 	readme, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := string(readme)
+	apiSurface := readmeSection(t, doc, "## API Surface")
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -61,7 +77,8 @@ func TestREADMEDocumentsEveryExportedServiceMethod(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	var undocumented []string
+	var undocumentedMethods []string
+	var undocumentedFuncs []string
 	sawPackage := false
 	for _, entry := range entries {
 		name := entry.Name()
@@ -79,7 +96,17 @@ func TestREADMEDocumentsEveryExportedServiceMethod(t *testing.T) {
 
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || !fn.Name.IsExported() {
+			if !ok || !fn.Name.IsExported() {
+				continue
+			}
+			if fn.Recv == nil {
+				// Package-level function or Option constructor (New,
+				// Migrate, NewIdempotencyKey, WithLogger, WithAttestor, ...).
+				// Checked against the whole doc, not just the API Surface
+				// table -- see the E-m12 note above.
+				if !strings.Contains(doc, fn.Name.Name+"(") {
+					undocumentedFuncs = append(undocumentedFuncs, fn.Name.Name)
+				}
 				continue
 			}
 			recvType := fn.Recv.List[0].Type
@@ -90,8 +117,8 @@ func TestREADMEDocumentsEveryExportedServiceMethod(t *testing.T) {
 			if !ok || ident.Name != "Service" {
 				continue
 			}
-			if !strings.Contains(doc, "`svc."+fn.Name.Name+"(") {
-				undocumented = append(undocumented, fn.Name.Name)
+			if !strings.Contains(apiSurface, "`svc."+fn.Name.Name+"(") {
+				undocumentedMethods = append(undocumentedMethods, fn.Name.Name)
 			}
 		}
 	}
@@ -100,10 +127,32 @@ func TestREADMEDocumentsEveryExportedServiceMethod(t *testing.T) {
 			filepath.Join(".", "*.go") + " listing may be broken")
 	}
 
-	sort.Strings(undocumented)
-	if len(undocumented) > 0 {
-		t.Errorf("exported *Service methods missing from README's API Surface: %v\n"+
+	sort.Strings(undocumentedMethods)
+	if len(undocumentedMethods) > 0 {
+		t.Errorf("exported *Service methods missing from README's \"## API Surface\" section: %v\n"+
 			"Add a row for each, or unexport it if it is not part of the library's surface.",
-			undocumented)
+			undocumentedMethods)
 	}
+	sort.Strings(undocumentedFuncs)
+	if len(undocumentedFuncs) > 0 {
+		t.Errorf("exported package-level ledger.* functions/options missing from README.md entirely: %v\n"+
+			"Document each (a table row, or a sentence in prose), or unexport it.",
+			undocumentedFuncs)
+	}
+}
+
+// readmeSection returns the text between a "## heading" line (inclusive of
+// heading text, so anchors on the heading itself still match) and the next
+// "\n## " line, or EOF.
+func readmeSection(t *testing.T, doc, heading string) string {
+	t.Helper()
+	idx := strings.Index(doc, "\n"+heading)
+	if idx == -1 {
+		t.Fatalf("README.md has no %q heading", heading)
+	}
+	rest := doc[idx+1:]
+	if next := strings.Index(rest[len(heading):], "\n## "); next != -1 {
+		return rest[:len(heading)+next]
+	}
+	return rest
 }
