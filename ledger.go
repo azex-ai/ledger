@@ -97,6 +97,13 @@ type Service struct {
 	// acknowledgement that a Worker built from this Service may run with the
 	// default no-op logger. See Worker and service.Worker.Run.
 	silentWorker bool
+
+	// custodialClassCodes records WithCustodialClassCodes. Empty means the
+	// shipped default scope (postgres.DefaultCustodialClassCodes). Read
+	// exactly once, by New, to build platformBalanceStore; the scope lives on
+	// that store handle afterwards (including across WithDB onto a RunInTx
+	// clone), so this field is empty on the clone by design.
+	custodialClassCodes []string
 }
 
 // Option mutates a Service during construction.
@@ -135,6 +142,30 @@ func WithMetrics(m core.Metrics) Option {
 func WithSilentWorker() Option {
 	return func(s *Service) {
 		s.silentWorker = true
+	}
+}
+
+// WithCustodialClassCodes names the classifications SolvencyCheck treats as
+// the platform's custodied asset position — the assets side of "do the
+// balances we owe holders have something behind them".
+//
+// The default (no call) is postgres.DefaultCustodialClassCodes:
+// {custodial, settlement}. Name your own set when your deployment's custody
+// accounts are called something else, or when reserves sit across more
+// classifications than the shipped presets create. Passing no codes is
+// ignored, so this option can never silently empty the scope.
+//
+// A scope that matches no classification is rejected the first time solvency
+// is read (core.ErrInvalidInput), not reported as Custodial = 0: a custody
+// figure that could only ever be zero is a broken configuration, and
+// answering "insolvent" to it would be an alarm nailed to ON. This library
+// performs no I/O at construction (see New), so that check necessarily
+// happens at read time rather than here.
+func WithCustodialClassCodes(codes ...string) Option {
+	return func(s *Service) {
+		if len(codes) > 0 {
+			s.custodialClassCodes = append([]string(nil), codes...)
+		}
 	}
 }
 
@@ -206,6 +237,9 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.auditStore = postgres.NewAuditStore(pool)
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
+	if len(s.custodialClassCodes) > 0 {
+		s.platformBalanceStore = s.platformBalanceStore.WithCustodialClassCodes(s.custodialClassCodes...)
+	}
 	s.reconcileAdapter = postgres.NewReconcileAdapter(pool)
 	s.accountPolicyStore = postgres.NewAccountPolicyStore(pool)
 	s.periodCloseStore = postgres.NewPeriodCloseStore(pool)
@@ -648,6 +682,13 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		attestor:     s.attestor,
 		authVerifier: s.authVerifier,
 		silentWorker: s.silentWorker,
+		// custodialClassCodes is deliberately NOT copied: unlike
+		// attestor/authVerifier above, nothing reads it after New -- the
+		// scope lives on the platformBalanceStore handle, which carries it
+		// across WithDB (postgres.PlatformBalanceStore.WithDB), so the
+		// clone's solvency reads already use it. Copying it would be a line
+		// no test could ever turn red, which is the shape I-54 exists to
+		// stop this file accumulating.
 		// onchain: carried for exactly the reason spelled out above for
 		// attestor/authVerifier -- Onchain() reads the field directly, and
 		// dropping it made tx.Onchain() return a bare nil on a Service whose

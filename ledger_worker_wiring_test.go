@@ -319,32 +319,40 @@ func TestServiceWorker_WiresTheFullReconciler(t *testing.T) {
 // error. The log line was unreachable under the default logger, so violating
 // a documented ordering constraint produced a handler that was never invoked
 // and events that stayed pending forever, with nothing anywhere to notice.
+//
+// The refusal is scoped to the case that actually loses events: no dispatcher
+// exists yet, so Run decided at startup not to create the event_callback loop
+// at all. Subscribing again after Run on a Worker that already had a
+// subscriber is fine and stays fine -- the loop exists and the new handler
+// joins the live dispatcher -- which is why the control below subscribes
+// before Run on a separate Worker.
+//
+// Synchronisation is on the startup log line rather than on polling Subscribe
+// itself: Run stores `running` immediately before emitting it, and a poll
+// loop that called Subscribe would install a dispatcher on its first,
+// too-early call and then never see an error again (this test was written
+// that way first and failed only under a loaded full-package run).
 func TestServiceWorker_SubscribeAfterRunIsAnError(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	logger := &recordingLogger{}
-	svc, err := ledger.New(pool, ledger.WithLogger(logger))
+	// Control: subscribing before Run is accepted.
+	ctlLogger := &recordingLogger{}
+	svc, err := ledger.New(pool, ledger.WithLogger(ctlLogger))
+	require.NoError(t, err)
+	control, err := svc.Worker(service.DefaultWorkerConfig())
+	require.NoError(t, err)
+	require.NoError(t, control.Subscribe(func(context.Context, core.Event) error { return nil }),
+		"control: Subscribe before Run must be accepted")
+
+	// A Worker with its own Service (hence its own logger) so the startup
+	// line polled below can only have come from this one.
+	lateLogger := &recordingLogger{}
+	svcLate, err := ledger.New(pool, ledger.WithLogger(lateLogger))
+	require.NoError(t, err)
+	late, err := svcLate.Worker(service.DefaultWorkerConfig())
 	require.NoError(t, err)
 
-	worker, err := svc.Worker(service.DefaultWorkerConfig())
-	require.NoError(t, err)
-
-	// Control: before Run, subscribing is fine.
-	require.NoError(t, worker.Subscribe(func(context.Context, core.Event) error { return nil }))
-
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- worker.Run(runCtx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
-
-	// A second Worker, so the "after Run" case is not masked by the
-	// dispatcher the control call above already created.
-	late, err := svc.Worker(service.DefaultWorkerConfig())
-	require.NoError(t, err)
 	lateCtx, cancelLate := context.WithCancel(ctx)
 	lateDone := make(chan error, 1)
 	go func() { lateDone <- late.Run(lateCtx) }()
@@ -353,9 +361,15 @@ func TestServiceWorker_SubscribeAfterRunIsAnError(t *testing.T) {
 		<-lateDone
 	})
 
-	require.Eventually(t, func() bool {
-		return late.Subscribe(func(context.Context, core.Event) error { return nil }) != nil
-	}, 5*time.Second, 50*time.Millisecond,
+	// Generous budget: this waits on a goroutine's first scheduling under
+	// -race on a machine that may be running several test binaries, and it
+	// costs nothing when the worker starts promptly.
+	require.Eventually(t, func() bool { return lateLogger.contains("worker: starting") }, 30*time.Second, 20*time.Millisecond,
+		"the late worker never started; logs: %v", lateLogger.snapshot())
+
+	subErr := late.Subscribe(func(context.Context, core.Event) error { return nil })
+	require.Error(t, subErr,
 		"Subscribe after Run must return an error: the event_callback loop was never started, so the "+
 			"handler would never be invoked and the events would stay pending forever")
+	require.ErrorIs(t, subErr, core.ErrInvalidInput)
 }
