@@ -148,3 +148,12 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | I-M7 pin `TestCheck2GlobalBalance_CallerCancellationIsIncompleteNotFailed`；I-7 Exceptions 补全；I-62 I-63 | `88dd59b` | `scanStopReason` 去掉 caller 分支 → pin 红；INVARIANTS 四条门禁绿（480 处 pin 引用） |
 | Makefile / go-verify 超时 5m→15m | `deafc4c` | postgres 包 -race 211s；并行下 302s 曾撞超时假红 |
 | D-contract | 前任 10 + 接手 `c8550f5`（14 commit，rebase 后无冲突） | openapi 里把 `/snapshots` 的 `currency_uid` 改名 → `TestOpenAPIContract_ParamsMatchGoHandlers` 红；server -race 绿；make test 18 包绿。合入后 lead 再生成 `schema.ts`（+230/−107），`Booking.expires_at` 手写类型改为 `string \| null`，codegen:check 与 web 225 用例绿 | ff + lead `schema.ts` commit | 关 H 全部 + E-M9 E-M11 + J-6/J-8/J-14 后端侧；H-M6 用 loose index scan + LATERAL（余额读 9,600→102 行）；migration 022 FK；bizcode 14011 起；Go 导出面快照门禁 |
+
+# W3 对抗式复审结论（两名复审员，只读）
+
+| 报告 | 结论 | 处置 |
+|---|---|---|
+| `w3-review/money-path.md` | 8 个攻击面 3 攻破 1 部分：**I-49 的 hold 项读可写表**（Critical，实跑：闸对 1000 授权 2000）；`SolvencyCheck` / `enforce_min_balance` 仍读 checkpoint；`event_uid` 冒领锁死 booking 无解除；未覆盖伪造 journal 自称 tx_mode 只 DRIFT；`Migrate` 窗口角色级；默认全关无 Warning；`unauthorized_journals` 一页一条签名即跳过其余 | w3-holds（C-1）、w3-fixes（M-2/4/6/7 + m-1..6）、Aaron（M-1/3/5，契约 §7.14） |
+| `w3-review/gates.md` | 34 次 mutation，23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿/恒 skip | w3-gates-fixes |
+
+复审证明了契约 §0「兄弟扫描」在执行上仍被形态描述框住：C-1 的兄弟被描述成「读 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」。这条写进最终 README 的方法教训。

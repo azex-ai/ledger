@@ -1803,3 +1803,13 @@
 | Major | 默认装机全关而 `StartupReport().Warnings` 为空 | w3-fixes |
 | Major | `unauthorized_journals` 一页有一条签名即跳过其余未签名并报绿 | w3-fixes |
 | Minor ×6 | custodial scope 只防全错 / 无资产类约束 / `''→available` 升级 / `anchor_observations` 可伪造 / CHANGELOG 016 极性 / I-53 行为变更未登记 | w3-fixes |
+
+## W3 对抗式复审（gates）的发现与处置
+
+| 级别 | 条目 | 处置 |
+|---|---|---|
+| Critical | 路由 scope 降级不可见（admin→write 全绿）：路由鉴权门禁只查存在 `requireScope` 不查级别 | w3-gates-fixes：路由→scope 显式表门禁 |
+| Critical | pin 引用门禁 63 条只 10 条 blocking（28 advisory、25 静默跳过）；白名单只许缩是纯注释 | w3-citations 缩名单 + w3-gates-fixes 机器强制只缩、跳过→红 |
+| Critical | 两条破坏性变更门禁在 CI 不可能红（diff vs HEAD；`--depth 1` 下 skip） | w3-gates-fixes：对照 merge-base / release tag；`fetch-depth: 0`；拿不到历史→红 |
+| Major | `TestPostJournal_IdempotentReplayNeverInsertsUnsignedRow` 拆掉实现仍绿 | w3-gates-fixes 重写 |
+| 19 处 | 其余门禁盲区（见 `w3-review/gates.md` 逐条表） | w3-gates-fixes，同一 mutation 修后必红 |
