@@ -129,3 +129,4 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | D-tests（第一版） | `d2940b7` | 删掉 I-6 的**一条** pin bullet → 绿（预期，仍有其余 pin）；删光 I-6 **全部** bullet 只留 `**Pinned by**` 标题 → **仍绿**：新 gate 只查标题存在（`invariants_pins_test.go:290`），是「守形状不守语义」形态在 gate 自身上重现。已退回加强 | 待 | F-m2 advisory 32 条要求改成显式只缩不扩白名单；I-7 Exceptions 扩写 → W3-lead |
 | D-surface | `798e2e3` | README 代码块改错方法名 → `TestREADMECustomLifecycleRuns` 红；根包 gate 全跑 | merge commit + lead 在 main 删 CLAUDE.md 的 helm 行（I-N22 半条，已知会 d-ops） | 5 个新 gate；examples 全部 exit 0（worker 记录） |
 | D-tests（终版） | `9c7d249` | 同一 mutation（删光 I-6 pin bullet）→ `TestInvariantsDocEveryInvariantHasPinnedBy` 红；main 合并后 make test 全绿 | merge commit | 首版被退回一次：gate 只查标题 |
+| D-tamper | `86a3988` 系列（rebase 后 8 commit）+ lead `d612221`（I-56 Enforced-by 引用补全，过 d-tests 新门禁） | 空锚守卫置 false → 两条 NOT_RUN pin 红；service/postgres -race、anchors/r2 绿；make test 除 pin 引用门禁外绿 → 引用补全后全绿 | ff | 关 C 全部 Major/Minor；I-55 I-56；migration 018；C-R1 记为披露残余限制；worker 因额度中断，收尾由 lead 完成 |
