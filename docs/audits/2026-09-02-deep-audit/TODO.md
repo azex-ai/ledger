@@ -1733,3 +1733,7 @@
 | E-m14 (W1-facade) | `(*ledger.Service).Ping` 改走 `DBTX()`：在 `RunInTx` clone 上探的是该事务而非连接池 | 只影响把 clone 误留到回调之外的代码 —— 那种 clone 现在 `Ping` 会报错（与它的每一次读写一致），此前报健康 |
 | I-R1 / B-m1 (W1-facade) | `ledger.New` 与 `(*Service).Worker` 现在都调用 `EventStore.SetLogger`：claim-lost 的三条 Warn 从 `slog.Default()` 改走注入的 `core.Logger` | 依赖这三行落在 `slog.Default()` 的日志采集配置需要跟着改 |
 | E-M4 (W1-facade) | `RunInTx` clone 上的 `Onchain()` 由恒 nil 改为返回顶层 Service 的实例 | 无需改动（此前写 `tx.Onchain().X()` 会 nil panic）。`EnableOnchain` 仍在 clone 上被拒 |
+| d-tests | 32 条 invariant 的 Enforced-by 引用未导出符号或纯散文，pin 引用门禁对它们只能 advisory；需重写引用风格后收进 blocking | W3-lead |
+| d-tests | I-7 Exceptions 正文未列 `deposits`/`withdrawals` 死表与 `rollup_queue`/`registration_rescans` 的 claim-lease 可空列（新 NOT NULL 门禁按既有设计分类通过） | W3-lead |
+| d-web 发现 | main 上 `POST /journals/{uid}/reverse` 对任何 `Idempotency-Key` 400，ledger-react client 默认注入 → 真实调用必 400；旧 MSW 测试不模拟 header 别名中间件所以一直绿 | D-web（client 已修）/ D-contract（openapi 收口，H-M3b 取消） |
+| d-threat | 修改已合入 migration 007（契约 §8 勘误）；migrate.go 安装机制变更待 W3 对抗式复审 | D-threat / W3-review |

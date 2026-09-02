@@ -131,3 +131,10 @@
 
 以上每条在对应任务 `bus done` 时由 lead 在审计 README「处置状态」里登记为「已按 7.x 口径修复，待 Aaron 确认」。
 | 7.11 `POST /journals/deposit-tolerance`（w1-templates 复核时发现的同形铸币路径） | 调用方任选 expected/actual/tolerance，直接执行 `deposit_confirm_pending` 等受保护模板，绕开模板闸 | 对 plan 内每个模板走同一道结构派生闸（∪ 名单），仅 `AllowGenericTemplatePost` 显式放行；路由改 admin scope；默认 403 | W1-templates（允许改 `routes.go` 该行；D-threat 接缝已登记） |
+
+## 8. 勘误与追加拍板（整改期间）
+
+- **§3 第 2 条勘误（2026-09-02，D-threat D-M2）**：允许**有意修改**已合入的 migration 007，且仅限把 superuser-only 语句改成逐属性条件执行。理由：golang-migrate 不校验文件哈希，已装过 007 的库不重跑、不受影响；失败点在 007 内部、后置 migration 无法回溯；无外部消费方。文件头必须写明修改日期与原因。这是本仓第二次对「migration 不可变」做显式例外（上一次是 2026-08-26 的「不加 IF NOT EXISTS」），两次都是全局规则字面搬用与本仓事实不符。
+- **migrate.go 安装机制变更**（先跑 001 → `GRANT ledger_owner TO runner` → `Up()` → defer `REVOKE`）：接受落地，标为 §2 结构决策，**W3 对抗式复审**必审项。
+- **`POST /journals/{uid}/reverse` 幂等键**：服务端从 journal uid 派生，客户端不得提供（w1-templates 落地、d-web 修 client、d-contract 收 openapi）。H-M3b 取消。
+- **F-m2 pin 门禁的 advisory 名单**：允许「先立机制、逐步收紧」，但 advisory 集合必须是显式、只缩不扩的白名单常量；32 条 Enforced-by 引用风格重写记为 W3 条目。
