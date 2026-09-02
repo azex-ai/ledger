@@ -3786,19 +3786,28 @@ to fix.
 - `postgres/sql/queries/journals.sql`'s `AcquireBalanceLock`
   (`hashtextextended('bal:' || key, 0)`) and `AcquireIdempotencyLock`
   (`hashtextextended('idem:' || key, 0)`), both single-key
-  `pg_advisory_xact_lock(bigint)`.
+  `pg_advisory_xact_lock(bigint)` -- exercised directly through the
+  test-only seams `postgres.AcquireBalanceLocksForTest` /
+  `postgres.AcquireIdempotencyLockForTest` (`postgres.NewQueriesForTest` /
+  `postgres.NewBalancePair` / `postgres.SortedUniquePairsForTest` build
+  their inputs), since both are otherwise unexported.
 - `postgres/ledger_store.go`'s `sortedUniquePairs` (shared dedupe+sort,
-  extracted from `balancePairsFromEntries`) and `ExecuteTemplateBatch`'s
-  pool-mode pre-lock step, before its per-journal posting loop.
-- `postgres/reserver_store.go`'s `s.pool == nil` guard inside `Reserve`'s
-  `RequireVerifiedBalance` branch.
+  extracted from `balancePairsFromEntries`) and
+  `postgres.LedgerStore.ExecuteTemplateBatch`'s pool-mode pre-lock step,
+  before its per-journal posting loop.
+- `postgres/reserver_store.go`'s `s.pool == nil` guard inside
+  `postgres.ReserverStore.Reserve`'s `RequireVerifiedBalance` branch.
 - `service/worker.go`'s `expirationJob := service.NewLockedJob("expiration",
   ...)`, mirroring `reconcileJob` / `sysRollupJob` / `fullReconcileJob` /
-  `partitionJob` / `attestJob`.
+  `partitionJob` / `attestJob`, run through `service.Worker.Run` (the
+  lock key itself exposed to tests via `service.AdvisoryLockKeyForTest`).
 - `postgres/sql/queries/integrity_checkpoint.sql`'s
-  `CountPendingRollupForDimension`, `AND failed_attempts < 10`.
-- `postgres/registration_rescan_store.go`'s `AdvanceRegistrationRescan` /
-  `RetryRegistrationRescan`, both `WHERE uid = $1::uuid AND attempts = $N`;
+  `CountPendingRollupForDimension`, `AND failed_attempts < 10`, gating
+  `postgres.CheckpointIntegrityStore.RebuildCheckpoint`.
+- `postgres/registration_rescan_store.go`'s
+  `postgres.RegistrationRescanStore.AdvanceRegistrationRescan` /
+  `postgres.RegistrationRescanStore.RetryRegistrationRescan`, both
+  `WHERE uid = $1::uuid AND attempts = $N`;
   `core.RegistrationRescanStore`'s interface doc comment
   (`core/onchain.go`); the 3 call sites in `service/onchain.go` that thread
   `job.Attempts` through as `expectedAttempts`.
@@ -4028,14 +4037,16 @@ stalling that chain's fund collection with no self-healing path
 **Enforced by**: `service.FullReconciliationService.RunFullReconciliation`
 (check suite composition, `service/reconcile.go`); `runCheck2GlobalBalance`'s
 `resumedLap` tracking and the `scanned == 0 && resumedLap` branch (same
-file); `service.RollupService.processItem`'s `BalanceDrift` call (`service/rollup.go`);
+file); `service.RollupService.processItem`'s `BalanceDrift` call
+(`service/rollup.go`), reached through `service.RollupService.ProcessBatch`;
 `chains/evm.multicallResultsToBalances` / `chains/evm.decodeERC20BalanceOf`
 (`chains/evm/scanner.go`) excluding an unreadable address from `balances`
 (see the m-10 correction below for the per-address, not per-batch, grain
 this operates at) instead of defaulting it to zero;
 `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPrice`
 / `chains/evm.feeCapBasis` (`chains/evm/sweeper.go`); `core.Sweeper.BatchSweep`'s
-`priorTxHash` parameter (`core/interfaces.go`).
+`priorTxHash` parameter (`core/interfaces.go`), reached from
+`service.Onchain.RunSweepOnce`.
 
 **Pinned by**:
 - `service.TestFullReconciliation_AllPass` / `TestFullReconciliation_FullCoverageCanBeTrue` —
@@ -4043,20 +4054,13 @@ this operates at) instead of defaulting it to zero;
   `true` when everything is wired and nothing is capped or skipped (the DB-backed
   half is `service.TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid`'s
   added `FullCoverage` assertion).
-- `service.TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete` /
-  `TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete` — the
-  resumed-vs-fresh boundary, both directions; `service.TestFullReconciliation_Check2ResumesAcrossRuns`'s
-  fourth run is the DB-backed pin for the same boundary.
+- `service.TestFullReconciliation_Check2ResumesAcrossRuns`'s fourth run is
+  the DB-backed pin for the resumed-vs-fresh boundary.
 - `service.TestRollupService_DriftDetection` (asserts the reported value is
   the positive magnitude 85, not the raw balance -85) /
   `TestRollupService_DriftDetection_ClearsOnceHealthy`.
-- `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` /
-  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`;
-  `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
+- `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
   (correction below).
-- `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
-  `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
-  `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
 - `service.TestOnchain_Sweep_GasBumpCarriesPriorTxHash` /
   `TestOnchain_Sweep_GasBumpFallsBackToChannelRefAfterRestart` — point 5's
   SERVICE half, which had no pin at all until the 2026-09-02 remediation
@@ -4068,9 +4072,7 @@ this operates at) instead of defaulting it to zero;
   The second test covers the restart case specifically: with the in-memory
   tracking gone, the bump must fall back to the booking's persisted
   `ChannelRef`, which is the durable hash point 5 is about.
-- `chains/evm.TestSweeper_ReplacementGasPrice_QuotesTheEscalatedBidInGwei` /
-  `TestSweeper_ReplacementGasPrice_FallsBackToMarketOnFirstDispatch` and
-  `service.TestOnchain_Sweep_GasBumpRespectsGasCeiling` — point 5's final
+- `service.TestOnchain_Sweep_GasBumpRespectsGasCeiling` — point 5's final
   clause ("`GasCeiling` bounds what will really be paid") held only for a
   FIRST dispatch. A replacement bids `max(market basis, prior fee x 1.125)`,
   which the market basis does not bound, so on the retry path — the only
@@ -4085,6 +4087,24 @@ this operates at) instead of defaulting it to zero;
   ladder's floor while the only gate that ran (`sweepTick`'s) had compared
   the market price, before the nonce was even known. Both dispatch and bump
   now gate on the bid for their own nonce.
+
+**Related tests** (same-package white-box tests calling an unexported entry
+point directly -- `runCheck2GlobalBalance`, `multicallResultsToBalances` /
+`decodeERC20BalanceOf`, `Sweeper.quoteFee` / `recordFee` /
+`replacementGasPriceFrom` / package-level `gasPriceFrom` -- so nothing in
+their own function bodies names a symbol this doc can hold them to; the
+DB-backed / service-level pins above cover the same properties through an
+exported entry point):
+- `service.TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete` /
+  `TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete` — the
+  resumed-vs-fresh boundary, both directions.
+- `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` /
+  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`.
+- `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
+  `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
+  `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+- `chains/evm.TestSweeper_ReplacementGasPrice_QuotesTheEscalatedBidInGwei` /
+  `TestSweeper_ReplacementGasPrice_FallsBackToMarketOnFirstDispatch`.
 
 > **Correction (m-10 fix on point 4, `.local/independent-review-2026-08-26.md`,
 > third-pass independent review).** Point 4 as originally written and its
