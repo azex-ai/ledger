@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -245,10 +246,46 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
 		}
-		if err := acquireBalanceLocks(ctx, qtx, []balancePair{{
-			holder:     holder,
-			currencyID: cur.ID,
-		}}); err != nil {
+		// Pre-lock the COMPLETE set of (holder, currency_id) pairs this
+		// journal will touch, in the same global order postJournalWithQueries
+		// derives (concurrency.md 2026-09-02 Major). Locking only the user's
+		// own pair here used to invert the order for the rest of the
+		// transaction: PostJournal below takes the system counterpart -holder
+		// FIRST (it sorts ascending and SystemAccountHolder(h) = -h is
+		// negative), so this path held H and asked for -H while every other
+		// write path in the repository holds -H and asks for H. Two entirely
+		// ordinary calls -- an AddPending and a ConfirmPending on the same
+		// user -- were then enough to close an ABBA cycle on the deposit
+		// money-path (SQLSTATE 40P01, retryable but a real failure + latency
+		// spike, no malicious input needed).
+		//
+		// Advisory xact locks are re-entrant, so PostJournal re-taking these
+		// same locks a few lines down is a no-op. The user's pair stays in the
+		// set, so the TOCTOU protection the pending-balance gate below relies
+		// on is unchanged -- asserted rather than assumed, right after.
+		resolved, err := ledger.resolveEntries(ctx, qtx, input.Entries)
+		if err != nil {
+			return nil, fmt.Errorf("%s: resolve entries for lock order: %w", errPrefix, err)
+		}
+		pairs := balancePairsFromEntries(resolved)
+		gatePair := balancePair{holder: holder, currencyID: cur.ID}
+		if !slices.Contains(pairs, gatePair) {
+			return nil, fmt.Errorf(
+				"%s: internal: journal entries do not touch (holder %d, currency %s), so the pending-balance check below would read an unlocked balance: %w",
+				errPrefix, holder, currencyUID, core.ErrInvalidInput,
+			)
+		}
+		// Idempotency BEFORE balance, the same order postJournalWithQueries
+		// and Reserve use. Taking it here rather than leaving it to
+		// PostJournal below (where it would land after these balance locks)
+		// is the second half of the same lock-order rule: a concurrent
+		// single-journal retry of this key would otherwise hold idem:K while
+		// waiting for a balance lock held here. Re-entrant, so PostJournal
+		// re-taking it costs nothing.
+		if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
+			return nil, fmt.Errorf("%s: %w", errPrefix, err)
+		}
+		if err := acquireBalanceLocks(ctx, qtx, pairs); err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
 		}
 		// Idempotency recheck UNDER the balance lock (I-3): the caller's
@@ -428,12 +465,12 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 		// Check actual pending balance — skip if already drained (confirmed/cancelled).
 		rowCur, err := s.ledger.dims.currencyByIDOrErr(ctx, s.q, row.CurrencyID)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("holder=%d currency=%d resolve currency: %w", row.AccountHolder, row.CurrencyID, err))
+			errs = append(errs, fmt.Errorf("holder=%d resolve currency: %w", row.AccountHolder, err))
 			continue
 		}
 		bal, err := s.ledger.GetBalance(ctx, row.AccountHolder, rowCur.UID, clsIDs.pending)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("holder=%d currency=%d get balance: %w", row.AccountHolder, row.CurrencyID, err))
+			errs = append(errs, fmt.Errorf("holder=%d currency=%s get balance: %w", row.AccountHolder, rowCur.UID, err))
 			continue
 		}
 		if !bal.IsPositive() {
@@ -454,8 +491,8 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf(
-				"pending: expire: cancel journal_id=%d holder=%d: %w",
-				row.JournalID, row.AccountHolder, err,
+				"pending: expire: cancel journal_id=%d holder=%d currency=%s: %w",
+				row.JournalID, row.AccountHolder, rowCur.UID, err,
 			))
 			continue
 		}
@@ -463,7 +500,13 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 	}
 
 	if len(errs) > 0 {
-		return cancelled, fmt.Errorf("pending: expire: %d errors: %v", len(errs), errs)
+		// errors.Join, not %v: this is PendingTimeoutSweeper's ONLY return
+		// surface, and a consumer's worker decides retry-vs-alert on it with
+		// errors.Is / core.IsRetryable. %v flattens every wrapped sentinel to
+		// text, so a transient DB failure and a frozen account came back
+		// indistinguishable (consumer-surface.md 2026-09-02 m-13). Join keeps
+		// errors.Is reaching through to every sub-error at once.
+		return cancelled, fmt.Errorf("pending: expire: %d errors: %w", len(errs), errors.Join(errs...))
 	}
 	return cancelled, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -121,6 +122,17 @@ func balancePairsFromEntries(entries []resolvedEntry) []balancePair {
 // still get the same canonical order a single-journal caller would derive —
 // sorting per-journal and then concatenating would NOT give the same order
 // two batches with a different journal sequence would need to agree on.
+//
+// The rule this function exists to serve, stated so it is greppable rather
+// than remembered: ANY call site that takes balance locks outside
+// postJournalWithQueries must lock the COMPLETE set of pairs its transaction
+// will touch, through this function. Locking a subset "because that is the
+// one I need to read" inverts the order for whatever runs next in the same
+// transaction -- which is exactly how PendingStore came to hold the user's
+// pair while PostJournal asked for the system counterpart's, against a whole
+// repository that does the opposite (concurrency.md 2026-09-02). Advisory
+// xact locks are re-entrant, so over-locking here costs nothing and the
+// canonical order is preserved.
 func sortedUniquePairs(pairs []balancePair) []balancePair {
 	seen := make(map[balancePair]struct{}, len(pairs))
 	out := make([]balancePair, 0, len(pairs))
@@ -254,6 +266,21 @@ type journalAuth struct {
 	signature []byte
 	keyID     string
 	status    core.AuthStatus
+	// replay marks "this idempotency key already has a posted journal, so
+	// nothing was signed and nothing is meant to be inserted"; status then
+	// carries the ALREADY-STORED journal's auth_status, read back from that
+	// row (attestJournal), never a value chosen to stand in for it.
+	//
+	// This flag exists because the replay case used to be labelled
+	// core.AuthStatusUnsignedNoAttestor, which is not a placeholder: it is
+	// the value service/attest_verify.go reads as "forged, or posted before
+	// the signing key was wired" (tamper-evident.md m-6). Nothing kept that
+	// mislabel out of the DB except one caller's locked recheck happening to
+	// short-circuit first -- an invariant held by a comment, not by
+	// structure. postJournalWithQueries now refuses outright to insert a row
+	// from a replay-flagged auth, so the label can never be persisted by any
+	// future write path either.
+	replay bool
 }
 
 // bytesOrEmpty normalizes a nil slice to a non-nil empty one. auth_digest/
@@ -274,18 +301,23 @@ func bytesOrEmpty(b []byte) []byte {
 // (s.pool != nil) and from the public Authorize (design doc §7.5); the
 // tx-mode branch never calls it at all (see PostJournal's doc comment).
 //
-// Returns journalAuth{status: core.AuthStatusUnsignedNoAttestor} (no error) when:
-//   - s.attestor is nil (signing not configured at all -- design doc §12:
-//     expand-safe, behavior unchanged from before P5);
-//   - input.IdempotencyKey already has a posted journal (replay -- the
-//     stored journal's own signature is what VerifyJournalAuth will see
-//     when read back; no new signing call happens, matching design doc
-//     §7.3's "same key + same payload -> digest same -> reuse, don't
-//     resign". This check is a best-effort optimization only:
-//     postJournalWithQueries's own locked recheck is what actually
-//     enforces idempotency, and its result is discarded on that path (the
-//     insert never happens, so the label on this particular return value
-//     is moot -- see PostAuthorized's doc comment for the general rule).
+// Returns journalAuth{status: core.AuthStatusUnsignedNoAttestor} (no error)
+// when s.attestor is nil -- signing is not configured at all (design doc
+// §12: expand-safe, behavior unchanged from before P5).
+//
+// Returns journalAuth{replay: true, status: <the stored row's auth_status>}
+// (no error) when input.IdempotencyKey already has a posted journal: the
+// stored journal's own signature is what VerifyJournalAuth will see when read
+// back, and no new signing call happens (design doc §7.3, "same key + same
+// payload -> digest same -> reuse, don't resign"). The status is READ from
+// that row rather than invented, so a replay of a signed journal reports
+// `signed`; it used to report unsigned_no_attestor, the value VerifyLedger
+// reads as suspected forgery (tamper-evident.md m-6). This check is a
+// best-effort optimization -- postJournalWithQueries's own locked recheck is
+// what actually enforces idempotency -- but "the label does not matter
+// because the insert never happens" is a property of that one caller, so
+// postJournalWithQueries fails closed on a replay-flagged auth that somehow
+// reaches its insert path instead of relying on it.
 //
 // Every journal is signed once an Attestor is configured -- there is no
 // per-journal-type coverage decision (Team Lead's 2026-08-21
@@ -299,8 +331,8 @@ func (s *LedgerStore) attestJournal(ctx context.Context, input core.JournalInput
 		return journalAuth{status: core.AuthStatusUnsignedNoAttestor}, nil
 	}
 
-	if _, err := s.q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
-		return journalAuth{status: core.AuthStatusUnsignedNoAttestor}, nil
+	if existing, err := s.q.GetJournalByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		return journalAuth{replay: true, status: core.AuthStatus(existing.AuthStatus)}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return journalAuth{}, fmt.Errorf("postgres: post journal: check idempotency before signing: %w", err)
 	}
@@ -534,6 +566,12 @@ func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, 
 // whatever `core.JournalInput` it is given regardless of when that value was
 // produced -- the same principle Authorize/PostAuthorized already rely on
 // for a single journal.
+//
+// Both modes take the batch's locks up front, in one canonical order, via
+// preacquireBatchLocks (see its doc comment). Signing is what differs between
+// the two branches; lock order is not, and must not be -- a consumer reaching
+// the tx branch through RunInTx deadlocks against a pool-mode batch just as
+// readily as two pool-mode batches deadlock against each other.
 func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.TemplateExecutionRequest) ([]*core.Journal, error) {
 	if len(requests) == 0 {
 		return nil, nil
@@ -576,57 +614,8 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 
 	qtx := s.q.WithTx(tx)
 
-	// Global lock order across the whole batch (concurrency.md Major):
-	// balancePairsFromEntries only orders locks WITHIN a single journal, but
-	// this method posts N journals in one transaction. Two concurrent
-	// batches whose journals touch the same holders in a different sequence
-	// could each acquire their first journal's balance lock and then block
-	// waiting for the other's -- an ABBA deadlock that needs no malicious
-	// input, just two ordinary batches (e.g. two batch settlements) that
-	// happen to list the same two holders in reverse order. Pre-acquiring
-	// the union of every pair the batch will touch, sorted once, fixes the
-	// order at the transaction's first balance-touching statement instead
-	// of re-deriving it per journal. Each journal's own acquireBalanceLocks
-	// call inside postJournalWithQueries below then re-takes the same
-	// (already-held) locks -- a no-op under Postgres's reentrant advisory
-	// xact locks -- so a lone-journal caller (ExecuteTemplate, which never
-	// goes through this batch path) is unaffected.
-	// Lock ORDER across lock kinds must also match the single-journal path,
-	// which takes idempotency → balance (postJournalWithQueries; Reserve is
-	// the same). This batch used to enter balance locks first and re-take
-	// each journal's idempotency lock later — the reverse. A concurrent
-	// single-journal retry of one of this batch's keys could then hold
-	// idem:K while waiting for bal:H held here, while this transaction held
-	// bal:H waiting for idem:K: ABBA, SQLSTATE 40P01. Postgres resolves it
-	// (ErrTransient, retry succeeds), so it was noise rather than
-	// corruption — but one canonical order costs nothing. Keys are sorted so
-	// two batches sharing keys agree with each other too.
-	idemKeys := make([]string, 0, len(inputs))
-	seenIdemKeys := make(map[string]struct{}, len(inputs))
-	for _, input := range inputs {
-		if _, ok := seenIdemKeys[input.IdempotencyKey]; ok {
-			continue
-		}
-		seenIdemKeys[input.IdempotencyKey] = struct{}{}
-		idemKeys = append(idemKeys, input.IdempotencyKey)
-	}
-	sort.Strings(idemKeys)
-	for _, key := range idemKeys {
-		if err := acquireIdempotencyLock(ctx, qtx, key); err != nil {
-			return nil, fmt.Errorf("postgres: execute template batch: %w", err)
-		}
-	}
-
-	var allPairs []balancePair
-	for i, input := range inputs {
-		resolved, err := s.resolveEntries(ctx, qtx, input.Entries)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: execute template batch[%d]: resolve entries for lock order: %w", i, err)
-		}
-		allPairs = append(allPairs, balancePairsFromEntries(resolved)...)
-	}
-	if err := acquireBalanceLocks(ctx, qtx, sortedUniquePairs(allPairs)); err != nil {
-		return nil, fmt.Errorf("postgres: execute template batch: %w", err)
+	if err := s.preacquireBatchLocks(ctx, qtx, inputs); err != nil {
+		return nil, err
 	}
 
 	journals := make([]*core.Journal, 0, len(inputs))
@@ -645,6 +634,70 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 	return journals, nil
 }
 
+// preacquireBatchLocks fixes the whole batch's lock order at the
+// transaction's first locking statement, before any journal is posted. Both
+// ExecuteTemplateBatch branches call it -- the pool-mode one above and the
+// tx-mode executeTemplateBatchWithQueries below -- because the deadlock it
+// prevents does not care which of the two opened the transaction
+// (concurrency.md 2026-09-02 Major: the fix had landed on the pool branch
+// only, and `RunInTx` + `tx.TemplateBatchExecutor()` is an ordinary way for a
+// consumer to reach the other one).
+//
+// Balance locks: balancePairsFromEntries only orders locks WITHIN a single
+// journal, but a batch posts N journals in one transaction. Two concurrent
+// batches whose journals touch the same holders in a different sequence
+// could each acquire their first journal's balance lock and then block
+// waiting for the other's -- an ABBA deadlock that needs no malicious input,
+// just two ordinary batches (e.g. two batch settlements) that happen to list
+// the same two holders in reverse order. Pre-acquiring the union of every
+// pair the batch will touch, sorted once, fixes the order instead of
+// re-deriving it per journal. Each journal's own acquireBalanceLocks call
+// inside postJournalWithQueries then re-takes the same (already-held) locks
+// -- a no-op under Postgres's reentrant advisory xact locks -- so a
+// lone-journal caller (ExecuteTemplate, which never goes through this batch
+// path) is unaffected.
+//
+// Lock ORDER across lock kinds must also match the single-journal path,
+// which takes idempotency → balance (postJournalWithQueries; Reserve is the
+// same). This batch used to enter balance locks first and re-take each
+// journal's idempotency lock later — the reverse. A concurrent single-journal
+// retry of one of this batch's keys could then hold idem:K while waiting for
+// bal:H held here, while this transaction held bal:H waiting for idem:K:
+// ABBA, SQLSTATE 40P01. Postgres resolves it (ErrTransient, retry succeeds),
+// so it was noise rather than corruption — but one canonical order costs
+// nothing. Keys are sorted so two batches sharing keys agree with each other
+// too.
+func (s *LedgerStore) preacquireBatchLocks(ctx context.Context, q *sqlcgen.Queries, inputs []core.JournalInput) error {
+	idemKeys := make([]string, 0, len(inputs))
+	seenIdemKeys := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		if _, ok := seenIdemKeys[input.IdempotencyKey]; ok {
+			continue
+		}
+		seenIdemKeys[input.IdempotencyKey] = struct{}{}
+		idemKeys = append(idemKeys, input.IdempotencyKey)
+	}
+	sort.Strings(idemKeys)
+	for _, key := range idemKeys {
+		if err := acquireIdempotencyLock(ctx, q, key); err != nil {
+			return fmt.Errorf("postgres: execute template batch: %w", err)
+		}
+	}
+
+	var allPairs []balancePair
+	for i, input := range inputs {
+		resolved, err := s.resolveEntries(ctx, q, input.Entries)
+		if err != nil {
+			return fmt.Errorf("postgres: execute template batch[%d]: resolve entries for lock order: %w", i, err)
+		}
+		allPairs = append(allPairs, balancePairsFromEntries(resolved)...)
+	}
+	if err := acquireBalanceLocks(ctx, q, sortedUniquePairs(allPairs)); err != nil {
+		return fmt.Errorf("postgres: execute template batch: %w", err)
+	}
+	return nil
+}
+
 // executeTemplateBatchWithQueries is the tx-mode-only path: q is always the
 // caller's own transaction (ExecuteTemplateBatch's s.pool == nil branch), so
 // this always runs inside a transaction this code did not open and has no
@@ -661,6 +714,10 @@ func (s *LedgerStore) executeTemplateBatchWithQueries(ctx context.Context, q *sq
 			return nil, fmt.Errorf("postgres: execute template batch[%d]: %w", i, err)
 		}
 		inputs[i] = *input
+	}
+
+	if err := s.preacquireBatchLocks(ctx, q, inputs); err != nil {
+		return nil, err
 	}
 
 	journals := make([]*core.Journal, 0, len(inputs))
@@ -917,14 +974,84 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		if err != nil {
 			return nil, fmt.Errorf("postgres: post journal: event %q: %w", input.EventUID, core.ErrNotFound)
 		}
-		id, err := q.GetEventIDByUID(ctx, pgUID)
+		event, err := q.GetEventByUID(ctx, pgUID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("postgres: post journal: event %q: %w", input.EventUID, core.ErrNotFound)
 			}
 			return nil, fmt.Errorf("postgres: post journal: resolve event: %w", err)
 		}
-		eventID = id
+		eventID = event.ID
+		// Set-once, checked at the gate (I-51, rule 4). This was previously
+		// only caught by linkJournalToEventAndBooking, at the very end of
+		// this function -- after the journal and every entry had been
+		// inserted and the whole transaction had to unwind. More importantly,
+		// checking it here is what makes the dimension rule below meaningful:
+		// both halves of "may this journal claim this event" are decided in
+		// one place, before anything is written.
+		if event.JournalID.Valid {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q is already linked to a journal: %w",
+				input.EventUID, core.ErrConflict,
+			)
+		}
+
+		// The event's own dimension, used when the event carries no booking.
+		// No writer produces such an event today (Booker.Transition is the
+		// only INSERT site and always copies its booking's holder/currency),
+		// so this is the defensive branch, not the normal one.
+		linkHolder, linkCurrencyID := event.AccountHolder, event.CurrencyID
+		if event.BookingID != 0 {
+			// Take the booking's row lock HERE, before acquireBalanceLocks
+			// below (concurrency.md 2026-09-02 Minor). linkJournalToEventAndBooking
+			// UPDATEs this row at the end of this function, which takes the
+			// same lock implicitly -- but by then the balance locks are
+			// already held, giving this path the order
+			// balance -> booking row, while Booker.Transition (and every
+			// caller following CLAUDE.md's Event-Journal atomicity recipe,
+			// including this library's own deposit confirmation) has the
+			// order booking row -> balance. That is a cycle between two
+			// perfectly ordinary calls, and event_uid is a wire field on
+			// POST /journals, so a consumer can reach it without ever
+			// touching Go. Locking here makes both paths
+			// booking row -> balance; re-entrant for the Transition path,
+			// which already holds this row's lock in the same transaction.
+			booking, err := q.GetBookingForUpdate(ctx, event.BookingID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, fmt.Errorf("postgres: post journal: booking %d from event %q: %w", event.BookingID, input.EventUID, core.ErrNotFound)
+				}
+				return nil, fmt.Errorf("postgres: post journal: lock booking %d: %w", event.BookingID, normalizeStoreError(err))
+			}
+			// The booking is authoritative for the dimension; the event's own
+			// copy is written from it.
+			linkHolder, linkCurrencyID = booking.AccountHolder, booking.CurrencyID
+		}
+
+		// This journal must actually be about the thing the event happened to
+		// (I-51, rule 4). event_uid was previously an existence check only,
+		// and the link it creates is consumed as a semantic fact: it fills
+		// events.journal_id and, through it, the booking's SET-ONCE
+		// journal_id. So a journal touching nobody related to that booking
+		// could claim it, and the booking's real settling transition would
+		// then fail with ErrConflict forever -- with the wrong journal
+		// standing as its accounting record. Requiring the booking's
+		// (account_holder, currency) to appear among this journal's entries
+		// is the weakest rule that makes the claim mean something; it does
+		// not constrain amounts or classifications, which legitimately vary
+		// (fees, spreads, multi-leg settlements).
+		if linkHolder == 0 || linkCurrencyID == 0 {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q has no account dimension to link against: %w",
+				input.EventUID, core.ErrInvalidInput,
+			)
+		}
+		if !slices.Contains(balancePairsFromEntries(resolved), balancePair{holder: linkHolder, currencyID: linkCurrencyID}) {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q belongs to (holder %d, currency %d), which none of this journal's entries touch: %w",
+				input.EventUID, linkHolder, linkCurrencyID, core.ErrInvalidInput,
+			)
+		}
 	}
 	if err := validateEntriesPrecision(ctx, s.dims, q, resolved); err != nil {
 		return nil, err
@@ -935,12 +1062,27 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		if err != nil {
 			return nil, fmt.Errorf("postgres: post journal: reversal_of %q: %w", input.ReversalOfUID, core.ErrNotFound)
 		}
-		orig, err := q.GetJournalByUID(ctx, pgUID)
+		// FOR UPDATE, not a plain read (I-51): validateReversalOfInput below
+		// reads the referenced journal's entries AND its existing reversal
+		// history, and both must stay put until this journal commits --
+		// exactly the row lock ReverseJournal and
+		// reverseJournalFractionWithQueries take, for exactly the same
+		// reason. Taken HERE, before acquireBalanceLocks further down, so
+		// both ways of posting a reversal agree on one lock order
+		// (journal row -> balance advisory locks). Re-entrant when this call
+		// came FROM one of those methods: they already hold this row's lock
+		// in the same transaction, so this is a no-op for them and the
+		// validation below simply re-runs at the choke point every reversal
+		// passes through.
+		orig, err := q.GetJournalForUpdateByUID(ctx, pgUID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, fmt.Errorf("postgres: post journal: reversal_of %q: %w", input.ReversalOfUID, core.ErrNotFound)
 			}
 			return nil, fmt.Errorf("postgres: post journal: resolve reversal_of: %w", err)
+		}
+		if err := validateReversalOfInput(ctx, q, orig, resolved); err != nil {
+			return nil, err
 		}
 		reversalOfID = orig.ID
 	}
@@ -988,6 +1130,19 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	// legible than this one.
 	if auth.status == "" {
 		return nil, fmt.Errorf("postgres: post journal: internal: journalAuth.status is empty -- every caller of postJournalWithQueries must set it: %w", core.ErrInvalidInput)
+	}
+	// A replay-flagged auth means attestJournal found this key already
+	// posted and deliberately signed nothing. Reaching here means the two
+	// locked rechecks above did NOT find that journal, so inserting now
+	// would write an unsigned row under a key that is supposed to already
+	// resolve to a signed one. There is no correct row to write, so write
+	// none (working-agreements §3: fail closed, never fall back to a label
+	// that happens to be accepted).
+	if auth.replay {
+		return nil, fmt.Errorf(
+			"postgres: post journal: internal: idempotency key %q was reported as an already-posted replay but the locked recheck did not find that journal; refusing to insert an unsigned row in its place: %w",
+			input.IdempotencyKey, core.ErrConflict,
+		)
 	}
 
 	row, err := q.InsertJournal(ctx, sqlcgen.InsertJournalParams{

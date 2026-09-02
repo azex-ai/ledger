@@ -72,6 +72,13 @@ never exceeds that entry's amount** — over-reversal is rejected with
 `ErrConflict`. A full `ReverseJournal` is only allowed while the journal has
 no reversal history; a reversal itself can never be reversed.
 
+That is an **upper** bound. The matching lower bound — after a `num == den`
+("reverse everything remaining") reversal, the original's net amount on every
+dimension is **zero** — holds only because every journal linked by
+`reversal_of` really is a reversal of what it points at. That is not a
+property of this invariant; it is **I-51**, and it is what makes the
+cumulative arithmetic here mean what it says.
+
 **Enforced by**:
 - The `journals.reversal_of` FK column (added in migration `014`).
 - `SELECT ... FOR UPDATE` on the original journal row serialises concurrent
@@ -4412,3 +4419,110 @@ it *by accident*, which is how all eighteen copies got there.
 ## How to add a new invariant
 
 ---
+
+## I-51: A caller-supplied link on a journal is a claim the store verifies, never a label it records
+
+`core.JournalInput` carries two links a caller can set by hand —
+`ReversalOfUID` and `EventUID`. Both are read downstream as statements of
+fact, so both are validated before anything is written, from every entry
+point (library facade and HTTP alike).
+
+### Rules 1–3: `reversal_of`
+
+A journal carrying `reversal_of = J` must actually be a reversal of `J`:
+
+1. **`J` is not itself a reversal.** Reversals are leaves; the chain is one
+   level deep, which is what makes "everything that reverses `J`" a query
+   rather than a traversal.
+2. **Same-dimension inversion.** Every entry must invert an entry `J` actually
+   has: same `(account_holder, currency, classification)`, opposite
+   `entry_type`. An entry on a dimension `J` never touched — including one on
+   a dimension `J` has but on the same side rather than the opposite — is
+   refused (`ErrInvalidInput`).
+3. **Within what is left.** Per dimension, `already reversed + this journal's
+   amount ≤ J's original amount` (`ErrConflict`), aggregated at exactly the
+   grain `cumulativeReversedByDimension` reads.
+
+This holds no matter which API posts the reversal: `ReverseJournal`,
+`ReverseJournalFraction`, or a `PostJournal` whose caller set
+`core.JournalInput.ReversalOfUID` itself.
+
+**Why**: `reversal_of` is not a decoration, it is an input to arithmetic.
+`cumulativeReversedByDimension` treats every journal linked to `J` as
+reversal history worth its own amounts, and `ReverseJournalFraction(J, 1, 1)`
+— "reverse everything remaining" — computes `original − already reversed`
+from it. So one unvalidated link is enough to make a full reversal reverse
+less than everything and return `nil`:
+
+```
+post 100                                   balance = 100
+PostJournal{reversal_of: J, four net-zero legs}   balance = 100   err = <nil>
+ReverseJournalFraction(J, 1, 1)                                   err = <nil>
+  -> reversal journal posted: debit 50 / credit 50
+after "fully reversed"                     balance = 50   <= expected 0
+CheckAccountingEquation  balanced=true gap=0
+ReconcileAccount         balanced=true gap=0
+```
+
+Every defense in the ledger stays green there, because nothing about double
+entry is broken: the middle journal is per-currency balanced, moves no money,
+and its legs are all on dimensions `J` genuinely touches — only the
+*directions* make it not a reversal. What is broken is the reversal chain, and
+I-2's cumulative rule cannot see it: the total reversed is exactly 100, the
+upper bound is respected, and 50 stays on the books. The caller is told the
+journal was fully reversed.
+
+The field is reachable from library mode (`svc.JournalWriter().PostJournal`),
+which `CLAUDE.md` names as the preferred consumption mode; the HTTP surface
+never accepted it. No attacker is needed — a consumer that runs its own
+correction flow and tags the correcting journal with `reversal_of` for
+auditability, which is what the field is for, lands on this.
+
+### Rule 4: `event_uid`
+
+A journal carrying `event_uid = E` must be about what `E` happened to:
+
+4. **The event's dimension is present, and the link is free.** `E`'s booking's
+   `(account_holder, currency)` must appear among this journal's entries, and
+   `events.journal_id` must not already be set (`ErrInvalidInput` /
+   `ErrConflict` respectively). Amounts and classifications are deliberately
+   *not* constrained — fees, spreads and multi-leg settlements legitimately
+   post more than the booking's own amount.
+
+Same failure shape, wider reach: `event_uid` is a field on `POST /journals`,
+so this one needs no library-mode consumer at all. Posting fills
+`events.journal_id` and through it the booking's **set-once** `journal_id`
+(see CLAUDE.md, "Event-Journal atomicity"), so before this rule any journal
+could claim any stranger's event — after which the booking's real settling
+transition fails with `ErrConflict` **permanently**, and an unrelated journal
+stands as that booking's accounting record. Nothing detects it: the claiming
+journal is balanced, and the booking simply never settles.
+
+**Enforced by**:
+- `validateReversalOfInput` (`postgres/reversal_fraction_store.go`), called
+  from `postJournalWithQueries` (`postgres/ledger_store.go`) — the single
+  choke point every journal insert passes through, so the reversal APIs
+  re-validate their own derived entries there too.
+- The `event_uid` branch of `postJournalWithQueries`, which resolves the
+  event, refuses an already-linked one, and requires the booking's
+  `(holder, currency)` pair among `balancePairsFromEntries(resolved)` —
+  all before the first INSERT, so a refused claim leaves both `journal_id`
+  columns untouched.
+- `GetJournalForUpdateByUID` on the referenced journal, taken while resolving
+  `reversal_of` and **before** the balance advisory locks, so the entries and
+  reversal history the rules above read cannot change before this journal
+  commits — the same row lock `ReverseJournal` and `ReverseJournalFraction`
+  take, in the same order relative to the balance locks.
+
+**Pinned by**:
+- `postgres.TestPostJournal_ReversalOfUID_RejectsNonReversingEntries` — the
+  repro above, asserted at the holder's balance (0 after "reverse everything
+  remaining"), not at any internal shape.
+- `postgres.TestPostJournal_ReversalOfUID_RejectsReversalOfAReversal`
+- `postgres.TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining` —
+  including the positive case: a correctly shaped hand-written reversal within
+  the remaining amount must still post.
+- `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` (rule 4) — a
+  stranger's journal is refused, and then the booking's OWN journal still
+  posts against the same event, proving the refusal consumed neither
+  `journal_id`; a second claim on the now-linked event is refused too.

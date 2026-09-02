@@ -744,3 +744,189 @@ func TestPendingStore_CancelPending_SignsWhenAttestorConfigured(t *testing.T) {
 	assert.Equal(t, core.AuthStatusSigned, j.AuthStatus,
 		"CancelPending must sign its journal when an Attestor is configured, got %q", j.AuthStatus)
 }
+
+// --- 2026-09-02 deep audit: pending-path concurrency + error surface ------
+
+// TestPendingStore_ConfirmPending_GlobalLockOrder_NoDeadlockWithOrdinaryPost
+// pins B-M1: checkPendingBalanceAndPost used to pre-acquire ONLY the user's
+// (holder, currency) balance lock, then hand the journal to PostJournal --
+// which takes the full set in global (holder, currency_id) order, i.e. the
+// system counterpart -holder FIRST because it is negative. The pending path
+// therefore held H and asked for -H while every other write path in the
+// repository holds -H and asks for H. Two entirely ordinary calls (an
+// AddPending and a ConfirmPending on the same user, or a ConfirmPending
+// racing a deposit_confirm) were enough to close an ABBA cycle: SQLSTATE
+// 40P01 on the deposit money-path, no malicious input required.
+//
+// The probe transaction below stands in for "any other writer", holding
+// bal(-H) -- the lock every canonical path takes first. Post-fix,
+// ConfirmPending pre-acquires the whole sorted set, so it blocks on bal(-H)
+// holding nothing and the probe's later bal(H) is uncontested.
+//
+// Falsification: put the pre-lock in checkPendingBalanceAndPost back to the
+// single {holder, currencyID} pair. The probe then loses a real 40P01.
+func TestPendingStore_ConfirmPending_GlobalLockOrder_NoDeadlockWithOrdinaryPost(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ls := postgres.NewLedgerStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	curUID := postgrestest.SeedCurrency(t, p, "USDT-LOCKORD", "Test USDT")
+	currencyID := postgrestest.InternalID(t, p, "currencies", curUID)
+	ps := postgres.NewPendingStore(p, ls, cs)
+
+	const userID = int64(1201)
+	amount := decimal.NewFromInt(100)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curUID,
+		Amount:         amount,
+		IdempotencyKey: postgrestest.UniqueKey("lockord-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	probeTx, err := p.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = probeTx.Rollback(ctx) }()
+	probeQ := postgres.NewQueriesForTest(probeTx)
+
+	require.NoError(t, postgres.AcquireBalanceLocksForTest(ctx, probeQ,
+		[]postgres.BalancePair{postgres.NewBalancePair(core.SystemAccountHolder(userID), currencyID)}),
+		"probe takes the system counterpart first, exactly as every canonical write path does")
+
+	var wg sync.WaitGroup
+	var confirmErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, confirmErr = ps.ConfirmPending(ctx, core.ConfirmPendingInput{
+			AccountHolder:  userID,
+			CurrencyUID:    curUID,
+			Amount:         amount,
+			IdempotencyKey: postgrestest.UniqueKey("lockord-confirm"),
+			Source:         "test",
+		})
+	}()
+
+	// Give ConfirmPending time to reach its blocking acquisition. It cannot
+	// produce a false PASS: if it had not got that far, the probe's second
+	// lock would simply be uncontested -- the same observation asserted below.
+	time.Sleep(1500 * time.Millisecond)
+
+	probeErr := postgres.AcquireBalanceLocksForTest(ctx, probeQ,
+		[]postgres.BalancePair{postgres.NewBalancePair(userID, currencyID)})
+
+	_ = probeTx.Rollback(ctx)
+	wg.Wait()
+
+	require.NoError(t, probeErr,
+		"a 40P01 here means ConfirmPending held the user's balance lock while waiting for the system counterpart's -- the reverse of every other path")
+	require.NoError(t, confirmErr, "ConfirmPending must serialize behind the probe, not deadlock with it")
+}
+
+// TestPendingStore_ConfirmPending_InsufficientBalance pins F-m6: until now the
+// shared balance gate in checkPendingBalanceAndPost was covered only through
+// CancelPending, so breaking it turned exactly one test red and the confirm
+// half -- the one that moves money into the spendable wallet -- had no direct
+// pin at all. Also asserts the rejection is side-effect free.
+func TestPendingStore_ConfirmPending_InsufficientBalance(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ls := postgres.NewLedgerStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	curUID := postgrestest.SeedCurrency(t, p, "USDT-CONFINSUF", "Test USDT")
+	ps := postgres.NewPendingStore(p, ls, cs)
+
+	const userID = int64(1202)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curUID,
+		Amount:         decimal.NewFromInt(50),
+		IdempotencyKey: postgrestest.UniqueKey("confinsuf-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	pendingCls, err := cs.GetByCode(ctx, "pending")
+	require.NoError(t, err)
+	walletCls, err := cs.GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+
+	_, err = ps.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curUID,
+		Amount:         decimal.NewFromInt(100), // > 50
+		IdempotencyKey: postgrestest.UniqueKey("confinsuf-confirm"),
+		Source:         "test",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrInsufficientBalance)
+
+	pendingBal, err := ls.GetBalance(ctx, userID, curUID, pendingCls.UID)
+	require.NoError(t, err)
+	assert.True(t, pendingBal.Equal(decimal.NewFromInt(50)), "a rejected confirm must not consume pending, got %s", pendingBal)
+	walletBal, err := ls.GetBalance(ctx, userID, curUID, walletCls.UID)
+	require.NoError(t, err)
+	assert.True(t, walletBal.IsZero(), "a rejected confirm must not credit the wallet, got %s", walletBal)
+}
+
+// TestPendingStore_ExpirePendingOlderThan_JoinsSentinelErrors pins E-m13: the
+// sweeper aggregated its per-account failures with %v, which flattens them to
+// text. PendingTimeoutSweeper is the only surface a consumer's worker sees, so
+// a %v there means errors.Is / core.IsRetryable are dead for the entire path
+// -- a frozen account and a transient DB failure become indistinguishable
+// strings, and a retry loop cannot tell which it got.
+//
+// The failure injected here is the ordinary one: an account frozen between
+// the deposit and the sweep. The sweeper must still report it, and the
+// sentinel must still be reachable through errors.Is.
+//
+// Falsification: change the errors.Join back to %v.
+func TestPendingStore_ExpirePendingOlderThan_JoinsSentinelErrors(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	cs := postgres.NewClassificationStore(p)
+	ls := postgres.NewLedgerStore(p)
+	ts := postgres.NewTemplateStore(p)
+	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+
+	curUID := postgrestest.SeedCurrency(t, p, "USDT-EXPJOIN", "Test USDT")
+	ps := postgres.NewPendingStore(p, ls, cs)
+	policies := postgres.NewAccountPolicyStore(p)
+
+	const userID = int64(1203)
+
+	_, err := ps.AddPending(ctx, core.AddPendingInput{
+		AccountHolder:  userID,
+		CurrencyUID:    curUID,
+		Amount:         decimal.NewFromInt(30),
+		IdempotencyKey: postgrestest.UniqueKey("expjoin-add"),
+		Source:         "test",
+	})
+	require.NoError(t, err)
+
+	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
+		AccountHolder: userID,
+		Status:        core.AccountPolicyStatusFrozen,
+		Note:          "compliance hold arriving after the deposit",
+	})
+	require.NoError(t, err)
+
+	// Negative threshold => cutoff in the future => the journal above is stale.
+	cancelled, err := ps.ExpirePendingOlderThan(ctx, -time.Second)
+	require.Error(t, err, "the sweeper must report the account it could not expire")
+	assert.Zero(t, cancelled)
+	assert.ErrorIs(t, err, core.ErrAccountFrozen,
+		"aggregating sub-errors with %%v breaks errors.Is for the sweeper's only return surface")
+}
