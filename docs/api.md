@@ -374,7 +374,8 @@ resolved channel adapter implements it (I-20; see
 
 The handler verifies that `booking.channel_name` matches `{channel}` (defence against forged payloads pointing at a different booking) and applies the resulting transition. Responds with the emitted event (same shape as `POST /bookings/{uid}/transition`).
 
-Two separate `403` refusals, both structural rather than configurable:
+Three separate `403` refusals on this path, all structural rather than
+configurable — a valid signature is necessary and never sufficient:
 
 - **channel mismatch** — the booking's `channel_name` is not `{channel}`. The
   channel→booking mapping in the database is trusted, never the `booking_uid`
@@ -384,18 +385,34 @@ Two separate `403` refusals, both structural rather than configurable:
   it exists to serve; most importantly it can never transition a `sweep`
   booking, which posts no journal, so a forged `confirmed` there would leave
   no accounting trace.
+- **`status: "confirmed"` is refused outright.** Confirming a deposit posts
+  accounting, and [INVARIANTS I-21](INVARIANTS.md) holds that a confirmed
+  deposit's journal comes from exactly one place — the service-layer
+  orchestration that writes the journal in the same transaction as the
+  transition. This path does not: it hands `status` straight to a booking
+  transition and posts nothing, so a `confirmed` here produces a deposit the
+  holder-facing surfaces call settled with no entries behind it and no
+  journal for reconciliation to miss. To ingest a confirmation, implement
+  `channel.SightingParser` on your adapter (the shape below); the server
+  routes a sighting-capable adapter to the deposit-ingestion path
+  automatically, and the built-in `evm` adapter already takes it. Any other
+  lifecycle status is accepted normally.
 
 **Replay.** The signature window (±5 min) rejects stale replays, but an
 identical request replayed *inside* the window still verifies. Rejecting that
-requires a nonce cache, which is a host-supplied dependency: call
-`(*server.Server).SetWebhookNonceRecorder(...)` at assembly time — the
-`postgres.WebhookSubscriberStore` implements it (`TryRecordNonce`). Until it
-is installed there is **no** in-window replay protection and the `409` below
-is unreachable; the library does not install one for you and does not fail
-closed on its absence, because an inbound channel that is not exposed does
-not need one.
+needs a nonce cache, and the cache is host-wired, not automatic:
 
-Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (the two refusals above), `404` (unknown channel or booking), `409` / `10901` (in-window replay — only when a nonce recorder is installed), `422` (transition rejected), `429`, `503`.
+```go
+srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())
+```
+
+`svc.WebhookNonceRecorder()` hands over the `postgres.WebhookSubscriberStore`
+that implements it. **Until that call is made there is no in-window replay
+protection and the `409` below cannot occur** — the library does not install
+one for you, because an inbound channel that is not exposed does not need one.
+If you register any channel, make the call.
+
+Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (the three refusals above), `404` (unknown channel or booking), `409` / `10901` (in-window replay — only once a nonce recorder is wired), `422` (transition rejected), `429`, `503`.
 
 Body cap: 1 MB regardless of `MAX_BODY_BYTES`.
 

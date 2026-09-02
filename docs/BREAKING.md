@@ -76,24 +76,60 @@ but running `Migrate` as a third-party role with no ADMIN OPTION on
 previously died at `002` with a bare `42501` and left the database marked
 dirty.
 
-### `core.Metrics.BalanceDrift`, `core.Metrics.NegativeBalanceDetected`, `core.Metrics.ReconcileGap`, `core.Metrics.ReservedAmount`
+### `core.Metrics.BalanceDrift`, `core.Metrics.NegativeBalanceDetected`, `core.Metrics.ReconcileGap`, `core.Metrics.ReservedAmount` take a currency uid
 
-**Planned in this remediation wave (H-M9), not yet landed.** These four methods
-take `currencyID int64` — an internal `currencies.id`. I-18 forbids an internal
-primary key in a `core` interface, and the library's own Prometheus
-implementation publishes it as the label `currency_id`, welding operator
-dashboards to a key that does not survive a dump/restore.
+**Landed (H-M9 / I-M1).** These four methods took `currencyID int64` — an
+internal `currencies.id`. I-18 forbids an internal primary key in a `core`
+interface, and the library's own Prometheus implementation published it as the
+label `currency_id`, welding operator dashboards to a key that does not
+survive a dump/restore. The parameter is now the currency **uid**.
 
-The parameter becomes the currency **uid**. Consumers implementing
-`core.Metrics` must update those four method signatures; consumers embedding
-`core.NoopMetrics` (the documented way) only need to update the methods they
-override. Prometheus series carrying `currency_id` will be replaced by
-`currency_uid` — dashboards and alert rules that group on that label must be
-updated.
+Re-signed with them, because an interface change is a change to every
+implementation of it: `core.NoopMetrics.BalanceDrift`,
+`core.NoopMetrics.NegativeBalanceDetected`, `core.NoopMetrics.ReconcileGap`,
+`core.NoopMetrics.ReservedAmount`,
+`observability.PrometheusMetrics.BalanceDrift`,
+`observability.PrometheusMetrics.NegativeBalanceDetected`,
+`observability.PrometheusMetrics.ReconcileGap` and
+`observability.PrometheusMetrics.ReservedAmount`.
 
-`core.TestNoInternalIDsInCoreInterfaceSignatures` currently records these four
-in `knownInterfaceInternalIDLeaks`; that list must be emptied in the same
-commit as the fix.
+Consumers implementing `core.Metrics` by hand must update those four
+signatures; consumers embedding `core.NoopMetrics` (the documented way) only
+need to update the methods they actually override.
+
+**Operators**: the Prometheus series for these four now carry `currency_uid`
+instead of `currency_id`. Dashboards, recording rules and alert rules that
+group or filter on that label must be updated — the old label simply
+disappears, so a rule referencing it silently matches nothing.
+
+### `core.Metrics` grows from 32 to 41 methods
+
+**Landed (I-M1 / I-M8 / I-M10 / B-m10).** New: `JobTickCompleted`,
+`JobTickFailed`, `JobTickSkippedLocked`, `JobPanicked`, `StuckRollups`,
+`PendingEvents`, `AttestationBatchResult`, `AnchorPublishResult`,
+`AnchorLagSeqs`.
+
+Go has no sealed interfaces, so a hand-written `core.Metrics` implementation
+stops compiling until all nine are added. **Embed `core.NoopMetrics`** — that
+is what it is for, and it is why this class of change is survivable at all.
+
+Also here: `LedgerStore` / `ReserverStore` / `BookingStore` gain a chained
+`WithMetrics(core.Metrics)` (defaulting to `core.NopMetrics()`), which
+`ledger.New` wires automatically. Two of the new methods
+(`PendingEvents`, `ReservedAmount`) have no production call site yet and are
+registered as such in `observability/emission_coverage_test.go` — they emit
+nothing today, so they carry no alerting surface.
+
+### `delivery.NewLocalDispatcher` and `service.NewLockedJob` take a `core.Metrics`
+
+**Landed (I-N12 / I-M8).**
+
+    delivery.NewLocalDispatcher(poller, logger)              -> (poller, logger, metrics)
+    service.NewLockedJob(name, fn, pool, logger)             -> (..., logger, metrics)
+
+`nil` is accepted and means `core.NopMetrics()`. Only direct constructor
+callers are affected — going through `ledger.Service.Worker()` /
+`service.Worker.Subscribe` needs no change, since the facade supplies it.
 
 ### `metadata` and `source` now have upper bounds (lead addendum)
 

@@ -1043,20 +1043,31 @@ paths:
         "401": { description: HMAC verification failed. }
         "403":
           description: >-
-            Two structural refusals on the legacy booking_uid path (design doc
-            §5-5): the booking's channel_name is not {channel}, or its
-            classification is not the deposit classification. The second is
-            what keeps a callback from ever transitioning a sweep booking,
-            which posts no journal and so would leave a forged "confirmed"
-            with no accounting trace.
+            Three structural refusals on the legacy booking_uid path; a valid
+            signature is necessary and never sufficient. (1) The booking's
+            channel_name is not {channel}. (2) Its classification is not the
+            deposit classification -- this is what keeps a callback from ever
+            transitioning a sweep booking, which posts no journal and so would
+            leave a forged "confirmed" with no accounting trace (design doc
+            §5-5). (3) status is "confirmed": confirming a deposit posts
+            accounting, and INVARIANTS I-21 holds that the journal comes from
+            exactly one place, the service-layer orchestration that writes it
+            in the same transaction as the transition. This path posts nothing,
+            so a "confirmed" here would produce a settled-looking deposit with
+            no entries behind it. Implement channel.SightingParser to ingest a
+            confirmation; the server routes a sighting-capable adapter to the
+            deposit-ingestion path automatically. Any other lifecycle status is
+            accepted normally.
         "409":
           description: >-
-            In-window replay, rejected by the inbound nonce cache. Reachable
-            only when the host installed one via
-            (*server.Server).SetWebhookNonceRecorder -- the library ships the
-            implementation (postgres.WebhookSubscriberStore.TryRecordNonce)
-            but wires nothing by default, so a deployment that skips that call
-            has no in-window replay protection and never answers 409 here.
+            In-window replay, rejected by the inbound nonce cache. The cache is
+            host-wired, not automatic -- `srv.SetWebhookNonceRecorder(
+            svc.WebhookNonceRecorder())` at assembly time. Until that call is
+            made there is no in-window replay protection and this response
+            cannot occur; the library ships the implementation
+            (postgres.WebhookSubscriberStore.TryRecordNonce) but installs
+            nothing by default, because an inbound channel that is not exposed
+            does not need one.
         "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
 
   /classifications:

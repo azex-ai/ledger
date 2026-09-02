@@ -23,19 +23,26 @@ func TestRollupAdapter_StuckRollups(t *testing.T) {
 	ctx := context.Background()
 	adapter := postgres.NewRollupAdapter(pool)
 
-	var stuckID int64
-	require.NoError(t, pool.QueryRow(ctx, `
-		INSERT INTO rollup_queue (account_holder, currency_id, classification_id, failed_attempts)
-		VALUES (1, 1, 1, 10)
-		RETURNING id
-	`).Scan(&stuckID))
+	// Real dimension ids: migration 022 put the FKs on rollup_queue that
+	// system_rollups always had, so a queue row naming a currency or
+	// classification that does not exist is now refused -- which is the
+	// constraint's purpose, and makes literal ids a fixture bug rather than a
+	// shortcut.
+	currencyID, classificationID := seedRollupDimension(t, pool, "stuck")
 
-	var healthyID int64
-	require.NoError(t, pool.QueryRow(ctx, `
-		INSERT INTO rollup_queue (account_holder, currency_id, classification_id, failed_attempts)
-		VALUES (2, 1, 1, 3)
-		RETURNING id
-	`).Scan(&healthyID))
+	insertQueueRow := func(holder int64, failedAttempts int) int64 {
+		t.Helper()
+		var id int64
+		require.NoError(t, pool.QueryRow(ctx, `
+			INSERT INTO rollup_queue (account_holder, currency_id, classification_id, failed_attempts)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id
+		`, holder, currencyID, classificationID, failedAttempts).Scan(&id))
+		return id
+	}
+
+	stuckID := insertQueueRow(1, 10)
+	healthyID := insertQueueRow(2, 3)
 
 	pending, err := adapter.CountPendingRollups(ctx)
 	require.NoError(t, err)

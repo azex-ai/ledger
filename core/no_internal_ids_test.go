@@ -137,25 +137,24 @@ func TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation(t *testing.T) {
 // internal BIGSERIAL primary key handed to every consumer implementing the
 // interface, and published by the library's own implementation as a
 // Prometheus label (H-M9).
-// knownInterfaceInternalIDLeaks are the four Metrics methods this gate found
-// on the day it was written (H-M9). They are recorded here rather than
-// silently tolerated because fixing them is a signature change to
-// core.Metrics -- a breaking change for every consumer implementing it,
-// owned by a separate task in this remediation wave (see
-// docs/plans/2026-09-02-remediation-contracts.md §4, D-ops) and carrying a
-// BREAKING.md entry.
+// knownInterfaceInternalIDLeaks is empty, which is the end state and not an
+// accident of never having been used.
 //
-// The list is self-invalidating in BOTH directions: a new violation is red
-// (it is not in the list), and fixing a listed one is also red (the entry
-// no longer describes a real leak, so it must be deleted in the same commit
-// as the fix). An empty map is the end state -- do not add to it to make a
-// gate quiet.
-var knownInterfaceInternalIDLeaks = map[string]string{
-	"Metrics.BalanceDrift":            "currency_id",
-	"Metrics.NegativeBalanceDetected": "currency_id",
-	"Metrics.ReconcileGap":            "currency_id",
-	"Metrics.ReservedAmount":          "currency_id",
-}
+// It held the four core.Metrics methods that took `currencyID int64` on the
+// day this gate was written (H-M9): recorded rather than silently tolerated,
+// because fixing them was a signature change to core.Metrics -- breaking for
+// every consumer implementing it -- and therefore owned by a different task
+// in this wave (contracts §4, D-ops). When that fix landed, the list's OTHER
+// direction went red naming all four ("no longer leaks -- delete the entry"),
+// which is how it came to be empty instead of quietly outliving the problem
+// it described.
+//
+// Both directions, restated because the value is entirely in the second one:
+// a new violation is red (it is not listed), and a listed one that stops
+// leaking is red too (the entry must be deleted in the same commit as the
+// fix). Never add to this map to quiet a gate -- an internal id in a core
+// interface parameter is I-18's subject, not a style preference.
+var knownInterfaceInternalIDLeaks = map[string]string{}
 
 func TestNoInternalIDsInCoreInterfaceSignatures(t *testing.T) {
 	banned := bannedInternalIDKeysForCore(t)
