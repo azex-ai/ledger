@@ -35,6 +35,29 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`Migrate` / `MigrateContext` and the period-close barrier** (D-lock:
+  B-M5, B-m4, B-X1, B-m9). `ledger.Migrate(databaseURL)` becomes
+  `ledger.Migrate(databaseURL, opts ...postgres.MigrateOption)` and gains
+  `ledger.MigrateContext(ctx, databaseURL, opts...)` — source-compatible
+  (variadic), no caller changes needed. The cluster migration lock is now a
+  polled `pg_try_advisory_lock` with a five-minute default budget
+  (`postgres.WithMigrateLockBudget`) and a per-attempt `Info` line
+  (`postgres.WithMigrateLogger`, falling back to `slog.Default()`) instead
+  of an unbounded, silent, uncancellable wait. `PeriodCloseStore.ClosePeriod`
+  now runs under an exclusive advisory barrier and can return
+  `core.ErrTransient` — **it does not append the close line in that case**;
+  callers must retry, and composing `ClosePeriod` into a `RunInTx` that also
+  takes ledger locks can surface 40P01 as `ErrTransient` (see I-61's
+  residual note). Deactivated currencies / classifications / journal types
+  are now **refused in new journals** (`ErrInvalidInput`) instead of being a
+  silent no-op, and all four `Deactivate*` methods return `core.ErrNotFound`
+  for a uid that matches no row instead of `nil`. `service.ReconcileQuerier`
+  gains `PeriodCloseViolations` (self-built implementations must add it;
+  `postgres.NewReconcileAdapter` users need no change), and the suite runs
+  sixteen checks rather than fifteen. I-3's wording is scoped to money
+  movement, with the configuration writes that need no idempotency key
+  listed explicitly.
+
 - **`capital_injection` / `capital_withdraw` sign correction** (A-C1,
   migration 016): `equity` changed from credit-normal to debit-normal, and
   both templates' legs reversed (injecting capital is now CR custodial + DR

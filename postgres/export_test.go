@@ -9,6 +9,9 @@ package postgres
 // tests must live in postgres_test and reach the unexported symbols through
 // this shim instead. See lock_order_test.go.
 
+import (
+	"context"
+)
 import "github.com/azex-ai/ledger/postgres/sqlcgen"
 
 // BalancePair is balancePair, exported for tests only.
@@ -44,7 +47,9 @@ var NewQueriesForTest = sqlcgen.New
 // what this lock already serializes -- Migrate holds it for its whole run --
 // so a test that holds it too becomes mutually exclusive with them rather than
 // racing them. See roles_test.go's TestRoleAttributeHardening... and I-47.
-var AcquireClusterLockForTest = acquireClusterLock
+func AcquireClusterLockForTest(databaseURL string) (func(), error) {
+	return acquireClusterLock(context.Background(), databaseURL, newMigrateConfig(nil))
+}
 
 // WithLedgerOwnerForTest is withLedgerOwner, exported for tests only.
 //
