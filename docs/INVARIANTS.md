@@ -5661,3 +5661,109 @@ committed close line.
   — the check is registered in the suite, stays green for the normal state
   of a closed period, and reports a journal forged straight into the table
   behind the line.
+
+## I-60: A panicking job tick, or a panicking Subscribe handler, never terminates the process
+
+(2026-09-02 second-round audit: `operability.md` I-9 / I-10. Contract
+`docs/plans/2026-09-02-remediation-contracts.md` Wave 2 D-ops.)
+
+**Rule**: Every place this library runs consumer-supplied or third-party-
+implementation-dependent code on a background tick — `service.Worker`'s
+scheduled jobs, `service.Onchain`'s five chain jobs (a `ChainReader`/
+`ChainScanner`/`Sweeper` bug reaches here), and a `Worker.Subscribe` handler
+delivered through `service/delivery.LocalDispatcher` — recovers a panic from
+that one call, converts it into an ordinary failure signal (a logged error
+plus, for job ticks, `core.Metrics.JobPanicked`; for a Subscribe handler, an
+ordinary handler error that schedules a retry exactly like a returned
+`error` would), and continues running everything else. None of the three
+call sites shares the same recover — `Worker` and `Onchain` each run their
+own scheduling loop (`Onchain`'s five jobs do not route through `Worker`'s
+loop at all) — so this is one rule enforced at three independent call sites,
+not one mechanism inherited by all three.
+
+**Why**: before this, a panic at any of these three points propagated
+straight out of `Run`/`ProcessBatch`. `Worker.Run` and `Onchain.Run` are
+both documented as typically launched `go worker.Run(ctx)` — an unrecovered
+panic in a goroutine is fatal to the whole process, taking down every other
+job and every in-flight request with it over one bug in a single job's tick
+or one consumer's `Subscribe` handler. A webhook handler with the identical
+bug only ever surfaces as an HTTP 500 (`middleware.Recoverer` on the HTTP
+path); a `Subscribe` handler had no equivalent floor.
+
+**Enforced by**: `service.Worker.safeRun` (unexported; wraps every
+`runLoop` tick, reached through the exported `service.Worker.Run`),
+`service.Onchain`'s own `safeRunTick` (unexported; same shape, independently
+implemented because `Onchain` keeps its own scheduling loop rather than
+routing through `Worker`'s), and `service/delivery.CallbackDeliverer`'s
+per-handler recover inside its `Deliver` method — reached from the exported
+`delivery.LocalDispatcher.ProcessBatch`, the entry point a consumer actually
+calls.
+
+**Pinned by**:
+- `service.TestWorker_JobPanic_DoesNotCrashProcess` — a queuer that panics
+  on its first call, run through `Worker.Run` end to end; asserts `Run`
+  returns cleanly via context cancellation (not a propagated panic) and that
+  `JobPanicked("rollup")` was emitted. Removing `safeRun`'s `recover()`
+  crashes this test's own process instead of failing it.
+- `service.TestOnchain_RunLoop_PanicDoesNotCrashProcess` — same shape
+  against `Onchain`'s independent loop, proving the recover was not
+  inherited from `Worker`.
+- `delivery.TestLocalDispatcher_ProcessBatch_HandlerPanicIsRecovered` — a
+  Subscribe handler that panics, driven through `LocalDispatcher.ProcessBatch`:
+  asserts the call does not panic, the event is scheduled for retry (not
+  silently dropped), and `EventDeliveryFailed` is emitted exactly as an
+  ordinary handler error would produce.
+
+## I-61: `core.Metrics`'s declared surface has no method without a production call site, or an explicitly tracked reason it does not yet have one
+
+(2026-09-02 second-round audit: `operability.md` I-1 / I-10. Contract
+`docs/plans/2026-09-02-remediation-contracts.md` Wave 2 D-ops.)
+
+Before this wave, 12 of `core.Metrics`'s (then) 32 methods had zero
+production call sites — the entire `postgres/` write layer had no
+`core.Metrics` dependency at all, so `JournalPosted`, `JournalFailed`,
+`ReserveCreated`/`Settled`/`Released`, and `IdempotencyCollision` were
+declared, documented, and permanently silent. A consumer who read the
+interface's doc comments and wired a dashboard against them would have
+waited forever for a signal this library was never going to send. The wide,
+one-method-per-signal shape `core.Metrics` deliberately uses (rather than a
+handful of generic `Counter`/`Gauge` calls, see its own doc comment) makes
+this failure mode easy to introduce silently: adding a method is a
+compile-time no-op everywhere else, so nothing forces the corresponding call
+site to exist.
+
+**Rule**: every method `core.Metrics` declares has at least one call site
+under non-test `service/` or `postgres/` source, **or** is named in
+`observability/emission_coverage_test.go`'s `crossBranchExclusions` map with
+the reason it does not yet have one and who owns closing the gap. An
+exclusion is not a permanent carve-out: a second gate
+(`TestCrossBranchExclusionsAreStillActuallyMissing`) fails the moment a call
+site for an excluded method actually appears, forcing its removal from the
+map instead of letting it rot into a silent, no-longer-true exemption.
+
+**Why this is enforced by reflection against the interface, not a
+hand-maintained list**: I-50 already states the general lesson for this
+repository — a hand-written enumeration cannot notice the member nobody
+thought to look at. `reflect.TypeOf((*core.Metrics)(nil)).Elem()`'s method
+set is the interface's actual shape; the check tracks it automatically as
+methods are added, rather than needing its own list edited in lockstep.
+
+**Enforced by**: `observability/emission_coverage_test.go` — reflects the
+metrics interface's live method set (not a hand-copied name list), walks
+`service/` and `postgres/` non-test source as text for `.MethodName(`, and
+checks the result against the `crossBranchExclusions` map, whose own doc
+comment states the governance rule: entries are removed once their call site
+lands, never added to silence a newly-introduced gap. Mirrors I-50's
+inversion — the exclusion map is this gate's *output*, not a list someone
+maintains by hand.
+
+**Pinned by**:
+- `observability.TestEveryMetricsMethodHasAProductionCallSite` — the gate
+  itself; reverting any one of the postgres-layer `WithMetrics` wiring
+  changes (I-M1) reproduces the exact 12-method failure this invariant
+  describes.
+- `observability.TestCrossBranchExclusionsAreStillActuallyMissing` — the
+  anti-rot half: currently holds `ReservedAmount` and `PendingEvents` (both
+  declared, neither wired — each needs a new aggregate query beyond this
+  wave's merge budget, tracked in `TODO.md`'s breaking-change list), and
+  fails if either gets a call site without being removed from the map first.
