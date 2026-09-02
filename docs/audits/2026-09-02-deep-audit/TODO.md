@@ -1683,3 +1683,11 @@
 | 条目 | 变更 | 消费方需要做什么 |
 |---|---|---|
 | （空） | | |
+
+## Lead 追加（整改期间发现，归属见括号）
+
+| 来源 | 条目 | 归属 |
+|---|---|---|
+| w1-gate 复核 | `examples/tamper-evident` 只演示伪造 journal、不演示篡改 checkpoint，且把闸演示成完整提现闸；随 I-49 更新演示步骤 | D-surface |
+| w1-gate 兄弟扫描 | `postgres/account_policy_enforce.go:114` 的 `min_balance` 放行读 checkpoint+delta。本波不修：篡改 checkpoint 只能放宽 floor，不构成出金路径。留作后续评估项 | 后续 |
+| lead 复核 f48ae31 | 闸开启路径的 `availableBase` 从 lock 内读改为 lock 外算，I-4 在该路径被削弱；已要求 w1-gate 补 lock 内 entries-only 重算取 min | W1-gate（进行中） |
