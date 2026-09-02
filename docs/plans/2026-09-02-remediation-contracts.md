@@ -130,3 +130,4 @@
 | 7.10 扫链失败的游标语义 | ingest 失败仍推进（G-C1） | **任何 ingest 失败都不推进游标**（与 rescan 对齐）；非 `ErrConflict` 失败进死信并计指标；连续失败 N 次后停止推进并告警，不做「跳过这一笔」 | W1-onchain |
 
 以上每条在对应任务 `bus done` 时由 lead 在审计 README「处置状态」里登记为「已按 7.x 口径修复，待 Aaron 确认」。
+| 7.11 `POST /journals/deposit-tolerance`（w1-templates 复核时发现的同形铸币路径） | 调用方任选 expected/actual/tolerance，直接执行 `deposit_confirm_pending` 等受保护模板，绕开模板闸 | 对 plan 内每个模板走同一道结构派生闸（∪ 名单），仅 `AllowGenericTemplatePost` 显式放行；路由改 admin scope；默认 403 | W1-templates（允许改 `routes.go` 该行；D-threat 接缝已登记） |
