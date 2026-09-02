@@ -23,6 +23,20 @@ package postgres_test
 // ⚠️ Expected to go red the moment a migration creates an object and does not
 // end with `SELECT ledger_resweep_ownership();` -- that is this pin doing its
 // job. The fix is the call, not an exception here.
+//
+// M-7 (W3 adversarial review of the gates): every check in this family --
+// here, function_acl_test.go, roles_test.go, grant_coverage_test.go -- was
+// scoped `WHERE nspname = 'public'`. The reviewer put a SECURITY DEFINER
+// function that grants ledger_app ALL ON ALL TABLES IN SCHEMA public into a
+// NEW schema, owned by the migration runner (a superuser in the common
+// install), granted EXECUTE to ledger_app, and every one of them stayed
+// green: one call and the leaked credential owns the database.
+//
+// Two changes close it. The sweeps below now cover every non-system schema.
+// And TestObjectOwnership_NoUnregisteredSchemas asserts that no other schema
+// exists at all unless it is registered -- which is what makes the remaining
+// `nspname = 'public'` filters elsewhere sound rather than merely narrow: a
+// second schema is red before anything in it needs auditing.
 
 import (
 	"context"
@@ -46,10 +60,11 @@ func TestObjectOwnership_EverythingInPublicBelongsToLedgerOwner(t *testing.T) {
 	// their parent's owner and cannot be altered independently, so they are
 	// not enumerable failures.
 	rows, err := pool.Query(ctx, `
-		SELECT c.relname, c.relkind, pg_get_userbyid(c.relowner)
+		SELECT n.nspname || '.' || c.relname, c.relkind, pg_get_userbyid(c.relowner)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = 'public'
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg\_%'
 		  AND c.relkind IN ('r', 'p', 'S', 'v', 'm')
 		  AND pg_get_userbyid(c.relowner) <> 'ledger_owner'
 		ORDER BY c.relname
@@ -70,7 +85,8 @@ func TestObjectOwnership_EverythingInPublicBelongsToLedgerOwner(t *testing.T) {
 		SELECT p.oid::regprocedure::text, pg_get_userbyid(p.proowner)
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = 'public'
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg\_%'
 		  AND p.prokind IN ('f', 'p')
 		  AND pg_get_userbyid(p.proowner) <> 'ledger_owner'
 		ORDER BY 1
@@ -105,7 +121,9 @@ func TestObjectOwnership_SecurityDefinerFunctionsRunAsLedgerOwner(t *testing.T) 
 		SELECT p.oid::regprocedure::text, pg_get_userbyid(p.proowner)
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = 'public' AND p.prosecdef
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg\_%'
+		  AND p.prosecdef
 		ORDER BY 1
 	`)
 	require.NoError(t, err)
@@ -122,5 +140,50 @@ func TestObjectOwnership_SecurityDefinerFunctionsRunAsLedgerOwner(t *testing.T) 
 	for sig, owner := range found {
 		assert.Equal(t, "ledger_owner", owner,
 			"%s runs with its owner's privileges and ledger_app can call it (I-35)", sig)
+	}
+}
+
+// registeredSchemas maps every schema this deployment is allowed to have to
+// why it exists. `public` is the ledger. Anything else must be argued for
+// here, because every other privilege gate in this package reads `public`
+// alone, and a schema nobody registered is a place to hide an object those
+// gates never look at (M-7: a SECURITY DEFINER escalation function in a
+// second schema was invisible to all of them).
+var registeredSchemas = map[string]string{
+	"public": "the ledger schema; 001_baseline builds it and ledger_resweep_ownership() keeps every object in it owned by ledger_owner",
+}
+
+func TestObjectOwnership_NoUnregisteredSchemas(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx, `
+		SELECT n.nspname, pg_get_userbyid(n.nspowner)
+		FROM pg_namespace n
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg\_%'
+		ORDER BY 1
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	found := map[string]string{}
+	for rows.Next() {
+		var name, owner string
+		require.NoError(t, rows.Scan(&name, &owner))
+		found[name] = owner
+	}
+	require.NoError(t, rows.Err())
+
+	require.Contains(t, found, "public", "sanity: the ledger schema must exist, or this gate is reading an empty catalogue")
+	for name, owner := range found {
+		assert.Containsf(t, registeredSchemas, name,
+			"schema %q (owned by %s) is not registered. Every privilege gate in this package is written against `public`: "+
+				"an object in another schema -- a SECURITY DEFINER function that grants ledger_app ALL ON ALL TABLES, say -- "+
+				"is checked by none of them. Either drop the schema or add it to registeredSchemas with the reason it exists "+
+				"AND extend those gates to cover it", name, owner)
+	}
+	for name, reason := range registeredSchemas {
+		assert.Containsf(t, found, name, "registered schema %q (%s) does not exist -- delete the entry", name, reason)
 	}
 }

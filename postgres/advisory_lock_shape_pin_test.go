@@ -15,7 +15,13 @@ import (
 // blockingSessionLock matches a session-level (not _xact_) advisory-lock
 // acquisition that BLOCKS (not the _try_ variant), in either the exclusive or
 // the shared form.
-var blockingSessionLock = regexp.MustCompile(`\bpg_advisory_lock(_shared)?\s*\(`)
+//
+// (?i) because SQL identifiers are case-insensitive: `PG_ADVISORY_LOCK(...)`
+// executes identically and used to be invisible here (m-1, W3 adversarial
+// review of the gates). The two sibling gates in this family already
+// normalized case; this one did not. The `_try_` exclusion below is
+// case-folded for the same reason.
+var blockingSessionLock = regexp.MustCompile(`(?i)\bpg_advisory_lock(_shared)?\s*\(`)
 
 // TestNoBlockingSessionAdvisoryLocks is the pin for B-m3: a comment cannot be
 // tested, so the reasoning the comment depends on is tested instead.
@@ -72,7 +78,7 @@ func TestNoBlockingSessionAdvisoryLocks(t *testing.T) {
 			if strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
 				continue
 			}
-			if strings.Contains(line, "pg_try_advisory_lock") {
+			if strings.Contains(strings.ToLower(line), "pg_try_advisory_lock") {
 				continue
 			}
 			if blockingSessionLock.MatchString(line) {

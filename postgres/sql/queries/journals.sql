@@ -119,8 +119,11 @@ LIMIT sqlc.arg(page_limit)::int;
 
 -- name: ListRecentJournals :many
 -- The NEWEST page_limit journals, newest first -- deliberately a separate
--- query from ListJournalsCursor above, which walks ASCENDING from a cursor
--- (the audit-pagination shape the HTTP list endpoint needs).
+-- query from ListJournalsCursor above, which pages DESCENDING from a cursor
+-- (the audit-pagination shape the HTTP list endpoint needs). Until H-m3 that
+-- one walked ASCENDING and this comment described it as it was; m-7 of the
+-- W3 gate review caught the stale half, which told a reader the opposite of
+-- what the query two blocks up now does.
 --
 -- service.VerifyLedger's step 4 samples "the most recent journals" for a
 -- valid P5 signature (design doc §8.4). Before this query existed it called

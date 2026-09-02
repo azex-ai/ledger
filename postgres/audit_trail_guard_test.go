@@ -254,3 +254,107 @@ func assertBlockedByGuard(t *testing.T, pool *pgxpool.Pool, stmt string) {
 	_, err := pool.Exec(context.Background(), stmt)
 	require.Error(t, err, "%s must be refused by the append-only guard", stmt)
 }
+
+// auditTriggerFunctions are the trigger functions that WRITE the forensic
+// trail. Two exist: the config-table logger from migration 006/020 and the
+// reconcile-cursor logger, which records into its own shaped table.
+var auditTriggerFunctions = []string{
+	"ledger_log_config_table_change",
+	"ledger_log_reconcile_scan_cursor_change",
+}
+
+// unauditedWritableTables maps a table ledger_app can UPDATE, with no blanket
+// refusal guard and no audit trigger, to why that is acceptable.
+//
+// Every entry has the same shape of argument: the table holds DERIVED or
+// OPERATIONAL state whose truth lives somewhere append-only, so tampering
+// shows up as a reconciliation gap rather than as a missing forensic row --
+// or it is a spool whose rows carry no authority at all. A table holding
+// authoritative state does not belong here; it belongs behind a guard, an
+// audit trigger, or both.
+var unauditedWritableTables = map[string]string{
+	"public.balance_checkpoints":  "derived cache: balance = checkpoint + SUM(entries after it), and journal_entries is blanket-guarded append-only. A tampered checkpoint is what reconciliation's checkpoint-vs-delta check (I-2) reports, which is a stronger control than a forensic row",
+	"public.balance_snapshots":    "point-in-time copies of the same derived figure as balance_checkpoints, recomputable from journal_entries",
+	"public.system_rollups":       "derived per-(classification, currency) aggregate, recomputed from journal_entries by the rollup worker",
+	"public.rollup_queue":         "work queue of pending recomputations; rows are claimed and consumed and hold no authoritative state",
+	"public.chain_cursors":        "scan progress per chain, monotonic-protected on write (B-m7). Corrupting it causes a rescan or a gap that deposit ingestion's idempotency keys absorb -- it cannot move money",
+	"public.registration_rescans": "bookkeeping for deposit-address rescans; the same rescan running twice is idempotent",
+	"public.deposit_reorgs":       "the reorg-anomaly record itself: rows are appended by ingestion and only their review status is updated. It is a forensic table, not a configuration one",
+	"public.ingest_dead_letters":  "spool of inbound payloads that failed to parse; rows are operator scratch space and authorize nothing",
+	"public.webhook_nonces":       "replay-protection cache with a TTL; a row is an opaque seen-nonce marker, and losing one costs at most one accepted replay that the ledger idempotency key then refuses",
+}
+
+// TestWritableTablesAreAuditedOrClassified is M-6 (W3 adversarial review of
+// the gates).
+//
+// TestPartialGuardTablesAreAudited above derives its population from "has a
+// BEFORE UPDATE row trigger that is not the blanket refusal" -- i.e. from
+// having a PARTIAL guard. A table with NO guard at all lets every update
+// through and records none of them, and is not in that population. The
+// reviewer added a config table (fee rules, with a bps column), granted
+// ledger_app SELECT/INSERT/UPDATE, classified it in
+// grant_coverage_test.go's `reviewed` bucket, and attached neither a guard
+// nor an audit trigger: green. I-58's promise -- "every table whose guard
+// lets updates through has a forensic trail" -- can be satisfied by not
+// having a guard.
+//
+// So the population here is derived from PRIVILEGE instead: every table
+// ledger_app can UPDATE without a blanket refusal in the way. Each one must
+// have an audit trigger or an entry above saying why it does not need one.
+func TestWritableTablesAreAuditedOrClassified(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx, `
+		SELECT n.nspname || '.' || c.relname,
+		       EXISTS (
+		         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+		         WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+		           AND p.proname = ANY($1::text[])
+		       ) AS audited
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+		  AND n.nspname NOT LIKE 'pg\_%'
+		  AND c.relkind IN ('r', 'p')
+		  AND NOT c.relispartition
+		  AND has_table_privilege('ledger_app', c.oid, 'UPDATE')
+		  AND NOT EXISTS (
+		        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+		        WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+		          AND p.proname = 'ledger_block_mutation'
+		          AND (t.tgtype & 2) <> 0 AND (t.tgtype & 16) <> 0 AND (t.tgtype & 1) <> 0
+		      )
+		ORDER BY 1
+	`, auditTriggerFunctions)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	population, classified := 0, map[string]bool{}
+	for rows.Next() {
+		var table string
+		var audited bool
+		require.NoError(t, rows.Scan(&table, &audited))
+		population++
+		if audited {
+			continue
+		}
+		if _, ok := unauditedWritableTables[table]; ok {
+			classified[table] = true
+			continue
+		}
+		t.Errorf("ledger_app can UPDATE %s, no blanket guard refuses those updates, and no audit trigger records them -- "+
+			"so a change made with the leaked credential leaves no trace anywhere (I-58).\n\n"+
+			"Note the population this gate derives: PRIVILEGE, not guard shape. TestPartialGuardTablesAreAudited only sees tables "+
+			"that HAVE a partial guard, so a table with no guard at all used to satisfy I-58 by omission.\n\n"+
+			"Attach ledger_log_config_table_change, or -- if the table holds derived or operational state whose truth lives in an "+
+			"append-only table -- add %q to unauditedWritableTables with that argument.", table, table)
+	}
+	require.NoError(t, rows.Err())
+
+	require.Positive(t, population, "no ledger_app-writable table was found -- the query regressed, and an empty population reads as a pass")
+	for table, reason := range unauditedWritableTables {
+		assert.Truef(t, classified[table],
+			"stale entry %q (%s): the table is gone, no longer writable by ledger_app, or now audited -- delete the entry", table, reason)
+	}
+}

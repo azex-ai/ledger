@@ -56,9 +56,85 @@ func TestJournals_RejectsNaNTotals(t *testing.T) {
 		"the rejection must come from migration 018's CHECK constraint, not from something incidental: %v", err)
 }
 
+// TestNaNConstraintsExistWithTheRightDefinition is m-7 (W3 adversarial
+// review of the gates): TestJournalEntries_RejectsNaNAmount below does go red
+// when migration 018's CHECK is replaced by CHECK (true) -- but not because
+// it notices the CHECK is gone. The balance trigger refuses the single-leg
+// insert first (SQLSTATE 23514, "unbalanced entries by currency"), and the
+// pin fails only because that message does not contain "not_nan". It is
+// therefore a pin on two mechanisms at once that cannot say which one broke,
+// and it would keep passing if the trigger were ever what got weakened.
+//
+// This asserts the constraint itself: present, on the parent AND on every
+// partition, and with a definition that actually tests for NaN. CHECK (true)
+// under the same name is red here.
+func TestNaNConstraintsExistWithTheRightDefinition(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	// (table, constraint, column) triples migration 018 declares. Partitions
+	// are derived from the catalogue, not listed.
+	want := []struct{ table, constraint, column string }{
+		{"journals", "chk_journals_total_debit_not_nan", "total_debit"},
+		{"journals", "chk_journals_total_credit_not_nan", "total_credit"},
+		{"journal_entries", "chk_journal_entries_amount_not_nan", "amount"},
+		{"balance_checkpoints", "chk_balance_checkpoints_balance_not_nan", "balance"},
+		{"reservations", "chk_reservations_reserved_amount_not_nan", "reserved_amount"},
+		{"bookings", "chk_bookings_amount_not_nan", "amount"},
+	}
+
+	for _, w := range want {
+		var def string
+		err := pool.QueryRow(ctx, `
+			SELECT pg_get_constraintdef(con.oid)
+			FROM pg_constraint con
+			JOIN pg_class c ON c.oid = con.conrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = 'public' AND c.relname = $1 AND con.conname = $2 AND con.contype = 'c'
+		`, w.table, w.constraint).Scan(&def)
+		require.NoErrorf(t, err, "%s.%s is missing: migration 018 declares it, and without it a NaN amount reaches the read path that panics on it", w.table, w.constraint)
+		low := strings.ToLower(def)
+		require.Containsf(t, low, "nan", "%s is defined as %q -- it no longer tests for NaN (CHECK (true) under the same name satisfies a name-only check)", w.constraint, def)
+		require.Containsf(t, low, strings.ToLower(w.column), "%s is defined as %q -- it no longer references %s", w.constraint, def, w.column)
+	}
+
+	// journal_entries is partitioned: a constraint on the parent only helps
+	// if it reached every partition, including the ones the partition job
+	// creates at runtime.
+	rows, err := pool.Query(ctx, `
+		SELECT c.relname,
+		       EXISTS (
+		         SELECT 1 FROM pg_constraint con
+		         WHERE con.conrelid = c.oid AND con.contype = 'c'
+		           AND pg_get_constraintdef(con.oid) ILIKE '%nan%'
+		       )
+		FROM pg_class c
+		JOIN pg_inherits i ON i.inhrelid = c.oid
+		JOIN pg_class parent ON parent.oid = i.inhparent
+		WHERE parent.relname = 'journal_entries'
+		ORDER BY 1
+	`)
+	require.NoError(t, err)
+	defer rows.Close()
+	partitions := 0
+	for rows.Next() {
+		var name string
+		var has bool
+		require.NoError(t, rows.Scan(&name, &has))
+		partitions++
+		require.Truef(t, has, "partition %s carries no NaN check: the parent's constraint did not reach it", name)
+	}
+	require.NoError(t, rows.Err())
+	require.Positive(t, partitions, "sanity: journal_entries must have partitions, or this half checked nothing")
+}
+
 // TestJournalEntries_RejectsNaNAmount pins migration 018 on the PARTITIONED
 // table: the constraint is declared on the parent, so it has to reach every
 // existing partition (and the ones the worker's partition job creates later).
+//
+// Read together with TestNaNConstraintsExistWithTheRightDefinition above,
+// which is what distinguishes "the CHECK is gone" from "something else
+// refused the insert" (m-7).
 func TestJournalEntries_RejectsNaNAmount(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()

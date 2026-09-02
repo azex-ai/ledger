@@ -141,34 +141,13 @@ func TestREADMEArchitectureTreePathsExist(t *testing.T) {
 	}
 }
 
-func TestCLAUDEMdFileLayoutPathsExist(t *testing.T) {
-	claude, err := os.ReadFile("CLAUDE.md")
-	if err != nil {
-		t.Skip("CLAUDE.md not present")
-	}
-	section := extractMarkdownSection(string(claude), "## File Layout Quick Reference")
-	pathRE := regexp.MustCompile("`([^`]+)`")
-	seen := map[string]bool{}
-	for _, line := range strings.Split(section, "\n") {
-		if !strings.HasPrefix(line, "| `") {
-			continue
-		}
-		cells := strings.SplitN(line, "|", 4)
-		if len(cells) < 3 {
-			continue
-		}
-		for _, m := range pathRE.FindAllStringSubmatch(cells[1], -1) {
-			p := strings.TrimSpace(m[1])
-			if seen[p] {
-				continue
-			}
-			seen[p] = true
-			if _, err := os.Stat(p); err != nil {
-				t.Errorf("CLAUDE.md's File Layout table names %q, which does not exist: %v", p, err)
-			}
-		}
-	}
-}
+// TestCLAUDEMdFileLayoutPathsExist lived here too, and skipped when
+// CLAUDE.md was absent. m-2 (W3 adversarial review of the gates): the same
+// judgement had two implementations with opposite failure policies -- the
+// copy in claude_md_paths_test.go (package ledger) Fatals on a missing
+// CLAUDE.md, this one passed -- and `go test -v` printed the same test name
+// twice with different verdicts. One decision, one place: the fail-closed
+// copy is the one that survives.
 
 // extractMarkdownSection returns the text between a "## heading" line
 // (exclusive) and the next "## " line (exclusive), or to EOF.
