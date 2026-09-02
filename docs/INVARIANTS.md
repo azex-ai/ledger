@@ -4114,15 +4114,23 @@ named `t.Run` subtests.
 ## I-49: Under the verified-balance gate, what `Reserve` may lock is computed from entries alone — `balance_checkpoints` cannot raise it
 
 **Rule**: When `core.ReserveInput.RequireVerifiedBalance` is set, the
-available base `Reserve` sizes the reservation against is
-Σ `VerifiedBalance(holder, currency, cls)` over every
-`balance_role='available'` classification the holder has entries in, minus
-that holder's active reservation holds. Each term is an entries-only
-recompute (I-32 → `CheckpointIntegrityStore.RecomputeBalance`); no term
-reads `balance_checkpoints`. Insufficiency against that base is
-`core.ErrInsufficientBalance` — distinct from the authorization refusal
-(`core.ErrUnauthorizedJournal`) I-32 defines. With the flag unset, `Reserve`
-is unchanged: checkpoint + delta, exactly as before.
+available base `Reserve` sizes the reservation against is `min(V, E)` minus
+that holder's active reservation holds, where both terms sum over every
+`balance_role='available'` classification the holder has entries in and
+**neither reads `balance_checkpoints`**:
+
+- **V** = Σ `VerifiedBalance(holder, currency, cls)`, computed by the gate
+  *before* the transaction opens (I-32 → an entries-only recompute plus an
+  authorization check per contributing journal). Authorized, possibly stale.
+- **E** = Σ `RecomputeCheckpointFromEntries(holder, currency, cls)`,
+  recomputed *inside* the transaction while the `(holder, currency)`
+  advisory lock is held, in pure SQL with no external call. Current, but
+  with no authorization check.
+
+Insufficiency against that base is `core.ErrInsufficientBalance` — distinct
+from the authorization refusal (`core.ErrUnauthorizedJournal`) I-32 defines.
+With the flag unset, `Reserve` is unchanged: checkpoint + delta under the
+lock, exactly as before.
 
 The set of classifications summed comes from `journal_entries`
 (`ListComputedBalancesForHolders`' `populated` CTE is a `DISTINCT` over
@@ -4156,21 +4164,36 @@ gap. This invariant is the corrected rule — see
 `docs/audits/2026-09-02-deep-audit/tamper-evident.md` C-1 and
 `lead-verification.md` C-Critical-1 for the reproduction.
 
-**Placement note (why the value is trustworthy despite being read outside
-the lock)**: the gate runs before the transaction opens, because an
-`AuthVerifier` may be a remote call and `financial.md` forbids external
-calls inside a transaction; `reserveWithQueries` then re-reads holds under
-the `(holder, currency)` advisory lock. An entry committed in that window
-makes the recomputed base stale — but only ever stale-*low* relative to
-the truth at lock time, since entries are append-only (I-1) and a
-concurrent reserve is serialized by the same lock. The gated path can
-therefore refuse a reservation it could have allowed; it can never allow
-one it should have refused. Re-reading under the lock would move the
-verifier call inside the transaction and is not an option.
+**Why `min` of two figures and not either one alone**: the gate must run
+before the transaction opens, because an `AuthVerifier` may be a remote call
+and `financial.md` forbids external calls inside a transaction. So **V** is
+authorized as of a moment that has already passed, and a journal committed
+in that window leaves it wrong in whichever direction that journal moved
+the balance. Each figure is blind to exactly what the other sees:
+
+- A **genuine spend** committing in the window leaves V *stale-high*. E sees
+  it, `E < V`, and the base is E. Without this term the fix for the
+  tampering hole would have opened a TOCTOU hole instead: before it, the
+  base was read under the lock (checkpoint-derived, but I-4-safe), and
+  moving it outside the lock without an under-lock recheck is precisely the
+  over-sell race I-4's advisory lock exists to close.
+- A **forged, unsigned credit** committing in that same window raises E — E
+  has no authorization check, by design, because it must not make an
+  external call while holding the lock. Then `E > V` and the base is V, so
+  the forgery buys nothing.
+
+Taking the minimum is safe in both directions and needs no assumption about
+which kind of journal landed. It can refuse a reservation that a perfectly
+synchronized reader would have allowed; it cannot allow one that reader
+would have refused. Verifying under the lock instead is not an option: it
+would put the verifier call inside the transaction.
 
 **Enforced by**: `postgres.ReserverStore.requireVerifiedAvailableBalance`
-(returns the sum) and `postgres.ReserverStore.reserveWithQueries` (uses it
-as `availableBase` whenever the gate ran, in place of
+(V, outside the transaction),
+`postgres.ReserverStore.sumAvailableFromEntriesWithQueries` (E, under the
+advisory lock, on the caller's transaction) and
+`postgres.ReserverStore.reserveWithQueries` (takes the minimum as
+`availableBase` whenever the gate ran, in place of
 `sumBalancesByRoleWithQueries`).
 
 **Pinned by**:
@@ -4182,6 +4205,15 @@ as `availableBase` whenever the gate ran, in place of
   (the gate is not refusing everything), and the same 500,000 *without* the
   flag succeeds (the tampering is genuinely in effect, and is exactly what
   the pre-fix gated path paid out).
+- `postgres.TestReserve_RequireVerifiedBalance_RechecksUnderLock` — the
+  `min(V, E)` half, with the window opened for real rather than simulated:
+  a second goroutine posts a genuine signed spend of 950 on its own
+  transaction (which takes the same `(holder, currency)` advisory lock),
+  waits until the gated `Reserve` is observably queued behind that lock in
+  `pg_locks`, and only then commits. V is therefore 1000 deterministically
+  (the spend was uncommitted when the gate ran) and E is 50, so a 500
+  reservation must be refused. Replacing the minimum with
+  `*verifiedAvailableBase` reserves 500 against a balance of 50.
 
 ---
 

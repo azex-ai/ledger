@@ -65,12 +65,12 @@ type ReserveInput struct {
 	//     balance_role=available classification this holder has touched in
 	//     CurrencyUID passes VerifiedBalanceReader's authorization check.
 	//
-	//   - It sizes the reservation off those checks' entries-only recomputes
-	//     rather than off balance_checkpoints. So this is also a stricter
-	//     AMOUNT check: an inflated checkpoint row cannot raise what a gated
-	//     Reserve will lock, even when every journal is genuinely signed.
-	//     Insufficiency under the recomputed base is ErrInsufficientBalance,
-	//     not ErrUnauthorizedJournal.
+	//   - It sizes the reservation off entries-only recomputes rather than off
+	//     balance_checkpoints. So this is also a stricter AMOUNT check: an
+	//     inflated checkpoint row cannot raise what a gated Reserve will lock,
+	//     even when every journal is genuinely signed. Insufficiency under the
+	//     recomputed base is ErrInsufficientBalance, not
+	//     ErrUnauthorizedJournal.
 	//
 	// Because the gate may call a (possibly remote) AuthVerifier, it runs
 	// before any transaction is opened -- setting this field on a Reserve

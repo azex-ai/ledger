@@ -496,3 +496,139 @@ func TestVerifiedBalance_TxBoundStoreFailsClosed(t *testing.T) {
 	require.ErrorIs(t, err, core.ErrInvalidInput)
 	require.Equal(t, before, verifier.verify.Load(), "the guard must fire before the verifier is consulted, not after")
 }
+
+// spendInput is journalInput's mirror: it moves `amount` back OUT of the
+// holder's available classification (CR available / DR custodial), so a
+// concurrent spend can be posted through the ordinary signed path.
+func (f vbFixture) spendInput(userID int64, idemKey string, amount decimal.Decimal) core.JournalInput {
+	return core.JournalInput{
+		JournalTypeUID: f.JournalTypeUID,
+		IdempotencyKey: idemKey,
+		Source:         "verified-balance-pin-test",
+		ActorID:        userID,
+		Entries: []core.EntryInput{
+			{AccountHolder: userID, CurrencyUID: f.CurrencyUID, ClassificationUID: f.AvailableUID, EntryType: core.EntryTypeCredit, Amount: amount},
+			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: f.CurrencyUID, ClassificationUID: f.CustodialUID, EntryType: core.EntryTypeDebit, Amount: amount},
+		},
+	}
+}
+
+// waitForBlockedAdvisoryLock blocks until some backend in THIS test's database
+// is waiting on an advisory lock, which is the observable form of "the Reserve
+// under test has finished its pre-transaction gate and is now queued behind
+// our lock". Polling pg_locks rather than sleeping is what makes the
+// interleaving in TestReserve_RequireVerifiedBalance_RechecksUnderLock
+// deterministic instead of merely likely.
+//
+// pg_locks is cluster-wide while postgrestest gives each test its own database
+// on a shared server, so the database filter is load-bearing: without it a
+// concurrent test package's advisory wait would satisfy this and let the
+// spender commit early, quietly turning the pin into a weaker assertion.
+//
+// Returns an error rather than calling t.Fatal because it runs on a helper
+// goroutine, where t.Fatal does not stop the test it appears to stop.
+func waitForBlockedAdvisoryLock(ctx context.Context, pool *pgxpool.Pool) error {
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var waiting int
+		if err := pool.QueryRow(ctx, `
+			SELECT count(*) FROM pg_locks
+			WHERE locktype = 'advisory'
+			  AND NOT granted
+			  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+		`).Scan(&waiting); err != nil {
+			return fmt.Errorf("poll pg_locks: %w", err)
+		}
+		if waiting > 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for the gated Reserve to block on the balance advisory lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestReserve_RequireVerifiedBalance_RechecksUnderLock pins the second half of
+// I-49: the gate's authorized figure is computed before the transaction opens
+// (an AuthVerifier may be remote), so it can be stale by the time the balance
+// advisory lock is held, and a stale-high figure would re-open the over-sell
+// race I-4's lock exists to close.
+//
+// The window is opened for real rather than simulated. A second goroutine
+// holds the (holder, currency) advisory lock -- by posting a genuine, signed
+// spend through PostJournal, which takes that lock itself -- and does not
+// commit until the Reserve under test is observably queued behind it:
+//
+//  1. spender: BEGIN, PostJournal(-950) on the caller's tx. Lock held, row
+//     uncommitted and therefore invisible to anyone else (READ COMMITTED).
+//  2. reserver: Reserve(500, gate on). The gate runs outside any transaction
+//     and sees only the committed 1000 deposit, so V = 1000 deterministically.
+//     It then blocks on the advisory lock.
+//  3. spender: sees the wait in pg_locks, COMMITs. Balance is now 50.
+//  4. reserver: acquires the lock, recomputes E = 50 from entries, takes
+//     min(1000, 50) = 50, and refuses 500.
+//
+// Delete the min() -- use *verifiedAvailableBase directly -- and step 4
+// reserves 500 against a balance of 50.
+func TestReserve_RequireVerifiedBalance_RechecksUnderLock(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupVBFixture(t, pool, ctx)
+	const holder int64 = 9009
+
+	attestor, verifier := newTestAttestor(t, "ed25519-reserve-vb-toctou")
+	ledger := postgres.NewLedgerStore(pool).WithAuth(attestor)
+	_, err := ledger.PostJournal(ctx, f.journalInput(holder, postgrestest.UniqueKey("reserve-vb-toctou-deposit"), decimal.NewFromInt(1000)))
+	require.NoError(t, err)
+
+	vb := postgres.NewVerifiedBalanceStore(pool, verifier)
+	reserver := postgres.NewReserverStore(pool, ledger, vb)
+
+	lockHeld := make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		// PostJournal on the caller's transaction acquires the same
+		// (holder, currency) advisory lock Reserve needs, and holds it until
+		// this transaction ends.
+		if _, err := ledger.WithDB(tx).WithAuth(attestor).PostJournal(ctx, f.spendInput(holder, postgrestest.UniqueKey("reserve-vb-toctou-spend"), decimal.NewFromInt(950))); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		close(lockHeld)
+
+		if err := waitForBlockedAdvisoryLock(ctx, pool); err != nil {
+			committed <- err
+			return
+		}
+		committed <- tx.Commit(ctx)
+	}()
+
+	<-lockHeld
+
+	_, err = reserver.Reserve(ctx, core.ReserveInput{
+		AccountHolder:          holder,
+		CurrencyUID:            f.CurrencyUID,
+		Amount:                 decimal.NewFromInt(500),
+		IdempotencyKey:         postgrestest.UniqueKey("reserve-vb-toctou-gated"),
+		RequireVerifiedBalance: true,
+	})
+	require.NoError(t, <-committed, "test setup: the concurrent spend must commit")
+	require.Error(t, err, "Reserve must re-derive the available base under the balance lock; the gate's pre-transaction figure can be stale-high")
+	require.ErrorIs(t, err, core.ErrInsufficientBalance)
+
+	// The spend really did land, so the refusal above is about the recomputed
+	// 50 and not about the reservation having failed for some other reason.
+	balance, err := postgres.NewCheckpointIntegrityStore(pool).RecomputeBalance(ctx, holder, f.CurrencyUID, f.AvailableUID)
+	require.NoError(t, err)
+	require.True(t, balance.Equal(decimal.NewFromInt(50)), "expected 50 after the concurrent spend, got %s", balance)
+}

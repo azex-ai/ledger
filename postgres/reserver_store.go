@@ -124,7 +124,8 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// The gate does not only authorize; it also decides the amount. What it
 	// computes is the entries-only recompute of every available-role
 	// classification, and that figure -- not checkpoint + delta -- is what
-	// sizes the reservation below (I-49).
+	// caps the reservation below, together with an under-lock recompute of
+	// the same sum (I-49).
 	var verifiedAvailableBase *decimal.Decimal
 	if input.RequireVerifiedBalance {
 		if s.pool == nil {
@@ -212,14 +213,16 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 // classification after creation, and the dims cache only holds immutable
 // fields.
 //
-// Placement: this runs OUTSIDE the transaction (an AuthVerifier may be a
-// remote call), while reserveWithQueries reads under the (holder, currency)
-// advisory lock. An entry landing in that window can only make the recomputed
-// figure stale-low relative to the truth at lock time -- the gate's answer is
-// conservative, never generous -- so the reservation is at worst refused when
-// it could have been allowed. Re-reading under the lock is not an option: it
-// would put the verifier call inside the transaction, which financial.md
-// forbids.
+// Placement: this runs OUTSIDE the transaction, because an AuthVerifier may
+// be a remote call. The figure it returns is therefore authorized but not
+// current -- a journal committed between here and the advisory lock can leave
+// it stale-HIGH (a spend lowers the true balance), which on its own would
+// re-open the very over-sell race I-4's lock exists to close. It is not used
+// on its own: reserveWithQueries re-derives the same sum from entries under
+// the lock, in pure SQL, and takes the minimum of the two. See that
+// function's comment for why each figure covers the other's blind spot.
+// Verifying under the lock instead is not an option -- it would put the
+// verifier call inside the transaction, which financial.md forbids.
 func (s *ReserverStore) requireVerifiedAvailableBalance(ctx context.Context, holder int64, currencyUID string, currencyID int64) (decimal.Decimal, error) {
 	rows, err := s.q.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
 		CurrencyID: currencyID,
@@ -244,11 +247,63 @@ func (s *ReserverStore) requireVerifiedAvailableBalance(ctx context.Context, hol
 	return total, nil
 }
 
+// sumAvailableFromEntriesWithQueries is the under-lock, transaction-local half
+// of I-49's available base: the same per-classification entries-only sum
+// CheckpointIntegrityStore.RecomputeBalance runs
+// (RecomputeCheckpointFromEntries — balance_checkpoints appears nowhere in its
+// FROM/JOIN), totalled over every balance_role='available' classification the
+// holder has entries in.
+//
+// Pure SQL on the caller's transaction, deliberately: this runs while the
+// (holder, currency) advisory lock is held, so it must not make an external
+// call. It is therefore current but unauthenticated — an unsigned forgery
+// counts here — which is exactly why reserveWithQueries takes the minimum of
+// this and the gate's authorized figure rather than either alone.
+//
+// One query per available classification rather than a single aggregate: a
+// holder has a handful of available-role classifications (usually one), the
+// generated query already exists and is the same trusted basis I-23 names,
+// and reusing it keeps "entries-only recompute" implemented in exactly one
+// place. The `balance` column ListComputedBalancesForHolders also returns is
+// checkpoint + delta and is ignored here; only the entries-derived
+// enumeration and the config-side balance_role are read from it.
+func (s *ReserverStore) sumAvailableFromEntriesWithQueries(ctx context.Context, qtx *sqlcgen.Queries, holder, currencyID int64) (decimal.Decimal, error) {
+	rows, err := qtx.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
+		CurrencyID: currencyID,
+		HolderIds:  []int64{holder},
+	})
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: list classifications: %w", err)
+	}
+
+	total := decimal.Zero
+	for _, row := range rows {
+		if core.BalanceRole(row.BalanceRole) != core.BalanceRoleAvailable {
+			continue
+		}
+		recomputed, err := qtx.RecomputeCheckpointFromEntries(ctx, sqlcgen.RecomputeCheckpointFromEntriesParams{
+			AccountHolder:    holder,
+			CurrencyID:       currencyID,
+			ClassificationID: row.ClassificationID,
+		})
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: classification %d: %w", row.ClassificationID, err)
+		}
+		balance, err := numericToDecimal(recomputed.Balance)
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: convert classification %d: %w", row.ClassificationID, err)
+		}
+		total = total.Add(balance)
+	}
+	return total, nil
+}
+
 // reserveWithQueries writes the reservation. verifiedAvailableBase is non-nil
 // exactly when ReserveInput.RequireVerifiedBalance was set: it carries the
-// entries-only available total requireVerifiedAvailableBalance computed, and
-// replaces the checkpoint-derived base below. Nil restores the ungated
-// behavior byte for byte.
+// entries-only available total requireVerifiedAvailableBalance computed
+// outside the transaction, and is combined with an under-lock recompute to
+// form the available base below. Nil restores the ungated behavior byte for
+// byte.
 func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64, verifiedAvailableBase *decimal.Decimal) (*core.Reservation, error) {
 	if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
@@ -311,16 +366,44 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// are not reservable. This is the same figure GetBalanceBreakdown reports
 	// as Available (before subtracting holds).
 	//
-	// Under the RequireVerifiedBalance gate the same sum is taken over
-	// entries-only recomputes instead (I-49), because checkpoint + delta reads
+	// Under the RequireVerifiedBalance gate the base is instead min(V, E) of
+	// two entries-only figures (I-49), neither of which reads
 	// balance_checkpoints — the one balance-bearing table an attacker holding
 	// the app's DB credential can UPDATE (it has no append-only trigger; the
-	// rollup worker must be able to write it). Holds are subtracted from
-	// either base identically: reservations are not part of what the
-	// checkpoint can misstate.
+	// rollup worker must be able to write it):
+	//
+	//   V = verifiedAvailableBase, computed by the gate BEFORE the
+	//       transaction opened, because it needs a possibly-remote
+	//       AuthVerifier and financial.md forbids external calls inside a
+	//       transaction. Authorized, but as of a moment now past.
+	//   E = sumAvailableFromEntriesWithQueries, recomputed HERE, under the
+	//       (holder, currency) advisory lock, in pure SQL with no external
+	//       call. Current, but it cannot tell a genuine journal from a forged
+	//       one.
+	//
+	// Each covers the other's blind spot, and taking the minimum is what
+	// makes the pair safe in both directions:
+	//
+	//   - A journal committed in the gate's window that SPENDS money leaves
+	//     V stale-high. E sees it, E < V, the reservation is sized off E. This
+	//     is I-4's over-sell hazard, and it is why V alone is not enough: the
+	//     pre-fix ungated read was inside this lock, so moving the base
+	//     outside it without this recheck would have traded a tampering hole
+	//     for a TOCTOU hole.
+	//   - A forged, unsigned journal committed in that same window CREDITS
+	//     money. E sees it too — E has no authorization check — but E > V, so
+	//     V wins and the forgery buys nothing. This is why E alone is not
+	//     enough either.
+	//
+	// Holds are subtracted from either base identically: reservations are not
+	// part of what a checkpoint or an unsigned journal can misstate.
 	var availableBase decimal.Decimal
 	if verifiedAvailableBase != nil {
-		availableBase = *verifiedAvailableBase
+		entriesBase, err := s.sumAvailableFromEntriesWithQueries(ctx, qtx, input.AccountHolder, currencyID)
+		if err != nil {
+			return nil, err
+		}
+		availableBase = decimal.Min(*verifiedAvailableBase, entriesBase)
 	} else {
 		roleSums, err := s.ledger.sumBalancesByRoleWithQueries(ctx, qtx, input.AccountHolder, currencyID)
 		if err != nil {
