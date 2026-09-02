@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/azex-ai/ledger/anchordev"
 	"github.com/azex-ai/ledger/core"
 )
 
@@ -234,4 +236,77 @@ func findLogCall(calls []logCall, msg string) *logCall {
 		}
 	}
 	return nil
+}
+
+// TestWorker_StartupLogNamesTheAnchorType pins C-m1's runtime half
+// (2026-09-02 audit, tamper-evident.md m-1). The boolean above answers "is
+// an anchor wired?" and nothing else -- so a deployment running
+// anchordev's local FILE anchor (on the same host as the database it is
+// supposed to be independent of, per that package's own doc comment)
+// logged attestation_anchor=true exactly like one publishing to an
+// object-lock bucket in a separate cloud account.
+//
+// Two assertions, because a type name alone is only half a signal:
+// StartupReport must NAME the anchor's type, and a dev anchor must
+// additionally produce a Warn. The type is matched by name rather than by
+// importing anchordev, which service (a domain package) must not depend on
+// -- see devAnchorTypePrefix's comment.
+func TestWorker_StartupLogNamesTheAnchorType(t *testing.T) {
+	t.Run("production-shaped anchor -- type named, no dev warning", func(t *testing.T) {
+		logger := &recordingLevelLogger{}
+		w := newMinimalWorkerForAttestationLogTest(t, logger)
+		w.SetAttestor(NewAttestationService(unreachableAttestationStore{}, stubAttestor{}, nil, stubAnchor{}, core.NewEngine(core.WithLogger(logger))))
+
+		report := w.StartupReport()
+		assert.Equal(t, "service.stubAnchor", report.AttestationAnchorType,
+			"the report must name the anchor's concrete type, not just that one exists")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		assert.NoError(t, w.Run(ctx))
+
+		startCall := findLogCall(logger.infos, "worker: starting")
+		if assert.NotNil(t, startCall) {
+			assert.Equal(t, "service.stubAnchor", argValue(startCall.args, "attestation_anchor_type"))
+		}
+		assert.Nil(t, findWarnContaining(logger.warns, "DEV-ONLY"),
+			"a non-dev anchor must not trigger the dev-anchor warning")
+	})
+
+	t.Run("dev file anchor -- warns that it cannot witness a rewrite", func(t *testing.T) {
+		logger := &recordingLevelLogger{}
+		w := newMinimalWorkerForAttestationLogTest(t, logger)
+		devAnchor := anchordev.NewLocalFileAnchorForDevelopment(filepath.Join(t.TempDir(), "anchor.txt"))
+		w.SetAttestor(NewAttestationService(unreachableAttestationStore{}, stubAttestor{}, nil, devAnchor, core.NewEngine(core.WithLogger(logger))))
+
+		report := w.StartupReport()
+		assert.Equal(t, "*anchordev.LocalFileAnchor", report.AttestationAnchorType)
+		assert.True(t, report.AttestationAnchor, "it IS an anchor -- the point is that the boolean cannot tell you which kind")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		assert.NoError(t, w.Run(ctx))
+
+		warn := findWarnContaining(logger.warns, "DEV-ONLY")
+		if assert.NotNil(t, warn, "a dev anchor in the attestation job must warn at startup; warns=%v", logger.warns) {
+			assert.Contains(t, warn.msg, "*anchordev.LocalFileAnchor",
+				"the warning must name the type so an operator can tell what is wired")
+		}
+	})
+}
+
+// TestNewAttestationService_WarnsWhenMetricsCannotCarryAnchorSignals pins
+// the other silent-degradation guard added with the AttestationMetrics port
+// (C-M9): a core.Metrics implementation that predates the three
+// attestation/anchor methods keeps working, but the loss of those signals
+// is logged rather than absorbed. "No anchor_publish_total time series
+// exists" and "publishing is fine" look identical on a dashboard.
+func TestNewAttestationService_WarnsWhenMetricsCannotCarryAnchorSignals(t *testing.T) {
+	logger := &recordingLevelLogger{}
+	// core.NewEngine's default metrics is core's Nop implementation, which
+	// does not carry the three methods.
+	_ = NewAttestationService(unreachableAttestationStore{}, stubAttestor{}, nil, stubAnchor{}, core.NewEngine(core.WithLogger(logger)))
+
+	assert.NotNil(t, findWarnContaining(logger.warns, "does not implement service.AttestationMetrics"),
+		"a metrics implementation that cannot carry the anchor signals must say so at construction; warns=%v", logger.warns)
 }
