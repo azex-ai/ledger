@@ -195,6 +195,20 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// rollup_queue, system_rollups, webhook_nonces, webhook_subscribers)
 	// have no guard at all and this is the record of that having been a
 	// conscious call, not an oversight.
+	//
+	// deposit_reorgs (migration 017, W1-onchain G-M8) earns its way in here
+	// rather than into appendOnly, and deliberately: rows are never deleted,
+	// but two UPDATEs are the whole point of the table. RecordDepositReorg
+	// upserts last_seen_at so "the anomaly is still observable" stays a
+	// separate fact from "when it was first noticed", and
+	// ResolveDepositReorg writes resolved_at + resolution, which is the ONLY
+	// way an anomaly leaves the on-call queue. Both are ledger_app writes
+	// (the recheck loop and an operator action through the same service),
+	// and neither is trigger-guarded -- recording that as a conscious call,
+	// per this list's contract. Its blast radius if ledger_app leaks: an
+	// attacker could mark a real reorg resolved, which is a
+	// detection-suppression risk on a queue an operator also reads
+	// out-of-band (RUNBOOK §12), not a balance-mutating one.
 	reviewed := map[string]bool{
 		"account_policies":       true,
 		"balance_checkpoints":    true,
@@ -204,6 +218,7 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 		"classifications":        true,
 		"currencies":             true,
 		"deposit_addresses":      true,
+		"deposit_reorgs":         true,
 		"deposits":               true,
 		"entry_templates":        true,
 		"events":                 true,

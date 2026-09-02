@@ -49,6 +49,14 @@ func (s *ChainCursorStore) GetCursor(ctx context.Context, chainID int64) (*core.
 }
 
 // SetCursor advances chainID's cursor (upsert).
+//
+// Monotonic: the underlying query only applies a strictly greater
+// lastScannedBlock, so a lagging replica cannot drag the cursor backwards
+// (concurrency.md B-m7 -- the previous query documented monotonicity as a
+// service/-layer invariant that no service/ code implemented). A backwards
+// call is therefore a silent no-op, which is the correct outcome: the
+// caller's own window was already covered by whoever moved the cursor
+// further ahead, and re-scanning is idempotent anyway.
 func (s *ChainCursorStore) SetCursor(ctx context.Context, chainID int64, lastScannedBlock int64) error {
 	if err := s.q.SetChainCursor(ctx, sqlcgen.SetChainCursorParams{
 		ChainID:          chainID,

@@ -82,12 +82,31 @@ type ChainCursor struct {
 type DepositSighting struct {
 	ChainID int64  `json:"chain_id"`
 	TxHash  string `json:"tx_hash"`
-	// TxLogSeq is this Transfer log's ordinal position among the logs in
-	// TxHash that credit one of our registered addresses -- deliberately NOT
-	// the chain's block-level log_index, which is reassigned across a reorg
-	// and would silently mint a fresh idempotency key for an
-	// already-recorded transfer (design doc §3, booking idempotency key =
+	// TxLogSeq is this Transfer log's zero-based position among ALL logs in
+	// TxHash's transaction receipt (design doc §3, booking idempotency key =
 	// deposit-{chain_id}-{tx_hash}-{txlog_seq}).
+	//
+	// Two properties make that the only admissible definition, and both were
+	// violated by the previous one ("position among the logs in TxHash that
+	// credit one of OUR registered addresses" -- G-C2,
+	// docs/audits/2026-09-02-deep-audit/onchain-money-path.md):
+	//
+	//  1. It must not depend on who is looking. The watcher queries every
+	//     registered address at once; a registration rescan queries exactly
+	//     one. A "position among our hits" therefore differed between the two
+	//     paths for any transaction crediting two registered addresses, so
+	//     the same transfer derived two different idempotency keys -- booking
+	//     it twice, or dead-lettering a legitimate one forever.
+	//  2. It must survive a reorg re-mining the same transaction. This is why
+	//     it is NOT the chain's block-level log_index, which shifts wholesale
+	//     when a transaction lands at a different position in a different
+	//     block, minting a fresh key for an already-credited transfer.
+	//
+	// Receipt position satisfies both: it is a property of the transaction
+	// alone. Every producer must use exactly this definition -- the
+	// chains/evm watcher derives it from eth_getTransactionReceipt, and an
+	// external scanner feeding the channel/onchain webhook must report the
+	// same receipt-relative index, not its own scan-order counter.
 	TxLogSeq int32 `json:"txlog_seq"`
 	// Token is the ERC-20 contract address that emitted the Transfer log.
 	Token  string          `json:"token"`
@@ -157,6 +176,60 @@ type IngestDeadLetter struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// Deposit chain-anomaly kinds recorded on DepositReorg.Kind. Both describe a
+// deposit booking whose on-chain reality stopped matching the ledger's
+// record, and both need a HUMAN to close them out: neither is something this
+// library may resolve on its own (a deep reorg's reversal is
+// ReorgPolicyManual's whole point; a recovered shallow-reorg failure cannot
+// be un-failed at all, since DepositLifecycle's failed is terminal).
+const (
+	// ReorgKindDeepReorg is a booking that reached confirmed (its journal is
+	// posted, the holder's balance moved) whose transaction is no longer on
+	// the canonical chain.
+	ReorgKindDeepReorg = "deep_reorg"
+	// ReorgKindShallowReorgFailed is a booking the watcher itself failed
+	// because its transaction disappeared before reaching the confirmation
+	// threshold. That decision is automatic and irreversible (failed is
+	// terminal in DepositLifecycle, and the booking's idempotency key
+	// resolves every future sighting of the same transfer back to it), so if
+	// the transaction turns out to be on chain after all, only a human can
+	// make the holder whole -- which they can only do if the decision left a
+	// record. G-M1.
+	ReorgKindShallowReorgFailed = "shallow_reorg_failed"
+)
+
+// DepositReorg is one open (or closed-out) chain anomaly on a deposit
+// booking -- the durable half of reorg handling.
+//
+// Why it is a table and not just an alert (G-M8,
+// docs/audits/2026-09-02-deep-audit/onchain-money-path.md): under the default
+// ReorgPolicyManual, detection used to be a log line plus a counter
+// increment, and the recheck that produced it stopped repeating once the
+// booking's block fell outside reorgRecheckWindow -- about 17 minutes on a
+// 2s-block chain. By the time an on-call engineer followed RUNBOOK §12's
+// "verify against a second source before reversing", the signal telling them
+// WHICH booking to look at was gone. A row survives the window, the process,
+// and the log retention period; LastSeenAt records that the anomaly is still
+// observable, and ResolvedAt is the only way one leaves the queue.
+type DepositReorg struct {
+	UID        string    `json:"uid"`
+	Kind       string    `json:"kind"`
+	BookingUID string    `json:"booking_uid"`
+	ChainID    int64     `json:"chain_id"`
+	TxHash     string    `json:"tx_hash"`
+	JournalUID string    `json:"journal_uid"`
+	DetectedAt time.Time `json:"detected_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	// ResolvedAt is the Unix epoch while the anomaly is open (the repo's
+	// no-NULL convention), and the closing timestamp once an operator
+	// resolved it. Use IsOpen rather than comparing timestamps at call sites.
+	ResolvedAt time.Time `json:"resolved_at"`
+	Resolution string    `json:"resolution"`
+}
+
+// IsOpen reports whether this anomaly still needs human attention.
+func (r DepositReorg) IsOpen() bool { return r.ResolvedAt.Unix() <= 0 }
+
 // SweepNativeToken is the sentinel token key for a chain's native asset
 // (ETH, ...) in ChainConfig.SweepTokens / SweepPolicy.Token -- native assets
 // have no ERC-20 contract address to key by.
@@ -197,6 +270,14 @@ type TokenConfig struct {
 	CurrencyCode string `json:"currency_code"`
 	// Decimals is the token contract's on-chain decimals() value (e.g. 6 for
 	// USDT/USDC, 18 for most ERC-20s and native ETH).
+	//
+	// MUST equal what the token contract's own decimals() returns: this
+	// value is the sole input to the adapter's raw-integer -> decimal
+	// normalization, so it alone fixes the order of magnitude every deposit
+	// of this token is credited at, and getting it wrong in the
+	// under-crediting direction produces no signal anywhere (G-M7). Prove it
+	// at startup with (*evm.ClientSet).VerifyTokenDecimals -- this library
+	// ships no binary, so the composition root owns that call.
 	Decimals int32 `json:"decimals"`
 	// AutoCreditCeiling is the maximum deposit amount (in ledger currency
 	// units) this token may auto-credit through the confirming->confirmed
@@ -212,6 +293,17 @@ type TokenConfig struct {
 	// (see UnboundedAutoCredit's doc comment). Only meaningful on
 	// ChainConfig.CreditTokens entries; SweepTokens never route through the
 	// review gate (sweep bookings never post a journal, I-19).
+	//
+	// This gate is decidable only while the token is still IN CreditTokens.
+	// A token removed from the allowlist (a delisting, a contract
+	// migration, a config rollback) leaves already-confirming bookings
+	// behind, and the startup check above can only see tokens that are
+	// still configured -- so those bookings' ceilings become unknowable.
+	// "Unknowable" is not "unbounded": every in-flight booking of a
+	// no-longer-configured token is parked for human review instead
+	// (G-M6). Before that, the missing map entry collapsed into a
+	// zero-valued TokenConfig, whose non-positive ceilings turned both
+	// gates off and auto-credited any amount.
 	AutoCreditCeiling decimal.Decimal `json:"auto_credit_ceiling"`
 	// ReconcileCeiling is the minimum deposit amount that requires a second,
 	// independent-source confirmation (OnchainDeps.DepositConfirmer) before
@@ -242,6 +334,26 @@ type TokenConfig struct {
 	ReconcileFailureLimit int32 `json:"reconcile_failure_limit"`
 }
 
+// maxTokenDecimals bounds TokenConfig.Decimals. No real token exceeds 18;
+// 36 leaves generous headroom while still rejecting a typo that would
+// normalize a raw amount into oblivion (or, negated, inflate it).
+const maxTokenDecimals = 36
+
+// Validate rejects a TokenConfig whose Decimals cannot describe any real
+// token. A negative value is the dangerous one: normalizeAmount computes
+// NewFromBigInt(raw, -Decimals), so Decimals=-6 MULTIPLIES the credited
+// amount by 10^6 (G-M7). Called by service.Onchain's startup validation and
+// by (*evm.ClientSet).VerifyTokenDecimals before it goes to the chain.
+func (c TokenConfig) Validate() error {
+	if c.Decimals < 0 {
+		return fmt.Errorf("core: token config: decimals must not be negative (a negative value multiplies every credited amount by 10^%d): %w", -c.Decimals, ErrInvalidInput)
+	}
+	if c.Decimals > maxTokenDecimals {
+		return fmt.Errorf("core: token config: decimals=%d exceeds the %d maximum: %w", c.Decimals, maxTokenDecimals, ErrInvalidInput)
+	}
+	return nil
+}
+
 // AutoCreditCeilingConfigured reports whether AutoCreditCeiling has been
 // deliberately set: either to a positive bound, or to the explicit
 // UnboundedAutoCredit sentinel. false means "left at the zero value" --
@@ -262,6 +374,12 @@ type ChainConfig struct {
 	ScanStartBlock int64 `json:"scan_start_block"`
 	// Confirmations is the number of block confirmations required before a
 	// pending deposit booking transitions to confirmed.
+	//
+	// It is ALSO the forward scanner's rollback depth: the watcher never
+	// scans past latest-Confirmations+1, so a block whose contents a reorg
+	// still might replace is never marked scanned (I-53, G-M2). One
+	// consequence for alerting: Metrics.ChainCursorLag's healthy baseline is
+	// therefore Confirmations, not 0.
 	Confirmations int32 `json:"confirmations"`
 	// Factory / InitHash are this chain's deployed DepositFactory address and
 	// DepositProxy init code hash -- the CREATE2 derivation fingerprint (see
@@ -331,9 +449,18 @@ type SweepPolicy struct {
 	// drain -- and, since addresses are predictable (salt=holder, factory
 	// public), a griefing vector (design doc §5-2).
 	MinThreshold decimal.Decimal `json:"min_threshold"`
-	// GasCeiling is the max gas price (wei) the sweep job will pay; a batch
+	// GasCeiling is the max gas price (GWEI) the sweep job will pay; a batch
 	// is skipped (not failed) for this interval if the current price exceeds
 	// it.
+	//
+	// The unit is gwei because that is what the quantity it is compared
+	// against -- Sweeper.GasPrice, see its doc comment in core/interfaces.go
+	// -- reports. These two MUST stay in the same unit: changing one without
+	// the other silently scales this ceiling by 10^9 and the only gate
+	// bounding what a sweep may spend stops firing (G-M3; this comment said
+	// "wei" until then, so a consumer following it configured a ceiling a
+	// billion times too high). Validate below rejects values that look like
+	// they were configured in wei.
 	GasCeiling decimal.Decimal `json:"gas_ceiling"`
 	// BatchLimit bounds how many addresses one sweep transaction collects
 	// from.
@@ -341,6 +468,13 @@ type SweepPolicy struct {
 	// Interval is how often the sweep job re-evaluates this (ChainID, Token).
 	Interval time.Duration `json:"interval"`
 }
+
+// maxPlausibleGasCeilingGwei is the upper bound SweepPolicy.Validate accepts
+// for GasCeiling. 1e6 gwei = 1000 ETH per 10^9 gas units: orders of magnitude
+// above any real gas spike, and orders of magnitude below the smallest
+// realistic wei-denominated figure (1 gwei = 1e9 wei), so it separates "an
+// absurdly generous ceiling" from "a wei value in a gwei field" cleanly.
+var maxPlausibleGasCeilingGwei = decimal.NewFromInt(1_000_000)
 
 func (p SweepPolicy) Validate() error {
 	if p.ChainID <= 0 {
@@ -354,6 +488,15 @@ func (p SweepPolicy) Validate() error {
 	}
 	if p.GasCeiling.IsNegative() {
 		return fmt.Errorf("core: sweep policy: gas_ceiling must not be negative: %w", ErrInvalidInput)
+	}
+	// A gwei ceiling above maxPlausibleGasCeilingGwei is not a ceiling
+	// anyone means: it is a wei-denominated figure pasted into a gwei field,
+	// which disables the gate entirely (G-M3). Turn the unit mismatch that
+	// used to be a documentation contradiction into a startup rejection
+	// (working-agreements §5: prefer a machine check over a comment).
+	if p.GasCeiling.GreaterThan(maxPlausibleGasCeilingGwei) {
+		return fmt.Errorf("core: sweep policy: gas_ceiling=%s gwei is implausibly high (max %s) -- it looks like a wei value in a gwei field, which would disable the gas gate entirely; see SweepPolicy.GasCeiling: %w",
+			p.GasCeiling.String(), maxPlausibleGasCeilingGwei.String(), ErrInvalidInput)
 	}
 	if p.BatchLimit <= 0 {
 		return fmt.Errorf("core: sweep policy: batch_limit must be positive: %w", ErrInvalidInput)
@@ -369,9 +512,19 @@ func (p SweepPolicy) Validate() error {
 type ReorgPolicy string
 
 const (
-	// ReorgPolicyManual (the default) only alerts on-call via a
-	// deposit.reorged event; a human decides whether/how to reverse the
-	// booking's journal.
+	// ReorgPolicyManual (the default) does not reverse anything on its own:
+	// a human decides whether and how to reverse the booking's journal,
+	// after verifying against a second source (RUNBOOK §12).
+	//
+	// It is deliberately NOT "alert only". Alerting alone is what this
+	// policy used to do, and it meant the whole verdict lived in a log line
+	// plus a counter increment, from a recheck that went quiet as soon as
+	// the booking's block fell outside the recheck window -- on a
+	// 2-second chain, minutes. So under the DEFAULT policy the answer to
+	// "which booking do I look at" expired before an on-call engineer could
+	// use it (G-M8). Every detection now also opens a durable DepositReorg
+	// row that outlives the window and the process, and only an operator's
+	// explicit resolution takes it off that queue.
 	ReorgPolicyManual ReorgPolicy = "manual"
 	// ReorgPolicyAutoReverse automatically posts a reversal journal and
 	// transitions the booking to reversed. A false positive (RPC blip,

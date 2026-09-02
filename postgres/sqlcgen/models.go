@@ -163,6 +163,20 @@ type DepositAddress struct {
 	CreatedAt     time.Time   `json:"created_at"`
 }
 
+type DepositReorg struct {
+	ID         int64       `json:"id"`
+	Uid        pgtype.UUID `json:"uid"`
+	Kind       string      `json:"kind"`
+	BookingUid pgtype.UUID `json:"booking_uid"`
+	ChainID    int64       `json:"chain_id"`
+	TxHash     string      `json:"tx_hash"`
+	JournalUid string      `json:"journal_uid"`
+	DetectedAt time.Time   `json:"detected_at"`
+	LastSeenAt time.Time   `json:"last_seen_at"`
+	ResolvedAt time.Time   `json:"resolved_at"`
+	Resolution string      `json:"resolution"`
+}
+
 type EntryAttestation struct {
 	EntryID     int64  `json:"entry_id"`
 	Seq         int64  `json:"seq"`

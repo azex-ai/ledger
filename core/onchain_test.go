@@ -145,3 +145,56 @@ func TestReorgPolicy_IsValid(t *testing.T) {
 	assert.False(t, ReorgPolicy("bogus").IsValid())
 	assert.False(t, ReorgPolicy("").IsValid())
 }
+
+// TestSweepPolicy_Validate_RejectsWeiShapedGasCeiling pins the machine half
+// of G-M3 (onchain-money-path.md Major): GasCeiling's own field doc said wei
+// while the quantity it is compared against (Sweeper.GasPrice) reports gwei,
+// so a consumer following the doc configured a ceiling 10^9 too high and the
+// only gate bounding sweep spend silently stopped firing. A documentation
+// contradiction becomes a startup rejection (working-agreements §5).
+func TestSweepPolicy_Validate_RejectsWeiShapedGasCeiling(t *testing.T) {
+	weiShaped := SweepPolicy{
+		ChainID:      1,
+		Token:        SweepNativeToken,
+		MinThreshold: decimal.NewFromInt(1),
+		GasCeiling:   decimal.RequireFromString("50000000000"), // 50 gwei written in wei
+		BatchLimit:   10,
+		Interval:     time.Minute,
+	}
+	err := weiShaped.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "wei value in a gwei field")
+
+	// A generous but plausible gwei ceiling still passes.
+	gweiShaped := weiShaped
+	gweiShaped.GasCeiling = decimal.NewFromInt(500)
+	require.NoError(t, gweiShaped.Validate())
+}
+
+// TestTokenConfig_Validate pins G-M7's configured-value half: Decimals is
+// the sole input to the adapter's raw-amount normalization
+// (NewFromBigInt(raw, -Decimals)), so a negative value multiplies every
+// credited amount by 10^n rather than dividing.
+func TestTokenConfig_Validate(t *testing.T) {
+	require.NoError(t, TokenConfig{Decimals: 0}.Validate())
+	require.NoError(t, TokenConfig{Decimals: 18}.Validate())
+
+	err := TokenConfig{Decimals: -1}.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	assert.Contains(t, err.Error(), "multiplies")
+
+	err = TokenConfig{Decimals: 37}.Validate()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+}
+
+// TestDepositReorg_IsOpen pins the no-NULL encoding of an unresolved anomaly
+// (core.DepositReorg): the epoch default means "open", and call sites must
+// not have to know that.
+func TestDepositReorg_IsOpen(t *testing.T) {
+	assert.True(t, DepositReorg{}.IsOpen(), "the zero value is an open anomaly")
+	assert.True(t, DepositReorg{ResolvedAt: time.Unix(0, 0)}.IsOpen(), "epoch means open")
+	assert.False(t, DepositReorg{ResolvedAt: time.Now()}.IsOpen())
+}
