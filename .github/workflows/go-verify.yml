@@ -88,6 +88,18 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          # fetch-depth: 0 -- the breaking-change gates
+          # (TestAPISurface_BreakingChangesAreDocumented,
+          # TestChangelogListsBreakingGoAPIChanges) diff the exported Go API
+          # against the last release TAG. actions/checkout defaults to a
+          # depth-1 clone with no tags, under which `git describe --tags`
+          # answers "fatal: No names found" -- so before this line, both
+          # gates were structurally unable to run in the only place they had
+          # to hold (C-3, W3 adversarial review). They now FAIL rather than
+          # skip when the baseline is unresolvable, which is what makes this
+          # line load-bearing instead of decorative.
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
