@@ -65,12 +65,20 @@
 | **DB owner / superuser** | `DROP TRIGGER` 后任意改写历史；`DROP` 分区静默丢整月 | 改写 → 签名/digest 验不过；丢分区 → 覆盖空洞；两者在 verify 中暴露 |
 | **DB 备份 / 只读副本** | 读到全部账务明细 | 不变（见 non-goal 1） |
 | **app 进程 + KMS 调用权限** | 铸造合法签名 | ⚠️ **不防**。见 non-goal 2 |
+| **app DB 凭证 → 下游系统**（2026-09-02 深度审计 D-M6 补入；此前整张表没有「下游完整性」这一列） | `ledger_app` 可 `SELECT secret FROM webhook_subscribers`（实跑确认），于是能向任意订阅方投递 **HMAC 校验通过** 的伪造事件（「充值已确认，金额 X」），下游按事件记账 | expand 阶段：`core.WebhookSigner` port 落地，密钥可移出 DB（与 `core.Attestor` 同一原则），未接线时按列签名并**告警一次**。contract 阶段（REVOKE 该列 / DROP 该列）留给已迁移密钥的部署 |
 
 **Non-goals（明确不做，不要事后当缺口报）**：
 
 1. **保密性**。这次事件若是「数据被读走」，那么复式记账与 Merkle **一条都不解决** ——
    它们证明数据没被改，不阻止数据被读。对症的是 P1 的只读 role、审计日志、缩小可查询面、
    凭证轮换、保留期收缩。本文只解决完整性 / 真实性 / 不可抵赖。
+
+   ⚠️ **这条 non-goal 不覆盖「读到密钥之后能伪造」**（2026-09-02 补，D-M6）。
+   「数据被读走」与「读到的东西本身就是一把可以签名的钥匙」是两件事，migration 007 自己就是
+   这么区分的：它把 `webhook_subscribers.secret` 从 `ledger_ro` 上摘掉的理由写的是
+   "Reading it does not just disclose data, it hands a read-only credential the ability to
+   forge signed event deliveries to any subscriber" —— 而同一句话对 `ledger_app` 一字不改地成立。
+   保密性不做，不等于「密钥留在 DB 里」也一并归入不做。
 2. **app 进程 + 签名能力同时失陷**。攻击者能调签名就能给伪造记录签名。唯一缓解是留痕
    与限速，不是密码学保证 —— 而留痕放在哪里是**消费方**的部署选择（同 §14）。
 3. **「从未被伪造」不能只靠事后机制**。batch digest / Merkle 会如实签署它看到的 DB 内容，

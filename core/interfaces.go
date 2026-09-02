@@ -681,6 +681,39 @@ type Attestor interface {
 	Sign(ctx context.Context, digest []byte) (signature []byte, keyID string, err error)
 }
 
+// WebhookSigner produces the HMAC an outbound event delivery is signed with,
+// so the key that authenticates this ledger to its downstream subscribers can
+// live outside the database.
+//
+// Same principle as Attestor, applied to the one key the schema still stores:
+// webhook_subscribers.secret. Migration 007 took that column away from
+// ledger_ro and wrote down exactly why -- "reading it does not just disclose
+// data, it hands a read-only credential the ability to forge signed event
+// deliveries to any subscriber" -- and the identical sentence is true of
+// ledger_app, which is the credential the whole threat model assumes is
+// leaked. Migration 014 recorded it as knowingly not closed. The blast radius
+// of a leaked application DB credential therefore extends past this ledger:
+// the holder can send any subscriber an HMAC-valid "deposit confirmed, amount
+// X" and have it booked downstream.
+//
+// SigningInput is the exact bytes to authenticate; the deliverer owns the
+// framing (currently "<unix timestamp>.<payload>") and the encoding of the
+// result, so an implementation is a MAC and nothing else. subscriberName
+// selects the key -- names come from webhook_subscribers.name, which is not a
+// secret and stays readable.
+//
+// Optional. With no signer installed, WebhookDeliverer falls back to the
+// secret column and says so once (see delivery.WebhookDeliverer.SetSigner):
+// this is the expand stage of deployment.md's three-step, and the column is
+// still the only path a deployment that has not migrated its keys has.
+//
+// Deployment note, as for Attestor: the webhook signing key must not live in
+// the same secrets bundle as DATABASE_URL, or the separation this port exists
+// to create is undone by where the key is kept.
+type WebhookSigner interface {
+	Sign(ctx context.Context, subscriberName string, signingInput []byte) (mac []byte, err error)
+}
+
 // AuthVerifier needs only the public key, so verification can run entirely
 // outside the database host -- that independence is the whole point
 // (design doc §7, P5).

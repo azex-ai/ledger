@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -72,6 +73,34 @@ type WebhookDeliverer struct {
 	client      *http.Client
 	logger      core.Logger
 	metrics     core.Metrics
+
+	// signer, when set, replaces webhook_subscribers.secret as the source of
+	// the outbound HMAC. See SetSigner.
+	signer          core.WebhookSigner
+	dbSecretWarnOne sync.Once
+}
+
+// SetSigner installs a core.WebhookSigner, moving the outbound HMAC key out of
+// the database.
+//
+// Why this exists: webhook_subscribers.secret is the last key this schema
+// stores, and ledger_app can read it. Migration 007 revoked exactly that
+// column from ledger_ro and wrote down the reason -- reading it "hands a
+// read-only credential the ability to forge signed event deliveries to any
+// subscriber" -- and the same sentence is true of the credential the threat
+// model assumes is leaked. So a leaked application DB credential does not just
+// expose this ledger: it lets the holder send any downstream subscriber an
+// HMAC-valid "deposit confirmed, amount X".
+//
+// Fully closing that means revoking the column, which is a migration for a
+// deployment that has moved its keys, not a change this library can make on
+// its behalf (deployment.md: expand, migrate, contract). This is the expand
+// step -- both paths work, the port wins where present -- and the fallback
+// warns once, so a deployment still on the column knows it is on it rather
+// than finding out from a threat model.
+func (d *WebhookDeliverer) SetSigner(signer core.WebhookSigner) *WebhookDeliverer {
+	d.signer = signer
+	return d
 }
 
 // NewWebhookDeliverer creates a new WebhookDeliverer.
@@ -248,15 +277,10 @@ func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt PendingEvent, sub W
 	req.Header.Set("X-Ledger-Event-UID", evt.UID)
 	req.Header.Set("X-Ledger-Timestamp", timestamp)
 
-	if sub.Secret == "" {
-		// Fail closed rather than deliver unsigned. A subscriber with an empty
-		// secret means the receiver cannot verify authenticity, and a receiver
-		// that only checks "if a signature is present" would accept forged
-		// events. Surface it as a delivery error (retried, and visible in
-		// last_error) instead of silently sending an unsigned POST.
-		return 0, fmt.Errorf("delivery: webhook: subscriber %d has no signing secret; refusing to deliver unsigned: %w", sub.ID, core.ErrInvalidInput)
+	sig, err := d.sign(ctx, sub, payload, timestamp)
+	if err != nil {
+		return 0, err
 	}
-	sig := computeSignature(payload, timestamp, sub.Secret)
 	req.Header.Set("X-Ledger-Signature", fmt.Sprintf("t=%s,v1=%s", timestamp, sig))
 
 	resp, err := d.client.Do(req)
@@ -269,6 +293,47 @@ func (d *WebhookDeliverer) sendHTTP(ctx context.Context, evt PendingEvent, sub W
 		return resp.StatusCode, nil
 	}
 	return resp.StatusCode, fmt.Errorf("delivery: webhook: http status %d", resp.StatusCode)
+}
+
+// sign produces the hex-encoded HMAC for one delivery, preferring the injected
+// core.WebhookSigner over the subscriber's stored secret.
+//
+// Either way this fails closed rather than delivering unsigned. A subscriber
+// the ledger cannot sign for is a subscriber that cannot verify authenticity,
+// and a receiver that only checks "is a signature present" would accept forged
+// events -- so the delivery becomes an error (retried, visible in last_error)
+// instead of an unsigned POST.
+func (d *WebhookDeliverer) sign(ctx context.Context, sub WebhookSubscriber, payload []byte, timestamp string) (string, error) {
+	signingInput := make([]byte, 0, len(timestamp)+1+len(payload))
+	signingInput = append(signingInput, timestamp...)
+	signingInput = append(signingInput, '.')
+	signingInput = append(signingInput, payload...)
+
+	if d.signer != nil {
+		mac, err := d.signer.Sign(ctx, sub.Name, signingInput)
+		if err != nil {
+			return "", fmt.Errorf("delivery: webhook: sign for subscriber %q: %w", sub.Name, err)
+		}
+		if len(mac) == 0 {
+			return "", fmt.Errorf("delivery: webhook: signer returned an empty MAC for subscriber %q; refusing to deliver unsigned: %w", sub.Name, core.ErrInvalidInput)
+		}
+		return hex.EncodeToString(mac), nil
+	}
+
+	// No signer: the pre-port path, reading the key out of the database.
+	// Warned once, because a deployment on this path is on it for every
+	// delivery and the fact worth surfacing is the configuration, not the
+	// request.
+	d.dbSecretWarnOne.Do(func() {
+		d.logger.Warn("delivery: webhook: signing outbound events with webhook_subscribers.secret; " +
+			"ledger_app can read that column, so a leaked database credential can forge signed deliveries to every subscriber. " +
+			"Install a core.WebhookSigner (WebhookDeliverer.SetSigner) to keep the key out of the database")
+	})
+
+	if sub.Secret == "" {
+		return "", fmt.Errorf("delivery: webhook: subscriber %d has no signing secret; refusing to deliver unsigned: %w", sub.ID, core.ErrInvalidInput)
+	}
+	return computeSignature(payload, timestamp, sub.Secret), nil
 }
 
 func computeSignature(payload []byte, timestamp, secret string) string {
