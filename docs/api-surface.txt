@@ -1551,6 +1551,7 @@ server.Deps.Journals = field core.JournalWriter
 server.Deps.PeriodCloser = field core.PeriodCloser
 server.Deps.PlatformBalances = field core.PlatformBalanceReader
 server.Deps.Queries = field core.QueryProvider
+server.Deps.ReadyProbe = field func() bool
 server.Deps.Reconciler = field core.Reconciler
 server.Deps.Reserver = field core.Reserver
 server.Deps.Solvency = field core.SolvencyChecker

@@ -122,6 +122,9 @@ type Server struct {
 	// logger is Config.Logger, defaulted. See that field's doc comment for
 	// what does and does not go through it.
 	logger core.Logger
+
+	// readyProbe is Deps.ReadyProbe; nil means "use the ready flag".
+	readyProbe func() bool
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
@@ -479,6 +482,23 @@ type Deps struct {
 	AccountPolicies  core.AccountPolicyStore
 	PeriodCloser     core.PeriodCloser
 	TrialBalance     core.TrialBalanceReader
+
+	// ReadyProbe answers GET /system/ready. Optional: nil keeps the
+	// SetReady/IsReady flag as the answer, which starts at false.
+	//
+	// E-M11: readiness was ONLY that flag, nothing in the library ever set
+	// it, and both docs/api.md and README described the endpoint as turning
+	// green once migrations and the worker had booted. A host that never
+	// found the setter got a probe that answers 503 forever -- with no
+	// warning, since "not ready yet" and "nobody will ever say ready" look
+	// identical from inside. This field makes the question answerable at
+	// construction: pass a probe (e.g. one that checks the migration
+	// version and the worker's last tick) and the deployment cannot forget.
+	//
+	// The library deliberately does not observe migrations or the worker
+	// itself: it has no binary, does not run the migrator, and the worker
+	// is optional. Readiness is a property of the host process.
+	ReadyProbe func() bool
 }
 
 // NewFromDeps is NewWithConfig taking a Deps struct instead of twenty-three
@@ -547,6 +567,7 @@ func newServer(cfg *Config, deps Deps) *Server {
 
 		allowSystemClassificationPost: cfg.AllowSystemClassificationPost,
 		logger:                        logger,
+		readyProbe:                    deps.ReadyProbe,
 	}
 	if cfg.DevCreditEnabled {
 		slog.Warn("server: developer credit endpoint is ENABLED — POST /api/v1/dev/credits mints holder balance with no custodied asset behind it")
@@ -598,11 +619,24 @@ func newServer(cfg *Config, deps Deps) *Server {
 	return s
 }
 
-// SetReady marks the service as ready (e.g. after migrations + worker boot).
+// SetReady marks the service as ready. This library never calls it: it does
+// not run your migrator and cannot observe your worker, so the readiness
+// decision belongs to the host's composition root (E-M11 -- the docs used to
+// claim the probe turned green by itself, and a host that missed this call
+// got a probe that answered 503 forever).
+//
+// Deps.ReadyProbe is the alternative that cannot be forgotten, because it is
+// answered at construction time.
 func (s *Server) SetReady(ready bool) { s.ready.Store(ready) }
 
-// IsReady reports whether the readiness flag is set.
-func (s *Server) IsReady() bool { return s.ready.Load() }
+// IsReady reports what GET /system/ready answers: Deps.ReadyProbe's verdict
+// when one was provided, otherwise the SetReady flag (false until set).
+func (s *Server) IsReady() bool {
+	if s.readyProbe != nil {
+		return s.readyProbe()
+	}
+	return s.ready.Load()
+}
 
 // StartRateLimiterGC launches the per-IP bucket GC loop in a goroutine; it
 // returns immediately and exits when stop is closed. Call this once after New().

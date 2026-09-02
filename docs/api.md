@@ -148,7 +148,29 @@ Common business codes you may see:
 
 ### Idempotency
 
-All mutations enforce idempotency. Client-initiated writes generate one random UUID in the `Idempotency-Key` header per logical submission and reuse it across retries. System events derive a deterministic key from the source event. Replaying the **same key with the same payload** returns the original result; reusing it with a different payload returns HTTP `409` / code `10901`.
+**Money-path mutations** (journals, template execution, reversals,
+reservations, bookings and their transitions, dev credits) enforce
+key-based idempotency. Client-initiated writes generate one random UUID in
+the `Idempotency-Key` header per logical submission and reuse it across
+retries. System events derive a deterministic key from the source event.
+Replaying the **same key with the same payload** returns the original result;
+reusing it with a different payload returns HTTP `409` / code `10901`.
+
+Two exceptions, both explicit in `openapi.yaml` (`x-idempotency`) rather than
+left to be discovered:
+
+- **`POST /journals/{uid}/reverse`** derives its key server-side
+  (`reversal:{uid}:{reason}`) and **rejects** a caller-supplied one with
+  `400`. Use `POST /journals/{uid}/reverse-partial` with `num` = `den` = 1
+  to choose the key yourself.
+- **Metadata mutations** (create/deactivate for classifications, journal
+  types, templates, currencies) are **not key-based**. They read no
+  `idempotency_key` and no `Idempotency-Key` header. A repeated create is
+  deduplicated by the `code` UNIQUE constraint — `409` / `10901`, never a
+  second row — and a repeated deactivate is idempotent by state. Sending a
+  key has no effect; note that a retry therefore answers `409` rather than
+  replaying the original `201`, so treat "already exists" as success when
+  retrying a create.
 
 ### Pagination
 
@@ -453,26 +475,65 @@ Auth: required. Idempotency: required.
 
 Post a journal by rendering a stored entry template.
 
+**This endpoint refuses any template with a leg on an `is_system`
+classification** (403, structurally derived from the template's own lines --
+not a name list), plus the codes in `PROTECTED_TEMPLATE_CODES`. That covers
+every deposit/capital/settlement/fee/fx template the presets install: those
+postings are what a deployment's own verified orchestration performs, and a
+write-scope key must not be able to mint them by naming a code. The single
+opt-out is `ALLOW_GENERIC_TEMPLATE_POST` (per code, after a reviewed
+decision).
+
+So the example below deliberately uses a holder-to-holder template, not
+`deposit_confirm` -- which an earlier revision of this document showed, and
+which the endpoint now answers with 403.
+
 Request:
 
 ```json
 {
-  "template_code": "deposit_confirm",
+  "template_code": "transfer_out",
   "holder_id": 1001,
   "currency_uid": "cur-usdt",
-  "idempotency_key": "deposit_journal:0xabc",
+  "idempotency_key": "transfer:req-7781",
   "amounts": {"amount": "500.00"},
   "actor_id": 0,
-  "source": "deposit_confirm",
+  "source": "api",
   "metadata": {}
 }
 ```
 
+`idempotency_key` is required and flat (top level). The
+`Idempotency-Key` header is an accepted alias for it.
+
 Response: same shape as `POST /journals`.
+
+Status codes: `201`, `400`, `401`, `403` (protected template code, or a
+template with an `is_system` leg), `422`, `429`, `503`.
 
 ### POST /journals/deposit-tolerance
 
 Apply the preset deposit-tolerance plan. Server picks one of: `confirm-as-expected`, `confirm-pending` + `release-shortfall`, or `manual review` based on the delta vs tolerance.
+
+⚠️ **Admin scope, and 403 under the default configuration.** This endpoint
+takes no `template_code`, but it turns caller-supplied expected/actual
+amounts into executions of `deposit_confirm_pending` / `deposit_confirm` /
+`deposit_release_pending` / `deposit_record_overage` -- the same
+deposit-shaped accounting `POST /journals/template` refuses by name. A
+write-scope key could therefore mint through here what it could not mint next
+door (contract §7.11), so:
+
+- every template the plan would execute passes the same gate as
+  `POST /journals/template`, which means the default answer is **403**;
+- the route requires the **admin** scope, not write (the same group as
+  `POST /dev/credits`).
+
+A deployment that genuinely resolves deposit tolerance over HTTP opts the
+four codes in via `ALLOW_GENERIC_TEMPLATE_POST` and calls this with an admin
+key. The alternative -- and the path the library itself takes -- is to run
+`presets.BuildDepositTolerancePlan` + `ExecuteDepositTolerancePlan` in the
+consumer's own Go orchestration, where no HTTP-reachable key is involved at
+all.
 
 Request:
 
@@ -943,7 +1004,38 @@ Response `200 OK`:
 
 ### GET /system/ready
 
-Kubernetes-style readiness probe. Returns 200 once migrations + worker have booted; 503 with `{"status": "starting"}` otherwise.
+Kubernetes-style readiness probe. **Returns 200 only when the host process
+says it is ready** — either `Deps.ReadyProbe` returns true, or
+`(*server.Server).SetReady(true)` has been called. The library observes
+neither migrations nor the worker: it runs no migrator, ships no binary, and
+the worker is optional, so readiness is a property of your composition root
+(E-M11 — this section used to say the probe turned green "once migrations +
+worker have booted", which nothing implemented; a deployment that wired
+neither got a permanent 503).
+
+Not ready is the standard envelope, not a bespoke shape:
+
+```json
+{ "code": 18101, "message": { "text": "Service is starting or temporarily unavailable" }, "data": null }
+```
+
+with HTTP status `503`. Probe scripts key on the HTTP status, not on a
+`status` string in the body.
+
+Wiring, in the host:
+
+```go
+srv, err := server.NewFromDeps(cfg, server.Deps{ /* … */
+    ReadyProbe: func() bool { return migrationsDone.Load() && worker.Healthy() },
+})
+// or, for a one-shot flip after boot:
+srv.SetReady(true)
+```
+
+Two other lifecycle methods are equally easy to miss and equally
+host-owned: `SetHolderSurface` (until called, every `/holder*` route answers
+404) and `StartRateLimiterGC` (without it, per-IP rate-limit buckets are
+never reclaimed).
 
 ### GET /system/balances
 

@@ -158,7 +158,10 @@ paths:
       tags: [Journals]
       summary: Render a template into a journal and post it.
       description: >-
-        Answers 403 when template_code is in the effective protected set:
+        Answers 403 for any template with a leg on an is_system
+        classification -- derived from the template's own lines, so a
+        deployment's own system-side template is covered without being
+        named -- and for any template_code in the effective protected set:
         presets.ProtectedTemplateCodes() (deposit_confirm and its siblings,
         protected by default) plus Config.ProtectedTemplateCodes (a
         deployment's own additional system-only codes), minus
@@ -178,7 +181,13 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JournalEnvelope" }
         "403":
-          description: template_code is in this deployment's Config.ProtectedTemplateCodes.
+          description: >-
+            Refused: the template has a leg on an is_system classification
+            (structurally derived from its own lines, whoever defined it), or
+            template_code is in the effective protected set
+            (presets.ProtectedTemplateCodes() plus
+            Config.ProtectedTemplateCodes). ALLOW_GENERIC_TEMPLATE_POST is
+            the single per-code opt-out for both rules.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -189,7 +198,27 @@ paths:
   /journals/deposit-tolerance:
     post:
       tags: [Journals]
-      summary: Resolve deposit shortfall / overage atomically.
+      summary: Resolve deposit shortfall / overage atomically (admin scope; 403 by default).
+      description: >-
+        ⚠️ Requires the **admin** scope, not write, and answers **403 under
+        the default configuration** (contract §7.11).
+
+
+        This endpoint takes no template_code, but it turns caller-supplied
+        expected/actual amounts into executions of deposit_confirm_pending /
+        deposit_confirm / deposit_release_pending / deposit_record_overage --
+        the same deposit-shaped accounting POST /journals/template refuses by
+        name. A write-scope key could therefore mint through here what it
+        could not mint next door. Every template the plan would execute now
+        passes the same gate as /journals/template, and the route moved to
+        the admin group (alongside POST /dev/credits).
+
+
+        A deployment that genuinely resolves deposit tolerance over HTTP opts
+        the four codes into ALLOW_GENERIC_TEMPLATE_POST and calls this with
+        an admin key. The library's own path is
+        presets.BuildDepositTolerancePlan + ExecuteDepositTolerancePlan in
+        the consumer's Go orchestration, with no HTTP-reachable key involved.
       requestBody:
         required: true
         content:
@@ -201,6 +230,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DepositToleranceEnvelope" }
+        "403":
+          description: >-
+            One of the templates the plan would execute is in the effective
+            protected set -- the default answer for every caller until the
+            codes are opted in via ALLOW_GENERIC_TEMPLATE_POST. Also returned
+            when the key lacks the admin scope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "422":
           $ref: "#/components/responses/DomainError"
   /journals/{uid}:
@@ -1026,6 +1064,13 @@ paths:
     post:
       tags: [Metadata]
       summary: Create a classification (with optional lifecycle).
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       requestBody:
         required: true
         content:
@@ -1041,6 +1086,13 @@ paths:
     post:
       tags: [Metadata]
       summary: Deactivate a classification.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       parameters:
         - in: path
           name: uid
@@ -1082,6 +1134,13 @@ paths:
     post:
       tags: [Metadata]
       summary: Create a journal type.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       requestBody:
         required: true
         content:
@@ -1102,6 +1161,14 @@ paths:
   /journal-types/{uid}/deactivate:
     post:
       tags: [Metadata]
+      summary: Deactivate a journal type.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       parameters:
         - in: path
           name: uid
@@ -1143,6 +1210,13 @@ paths:
     post:
       tags: [Metadata]
       summary: Create an entry template.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       requestBody:
         required: true
         content:
@@ -1177,6 +1251,14 @@ paths:
   /templates/{uid}/deactivate:
     post:
       tags: [Metadata]
+      summary: Deactivate an entry template.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       parameters:
         - in: path
           name: uid
@@ -1216,6 +1298,14 @@ paths:
               schema: { $ref: "#/components/schemas/CurrencyListEnvelope" }
     post:
       tags: [Metadata]
+      summary: Create a currency.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       requestBody:
         required: true
         content:
@@ -1244,6 +1334,13 @@ paths:
     post:
       tags: [Metadata]
       summary: Deactivate a currency.
+      x-idempotency: >-
+        Not key-based. This endpoint reads no idempotency_key and no
+        Idempotency-Key header (J-14): a repeated create is deduplicated by
+        the `code` UNIQUE constraint (409 / business code 10901, never a
+        second row), and a repeated deactivate is idempotent by state.
+        Sending a key has no effect -- it is not a replay scope, and the
+        response to a retry is a conflict rather than the original result.
       parameters:
         - in: path
           name: uid

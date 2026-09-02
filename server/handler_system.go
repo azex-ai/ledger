@@ -41,9 +41,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleReady returns 200 only after migrations + worker have booted.
-// Kubernetes-style readiness probe: keep the pod out of the load-balancer
-// rotation until we're actually serving.
+// handleReady answers the Kubernetes-style readiness probe. It returns 200
+// only when the HOST says it is ready -- Deps.ReadyProbe's verdict, or the
+// SetReady flag when no probe was provided. This library observes neither
+// migrations nor the worker (it runs no migrator, has no binary, and the
+// worker is optional), so a deployment that wires neither gets a permanent
+// 503. That used to be undocumented in both directions: the setter appeared
+// only in an example, and api.md/README claimed the probe turned green after
+// "migrations + worker have booted" on its own (E-M11).
+//
+// The 503 body is the standard envelope with code 18101, not the
+// {"status":"starting"} shape an earlier revision of the docs showed.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if !s.IsReady() {
 		httpx.Error(w, bizcode.New(18101, "starting up"))
