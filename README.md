@@ -232,6 +232,13 @@ srv, err := server.NewFromDeps(cfg, server.Deps{
 if err != nil {
     return err // invalid cfg -- you decide how to fail, not the library
 }
+
+// Inbound-webhook replay protection. Not optional in any deployment that
+// exposes /api/v1/webhooks/: without it, a callback replayed inside the
+// signature's ±5 minute window verifies and reaches ingestion. The first
+// unprotected callback logs a warning saying exactly that.
+srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())
+
 http.ListenAndServe(":8080", srv.Handler())
 ```
 
@@ -716,6 +723,7 @@ Surface below, this one is **not** included in `InstallDefaultPresets` or
 | `svc.Audit()` | `core.AuditQuerier` | Journal lists, booking trace, reversal chain |
 | `svc.ConfigHistory()` | `core.ConfigChangeReader` | Forensic trail: who changed the config/lifecycle tables, the reconciliation scan cursors, or an account policy — and when |
 | `svc.AssertRuntimeRole(ctx)` | `error` | Startup check: this connection authenticates as `ledger_app`, the role every ACL-enforced invariant is written against |
+| `svc.WebhookNonceRecorder()` | `*postgres.WebhookSubscriberStore` | Inbound-webhook replay cache — pass to `srv.SetWebhookNonceRecorder` |
 | `svc.PlatformBalanceReader()` | `core.PlatformBalanceReader` | Per-classification platform-wide balances |
 | `svc.SolvencyChecker()` | `core.SolvencyChecker` | Custodial vs user liability check |
 | `svc.PeriodCloser()` | `core.PeriodCloser` | Manages the accounting period close line |
@@ -1051,7 +1059,7 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 - **Authentication**: bearer-token API keys via `Authorization: Bearer <key>`, required on every endpoint (probes and webhook callbacks excepted). Keys are `name:scope:secret` triples — scope `read` < `write` < `admin`; the key name lands in access logs for audit. Constant-time compare.
 - **Rate limits**: in-memory per-IP token bucket -- 100 req/min mutations, 1000 req/min reads. Single-instance only.
 - **Body size**: every request is capped at `MAX_BODY_BYTES`; webhooks have an additional 1 MB cap enforced in the handler.
-- **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected.
+- **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected. That window is a staleness bound, **not** replay protection: an identical request replayed inside it verifies every time. Rejecting it needs the nonce cache, which is off unless you wire it — `srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())`. Leave it out and the first callback logs a warning saying so, and whether a replay double-books then rests entirely on the downstream idempotency key.
 - **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure; `/api/v1/system/ready` returns 503 until migrations + worker have booted.
 - **`write` scope and system classifications.** `POST /journals` accepts handwritten, per-currency-balanced entries, but by default **refuses any entry touching an `is_system` classification** (custodial, suspense, equity, …) — the handwritten-path counterpart to the protected-template guard, so a leaked `write`-scope key cannot mint deposit-shaped accounting through either endpoint (`docs/INVARIANTS.md` I-38). A deployment that legitimately hand-posts system-side journals over HTTP sets `Config.AllowSystemClassificationPost` (logs a startup warning). Non-system journals are unaffected. `write` scope still grants broad authority — don't issue it to a party that shouldn't record accounting.
 - **Authentication scope.** When `API_KEYS` is set, `authMiddleware` requires a valid bearer key on **every** endpoint regardless of HTTP method -- reads included (`server/middleware_auth.go`). The only exemptions are the unauthenticated probe paths (`/system/health`, `/system/ready`) and the inbound webhook paths (which authenticate via their channel's HMAC signature instead). The holder-token surface (`/holder/*`) authenticates with a minted holder token rather than an API key. Per-key holder scoping for the platform-wide read endpoints (`/platform/balances` / `/platform/solvency`) is not implemented -- any valid `read`-scope key can call them -- so still front standalone deployments with a network boundary you control. When `API_KEYS` is empty the server logs a startup warning and serves every endpoint unauthenticated; never run that way in production. This does not apply to library-mode consumption, where your own application owns the auth boundary.

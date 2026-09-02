@@ -31,8 +31,14 @@ import (
 func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		// webhookPathPrefix, not a second copy of the literal: this exemption
+		// and authMiddleware's have to name the same set of paths, and they
+		// were two independent strings. Editing one and not the other yields
+		// either an unauthenticated route whose body gets rewritten (breaking
+		// the HMAC the exemption exists to protect) or an authenticated one
+		// that skips the alias -- neither of which any test would have caught.
 		if key == "" || r.Method != http.MethodPost ||
-			strings.HasPrefix(r.URL.Path, "/api/v1/webhooks/") {
+			strings.HasPrefix(r.URL.Path, webhookPathPrefix) {
 			next.ServeHTTP(w, r)
 			return
 		}

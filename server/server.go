@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
@@ -60,7 +61,11 @@ type Server struct {
 	rateLimiter *rateLimiter
 
 	// Optional inbound-webhook replay cache (see SetWebhookNonceRecorder).
-	webhookNonces WebhookNonceRecorder
+	// webhookNonceWarnOnce fires the one-time "replay protection is off"
+	// warning from the handler rather than from newServer, because the
+	// recorder is late-bound.
+	webhookNonces        WebhookNonceRecorder
+	webhookNonceWarnOnce sync.Once
 
 	// Optional crypto-deposit add-on (see SetDepositAddressProvider /
 	// SetDepositIngester in handler_onchain.go). Nil until a consumer's

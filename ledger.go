@@ -71,6 +71,7 @@ type Service struct {
 	balanceTrendsStore   *postgres.BalanceTrendsStore
 	auditStore           *postgres.AuditStore
 	configHistoryStore   *postgres.ConfigHistoryStore
+	webhookSubscribers   *postgres.WebhookSubscriberStore
 	pendingStore         *postgres.PendingStore
 	platformBalanceStore *postgres.PlatformBalanceStore
 	reconcileAdapter     *postgres.ReconcileAdapter
@@ -237,6 +238,10 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.balanceTrendsStore = postgres.NewBalanceTrendsStore(pool, s.ledgerStore)
 	s.auditStore = postgres.NewAuditStore(pool)
 	s.configHistoryStore = postgres.NewConfigHistoryStore(pool)
+	// SetLogger so the nonce-prune degradation warning (a database missing
+	// migration 002's DELETE grant) reaches the consumer's logger instead of
+	// slog.Default().
+	s.webhookSubscribers = postgres.NewWebhookSubscriberStore(pool).SetLogger(s.logger)
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 	if len(s.custodialClassCodes) > 0 {
@@ -612,6 +617,21 @@ func (s *Service) BalanceTrends() core.BalanceTrendReader { return s.balanceTren
 // Audit returns the read-only audit query interface.
 func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
 
+// WebhookNonceRecorder returns the inbound-webhook replay cache, ready to hand
+// to server.Server.SetWebhookNonceRecorder.
+//
+// It exists because the capability did not: the cache was implemented,
+// migration 002 granted it the DELETE it needs, and then nothing anywhere --
+// no example, no README assembly, no facade accessor -- ever wired it, so
+// every deployment built from this repository's own instructions ran with
+// replay protection off. A ledger that ships a defence nobody can find has not
+// shipped it.
+//
+// \tsrv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())
+func (s *Service) WebhookNonceRecorder() *postgres.WebhookSubscriberStore {
+	return s.webhookSubscribers
+}
+
 // AssertRuntimeRole reports whether this Service's connection authenticates as
 // the database role the schema's ACLs are written against (`ledger_app`).
 //
@@ -747,6 +767,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		balanceTrendsStore:   s.balanceTrendsStore.WithDB(tx, ls),
 		auditStore:           s.auditStore.WithDB(tx),
 		configHistoryStore:   s.configHistoryStore.WithDB(tx),
+		webhookSubscribers:   s.webhookSubscribers,
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
 		reconcileAdapter:     s.reconcileAdapter.WithDB(tx),

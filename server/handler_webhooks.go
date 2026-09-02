@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,12 @@ import (
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
 
+// depositConfirmedStatus is the terminal state a deposit lifecycle reaches
+// only once its journal has been posted. Named here because the legacy
+// callback path has to refuse it by value (see handleWebhookCallback); the
+// lifecycle itself lives in presets.DepositLifecycle.
+const depositConfirmedStatus core.Status = "confirmed"
+
 // WebhookNonceRecorder is the replay cache the webhook handler consults after
 // signature verification. Nil disables the check (library consumers wiring
 // their own HTTP layer, tests). See postgres.WebhookSubscriberStore.TryRecordNonce.
@@ -22,9 +29,20 @@ type WebhookNonceRecorder interface {
 	TryRecordNonce(ctx context.Context, nonce string) (bool, error)
 }
 
-// SetWebhookNonceRecorder installs the inbound-webhook replay cache. Optional:
-// without it, replay protection inside the signature timestamp window relies
-// solely on downstream Transition idempotency (the pre-v0.3 behavior).
+// SetWebhookNonceRecorder installs the inbound-webhook replay cache.
+//
+// Optional, but leaving it out is a real reduction in what this endpoint
+// guarantees, not a configuration nicety: the signature covers a timestamp and
+// the adapter rejects timestamps outside a +/-5 minute window, so an identical
+// request replayed INSIDE that window verifies every time. The nonce cache is
+// the layer that rejects it. Whether the replay then causes double accounting
+// depends entirely on the downstream idempotency key, which for the sighting
+// path is derived from the transfer itself and for the legacy path is derived
+// from (booking_uid, status, channel_ref).
+//
+// ledger.Service exposes a ready-made one -- svc.WebhookNonceRecorder() -- and
+// leaving it nil now produces a one-time warning on the first callback that
+// takes the unprotected path (see handleWebhookCallback).
 func (s *Server) SetWebhookNonceRecorder(r WebhookNonceRecorder) { s.webhookNonces = r }
 
 func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
@@ -50,6 +68,25 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	// an identical request replayed inside the window still verifies. The
 	// nonce is a digest of everything that makes the request unique — an
 	// exact resend hits the cache and is rejected before touching bookings.
+	//
+	// The nil branch is a degraded mode and says so. Until this warning
+	// existed, "replay protection is on" and "replay protection is off" had
+	// identical runtime output, and every example and README assembly in this
+	// repository produced the second one — the capability was in the library
+	// and absent from every path a consumer actually walks, which is the shape
+	// this audit round found four times (working-agreements §3).
+	//
+	// Warned here rather than in newServer because the recorder is late-bound:
+	// SetWebhookNonceRecorder may legitimately be called after the Server is
+	// constructed. sync.Once because the condition cannot change once the
+	// first callback has arrived, so per-request logging would only bury it.
+	if s.webhookNonces == nil {
+		s.webhookNonceWarnOnce.Do(func() {
+			slog.Warn("server: inbound webhook replay cache is NOT configured — a callback replayed inside the signature's ±5 minute window " +
+				"passes signature verification and reaches ingestion; whether it double-books depends solely on downstream idempotency. " +
+				"Wire it with srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())")
+		})
+	}
 	if s.webhookNonces != nil {
 		sum := sha256.Sum256([]byte(channelName + "\x00" + r.Header.Get("X-Timestamp") + "\x00" + r.Header.Get("X-Signature") + "\x00" + string(body)))
 		fresh, err := s.webhookNonces.TryRecordNonce(r.Context(), hex.EncodeToString(sum[:]))
@@ -107,6 +144,29 @@ func (s *Server) handleWebhookCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if booking.ClassificationUID != depositClass.UID {
 		httpx.Error(w, httpx.ErrForbidden("webhook channel may only transition deposit bookings"))
+		return
+	}
+
+	// G-m5: and it may not declare a deposit CONFIRMED through this path.
+	//
+	// I-21 states that a confirmed deposit's accounting comes from exactly one
+	// place -- service's postDepositConfirmedJournal, which posts the journal
+	// in the same transaction as the transition. That is true of the service
+	// layer and was never true of this one: the legacy ParseCallback branch
+	// hands ToStatus straight to Booker.Transition, which moves the booking to
+	// a terminal `confirmed` and posts nothing. The result is a deposit the
+	// holder-facing surfaces call settled with no entries behind it and no
+	// journal for reconciliation to find missing.
+	//
+	// Unreachable through this repository's own adapter (channel/onchain
+	// implements sightingParser, so it is routed above and never reaches
+	// here), which is exactly why it went unnoticed: the path is only taken by
+	// a consumer's own channel.Adapter, and a consumer's adapter is the case
+	// the classification confinement two lines up already exists to defend
+	// against.
+	if core.Status(payload.Status) == depositConfirmedStatus {
+		httpx.Error(w, httpx.ErrForbidden(
+			"a channel callback may not confirm a deposit: confirmation posts accounting and must go through the deposit sighting path (implement channel.SightingParser), not a bare status transition"))
 		return
 	}
 
