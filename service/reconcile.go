@@ -482,7 +482,7 @@ func NewFullReconciliationService(
 // failure that aborts the rest.
 func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (*core.ReconcileReport, error) {
 	now := time.Now()
-	checks := make([]core.CheckResult, 0, 15)
+	checks := make([]core.CheckResult, 0, 16)
 
 	// --- Check #1: global debit == credit equality ---
 	checks = append(checks, s.runCheck1JournalBalance(ctx))

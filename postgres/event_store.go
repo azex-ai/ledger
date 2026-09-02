@@ -49,7 +49,7 @@ func (s *EventStore) WithDB(db DBTX) *EventStore {
 		pool:       nil, // tx mode
 		q:          sqlcgen.New(db),
 		claimLease: s.claimLease,
-		dims:       s.dims,
+		dims:       dimCacheForTx(s.dims),
 		logger:     s.logger,
 	}
 }

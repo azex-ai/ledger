@@ -210,7 +210,7 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 		pool:     nil, // tx mode: pool deliberately nil
 		db:       db,
 		q:        sqlcgen.New(db),
-		dims:     s.dims,
+		dims:     dimCacheForTx(s.dims),
 		attestor: s.attestor,
 	}
 }
@@ -236,7 +236,7 @@ func (s *LedgerStore) WithAuth(attestor core.Attestor) *LedgerStore {
 		pool:     s.pool,
 		db:       s.db,
 		q:        s.q,
-		dims:     s.dims,
+		dims:     dimCacheForTx(s.dims),
 		attestor: attestor,
 	}
 }

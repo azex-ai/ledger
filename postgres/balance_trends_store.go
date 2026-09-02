@@ -45,7 +45,7 @@ func (s *BalanceTrendsStore) WithDB(db DBTX, ls *LedgerStore) *BalanceTrendsStor
 		db:          db,
 		q:           sqlcgen.New(db),
 		ledgerStore: ls,
-		dims:        s.dims,
+		dims:        dimCacheForTx(s.dims),
 	}
 }
 

@@ -63,7 +63,7 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore, verifiedBalance *
 // transaction" placement rule) -- see Reserve's doc comment.
 func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 	return &ReserverStore{
-		dims:            s.dims,
+		dims:            dimCacheForTx(s.dims),
 		pool:            nil, // tx mode
 		db:              db,
 		q:               sqlcgen.New(db),

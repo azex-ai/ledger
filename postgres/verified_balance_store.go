@@ -88,7 +88,7 @@ func NewVerifiedBalanceStore(pool *pgxpool.Pool, verifier core.AuthVerifier) *Ve
 // single source of that wiring.
 func (s *VerifiedBalanceStore) WithDB(db DBTX) *VerifiedBalanceStore {
 	return &VerifiedBalanceStore{
-		dims:      s.dims,
+		dims:      dimCacheForTx(s.dims),
 		pool:      nil, // tx mode
 		db:        db,
 		q:         sqlcgen.New(db),

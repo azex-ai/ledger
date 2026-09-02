@@ -23,13 +23,23 @@
 //     and failed on a foreign key, until the process restarted
 //     (concurrency.md 2026-09-02 B-m5).
 //
-// The shared cache is therefore refreshed through the POOL, never through
-// the caller's Queries, so it can only ever contain committed rows. A uid
-// that is still missing after that refresh is resolved once through the
-// caller's own Queries into a throwaway cache — so a row created earlier in
-// the same open transaction still resolves, without being published. That
-// second read only happens on a genuine miss (a not-found error, or an
-// in-transaction creation), never on the hot path.
+// A tx-bound store clone therefore gets its own tx-scoped VIEW of the cache
+// (dimCacheForTx) instead of the shared pointer: it reads through to the
+// pool-wide cache, so a warm parent costs it nothing, but anything it has to
+// go to the database for lands in its own maps and dies with the clone.
+// Nothing a transaction can see before it commits ever becomes visible to
+// the rest of the process. The pool-wide cache is only ever refreshed from
+// outside a caller's transaction, so it holds committed rows by
+// construction.
+//
+// Note what this deliberately does NOT do: refresh the shared cache through
+// a second pool connection. That was the first shape of this fix, and it
+// deadlocks — the refresh runs while the caller already holds a pool
+// connection for its open transaction, so N concurrent cold-cache writers
+// on an N-connection pool all wait for a connection none of them will
+// release (reproduced by TestIdempotency_ConcurrentSameKey with 100
+// goroutines). A cache refresh must never need a connection the caller does
+// not already have.
 //
 // A miss triggers one full-table refresh — these tables are small by design.
 package postgres
@@ -69,11 +79,10 @@ type dimJournalType struct {
 type dimCache struct {
 	mu sync.RWMutex
 
-	// pool is the connection pool this cache belongs to, or nil for a
-	// throwaway cache (see dimLookup's overlay). Non-nil means "refresh
-	// through the pool, ignoring whatever Queries the caller handed in" —
+	// parent is the pool-wide cache a tx-scoped view reads through, or nil
+	// for the pool-wide cache itself. A view never writes to its parent —
 	// that is what keeps uncommitted rows out of process-wide state.
-	pool *pgxpool.Pool
+	parent *dimCache
 
 	currencyByUID map[string]dimCurrency
 	currencyByID  map[int64]dimCurrency
@@ -95,21 +104,31 @@ func dimCacheFor(pool *pgxpool.Pool) *dimCache {
 	if c, ok := dimCaches.Load(pool); ok {
 		return c.(*dimCache)
 	}
-	c, _ := dimCaches.LoadOrStore(pool, &dimCache{pool: pool})
+	c, _ := dimCaches.LoadOrStore(pool, &dimCache{})
 	return c.(*dimCache)
 }
 
-// refresh reloads all three dimension tables.
+// dimCacheForTx returns a tx-scoped view over parent, for a store clone bound
+// to a caller's transaction (WithDB). Reads fall through to parent, so a warm
+// pool-wide cache serves them with no extra query; anything this view has to
+// resolve itself — notably a config row the caller created in this very
+// transaction — stays in the view and is discarded with it.
 //
-// When this cache belongs to a pool (the shared, process-wide case) the read
-// goes through the pool and q is deliberately ignored: q may be a caller's
-// open transaction, and publishing its uncommitted rows into shared state is
-// the B-m5 bug (see the package doc). q is used only by the throwaway
-// overlay cache in dimLookup, whose contents are discarded.
+// Every store that carries a *dimCache MUST use this in WithDB rather than
+// passing s.dims through. Sharing the pointer is what let an uncommitted row
+// become process-wide state (concurrency.md 2026-09-02 B-m5).
+func dimCacheForTx(parent *dimCache) *dimCache {
+	return &dimCache{parent: parent}
+}
+
+// refresh reloads all three dimension tables into c from q.
+//
+// c is either a tx-scoped view (q is the caller's transaction; the rows land
+// in the view and die with it) or the pool-wide cache (q never belongs to a
+// caller's transaction, because tx-bound clones hold views — see
+// dimCacheForTx). Either way this uses the connection the caller already
+// has: see the package doc for why acquiring a second one deadlocks.
 func (c *dimCache) refresh(ctx context.Context, q *sqlcgen.Queries) error {
-	if c.pool != nil {
-		q = sqlcgen.New(c.pool)
-	}
 	curs, err := q.ListCurrencyDims(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: dims: list currencies: %w", err)
@@ -149,45 +168,35 @@ func (c *dimCache) refresh(ctx context.Context, q *sqlcgen.Queries) error {
 	return nil
 }
 
-// dimLookup runs pick under the read lock; on a miss it refreshes the shared
-// cache once (through the pool — committed rows only) and retries. If the key
-// is STILL missing, it resolves once through the caller's own Queries into a
-// throwaway cache and returns that result WITHOUT caching it: a config row
-// created earlier in the caller's still-open transaction has to resolve, but
-// it must not become visible to the rest of the process before it commits
-// (see the package doc, dimension 2). A miss on that read is the caller's
-// ErrNotFound.
+// dimLookup reads c (and, for a tx-scoped view, its parent) under the read
+// lock; on a miss it refreshes c once from q and retries. The second miss is
+// the caller's ErrNotFound.
 //
-// pick takes the cache to read from precisely so the overlay can be
-// consulted with the same accessor as the shared cache.
+// pick takes the cache to read from so the same accessor can be applied to
+// the view and to its parent.
 func dimLookup[K comparable, V any](ctx context.Context, c *dimCache, q *sqlcgen.Queries, pick func(*dimCache) map[K]V, key K) (V, bool, error) {
-	c.mu.RLock()
-	v, ok := pick(c)[key]
-	c.mu.RUnlock()
-	if ok {
+	if v, ok := dimRead(c, pick, key); ok {
 		return v, true, nil
 	}
 	if err := c.refresh(ctx, q); err != nil {
 		var zero V
 		return zero, false, err
 	}
-	c.mu.RLock()
-	v, ok = pick(c)[key]
-	c.mu.RUnlock()
-	if ok || c.pool == nil {
-		// c.pool == nil means c IS a throwaway cache (or a store built
-		// without a pool): refresh already read through q, so there is
-		// nothing further to try.
-		return v, ok, nil
-	}
-
-	overlay := &dimCache{}
-	if err := overlay.refresh(ctx, q); err != nil {
-		var zero V
-		return zero, false, err
-	}
-	v, ok = pick(overlay)[key]
+	v, ok := dimRead(c, pick, key)
 	return v, ok, nil
+}
+
+// dimRead looks key up in c, falling through to c.parent when c is a
+// tx-scoped view. Only a view's own maps are ever written, so falling
+// through is a pure read of the pool-wide cache.
+func dimRead[K comparable, V any](c *dimCache, pick func(*dimCache) map[K]V, key K) (V, bool) {
+	c.mu.RLock()
+	v, ok := pick(c)[key]
+	c.mu.RUnlock()
+	if ok || c.parent == nil {
+		return v, ok
+	}
+	return dimRead(c.parent, pick, key)
 }
 
 func (c *dimCache) currencyByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid string) (dimCurrency, error) {

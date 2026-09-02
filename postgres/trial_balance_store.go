@@ -41,7 +41,7 @@ func (s *TrialBalanceStore) WithDB(db DBTX) *TrialBalanceStore {
 	return &TrialBalanceStore{
 		pool: nil, // tx mode
 		q:    sqlcgen.New(db),
-		dims: s.dims,
+		dims: dimCacheForTx(s.dims),
 	}
 }
 

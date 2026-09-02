@@ -94,7 +94,7 @@ func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
 		pool:           nil, // tx mode — disables inner BeginTx
 		db:             db,
 		q:              sqlcgen.New(db),
-		dims:           s.dims,
+		dims:           dimCacheForTx(s.dims),
 		custodialCodes: s.custodialCodes,
 	}
 }

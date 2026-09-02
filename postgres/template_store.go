@@ -40,7 +40,7 @@ func (s *TemplateStore) WithDB(db DBTX) *TemplateStore {
 	return &TemplateStore{
 		pool: nil, // tx mode
 		q:    sqlcgen.New(db),
-		dims: s.dims,
+		dims: dimCacheForTx(s.dims),
 	}
 }
 

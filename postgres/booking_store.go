@@ -50,7 +50,7 @@ func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 		pool: nil, // tx mode
 		db:   db,
 		q:    sqlcgen.New(db),
-		dims: s.dims,
+		dims: dimCacheForTx(s.dims),
 	}
 }
 

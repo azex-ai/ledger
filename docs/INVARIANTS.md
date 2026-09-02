@@ -5206,7 +5206,7 @@ recurred three times independently in one round: `EventStore.SetLogger` was
 added to route warnings to the consumer's logger and then never called from
 the composition root; `SetFullReconciler` was never auto-wired even though
 `DefaultWorkerConfig` has always advertised a `FullReconcileInterval`, so
-fifteen reconciliation checks — `unauthorized_journals` among them — were off
+sixteen reconciliation checks — `unauthorized_journals` among them — were off
 for every library consumer; and I-40's clone list, being an enumeration,
 never grew to include the fourth, fifth and sixth methods with the identical
 defect. Property 5 exists because enumerated lists in this repository have

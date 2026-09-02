@@ -46,7 +46,7 @@ func NewCheckpointIntegrityStore(pool *pgxpool.Pool) *CheckpointIntegrityStore {
 // WithDB returns a clone of the store bound to an existing transaction.
 func (s *CheckpointIntegrityStore) WithDB(db DBTX) *CheckpointIntegrityStore {
 	return &CheckpointIntegrityStore{
-		dims: s.dims,
+		dims: dimCacheForTx(s.dims),
 		pool: nil, // tx mode
 		db:   db,
 		q:    sqlcgen.New(db),

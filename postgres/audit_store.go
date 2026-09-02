@@ -41,7 +41,7 @@ func (s *AuditStore) WithDB(db DBTX) *AuditStore {
 		pool: s.pool,
 		db:   db,
 		q:    sqlcgen.New(db),
-		dims: s.dims,
+		dims: dimCacheForTx(s.dims),
 	}
 }
 

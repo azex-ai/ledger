@@ -36,7 +36,7 @@ func NewAccountPolicyStore(pool *pgxpool.Pool) *AccountPolicyStore {
 // WithDB returns a clone bound to an existing transaction (or any DBTX). The
 // caller owns the transaction lifecycle.
 func (s *AccountPolicyStore) WithDB(db DBTX) *AccountPolicyStore {
-	return &AccountPolicyStore{pool: nil, db: db, q: sqlcgen.New(db), dims: s.dims}
+	return &AccountPolicyStore{pool: nil, db: db, q: sqlcgen.New(db), dims: dimCacheForTx(s.dims)}
 }
 
 // SetPolicy creates or updates the policy at the exact dimension in input,
