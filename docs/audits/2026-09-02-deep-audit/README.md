@@ -44,8 +44,8 @@ Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径�
 
 | 复审 | 结果 | 处置 |
 |---|---|---|
-| money-path（8 个攻击面） | 3 攻破 1 部分。**Critical：I-49 修了 `min(V,E)`，但被减掉的 hold 项读 `reservations` 可写列，一条 UPDATE 让闸对 1000 授权 2000**；另 `SolvencyCheck` / `enforce_min_balance` / `ConfirmPending` 仍读 checkpoint、未覆盖伪造 journal 自称 tx_mode 只 DRIFT、默认全关无 Warning、`unauthorized_journals` 一页一条签名即跳过其余、`Migrate` 窗口角色级、`event_uid` 冒领锁死无解除 | W3-holds ✅（闸内 hold = Σ 未过期 `reserved_amount`，不读任何结算声明；`Settle` 拒过期）；W3-fixes ✅（SolvencyCheck entries-only、未覆盖 entry 不看自称、StartupReport 五条 Warning、Complete = 全核、custodial scope 逐 code、`anchor_observations` owner 写入且拒超链高）；W3-fixes-2 进行中（M-3 owner-only 解除、M-5 文档层）；M-1 / ConfirmPending / M-5 机制层 / 签名 receipt → Aaron |
-| gates（34 次 mutation） | 23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿 / 恒 skip | W3-citations ✅（白名单清空）；W3-gates-fixes 进行中 |
+| money-path（8 个攻击面） | 3 攻破 1 部分。**Critical：I-49 修了 `min(V,E)`，但被减掉的 hold 项读 `reservations` 可写列，一条 UPDATE 让闸对 1000 授权 2000**；另 `SolvencyCheck` / `enforce_min_balance` / `ConfirmPending` 仍读 checkpoint、未覆盖伪造 journal 自称 tx_mode 只 DRIFT、默认全关无 Warning、`unauthorized_journals` 一页一条签名即跳过其余、`Migrate` 窗口角色级、`event_uid` 冒领锁死无解除 | W3-holds ✅（闸内 hold = Σ 未过期 `reserved_amount`，不读任何结算声明；`Settle` 拒过期）；W3-fixes ✅（SolvencyCheck entries-only、未覆盖 entry 不看自称、StartupReport 五条 Warning、Complete = 全核、custodial scope 逐 code、`anchor_observations` owner 写入且拒超链高）；W3-fixes-2 ✅（M-3 owner-only 解除函数 migration 027；M-5 文档层：examples 拆 `MIGRATE_DATABASE_URL` + 静态门禁；**M-5 实跑定级 Critical**）；W3-migrate 进行中（M-5 机制层：迁移改专用连接 `SET ROLE`，窗口从角色级降到连接级，契约 §7.16）；M-1 / ConfirmPending / 签名 receipt → Aaron |
+| gates（34 次 mutation） | 23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿 / 恒 skip | W3-citations ✅（白名单清空）；W3-gates-fixes ✅（23 处全关：路由→scope 门禁运行中间件链对照 openapi；pin 引用门禁白名单恒空、跳过登记制、money-path invariant 全部 blocking；破坏性变更门禁对照上一 release tag 且 `fetch-depth: 0`） |
 
 方法教训（进本 README 的正文）：契约 §0 的兄弟扫描仍被**形态描述**框住——C-1 的兄弟被写成「读了 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」，`reservations` 是第二项、receipt 表是第三项。下一轮的扫描要按「谁能写这张表」列算式的每一项，而不是按上一处 bug 的表名。
 
