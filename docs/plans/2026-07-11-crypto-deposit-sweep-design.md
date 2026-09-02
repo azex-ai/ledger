@@ -75,13 +75,22 @@ chain_cursors (
 汇合点 `IngestDeposit(sighting)`：
 
 - 首个确认 → `CreateBooking`（classification=deposit），幂等 key =
-  **`deposit-{chain_id}-{tx_hash}-{txlog_seq}`**。`txlog_seq` 是该 tx 内部第几个命中我们地址的
-  Transfer（tx 内确定），**不用块级 log_index**（reorg 后必变 → 重复入账）。
+  **`deposit-{chain_id}-{tx_hash}-{txlog_seq}`**。`txlog_seq` 是该 log 在其 **tx receipt 内的
+  零基位置**（tx 内确定、与查询地址集无关），**不用块级 log_index**（reorg 后必变 → 重复入账）。
+  ⚠️ 2026-09-02 更正（G-C2）：原措辞「该 tx 内部第几个命中我们地址的 Transfer」把一个会变的集合
+  写进了定义 —— watcher 查全量注册地址、registration rescan 只查一个地址，同一笔 tx 命中两个注册
+  地址时两条路径派生出不同的键（双记账 / 合法充值进死信）。以 receipt 位置为准，见 I-20。
 - booking payload 只含稳定身份字段（chain_id/tx_hash/token/to/amount）；confirmations、
   见到时块高等易变字段走 Transition metadata —— 否则双路径触发三态幂等 ErrConflict。
 - 确认数 ≥ 该链阈值 → `RunInTx`：`Transition(confirmed)` + `ExecuteTemplate("deposit_confirm")`，
   EventID 原子互链（即 examples/crypto-deposit 手工流程的编排化）。
 - 阈值前 tx 消失（浅 reorg）→ `Transition(failed)`，无 journal。确认阈值是 reorg 防线。
+  ⚠️ 2026-09-02 补齐「消失」的判定标准（G-M1）：单次 `TxIncluded=false` 不算消失（落后节点、
+  负载均衡后端视图不一致都会这样答，而这个窗口正是节点最容易分歧的时候），需 **连续 N 次**
+  未命中（N = `service.WithShallowReorgMisses`，默认 3）。`failed` 是终态且幂等键会把日后
+  同一笔转账的观测都解析回这个 booking，所以这是不可逆的自动拒付 —— 打 failed 的同时会往
+  `deposit_reorgs`（kind=`shallow_reorg_failed`）落一行未结案记录，若该 tx 后来回到链上，
+  reorg 复检会持续告警要人工处置（库自身无法再入账）。
 - token→currency 映射走 `ChainSet`（每链 token 合约地址 → currency code + **decimals**，
   adapter 边界归一为 decimal.Decimal）。未注册 token 忽略 + 日志。
 - 白名单限定标准 USDT/USDC → 豁免 fee-on-transfer 面值多记问题（写进约束：扩白名单时必须重审）。

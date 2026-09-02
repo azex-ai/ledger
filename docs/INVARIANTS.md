@@ -911,13 +911,36 @@ runtime validation.
 ## I-20: Deposit booking idempotency survives a reorg
 
 A crypto deposit's booking idempotency key is
-`deposit-{chain_id}-{tx_hash}-{txlog_seq}`, where `txlog_seq` is the
-transfer's ordinal position **among the logs in that transaction that credit
-one of our registered addresses** (tx-local, deterministic) — never the
-chain's block-level `log_index` (design doc §3). A reorg that re-includes the
-same transaction in a different block reassigns block-level log indices, but
-never reorders the transfers within the transaction itself, so `txlog_seq`
-for a given transfer is stable across the reorg while `log_index` is not.
+`deposit-{chain_id}-{tx_hash}-{txlog_seq}`, where `txlog_seq` is the log's
+zero-based position **among all logs in that transaction's receipt** — never
+the chain's block-level `log_index`, and never a position within whatever
+subset of logs a particular query happened to return (design doc §3).
+
+Two properties are required of that definition, and only a
+transaction-internal one has both:
+
+1. **Independent of who is looking.** The watcher queries `eth_getLogs` for
+   every registered address at once; a registration rescan queries exactly
+   one address. Any definition phrased in terms of "the logs that credit one
+   of *our* registered addresses" is a function of a set that differs between
+   those two callers, so a transaction crediting two registered addresses
+   yielded a different `txlog_seq` — and therefore a different idempotency
+   key — depending on which path saw it first.
+2. **Stable when the transaction is re-mined.** A reorg that re-includes the
+   same transaction in a different block reassigns block-level log indices,
+   but does not reorder the logs the transaction itself emits. Keying off
+   `log_index` would mint a fresh key for an already-credited transfer.
+
+⚠️ Until the 2026-09-02 remediation (G-C2) this invariant was stated with the
+first property violated: `txlog_seq` was the hit's ordinal among the logs the
+current call returned. The consequences were both directions of wrong — the
+same transfer booked twice (rescan first, then the watcher deriving a
+higher-numbered, unused key for it), or a legitimate deposit dead-lettered
+forever (watcher first, then the rescan deriving a key already held by a
+different holder's transfer, hitting `ensureBookingMatchesInput`'s payload
+mismatch). It was reachable without an attacker — one multisend crediting two
+registered addresses — and, because deposit addresses are publicly derivable
+(`salt = holder`, factory address public), constructible on purpose.
 
 **Why**: both ingestion paths (the chains/evm watcher's `eth_getLogs` poll
 and the onchain webhook) may observe the same transfer more than once as
@@ -932,10 +955,18 @@ instead of creating a duplicate.
 
 **Enforced by**:
 - `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
-  comment and shape deliberately exclude any block-level log index; both
-  ingestion paths (chains/evm watcher and the `channel/onchain` webhook
-  bridge) must derive this from the transaction's internal transfer
-  ordering, not from `eth_getLogs`' block-scoped `logIndex`.
+  comment states the single admissible definition (receipt-relative
+  position). Both ingestion paths must derive it that way: the chains/evm
+  watcher and an external scanner feeding the `channel/onchain` webhook
+  bridge.
+- `evm.Reader.FetchDeposits` (`chains/evm/reader.go`) — for every
+  transaction that credited a registered address in the scanned window it
+  reads the transaction receipt (`eth_getTransactionReceipt`) and maps each
+  hit log's block-level index to its position inside that receipt. A receipt
+  that cannot be read fails the whole scan rather than falling back to a
+  query-dependent number: with I-52's cursor semantics the caller then
+  retries the same window, so failing closed costs a tick, while guessing
+  costs a duplicate or lost deposit.
 - `service.Onchain`'s `depositIdempotencyKey`
   (`deposit-{chain_id}-{tx_hash}-{txlog_seq}`) is constructed once, at
   booking-creation time, by the shared `IngestDeposit` orchestration — not
@@ -976,6 +1007,20 @@ instead of creating a duplicate.
   `TxLogSeq` from the payload's tx-local `txlog_seq` field, never a
   block-scoped index; also requires `block_number` per
   `core.DepositSighting.Validate`)
+- `evm.TestReader_FetchDeposits_TxLogSeqIsIndependentOfAddressFilter`
+  (`chains/evm/reader_test.go`) — the pin this invariant lacked entirely: one
+  transaction crediting two registered addresses, queried once with both
+  addresses (the watcher) and once with one (a registration rescan), must
+  derive the same `TxLogSeq` for the same transfer, and that value must be
+  the receipt position rather than the filtered-result position. Every
+  earlier pin listed above goes through the store, a hand-fed sighting, or
+  the webhook parser — none of them through the watcher's own derivation,
+  which is where the defect lived.
+- `evm.TestReader_FetchDeposits_SkippedLogsLeaveATraceAndDoNotShiftSeq` (a
+  log dropped for an unlisted token or a malformed payload must not renumber
+  the surviving transfers — the same defect's second face)
+- `evm.TestReader_FetchDeposits_UnreadableReceiptFailsClosed` (no sighting may
+  be produced from a transaction whose receipt could not be read)
 
 ## I-21: Review holds a deposit with zero ledger effect
 
@@ -3408,6 +3453,34 @@ this operates at) instead of defaulting it to zero;
 - `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
   `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
   `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+- `service.TestOnchain_Sweep_GasBumpCarriesPriorTxHash` /
+  `TestOnchain_Sweep_GasBumpFallsBackToChannelRefAfterRestart` — point 5's
+  SERVICE half, which had no pin at all until the 2026-09-02 remediation
+  (G-M10): the three `chains/evm` tests above only cover the pure fee
+  arithmetic, so reverting `service/onchain.go`'s gas-bump call site to pass
+  `priorTxHash: ""` — i.e. the whole of point 5, from the caller's side —
+  left the suite green. Both existing revival tests configured
+  `MaxSweepBumps(0)`, so the gas-bump branch was never executed by anything.
+  The second test covers the restart case specifically: with the in-memory
+  tracking gone, the bump must fall back to the booking's persisted
+  `ChannelRef`, which is the durable hash point 5 is about.
+- `chains/evm.TestSweeper_ReplacementGasPrice_QuotesTheEscalatedBidInGwei` /
+  `TestSweeper_ReplacementGasPrice_FallsBackToMarketOnFirstDispatch` and
+  `service.TestOnchain_Sweep_GasBumpRespectsGasCeiling` — point 5's final
+  clause ("`GasCeiling` bounds what will really be paid") held only for a
+  FIRST dispatch. A replacement bids `max(market basis, prior fee x 1.125)`,
+  which the market basis does not bound, so on the retry path — the only
+  path where the fee escalates — the ceiling was being compared against a
+  quantity that could be arbitrarily smaller than the bid (G-M4). The gate
+  now reads `core.Sweeper.ReplacementGasPrice` for the same
+  `(signerNonce, priorTxHash)` pair the ensuing `BatchSweep` is called with.
+- `service.TestOnchain_Sweep_RevivedDispatchRespectsGasCeiling` — the same
+  gap's sibling, at the other call site: `advanceSweep`'s dispatch branch is
+  also how a REVIVED sweep booking goes out, and a revival keeps the failed
+  booking's nonce, so the adapter still bids over the exhausted bump
+  ladder's floor while the only gate that ran (`sweepTick`'s) had compared
+  the market price, before the nonce was even known. Both dispatch and bump
+  now gate on the bid for their own nonce.
 
 > **Correction (m-10 fix on point 4, `.local/independent-review-2026-08-26.md`,
 > third-pass independent review).** Point 4 as originally written and its
@@ -4415,9 +4488,6 @@ ASTs. It is tuned to be noisy about anything shaped like the bug and to force
 a classification, not to be exact. Someone determined to evade it can, by
 writing the expression in a shape it does not recognise — but they cannot do
 it *by accident*, which is how all eighteen copies got there.
-
-## How to add a new invariant
-
 ---
 
 ## I-51: A caller-supplied link on a journal is a claim the store verifies, never a label it records
@@ -4526,3 +4596,96 @@ journal is balanced, and the booking simply never settles.
   stranger's journal is refused, and then the booking's OWN journal still
   posts against the same event, proving the refusal consumed neither
   `journal_id`; a second claim on the now-linked event is refused too.
+## I-52: The forward-scan cursor never outruns ingestion
+
+`chain_cursors.last_scanned_block` advances for a window `[from, to]` only
+after **every** deposit sighting `evm.Reader.FetchDeposits` returned for that
+window has either been ingested successfully or been written to
+`ingest_dead_letters`. A sighting whose ingestion failed in a way a retry
+could fix leaves the cursor where it is, so the whole window is re-scanned on
+the next tick (`IngestDeposit` is idempotent, so re-scanning has no other
+effect). The cursor is also monotonic in storage: `SetChainCursor` only
+applies a strictly greater block, so no replica can drag it backwards.
+
+**Why**: below the cursor, nothing ever looks again. The forward scan starts
+at `cursor + 1`; the pending/confirming recheck loop only revisits bookings
+that already exist; a registration rescan only covers newly registered
+addresses. So a sighting dropped while the cursor advanced past it is a real,
+on-chain deposit that the ledger will never see again — the user's money is
+on chain and absent from the books. Before this invariant (G-C2's sibling
+G-C1, 2026-09-02 audit) an ingest failure produced one log line — into
+`core.NopLogger()` by default — and the cursor advanced regardless, while
+`Metrics.ChainCursorLag` kept reporting a healthy zero *because* the cursor
+kept moving. The same logical action next door (`processRegistrationRescan`)
+had had the correct semantics all along, which is what made this a
+same-shape sibling rather than a novel bug.
+
+The deliberate asymmetry: a sighting whose rejection is **deterministic**
+(`core.IsRetryable` false — a payload conflict on an existing key, a currency
+that was never registered, an amount finer than the currency's exponent) is
+dead-lettered and then skipped. Holding the cursor for it would convert one
+unbookable deposit into "this chain ingests nothing, ever again", and the
+dead-letter row means it is recorded rather than lost. Everything else,
+including an unclassified error, holds the cursor.
+
+**Enforced by**:
+- `service.Onchain.scanChainOnce` (`service/onchain.go`) — collects blocking
+  failures and returns without calling `SetCursor`; classifies via
+  `permanentIngestFailure` (`core.IsRetryable`); records deterministic
+  rejections through `DeadLetterRecorder`. `Metrics.ChainCursorLag` is
+  reported against the block actually scanned, so a held cursor shows up as
+  a growing lag.
+- `service.Onchain.escalateWatcherStall` — after
+  `WithWatcherStallAlertAfter` consecutive failed ticks on one chain, every
+  still-blocking sighting is dead-lettered and a wedged-watcher error is
+  logged; the cursor still does not move.
+- `service.Onchain.processRegistrationRescan` — same classification, same
+  fail-closed advance semantics for the historical rescan path.
+- `postgres.SetChainCursor` (`postgres/sql/queries/chain_cursors.sql`) —
+  `WHERE chain_cursors.last_scanned_block < EXCLUDED.last_scanned_block`.
+- `service.newWatchLockedJob` — the per-chain watch loop runs under
+  `advisoryLockKey("job:onchain_watch:<chainID>")`, so concurrent replicas
+  cannot undo a deliberately held cursor.
+
+**Pinned by**:
+- `service.TestOnchain_Watch_HoldsCursorWhenIngestFails` (a transient
+  ingest failure leaves the cursor unset across two ticks, dead-letters the
+  blocking sighting on reaching the escalation threshold, and books the
+  deposit exactly once when ingestion finally succeeds)
+- `service.TestOnchain_Watch_DeadLettersPermanentRejectionAndAdvances` (a
+  deterministically unbookable sighting is recorded and only then skipped)
+- `postgres.TestChainCursorStore_SetCursor_IsMonotonic`
+- `service.TestOnchain_Watch_SkipsWhenAnotherReplicaHoldsTheLock` /
+  `TestOnchain_Watch_RunsWhenLockIsFree`
+
+---
+
+## I-53: The forward scan stays behind the reorg-mutable tip
+
+The watcher never scans (and therefore never marks scanned) a block newer
+than `latest - Confirmations + 1`, where `Confirmations` is the chain's
+configured confirmation threshold (`core.ChainConfig.Confirmations`, floored
+at 1). The registration rescan path uses the same bound.
+
+**Why**: `Confirmations` is the consumer's own statement of how deep a reorg
+they expect to be surprised by. Scanning to the head marked blocks scanned
+that a reorg can still replace, and the cursor never goes back (I-52): a
+transfer that exists only in the replacement block — reordered in, or
+included from the mempool by the replacement — had never been scanned and
+never would be. One consequence for alerting: `Metrics.ChainCursorLag`'s
+healthy baseline is `Confirmations`, not 0.
+
+**Enforced by**:
+- `service.Onchain.scanChainOnce` / `processRegistrationRescan` via
+  `confirmationDepth(cfg)` (`service/onchain.go`).
+
+**Pinned by**:
+- `service.TestOnchain_Watch_NeverScansPastConfirmationDepth`
+  (`LatestBlock` 1000 with `Confirmations` 12: the window handed to
+  `FetchDeposits` ends at 989 at the latest, and the cursor never claims
+  more)
+
+## How to add a new invariant
+
+---
+
