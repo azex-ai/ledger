@@ -1710,3 +1710,5 @@
 | A-M3 / A-N4（W1-sign） | holder 面四处 `balance_role <> ''` 收敛为 `NOT IN ('', 'memo')` | 无 API 变更。行为变化：提现手续费重新出现在 `ListHolderTransactions` 里；只有 memo 记账的币种不再出现在 `ListHolderBalances` 中 |
 | A-M1（W1-sign） | `GET /holders/{h}/trends` 的 `inflow` / `outflow` 语义由「credit / debit 合计」改为 normal_side-aware 的「使余额上升 / 下降的合计」 | 对 debit-normal 分类（`main_wallet` / `locked`）两列数值互换。任何按这两列画图的消费方在升级后会看到方向反转 —— 那是修正，不是回归 |
 | A-M5（W1-sign） | `RollupAdapter.GetSnapshotBalances` 在检出回溯写入时返回**实时重算的完整维度集**（可能多于缓存里的行）；`GetBalanceTrends` 对被回溯写入作废的天数同样实时重算 | 无 API 变更。消费方若假设 `GetSnapshotBalances` 的行数等于快照表行数，需要放弃该假设 |
+| w1-facade 实测 | `DATABASE_URL=<共享 PG>` 模式下 `go test ./...` 假红：`internal/postgrestest.isolatedConnection` 的库名是 per-binary 计数器 `ledger_test_<n>`，多个测试二进制共享一台 PG 必撞（实测 `database "ledger_test_13" already exists`）；testcontainers 模式每二进制一台 server 所以看不出 | D-tests（新增条目 F-X1） |
+| w1-facade rebase | `docs/INVARIANTS.md` 的「How to add a new invariant」标题出现两次，且 I-51 被追加在它之后；编号门禁只查序号不查位置 | W3-lead |
