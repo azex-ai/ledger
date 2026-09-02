@@ -1140,11 +1140,32 @@ be sitting in the user's balance by the time a human looks at the queue.
 
 The application-facing database role, `ledger_app`, can `SELECT`/`INSERT`/
 `UPDATE` ordinary tables and `SELECT`/`INSERT` (never `UPDATE`/`DELETE`) on
-`journal_entries` — but it cannot `DROP`, `TRUNCATE`, `ALTER`, manage
-triggers, or create any object, anywhere in the schema. This is true from
-the moment the schema exists, independent of who currently owns the
-tables: `ledger_app` was never granted anything beyond
+`journal_entries` — but it can issue no DDL of its own: no `DROP`,
+`TRUNCATE`, `ALTER` or trigger management, and it cannot create an object by
+naming one. This is true from the moment the schema exists, independent of
+who currently owns the tables: `ledger_app` was never granted anything beyond
 `SELECT`/`INSERT`/`UPDATE` and will never own anything.
+
+**The DDL it CAN reach, and only through**: migration 007 grants `EXECUTE` on
+two `SECURITY DEFINER` functions, `ledger_create_monthly_partition` and
+`ledger_rebalance_default_partition` (I-35). Between them they issue `CREATE
+TABLE ... PARTITION OF`, `DETACH`/`ATTACH PARTITION` and a `TRUNCATE` of the
+default partition — so the sentence above has to be read precisely: what
+`ledger_app` cannot do is compose DDL. What it can do is call two functions
+that each perform one fixed, argument-validated shape of it, on
+`journal_entries` alone, running as `ledger_owner` rather than as itself.
+
+This wording was corrected on 2026-09-02: the invariant previously said
+`ledger_app` "cannot ... create any object, anywhere in the schema" and
+"cannot `TRUNCATE`", both of which migration 007 had made false, while I-35
+described the exception as an established fact. Two invariants contradicted
+each other for two audit rounds, and the pin could not see it because it only
+tried bare statements — "cannot do X directly" and "cannot do X" differ by a
+dimension nothing was testing. The reason it matters is not the two functions
+(013 and 021 constrain both arguments and both are load-bearing for partition
+maintenance without an owner-privileged serving pool): it is that a reader
+doing threat modelling off I-22 would conclude a leaked app credential
+produces no DDL surface at all.
 
 **The one exception, and what it is not**: migration 002 grants `DELETE` on
 `webhook_nonces`. That table is a replay cache holding no financial data, and
@@ -1172,6 +1193,39 @@ a table is required to GRANT `ledger_app`/`ledger_ro` on it explicitly
 (contracts.md §9 point 3). The pin below (`TestGrantCoverage_*`) makes that
 rule self-enforcing going forward instead of depending on a migration
 author remembering it (`working-agreements` §5).
+
+Coverage is every **table, sequence, partition and function** in `public`, as
+of 2026-09-02. The first two were covered from the start; the other two were
+blind spots that each hid a real finding for two rounds. Partitions were
+excluded by the main query's `NOT relispartition`, so a partition granted
+separately was invisible — `TestPartitionACL_EveryPartitionCarriesTheParentShape`
+now derives each partition's expected ACL from `journal_entries` itself.
+Functions were not looked at at all, which is how 007's two `EXECUTE` grants
+sat unexamined; `TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist`
+asserts each role's `EXECUTE` set equals a written whitelist, and migration
+021 revokes the `PUBLIC` default that made every guard function in the schema
+callable by everyone.
+
+**Ownership is part of the grant story, not separate from it** (2026-09-02,
+migrations 019/021): every relation and routine in `public` must be owned by
+`ledger_owner`. The `Why` paragraph above explains what ownership confers that
+`GRANT` cannot; the corollary is that an object owned by anyone else is
+outside the model this invariant describes, whether or not its ACL looks
+right. That applied to everything migrations 002–018 created — including both
+`SECURITY DEFINER` functions, which therefore ran with the *bootstrap*
+credential's privileges rather than `ledger_owner`'s. See I-57.
+
+**A table carrying a credential-shaped column may not be granted table-level
+`SELECT` to `ledger_ro`** (2026-09-02, D-m3). Migration 007 took
+`webhook_subscribers` away from `ledger_ro` because reading `secret` "does not
+just disclose data, it hands a read-only credential the ability to forge signed
+event deliveries to any subscriber" — but the grant-coverage pin went on
+requiring table-level `SELECT` for `ledger_ro` on every other table, so the next
+table with a signing key would have gone red until its author granted the key
+to the BI role. The requirement is now derived from
+`information_schema.columns`: a column matching
+`secret|password|passwd|token|private_key|seed|hmac|credential` obliges the
+table to be column-scoped, and obliges that column to be unreadable.
 
 **Note on the configuration tables (migration 003)**: the guard set is not
 limited to the tables that record money. A per-journal authorization signature
@@ -1216,7 +1270,17 @@ automatically — and any table with only a *partial* guard (`classifications`,
   `journal_entries`. Those last two subtests are what keep the refusals
   from being vacuous: a role granted nothing at all would also fail every
   forbidden operation, so the pin only means something because the
-  permitted operations are asserted to succeed in the same run.
+  permitted operations are asserted to succeed in the same run. Two further
+  subtests (2026-09-02) close the "directly" gap described above: it CAN
+  create a partition through `ledger_create_monthly_partition` — and that
+  partition comes out owned by `ledger_owner` — and it CANNOT call a function
+  outside the whitelist.
+- `postgres.TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist` /
+  `postgres.TestPartitionACL_EveryPartitionCarriesTheParentShape` — the two
+  layers grant coverage never read. The first asserts each role's `EXECUTE`
+  set is exactly the reviewed list, so a function reachable by the `PUBLIC`
+  default is a capability nobody granted; the second derives every
+  `journal_entries` partition's expected ACL from the parent.
 - `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant`
   — a partition created *after* the
   role grants were issued is still writable by `ledger_app` through the
@@ -1460,6 +1524,26 @@ docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
   freeze/overdraft floor (`postgres/account_policy_enforce.go`), so widening
   its dimension in the same statement that flips `status` to `active` is the
   same class of attack as `balance_role`'s promotion above.
+
+  ⚠️ **Read that list again: the three mutable columns ARE the enforcement
+  knobs.** The guard protects which account a policy applies to, not what the
+  policy says. `UpsertAccountPolicy` writes `status`, `min_balance` and
+  `enforce_min_balance`, so the whitelist has to permit them, so a credential
+  with raw SQL can unfreeze an account and move its overdraft floor to
+  -1,000,000 in one statement -- measured, as `ledger_app`, and it succeeds
+  both before and after 2026-09-02. That is not a defect in the guard; it is
+  the limit of what a column whitelist can do for a table whose contents are
+  the control.
+
+  What changed on 2026-09-02 (migration 020, D-M3) is the second layer: that
+  statement now lands a row in `config_table_changes` carrying the full
+  before/after and the authenticated role. Before, `account_policies` was the
+  one table in this family with a whitelist that passed the attack AND no
+  audit trigger -- excluded from the audit set on the grounds that it had an
+  application-level trail in `account_policy_changes`, which the application
+  writes and an attacker with raw SQL does not. Neither table recorded
+  anything. It could not be stopped and could not be seen; now it is seen,
+  and I-58 covers the general rule.
 - `account_policy_changes` — its own audit trail — is append-only: no
   `UPDATE`, no `DELETE`.
 - `bookings.journal_id` is set-once (`NULL -> non-NULL` only), matching the
@@ -1584,6 +1668,13 @@ three now fails the test loudly instead of defaulting to full access.
   - `TestAccountPoliciesGuard`
   - `TestBookingsAndEventsGuards`
   - `TestIdempotencyReceiptTablesAreAppendOnly`
+- `postgres.TestAccountPolicyEnforcementKnobChangeIsAudited` — the one case
+  in this list where the attack SUCCEEDS by construction (the guard has to
+  permit the three enforcement columns; see above). It runs the unfreeze +
+  overdraft-floor statement as `ledger_app`, requires it to succeed, and then
+  requires the resulting `config_table_changes` row to carry the before/after
+  and the authenticated role. Asserting the refusal here would have been
+  asserting something untrue.
 - `postgres/grant_coverage_test.go`'s
   `TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants` now
   fails on any table absent from its append-only/update-revoked/reviewed
@@ -2702,6 +2793,18 @@ functions — `ledger_create_monthly_partition` and
 its privileges regardless of the caller, so `ledger_app`'s grant is `EXECUTE`
 on exactly these two functions — nothing that looks like DDL.
 
+⚠️ **That ownership sentence was false from migration 007 until 019/021**
+(2026-09-02, D-M1). 001_baseline transfers ownership with a catalogue sweep at
+the bottom of its own file, so nothing built by a later migration was ever
+swept: measured on a clean install of 001–015, both of these functions came
+back owned by the credential that ran the migration — a superuser in the
+common install — and `ledger_app` holds `EXECUTE` on both. The privilege this
+invariant says is `ledger_owner`'s was whatever the bootstrap credential had.
+007's header argues the blast radius shrinks *because* these run as
+`ledger_owner`; that premise did not hold in any deployment. Migration 019
+extracts the sweep into a callable `ledger_resweep_ownership()`, 021 runs it,
+and I-57 makes it a gate rather than a sentence.
+
 **Why**: all four statements the old direct-DDL version issued are
 owner-gated; `ledger_app` holds none of them (confirmed: `CREATE TABLE
 ... PARTITION OF` → `permission denied for schema public`, `DETACH
@@ -2734,8 +2837,28 @@ additionally validates its name argument against
 `^journal_entries_y[0-9]{4}m[0-9]{2}$` before using it in `format(%I)`,
 since `EXECUTE` on the function is itself a `ledger_app`-reachable
 capability and must not accept an arbitrary identifier.
+`ledger_rebalance_default_partition` validates its date range the same way and
+for the same reason (migration 021, D-m1): month-aligned, non-inverted, and at
+most 120 months. Migration 013 wrote that argument down about the sibling
+function and did not carry it across, so until 021 a single call could create
+three centuries of partitions — measured as `ledger_app`, a two-year range
+produced 24 partition tables and 96 dependent relations that `ledger_app`
+cannot drop, each call holding `ACCESS EXCLUSIVE` on `journal_entries`. The
+cap is on the caller's arguments only; the widening the function then performs
+to cover rows already sitting in the default partition stays unbounded, or a
+lapsed horizon would be unrecoverable.
 
 **Pinned by**:
+- `postgres.TestPartitionFunctions_OwnedByLedgerOwner` — the assertion this
+  invariant stated as fact and none of its pins checked. The three that
+  existed verified that the functions can be called, that the name argument is
+  validated, and that `search_path` includes `pg_temp`; "owned by whom" was
+  the one property that mattered for the `SECURITY DEFINER` claim and the one
+  nobody looked at.
+- `postgres.TestLedgerRebalanceDefaultPartition_RejectsUnboundedRange` — runs
+  the measured attack (a three-century range) plus the inverted and
+  non-month-aligned cases as `ledger_app`, and requires the legitimate
+  caller's own range shape to still succeed so the refusals are not vacuous.
 - `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` — rewritten
   for this migration: it now uses a single `ledger_app` pool for both
   creating the partition and inserting into it (previously required a
@@ -5181,3 +5304,178 @@ both documented in that package and in `docs/RUNBOOK.md`:
   the retention is real and observable.
 - `anchors/r2.TestAnchor_PublishIsCreateOnlyPerSeq` /
   `TestAnchor_HeadFailsClosedOnAForeignObject`.
+## I-57: Every object in the schema belongs to `ledger_owner`, and a migration that creates one cannot forget to say so
+
+(`docs/audits/2026-09-02-deep-audit/threat-model.md`, "007 的两个 SECURITY DEFINER 分区函数不属于 ledger_owner"; `docs/plans/2026-09-02-remediation-contracts.md` §4, D-M1.)
+
+**Rule**: every relation (`r`, `p`, `S`, `v`, `m`) and every routine in schema
+`public` is owned by `ledger_owner`. Not "should be", and not "at install
+time": at every point after `postgres.Migrate` returns, checked by enumerating
+`pg_class` and `pg_proc` rather than by trusting any migration to have done it.
+
+**Why**: I-22 explains what ownership confers that `GRANT` cannot — `ALTER`,
+`DROP`, `TRUNCATE` and trigger management are owner-gated and cannot be
+granted. Two consequences follow, and 001_baseline's own header states both
+before the schema goes on to violate them:
+
+1. **A function's owner can rewrite its body.** Replacing
+   `ledger_block_mutation`'s body with `BEGIN RETURN NEW; END` turns every
+   append-only guarantee in this schema off, silently, while leaving every
+   trigger in place and firing. 001 calls function ownership "part of the
+   tamper-evidence story, not an afterthought to it".
+2. **A `SECURITY DEFINER` function runs as its owner.** `ledger_app` holds
+   `EXECUTE` on two of them (I-35). Whoever owns those functions is the
+   privilege a leaked application credential actually reaches through them.
+
+And a third, operational: the bootstrap credential keeps a permanent `ADMIN
+OPTION` on `ledger_owner`, which 001 acknowledges and answers by telling
+operators to rotate or retire that credential after install. `DROP ROLE`
+refuses while the role still owns objects, so that advice was not executable.
+
+**What was wrong**: 001 transfers ownership with a catalogue sweep at the
+bottom of its own file, and argues — correctly, about itself — that "sweeping
+the catalogue instead of a list of names is what makes both classes impossible
+here". It made them impossible *inside 001*. Nothing swept anything created
+afterwards, and a full-repo grep for `relowner`/`proowner`/`OWNER TO` returned
+only 001's own up/down pair: no test, no other migration, nothing. Measured on
+a clean install of 001–015: 4 tables, 4 sequences and 9 functions owned by the
+migration credential, including both `SECURITY DEFINER` partition functions and
+every guard and audit trigger function 003/006/010 introduced.
+
+**Why it stayed true for two audit rounds**: `grant_coverage_test.go` is the
+strictest gate in this schema — an unclassified new table fails it outright —
+and it reads ACLs. Ownership is not an ACL. Neither is a function's `EXECUTE`
+privilege, which is the other half of the same blind spot (I-22's grant
+coverage note).
+
+**Enforced by**:
+- `ledger_resweep_ownership()` (`019_ownership_resweep.up.sql`) — the sweep
+  extracted from 001 as an idempotent, callable function, skipping objects
+  already owned by `ledger_owner`. That skip is load-bearing, not an
+  optimization: the migration credential holds `SET` but not `INHERIT` on
+  `ledger_owner`, so once an object's owner IS `ledger_owner` it no longer
+  passes Postgres's ownership check for it and a re-issued `ALTER` fails.
+- `SELECT ledger_resweep_ownership();` as the last statement of
+  `021_least_privilege_hardening.up.sql`, and of every migration batch after
+  it. Last, and once: transferring ownership is a one-way door within a run,
+  so a sweep placed before a migration that still has to `REVOKE` or `CREATE
+  OR REPLACE` a 001-created object breaks that migration. 019's header
+  documents the manoeuvre for a future migration that must modify an
+  already-transferred object.
+- `schema_migrations` is the sweep's one named exclusion, with its reason in
+  the function body: golang-migrate creates it as the runner and 001 re-grants
+  the runner access through a temporary membership upgrade only the bootstrap
+  credential can perform. It is already `ledger_owner`'s after 001, so the
+  exclusion costs nothing and the pin asserts that rather than assuming it.
+
+**Pinned by**:
+- `postgres.TestObjectOwnership_EverythingInPublicBelongsToLedgerOwner` —
+  enumerates every relation and routine and fails on any not owned by
+  `ledger_owner`. ⚠️ Expected to go red on a migration that creates an object
+  and does not end with the sweep. The fix is the call, not an exception.
+- `postgres.TestObjectOwnership_SecurityDefinerFunctionsRunAsLedgerOwner` —
+  the same property stated as the thing that matters: every `prosecdef`
+  function's owner, since that is the privilege its callers reach.
+- `postgres.TestPartitionFunctions_OwnedByLedgerOwner` — I-35's own missing
+  assertion, stated where its other pins live.
+- `postgres.TestMigrate_InstallsUnderNonSuperuserBootstrapCredential` — the
+  end state must be identical regardless of which credential installed it.
+
+## I-58: A change that a guard lets through is recorded, and the record is not writable by the role it is about
+
+(`docs/audits/2026-09-02-deep-audit/threat-model.md`, "account_policies 的守卫白名单恰好放行了它唯一要保护的三个风控开关" / "006 新建的两张审计表对 ledger_app 开放 INSERT"; `docs/plans/2026-09-02-remediation-contracts.md` §4, D-M3 / D-M4 / D-m10.)
+
+**Rule**, in three parts:
+
+1. **Coverage is derived, not listed.** Every table carrying a *partial*
+   guard — a `BEFORE UPDATE` row trigger that is not the blanket
+   `ledger_block_mutation()` refusal — carries an `AFTER UPDATE` trigger
+   writing the before/after row into `config_table_changes`. "Partial guard"
+   means some updates are meant to pass, and by construction the guard records
+   none of the ones that do; that is exactly the population that needs a
+   second layer. The predicate is I-22's ACL derivation run backwards, and it
+   selects eleven tables where migration 006 named four.
+2. **The record names the role that made the change, and `ledger_app` cannot
+   write it.** The two DB-written audit tables (`config_table_changes`,
+   `reconcile_scan_cursor_changes`) grant `ledger_app` no `INSERT` and no
+   sequence `USAGE`; their trigger functions are `SECURITY DEFINER` owned by
+   `ledger_owner` (I-57), and they record `session_user` — the role that
+   authenticated, which `SET ROLE` cannot move.
+3. **Somebody can read it.** `core.ConfigChangeReader`, reachable as
+   `svc.ConfigHistory()`, queries all three forensic tables with filters and
+   keyset paging.
+
+**Why**: `account_policies` is the case that makes all three necessary at
+once. It is the only DB-enforced freeze/overdraft floor, and its guard's
+whitelist necessarily contains `status`, `min_balance` and
+`enforce_min_balance` — `UpsertAccountPolicy` writes them. So the attack from
+the previous audit round ("风控冻结、透支下限都可被一条 UPDATE 取消") still
+succeeds verbatim, measured as `ledger_app`, and cannot be stopped at the
+guard without breaking the legitimate write. Migration 006 then excluded the
+table from the audit triggers, reasoning that it already had an
+application-level trail in `account_policy_changes` — a table the application
+writes, in the application's transaction, by the path an attacker with raw SQL
+does not take. The result was the one table in the family that could neither
+be stopped nor seen: zero rows in either trail after a successful unfreeze.
+
+The two halves of part 2 are one finding, not two. An append-only table the
+suspect can append to answers "who" with a value the suspect chose — measured
+before migration 020, `ledger_app` inserted a row reading
+`changed_by='ledger_owner'`, `changed_at` 30 days in the past — and can be
+flooded until filtering by table or time is worthless. Making the writer
+`SECURITY DEFINER` is only an improvement if the definer is the right role,
+which is why this ships in the same batch as I-57.
+
+Part 3 is not documentation polish. Migration 006 built the trail and nothing
+read it: a full-repo grep outside migrations and `web/` found the table names
+only in INVARIANTS prose and in tests. By `working-agreements` §3's own test —
+if this step had never run, would anything visible be different? — the answer
+was no on every surface an operator reaches. Evidence that cannot be read is
+not detection.
+
+**What is deliberately NOT claimed**: the application-written
+`account_policy_changes` keeps its `ledger_app` `INSERT`, because it carries a
+business `actor_id` no trigger can produce and revoking it would delete the
+only operator attribution the ledger has. So the two trails answer different
+halves — "which operator" and "which database role" — and only the second is
+unforgeable. Read together, that asymmetry is itself the signal: a
+`config_table_changes` row for `account_policies` with no matching
+`account_policy_changes` entry is a change nobody in the application made.
+
+**Enforced by**:
+- `020_audit_trail_integrity_and_coverage.up.sql` — the catalogue-derived
+  `DO` loop attaching the audit trigger, `SECURITY DEFINER` +
+  `session_user` on both writer functions, and `REVOKE INSERT` /
+  `REVOKE USAGE, SELECT` on the two tables and their sequences.
+- `events` is the one carve-out, and it is a column set rather than a table:
+  its delivery bookkeeping columns (`delivery_status`, `attempts`,
+  `next_attempt_at`, `delivered_at`) are subtracted inside the `WHEN` clause,
+  because they are rewritten on every poll and every retry and have nothing to
+  do with the ledger's rules. A change to `journal_id`, `to_status` or
+  `amount` — the columns 006 lists as the ones that must not be writable —
+  still records. `bookings` and `reservations` are audited in full at business
+  rate; that is a real capacity change and `docs/CAPACITY.md` sizes for it.
+- The append-only guards from 006 still hold: audit rows cannot be updated or
+  deleted, including by `ledger_owner`, whose privileges the `SECURITY
+  DEFINER` functions now run with.
+
+**Pinned by**:
+- `postgres.TestPartialGuardTablesAreAudited` — derives the partial-guard
+  population from `pg_trigger` and requires each to carry an audit trigger.
+  ⚠️ Goes red when a migration adds a partial guard without one.
+- `postgres.TestAccountPolicyEnforcementKnobChangeIsAudited` — runs the
+  unfreeze + overdraft-floor statement as `ledger_app`, requires it to
+  SUCCEED (the guard has to permit it), and requires the resulting audit row
+  to carry the before/after and `changed_by='ledger_app'`.
+- `postgres.TestLedgerAppCannotWriteTheAuditTrail` — the three forge attempts
+  (both tables, plus `nextval` on the sequence), each measured as succeeding
+  before 020, plus a subtest requiring the legitimate trigger path to still
+  write, so that "the audit trail went quiet" cannot pass as a fix.
+- `postgres.TestAuditTrailRowsStayImmutable` — `UPDATE`/`DELETE` refused on
+  all three tables, run as the owner rather than as `ledger_app` so that an
+  ACL refusal cannot stand in for the trigger's.
+- `postgres.TestConfigHistory_ReadsBackATamperedRule` /
+  `postgres.TestConfigHistory_ReadsScanCursorWrites` — tamper, then read the
+  tamper back through `ledger.New(pool)` → `ConfigHistory()`, not off the
+  tables. The first also asserts the absence described above: the same edit
+  leaves no `account_policy_changes` row.

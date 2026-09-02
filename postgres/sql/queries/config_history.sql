@@ -53,9 +53,17 @@ LIMIT sqlc.arg(page_limit)::int;
 -- the config_table_changes rows for account_policies is how a change made
 -- with raw SQL becomes visible as a change with no operator behind it.
 -- account_holder 0 means "every holder".
-SELECT apc.*, ap.account_holder, ap.currency_id, ap.classification_id
+-- LEFT JOINs on the dimension tables because a policy's currency_id /
+-- classification_id are 0 when it applies to all of them; the uid comes back
+-- empty in that case, which is the same "no filter" meaning core.AccountPolicy
+-- already gives an empty uid (I-18: internal ids never leave this package).
+SELECT apc.*, ap.account_holder,
+       COALESCE(cur.uid::text, '')::text AS currency_uid,
+       COALESCE(cls.uid::text, '')::text AS classification_uid
 FROM account_policy_changes apc
 JOIN account_policies ap ON ap.id = apc.policy_id
+LEFT JOIN currencies cur ON cur.id = ap.currency_id
+LEFT JOIN classifications cls ON cls.id = ap.classification_id
 WHERE (sqlc.arg(account_holder)::bigint = 0 OR ap.account_holder = sqlc.arg(account_holder)::bigint)
   AND (sqlc.arg(since)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR apc.created_at >= sqlc.arg(since)::timestamptz)
   AND (sqlc.arg(until)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR apc.created_at <= sqlc.arg(until)::timestamptz)

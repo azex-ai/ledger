@@ -136,6 +136,12 @@ type ConfigChange struct {
 // cursor. Moving a cursor forward makes the next scan see fewer rows, so
 // forging one is how a full reconciliation is made to report a clean bill of
 // health over ledger it never looked at (migration 010's header, I-41).
+// The four Old/New position fields are the check's stored keyset positions,
+// not entity references: they are the ordering state a resumable scan writes
+// down, the same kind of value AuditFilter.Cursor carries in encoded form. A
+// forensic reader needs the raw numbers because the finding is "the cursor
+// jumped to the end of the keyspace", which is a statement about the
+// positions themselves.
 type ScanCursorChange struct {
 	CheckName        string    `json:"check_name"`
 	OldAfterHolder   int64     `json:"old_after_holder"`
@@ -157,14 +163,17 @@ type ScanCursorChange struct {
 // at all. The two trails answer different halves and are meant to be read
 // together: a config_table_changes row for account_policies with no matching
 // row here is a change nobody in the application made.
+//
+// CurrencyUID and ClassificationUID are empty when the policy applies to all
+// of them, matching AccountPolicy's own convention.
 type AccountPolicyChange struct {
-	AccountHolder    int64     `json:"account_holder"`
-	CurrencyID       int64     `json:"currency_id"`
-	ClassificationID int64     `json:"classification_id"`
-	OldState         []byte    `json:"old_state"`
-	NewState         []byte    `json:"new_state"`
-	ActorID          int64     `json:"actor_id"`
-	CreatedAt        time.Time `json:"created_at"`
+	AccountHolder     int64     `json:"account_holder"`
+	CurrencyUID       string    `json:"currency_uid"`
+	ClassificationUID string    `json:"classification_uid"`
+	OldState          []byte    `json:"old_state"`
+	NewState          []byte    `json:"new_state"`
+	ActorID           int64     `json:"actor_id"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // ConfigChangeFilter narrows a forensic query. Zero values mean "no filter".

@@ -150,13 +150,13 @@ func (s *ConfigHistoryStore) ListAccountPolicyChanges(ctx context.Context, filte
 	out := make([]core.AccountPolicyChange, len(rows))
 	for i, r := range rows {
 		out[i] = core.AccountPolicyChange{
-			AccountHolder:    r.AccountHolder,
-			CurrencyID:       r.CurrencyID,
-			ClassificationID: r.ClassificationID,
-			OldState:         r.OldState,
-			NewState:         r.NewState,
-			ActorID:          r.ActorID,
-			CreatedAt:        r.CreatedAt,
+			AccountHolder:     r.AccountHolder,
+			CurrencyUID:       r.CurrencyUid,
+			ClassificationUID: r.ClassificationUid,
+			OldState:          r.OldState,
+			NewState:          r.NewState,
+			ActorID:           r.ActorID,
+			CreatedAt:         r.CreatedAt,
 		}
 	}
 

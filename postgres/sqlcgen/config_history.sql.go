@@ -11,9 +11,13 @@ import (
 )
 
 const listAccountPolicyChangesByHolder = `-- name: ListAccountPolicyChangesByHolder :many
-SELECT apc.id, apc.policy_id, apc.old_state, apc.new_state, apc.actor_id, apc.created_at, ap.account_holder, ap.currency_id, ap.classification_id
+SELECT apc.id, apc.policy_id, apc.old_state, apc.new_state, apc.actor_id, apc.created_at, ap.account_holder,
+       COALESCE(cur.uid::text, '')::text AS currency_uid,
+       COALESCE(cls.uid::text, '')::text AS classification_uid
 FROM account_policy_changes apc
 JOIN account_policies ap ON ap.id = apc.policy_id
+LEFT JOIN currencies cur ON cur.id = ap.currency_id
+LEFT JOIN classifications cls ON cls.id = ap.classification_id
 WHERE ($1::bigint = 0 OR ap.account_holder = $1::bigint)
   AND ($2::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR apc.created_at >= $2::timestamptz)
   AND ($3::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR apc.created_at <= $3::timestamptz)
@@ -31,15 +35,15 @@ type ListAccountPolicyChangesByHolderParams struct {
 }
 
 type ListAccountPolicyChangesByHolderRow struct {
-	ID               int64     `json:"id"`
-	PolicyID         int64     `json:"policy_id"`
-	OldState         []byte    `json:"old_state"`
-	NewState         []byte    `json:"new_state"`
-	ActorID          int64     `json:"actor_id"`
-	CreatedAt        time.Time `json:"created_at"`
-	AccountHolder    int64     `json:"account_holder"`
-	CurrencyID       int64     `json:"currency_id"`
-	ClassificationID int64     `json:"classification_id"`
+	ID                int64     `json:"id"`
+	PolicyID          int64     `json:"policy_id"`
+	OldState          []byte    `json:"old_state"`
+	NewState          []byte    `json:"new_state"`
+	ActorID           int64     `json:"actor_id"`
+	CreatedAt         time.Time `json:"created_at"`
+	AccountHolder     int64     `json:"account_holder"`
+	CurrencyUid       string    `json:"currency_uid"`
+	ClassificationUid string    `json:"classification_uid"`
 }
 
 // (Named ...ByHolder because account_policies.sql already carries a
@@ -53,6 +57,10 @@ type ListAccountPolicyChangesByHolderRow struct {
 // the config_table_changes rows for account_policies is how a change made
 // with raw SQL becomes visible as a change with no operator behind it.
 // account_holder 0 means "every holder".
+// LEFT JOINs on the dimension tables because a policy's currency_id /
+// classification_id are 0 when it applies to all of them; the uid comes back
+// empty in that case, which is the same "no filter" meaning core.AccountPolicy
+// already gives an empty uid (I-18: internal ids never leave this package).
 func (q *Queries) ListAccountPolicyChangesByHolder(ctx context.Context, arg ListAccountPolicyChangesByHolderParams) ([]ListAccountPolicyChangesByHolderRow, error) {
 	rows, err := q.db.Query(ctx, listAccountPolicyChangesByHolder,
 		arg.AccountHolder,
@@ -76,8 +84,8 @@ func (q *Queries) ListAccountPolicyChangesByHolder(ctx context.Context, arg List
 			&i.ActorID,
 			&i.CreatedAt,
 			&i.AccountHolder,
-			&i.CurrencyID,
-			&i.ClassificationID,
+			&i.CurrencyUid,
+			&i.ClassificationUid,
 		); err != nil {
 			return nil, err
 		}
