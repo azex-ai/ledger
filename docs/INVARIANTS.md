@@ -2708,7 +2708,7 @@ The "Pinned by" section is the contract. If a test name disappears, either
 (a) the invariant is no longer being checked — fix it — or (b) the test was
 renamed; update this doc.
 
-## I-38: The HTTP wire contract is machine-checked against docs/openapi.yaml, and a write-scope key cannot mint a deposit-shaped journal through the generic template endpoint
+## I-38: The HTTP wire contract is machine-checked against docs/openapi.yaml, and a write-scope key cannot post a journal touching a system classification through either journal endpoint
 
 (`docs/audits/2026-08-25-financial-engineering/structure.md`'s two Majors;
 `docs/plans/2026-08-26-audit-remediation-contracts.md` Wave 2, D-contract.)
@@ -2763,16 +2763,25 @@ renamed; update this doc.
    handler). None of the three represent a behavior change -- the Go
    handlers were already correct; only the documentation the completeness
    gate exists to keep honest was wrong.
-2. `POST /journals/template` refuses (403) any `template_code` in the
-   effective protected set, no matter what scope the caller's API key holds.
-   The effective set is `presets.ProtectedTemplateCodes()` (the four codes
-   named below) PLUS `server.Config.ProtectedTemplateCodes` (a deployment's
-   own additional system-only codes) MINUS `Config.AllowGenericTemplatePost`
-   (an explicit, per-code opt-out). A deployment does not need to enumerate
-   the library's own codes to get them protected -- that used to be true
-   (`ProtectedTemplateCodes` defaulted to empty, protecting nothing until a
-   deployment separately opted in) and is the subject of the revision note
-   below.
+2. `POST /journals/template` refuses (403), no matter what scope the
+   caller's API key holds, any `template_code` whose template has a leg on a
+   classification flagged `is_system` -- derived from the template's own rows
+   at request time, so it holds for a template this library ships and for one
+   a deployment defined itself, and a template that cannot be resolved fails
+   closed (the error propagates; `ExecuteTemplate` is not reached). On top of
+   that structural rule it also refuses any code in the effective protected
+   name set: `presets.ProtectedTemplateCodes()` (the five codes named below)
+   PLUS `server.Config.ProtectedTemplateCodes` (a deployment's own additional
+   system-only codes). `Config.AllowGenericTemplatePost` is the single,
+   per-code, explicit opt-out from BOTH layers. A deployment does not need to
+   enumerate anything to get this protection.
+   The same two-layer check applies to `POST /journals/deposit-tolerance`,
+   which takes no `template_code` but turns caller-supplied expected/actual
+   amounts into executions of those very codes: every step the plan would
+   execute passes the same gate, and the route sits in the admin group rather
+   than the write group (contract §7.11). Under default configuration that
+   endpoint therefore answers 403; a plan with no steps executes nothing and
+   is unaffected.
    **Revision note (M-2, 2026-08-26 independent review, second pass):** the
    first revision of this guarantee left `ProtectedTemplateCodes` empty by
    default, on the theory that "this library does not know which of a
@@ -2785,6 +2794,34 @@ renamed; update this doc.
    default now includes the library's own codes; `AllowGenericTemplatePost`
    is the new opt-out for a deployment with a reviewed reason to post one of
    them through this endpoint anyway.
+   **Revision note (D-C1, 2026-09-02 deep audit, Critical):** the name list
+   was still the whole of this endpoint's guard, and `dev_credit` -- the one
+   template in this library whose doc comment says it mints spendable holder
+   balance with nothing behind it -- was never on it. A `write`-scope key
+   could post it in any ENV, with `POST /dev/credits` correctly answering
+   `FeatureNotEnabled` the whole time, and the same held for every other
+   preset touching a system account (`capital_injection`, `fee_charge`,
+   `checkout_settlement_*`, `fx_*`, `transfer_*`, ...) plus every
+   deployment-defined one. The two endpoints' defenses had different shapes:
+   (3) below was already structural, this one was a hand-kept list of four.
+   The structural rule above is now the primary guard and the list is
+   belt-and-braces (it answers before the template table is read, so it also
+   covers a code whose rows do not exist yet); `dev_credit` was added to it
+   as well. This tightening is a wire-behavior break -- see the 2026-09-02
+   audit TODO's breaking-change list for the codes that changed from 201 to
+   403 and what a deployment does about it.
+   **Revision note (§7.11, 2026-09-02, found while sibling-scanning D-C1):**
+   closing the named-template endpoint left a second spelling of the same
+   mint wide open. `POST /journals/deposit-tolerance` sat in the `write`
+   scope group and executed `deposit_confirm_pending` / `deposit_confirm` /
+   `deposit_release_pending` / `deposit_record_overage` from
+   `expected_amount` / `actual_amount` the caller supplies -- so
+   `expected == actual == 1000000` posted a full deposit confirmation for a
+   million, by a plain write-scope key, while the identical code was refused
+   by name one route above. Every planned step now goes through the same
+   `refuseProtectedTemplate`, and the route moved to the admin group next to
+   `POST /dev/credits`. This is the guarantee's real shape: the rule is about
+   what gets executed, not about which field named it.
 
 3. `POST /journals` (the handwritten-entry endpoint) refuses, by default, any
    entry that touches a classification flagged `is_system` (custodial,
@@ -2803,8 +2840,9 @@ renamed; update this doc.
    journals over HTTP.
 
    Together (2) and (3) mean a leaked or over-scoped `write`-scope key can no
-   longer mint deposit-shaped accounting through *either* the template or the
-   handwritten endpoint under default configuration — the guarantee this
+   longer post accounting that touches a system classification -- deposit-shaped
+   or otherwise -- through *either* the template or the handwritten endpoint
+   under default configuration — the guarantee this
    invariant claims. Enforced by `handlePostJournal`'s
    `rejectSystemClassificationEntries` (`server/handler_journals.go`), pinned by
    `TestPostJournal_RejectsSystemClassificationByDefault`.
@@ -2826,10 +2864,15 @@ for a deployment that remembered to opt in; the current revision closes it
 by default.
 
 **Enforced by**: `server.PagedResponse` / `cursorPtr` (`server/response.go`);
+`refuseProtectedTemplate` (`server/handler_journals.go`) -- the single
+function both `handlePostTemplate` and `handlePostDepositTolerance` call,
+combining `rejectSystemClassificationTemplate` (which shares
+`systemClassificationUIDs` with the handwritten path's
+`rejectSystemClassificationEntries`) with
 `presets.ProtectedTemplateCodes()` (`presets/protected_templates.go`) merged
 with `server.Config.ProtectedTemplateCodes` and reduced by
 `Config.AllowGenericTemplatePost` into `server.Server.protectedTemplateCodes`
-(`server/server.go`), checked in `handlePostTemplate`
+(`server/server.go`), both checked in `handlePostTemplate`
 (`server/handler_journals.go`); `server/openapi_contract_test.go`'s
 `TestOpenAPIContract_RequestBodiesMatchGoStructs` /
 `TestOpenAPIContract_ResponseEnvelopesMatchGoStructs` /
@@ -2869,14 +2912,58 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   `TestOnchain_Run_AllowsReconcileGateDisabled` — the startup fence: active
   reconciliation gate with no `ReconcileFailureLimit` refuses to start;
   reconciliation gate not activated at all is unaffected.
+- `server.TestPostTemplate_ProtectsEveryInstalledTemplateWithASystemLeg` —
+  D-C1's own pin, and the structural one: it installs every preset bundle
+  this library ships (including `DevCreditBundle`, the one
+  `InstallExtendedPresets` deliberately excludes) into in-memory config
+  stores, enumerates the resulting template table, and requires a 403 on
+  every template with an `is_system` leg. The verdict comes from the
+  installed rows, never from the guard's own idea of what is dangerous —
+  which is why the earlier pin could not notice `dev_credit` was missing
+  (D-m9). Verified red 2026-09-02: 15 of the 19 system-leg templates
+  answered 201 with `ExecuteTemplate` reached.
+- `server.TestPostTemplate_AllowsInstalledTemplatesWithoutASystemLeg` — the
+  control for the above: installed templates whose legs are all holder-side
+  (`lock_funds`, `unlock_funds`) still execute, so the rule is not a blanket
+  deny of the endpoint.
+- `server.TestPostTemplate_RefusesTheAuditedMintingCodes` — the three codes
+  the 2026-09-02 audit's own httptest reproduction posted successfully,
+  named as literals: `dev_credit`, `capital_injection`, `fee_charge`.
+- `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` /
+  `TestPostTemplate_UnknownTemplateCodeNeverReachesExecuteTemplate` — the two
+  layers are independent and the order is load-bearing: a protected code is
+  refused even when the template table answers `ErrNotFound` for everything,
+  and an unknown code fails closed at the guard rather than reaching
+  `ExecuteTemplate`.
 - `server.TestPostTemplate_DefaultProtectsDepositCodes` — M-2's own pin:
-  table-driven over `presets.ProtectedTemplateCodes()` itself (not a
-  hardcoded literal list), an unconfigured `Config.ProtectedTemplateCodes`
-  still refuses every one of them; verified red before this revision (all
-  four posted 201, not 403).
+  an unconfigured `Config.ProtectedTemplateCodes` still refuses every code in
+  the library's hardcoded set; verified red before that revision (all four
+  posted 201, not 403). Written as literals rather than ranged over
+  `presets.ProtectedTemplateCodes()` (D-m9): a table driven by the
+  implementation's own return value cannot fail because a dangerous code is
+  absent from that return value.
 - `server.TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes` — the
-  default is not a blanket deny: a code outside the library's own set and
-  outside `Config.ProtectedTemplateCodes` still posts normally.
+  name-list layer is not a blanket deny: a code outside the library's own set
+  and outside `Config.ProtectedTemplateCodes` is not refused by it.
+- `server.TestPostTemplate_AllowGenericTemplatePostIsTheOnlyWayPastTheSystemLegRule`
+  — the structural rule's single opt-out, per-code and explicit.
+- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` /
+  `TestPostDepositTolerance_RequiresAdminScope` — §7.11's own pins: all five
+  outcomes that would execute a step are refused under default config
+  (verified red 2026-09-02: all five posted 201 with `ExecuteTemplate`
+  reached), and a `write`-scope key is refused by the route's scope even with
+  the step codes opted in (verified red before the route moved).
+- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` /
+  `TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` — the
+  controls: the gate refuses executions, not the endpoint, and the same
+  single escape hatch opts a deployment back in.
+- `server.TestReverseJournal_RejectsClientSuppliedIdempotencyKey` /
+  `TestReverseJournal_RejectsIdempotencyKeyHeader` /
+  `TestReverseJournal_WithoutIdempotencyKeyPostsTheReversal` — H-M3's Go
+  half: `POST /journals/{uid}/reverse` derives its idempotency key
+  server-side, so a caller-supplied one (body field, or lifted from the
+  `Idempotency-Key` header) is now refused (400) instead of parsed away in
+  silence.
 - `server.TestPostTemplate_AllowGenericTemplatePostOptsCodeBackIn` /
   `TestPostTemplate_AllowGenericTemplatePostIsScopedToOneCode` — the escape
   hatch opts a specific default-protected code back in without opening the

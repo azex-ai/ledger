@@ -16,6 +16,7 @@ import (
 
 	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 )
 
@@ -816,6 +817,22 @@ func TestPostJournal_PassesEventID(t *testing.T) {
 func TestPostDepositTolerance(t *testing.T) {
 	var calls []string
 	srv := newTestServerWith(func(o *testServerOpts) {
+		// This test exercises plan execution and the response shape, not the
+		// template gate. Under default configuration the endpoint refuses
+		// every step it would execute (contract §7.11 -- caller-supplied
+		// amounts turning into deposit_confirm_pending and friends is the
+		// same mint POST /journals/template refuses by name), so it opts the
+		// step codes in explicitly. The gate itself is pinned by
+		// server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault.
+		o.config = &server.Config{
+			Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024,
+			AllowGenericTemplatePost: []string{
+				presets.DepositConfirmPendingTemplateCode,
+				presets.DepositConfirmTemplateCode,
+				presets.DepositReleasePendingTemplateCode,
+				presets.DepositRecordOverageTemplateCode,
+			},
+		}
 		o.journals = &mockJournalWriter{
 			templateFn: func(ctx context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
 				calls = append(calls, code)
