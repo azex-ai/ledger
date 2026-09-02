@@ -36,7 +36,9 @@
 //
 // Run order:
 //
-//  1. Start Postgres and set DATABASE_URL.
+//  1. Start Postgres and set DATABASE_URL (optionally MIGRATE_DATABASE_URL
+//     too, so migrations run on their own credential -- see docs/RUNBOOK.md
+//     "Database roles").
 //  2. go run ./examples/crypto-deposit
 //
 // Installs everything it needs: the deposit accounting bundle
@@ -72,7 +74,20 @@ func run() error {
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
-	if err := postgres.Migrate(dbURL); err != nil {
+	// Migrations run on their own credential. For a non-superuser runner,
+	// Migrate holds `ledger_owner WITH INHERIT TRUE` for the length of each
+	// migration, and that grant is a cluster-wide row in pg_auth_members --
+	// ROLE-scoped, not session-scoped -- so every connection authenticated as
+	// the same role inherits it while it is held, this process's own pool
+	// included. See docs/RUNBOOK.md "Database roles".
+	migrateURL := os.Getenv("MIGRATE_DATABASE_URL")
+	if migrateURL == "" {
+		migrateURL = dbURL
+		log.Printf("warning: MIGRATE_DATABASE_URL is unset, so migrations run on DATABASE_URL. " +
+			"With a non-superuser migration credential that makes this pool owner-equivalent -- able to drop the " +
+			"append-only guards -- for the length of the migration run. Acceptable for a local example, not for production.")
+	}
+	if err := postgres.Migrate(migrateURL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 

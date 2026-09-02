@@ -27,6 +27,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 14. [Onchain money-path metrics -- this library ships none of the alerting](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)
 15. [A chain's sweep collection has stopped moving](#15-a-chains-sweep-collection-has-stopped-moving)
 16. [P5 signing key rotation](#16-p5-signing-key-rotation)
+17. [A booking's event was claimed by the wrong journal](#17-a-bookings-event-was-claimed-by-the-wrong-journal)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -689,9 +690,35 @@ uses for migrations already has this authority.
 `001_baseline` (docs/plans/2026-08-21-tamper-evident-ledger-design.md §3)
 creates three least-privilege roles, grants them, revokes `PUBLIC`'s
 default schema access, and transfers every table/sequence to `ledger_owner`
-— all in the same migration that first creates the schema. There is no
-window, on a fresh install, where a connection has broader access than the
-table below describes.
+— all in the same migration that first creates the schema.
+
+> ⚠️ **The migration credential must not be the application credential, and
+> nothing else may be using it while `Migrate()` runs.** For a non-superuser
+> runner, `Migrate()` grants that role `ledger_owner WITH INHERIT TRUE` for
+> the duration of each migration (see the second operational note below).
+> That grant is a row in `pg_auth_members`, which is **cluster-wide and
+> role-scoped, not session-scoped**: while it is held, *every* session
+> connected as that role inherits `ledger_owner` — including your
+> application's connection pool, if it authenticates as the same role. A pool
+> in that state can `DROP TRIGGER journal_entries_no_update`, `TRUNCATE
+> journal_entries`, or detach a partition, i.e. I-22 does not hold for the
+> length of the migration run (2026-09-02 adversarial re-review,
+> `w3-review/money-path.md` M-5; this paragraph replaces a claim that there
+> was "no window ... where a connection has broader access than the table
+> below describes", which was true only for a superuser runner).
+>
+> Two requirements follow, and the shipped examples now demonstrate both:
+>
+> 1. Point migrations at their own credential —  `MIGRATE_DATABASE_URL`
+>    (superuser, `ledger_owner`, or a role with `ADMIN OPTION` on it) — and
+>    the application at `DATABASE_URL` (`ledger_app`). Every
+>    `examples/*/main.go` reads them separately and logs a warning when it
+>    has to fall back to one URL for both.
+> 2. Run migrations when the application is not serving on that credential
+>    (a deploy step or an init container, not an in-process call on a live
+>    pod). If your deployment must migrate in-process, use a superuser or
+>    `ledger_owner` connection for it: neither needs the temporary grant, so
+>    neither opens the window.
 
 | Role | Can do | Used by |
 |---|---|---|
@@ -1612,6 +1639,78 @@ Three things an operator has to know before rotating:
    `NotAfter` -- the dev implementation deliberately does not, and says so
    in its own doc comment. Treat a leaked signing key as an incident, not a
    rotation.
+
+---
+
+## 17. A booking's event was claimed by the wrong journal
+
+**Symptom**: a booking's settling journal is refused forever with
+`event "<uid>" is already linked to a journal: conflict`
+(`ledger_journals_failed_total{reason="conflict"}`, §7), and
+`bookings.journal_id` points at a journal that has nothing to do with that
+booking's settlement. Everything downstream of that booking stops: no
+accounting record, no further journal-bearing transition, and the booking
+sits in its lifecycle indefinitely.
+
+**How it happens**: `event_uid` is a caller-supplied link and I-51 rule 4 only
+requires the claiming journal to touch the booking's
+`(account_holder, currency)` — deliberately weak, because amounts and
+classifications legitimately vary across fees, spreads and multi-leg
+settlements. A buggy caller (or a credential with write scope) can therefore
+take the link with any journal at all, and both `events.journal_id` and
+`bookings.journal_id` are set-once. Journals are append-only, so the claimant
+cannot be deleted.
+
+**Confirm** — find what is holding the link, and satisfy yourself it is wrong:
+
+```sql
+SELECT e.uid            AS event_uid,
+       e.to_status,
+       b.uid            AS booking_uid,
+       b.amount         AS booking_amount,
+       j.uid            AS claiming_journal_uid,
+       j.idempotency_key,
+       j.source,
+       j.total_debit,
+       j.created_at
+FROM events e
+JOIN journals j ON j.id = e.journal_id
+LEFT JOIN bookings b ON b.id = e.booking_id
+WHERE e.uid = '<event-uid>';
+```
+
+A claim is wrong when that journal's legs are not this booking's settlement —
+typically a much smaller amount, an unrelated classification, or a source
+belonging to a different flow. **If it moved money, it is still a real
+journal**: fix that separately with a reversal (I-51). Do not treat the
+unlink as an undo.
+
+**Resolve** — owner-only, one statement:
+
+```sql
+-- as ledger_owner (or a superuser). ledger_app gets 42501 by design.
+SELECT ledger_unlink_event_journal('<event-uid>'::uuid);
+```
+
+It clears `events.journal_id`, and `bookings.journal_id` too when the booking
+holds the same journal (never a different one). It refuses loudly if the
+event does not exist or holds no link, so a runbook step cannot report
+success having done nothing. Then re-drive the booking's settlement through
+the normal path; the real journal can now claim the event.
+
+**Afterwards**:
+
+- The claiming journal is left exactly as it was, and its own
+  `journals.event_id` still points at the event. That is deliberate: the row
+  is append-only and it is the evidence. Nothing reads journals by
+  `event_id`, and `event_id` is not part of the signed digest, so the stale
+  pointer affects nothing but a manual query.
+- The repair is audited twice: `config_table_changes` gets a row with
+  `table_name = 'ledger_unlink_event_journal'` naming the event, both journal
+  ids and the authenticated role, plus migration 020's automatic before/after
+  rows for `events` and `bookings`. Include them in the postmortem.
+- Find the caller. A legitimate service that claims events it does not own is
+  the actual defect; the unlink only clears the symptom.
 
 ---
 

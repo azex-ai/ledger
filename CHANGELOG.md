@@ -326,6 +326,27 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Fixed
 
+- **Migrations must run on their own credential** (W3 re-review M-5,
+  documentation layer only — no mechanism change). For a non-superuser
+  runner, `Migrate` grants that role `ledger_owner WITH INHERIT TRUE` for the
+  length of each migration, and that grant is a row in `pg_auth_members`:
+  **cluster-wide and role-scoped, not session-scoped**. Every session
+  authenticated as the same role inherits it while it is held. Measured on a
+  throwaway `postgres:17` with a non-superuser `CREATEROLE` runner: a second
+  connection on that role executed `DROP TRIGGER
+  journal_entries_no_update ON journal_entries` mid-run and it stayed
+  dropped, while `Migrate` returned `nil` — i.e. I-22 does not hold for the
+  duration of a migration run when the application shares the migration
+  credential. All eight `examples/**/main.go` now read
+  `MIGRATE_DATABASE_URL` separately from `DATABASE_URL` and log a warning
+  when they fall back to one URL for both; `docs/RUNBOOK.md`'s "Database
+  roles" section states the requirement and drops its previous claim that
+  "there is no window ... where a connection has broader access". A static
+  gate (`TestExamplesUseASeparateMigrationURL`) keeps the examples teaching
+  it. **Action for consumers**: point migrations at a superuser /
+  `ledger_owner` / `ADMIN OPTION` credential that the serving application
+  does not use, and run them as a deploy step rather than in-process on a
+  live pod.
 - **`SolvencyCheck` no longer reads `balance_checkpoints`** (W3 re-review,
   w3-review/money-path.md M-2). Both of its figures are recomputed from
   `journal_entries` (the I-23 basis) instead of `checkpoint + delta`. A
@@ -397,6 +418,19 @@ written because it was true when `[0.6.0]` shipped.
 - New migrations **016** (`preset_sign_correction`, owner-run polarity
   correction + forced rollup/snapshot recompute) and **017**
   (`deposit_reorgs`, durable reorg-anomaly table + monotonic scan cursor).
+- Migration **027** (`unlink_event_journal`, W3 re-review M-3, contract
+  §7.15): `ledger_unlink_event_journal(uuid)` — SECURITY DEFINER, owned by
+  `ledger_owner`, **never granted to `ledger_app`** — clears
+  `events.journal_id` (and `bookings.journal_id`, when the booking holds the
+  same journal) so a booking whose event was claimed by an unrelated journal
+  can settle. Before it there was no unlink of any kind: both columns are
+  set-once and journals are append-only, so one 0.01 journal touching the
+  booking's `(holder, currency)` — all I-51 rule 4 requires — stopped that
+  booking's accounting forever. The two set-once guards gained exactly one
+  exception for it (`journal_id` non-NULL → **NULL** only, requiring
+  `ledger_owner` membership AND a transaction-local flag). The claiming
+  journal is left untouched; if it moved money, reverse it. Procedure:
+  `docs/RUNBOOK.md` §17.
 - Migration **024** (`owner_written_anchor_observations`, W3 re-review m-4):
   `ledger_app` loses `INSERT` on `anchor_observations` and gains `EXECUTE`
   on `ledger_record_anchor_observation(uuid, bigint, bytea)`, a

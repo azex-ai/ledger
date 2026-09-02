@@ -5559,6 +5559,37 @@ transition fails with `ErrConflict` **permanently**, and an unrelated journal
 stands as that booking's accounting record. Nothing detects it: the claiming
 journal is balanced, and the booking simply never settles.
 
+**What rule 4 does NOT prevent, and the door that exists for it**
+(2026-09-02 adversarial re-review, `w3-review/money-path.md` M-3; contract
+§7.15). Requiring the booking's `(holder, currency)` is the weakest rule that
+makes the claim mean something, and that is on purpose — but for anything
+holding write scope, holder and currency are already known. So a journal
+about the right holder and the wrong everything-else (measured: 0.01 on an
+unrelated classification) can still take the link, and the wedge above
+follows exactly as before. Tightening rule 4 to relate the amount to the
+booking's would break legitimate multi-leg settlement, so the residue is
+accepted — with a way out, because until migration 027 there was none at all:
+`journals` are append-only so the claimant cannot be deleted, both
+`journal_id` columns are set-once, and the library shipped no unlink of any
+kind. That is not fail-closed, it is stuck.
+
+Migration 027 adds `ledger_unlink_event_journal(uuid)`: SECURITY DEFINER,
+owned by `ledger_owner`, EXECUTE revoked from PUBLIC and never granted to
+`ledger_app` (42501, pinned). It clears `events.journal_id`, clears
+`bookings.journal_id` when the booking holds that same journal, refuses
+loudly on an unknown or already-unlinked event, and writes a
+`config_table_changes` row naming the event, both journal ids and the
+authenticated role. The two set-once guards gained exactly one exception for
+it — `journal_id` may go non-NULL -> **NULL** (never to another journal) when
+the caller holds `ledger_owner` AND a transaction-local flag is set. Both
+halves are required: `set_config` is available to any role, so the flag alone
+would hand `ledger_app` the same door, and the role check alone would widen
+set-once for every owner-issued statement. The claiming journal itself is
+left untouched (its `journals.event_id` still points at the event — nothing
+reads journals by that column, and it is not in the signed digest); if it
+moved money, that is corrected by a reversal, not by the unlink.
+`docs/RUNBOOK.md` §17 is the procedure.
+
 **Enforced by**:
 - `validateReversalOfInput` (`postgres/reversal_fraction_store.go`), called
   from `postJournalWithQueries` (`postgres/ledger_store.go`) — the single
@@ -5587,6 +5618,16 @@ journal is balanced, and the booking simply never settles.
   stranger's journal is refused, and then the booking's OWN journal still
   posts against the same event, proving the refusal consumed neither
   `journal_id`; a second claim on the now-linked event is refused too.
+- `postgres.TestMigration027_UnlinkEventJournalReopensAWedgedBooking` /
+  `TestMigration027_UnlinkEventJournalIsRefusedForLedgerApp` /
+  `TestMigration027_UnlinkEventJournalFailsLoud`
+  (`postgres/migration_027_test.go`) — the residue and its door: a same-holder
+  0.01 journal wedges the booking (its settling journal returns `ErrConflict`
+  and `bookings.journal_id` is held), the owner-only unlink reopens both links
+  and the real journal then posts, the claiming journal survives untouched and
+  the repair is audited; `ledger_app` gets 42501 on the function and is
+  refused on the raw UPDATE even with the flag set by hand; an unknown or
+  already-unlinked event raises instead of reporting success.
 ## I-52: The forward-scan cursor never outruns ingestion
 
 `chain_cursors.last_scanned_block` advances for a window `[from, to]` only

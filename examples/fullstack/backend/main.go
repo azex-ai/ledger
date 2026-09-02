@@ -23,6 +23,8 @@
 // Run:
 //
 //	export DATABASE_URL="postgres://user:pass@localhost:5432/ledger_example?sslmode=disable"
+//	# optional: migrations on their own credential (see docs/RUNBOOK.md "Database roles")
+//	export MIGRATE_DATABASE_URL="postgres://ledger_owner:pass@localhost:5432/ledger_dev?sslmode=disable"
 //	go run ./examples/fullstack/backend
 //
 // Then in ../web: npm install && npm run dev — the dashboard on :3090 talks to
@@ -78,7 +80,20 @@ func run() error {
 	// translates to the pgx5:// scheme golang-migrate's driver registry wants
 	// internally (postgres/migrate.go's toMigrateURL) -- no conversion needed
 	// on the caller's side.
-	if err := ledger.Migrate(dbURL); err != nil {
+	// Migrations run on their own credential. For a non-superuser runner,
+	// Migrate holds `ledger_owner WITH INHERIT TRUE` for the length of each
+	// migration, and that grant is a cluster-wide row in pg_auth_members --
+	// ROLE-scoped, not session-scoped -- so every connection authenticated as
+	// the same role inherits it while it is held, this process's own pool
+	// included. See docs/RUNBOOK.md "Database roles".
+	migrateURL := os.Getenv("MIGRATE_DATABASE_URL")
+	if migrateURL == "" {
+		migrateURL = dbURL
+		log.Printf("warning: MIGRATE_DATABASE_URL is unset, so migrations run on DATABASE_URL. " +
+			"With a non-superuser migration credential that makes this pool owner-equivalent -- able to drop the " +
+			"append-only guards -- for the length of the migration run. Acceptable for a local example, not for production.")
+	}
+	if err := ledger.Migrate(migrateURL); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 

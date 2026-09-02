@@ -13,6 +13,8 @@
 // Run:
 //
 //	export DATABASE_URL="postgres://user:pass@localhost:5432/ledger_dev?sslmode=disable"
+//	# optional: migrations on their own credential (see docs/RUNBOOK.md "Database roles")
+//	export MIGRATE_DATABASE_URL="postgres://ledger_owner:pass@localhost:5432/ledger_dev?sslmode=disable"
 //	go run ./examples/credits-topup
 package main
 
@@ -48,11 +50,23 @@ func run() error {
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
+	// Migrations run on their own credential. For a non-superuser runner,
+	// Migrate holds `ledger_owner WITH INHERIT TRUE` for the length of each
+	// migration, and that grant is a cluster-wide row in pg_auth_members --
+	// ROLE-scoped, not session-scoped -- so every connection authenticated as
+	// the same role inherits it while it is held, this process's own pool
+	// included. See docs/RUNBOOK.md "Database roles".
+	migrateURL := os.Getenv("MIGRATE_DATABASE_URL")
+	if migrateURL == "" {
+		migrateURL = dbURL
+		log.Printf("warning: MIGRATE_DATABASE_URL is unset, so migrations run on DATABASE_URL. " +
+			"With a non-superuser migration credential that makes this pool owner-equivalent -- able to drop the " +
+			"append-only guards -- for the length of the migration run. Acceptable for a local example, not for production.")
+	}
 	// postgres.Migrate uses golang-migrate's pgx5 driver (pgx5:// scheme);
 	// pgxpool.New wants postgres://. Accept a standard postgres:// URL and
 	// translate for the migrator.
-	migrateURL := dbURL
-	if rest, ok := strings.CutPrefix(dbURL, "postgres://"); ok {
+	if rest, ok := strings.CutPrefix(migrateURL, "postgres://"); ok {
 		migrateURL = "pgx5://" + rest
 	}
 	if err := postgres.Migrate(migrateURL); err != nil {

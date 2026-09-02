@@ -144,3 +144,51 @@ func checkNoBannedPhrases(t *testing.T, path string, phrases []string, why strin
 		}
 	}
 }
+
+// --- M-5 (2026-09-02 adversarial re-review, w3-review/money-path.md): no
+// example may hand the same connection URL to Migrate and to pgxpool.New.
+//
+// For a non-superuser runner, postgres.Migrate grants that role
+// `ledger_owner WITH INHERIT TRUE` for the length of each migration. That
+// grant is a row in pg_auth_members -- cluster-wide and ROLE-scoped, not
+// session-scoped -- so while it is held, every session authenticated as the
+// same role inherits ledger_owner, including the application's own pool. All
+// eight examples used one DATABASE_URL for both, which is precisely the
+// shape that makes an application pool owner-equivalent (able to DROP the
+// append-only triggers) for the duration of a migration run.
+//
+// The library cannot enforce credential separation -- it never sees the
+// operator's roles -- so the examples are where the practice is taught, and
+// this is the gate that keeps them teaching it. -----------------------
+
+func TestExamplesUseASeparateMigrationURL(t *testing.T) {
+	migrateRE := regexp.MustCompile(`(?:postgres|ledger)\.Migrate(?:Context)?\(([^,)]+)`)
+	poolRE := regexp.MustCompile(`pgxpool\.New\([^,]+,\s*([^,)]+)`)
+
+	forEachExampleMainGo(t, func(t *testing.T, path, src string) {
+		migrateArgs := migrateRE.FindAllStringSubmatch(src, -1)
+		if len(migrateArgs) == 0 {
+			return // an example that does not migrate has nothing to separate
+		}
+		poolArgs := poolRE.FindAllStringSubmatch(src, -1)
+		if len(poolArgs) == 0 {
+			t.Errorf("%s calls Migrate but never pgxpool.New -- this gate's assumption about example shape no longer holds", path)
+			return
+		}
+		for _, m := range migrateArgs {
+			migrateVar := strings.TrimSpace(m[1])
+			for _, p := range poolArgs {
+				poolVar := strings.TrimSpace(p[1])
+				if migrateVar == poolVar {
+					t.Errorf("%s passes %s to both Migrate and pgxpool.New -- migrations must run on their own credential "+
+						"(MIGRATE_DATABASE_URL), because Migrate's ledger_owner grant is role-wide and every session on that "+
+						"role inherits it for the length of the run (see docs/RUNBOOK.md \"Database roles\")", path, migrateVar)
+				}
+			}
+		}
+		if !strings.Contains(src, "MIGRATE_DATABASE_URL") {
+			t.Errorf("%s migrates without reading MIGRATE_DATABASE_URL -- the separation has to be visible to a reader "+
+				"copying this example, not only true of its variable names", path)
+		}
+	})
+}
