@@ -36,6 +36,19 @@ package postgres_test
 // The fix is in two places and this test covers both: 007 now issues an ALTER
 // only for an attribute a role actually holds, and postgres.Migrate takes
 // ledger_owner's privileges for the span between 001 and the rest.
+//
+// It covers a third thing it did not originally set out to. Migration 018
+// opens that same membership window inside itself (001's "Keepsake 2 of 2"
+// idiom) and revokes it at the bottom of the file -- which, because the runner
+// is the only role that can issue either grant, revokes Migrate's window too.
+// Under one run-wide window this test went red at 020's `CREATE TRIGGER ... ON
+// public.account_policies` ("permission denied for table account_policies",
+// database dirty at 20, 021 never applied). Migrate now takes the membership
+// per migration, so that coupling cannot exist; the assertions below (applied
+// to the latest version, not dirty) are what notices if it comes back.
+//
+// Nothing else in the suite can notice any of this: every other test installs
+// as the container's superuser, which takes the no-op branch of the elevation.
 
 import (
 	"context"
@@ -129,8 +142,17 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 		}
 	}
 
+	// Scoped through pg_roles rather than naming ledger_owner as a literal:
+	// pg_has_role raises 42704 on a role that does not exist, and on a fresh
+	// server this test is the one that has to work when nothing has created
+	// these roles yet -- `go test -run TestMigrate_Installs...` on a cold
+	// container did exactly that, failing here for the one reason that is not
+	// a finding about Migrate. Absent means "does not inherit", which is the
+	// question being asked.
 	var inheritsBefore bool
-	require.NoError(t, admin.QueryRow(ctx, "SELECT pg_has_role($1, 'ledger_owner', 'USAGE')", bootstrap).Scan(&inheritsBefore))
+	require.NoError(t, admin.QueryRow(ctx, `
+		SELECT COALESCE((SELECT pg_has_role($1, oid, 'USAGE') FROM pg_roles WHERE rolname = 'ledger_owner'), false)
+	`, bootstrap).Scan(&inheritsBefore))
 	require.False(t, inheritsBefore,
 		"sanity: the credential must NOT already hold ledger_owner's privileges, or this test proves nothing about how Migrate gets them")
 

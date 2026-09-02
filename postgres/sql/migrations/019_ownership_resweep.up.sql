@@ -151,12 +151,18 @@ REVOKE ALL ON FUNCTION ledger_resweep_ownership() FROM PUBLIC;
 
 -- ####  Why this file does not call the function it defines  ####
 --
--- Transferring ownership is a one-way door within a migration run. Once an
--- object belongs to ledger_owner, the migration credential -- which holds SET
--- but not INHERIT on that role -- stops passing Postgres's ownership check
--- for it, so CREATE OR REPLACE FUNCTION, REVOKE, ALTER and DROP against it
--- all start failing. Sweeping here would therefore break 020 and 021, which
--- both have to modify functions and grants that 001-018 created.
+-- Because the sweep has to run after the last object in this batch is
+-- created, and 020 and 021 both create some. Anything it transferred before
+-- them would be swept, and then their new functions and grants would not be --
+-- which is the exact gap D-M1 is about, reintroduced one batch later.
+--
+-- (An earlier draft of this comment gave a different reason: that ownership
+-- transfer is a one-way door mid-run, because the migration credential holds
+-- SET but not INHERIT on ledger_owner and so stops passing the ownership
+-- check for anything it hands over. That was true before postgres.Migrate
+-- took ledger_owner's privileges for each migration it applies. It is not any
+-- more, and leaving it written down would have had the next author solving a
+-- problem that no longer exists.)
 --
 -- So the sweep runs exactly once, as the last statement of the last migration
 -- in this batch (021). The rule that replaces "remember to call it" is
@@ -164,9 +170,12 @@ REVOKE ALL ON FUNCTION ledger_resweep_ownership() FROM PUBLIC;
 -- in `public` not owned by ledger_owner after all migrations have run.
 --
 -- A future migration that must modify an object this sweep has already
--- transferred takes ledger_owner's authority for the duration, using the same
--- manoeuvre 001's "Keepsake 2 of 2" uses for schema_migrations and off the
--- same permanent ADMIN OPTION:
+-- transferred needs nothing: postgres.Migrate holds ledger_owner's privileges
+-- for the duration of each migration it applies (see applyRemainingMigrations
+-- in postgres/migrate.go) and hands them back afterwards. Just write the
+-- statement.
+--
+-- ⚠️ Do NOT reach for 001's "Keepsake 2 of 2" manoeuvre --
 --
 --     DO $$ DECLARE runner text := current_user; BEGIN
 --         EXECUTE format('GRANT ledger_owner TO %I WITH INHERIT TRUE', runner);
@@ -175,7 +184,22 @@ REVOKE ALL ON FUNCTION ledger_resweep_ownership() FROM PUBLIC;
 --     DO $$ DECLARE runner text := current_user; BEGIN
 --         EXECUTE format('REVOKE ledger_owner FROM %I', runner);
 --     END $$;
+--
+-- -- inside a migration after 001. 001 has to do it that way because it runs
+-- before the mechanism exists; everything after 001 does not, and the REVOKE
+-- half is actively harmful: the runner is the only role that can issue either
+-- grant, so both carry the same grantor and Postgres has one row to revoke.
+-- Revoking "your own" membership therefore ends Migrate's window as well.
+-- Measured (2026-09-03): 018 uses this idiom, and under Migrate's original
+-- single run-wide window it left 019, 020 and 021 unprivileged -- a CREATEROLE
+-- bootstrap install died at 020's CREATE TRIGGER with "permission denied for
+-- table account_policies", dirty at 20. Migrate now opens one window per
+-- migration precisely so that a migration cannot do this to its successors,
+-- but the idiom is still dead weight and still misleading, so: don't.
+--
+-- What a migration creating new objects DOES still owe is a call to
+--
 --     SELECT ledger_resweep_ownership();
 --
--- and ends with the sweep again, because objects created while holding that
--- membership belong to the runner, not to ledger_owner.
+-- as its last statement, because objects created while holding that membership
+-- belong to the runner, not to ledger_owner.

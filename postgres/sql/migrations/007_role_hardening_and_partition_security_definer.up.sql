@@ -1,3 +1,41 @@
+-- ⚠️⚠️  THIS FILE WAS DELIBERATELY MODIFIED AFTER IT HAD BEEN MERGED AND
+-- ⚠️⚠️  SHIPPED. Date: 2026-09-02. Finding: 2026-09-02 deep audit, D-M2.
+-- ⚠️⚠️  Sanctioned in docs/plans/2026-09-02-remediation-contracts.md §8 as an
+-- ⚠️⚠️  explicit exception to §3's "an already-merged migration is immutable"
+-- ⚠️⚠️  (and to deployment.md's rule of the same shape).
+--
+-- WHY an exception was the only option, in three parts:
+--
+--   1. The bug is that section 1 below could not be executed at all by the
+--      bootstrap credential docs/RUNBOOK.md sanctions -- a CREATEROLE,
+--      non-superuser role. The install died HERE, in this file, with SQLSTATE
+--      42501, and golang-migrate marked the database dirty at 007, so 008
+--      onward silently never ran. A later migration cannot reach back and
+--      repair a failure point inside an earlier one: the chain never gets far
+--      enough to run it.
+--   2. golang-migrate does not checksum migration files. A database that has
+--      already applied 007 will not re-run it and is not affected by this
+--      edit in any way. What changes is only what a FRESH install does.
+--   3. This library has no external consumers yet (no-compat window), so
+--      there is no third party holding the old file.
+--
+-- WHAT was changed, exhaustively: section 1's three unconditional
+-- `ALTER ROLE ... NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+-- NOBYPASSRLS` statements became one DO block that issues an ALTER only for an
+-- attribute a role actually holds, and raises if it cannot strip one. Same
+-- intent, same end state, fail-closed instead of the previous silent repair.
+-- Nothing else in this file was touched -- not section 2 (the ledger_ro secret
+-- revoke), not section 3 (the SECURITY DEFINER partition functions), not a
+-- grant, not a comment outside section 1. See the AMENDED note in section 1
+-- for the per-clause measurements behind it.
+--
+-- This is the second time this repository has made this exception (the first
+-- was 2026-08-26, "do not add IF NOT EXISTS"). Both times the global rule's
+-- literal wording assumed facts -- checksummed migrations, external consumers
+-- -- that are not this repository's.
+--
+-- ------------------------------------------------------------------------
+--
 -- Three unrelated findings from the same threat-model report, grouped here
 -- because each one is a role/grant change and none touches application
 -- tables: (1) role attributes silently inherited from a pre-existing role of

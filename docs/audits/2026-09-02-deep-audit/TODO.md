@@ -683,6 +683,17 @@
 - **修法**：改 007:23-25 三条语句（已落地 migration 不改，新开一个 migration 无法回溯修 007 的失败点，因此这条必须以修改 007 文件本身或引入一个前置 000 migration 的形式处理——鉴于本库无外部用户且 CHANGELOG 已记载破坏性变更惯例，建议直接改 007 并在 header 注明原因）：把 NOSUPERUSER 从 ALTER ROLE 里去掉（Postgres 只允许 superuser 触碰该属性，即使值不变也报 42501），保留 NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS（实测 CREATEROLE 角色可执行）；对 SUPERUSER 改成安装期断言而非设置：DO 块检查 pg_roles 里三个 role 若有 rolsuper 则 RAISE EXCEPTION，让共享集群上的既存 superuser role 变成硬失败（fail-closed）而不是静默继承——这仍然满足 007 原本要关的那个 Minor。
 - **规则/文档要改**：docs/RUNBOOK.md:648 保留「superuser 或 CREATEROLE」并补一句「若集群上已存在同名 role 且带 SUPERUSER，安装会以异常终止并要求人工处置」；docs/RUNBOOK.md:650 的 Every migration after 001 runs as ledger_owner 删除或改成事实（postgres.Migrate 全程只吃一个 URL，没有切换连接的机制）。
 - **pin**：反转 postgres/roles_test.go:801 的 TestRoleAttributeHardeningResetsPreExistingPrivileges：不再用超级用户 pool 直接 Exec 那条语句，改为新建一个 CREATEROLE-only 角色并用它跑一次完整 postgres.Migrate，断言 001-015 全部 applied 且 schema_migrations 未 dirty（当前会红在 007）。
+- **订正（2026-09-03，d-threat 落地后实测；本条的「修法」原文有一处事实错误，不要照抄）**：
+  - ❌ 原文「保留 NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS（**实测 CREATEROLE 角色可执行**）」**不成立**。Postgres 按「发起 ALTER 的角色是否持有同名属性」判权，且判的是**子句有没有写**、不是有没有改变什么。postgres:17.10 实测（目标角色五个属性本来就全为 false，仍然报错）：
+
+    | 发起角色 | NOSUPERUSER | NOCREATEDB | NOCREATEROLE | NOREPLICATION | NOBYPASSRLS |
+    |---|---|---|---|---|---|
+    | `CREATEROLE`（无 CREATEDB） | 42501 | **42501** | ok | 42501 | 42501 |
+    | `CREATEROLE CREATEDB` | 42501 | ok | ok | 42501 | 42501 |
+
+    即 `REPLICATION` / `BYPASSRLS` 与 `SUPERUSER` 同形（都要求发起者自己持有该属性），而 RUNBOOK 认可的最窄 bootstrap（CREATEROLE-only）连 `NOCREATEDB` 都发不出——五个子句里能发的只有 `NOCREATEROLE` 一个。所以「去掉 NOSUPERUSER、保留其余四个」这条修法本身仍会 42501 卡死在 007。落地采用的是逐属性条件执行（只对真正持有的属性发 ALTER，发不出去则 RAISE），五种 bootstrap 形态下都可安装。
+  - ➕ **安装前提补充**（`postgres.Migrate` 的新机制要求，已同步写进 `postgres/migrate.go` 的 godoc 与本行）：迁移凭证必须是**超级用户**、**`ledger_owner` 本人**、或**对 `ledger_owner` 持有 ADMIN OPTION** 三者之一。装过 001 的凭证永久满足第三条（Postgres 给角色创建者永久 ADMIN OPTION）；不满足的第三方角色现在在跑任何 migration 之前就被拒，错误信息列出这三条出路。⚠️ `docs/RUNBOOK.md:648-651` 归 **D-ops** 独占，d-threat 没动：那里还写着「Every migration after 001 runs as `ledger_owner` and needs no elevated privilege」（从来不存在的机制，本条与 D-M7 都要求改），并且缺 ADMIN OPTION 这一条前提——请 D-ops / W3 按 `postgres/migrate.go` 的 godoc（唯一真相源）同步这三条。
+  - ➕ **2026-09-03 新发现（跨分支交互，已在 d-threat 修掉）**：migration 018（d-tamper 本波新增）自己用了 001「Keepsake 2 of 2」的临时提权惯用法（文件头 `GRANT ledger_owner TO <runner> WITH INHERIT TRUE`、文件尾 `REVOKE`），它的 REVOKE 会把 `Migrate` 自己的提权窗口一并撤掉（两条 grant 的 grantor 都只能是 runner 自己，Postgres 只有一行可撤）。实测：CREATEROLE 非超级用户 bootstrap 装到 020 的 `CREATE TRIGGER ... ON public.account_policies` 报 `permission denied`、库被标 dirty 在 20、021 从未执行——即 D-M2 同形失败往后挪了 18 个 migration。因为其余测试全部以超级用户安装（走提权的 no-op 分支），全仓无一处能发现。修法：`Migrate` 改为**逐个 migration 各开一个提权窗口**（`applyRemainingMigrations`），使「migration 对自己 membership 做的事」不会外溢到后续 migration，同时把窗口从「整次安装」收窄到「一个 migration」。⚠️ 遗留给 W3：019 文件尾那段「未来 migration 需要 owner 权限时照抄这套 GRANT/REVOKE」的指引已按此更新（说明不要再用），但 018 里那段现在是**冗余且有害**的写法，建议 W3 清掉并加一条静态门禁（001 之外的 migration 不得出现 `REVOKE ledger_owner FROM`）。
 
 ### D-M3 [Major] account_policies 的守卫白名单恰好放行 status/min_balance/enforce_min_balance 三个风控开关，且这张表被排除在审计触发器之外，攻击成功且零痕迹
 - **位置**：`postgres/sql/migrations/006_threat_model_guard_coverage.up.sql:42` · `postgres/sql/migrations/006_threat_model_guard_coverage.up.sql:250` · `postgres/account_policy_enforce.go:85` · `postgres/account_policy_enforce.go:110` · `postgres/roles_test.go:491`

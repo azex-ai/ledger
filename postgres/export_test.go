@@ -45,3 +45,15 @@ var NewQueriesForTest = sqlcgen.New
 // so a test that holds it too becomes mutually exclusive with them rather than
 // racing them. See roles_test.go's TestRoleAttributeHardening... and I-47.
 var AcquireClusterLockForTest = acquireClusterLock
+
+// WithLedgerOwnerForTest is withLedgerOwner, exported for tests only.
+//
+// Migrate has no seam for "make migration 014 raise": the migration set is
+// embedded, and the failure this needs to reproduce is a statement inside it
+// failing halfway through the elevated window. Driving withLedgerOwner with a
+// body that returns an error reproduces exactly that window and that exit
+// path, without a test that has to corrupt a real migration to get there.
+var WithLedgerOwnerForTest = withLedgerOwner
+
+// RevokeLedgerOwnerForTest is revokeLedgerOwner, exported for tests only.
+var RevokeLedgerOwnerForTest = revokeLedgerOwner

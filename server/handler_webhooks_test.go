@@ -264,7 +264,6 @@ func TestWebhookLegacy_RejectsChannelMismatch(t *testing.T) {
 	assert.False(t, rec.transitionCalled)
 }
 
-
 // TestWebhookLegacy_RefusesToConfirmADeposit pins G-m5 (2026-09-02 deep audit).
 //
 // I-21 says a confirmed deposit's accounting comes from exactly one place --

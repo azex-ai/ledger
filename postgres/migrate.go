@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,38 @@ func NewMigrationSource() (source.Driver, error) {
 // the examples, DATABASE_URL itself -- speaks "postgres", and requiring the
 // caller to hold two spellings of one connection string is a trap they hit at
 // the first line of their integration. Normalizing here costs nothing.
+//
+// # What the credential in databaseURL must be able to do
+//
+// Three prerequisites, all of them install-time only. This comment is the
+// source for them. docs/RUNBOOK.md's "Database roles" section carries the
+// operator-facing version and, as of 2026-09-03, is behind on the third and
+// still says "every migration after 001 runs as ledger_owner and needs no
+// elevated privilege" -- a mechanism that has never existed (D-M2 / D-M7,
+// docs/audits/2026-09-02-deep-audit/TODO.md; that file belongs to another
+// worker in this remediation wave).
+//
+//  1. CREATE ROLE, and CREATE on schema `public` -- 001_baseline creates the
+//     three roles and every object. A superuser has this; so does the
+//     database-owning, CREATEROLE account managed Postgres hands out.
+//  2. CONNECT on the cluster's `postgres` maintenance database -- where the
+//     cross-database migration lock lives. See acquireClusterLock.
+//  3. **Either** superuser, **or** ledger_owner itself, **or** ADMIN OPTION on
+//     ledger_owner. Everything after 001 alters objects 001 transferred to
+//     ledger_owner, so this call takes that role's privileges for the span of
+//     migrations 002..N and gives them back before returning (see
+//     withLedgerOwner). The credential that installed 001 always satisfies
+//     this: Postgres gives a role's creator a permanent ADMIN OPTION on it.
+//     A third-party role that did not create ledger_owner does not, and is
+//     refused here with a message naming the three ways out -- before any
+//     migration runs, rather than at whichever later statement happens to
+//     need the authority first.
+//
+// A returned error does not imply "nothing was applied". The one case where
+// both are true at once is a failure to hand ledger_owner's privileges back:
+// the schema is then up to date AND the migration credential is left holding
+// them, which is reported rather than logged because nothing else in the
+// deployment can notice it. The message says which.
 func Migrate(databaseURL string) error {
 	databaseURL = toMigrateURL(databaseURL)
 
@@ -90,16 +123,85 @@ func Migrate(databaseURL string) error {
 	if err := migrateBaselineFirst(m); err != nil {
 		return err
 	}
-	restore, err := elevateToLedgerOwner(databaseURL)
+	return applyRemainingMigrations(databaseURL, m)
+}
+
+// applyRemainingMigrations applies 002..N one migration at a time, each inside
+// its own ledger_owner window, and reports the first failure.
+//
+// One window per migration rather than one for the whole run. The reason is
+// measured, not defensive: 018 opens the same window itself -- 001's "Keepsake
+// 2 of 2" idiom, `GRANT ledger_owner TO <runner> WITH INHERIT TRUE` at the top
+// and `REVOKE ledger_owner FROM <runner>` at the bottom -- and its REVOKE
+// takes ours with it. It has to: the runner is the only role that can issue
+// either grant, so both carry the same grantor, and Postgres has exactly one
+// row of them to revoke.
+//
+// Under a single run-wide window that left 019, 020 and 021 running
+// unprivileged. Measured on postgres:17.10 as a CREATEROLE, non-superuser
+// bootstrap: 020 died at `CREATE TRIGGER ... ON public.account_policies` with
+// "permission denied for table account_policies", golang-migrate marked the
+// database dirty at 20, and 021 never ran -- the same D-M2 shape the window
+// was introduced to fix, moved eighteen migrations along, and invisible to
+// every other test because they all install as a superuser (which takes the
+// no-op branch of the elevation and is unaffected by anybody's GRANT).
+//
+// Re-taking the membership before each migration makes that coupling
+// impossible in both directions: what a migration does to its own membership
+// cannot outlive that migration, and no migration has to know this mechanism
+// exists. It also narrows the window from "the whole install" to "one
+// migration", which is the direction 001's header asks this credential to move
+// in. A REVOKE of a membership a migration already revoked is a Postgres
+// WARNING, not an error (verified), so the window's own release stays honest.
+func applyRemainingMigrations(databaseURL string, m *migrate.Migrate) error {
+	for {
+		err := withLedgerOwner(databaseURL, func() error { return m.Steps(1) })
+
+		// The three ways golang-migrate says "there was nothing left to do",
+		// all of which mean this install is complete: ErrNoChange, os.ErrNotExist
+		// (readUp's answer when the limit was reached with nothing applied) and
+		// ErrShortLimit (fewer migrations available than asked for).
+		var short migrate.ErrShortLimit
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, migrate.ErrNoChange), errors.Is(err, os.ErrNotExist), errors.As(err, &short):
+			return nil
+		default:
+			return fmt.Errorf("postgres: migrate: up: %w", err)
+		}
+	}
+}
+
+// withLedgerOwner runs fn with the migration credential holding ledger_owner's
+// privileges, and takes them back away before returning -- on every exit path
+// fn can take, including an error and including a panic.
+//
+// The elevated span is a function argument rather than a `defer` in Migrate so
+// that "the membership is released even when the thing inside fails" is a
+// property one function owns and a test can drive directly. The failure that
+// matters is not the happy path: it is the migration that raises halfway
+// through, which is exactly when the release is easiest to lose and hardest to
+// notice, because the error everyone reads is the migration's.
+//
+// Both halves are no-ops when the credential already has those privileges --
+// which covers a superuser, and covers connecting as ledger_owner itself.
+func withLedgerOwner(databaseURL string, fn func() error) (err error) {
+	runner, elevated, err := elevateToLedgerOwner(databaseURL)
 	if err != nil {
 		return err
 	}
-	defer restore()
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("postgres: migrate: up: %w", err)
+	if !elevated {
+		return fn()
 	}
-	return nil
+
+	// errors.Join, not "return the first one": a migration failure and a
+	// failure to give the privileges back are independent facts about
+	// different things, and the second one is the one nobody else can see.
+	defer func() {
+		err = errors.Join(err, revokeLedgerOwner(databaseURL, runner))
+	}()
+	return fn()
 }
 
 // migrateBaselineFirst applies 001_baseline alone when nothing has been
@@ -127,10 +229,10 @@ func migrateBaselineFirst(m *migrate.Migrate) error {
 }
 
 // elevateToLedgerOwner gives the migration credential ledger_owner's
-// privileges for the rest of this Migrate call, and returns the function that
-// takes them away again. Both halves are no-ops when the credential already
-// has them -- which covers a superuser, and covers connecting as ledger_owner
-// itself.
+// privileges, and reports which credential it was and whether anything was
+// actually granted. elevated is false when the credential already had them --
+// which covers a superuser, and covers connecting as ledger_owner itself --
+// and in that case there is nothing for revokeLedgerOwner to undo.
 //
 // The grant is not a privilege the credential did not already command. Postgres
 // gives the creator of a role a permanent ADMIN OPTION on it that a
@@ -152,48 +254,70 @@ func migrateBaselineFirst(m *migrate.Migrate) error {
 // credential that cannot take ledger_owner's privileges also cannot run any
 // migration after 001, so continuing only converts one actionable error into a
 // dirty database and a 42501 from whichever statement happens to be first.
-func elevateToLedgerOwner(databaseURL string) (restore func(), err error) {
+func elevateToLedgerOwner(databaseURL string) (runner string, elevated bool, err error) {
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, strings.Replace(databaseURL, "pgx5://", "postgres://", 1))
 	if err != nil {
-		return nil, fmt.Errorf("postgres: migrate: elevate: connect: %w", err)
+		return "", false, fmt.Errorf("postgres: migrate: elevate: connect: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
-	var runner string
 	var alreadyHas bool
 	if err := conn.QueryRow(ctx, `
 		SELECT current_user,
 		       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_owner')
 		         AND pg_has_role(current_user, 'ledger_owner', 'USAGE')
 	`).Scan(&runner, &alreadyHas); err != nil {
-		return nil, fmt.Errorf("postgres: migrate: elevate: probe role: %w", err)
+		return "", false, fmt.Errorf("postgres: migrate: elevate: probe role: %w", err)
 	}
 	if alreadyHas {
-		return func() {}, nil
+		return runner, false, nil
 	}
 
 	if _, err := conn.Exec(ctx, fmt.Sprintf("GRANT ledger_owner TO %s WITH INHERIT TRUE", pgx.Identifier{runner}.Sanitize())); err != nil {
-		return nil, fmt.Errorf("postgres: migrate: elevate: %q needs ledger_owner's privileges to run any migration after 001_baseline "+
+		return "", false, fmt.Errorf("postgres: migrate: elevate: %q needs ledger_owner's privileges to run any migration after 001_baseline "+
 			"(001 transfers every object it creates to ledger_owner, so later GRANT/ALTER/REPLACE statements fail the ownership check without them). "+
 			"Run migrations as a superuser, as a role holding ADMIN OPTION on ledger_owner (the credential that installed 001 always does), "+
 			"or as ledger_owner itself: %w", runner, err)
 	}
 
-	return func() {
-		ctx := context.Background()
-		conn, err := pgx.Connect(ctx, strings.Replace(databaseURL, "pgx5://", "postgres://", 1))
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close(ctx) }()
-		// Best effort by construction: the credential holds ADMIN OPTION on
-		// ledger_owner permanently either way (001's header), so a failure to
-		// revoke leaves it with something it can retake at will rather than
-		// with something new. Losing the revoke must not fail a migration that
-		// otherwise succeeded.
-		_, _ = conn.Exec(ctx, fmt.Sprintf("REVOKE ledger_owner FROM %s", pgx.Identifier{runner}.Sanitize()))
-	}, nil
+	return runner, true, nil
+}
+
+// revokeLedgerOwner ends the window elevateToLedgerOwner opened.
+//
+// Returns an error rather than swallowing one, which is a correction to this
+// code's first shape. That version argued the failure was harmless because the
+// credential holds ADMIN OPTION on ledger_owner permanently anyway (001's
+// header), so a lost REVOKE "leaves it with something it can retake at will
+// rather than with something new". True, and beside the point: retaking it is
+// a deliberate act somebody performs, while this leaves the privilege standing
+// with nobody aware of it. The whole argument for elevating inside Migrate at
+// all is that the window is bounded and explicit -- a silently unbounded
+// window is the thing this mechanism was introduced to avoid, and
+// working-agreements.md §3's test ("if this step had never run, would anything
+// I can see be different?") answered no.
+//
+// So the operator is told, and told what to do. The cost is a Migrate that can
+// return an error after applying every migration successfully; Migrate's own
+// doc comment says so, and the alternative is a migration credential that
+// quietly stays owner-equivalent for as long as it exists.
+func revokeLedgerOwner(databaseURL, runner string) error {
+	const remedy = "the migration credential %q is still a member of ledger_owner and still inherits its privileges. " +
+		"Revoke it by hand (REVOKE ledger_owner FROM %q) -- until then that credential can ALTER, DROP and TRUNCATE " +
+		"every object in the schema, which is the standing authority 001_baseline asks operators not to leave lying around: %w"
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, strings.Replace(databaseURL, "pgx5://", "postgres://", 1))
+	if err != nil {
+		return fmt.Errorf("postgres: migrate: revoke: connect: "+remedy, runner, runner, err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	if _, err := conn.Exec(ctx, fmt.Sprintf("REVOKE ledger_owner FROM %s", pgx.Identifier{runner}.Sanitize())); err != nil {
+		return fmt.Errorf("postgres: migrate: revoke: "+remedy, runner, runner, err)
+	}
+	return nil
 }
 
 // toMigrateURL rewrites a postgres:// or postgresql:// URL to the pgx5://
