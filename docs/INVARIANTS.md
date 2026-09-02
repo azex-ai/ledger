@@ -104,16 +104,41 @@ cumulative arithmetic here mean what it says.
 - `postgres.TestReverseJournal_MutualExclusionWithFraction`
 - `postgres.TestJournals_UpdateGuard_CoversEffectiveAtAndUID`
 
-## I-3: Idempotency on every mutation
+## I-3: Idempotency on every mutation that moves money
 
-Every state-changing operation requires an `idempotency_key`. Replaying the
-same key with the same payload returns the original result and produces no
-additional side effects. Reusing the same key with a different payload is a
-conflict.
+Every operation that moves money, or advances a money-bearing state machine,
+requires an `idempotency_key`. Replaying the same key with the same payload
+returns the original result and produces no additional side effects. Reusing
+the same key with a different payload is a conflict.
+
+Concretely, that is: posting a journal (including every reversal form),
+`Reserve` / `Settle` / `SettlePartial` / `Release` / `FinalizeSettlement`,
+`AddPending` / `ConfirmPending` / `CancelPending`, and `Booker`'s
+`CreateBooking` / `Transition`.
+
+**Configuration writes are deliberately excluded**, and this is a scope
+statement, not an outstanding gap:
+
+| Excluded | Why it needs no key |
+|---|---|
+| `CreateCurrency` / `CreateClassification` / `CreateJournalType` / `CreateTemplate` | Natural-key inserts: `code` is `UNIQUE`, so a replay is a duplicate-key conflict, not a second row |
+| `Deactivate*` (currency / classification / journal type / template) | Idempotent by construction — a flag set to `false` twice is `false`. Since 2026-09-02 a uid matching no row is `ErrNotFound` rather than a silent success |
+| `SetPolicy` (`AccountPolicyStore`) | Upsert at an exact `(holder, currency, classification)` dimension; replaying the same payload converges on the same row, and the append-only `account_policy_changes` trail records each application |
+| `ClosePeriod` | Append-only and latest-row-wins: a duplicate close line at the same `close_before` leaves the active line unchanged |
+| `EnsureAddress` (`AddressRegistry`) | Upsert on a deterministically derived address |
+
+> Scope corrected 2026-09-02 (`concurrency.md` B-m9). This section used to
+> open with "Every state-changing operation requires an `idempotency_key`" —
+> a universal claim that every configuration write in the library falsifies,
+> and has always falsified. Stated that way it read as an unfulfilled promise
+> about six real code paths, which invites someone to "fix" them by bolting
+> keys onto self-idempotent upserts: pure cost, no property gained. The rule
+> now says what it protects (money movement) and lists what it does not.
 
 **Why**: in distributed systems, every retry path needs a deterministic
 "is this the same thing I already did?" answer. Without it, network-flaky
-clients double-charge / double-credit users.
+clients double-charge / double-credit users. Configuration writes have no
+such hazard: there is no amount to apply twice.
 
 **Enforced by**:
 - `UNIQUE` constraint on `journals.idempotency_key`.
@@ -125,6 +150,11 @@ clients double-charge / double-credit users.
 - `UNIQUE` constraint on `booking_transition_receipts.idempotency_key`
   (migration `005`) — see the `Transition` paragraph below.
 - Each `Validate()` method rejects empty idempotency keys at the Go boundary.
+- `core.TestIdempotencyKeyScopeMatchesInvariantI3` — an AST gate over the
+  `core` package: every `*Input` type either carries an `IdempotencyKey`
+  field and is on the money-path list above, or carries none and is on the
+  exclusion list. A new money-path input that forgets the key turns it red;
+  so does a new configuration input that is not classified either way.
 - The store layer re-reads the persisted row after a `23505` race:
   if payload matches, it returns the original record; if payload diverges,
   it returns `ErrConflict`.
