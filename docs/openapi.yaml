@@ -13,7 +13,7 @@ info:
       - `docs/api.md`         — long-form prose
       - `docs/INVARIANTS.md`  — what the ledger guarantees
       - `docs/RUNBOOK.md`     — incident response
-  version: "0.4.0"
+  version: "0.6.0"
   license:
     name: Apache-2.0
 servers:
@@ -222,6 +222,15 @@ paths:
       description: >-
         Rejected (409) once the journal has any reversal history, full or
         partial — use reverse-partial to continue a partially-reversed journal.
+
+
+        The idempotency key of a full reversal is derived server-side as
+        `reversal:{uid}:{reason}`, so this endpoint takes none: supplying
+        `idempotency_key` (in the body, or via the `Idempotency-Key` header,
+        which the alias middleware folds into the body) is answered 400
+        rather than accepted and ignored, which is what an earlier revision
+        of this spec advertised as `required` (H-M3). Callers that need to
+        choose the key use reverse-partial with `num` == `den` == 1.
       parameters:
         - in: path
           name: uid
@@ -233,10 +242,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [reason, idempotency_key]
+              required: [reason]
               properties:
                 reason: { type: string }
-                idempotency_key: { type: string }
+                idempotency_key:
+                  type: string
+                  description: >-
+                    Must be absent or empty. Present and non-empty is a 400 —
+                    see this operation's description.
       responses:
         "201":
           description: Reversal posted.
@@ -293,7 +306,7 @@ paths:
           required: true
           schema: { type: integer, format: int64 }
         - in: query
-          name: currency
+          name: currency_uid
           required: true
           schema: { type: string, format: uuid }
         - in: query
@@ -312,12 +325,21 @@ paths:
   /balances/{holder}:
     get:
       tags: [Balances]
-      summary: All balances for one holder across currencies.
+      summary: All of one holder's balances in one currency.
+      description: >-
+        One Balance per classification the holder has touched in
+        `currency_uid`. `currency_uid` is required -- there is no
+        across-currencies form of this endpoint (an earlier revision of this
+        spec said there was, while the handler answered 400; H-M1).
       parameters:
         - in: path
           name: holder
           required: true
           schema: { type: integer, format: int64 }
+        - in: query
+          name: currency_uid
+          required: true
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Balances.
@@ -408,6 +430,7 @@ paths:
                     properties:
                       data:
                         type: object
+                        required: [list, next_cursor]
                         properties:
                           list:
                             type: array
@@ -967,6 +990,13 @@ paths:
     get:
       tags: [Metadata]
       summary: List classifications.
+      parameters:
+        - in: query
+          name: active_only
+          description: >-
+            When exactly "true", deactivated rows are omitted. Any other
+            value (including absent) lists both active and deactivated.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Classifications.
@@ -1016,6 +1046,13 @@ paths:
     get:
       tags: [Metadata]
       summary: List journal types.
+      parameters:
+        - in: query
+          name: active_only
+          description: >-
+            When exactly "true", deactivated rows are omitted. Any other
+            value (including absent) lists both active and deactivated.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Journal types.
@@ -1070,6 +1107,13 @@ paths:
     get:
       tags: [Metadata]
       summary: List entry templates.
+      parameters:
+        - in: query
+          name: active_only
+          description: >-
+            When exactly "true", deactivated rows are omitted. Any other
+            value (including absent) lists both active and deactivated.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Templates.
@@ -1137,6 +1181,13 @@ paths:
   /currencies:
     get:
       tags: [Metadata]
+      parameters:
+        - in: query
+          name: active_only
+          description: >-
+            When exactly "true", deactivated rows are omitted. Any other
+            value (including absent) lists both active and deactivated.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Currencies.
@@ -1253,14 +1304,16 @@ paths:
           required: true
           schema: { type: integer, format: int64 }
         - in: query
-          name: currency
+          name: currency_uid
           required: true
           schema: { type: string, format: uuid }
         - in: query
-          name: from
+          name: start
+          required: true
           schema: { type: string, format: date }
         - in: query
-          name: to
+          name: end
+          required: true
           schema: { type: string, format: date }
       responses:
         "200":
@@ -1278,6 +1331,7 @@ paths:
                     properties:
                       data:
                         type: object
+                        required: [list, next_cursor]
                         properties:
                           list:
                             type: array
@@ -1926,6 +1980,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -1947,6 +2002,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2017,6 +2073,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2069,6 +2126,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2123,6 +2181,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2163,7 +2222,15 @@ components:
         account_holder: { type: integer, format: int64 }
         currency_uid: { type: string, format: uuid }
         reserved_amount: { $ref: "#/components/schemas/Decimal" }
-        settled_amount:  { $ref: "#/components/schemas/Decimal", nullable: true }
+        settled_amount:
+          $ref: "#/components/schemas/Decimal"
+          description: >-
+            Absent from the wire until a settlement exists
+            (reservationResponse.SettledAmount is *string + omitempty, and
+            settled_amount is deliberately not in `required`). It is never
+            JSON null -- an earlier revision carried OpenAPI 3.0's `nullable:
+            true` here, which 3.1 ignores, so the declaration promised a
+            value the handler does not produce (H-m6).
         status:
           type: string
           enum: [active, settling, settled, released]
@@ -2185,6 +2252,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2208,6 +2276,7 @@ components:
         actor_id:         { type: integer, format: int64 }
     AccountPolicy:
       type: object
+      required: [uid, account_holder, status, min_balance, enforce_min_balance, note, updated_at, created_at]
       properties:
         uid: { type: string, format: uuid }
         account_holder: { type: integer, format: int64 }
@@ -2234,6 +2303,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2254,7 +2324,8 @@ components:
         channel_name:    { type: string }
         metadata:
           type: object
-          additionalProperties: true
+          description: Free-form string tags; values are strings, never nested JSON.
+          additionalProperties: { type: string }
         expires_at: { $ref: "#/components/schemas/Timestamp" }
     TransitionInput:
       type: object
@@ -2265,7 +2336,8 @@ components:
         amount: { $ref: "#/components/schemas/Decimal" }
         metadata:
           type: object
-          additionalProperties: true
+          description: Free-form string tags; values are strings, never nested JSON.
+          additionalProperties: { type: string }
         actor_id: { type: integer, format: int64 }
         source:   { type: string }
         idempotency_key:
@@ -2299,8 +2371,16 @@ components:
         idempotency_key: { type: string }
         metadata:
           type: object
-          additionalProperties: true
-        expires_at: { $ref: "#/components/schemas/Timestamp" }
+          description: Free-form string tags; values are strings, never nested JSON.
+          additionalProperties: { type: string }
+        expires_at:
+          description: >-
+            Null when the booking has no expiry (the ordinary case for a
+            booking created without one). Always present as a key; never an
+            empty string, which is what an earlier revision emitted (H-M2).
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/Timestamp"
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
     BookingEnvelope:
@@ -2316,6 +2396,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2377,7 +2458,8 @@ components:
         journal_uid: { type: string, format: uuid, description: "Empty when no journal linked." }
         metadata:
           type: object
-          additionalProperties: true
+          description: Free-form string tags; values are strings, never nested JSON.
+          additionalProperties: { type: string }
         occurred_at: { $ref: "#/components/schemas/Timestamp" }
         actor_id: { type: integer, format: int64 }
         source: { type: string }
@@ -2394,6 +2476,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2406,6 +2489,12 @@ components:
       type: object
       required: [initial, transitions]
       properties:
+        version:
+          type: integer
+          description: >-
+            Shape version of this lifecycle JSON (0 and 1 are equivalent
+            today). Absent from the wire when 0 -- core.Lifecycle.Version has
+            `omitempty`.
         initial: { type: string }
         terminal:
           type: array
@@ -2424,7 +2513,14 @@ components:
         normal_side: { $ref: "#/components/schemas/NormalSide" }
         is_system: { type: boolean }
         balance_role: { $ref: "#/components/schemas/BalanceRole" }
-        lifecycle: { $ref: "#/components/schemas/Lifecycle" }
+        lifecycle:
+          description: >-
+            Omit or send null for a label-only classification (no bookings).
+            The Go request field is a non-omitempty pointer, so the wire form
+            of "no lifecycle" is a literal null, not an absent key.
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/Lifecycle"
     Classification:
       type: object
       description: >-
@@ -2456,6 +2552,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2487,6 +2584,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2550,6 +2648,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2580,6 +2679,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2680,6 +2780,7 @@ components:
           additionalProperties: { type: string }
     DepositTolerancePlanResult:
       type: object
+      required: [outcome, expected_amount, actual_amount, tolerance, delta, requires_manual_review, journals]
       properties:
         outcome:
           type: string
@@ -2731,6 +2832,7 @@ components:
 
     BookingTrace:
       type: object
+      required: [booking, events, journals]
       properties:
         booking: { $ref: "#/components/schemas/Booking" }
         events:
@@ -2748,6 +2850,7 @@ components:
 
     PlatformBalance:
       type: object
+      required: [currency_uid, user_side, system_side]
       properties:
         currency_uid: { type: string, format: uuid }
         user_side:
@@ -2767,6 +2870,7 @@ components:
 
     SolvencyReport:
       type: object
+      required: [currency_uid, liability, custodial, solvent, margin]
       properties:
         currency_uid: { type: string, format: uuid }
         liability: { $ref: "#/components/schemas/Decimal" }
@@ -2782,6 +2886,7 @@ components:
 
     BalanceTrendPoint:
       type: object
+      required: [date, balance, inflow, outflow]
       properties:
         date: { type: string, format: date }
         balance: { $ref: "#/components/schemas/Decimal" }
@@ -2794,6 +2899,7 @@ components:
           properties:
             data:
               type: object
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
@@ -2804,6 +2910,7 @@ components:
 
     ReconcileReport:
       type: object
+      required: [checks, overall_passed, full_coverage, run_at]
       properties:
         overall_passed:
           type: boolean
@@ -2820,29 +2927,37 @@ components:
         run_at: { $ref: "#/components/schemas/Timestamp" }
         checks:
           type: array
-          items:
-            type: object
-            properties:
-              name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity" }
-              passed:
-                type: boolean
-                description: >-
-                  False if any finding was detected. Reports only on what the
-                  check actually examined — read together with `complete`.
-              complete:
-                type: boolean
-                description: >-
-                  False when the check could not cover its full scope (capped
-                  or timed-out scan, or a check skipped outright). Partial
-                  coverage never reads as a pass.
-              checked_at: { $ref: "#/components/schemas/Timestamp" }
-              findings:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    description: { type: string }
-                    detail: { type: string }
+          items: { $ref: "#/components/schemas/ReconcileCheck" }
+    ReconcileCheck:
+      type: object
+      required: [name, passed, complete, findings, checked_at]
+      properties:
+        name: { type: string, description: "e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity" }
+        passed:
+          type: boolean
+          description: >-
+            False if any finding was detected. Reports only on what the
+            check actually examined — read together with `complete`.
+        complete:
+          type: boolean
+          description: >-
+            False when the check could not cover its full scope (capped
+            or timed-out scan, or a check skipped outright). Partial
+            coverage never reads as a pass.
+        checked_at: { $ref: "#/components/schemas/Timestamp" }
+        findings:
+          type: array
+          items: { $ref: "#/components/schemas/ReconcileFinding" }
+    ReconcileFinding:
+      type: object
+      required: [description]
+      properties:
+        description: { type: string }
+        detail:
+          type: string
+          description: >-
+            Optional structured context. Absent from the wire when the check
+            recorded none (server's wire struct has `omitempty`).
     ReconcileReportEnvelope:
       allOf:
         - $ref: "#/components/schemas/Envelope"

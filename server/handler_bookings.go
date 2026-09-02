@@ -52,9 +52,17 @@ type bookingResponse struct {
 	JournalUID        string            `json:"journal_uid,omitempty"`
 	IdempotencyKey    string            `json:"idempotency_key"`
 	Metadata          map[string]string `json:"metadata"`
-	ExpiresAt         string            `json:"expires_at"`
-	CreatedAt         string            `json:"created_at"`
-	UpdatedAt         string            `json:"updated_at"`
+	// ExpiresAt is a pointer, without omitempty, so a booking with no
+	// expiry serializes as a literal `"expires_at": null` (H-M2). It used to
+	// be a plain string left at "" in that case, which is a third state --
+	// "", null, or a timestamp -- that no date parser accepts and no
+	// generated client can model, on the ordinary path of every booking
+	// created without an expiry. The spec's matching declaration is
+	// `oneOf: [null, Timestamp]`, still inside `required`: the key is always
+	// present, its value is null or an RFC3339 UTC instant.
+	ExpiresAt *string `json:"expires_at"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
 }
 
 type eventResponse struct {
@@ -93,7 +101,8 @@ func bookingToResponse(op *core.Booking) bookingResponse {
 		Metadata:          op.Metadata,
 	}
 	if !op.ExpiresAt.IsZero() {
-		resp.ExpiresAt = op.ExpiresAt.UTC().Format(time.RFC3339)
+		expiresAt := op.ExpiresAt.UTC().Format(time.RFC3339)
+		resp.ExpiresAt = &expiresAt
 	}
 	resp.CreatedAt = op.CreatedAt.UTC().Format(time.RFC3339)
 	resp.UpdatedAt = op.UpdatedAt.UTC().Format(time.RFC3339)

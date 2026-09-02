@@ -44,8 +44,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
-
-	"github.com/azex-ai/ledger/core"
 )
 
 // --- docs/openapi.yaml plumbing ---
@@ -83,9 +81,13 @@ func resolve(t *testing.T, schemas map[string]any, node map[string]any) map[stri
 	return node
 }
 
-// flattenAllOf merges an allOf member list's "properties" maps into one --
-// every envelope schema in this spec is `allOf: [Envelope, {properties:
-// {data: ...}}]`.
+// flattenAllOf merges an allOf member list's "properties" and "required"
+// into one node -- every envelope schema in this spec is `allOf: [Envelope,
+// {properties: {data: ...}}]`, so the base member is where `required:
+// [code, message, data]` lives while the overlay is where `data`'s actual
+// shape lives. Both halves have to survive the merge:
+// openapi_types_test.go's required-completeness walk reads `required`, and
+// dropping it here would report every envelope in the spec as missing one.
 func flattenAllOf(t *testing.T, schemas map[string]any, schema map[string]any) map[string]any {
 	t.Helper()
 	allOf, ok := schema["allOf"].([]any)
@@ -93,6 +95,8 @@ func flattenAllOf(t *testing.T, schemas map[string]any, schema map[string]any) m
 		return schema
 	}
 	mergedProps := map[string]any{}
+	var mergedRequired []any
+	seenRequired := map[string]bool{}
 	for _, partAny := range allOf {
 		part, ok := partAny.(map[string]any)
 		require.True(t, ok, "openapi.yaml: allOf member is not a mapping")
@@ -102,8 +106,21 @@ func flattenAllOf(t *testing.T, schemas map[string]any, schema map[string]any) m
 				mergedProps[k] = v
 			}
 		}
+		req, _ := part["required"].([]any)
+		for _, r := range req {
+			s, ok := r.(string)
+			if !ok || seenRequired[s] {
+				continue
+			}
+			seenRequired[s] = true
+			mergedRequired = append(mergedRequired, r)
+		}
 	}
-	return map[string]any{"properties": mergedProps}
+	out := map[string]any{"properties": mergedProps}
+	if len(mergedRequired) > 0 {
+		out["required"] = mergedRequired
+	}
+	return out
 }
 
 func namedSchema(t *testing.T, schemas map[string]any, name string) map[string]any {
@@ -313,7 +330,7 @@ var responseEnvelopeCases = []struct {
 	{"PlatformBalanceEnvelope", platformBalanceResponse{}},
 	{"SolvencyEnvelope", solvencyResponse{}},
 	{"ReconcileEnvelope", reconcileResponse{}},
-	{"ReconcileReportEnvelope", core.ReconcileReport{}},
+	{"ReconcileReportEnvelope", reconcileReportResponse{}},
 	{"PeriodCloseEnvelope", periodCloseResponse{}},
 	{"TrialBalanceEnvelope", trialBalanceResponse{}},
 	{"HealthEnvelope", healthResponse{}},
@@ -815,5 +832,132 @@ func TestOpenAPIContract_EveryRouteIsDocumented(t *testing.T) {
 	if len(missing) > 0 {
 		t.Fatalf("route(s) %v are served by the chi router but absent from docs/openapi.yaml -- "+
 			"a new endpoint defaults to undocumented, invisible to every spec->Go check; add it to openapi.yaml (or to enumerateRoutes' undocumented set if it is deliberately not part of the REST surface)", missing)
+	}
+}
+
+// --- registry: inline (unnamed) requestBody schemas <-> Go request structs ---
+//
+// H-M3: an operation whose requestBody schema is written inline instead of
+// as a `$ref` to components.schemas was invisible to every check in this
+// file -- schemaRefIn returns "" for it, so it landed in neither the
+// "registered" nor the "unregistered" set but in a third state, unchecked
+// and unreported. Thirteen requestBodies were in that state, five of them
+// the reservation settle/release paths, and one of them
+// (POST /journals/{uid}/reverse) documented `idempotency_key` as REQUIRED
+// while the Go struct did not read the field at all: a caller believed it
+// was scoping the replay window of a money-correcting write and was not.
+//
+// Inline is a legitimate choice for a body with no reusable shape, so the
+// fix is to register those bodies by route (there is no schema name to key
+// on) rather than to force a component for each. Completeness is enforced
+// by TestOpenAPIContract_EveryRequestBodyIsRegistered below, which walks
+// every requestBody in the spec and demands each one be covered by exactly
+// one of the two registries -- so a new inline body defaults to red, not to
+// invisible.
+var inlineRequestBodyCases = []struct {
+	route string // "METHOD /path", as spelled in openapi.yaml's paths keys
+	goVal any
+}{
+	{"POST /journals/{uid}/reverse", reverseJournalRequest{}},
+	{"POST /journals/{uid}/reverse-partial", reverseJournalFractionRequest{}},
+	{"POST /balances/batch", batchBalancesRequest{}},
+	{"POST /reservations/{uid}/settle", settleReservationRequest{}},
+	{"POST /reservations/{uid}/settle-partial", settlePartialReservationRequest{}},
+	{"POST /reservations/{uid}/finalize", terminalReservationOpRequest{}},
+	{"POST /reservations/{uid}/release", terminalReservationOpRequest{}},
+	{"POST /deposits/{uid}/review/reject", rejectDepositReviewRequest{}},
+	{"POST /journal-types", createJournalTypeRequest{}},
+	{"POST /currencies", createCurrencyRequest{}},
+	{"POST /reconcile/account", reconcileAccountRequest{}},
+	{"POST /holder-tokens", mintHolderTokenRequest{}},
+	{"POST /dev/credits", devCreditRequest{}},
+}
+
+// requestBodySchemas returns every operation's application/json requestBody
+// schema node, keyed "METHOD /path".
+func requestBodySchemas(t *testing.T, paths map[string]any) map[string]map[string]any {
+	t.Helper()
+	out := map[string]map[string]any{}
+	for pathKey, methodsAny := range paths {
+		methods, ok := methodsAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		for method, opAny := range methods {
+			op, ok := opAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			rb, ok := op["requestBody"].(map[string]any)
+			if !ok {
+				continue
+			}
+			content, _ := rb["content"].(map[string]any)
+			appJSON, _ := content["application/json"].(map[string]any)
+			schema, _ := appJSON["schema"].(map[string]any)
+			if schema == nil {
+				continue
+			}
+			out[strings.ToUpper(method)+" "+pathKey] = schema
+		}
+	}
+	return out
+}
+
+func TestOpenAPIContract_InlineRequestBodiesMatchGoStructs(t *testing.T) {
+	schemas := loadOpenAPISchemas(t)
+	bodies := requestBodySchemas(t, loadOpenAPIPaths(t))
+
+	for _, tc := range inlineRequestBodyCases {
+		t.Run(tc.route, func(t *testing.T) {
+			schema, ok := bodies[tc.route]
+			require.True(t, ok, "inlineRequestBodyCases names %s, which has no application/json requestBody in docs/openapi.yaml -- delete the entry", tc.route)
+			require.Empty(t, schemaRefIn(schema), "%s's requestBody is now a $ref; move it to requestBodySchemaCases and delete the inline entry", tc.route)
+
+			specKeys := propKeys(map[string]any(nil))
+			if props, ok := schema["properties"].(map[string]any); ok {
+				specKeys = propKeys(props)
+			}
+			assertExactKeys(t, "inline requestBody "+tc.route, specKeys, goJSONFieldNames(t, tc.goVal))
+
+			// Types, formats and nesting, same walk the named schemas get.
+			assertSchemaMatchesGoType(t, schemas, "inline requestBody "+tc.route,
+				resolveNode(t, schemas, schema), reflect.TypeOf(tc.goVal),
+				compareOpts{bidirectional: true, requestSide: true})
+		})
+	}
+}
+
+// TestOpenAPIContract_EveryRequestBodyIsRegistered is the completeness gate
+// that closes H-M3's third state: every requestBody in the spec, $ref'd or
+// inline, must be covered by one of the two registries.
+func TestOpenAPIContract_EveryRequestBodyIsRegistered(t *testing.T) {
+	bodies := requestBodySchemas(t, loadOpenAPIPaths(t))
+
+	byName := make(map[string]bool, len(requestBodySchemaCases))
+	for _, tc := range requestBodySchemaCases {
+		byName[tc.schema] = true
+	}
+	byRoute := make(map[string]bool, len(inlineRequestBodyCases))
+	for _, tc := range inlineRequestBodyCases {
+		byRoute[tc.route] = true
+	}
+
+	var unchecked []string
+	for route, schema := range bodies {
+		if name := schemaRefIn(schema); name != "" {
+			if !byName[name] {
+				unchecked = append(unchecked, route+" ($ref "+name+")")
+			}
+			continue
+		}
+		if !byRoute[route] {
+			unchecked = append(unchecked, route+" (inline)")
+		}
+	}
+	sort.Strings(unchecked)
+	if len(unchecked) > 0 {
+		t.Fatalf("requestBody(ies) %v are declared in docs/openapi.yaml but checked against no Go struct -- "+
+			"a requestBody defaults to unchecked, not to verified; register a $ref'd one in requestBodySchemaCases (by schema name) or an inline one in inlineRequestBodyCases (by route)", unchecked)
 	}
 }

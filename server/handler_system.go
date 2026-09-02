@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/bizcode"
 	"github.com/azex-ai/ledger/pkg/httpx"
 )
@@ -165,17 +166,68 @@ func (s *Server) handleReconcileAccount(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// handleReconcileFull runs the full reconciliation suite
-// on-demand and returns the full report. This is the heavier, fleet-wide
-// counterpart to POST /reconcile (which only runs the global DR=CR check) —
-// expect it to take longer on a large ledger since check #2 scans checkpoints.
+// reconcileReportResponse and its two nested types are this package's wire
+// representation of core.ReconcileReport (H-m7). core.ReconcileReport used
+// to be handed to httpx.OK directly, which made it the one domain type in
+// the repository doubling as an HTTP contract: renaming a json tag on
+// core.CheckResult was an undocumented HTTP breaking change, and its
+// nested checks[]/findings[] had no addressable Go type for the openapi
+// gate's registries to reflect on. Every other endpoint puts a server-local
+// *Response type in between; so does this one now.
+type reconcileReportResponse struct {
+	Checks        []reconcileCheckResponse `json:"checks"`
+	OverallPassed bool                     `json:"overall_passed"`
+	FullCoverage  bool                     `json:"full_coverage"`
+	RunAt         time.Time                `json:"run_at"`
+}
+
+type reconcileCheckResponse struct {
+	Name      string                     `json:"name"`
+	Passed    bool                       `json:"passed"`
+	Complete  bool                       `json:"complete"`
+	Findings  []reconcileFindingResponse `json:"findings"`
+	CheckedAt time.Time                  `json:"checked_at"`
+}
+
+type reconcileFindingResponse struct {
+	Description string `json:"description"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+func toReconcileReportResponse(report *core.ReconcileReport) reconcileReportResponse {
+	out := reconcileReportResponse{
+		Checks:        make([]reconcileCheckResponse, len(report.Checks)),
+		OverallPassed: report.OverallPassed,
+		FullCoverage:  report.FullCoverage,
+		RunAt:         report.RunAt,
+	}
+	for i, c := range report.Checks {
+		findings := make([]reconcileFindingResponse, len(c.Findings))
+		for j, f := range c.Findings {
+			findings[j] = reconcileFindingResponse{Description: f.Description, Detail: f.Detail}
+		}
+		out.Checks[i] = reconcileCheckResponse{
+			Name:      c.Name,
+			Passed:    c.Passed,
+			Complete:  c.Complete,
+			Findings:  findings,
+			CheckedAt: c.CheckedAt,
+		}
+	}
+	return out
+}
+
+// handleReconcileFull runs the full reconciliation suite on-demand and
+// returns the full report. This is the heavier, fleet-wide counterpart to
+// POST /reconcile (which only runs the global DR=CR check) — expect it to
+// take longer on a large ledger since check #2 scans checkpoints.
 func (s *Server) handleReconcileFull(w http.ResponseWriter, r *http.Request) {
 	report, err := s.fullReconciler.RunFullReconciliation(r.Context())
 	if err != nil {
 		httpx.Error(w, err)
 		return
 	}
-	httpx.OK(w, report)
+	httpx.OK(w, toReconcileReportResponse(report))
 }
 
 // --- Snapshots ---
