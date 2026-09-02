@@ -9,10 +9,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/service"
 )
+
+// seedRollupDimension returns real currencies.id / classifications.id values.
+//
+// These tests used to use literal ids (currency 1, classification 10): with no
+// FK on rollup_queue and balance_checkpoints, a queue row could name a
+// dimension that does not exist, and so could a test. Migration 022 added the
+// constraints system_rollups always had, which is what these tests now have
+// to satisfy -- the fixture is the part that was wrong, not the constraint.
+func seedRollupDimension(t *testing.T, pool *pgxpool.Pool, suffix string) (currencyID, classificationID int64) {
+	t.Helper()
+	curUID := postgrestest.SeedCurrency(t, pool, "RQ-"+suffix, "Rollup Queue "+suffix)
+	classUID := postgrestest.SeedClassification(t, pool, "rq_"+suffix, "Rollup Queue "+suffix, "debit", false)
+	return postgrestest.InternalID(t, pool, "currencies", curUID),
+		postgrestest.InternalID(t, pool, "classifications", classUID)
+}
 
 // TestRollupQueue_ReDirtyPreventsLostEnqueue pins the DB-level closure of the
 // enqueue-coalescing gap: a journal (EnqueueRollup) that arrives while a worker
@@ -25,7 +42,8 @@ func TestRollupQueue_ReDirtyPreventsLostEnqueue(t *testing.T) {
 	adapter := postgres.NewRollupAdapter(pool)
 	adapter.SetClaimLease(2 * time.Minute) // claim comfortably in the future
 
-	const holder, currency, class = int64(100), int64(1), int64(10)
+	const holder = int64(100)
+	currency, class := seedRollupDimension(t, pool, "a")
 
 	// 1. A journal enqueues the dimension → one pending row.
 	require.NoError(t, adapter.EnqueueRollup(ctx, holder, currency, class))
@@ -68,7 +86,8 @@ func TestRollupQueue_MarkProcessedSucceedsWithoutRedirty(t *testing.T) {
 	adapter := postgres.NewRollupAdapter(pool)
 	adapter.SetClaimLease(2 * time.Minute)
 
-	const holder, currency, class = int64(200), int64(1), int64(20)
+	const holder = int64(200)
+	currency, class := seedRollupDimension(t, pool, "b")
 
 	require.NoError(t, adapter.EnqueueRollup(ctx, holder, currency, class))
 
@@ -96,7 +115,8 @@ func TestRollupQueue_StaleWorkerCannotMarkOrReleaseReclaimedRow(t *testing.T) {
 	ctx := context.Background()
 	adapter := postgres.NewRollupAdapter(pool)
 
-	const holder, currency, class = int64(400), int64(1), int64(40)
+	const holder = int64(400)
+	currency, class := seedRollupDimension(t, pool, "c")
 
 	require.NoError(t, adapter.EnqueueRollup(ctx, holder, currency, class))
 
@@ -146,7 +166,8 @@ func TestRollupQueue_CheckpointUpsertIsMonotonic(t *testing.T) {
 	ctx := context.Background()
 	adapter := postgres.NewRollupAdapter(pool)
 
-	const holder, currency, class = int64(300), int64(1), int64(30)
+	const holder = int64(300)
+	currency, class := seedRollupDimension(t, pool, "d")
 
 	// Fresh checkpoint at last_entry_id = 100.
 	require.NoError(t, adapter.UpsertCheckpoint(ctx, service.BalanceCheckpoint{

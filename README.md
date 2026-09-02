@@ -944,7 +944,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
 - [**DR.md**](docs/DR.md) -- Backup & disaster recovery: PITR strategy, RPO/RTO targets, restore procedure, and invariant-based backup verification (quarterly drill).
 - [**CAPACITY.md**](docs/CAPACITY.md) -- Benchmark baseline, sizing guide (pool/replicas/DB), suggested SLOs, and scaling signals.
-- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (59 paths, 97 schemas).
+- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (59 paths, 100 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
 - [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (FX two-leg), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
@@ -1060,6 +1060,7 @@ nothing from the environment):
 | `DEV_CREDIT_ENABLED` | Enables `POST /api/v1/dev/credits` (mints holder balance against no custodied asset). Requires `ENV=dev`; boot fails otherwise. | `false` |
 | `PROTECTED_TEMPLATE_CODES` | Comma-separated extra template codes to protect beyond the structural rule (any template with a leg on an `is_system` classification) and the built-in list — see "write scope and system classifications" below | (built-in list only) |
 | `ALLOW_GENERIC_TEMPLATE_POST` | Comma-separated template codes exempted from the protected-template gate (`POST /journals/template` normally refuses these) | (none exempted) |
+| `ALLOW_SYSTEM_CLASSIFICATION_POST` | `true` allows `POST /classifications` to create `is_system` classifications. Off by default; `newServer` logs a warning at boot when it is on, because a system classification is one side of every money-path template. | `false` |
 
 `DATABASE_URL` / `HTTP_PORT` / migration-on-boot behavior are read by your
 own composition root, not by this library — see

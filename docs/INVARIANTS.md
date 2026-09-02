@@ -339,6 +339,32 @@ the only remaining source of a row's `id`, and any INSERT statement naming
 `id` explicitly is refused at the ACL layer (`42501`) regardless of what
 value it supplies. See I-42 for the full argument.
 
+**Cost, and the half of it that is still open (H-M6, 2026-09-02)**: "checkpoint
++ delta" is a claim about *work*, not only about correctness — it exists so a
+balance read costs the delta rather than the history. Until this wave the read
+did not deliver that. `ListComputedBalancesForHolders` found the holder's
+populated classifications with a `SELECT DISTINCT` over their whole history,
+and expressed the delta as a `LEFT JOIN … id > cp.last_entry_id` whose bound
+came from a joined row — so the planner had no constant to index on and read
+every entry of every holder before discarding almost all of them. Measured on
+a 24-partition fixture: **42,240 entry rows touched to answer a five-entry
+delta for a holder with 9,600 entries**, and exactly 10x that for 10x the
+history. The query is now a loose index scan for the dimension set plus a
+LATERAL for the delta (the shape `platform_balances.sql` already used); the
+same fixture touches **102 rows, independent of history**.
+`postgres.TestBalanceRead_CostDoesNotGrowWithHistory` holds it there.
+
+Still open, deliberately: `journal_entries` is `PARTITION BY RANGE (created_at)`
+and no balance read carries a `created_at` predicate, so **every read visits
+every partition** and the constant factor grows by one partition per month.
+The available fix is a lower bound derived from
+`balance_checkpoints.last_entry_at` (safe only if `id` is monotonic with
+`created_at`, which migration 008 secures by ACL and a single sequence rather
+than structurally, and which the same pin's partition assertion documents as
+unpruned today). Not applied here: it is a correctness bet on I-42's
+mechanism, and the row-count fix above removes the cost pressure that would
+justify taking it now.
+
 **Pinned by**:
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
 - `postgres.TestPlatformBalance_RealtimeReflectsUnrolledJournal`
@@ -348,6 +374,16 @@ value it supplies. See I-42 for the full argument.
 - `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-42's
   pin — the same forged-id attack, now asserted refused under a real
   `ledger_app` credential)
+- `postgres.TestBalanceRead_AgreesWithEntriesOnlyRecompute` — recomputes every
+  balance from the append-only entries alone, ignoring checkpoints, including
+  for a dimension with no checkpoint row and one whose watermark was reset to
+  zero. This is the invariant's own equation, checked against the read path
+  rather than against the read path's previous output.
+- `postgres.TestBalanceRead_CostDoesNotGrowWithHistory` — the cost half above,
+  in both directions: rows read must not scale with history, and the partition
+  count visited is asserted to still be *all* of them, so if pruning ever
+  starts working this paragraph is forced to be rewritten rather than left
+  stale.
 
 ## I-6: Decimal precision is `NUMERIC(30,18)`
 

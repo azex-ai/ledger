@@ -487,33 +487,50 @@ func (q *Queries) ListBalancesAtForHolderCurrency(ctx context.Context, arg ListB
 }
 
 const listComputedBalancesForHolders = `-- name: ListComputedBalancesForHolders :many
-WITH populated AS (
-    SELECT DISTINCT je.account_holder, je.classification_id
-    FROM journal_entries je
-    WHERE je.account_holder = ANY($2::bigint[])
-      AND je.currency_id = $1::bigint
+WITH RECURSIVE populated AS (
+    SELECT
+        h.account_holder,
+        (
+          SELECT MIN(je.classification_id)
+          FROM journal_entries je
+          WHERE je.account_holder = h.account_holder
+            AND je.currency_id = $1::bigint
+        ) AS classification_id
+    FROM unnest($2::bigint[]) AS h(account_holder)
+  UNION ALL
+    SELECT
+        p.account_holder,
+        (
+          SELECT MIN(je.classification_id)
+          FROM journal_entries je
+          WHERE je.account_holder = p.account_holder
+            AND je.currency_id = $1::bigint
+            AND je.classification_id > p.classification_id
+        )
+    FROM populated p
+    WHERE p.classification_id IS NOT NULL
 )
 SELECT
-    p.account_holder,
+    p.account_holder::bigint AS account_holder,
     c.id AS classification_id,
     c.uid AS classification_uid,
     c.balance_role,
-    (
-      COALESCE(cp.balance, 0::numeric) +
-      COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0::numeric)
-    )::numeric AS balance
+    (COALESCE(cp.balance, 0::numeric) + COALESCE(d.delta, 0::numeric))::numeric AS balance
 FROM populated p
 JOIN classifications c ON c.id = p.classification_id
 LEFT JOIN balance_checkpoints cp
   ON cp.account_holder = p.account_holder
  AND cp.currency_id = $1::bigint
  AND cp.classification_id = p.classification_id
-LEFT JOIN journal_entries je
-  ON je.account_holder = p.account_holder
- AND je.currency_id = $1::bigint
- AND je.classification_id = p.classification_id
- AND je.id > COALESCE(cp.last_entry_id, 0)
-GROUP BY p.account_holder, c.id, c.uid, c.balance_role, cp.balance
+LEFT JOIN LATERAL (
+    SELECT SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)) AS delta
+    FROM journal_entries je
+    WHERE je.account_holder = p.account_holder
+      AND je.currency_id = $1::bigint
+      AND je.classification_id = p.classification_id
+      AND je.id > COALESCE(cp.last_entry_id, 0)
+) d ON TRUE
+WHERE p.classification_id IS NOT NULL
 ORDER BY p.account_holder, c.id
 `
 
@@ -533,6 +550,47 @@ type ListComputedBalancesForHoldersRow struct {
 // Computes checkpoint + delta for every populated classification in one
 // snapshot-consistent query. This is the batch primitive behind GetBalances,
 // BatchGetBalances, and role breakdowns; callers must not loop GetBalance.
+//
+// H-M6. Both halves used to read the holder's WHOLE history, which cancelled
+// out the point of storing a checkpoint at all. Measured on a 24-partition
+// fixture (postgres.TestBalanceRead_CostDoesNotGrowWithHistory): the old
+// shape touched 42,240 entry rows to answer a five-entry delta for a holder
+// with 9,600 entries, and exactly 10x that for 10x the history. This shape
+// touches 102, whatever the history. Two causes, one per half:
+//
+//   - `SELECT DISTINCT ... FROM journal_entries` to find which
+//     classifications the holder has touched: a full index-only scan of the
+//     holder's history, in every partition, to produce (here) three rows.
+//     It is now a "loose index scan" -- a recursive walk of
+//     min(classification_id) > previous over the same
+//     (account_holder, currency_id, classification_id, id) index, which
+//     visits one index tuple per (dimension, partition) instead of all of
+//     them. Same set by construction: repeatedly taking the smallest
+//     classification_id greater than the last one enumerates exactly the
+//     distinct values present.
+//
+//   - the delta as a LEFT JOIN + GROUP BY: `je.id > cp.last_entry_id` takes
+//     its bound from a joined row, so the planner had no constant to index
+//     on and chose a hash join over a sequential Append across every
+//     partition -- reading every entry of every holder, then discarding
+//     almost all of them. As a LATERAL it is one index range scan per
+//     dimension with all four index columns bound, so it reads the delta and
+//     nothing else. Same value: SUM over an empty set is NULL either way,
+//     and COALESCE turns it into 0, and the GROUP BY disappears because the
+//     dimension walk already yields one row per (holder, classification).
+//
+// This is not a new pattern in this repository -- platform_balances.sql has
+// always computed its checkpoint+delta with exactly this LATERAL, and says
+// why in its header. Two queries implementing one formula in two shapes, the
+// slow one on the hot path, is what the audit found.
+//
+// Still true after this change (docs/INVARIANTS.md I-5): there is no
+// predicate on created_at, so NO partition pruning happens and the constant
+// factor grows by one partition per month. Adding a created_at lower bound
+// derived from balance_checkpoints.last_entry_at is safe only if entry id is
+// monotonic with created_at, which migration 008 guarantees by ACL and a
+// single sequence rather than structurally -- deferred deliberately, not
+// overlooked.
 func (q *Queries) ListComputedBalancesForHolders(ctx context.Context, arg ListComputedBalancesForHoldersParams) ([]ListComputedBalancesForHoldersRow, error) {
 	rows, err := q.db.Query(ctx, listComputedBalancesForHolders, arg.CurrencyID, arg.HolderIds)
 	if err != nil {
