@@ -56,6 +56,9 @@ func (i CreateBookingInput) Validate() error {
 	if !i.Amount.IsPositive() {
 		return fmt.Errorf("core: booking: amount must be positive: %w", ErrInvalidInput)
 	}
+	if err := validateFreeformFields("booking", "", i.Metadata); err != nil {
+		return err
+	}
 	if i.IdempotencyKey == "" {
 		return fmt.Errorf("core: booking: idempotency key required: %w", ErrInvalidInput)
 	}
@@ -119,6 +122,9 @@ type TransitionInput struct {
 func (i TransitionInput) Validate() error {
 	if i.BookingUID == "" {
 		return fmt.Errorf("core: booking: booking_uid required: %w", ErrInvalidInput)
+	}
+	if err := validateFreeformFields("transition", i.Source, i.Metadata); err != nil {
+		return err
 	}
 	if i.ToStatus == "" {
 		return fmt.Errorf("core: booking: to_status required: %w", ErrInvalidInput)

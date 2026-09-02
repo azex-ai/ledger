@@ -50,6 +50,23 @@ updated.
 in `knownInterfaceInternalIDLeaks`; that list must be emptied in the same
 commit as the fix.
 
+### `metadata` and `source` now have upper bounds (lead addendum)
+
+`core.MaxSourceLen` (256), `core.MaxMetadataKeys` (64),
+`core.MaxMetadataKeyLen` (128), `core.MaxMetadataValueLen` (2048),
+`core.MaxMetadataTotalLen` (16384). Every write input that carries those two
+free-form fields (`JournalInput`, `CreateBookingInput`, `TransitionInput`,
+the three pending inputs) rejects a value over the bound with
+`core.ErrInvalidInput` / HTTP 400.
+
+Purely additive symbols, but a **behavior change**: a library-mode consumer
+that was storing very large metadata now gets an error where it previously
+got a write. The HTTP surface was already bounded by `Config.MaxBodyBytes`,
+so an HTTP caller within the body limit is unaffected. The bounds are
+generous by design — nothing in the presets or examples comes within an
+order of magnitude — because they exist against pathology on the
+append-only tables, not as a business rule.
+
 ### `core.HolderReader.ListHolderHolds` is paginated (H-m9)
 
 `ListHolderHolds(ctx, holder)` → `ListHolderHolds(ctx, holder, cursor string,

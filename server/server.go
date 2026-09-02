@@ -362,6 +362,13 @@ func LoadConfig() (*Config, error) {
 
 // New creates a new Server with all dependencies. Configuration is read from
 // the environment via LoadConfig — call NewWithConfig if you need custom config.
+//
+// Deprecated: prefer NewFromDeps(cfg, deps). Twenty-three positional
+// dependencies of near-identical interface type have no compile-time
+// protection against being swapped (E-M10): Deps names each one, and
+// NewFromDeps returns an error instead of panicking so the caller's
+// composition root decides how to fail. This constructor stays for
+// compatibility and is unchanged.
 func New(
 	journals core.JournalWriter,
 	balances core.BalanceReader,
@@ -396,7 +403,12 @@ func New(
 		accountPolicies, periodCloser, trialBalance)
 }
 
-// NewWithConfig creates a Server using an explicit config, skipping env-var loading.
+// NewWithConfig creates a Server using an explicit config, skipping env-var
+// loading.
+//
+// Deprecated: prefer NewFromDeps(cfg, deps) — see New's note. This
+// constructor still panics on an invalid config; NewFromDeps returns the
+// error.
 func NewWithConfig(
 	cfg *Config,
 	journals core.JournalWriter,

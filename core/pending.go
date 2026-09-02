@@ -57,6 +57,9 @@ type AddPendingInput struct {
 }
 
 func (i AddPendingInput) Validate() error {
+	if err := validateFreeformFields("pending: add", i.Source, i.Metadata); err != nil {
+		return err
+	}
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: add: account_holder required: %w", ErrInvalidInput)
 	}
@@ -84,6 +87,9 @@ type ConfirmPendingInput struct {
 }
 
 func (i ConfirmPendingInput) Validate() error {
+	if err := validateFreeformFields("pending: confirm", i.Source, i.Metadata); err != nil {
+		return err
+	}
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: confirm: account_holder required: %w", ErrInvalidInput)
 	}
@@ -112,6 +118,9 @@ type CancelPendingInput struct {
 }
 
 func (i CancelPendingInput) Validate() error {
+	if err := validateFreeformFields("pending: cancel", i.Source, i.Metadata); err != nil {
+		return err
+	}
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("pending: cancel: account_holder required: %w", ErrInvalidInput)
 	}
