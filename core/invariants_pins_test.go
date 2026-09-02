@@ -644,8 +644,7 @@ func pkgDirMatches(dir, pkg string) bool {
 // legitimate doc edit, fix the citation or the pin -- do not add the
 // section here to make it go away.
 var citationStyleGapInvariants = map[string]bool{
-	"I-42": true, "I-43": true,
-	"I-44": true, "I-45": true, "I-46": true, "I-49": true, "I-52": true,
+	"I-49": true, "I-52": true,
 	"I-53": true, "I-54": true,
 }
 

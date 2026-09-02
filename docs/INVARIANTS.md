@@ -4294,10 +4294,11 @@ DEFINER) never receive a per-partition grant at all -- the only way
 `ledger_app` reaches them is tuple-routing through the parent's own name,
 which Postgres checks against the parent's ACL (the one this migration
 restricts), not the partition the row physically lands in --
-`postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` (I-35) already
-pins that routing behavior. `postgres/sql/queries/journals.sql`'s
+`TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` (postgres package,
+I-35) already pins that routing behavior. `postgres/sql/queries/journals.sql`'s
 `InsertJournalEntry` is the sole production write path into this table and
-never lists `id` in its column list, so it is unaffected.
+never lists `id` in its column list, so it is unaffected. That write path
+is reached through `postgres.LedgerStore.PostJournal`.
 
 **Pinned by**:
 - `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` --
@@ -4305,13 +4306,19 @@ never lists `id` in its column list, so it is unaffected.
   real `ledger_app` credential (`newAppPool`) and asserted refused
   (`SQLSTATE 42501`) rather than silently splitting the ledger's two views
   of the same balance.
-- `postgres.TestRoleAttributes` -- static ACL shape: `journal_entries` keeps
-  table-level `SELECT` for `ledger_app`, no table-level `INSERT`, a
-  column-level `INSERT` on `journal_id` (representative of the
-  non-`id` column set), and no column-level `INSERT` on `id`.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants/journal_entries` --
   the same shape, enumerated structurally alongside every other table's grant
   policy rather than hardcoded to this one table.
+
+**Related tests** (static ACL shape checked via `pg_roles` /
+`information_schema` and local unexported helpers
+(`assertGrants`/`assertColumnPrivilegeExists`/`assertColumnPrivilegeAbsent`),
+so nothing in its own function body names a Go symbol this doc can hold it
+to):
+- `postgres.TestRoleAttributes` -- `journal_entries` keeps table-level
+  `SELECT` for `ledger_app`, no table-level `INSERT`, a column-level
+  `INSERT` on `journal_id` (representative of the non-`id` column set), and
+  no column-level `INSERT` on `id`.
 
 > **Correction (M-5 fix, `.local/independent-review-2026-08-26.md`,
 > docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
@@ -4426,7 +4433,9 @@ function is never inlined by the planner — see the migration's comment and
 `CASE` (statistically indistinguishable) and ~3.0ms/op for an otherwise
 identical `STRICT` variant (~2.1x slower) — the `STRICT` measurement was
 taken with a throwaway benchmark during this task and is not preserved in
-the repository.
+the repository. `postgres.VerifiedBalanceStore.VerifiedBalance` (I-32) is
+one of the entries-only recompute paths that ultimately routes its sign
+arithmetic through this convergence.
 
 **Pinned by**:
 - `core.TestSign_RejectsUnknownNormalSideAndEntryType` / `TestSign_Table` —
@@ -4446,6 +4455,14 @@ the repository.
   `TestLedgerSignedDelta_AgreesWithCoreDelta` — the SQL functions match
   `core.SignedAmount` / `core.Delta` bit-for-bit across all four valid
   combinations.
+- `postgres.TestVerifiedBalance_ZeroContributingJournalsIsDefinedZero` — the
+  vacuous-truth case for the entries-only recompute path this convergence
+  ultimately backs.
+
+**Related tests** (call `ledger_signed_amount`/`ledger_signed_delta`
+directly via raw SQL, or INSERT directly to probe a CHECK constraint, so
+nothing in their own function bodies names a Go symbol this doc can hold
+them to):
 - `postgres.TestLedgerSignedAmount_RejectsUnknownNormalSide` /
   `TestLedgerSignedDelta_RejectsUnknownNormalSide` — the SQL-side reject,
   asserted against the exact Postgres error code
@@ -4534,13 +4551,15 @@ rejected prior shapes (a journal-type code or a uid string).
 `IsValid()` — the DB layer cannot accept a value the Go layer would refuse,
 or vice versa. `postgres/sql/queries/holder.sql`'s
 `ListHolderTransactionRows` is the sole place the `COALESCE(NULLIF(...),
-'other')` read-time fallback is applied. `presets.JournalTypePreset.HolderKind`
+'other')` read-time fallback is applied, read through
+`postgres.LedgerStore.ListHolderTransactions`. `presets.JournalTypePreset.HolderKind`
 (`presets/templates.go` and every other `presets/*.go` bundle file) —
 every preset journal type this package installs declares one explicitly;
 `presets.ensureJournalTypePreset`'s expand-safe upgrade (mirroring
-`ensureClassificationPreset`'s `balance_role` upgrade) retags a
-pre-migration-012 row in place on re-install and rejects a conflicting
-pre-existing non-empty value rather than silently overwriting it.
+`ensureClassificationPreset`'s `balance_role` upgrade), reached through
+`presets.InstallDefaultTemplatePresets`, retags a pre-migration-012 row in
+place on re-install and rejects a conflicting pre-existing non-empty value
+rather than silently overwriting it.
 
 **Pinned by**:
 - `core.TestHolderTxKind_IsValid` — the closed vocabulary, including the two
@@ -4705,6 +4724,8 @@ never-signed-at-all case this same function already handles per I-32);
 constructor that makes "register the retired key" a thing an operator can
 actually do, plus `LocalVerifier.KeyIDs` for a startup log or health
 endpoint answering "which generations can this process verify?".
+`runCheckUnauthorizedJournals` is reached only through
+`service.FullReconciliationService.RunFullReconciliation` (I-32).
 
 **Pinned by**:
 - `authdev.TestNewLocalAttestor_RejectsUnknownKeyID` — an unrecognized
@@ -4765,9 +4786,13 @@ this bug's exact shape: `time.Now()`-based tests passed on the author's
 Mac and only failed in Linux CI.
 
 **Enforced by**: `core.canonicalTimestamp` (`core/auth.go`), called from
-`core.CanonicalJournalDigest` and `core.encodeAttestedEntry`
-(`core/attestation.go`) before every `.Format(time.RFC3339Nano)` call that
-feeds a signed digest. No new domain separator accompanies this fix --
+`core.CanonicalJournalDigest`, `core.CanonicalBatchDigest`, and
+`core.encodeAttestedEntry` (`core/attestation.go`) before every
+`.Format(time.RFC3339Nano)` call that feeds a signed digest.
+`core.VerifyJournalAuth` (I-26) is what a caller-facing digest mismatch
+ultimately surfaces through, fed by `postgres.AttestationStore.JournalAuthMaterial`
+reading the value back from a real `TIMESTAMPTZ` column via
+`postgres.LedgerStore.PostJournal`. No new domain separator accompanies this fix --
 `canonicalTimestamp`'s doc comment lays out why: the floor is a no-op for
 any `effective_at` that was already microsecond-aligned (every instant that
 round-tripped a `TIMESTAMPTZ` column, and every instant macOS's `time.Now()`
