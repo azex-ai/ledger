@@ -7,10 +7,25 @@
 > 是唯一随处置状态维护的两份。上一轮（2026-08-25）的方法与结论见
 > `docs/audits/2026-08-25-financial-engineering/README.md`，本轮**不重报**它已关闭的条目。
 
-## 处置状态
+## 处置状态（2026-09-02 更新）
 
-**待 Aaron 拍板。** 六条 Critical 已由 lead 逐条复核（四条实跑复现、两条完整读链），均 CONFIRMED。
-未做任何修复。
+Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contracts.md`，任务清单 `TODO.md`，lead 逐条证伪记录在 `lead-verification.md`。
+
+**Wave 1（六条 Critical + 契约层）已合入五条，第六条待 ff：**
+
+| # | 处置 | 合入 | lead 证伪 |
+|---|---|---|---|
+| C-1 提现闸金额读 checkpoint | 闸开启时 availableBase = min(锁外验签重算 V, 锁内 entries-only 重算 E)，不读 checkpoint；I-32 措辞改写，新 I-49 | `a9993fe` | 拆修复两 pin 红；min 换 V 红 |
+| C-2 capital 方向反 | 五个模板方向修正（capital ×2、settlement ×2、fee_charge）+ equity 改 debit-normal + migration 016 修存量行 + 每模板偿付能力 pin + SQL 符号机械 gate（I-50） | ff `edbd994` | 拆回 presets 5 条 + solvency + gate 红 |
+| C-3 ReversalOfUID 零校验 | 冲销链完整性提升为 I-51（含兄弟 EventUID rule 4）；pending / batch 锁序统一为一个 canonical order | `dfa2017` | 拆回三文件 7 pin 红（两个真 40P01）；EventUID 检查置 false 红 |
+| C-4 扫链失败推进游标 | 任何 ingest 失败不推进 + 死信 + wedged 告警（I-52）；扫描停在 reorg 可变链尖之后（I-53） | ff `0774ef3` | hold-cursor 守卫置 false 红 |
+| C-5 TxLogSeq 依赖地址集 | 改为 receipt 内零基位置，pin 经过 `FetchDeposits`；I-20 重写 | ff `0774ef3` | 随上 |
+| C-6 dev_credit 不在名单 | 模板保护改结构派生（任一腿落 is_system 分类即拒），`deposit-tolerance` 同闸 + admin scope（§7.11） | `0c86040` | 拆回 handler/routes 四 pin 红 |
+| W1-facade（默认与 clone 边界） | `Worker.Run` 在 NopLogger 下拒绝启动除非 opt-in；clone 逃逸四入口全堵；I-40 换 go/ast 门禁；I-54 | 待 ff | 守卫置 false 两 pin 红 |
+
+Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径、`EventUID` 输入门、`EnableOnchain` 从不传 pool 使单飞锁全死、`advanceSweep` dispatch 分支绕过 GasCeiling。
+
+**待 Aaron 确认的语义口径**（契约 §7，已按推荐落地，可回退）：equity 改 debit-normal；`checkout_settlement` 语义（custodial 装欠用户净额、平台自赚进 fees）；托管资产口径改注入式 `CustodialClassCodes`；`Worker.Run` 对 NopLogger fail-closed。
 
 ## 0. 一句话结论
 
