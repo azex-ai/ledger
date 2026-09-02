@@ -768,7 +768,8 @@ Surface below, this one is **not** included in `InstallDefaultPresets` or
 | `svc.InstallDefaultPresets(ctx)` | Install deposit + withdrawal bundles |
 | `svc.InstallExtendedPresets(ctx)` | Install all 8 preset bundles |
 | `svc.Ping(ctx)` | DB connectivity check (`SELECT 1`) |
-| `ledger.Migrate(databaseURL)` | Run pending schema migrations |
+| `ledger.Migrate(databaseURL, opts...)` | Run pending schema migrations. Options are `postgres.WithMigrateLogger` (surfaces the "waiting for the cluster migration lock" line — the only signal that a boot is blocked on another node's migration) and `postgres.WithMigrateLockBudget` (default 5m before that wait fails) |
+| `ledger.MigrateContext(ctx, databaseURL, opts...)` | Same, cancellable: a boot sequence being torn down stops waiting for the cluster migration lock |
 | `ledger.NewIdempotencyKey(scope)` | Generate `scope:<16-byte-hex>` key via `crypto/rand` |
 | `ledger.RetryIdempotent(ctx, scope, attempts, fn)` | Retry `fn` with the same idempotency key on every attempt — see "Retrying a failed write" below |
 

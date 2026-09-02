@@ -150,11 +150,8 @@ such hazard: there is no amount to apply twice.
 - `UNIQUE` constraint on `booking_transition_receipts.idempotency_key`
   (migration `005`) — see the `Transition` paragraph below.
 - Each `Validate()` method rejects empty idempotency keys at the Go boundary.
-- `core.TestIdempotencyKeyScopeMatchesInvariantI3` — an AST gate over the
-  `core` package: every `*Input` type either carries an `IdempotencyKey`
-  field and is on the money-path list above, or carries none and is on the
-  exclusion list. A new money-path input that forgets the key turns it red;
-  so does a new configuration input that is not classified either way.
+- The scope boundary itself is machine-checked, not maintained by hand: see
+  the AST gate in **Pinned by** below.
 - The store layer re-reads the persisted row after a `23505` race:
   if payload matches, it returns the original record; if payload diverges,
   it returns `ErrConflict`.
@@ -230,6 +227,12 @@ client-driven calls (`POST /bookings/{uid}/transition`) carry a
 caller-supplied key via the `Idempotency-Key` header (api-contract.md §9).
 
 **Pinned by**:
+- `core.TestIdempotencyKeyScopeMatchesInvariantI3` — the AST gate over the
+  `core` package: every `*Input` type either carries an `IdempotencyKey`
+  field and is on the money-path list above, or carries none and is on the
+  exclusion list. A new money-path input that forgets the key turns it red;
+  so does a new configuration input that nobody classified, which is what
+  stops the exclusion table drifting away from the code.
 - `core.TestJournalInput_Validate_NoIdempotencyKey`
 - `postgres.TestLedgerStore_PostJournal_Idempotent`
 - `postgres.TestPendingStore_AddPending_Idempotent`
@@ -4641,7 +4644,8 @@ that runs its migration job from more than one pod at once.
 
 **Enforced by**: `postgres.acquireClusterLock` and
 `postgres.maintenanceDatabaseURL` (`postgres/migrate.go`), called from
-`postgres.Migrate` before `migrate.NewWithSourceInstance`.
+`postgres.Migrate` / `postgres.MigrateContext` before
+`migrate.NewWithSourceInstance`.
 
 **Pinned by**:
 - `postgres.TestMigrate_ClusterLockHeldElsewhere_FailsWithinBudget` — a
@@ -4652,8 +4656,6 @@ that runs its migration job from more than one pod at once.
   still a wait: `Migrate` succeeds once the holder lets go.
 - `postgres.TestMigrateContext_CancelledWhileWaiting` — a torn-down boot
   sequence stops waiting.
-- `postgres.TestNoBlockingSessionAdvisoryLocks` — no blocking session-level
-  advisory lock may reappear anywhere in the repository.
 - `postgres.TestMigrate_ConcurrentAcrossDatabases` — installs
 into 8 freshly created databases on one cluster concurrently (after a
 sequential warm-up `Migrate()` call so every racer hits `007`'s
