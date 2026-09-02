@@ -1,11 +1,14 @@
 -- audit_lists.sql
 -- Read-only queries for the audit layer.
--- All list queries use keyset (cursor) pagination on journal.id ASC.
+-- All journal list queries use keyset (cursor) pagination on journal.id
+-- DESC -- newest first, the same direction as ListJournalsCursor and the
+-- holder surface (H-m3). cursor_id = 0 means "first page"; the caller
+-- encodes the last (oldest) row's id as the next cursor.
 
 -- name: ListJournalsByAccount :many
 -- Returns journals whose entries touch (holder, currency_id[, classification_id]).
 -- classification_id = 0 means "all classifications".
--- Keyset cursor: id > cursor_id, ordered by id ASC.
+-- Keyset cursor: id < cursor_id (0 = first page), ordered by id DESC.
 -- since/until zero value (year 0001) is treated as unbounded.
 SELECT DISTINCT j.*
 FROM journals j
@@ -15,8 +18,8 @@ WHERE je.account_holder = sqlc.arg(holder)::bigint
   AND (sqlc.arg(classification_id)::bigint = 0 OR je.classification_id = sqlc.arg(classification_id)::bigint)
   AND (sqlc.arg(since)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR j.created_at >= sqlc.arg(since)::timestamptz)
   AND (sqlc.arg(until)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR j.created_at <= sqlc.arg(until)::timestamptz)
-  AND j.id > sqlc.arg(cursor_id)::bigint
-ORDER BY j.id ASC
+  AND (sqlc.arg(cursor_id)::bigint = 0 OR j.id < sqlc.arg(cursor_id)::bigint)
+ORDER BY j.id DESC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: ListJournalsByTimeRange :many
@@ -26,8 +29,8 @@ SELECT *
 FROM journals
 WHERE (sqlc.arg(since)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at >= sqlc.arg(since)::timestamptz)
   AND (sqlc.arg(until)::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at <= sqlc.arg(until)::timestamptz)
-  AND id > sqlc.arg(cursor_id)::bigint
-ORDER BY id ASC
+  AND (sqlc.arg(cursor_id)::bigint = 0 OR id < sqlc.arg(cursor_id)::bigint)
+ORDER BY id DESC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: TraceBookingEvents :many

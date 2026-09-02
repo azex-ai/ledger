@@ -60,9 +60,13 @@ ORDER BY je.id;
 SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classification_id, je.entry_type, je.amount, je.created_at, je.effective_at, j.uid AS journal_uid
 FROM journal_entries je
 JOIN journals j ON j.id = je.journal_id
+-- Keyset pagination, NEWEST FIRST, same direction as ListJournalsCursor
+-- (H-m3): an account's entry list is a statement, and the two reads a
+-- consumer pages through side by side must not disagree about which end
+-- they start from.
 WHERE je.account_holder = $1 AND je.currency_id = $2
-  AND je.id > sqlc.arg(cursor_id)::bigint
-ORDER BY je.id ASC
+  AND (sqlc.arg(cursor_id)::bigint = 0 OR je.id < sqlc.arg(cursor_id)::bigint)
+ORDER BY je.id DESC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: SumEntriesSinceCheckpoint :many
@@ -94,9 +98,23 @@ WHERE account_holder = $1
 GROUP BY entry_type;
 
 -- name: ListJournalsCursor :many
+-- Keyset pagination, NEWEST FIRST (H-m3). cursor_id = 0 means "first page";
+-- the caller encodes the last (oldest) row's id as the opaque next_cursor,
+-- and the next page is strictly older.
+--
+-- This used to be `id > cursor ORDER BY id ASC` while docs/openapi.yaml
+-- described the endpoint as "descending id" and the holder surface's own
+-- journal pagination (holder.sql page_journals) really was DESC: the same
+-- API paginated its ledger reads in two directions, and the documented one
+-- was the direction nothing implemented.
+--
+-- Not to be confused with ListRecentJournals (a fixed-size head sample with
+-- no cursor, used by verification): conflating "the newest page of a
+-- paginated read" with "a sample of the newest rows" is what made the
+-- audit's M-1 finding possible.
 SELECT * FROM journals
-WHERE id > sqlc.arg(cursor_id)::bigint
-ORDER BY id ASC
+WHERE (sqlc.arg(cursor_id)::bigint = 0 OR id < sqlc.arg(cursor_id)::bigint)
+ORDER BY id DESC
 LIMIT sqlc.arg(page_limit)::int;
 
 -- name: ListRecentJournals :many

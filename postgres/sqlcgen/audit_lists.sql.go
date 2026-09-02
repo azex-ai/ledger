@@ -106,8 +106,8 @@ WHERE je.account_holder = $1::bigint
   AND ($3::bigint = 0 OR je.classification_id = $3::bigint)
   AND ($4::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR j.created_at >= $4::timestamptz)
   AND ($5::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR j.created_at <= $5::timestamptz)
-  AND j.id > $6::bigint
-ORDER BY j.id ASC
+  AND ($6::bigint = 0 OR j.id < $6::bigint)
+ORDER BY j.id DESC
 LIMIT $7::int
 `
 
@@ -123,10 +123,13 @@ type ListJournalsByAccountParams struct {
 
 // audit_lists.sql
 // Read-only queries for the audit layer.
-// All list queries use keyset (cursor) pagination on journal.id ASC.
+// All journal list queries use keyset (cursor) pagination on journal.id
+// DESC -- newest first, the same direction as ListJournalsCursor and the
+// holder surface (H-m3). cursor_id = 0 means "first page"; the caller
+// encodes the last (oldest) row's id as the next cursor.
 // Returns journals whose entries touch (holder, currency_id[, classification_id]).
 // classification_id = 0 means "all classifications".
-// Keyset cursor: id > cursor_id, ordered by id ASC.
+// Keyset cursor: id < cursor_id (0 = first page), ordered by id DESC.
 // since/until zero value (year 0001) is treated as unbounded.
 func (q *Queries) ListJournalsByAccount(ctx context.Context, arg ListJournalsByAccountParams) ([]Journal, error) {
 	rows, err := q.db.Query(ctx, listJournalsByAccount,
@@ -179,8 +182,8 @@ SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata
 FROM journals
 WHERE ($1::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at >= $1::timestamptz)
   AND ($2::timestamptz <= '0001-01-02 00:00:00+00'::timestamptz OR created_at <= $2::timestamptz)
-  AND id > $3::bigint
-ORDER BY id ASC
+  AND ($3::bigint = 0 OR id < $3::bigint)
+ORDER BY id DESC
 LIMIT $4::int
 `
 

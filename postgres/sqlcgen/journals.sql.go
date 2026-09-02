@@ -422,8 +422,8 @@ SELECT je.id, je.journal_id, je.account_holder, je.currency_id, je.classificatio
 FROM journal_entries je
 JOIN journals j ON j.id = je.journal_id
 WHERE je.account_holder = $1 AND je.currency_id = $2
-  AND je.id > $3::bigint
-ORDER BY je.id ASC
+  AND ($3::bigint = 0 OR je.id < $3::bigint)
+ORDER BY je.id DESC
 LIMIT $4::int
 `
 
@@ -448,6 +448,10 @@ type ListEntriesByAccountRow struct {
 }
 
 // Column order matches the table's physical order (see InsertJournalEntry).
+// Keyset pagination, NEWEST FIRST, same direction as ListJournalsCursor
+// (H-m3): an account's entry list is a statement, and the two reads a
+// consumer pages through side by side must not disagree about which end
+// they start from.
 func (q *Queries) ListEntriesByAccount(ctx context.Context, arg ListEntriesByAccountParams) ([]ListEntriesByAccountRow, error) {
 	rows, err := q.db.Query(ctx, listEntriesByAccount,
 		arg.AccountHolder,
@@ -540,8 +544,8 @@ func (q *Queries) ListJournalEntries(ctx context.Context, journalID int64) ([]Li
 
 const listJournalsCursor = `-- name: ListJournalsCursor :many
 SELECT id, journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, reversal_of, created_at, event_id, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status FROM journals
-WHERE id > $1::bigint
-ORDER BY id ASC
+WHERE ($1::bigint = 0 OR id < $1::bigint)
+ORDER BY id DESC
 LIMIT $2::int
 `
 
@@ -550,6 +554,20 @@ type ListJournalsCursorParams struct {
 	PageLimit int32 `json:"page_limit"`
 }
 
+// Keyset pagination, NEWEST FIRST (H-m3). cursor_id = 0 means "first page";
+// the caller encodes the last (oldest) row's id as the opaque next_cursor,
+// and the next page is strictly older.
+//
+// This used to be `id > cursor ORDER BY id ASC` while docs/openapi.yaml
+// described the endpoint as "descending id" and the holder surface's own
+// journal pagination (holder.sql page_journals) really was DESC: the same
+// API paginated its ledger reads in two directions, and the documented one
+// was the direction nothing implemented.
+//
+// Not to be confused with ListRecentJournals (a fixed-size head sample with
+// no cursor, used by verification): conflating "the newest page of a
+// paginated read" with "a sample of the newest rows" is what made the
+// audit's M-1 finding possible.
 func (q *Queries) ListJournalsCursor(ctx context.Context, arg ListJournalsCursorParams) ([]Journal, error) {
 	rows, err := q.db.Query(ctx, listJournalsCursor, arg.CursorID, arg.PageLimit)
 	if err != nil {

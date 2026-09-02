@@ -165,7 +165,15 @@ List endpoints use opaque cursor pagination: `?cursor=<base64>&limit=50`. `limit
 }
 ```
 
-When `next_cursor` is empty (or absent), there is no next page.
+When `next_cursor` is null, there is no next page.
+
+**Direction** is per endpoint and stated in each one's summary in
+[`openapi.yaml`](openapi.yaml). The ledger reads — `GET /journals`,
+`GET /entries`, `GET /audit/journals`, `GET /reservations`,
+`GET /holder/transactions` — page **newest first**: the first page is the most
+recent rows and the cursor walks strictly older. The queue-shaped reads —
+`GET /bookings`, `GET /events`, `GET /deposits/reviews` — page **oldest
+first**, because they are worked through in occurrence order.
 
 ### Rate limits
 

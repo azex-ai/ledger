@@ -50,6 +50,25 @@ updated.
 in `knownInterfaceInternalIDLeaks`; that list must be emptied in the same
 commit as the fix.
 
+### `GET /journals`, `GET /entries`, `GET /audit/journals` now page newest first (H-m3)
+
+`ListJournalsCursor`, `ListEntriesByAccount`, `ListJournalsByAccount` and
+`ListJournalsByTimeRange` changed from `id > cursor ORDER BY id ASC` to
+`id < cursor ORDER BY id DESC`. docs/openapi.yaml already described
+`GET /journals` as "descending id", and the holder surface's own journal
+pagination always was descending — so the documented direction was the one
+nothing implemented, and a consumer building a "most recent activity" list
+got the oldest page with the cursor walking away from the present.
+
+**Run-time behavior change, not a compile break.** A consumer that renders
+these pages in arrival order will see the order invert. Cursor handling does
+not change (still an opaque string from `next_cursor`); a consumer that
+decoded the cursor and reasoned about it as "the largest id seen" must stop
+(it was never a documented value). The queue-shaped lists
+(`GET /bookings`, `GET /events`, `GET /deposits/reviews`) deliberately stay
+oldest-first, and every endpoint's direction is now stated in its openapi
+summary and in docs/api.md's Pagination section.
+
 ### `server.PagedResponse` on `GET /holder/balances` and `GET /holder/holds` (H-m4)
 
 Both routes used to answer `{"list": [...]}` with **no** `next_cursor` key.

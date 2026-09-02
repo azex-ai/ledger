@@ -111,7 +111,12 @@ paths:
   /journals:
     get:
       tags: [Journals]
-      summary: List journals (cursor-paginated, descending id).
+      summary: List journals (cursor-paginated, newest first).
+      description: >-
+        Ordered by internal id descending, so the first page is the most
+        recent journals. `next_cursor` walks strictly older. The same
+        direction as GET /entries, GET /audit/journals and
+        GET /holder/transactions.
       parameters:
         - in: query
           name: cursor
@@ -299,7 +304,11 @@ paths:
   /entries:
     get:
       tags: [Journals]
-      summary: List entries on one account dimension (cursor-paginated).
+      summary: List entries on one account dimension (cursor-paginated, newest first).
+      description: >-
+        Ordered newest first, the same direction as GET /journals: an
+        account's entry list is a statement, and two reads a consumer pages
+        side by side must not start from opposite ends.
       parameters:
         - in: query
           name: holder
@@ -449,7 +458,8 @@ paths:
   /reservations:
     get:
       tags: [Reservations]
-      summary: List reservations.
+      summary: List reservations (cursor-paginated, newest first).
+      description: Ordered by internal id descending, like the ledger reads.
       parameters:
         - in: query
           name: holder
@@ -817,7 +827,13 @@ paths:
   /bookings:
     get:
       tags: [Bookings]
-      summary: List bookings.
+      summary: List bookings (cursor-paginated, oldest first).
+      description: >-
+        Ordered by internal id ascending: a booking list is worked through
+        like a queue (see also GET /deposits/reviews), so the first page is
+        the oldest. Deliberately the opposite of the ledger reads
+        (GET /journals, GET /entries, GET /audit/journals), which are
+        statements and page newest first (H-m3).
       parameters:
         - in: query
           name: holder
@@ -895,7 +911,11 @@ paths:
   /events:
     get:
       tags: [Events]
-      summary: List events.
+      summary: List events (cursor-paginated, oldest first).
+      description: >-
+        Ordered by internal id ascending -- an event stream is consumed in
+        occurrence order. Deliberately the opposite of the ledger reads,
+        which page newest first (see GET /journals).
       parameters:
         - in: query
           name: classification_code
@@ -1358,6 +1378,9 @@ paths:
         `from`/`to`) to list journals touching that account dimension; pass
         `from`/`to` alone to scan a global time range instead. Providing
         neither, or `holder` without `currency_uid`, is a 400.
+
+        Both modes are cursor-paginated **newest first** (H-m3), the same
+        direction as GET /journals and GET /holder/transactions.
       parameters:
         - in: query
           name: holder

@@ -77,9 +77,12 @@ func TestAudit_ListJournalsByAccount_OrderedByID(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(journals), 2, "expected at least 2 journals")
 
-	// Verify ordering: CreatedAt should be non-decreasing (keyset order).
+	// Verify ordering: newest first (H-m3 flipped this list, and GET
+	// /journals / GET /entries, from oldest-first to newest-first so the
+	// ledger reads all page in the direction docs/openapi.yaml always
+	// described and the holder surface always used).
 	for i := 1; i < len(journals); i++ {
-		assert.False(t, journals[i-1].CreatedAt.After(journals[i].CreatedAt), "journals should be ordered oldest first")
+		assert.False(t, journals[i-1].CreatedAt.Before(journals[i].CreatedAt), "journals should be ordered newest first")
 	}
 
 	// Both posted journals should be in the result.
