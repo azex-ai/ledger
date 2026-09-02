@@ -31,6 +31,68 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `server.New`, `server.NewWithConfig` drop the `snapshotter` and `systemRollup` parameters
+
+**Landed (2026-08-29 review, MJ-5).**
+
+    server.New(..., reconciler, snapshotter, systemRollup, queries, ...)
+    -> server.New(..., reconciler, queries, ...)
+
+`server.Deps.Snapshotter` and `server.Deps.SystemRollup` are removed with
+them. The HTTP layer never consumed either one -- both drive the background
+Worker, which a composition root assembles separately -- so the parameters
+were dependencies the constructor demanded and dropped on the floor. A caller
+of the positional constructors deletes the two arguments; a caller of
+`server.NewFromDeps` deletes the two struct fields. Nothing else changes: the
+Worker still takes them where it always did.
+
+Prefer `server.NewFromDeps(cfg, deps)` at new call sites -- twenty-one
+positional interface parameters give the compiler nothing to catch a
+transposition with, which is why `Deps` exists.
+
+### `onchain.New` returns an error
+
+**Landed (2026-09-02 deep audit, backend remediation).**
+
+    onchain.New(signingKey []byte) *EVMAdapter
+    -> onchain.New(signingKey []byte) (*EVMAdapter, error)
+
+The adapter used to accept a signing key of any length, including empty, and
+then verify inbound webhook HMACs against it -- an empty key makes every
+forged callback verify. It now refuses a key shorter than the minimum and
+says so at construction, which is the only place a deployment can still fix
+it. Callers add error handling; a deployment whose key was too short was
+never actually verifying anything and must now supply a real one.
+
+### `core.JournalQuerier.ListRecentJournals`, `core.Sweeper.ReplacementGasPrice`, `service.AttestationStore.RecordAnchorObservation` / `HighestObservedAnchorSeq`, `service.ReconcileQuerier.PeriodCloseViolations`, `service.RollupQueuer.CountStuckRollups`
+
+**Landed (2026-09-02 deep audit: W1-onchain, D-tamper, D-lock, D-ops).** Six
+methods added to five existing exported interfaces. Go has no sealed
+interfaces, so a hand-written implementation of any of them stops compiling
+until the method is added; the `postgres` adapters this repository ships
+implement all six, so a consumer using them needs no change.
+
+What each is for, since an implementor has to make it mean something:
+
+- `ListRecentJournals(ctx, limit) ([]Journal, error)` -- newest-first sample
+  of journals. Required by attestation verification and reconciliation, both
+  of which must see the most recent rows; the ascending `ListJournals` page
+  they used before could never contain a freshly forged one.
+- `ReplacementGasPrice(ctx, chainID, signerNonce, priorTxHash)` -- the gas
+  price a replacement sweep transaction must pay for the given nonce.
+  Returning a price that does not exceed the stuck transaction's leaves the
+  sweep stuck.
+- `RecordAnchorObservation(ctx, seq, head)` / `HighestObservedAnchorSeq(ctx)`
+  -- the local record of anchor sequence numbers already seen, which is what
+  makes an anchor rollback detectable. An implementation that forgets
+  (returns 0) disables rollback detection silently.
+- `PeriodCloseViolations(ctx, pageLimit)` -- journals dated into a closed
+  period. Reconciliation reports it as a check; an implementation returning
+  an empty slice reports a clean ledger it did not verify.
+- `CountStuckRollups(ctx)` -- balance-rollup queue items that exhausted their
+  retry budget, exported as a gauge. Zero means "the queue is healthy", so a
+  stub that returns zero is an alert that never fires.
+
 ### `anchordev.NewLocalFileAnchor` -> `anchordev.NewLocalFileAnchorForDevelopment`
 
 Renamed, no compatibility shim. The local-file anchor writes to the same

@@ -35,6 +35,20 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`core.HolderReader.ListHolderHolds` is paginated and
+  `core.JournalQuerier` gains `ListRecentJournals`** (H-m9, D-tamper).
+  `ListHolderHolds(ctx, holder)` becomes
+  `ListHolderHolds(ctx, holder, cursor string, limit int32) ([]HolderHold,
+  string, error)` — the unpaginated form returned a holder's entire hold set,
+  an unbounded body from an unbounded scan. `JournalQuerier` gains
+  `ListRecentJournals(ctx, limit) ([]Journal, error)`, a NEWEST-FIRST sample
+  that attestation verification and reconciliation both need: the ascending
+  `ListJournals` page they read before could never contain a freshly forged
+  row. Self-built implementations of either interface must add the method
+  (`postgres.LedgerStore` / `postgres.NewQueryAdapter` users need no change).
+  Both were missing from this list until the breaking-change gate learned to
+  diff interface method sets (M11).
+
 - **`Migrate` / `MigrateContext` and the period-close barrier** (D-lock:
   B-M5, B-m4, B-X1, B-m9). `ledger.Migrate(databaseURL)` becomes
   `ledger.Migrate(databaseURL, opts ...postgres.MigrateOption)` and gains

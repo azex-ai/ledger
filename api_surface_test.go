@@ -17,13 +17,26 @@ package ledger
 //     edit -- is red until the author regenerates it, which makes "I am
 //     changing the public API" an explicit act rather than a side effect.
 //   - TestAPISurface_BreakingChangesAreDocumented: comparing the working
-//     tree's snapshot against the one committed at HEAD, any REMOVED or
-//     CHANGED symbol must be named in docs/BREAKING.md. Additions are free
-//     (except interface methods, which are breaking for implementors and
-//     are reported as such). This is the local equivalent of an apidiff CI
-//     job diffing against the last release tag, and it keeps working when
-//     the author regenerates the snapshot in the same commit -- which a
-//     plain snapshot check cannot.
+//     tree's snapshot against the one at the BASELINE (the last release tag,
+//     or the merge-base with main), any REMOVED or CHANGED symbol -- and any
+//     ADDED interface method, which breaks every consumer implementation
+//     that does not embed a Noop base -- must be named in docs/BREAKING.md.
+//     Other additions are free.
+//
+// C-3 (W3 adversarial review of the gates): the baseline used to be HEAD,
+// which made this gate structurally incapable of failing in CI. The author
+// regenerates the snapshot and commits; from that commit on the working
+// tree and HEAD agree, the delta is empty, and the post-commit state is the
+// only state CI ever sees. The reviewer changed an exported signature,
+// regenerated, committed without a BREAKING.md entry, and the gate passed.
+// Diffing against a ref that does NOT move with the commit -- the last
+// release tag, the same baseline changelog_breaking_test.go uses -- is what
+// makes the answer the same locally and in CI.
+//
+// It follows that CI must have that ref: `actions/checkout` defaults to a
+// depth-1 clone with no tags, so .github/workflows/* set `fetch-depth: 0`.
+// If the baseline cannot be resolved this gate FAILS rather than skips: a
+// gate that did not run is not a gate that passed (working-agreements §3).
 //
 // deployment.md's terms: a Go library's exported surface is an API contract,
 // so a break goes through expand -> migrate -> contract and lands in
@@ -39,6 +52,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -120,21 +134,18 @@ func TestAPISurface_MatchesSnapshot(t *testing.T) {
 }
 
 // TestAPISurface_BreakingChangesAreDocumented compares the working tree's
-// snapshot against the one committed at HEAD and requires every removal or
-// signature change to be named in docs/BREAKING.md.
+// snapshot against the one at the release baseline and requires every
+// removal, signature change, or added interface method to be named in
+// docs/BREAKING.md.
 func TestAPISurface_BreakingChangesAreDocumented(t *testing.T) {
-	previous, ok := snapshotAtHEAD(t)
-	if !ok {
-		// First introduction of the snapshot: nothing to compare against.
-		// Deliberately not a skip on any other cause -- see snapshotAtHEAD.
-		return
-	}
-	current, err := os.ReadFile(apiSurfacePath)
-	if err != nil {
-		t.Fatalf("read %s: %v", apiSurfacePath, err)
-	}
+	baseline := breakingBaselineRef(t)
+	previous := surfaceAtRef(t, baseline)
+	current := renderAPISurface(t)
 
-	removed, changed := breakingDelta(previous, string(current))
+	removed, changed := breakingDelta(previous, current)
+	addedMethods := addedInterfaceMethods(previous, current)
+	changed = append(changed, addedMethods...)
+	sort.Strings(changed)
 	if len(removed) == 0 && len(changed) == 0 {
 		return
 	}
@@ -150,37 +161,148 @@ func TestAPISurface_BreakingChangesAreDocumented(t *testing.T) {
 		if isGeneratedSymbol(sym) {
 			continue
 		}
-		if !strings.Contains(doc, sym) {
+		if !symbolDocumented(doc, sym) {
 			undocumented = append(undocumented, sym)
 		}
 	}
 	sort.Strings(undocumented)
 	if len(undocumented) > 0 {
-		t.Fatalf("symbol(s) removed or changed relative to HEAD without a %s entry naming them: %v\n\n"+
+		t.Fatalf("symbol(s) removed, changed, or added to an exported interface relative to %s without a %s entry naming them: %v\n\n"+
 			"A Go library's exported surface is an API contract (deployment.md): a consumer's build breaks, "+
 			"and the only place they can find out why is this file. Add an entry under [Unreleased] with the "+
-			"symbol name and what the consumer must do.", breakingPath, undocumented)
+			"symbol name and what the consumer must do.", baseline, breakingPath, undocumented)
 	}
 }
 
-// snapshotAtHEAD returns docs/api-surface.txt as committed at HEAD. A
-// missing file at HEAD (the commit that introduces the snapshot) returns
-// ok=false; anything else is fatal rather than skipped -- a gate that cannot
-// run must not read as a pass (working-agreements §3).
-func snapshotAtHEAD(t *testing.T) (string, bool) {
+// breakingBaselineRef resolves the ref this gate diffs against: the last
+// release tag, falling back to the merge-base with main for work that
+// predates the next tag. Never HEAD -- see the C-3 note in this file's
+// header. Unresolvable is fatal, never a skip.
+//
+// changelog_breaking_test.go resolves the same "last release tag" for the
+// CHANGELOG half of this contract and is fail-closed for the same reason;
+// the two live in different test packages (ledger vs ledger_test) so the
+// resolution cannot be shared, but their POLICY must not diverge: neither
+// may go back to skipping.
+func breakingBaselineRef(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Fatalf("git not found: this gate diffs the exported surface against HEAD and cannot answer without it (%v)", err)
+		t.Fatalf("git not found: this gate diffs the exported surface against the last release and cannot answer without it (%v)", err)
 	}
-	out, err := exec.Command("git", "show", "HEAD:"+apiSurfacePath).Output()
-	if err != nil {
-		// Distinguish "not in HEAD yet" from "git is unhappy".
-		if inRepo := exec.Command("git", "rev-parse", "--git-dir").Run(); inRepo != nil {
-			t.Fatalf("not a git repository (or git failed): this gate diffs the exported surface against HEAD and cannot answer without it (%v)", inRepo)
+	if inRepo := exec.Command("git", "rev-parse", "--git-dir").Run(); inRepo != nil {
+		t.Fatalf("not a git repository (or git failed): this gate diffs the exported surface against the last release and cannot answer without it (%v)", inRepo)
+	}
+	if out, err := exec.Command("git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*").Output(); err == nil {
+		if tag := strings.TrimSpace(string(out)); tag != "" {
+			return tag
 		}
-		return "", false
 	}
-	return string(out), true
+	for _, ref := range []string{"origin/main", "main"} {
+		if out, err := exec.Command("git", "merge-base", "HEAD", ref).Output(); err == nil {
+			if base := strings.TrimSpace(string(out)); base != "" {
+				return base
+			}
+		}
+	}
+	t.Fatalf("cannot resolve a baseline to diff the exported surface against: no v[0-9]* tag reachable from HEAD and no merge-base with origin/main or main.\n" +
+		"A CI checkout defaults to a depth-1 clone with no tags, which is exactly the state this gate must not silently pass in " +
+		"(working-agreements §3: not run is not passed). Check out with `fetch-depth: 0`.")
+	return ""
+}
+
+// surfaceAtRef renders the exported surface of the sources AT ref, by
+// exporting that tree to a temporary directory and running the same renderer
+// over it.
+//
+// Deliberately not `git show ref:docs/api-surface.txt`: that reads the
+// snapshot FILE, which only exists at refs newer than this gate (it does not
+// exist at v0.6.0, the current baseline), and a missing file would leave the
+// gate with nothing to compare -- silently passing, which is the C-3 shape
+// again one level down. Rendering the sources works at any ref and does not
+// depend on a previous author having regenerated anything.
+func surfaceAtRef(t *testing.T, ref string) string {
+	t.Helper()
+	dir := t.TempDir()
+	archive := exec.Command("git", "archive", "--format=tar", ref)
+	tarball, err := archive.Output()
+	if err != nil {
+		t.Fatalf("git archive %s: %v -- this gate renders the exported surface at the baseline and cannot answer without that tree", ref, err)
+	}
+	extract := exec.Command("tar", "-x", "-C", dir)
+	extract.Stdin = bytes.NewReader(tarball)
+	if err := extract.Run(); err != nil {
+		t.Fatalf("extract the %s tree: %v", ref, err)
+	}
+	return renderAPISurfaceIn(t, dir)
+}
+
+// symbolDocumented reports whether docs/BREAKING.md names sym.
+//
+// An exact substring is the easy case. The other accepted spelling is
+// "owner names the member": the entry headed "core.Metrics grows from 32 to
+// 41 methods" lists the nine new methods by bare name under a heading that
+// names the interface, which is better documentation than nine
+// fully-qualified headings would be. So an owner mention plus the member
+// name as a whole word counts. Both halves are required -- a doc that
+// mentions the type but never the member does not tell a consumer which
+// call to fix.
+func symbolDocumented(doc, sym string) bool {
+	if strings.Contains(doc, sym) {
+		return true
+	}
+	idx := strings.LastIndex(sym, ".")
+	if idx <= 0 {
+		return false
+	}
+	owner, member := sym[:idx], sym[idx+1:]
+	// Only members of a named type (pkg.Type.Member) get the relaxation. A
+	// package-level symbol's owner is the package name, which is a word
+	// common enough ("server", "core") that owner+member would match almost
+	// any prose -- pkg.Symbol must be named exactly.
+	if !strings.Contains(owner, ".") {
+		return false
+	}
+	if !strings.Contains(doc, owner) {
+		return false
+	}
+	word, err := regexp.Compile(`\b` + regexp.QuoteMeta(member) + `\b`)
+	if err != nil {
+		return false
+	}
+	return word.MatchString(doc)
+}
+
+// addedInterfaceMethods returns methods added to an interface that already
+// existed at the baseline. Go has no sealed interfaces, so this breaks every
+// consumer implementation that does not embed a Noop base -- the exact
+// failure this whole file was built for (core.Metrics' method growth), and
+// the one an "additions are free" rule would wave through.
+//
+// Methods on an interface that is itself new are NOT breaking: nobody can
+// have implemented it yet.
+func addedInterfaceMethods(previous, current string) []string {
+	prev, cur := surfaceIndex(previous), surfaceIndex(current)
+	var out []string
+	for sym, decl := range cur {
+		if !strings.HasPrefix(decl, "interface method ") && !strings.HasPrefix(decl, "embedded interface") {
+			continue
+		}
+		if _, existed := prev[sym]; existed {
+			continue
+		}
+		owner, _, found := strings.Cut(sym, ".<embedded ")
+		if !found {
+			if idx := strings.LastIndex(sym, "."); idx != -1 {
+				owner = sym[:idx]
+			}
+		}
+		if _, ownerExisted := prev[owner]; !ownerExisted {
+			continue // brand-new interface: no implementations to break
+		}
+		out = append(out, sym)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // breakingDelta returns the symbols present in previous but absent from
@@ -251,7 +373,15 @@ func diffSurfaces(want, got string) string {
 // root and renders one stable line per exported symbol.
 func renderAPISurface(t *testing.T) string {
 	t.Helper()
-	dirs := surfaceDirs(t)
+	return renderAPISurfaceIn(t, ".")
+}
+
+// renderAPISurfaceIn renders the surface of the module rooted at root, so the
+// same renderer can read the working tree and a baseline tree exported to a
+// temporary directory.
+func renderAPISurfaceIn(t *testing.T, root string) string {
+	t.Helper()
+	dirs := surfaceDirs(t, root)
 
 	var lines []string
 	for _, dir := range dirs {
@@ -297,10 +427,10 @@ func renderAPISurface(t *testing.T) string {
 	return b.String()
 }
 
-func surfaceDirs(t *testing.T) []string {
+func surfaceDirs(t *testing.T, root string) []string {
 	t.Helper()
 	var dirs []string
-	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -308,7 +438,7 @@ func surfaceDirs(t *testing.T) []string {
 			return nil
 		}
 		base := filepath.Base(path)
-		if path != "." && (surfaceSkipDirs[base] || strings.HasPrefix(base, ".")) {
+		if path != root && (surfaceSkipDirs[base] || strings.HasPrefix(base, ".")) {
 			return filepath.SkipDir
 		}
 		matches, globErr := filepath.Glob(filepath.Join(path, "*.go"))
@@ -324,7 +454,7 @@ func surfaceDirs(t *testing.T) []string {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk module root: %v", err)
+		t.Fatalf("walk module root %s: %v", root, err)
 	}
 	sort.Strings(dirs)
 	if len(dirs) < 5 {

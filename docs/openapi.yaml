@@ -99,6 +99,7 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
   /system/balances:
     get:
+      x-required-scope: read
       tags: [System]
       summary: Aggregated system rollups.
       responses:
@@ -110,6 +111,7 @@ paths:
 
   /journals:
     get:
+      x-required-scope: read
       tags: [Journals]
       summary: List journals (cursor-paginated, newest first).
       description: >-
@@ -131,6 +133,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JournalListEnvelope" }
     post:
+      x-required-scope: write
       tags: [Journals]
       summary: Post a balanced journal.
       requestBody:
@@ -155,6 +158,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /journals/template:
     post:
+      x-required-scope: write
       tags: [Journals]
       summary: Render a template into a journal and post it.
       description: >-
@@ -197,6 +201,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /journals/deposit-tolerance:
     post:
+      x-required-scope: admin
       tags: [Journals]
       summary: Resolve deposit shortfall / overage atomically (admin scope; 403 by default).
       description: >-
@@ -243,6 +248,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /journals/{uid}:
     get:
+      x-required-scope: read
       tags: [Journals]
       summary: Get one journal with all its entries.
       parameters:
@@ -260,6 +266,7 @@ paths:
           $ref: "#/components/responses/NotFound"
   /journals/{uid}/reverse:
     post:
+      x-required-scope: write
       tags: [Journals]
       summary: Post the full reversal of an existing journal.
       description: >-
@@ -304,6 +311,7 @@ paths:
           description: Already reversed.
   /journals/{uid}/reverse-partial:
     post:
+      x-required-scope: write
       tags: [Journals]
       summary: Reverse num/den of a journal (partial reversal).
       description: >-
@@ -341,6 +349,7 @@ paths:
 
   /entries:
     get:
+      x-required-scope: read
       tags: [Journals]
       summary: List entries on one account dimension (cursor-paginated, newest first).
       description: >-
@@ -371,6 +380,7 @@ paths:
 
   /balances/{holder}:
     get:
+      x-required-scope: read
       tags: [Balances]
       summary: All of one holder's balances in one currency.
       description: >-
@@ -395,6 +405,7 @@ paths:
               schema: { $ref: "#/components/schemas/BalancesEnvelope" }
   /balances/{holder}/{currency}:
     get:
+      x-required-scope: read
       tags: [Balances]
       summary: Balances for one holder × currency.
       description: >-
@@ -420,6 +431,7 @@ paths:
               schema: { $ref: "#/components/schemas/BalanceByCurrencyEnvelope" }
   /balances/{holder}/{currency}/breakdown:
     get:
+      x-required-scope: read
       tags: [Balances]
       summary: Holder-facing liquidity view (available / pending / locked / total).
       description: >
@@ -445,6 +457,7 @@ paths:
               schema: { $ref: "#/components/schemas/BalanceBreakdownEnvelope" }
   /balances/batch:
     post:
+      x-required-scope: read
       tags: [Balances]
       summary: Batch balance lookup.
       requestBody:
@@ -495,6 +508,7 @@ paths:
 
   /reservations:
     get:
+      x-required-scope: read
       tags: [Reservations]
       summary: List reservations (cursor-paginated, newest first).
       description: Ordered by internal id descending, like the ledger reads.
@@ -518,6 +532,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ReservationListEnvelope" }
     post:
+      x-required-scope: write
       tags: [Reservations]
       summary: Reserve funds (TOCTOU-safe).
       requestBody:
@@ -535,6 +550,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /reservations/{uid}/settle:
     post:
+      x-required-scope: write
       tags: [Reservations]
       summary: Settle reservation with actual amount; remainder auto-released.
       parameters:
@@ -577,6 +593,7 @@ paths:
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/settle-partial:
     post:
+      x-required-scope: write
       tags: [Reservations]
       summary: Settle part of a reservation; call repeatedly to accumulate.
       description: >-
@@ -623,6 +640,7 @@ paths:
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/finalize:
     post:
+      x-required-scope: write
       tags: [Reservations]
       summary: Finish a partially-settled reservation (settling → settled).
       description: Releases the unsettled remainder. Rejected on a reservation with no partial settlements.
@@ -665,6 +683,7 @@ paths:
         "422": { $ref: "#/components/responses/DomainError" }
   /reservations/{uid}/release:
     post:
+      x-required-scope: write
       tags: [Reservations]
       summary: Release a reservation without settling.
       parameters:
@@ -707,6 +726,7 @@ paths:
 
   /accounts/{holder}/policy:
     put:
+      x-required-scope: admin
       tags: [Accounts]
       summary: Set (create or update) the freeze/close + balance-floor policy for an account dimension.
       parameters:
@@ -728,6 +748,7 @@ paths:
         "422": { $ref: "#/components/responses/DomainError" }
   /accounts/{holder}/policies:
     get:
+      x-required-scope: read
       tags: [Accounts]
       summary: List every policy row for an account holder (across currencies/classifications).
       parameters:
@@ -744,6 +765,7 @@ paths:
 
   /holders/{holder}/deposit-address:
     post:
+      x-required-scope: write
       tags: [Crypto Deposit]
       summary: Issue (idempotently) a holder's CREATE2 custody deposit address.
       description: >-
@@ -764,6 +786,7 @@ paths:
               schema: { $ref: "#/components/schemas/DepositAddressEnvelope" }
         "503": { description: Crypto-deposit add-on not enabled on this server. }
     get:
+      x-required-scope: read
       tags: [Crypto Deposit]
       summary: Look up a holder's already-registered deposit address.
       description: Does not create one -- 404s if the holder has none yet.
@@ -783,6 +806,7 @@ paths:
 
   /deposits/reviews:
     get:
+      x-required-scope: read
       tags: [Crypto Deposit]
       summary: List deposit bookings parked in human review (M3 compensating controls).
       description: >-
@@ -808,6 +832,7 @@ paths:
         "503": { description: Crypto-deposit add-on not enabled on this server. }
   /deposits/{uid}/review/approve:
     post:
+      x-required-capability: deposit_review
       tags: [Crypto Deposit]
       summary: Approve a review-parked deposit, posting its deposit_confirm journal.
       description: >-
@@ -830,6 +855,7 @@ paths:
         "503": { description: Crypto-deposit add-on not enabled on this server. }
   /deposits/{uid}/review/reject:
     post:
+      x-required-capability: deposit_review
       tags: [Crypto Deposit]
       summary: Reject a review-parked deposit to failed -- no journal is ever posted.
       description: >-
@@ -864,6 +890,7 @@ paths:
 
   /bookings:
     get:
+      x-required-scope: read
       tags: [Bookings]
       summary: List bookings (cursor-paginated, oldest first).
       description: >-
@@ -895,6 +922,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BookingListEnvelope" }
     post:
+      x-required-scope: write
       tags: [Bookings]
       summary: Create a booking against a classification's lifecycle.
       requestBody:
@@ -911,6 +939,7 @@ paths:
         "422": { $ref: "#/components/responses/DomainError" }
   /bookings/{uid}:
     get:
+      x-required-scope: read
       tags: [Bookings]
       summary: Get one booking.
       parameters:
@@ -927,6 +956,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
   /bookings/{uid}/transition:
     post:
+      x-required-scope: write
       tags: [Bookings]
       summary: Advance a booking's lifecycle state.
       parameters:
@@ -948,6 +978,7 @@ paths:
 
   /events:
     get:
+      x-required-scope: read
       tags: [Events]
       summary: List events (cursor-paginated, oldest first).
       description: >-
@@ -978,6 +1009,7 @@ paths:
               schema: { $ref: "#/components/schemas/EventListEnvelope" }
   /events/{uid}:
     get:
+      x-required-scope: read
       tags: [Events]
       summary: Get one event.
       parameters:
@@ -1072,6 +1104,7 @@ paths:
 
   /classifications:
     get:
+      x-required-scope: read
       tags: [Metadata]
       summary: List classifications.
       parameters:
@@ -1088,6 +1121,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ClassificationListEnvelope" }
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Create a classification (with optional lifecycle).
       x-idempotency: >-
@@ -1110,6 +1144,7 @@ paths:
               schema: { $ref: "#/components/schemas/ClassificationEnvelope" }
   /classifications/{uid}/deactivate:
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Deactivate a classification.
       x-idempotency: >-
@@ -1142,6 +1177,7 @@ paths:
 
   /journal-types:
     get:
+      x-required-scope: read
       tags: [Metadata]
       summary: List journal types.
       parameters:
@@ -1158,6 +1194,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JournalTypeListEnvelope" }
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Create a journal type.
       x-idempotency: >-
@@ -1186,6 +1223,7 @@ paths:
               schema: { $ref: "#/components/schemas/JournalTypeEnvelope" }
   /journal-types/{uid}/deactivate:
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Deactivate a journal type.
       x-idempotency: >-
@@ -1218,6 +1256,7 @@ paths:
 
   /templates:
     get:
+      x-required-scope: read
       tags: [Metadata]
       summary: List entry templates.
       parameters:
@@ -1234,6 +1273,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TemplateListEnvelope" }
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Create an entry template.
       x-idempotency: >-
@@ -1256,6 +1296,7 @@ paths:
               schema: { $ref: "#/components/schemas/TemplateEnvelope" }
   /templates/{code}/preview:
     post:
+      x-required-scope: read
       tags: [Metadata]
       summary: Render a template without posting.
       parameters:
@@ -1276,6 +1317,7 @@ paths:
               schema: { $ref: "#/components/schemas/TemplatePreviewResultEnvelope" }
   /templates/{uid}/deactivate:
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Deactivate an entry template.
       x-idempotency: >-
@@ -1308,6 +1350,7 @@ paths:
 
   /currencies:
     get:
+      x-required-scope: read
       tags: [Metadata]
       parameters:
         - in: query
@@ -1323,6 +1366,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CurrencyListEnvelope" }
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Create a currency.
       x-idempotency: >-
@@ -1358,6 +1402,7 @@ paths:
               schema: { $ref: "#/components/schemas/CurrencyEnvelope" }
   /currencies/{uid}/deactivate:
     post:
+      x-required-scope: admin
       tags: [Metadata]
       summary: Deactivate a currency.
       x-idempotency: >-
@@ -1390,6 +1435,7 @@ paths:
 
   /reconcile:
     post:
+      x-required-scope: admin
       tags: [Reconciliation]
       summary: Run global accounting-equation check.
       responses:
@@ -1400,6 +1446,7 @@ paths:
               schema: { $ref: "#/components/schemas/ReconcileEnvelope" }
   /reconcile/account:
     post:
+      x-required-scope: admin
       tags: [Reconciliation]
       summary: Reconcile a single account dimension.
       requestBody:
@@ -1420,6 +1467,7 @@ paths:
               schema: { $ref: "#/components/schemas/ReconcileEnvelope" }
   /reconcile/full:
     post:
+      x-required-scope: admin
       tags: [Reconciliation]
       summary: Run the complete 10-check reconciliation suite on-demand.
       description: |
@@ -1439,6 +1487,7 @@ paths:
 
   /snapshots:
     get:
+      x-required-scope: read
       tags: [Reconciliation]
       summary: List balance snapshots for an account dimension.
       parameters:
@@ -1493,6 +1542,7 @@ paths:
 
   /audit/journals:
     get:
+      x-required-scope: read
       tags: [Audit]
       summary: List journals by account dimension or by global time range.
       description: |
@@ -1536,6 +1586,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /audit/bookings/{uid}/trace:
     get:
+      x-required-scope: read
       tags: [Audit]
       summary: Trace a booking end-to-end (booking + every event + every linked journal).
       parameters:
@@ -1553,6 +1604,7 @@ paths:
           $ref: "#/components/responses/NotFound"
   /audit/journals/{uid}/reversals:
     get:
+      x-required-scope: read
       tags: [Audit]
       summary: List the reversal chain for a journal (root journal + every journal that transitively reverses it).
       parameters:
@@ -1569,6 +1621,7 @@ paths:
 
   /platform/balances:
     get:
+      x-required-scope: read
       tags: [Platform]
       summary: Real-time per-classification balance breakdown for a currency.
       description: |
@@ -1589,6 +1642,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /platform/solvency:
     get:
+      x-required-scope: read
       tags: [Platform]
       summary: Compare total user-side liability against custodial system balance for a currency.
       parameters:
@@ -1607,6 +1661,7 @@ paths:
 
   /balances/trends:
     get:
+      x-required-scope: read
       tags: [Trends]
       summary: Historical daily balance series for an account dimension.
       description: |
@@ -1645,6 +1700,7 @@ paths:
 
   /holder-tokens:
     post:
+      x-required-scope: write
       tags: [Holder]
       summary: Mint a holder-scoped read token (host backend, write scope).
       description: >
@@ -1780,6 +1836,7 @@ paths:
 
   /dev/credits:
     post:
+      x-required-scope: admin
       tags: [Developer]
       summary: Credit a holder with no custodied asset behind it (developer mode).
       description: >-
@@ -1828,6 +1885,7 @@ paths:
 
   /periods/close:
     post:
+      x-required-scope: admin
       tags: [Periods]
       summary: Close an accounting period (hard write barrier before close_before).
       requestBody:
@@ -1847,6 +1905,7 @@ paths:
           $ref: "#/components/responses/DomainError"
   /periods/closes:
     get:
+      x-required-scope: read
       tags: [Periods]
       summary: List period closes (most recent first).
       parameters:
@@ -1861,6 +1920,7 @@ paths:
               schema: { $ref: "#/components/schemas/PeriodCloseListEnvelope" }
   /reports/trial-balance:
     get:
+      x-required-scope: read
       tags: [Reports]
       summary: Trial balance for one currency as of a point in time.
       parameters:

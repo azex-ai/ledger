@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -25,8 +26,15 @@ import (
 // or changed one to be named somewhere in the CHANGELOG's current
 // [Unreleased] section.
 //
-// Scope: exported top-level func/method SIGNATURES and exported top-level
-// TYPE names in core/*.go and ledger.go. Struct field additions (e.g.
+// Scope: exported top-level func/method SIGNATURES, exported top-level TYPE
+// names, and the METHOD SETS of exported interfaces in core/*.go and
+// ledger.go. The interface method set is here because of M11 (W3 adversarial
+// review of the gates): this file's whole premise is core.Metrics' method
+// growth, and yet a TypeSpec was recorded as the bare string "type", so
+// adding a method to an exported interface -- breaking every hand-written
+// implementation -- was structurally invisible to the diff. Adding one is now
+// reported as a break, in the direction that matters: an added method is only
+// breaking if the interface already existed. Struct field additions (e.g.
 // SettleInput gaining a required IdempotencyKey) are a real breaking change
 // too but are not diffed here -- they don't change a symbol's presence or a
 // func signature, and diffing struct field sets doubles this file's size for
@@ -34,14 +42,26 @@ import (
 // didn't actually contain. If a future field-only break slips through
 // undocumented, extend fieldsOf below; don't route around this test.
 //
-// Requires `git`; skips (not fails) when the last release tag can't be
-// resolved (e.g. a shallow clone) -- this is a documentation gate, not a
-// correctness one, and a CI environment without full history should not
-// spend a Critical-severity red build on it.
+// Requires `git` AND the release tags. C-3 (W3 adversarial review of the
+// gates): this used to t.Skip when the tag could not be resolved, and
+// `actions/checkout` defaults to a depth-1 clone with NO tags -- so in CI,
+// the only place this gate had to hold, it skipped every single run. A
+// `git clone --depth 1` reproduces it: `git describe --tags` answers
+// "fatal: No names found". The workflows now check out with `fetch-depth: 0`
+// and an unresolvable tag is a failure, because a gate that did not run is
+// not a gate that passed (working-agreements §3).
+//
+// api_surface_test.go's TestAPISurface_BreakingChangesAreDocumented resolves
+// the same baseline for the BREAKING.md half of this contract and is
+// fail-closed for the same reason. The two live in different test packages
+// so the resolution cannot be shared; their POLICY must not diverge.
 func TestChangelogListsBreakingGoAPIChanges(t *testing.T) {
 	tag, err := lastReleaseTag()
 	if err != nil {
-		t.Skipf("could not resolve the last release tag, skipping: %v", err)
+		t.Fatalf("could not resolve the last release tag: %v\n\n"+
+			"This gate diffs the exported Go API against the last release, so without tags it cannot run -- and not running is not passing "+
+			"(working-agreements §3; before this was a failure it silently skipped on every CI run, since actions/checkout fetches depth 1 and no tags). "+
+			"Fetch tags: `git fetch --tags`, or check out with `fetch-depth: 0`.", err)
 	}
 
 	changelog := mustReadFile(t, "CHANGELOG.md")
@@ -82,26 +102,73 @@ func TestChangelogListsBreakingGoAPIChanges(t *testing.T) {
 				broken = append(broken, name+" (signature changed in "+f+")")
 			}
 		}
+		// Methods added to an interface that already existed: breaking for
+		// every implementor (M11). Methods of a NEW interface are not --
+		// nobody can have implemented it yet.
+		for name, sig := range newSym {
+			if !strings.HasPrefix(sig, interfaceMethodSig) {
+				continue
+			}
+			if _, existed := oldSym[name]; existed {
+				continue
+			}
+			owner := name[:strings.LastIndex(name, ".")]
+			if _, ownerExisted := oldSym[owner]; !ownerExisted {
+				continue
+			}
+			broken = append(broken, name+" (added to exported interface "+owner+" in "+f+")")
+		}
 	}
 
 	sort.Strings(broken)
 	for _, sym := range broken {
 		bareName := strings.SplitN(sym, " ", 2)[0]
-		// A method key is "Type.Method", but CHANGELOG.md (like Go doc
-		// convention generally) writes it as "(*ledger.Type).Method" or
-		// "ledger.Type.Method" -- there is always a ")" or "." directly
-		// before the bare method name, never "Type.Method" as a literal
-		// substring. Match on ".MethodName(" instead, which every one of
-		// those spellings contains, rather than demanding the exact key.
-		needle := bareName
-		if dot := strings.LastIndex(bareName, "."); dot != -1 {
-			needle = bareName[dot:] + "("
-		}
-		if !strings.Contains(unreleased, needle) {
-			t.Errorf("exported symbol %s since %s, but CHANGELOG.md's [Unreleased] section does not contain %q",
-				sym, tag, needle)
+		if !changelogMentions(unreleased, bareName) {
+			t.Errorf("exported symbol %s since %s, but CHANGELOG.md's [Unreleased] section does not name it. "+
+				"Accepted spellings: the qualified key %q, %q, or an entry that names the owning type AND the member as a word",
+				sym, tag, bareName, memberCallNeedle(bareName))
 		}
 	}
+}
+
+// changelogMentions reports whether the CHANGELOG section names symbol.
+//
+// A method key is "Type.Method", but CHANGELOG.md (like Go doc convention
+// generally) writes it as "(*ledger.Type).Method", "ledger.Type.Method", or
+// -- for a list of methods added to one interface -- the owning type in the
+// entry's opening line and the members as bare backticked names below it.
+// The last form is better documentation than nine qualified headings would
+// be, so it counts, provided BOTH halves are present: an entry that names
+// the type but never the member does not tell a consumer which call to fix.
+//
+// docs/BREAKING.md's half of this contract (api_surface_test.go's
+// symbolDocumented) accepts the same three spellings, deliberately.
+func changelogMentions(section, symbol string) bool {
+	if strings.Contains(section, symbol) {
+		return true
+	}
+	dot := strings.LastIndex(symbol, ".")
+	if dot == -1 {
+		return false
+	}
+	if strings.Contains(section, memberCallNeedle(symbol)) {
+		return true
+	}
+	owner, member := symbol[:dot], symbol[dot+1:]
+	if !strings.Contains(section, owner) {
+		return false
+	}
+	return regexp.MustCompile(`\b` + regexp.QuoteMeta(member) + `\b`).MatchString(section)
+}
+
+// memberCallNeedle renders "Type.Method" as ".Method(", the spelling every
+// qualified Go-doc form of a method call contains.
+func memberCallNeedle(symbol string) string {
+	dot := strings.LastIndex(symbol, ".")
+	if dot == -1 {
+		return symbol
+	}
+	return symbol[dot:] + "("
 }
 
 // lastReleaseTag returns the most recent vX.Y.Z tag reachable from HEAD,
@@ -127,10 +194,17 @@ func gitShow(rev, path string) (string, error) {
 	return out.String(), nil
 }
 
+// interfaceMethodSig prefixes the signature of an interface's method, so the
+// diff above can tell "a method appeared on an existing interface" (breaking
+// for implementors) from any other addition.
+const interfaceMethodSig = "interface method "
+
 // exportedSymbols parses src and returns a map of exported symbol name to a
 // normalized signature string: package-level funcs and Option-style
-// constructors keyed by name, methods keyed by "Recv.Method", and exported
-// top-level type declarations keyed by name with signature "type".
+// constructors keyed by name, methods keyed by "Recv.Method", exported
+// top-level type declarations keyed by name with signature "type", and each
+// exported interface's methods keyed "Iface.Method" with an
+// interfaceMethodSig-prefixed signature.
 func exportedSymbols(t *testing.T, filename, src string) map[string]string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -166,6 +240,28 @@ func exportedSymbols(t *testing.T, filename, src string) map[string]string {
 					continue
 				}
 				out[ts.Name.Name] = "type"
+				iface, ok := ts.Type.(*ast.InterfaceType)
+				if !ok || iface.Methods == nil {
+					continue
+				}
+				for _, m := range iface.Methods.List {
+					ft, isFunc := m.Type.(*ast.FuncType)
+					for _, name := range m.Names {
+						if !name.IsExported() {
+							continue
+						}
+						sig := interfaceMethodSig
+						if isFunc {
+							sig += signatureString(ft)
+						}
+						out[ts.Name.Name+"."+name.Name] = sig
+					}
+					if len(m.Names) == 0 {
+						// Embedded interface: its method set arrives
+						// wholesale, so record the embedding itself.
+						out[ts.Name.Name+".<embedded "+exprString(m.Type)+">"] = interfaceMethodSig + "embedded"
+					}
+				}
 			}
 		}
 	}
