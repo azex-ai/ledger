@@ -732,7 +732,13 @@ Operational notes:
   role — it is not a privilege the credential did not already command,
   only a bounded, explicit window instead of a permission error two
   migrations in. A superuser, or a connection as `ledger_owner` itself,
-  skips the whole step.
+  skips the whole step. The credential must be **one of the three**:
+  superuser, `ledger_owner` itself, or a role holding `ADMIN OPTION` on
+  `ledger_owner` (the only way a role other than `ledger_owner`'s own
+  creator gets there). Any other credential is refused before a single
+  migration runs, with a message naming all three ways out, rather than
+  failing partway through with a `pg_authid`-shaped permission error
+  (see `postgres.Migrate`'s own doc comment, the source for this list).
 - **`Migrate()` also needs `CONNECT` on the cluster's `postgres` maintenance
   database** (`docs/INVARIANTS.md` I-47) — it acquires a cluster-wide
   migration lock there before touching the target database, to serialize

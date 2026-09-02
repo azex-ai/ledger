@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,7 @@ commands:
   currencies      list currencies
   classifications list classifications
   rollup          rollup queue admin (reset-claim)
+  config-history  forensic trail: who changed account policies / config tables / reconcile scan cursors, and when
 
 env:
   DATABASE_URL   postgres connection string (required)
@@ -237,6 +239,8 @@ func run(args []string) error {
 		return cmdClassifications(ctx, svc, rest)
 	case "rollup":
 		return cmdRollup(ctx, pool, rest)
+	case "config-history":
+		return cmdConfigHistory(ctx, svc, rest)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
@@ -486,6 +490,108 @@ func cmdRollup(ctx context.Context, pool *pgxpool.Pool, args []string) error {
 	default:
 		return fmt.Errorf("unknown rollup subcommand %q (want: reset-claim)", args[0])
 	}
+}
+
+// cmdConfigHistory is the operator-facing read side of the forensic trail
+// D-threat built (core.ConfigChangeReader, migration 006's
+// config_table_changes / reconcile_scan_cursor_changes / account_policy_changes):
+// a ledger that records tampering evidence into a table with no query, no
+// store method, and no command an on-call engineer can actually run has not
+// made tampering visible (docs/RUNBOOK.md's own "配置篡改取证" section
+// documents this command's exact flags; keep the two in sync).
+//
+// Exactly one of --table / --check / --holder selects which of the three
+// underlying trails to query -- they are different tables answering
+// different questions (which config table changed / which reconcile check's
+// scan cursor moved / whose account policy changed), not one table filtered
+// three ways.
+func cmdConfigHistory(ctx context.Context, svc *ledger.Service, args []string) error {
+	fs := flag.NewFlagSet("config-history", flag.ExitOnError)
+	table := fs.String("table", "", "config_table_changes.table_name to filter on (e.g. account_policies, classifications)")
+	check := fs.String("check", "", "reconcile_scan_cursor_changes.check_name to filter on (e.g. checkpoint_balance)")
+	holder := fs.Int64("holder", 0, "account_policy_changes.account_holder to filter on")
+	since := fs.String("since", "", "lower bound, inclusive: RFC3339 timestamp or <N>d (e.g. 30d, 7d)")
+	until := fs.String("until", "", "upper bound, inclusive: RFC3339 timestamp or <N>d")
+	cursor := fs.String("cursor", "", "opaque page cursor from a previous run; empty = latest")
+	limit := fs.Int("limit", 50, "max rows to return")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	selected := 0
+	for _, v := range []string{*table, *check} {
+		if v != "" {
+			selected++
+		}
+	}
+	if *holder != 0 {
+		selected++
+	}
+	if selected != 1 {
+		return fmt.Errorf("exactly one of --table, --check, --holder is required (they query three different trails, not one filtered three ways)")
+	}
+
+	sinceAt, err := parseHistoryBound(*since)
+	if err != nil {
+		return fmt.Errorf("--since: %w", err)
+	}
+	untilAt, err := parseHistoryBound(*until)
+	if err != nil {
+		return fmt.Errorf("--until: %w", err)
+	}
+	filter := core.ConfigChangeFilter{
+		TableName:     *table,
+		CheckName:     *check,
+		AccountHolder: *holder,
+		Since:         sinceAt,
+		Until:         untilAt,
+		Cursor:        *cursor,
+		Limit:         int32(*limit),
+	}
+
+	reader := svc.ConfigHistory()
+	switch {
+	case *table != "":
+		list, nextCursor, err := reader.ListConfigChanges(ctx, filter)
+		if err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"list": list, "next_cursor": nextCursor})
+	case *check != "":
+		list, nextCursor, err := reader.ListScanCursorChanges(ctx, filter)
+		if err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"list": list, "next_cursor": nextCursor})
+	default: // --holder
+		list, nextCursor, err := reader.ListAccountPolicyChanges(ctx, filter)
+		if err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"list": list, "next_cursor": nextCursor})
+	}
+}
+
+// parseHistoryBound parses --since/--until: "" (no bound), "<N>d" (N days
+// ago from now -- the RUNBOOK's documented shorthand for the common case of
+// an on-call engineer bounding a forensic query to a recent window), or an
+// absolute RFC3339 timestamp.
+func parseHistoryBound(s string) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, nil
+	}
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.Atoi(days)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("%q: want <N>d (e.g. 30d) or RFC3339: %w", s, err)
+		}
+		return time.Now().AddDate(0, 0, -n), nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%q: want <N>d (e.g. 30d) or RFC3339: %w", s, err)
+	}
+	return t, nil
 }
 
 // cmdVerify runs the P6 five-step verification (design doc §8.4):
