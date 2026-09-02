@@ -789,8 +789,24 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 // this package:
 //
 //	if err := ledger.Migrate("pgx5://user:pass@host/db"); err != nil { ... }
-func Migrate(databaseURL string) error {
-	return postgres.Migrate(databaseURL)
+//
+// Options are forwarded. A consumer who is not importing the postgres package
+// still needs them: postgres.WithMigrateLogger surfaces the "waiting for the
+// cluster migration lock" line that is the only signal a boot is blocked on
+// another node's migration, and postgres.WithMigrateLockBudget raises the
+// five-minute default for a long migration window. A re-export that quietly
+// dropped them would put those exactly where they cannot be reached from the
+// facade this library tells consumers to use.
+func Migrate(databaseURL string, opts ...postgres.MigrateOption) error {
+	return postgres.Migrate(databaseURL, opts...)
+}
+
+// MigrateContext is Migrate with a caller-supplied context, so a boot
+// sequence being torn down stops waiting for the cluster migration lock
+// instead of holding the process open. Thin re-export of
+// postgres.MigrateContext.
+func MigrateContext(ctx context.Context, databaseURL string, opts ...postgres.MigrateOption) error {
+	return postgres.MigrateContext(ctx, databaseURL, opts...)
 }
 
 // ---------------------------------------------------------------------------
