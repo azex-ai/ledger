@@ -50,10 +50,14 @@ const amountScale = 18
 
 // authAmountEncodedLen is the fixed width, in bytes, EncodeAmount always
 // produces. 16 bytes (128-bit two's complement) comfortably covers
-// NUMERIC(30,18)'s maximum magnitude (10^30 scaled by 10^18 needs ~100 bits)
-// with headroom; the width itself is part of the wire contract -- changing
-// it is a breaking encoding change exactly like bumping the domain
-// separator (see authDigestDomain).
+// NUMERIC(30,18): precision 30 with scale 18 leaves 12 integer digits, so
+// the largest value is just under 10^12, and rescaling it to 18 fractional
+// digits gives an integer just under 10^30 -- about 100 bits, with headroom
+// inside 128. (The old wording said "10^30 scaled by 10^18 needs ~100
+// bits", which multiplied the scaling in twice; the conclusion was right,
+// the derivation was not -- 2026-09-02 audit, A-N7.) The width itself is
+// part of the wire contract -- changing it is a breaking encoding change
+// exactly like bumping the domain separator (see authDigestDomain).
 const authAmountEncodedLen = 16
 
 // EncodeAmount deterministically encodes amt as a fixed-point integer scaled
@@ -219,16 +223,26 @@ const authDigestDomain = byte(0x10)
 // fixed-layout byte encoding would need its own canonicalization (sorted
 // keys, escaping) this function does not otherwise require. Practical
 // consequence: VerifyJournalAuth's signature check says nothing about
-// whether a journal's stored metadata matches what was signed -- a party
-// who can write to the journals table directly (the threat model this
-// signing subsystem exists for, design doc §1) could in principle alter
-// metadata on an existing row without invalidating auth_signature. Nothing
-// in financial content (accounts, amounts, journal type, idempotency key,
-// reversal linkage) is affected either way. Whether journals.metadata
-// itself should be append-only-guarded at the DB role layer (the same
-// mechanism migration 003 added for the config tables C2 found writable) is
-// a threat-model question orthogonal to this digest, not something adding
-// Metadata to the byte layout above would resolve on its own.
+// whether a journal's stored metadata matches what was signed.
+//
+// Who can actually exploit that, precisely (corrected 2026-09-02, audit
+// C-m5 -- the previous wording said "a party who can write to the journals
+// table directly", which overstated it and invited a maintainer to
+// re-litigate a decision that is already covered): NOT the application
+// credential. `ledger_journals_block_arbitrary_update` (migration 001)
+// rejects any UPDATE on journals whose mutable-column whitelist is exactly
+// ['event_id'], so ledger_app cannot alter metadata on an existing row at
+// all. It takes ledger_owner or a superuser -- the same party that can drop
+// the trigger, rewrite the whole table, or recompute a self-consistent
+// attestation chain, i.e. the party P6's external anchor exists to catch
+// rather than the one P5's signature does.
+//
+// The fields this digest does not cover have been enumerated and are
+// exactly two: EventUID (provenance, disclosed in I-26) and Metadata.
+// Neither affects accounting outcome (accounts, amounts, journal type,
+// idempotency key, reversal linkage) nor withdrawal eligibility, so
+// widening the byte layout to include them would add encoding risk for no
+// gain.
 //
 // Byte layout (all integers big-endian, unsigned unless noted):
 //

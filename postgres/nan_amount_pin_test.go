@@ -256,3 +256,34 @@ func seedNaNFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) nanFi
 	require.NoError(t, pool.QueryRow(ctx, "SELECT id FROM journal_types WHERE uid=$1", jt.UID).Scan(&f.journalTypeID))
 	return f
 }
+
+// TestJournalsGuard_MetadataIsNotUpdatable pins the claim core/auth.go's
+// CanonicalJournalDigest doc comment now makes (2026-09-02 audit, C-m5).
+// That comment used to warn that "a party who can write to the journals
+// table directly could in principle alter metadata on an existing row
+// without invalidating auth_signature", which overstated the exposure and
+// invited a maintainer to re-litigate a decision the schema had already
+// covered: ledger_journals_block_arbitrary_update's mutable whitelist is
+// exactly ['event_id'].
+//
+// Since the comment now asserts that only ledger_owner/superuser can do it,
+// the application-credential half of that assertion needs a pin, or the
+// comment is just prose again.
+func TestJournalsGuard_MetadataIsNotUpdatable(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	fx := seedNaNFixture(t, ctx, pool)
+
+	var journalID int64
+	require.NoError(t, pool.QueryRow(ctx, `
+		INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, effective_at, uid)
+		VALUES ($1, $2, 1::numeric, 1::numeric, '{"note":"original"}'::jsonb, 0, 'metadata-guard-pin', now(), gen_random_uuid())
+		RETURNING id
+	`, fx.journalTypeID, postgrestest.UniqueKey("metadata-guard")).Scan(&journalID))
+
+	_, err := pool.Exec(ctx, `UPDATE journals SET metadata = '{"note":"tampered"}'::jsonb WHERE id = $1`, journalID)
+	require.Error(t, err,
+		"journals.metadata must not be updatable: the guard's mutable whitelist is ['event_id'] only")
+	require.Contains(t, err.Error(), "UPDATE on journals is not allowed",
+		"the refusal must come from ledger_journals_block_arbitrary_update: %v", err)
+}

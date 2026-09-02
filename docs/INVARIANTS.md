@@ -1632,11 +1632,20 @@ concedes "app process + signing key both compromised" as out of scope
 a local key satisfies the same guarantee.
 
 **Scope note (honest, not silently narrowed; updated 2026-08-21, design doc
-§7.5, board #12/#13)**: `PostJournal`'s tx-mode branch, `ExecuteTemplateBatch`,
-and `ReverseJournal`/`ReverseJournalFraction` still never sign, because
-there is no point in those call chains that is provably outside a DB
-transaction the way `financial.md` requires for the Attestor's signing
-call. This was ALSO true, before this fix, of every `JournalWriter` call
+§7.5, board #12/#13; corrected 2026-09-02, `tamper-evident.md` m-3)**: in
+**tx mode** -- a store bound via `WithDB`, i.e. any `JournalWriter` call
+composed inside `ledger.Service.RunInTx` -- `PostJournal`,
+`ExecuteTemplateBatch` and `ReverseJournal`/`ReverseJournalFraction` never
+sign, because there is no point in those call chains that is provably
+outside a DB transaction the way `financial.md` requires for the Attestor's
+signing call.
+
+In **pool mode** those three DO sign under a configured Attestor (board
+#15) -- see **I-31**, which is the invariant for exactly that. This note
+used to say they "still never sign" without the mode qualifier, which
+contradicted I-31 on the same page and, worse, told a reader that a
+correctly-signing path was unsigned. `core/auth.go`'s
+`AuthStatusUnsignedTxMode` doc comment has the accurate wording. This was ALSO true, before this fix, of every `JournalWriter` call
 composed inside `ledger.Service.RunInTx` -- including
 `service/onchain.go`'s `postDepositConfirmedJournal`, P5's own headline use
 case (M5: forged deposit accounting), which is composed via `RunInTx` to
@@ -1680,6 +1689,49 @@ journal was ever signed under `0x01` in a real deployment, so this was
 the cheapest possible time. `AuthorizedJournal.Input.EventUID` may now be
 set or changed freely, before or after `Authorize` returns, without
 affecting `Digest`/`Signature` at all.
+
+**Disclosed residual limitation 2 (`unsigned_tx_mode` is one-way, and stays
+that way this round -- 2026-09-02 audit, C-R1)**: a journal posted through
+`RunInTx` without going through `Authorize`/`PostAuthorized` carries
+`AuthStatusUnsignedTxMode` forever. Journals are append-only, so it cannot
+be signed after the fact, and `VerifiedBalanceReader` treats any dimension
+with such a contributing journal as permanently UNDEFINED (I-32) -- which,
+with `RequireVerifiedBalance: true`, means withdrawals from that dimension
+are refused for good. The previous round made the trap **disclosed** (the
+status column, `ledger.go`'s `RunInTx` doc comment, this note) and provided
+the `Authorize` → `PostAuthorized` sequence to avoid it. It did not provide
+a way out of it, and **this round does not either**. Recorded as a
+deliberate decision rather than an oversight, with the options that were
+examined:
+
+- **(a) Re-sign in place** -- widen
+  `ledger_journals_block_arbitrary_update`'s mutable whitelist to the
+  `auth_*` columns for a one-time `unsigned_tx_mode` → `signed` transition.
+  **Rejected.** Design doc §8.2 argues specifically against opening that
+  guard for marker columns, and A4 is this repository's own precedent for
+  a guard that rotted after being opened "just for one column". The
+  whitelist is currently `['event_id']` and every reader of I-2 and I-26
+  relies on that being the whole list.
+- **(b) A side table** -- `journal_reauthorizations(journal_id PK, digest,
+  signature, key_id, created_at)`, itself append-only, consulted by
+  `VerifyJournalAuth`/`VerifiedBalance` when the main row is
+  `unsigned_tx_mode`. Sound, and the recommended shape if this is ever
+  built, but it touches the withdrawal gate's hot read path
+  (`postgres/verified_balance_store.go`) and adds a second place a
+  signature can live -- a change to the verification model, not a bug fix,
+  and one that wants Aaron's sign-off rather than a remediation worker's
+  judgement.
+- **(c) Refuse instead of degrade** -- a `WithStrictSigning()` option
+  making `PostJournal`/`ExecuteTemplate`/`ExecuteTemplateBatch` return an
+  error inside `RunInTx` rather than silently producing an unsignable
+  journal. Prevents new instances, does nothing for existing ones, and
+  lands in `ledger.go` + `postgres/ledger_store.go` -- outside this
+  round's remediation task boundary.
+
+Recommendation on record: (c) to stop new occurrences, (b) to rescue
+existing ones, both as a separate change with an explicit decision. Until
+then the honest statement is the one `ledger.go` already makes: permanently
+UNDEFINED, with no remediation API.
 
 **Disclosed residual limitation**: an attacker with DB write credentials
 can set `event_id` on a journal that originally had none (045 allows the
@@ -1841,6 +1893,21 @@ NULL`), not an id-range assumption, so the late entry is simply
   `journal_entries` content (catching both a content rewrite and a row
   deletion, since a deleted row shrinks the recount below the stored
   `entry_count`).
+- `service.VerifyLedger`'s **step 3b** -- the read side of "every entry
+  covered". The four items above are all about entries the chain SAYS it
+  covers; none of them answers "is anything sitting outside coverage",
+  which is the shape of a row inserted by direct SQL after the last batch.
+  The 2026-09-02 audit (`tamper-evident.md` M-2) found this half of the
+  invariant unimplemented: design doc §8.4 step 3 asks for the anti-join,
+  `ListUncoveredEntries` existed for the WRITE side, and `VerifyLedger`
+  was listed here as the enforcer while executing only the first half.
+  Step 3b now probes `UncoveredEntries` (bounded by
+  `VerifyConfig.UncoveredProbeLimit`, default 1000, with the cap reported
+  when hit) and splits the result by the journal behind each entry: no
+  valid authorization -> `TAMPERED`; legitimately signed or
+  `unsigned_tx_mode` -> `DRIFT` with the count in
+  `VerifyReport.UncoveredEntries`. A non-zero count is never `VERIFIED`:
+  this run cannot testify about entries no signed attestation covers.
 
 **Pinned by** (`service/attestation_test.go` unless noted):
 - `TestAttestationService_LateArrivingEntryIsEventuallyCoveredExactlyOnce`
@@ -1871,6 +1938,12 @@ NULL`), not an id-range assumption, so the late entry is simply
   -- both simulate this wave's actual threat model (an owner-role
   bypassing the no-UPDATE/no-DELETE trigger) and confirm `VerifyLedger`
   classifies the result `TAMPERED`, not `VERIFIED`.
+- `service.TestVerifyLedger_FlagsUncoveredUnsignedEntry` /
+  `TestVerifyLedger_UncoveredButLegitimateEntriesAreDriftNotVerified`
+  (`service/attest_verify_anchor_test.go`) -- step 3b's two outcomes: a
+  forged journal's entries inserted after full coverage are `TAMPERED`;
+  entries legitimately posted after the last batch are `DRIFT` with a
+  count, never `VERIFIED`.
 
 ## I-28: The latest external anchor head matches the DB's attestation chain
 
@@ -1881,9 +1954,34 @@ earlier batch's content, that single remembered value is enough to
 detect a rewrite anywhere in the history: `ledger-cli verify` compares
 the anchor's head against the DB row at the same `seq` and flags a
 mismatch as `TAMPERED`. An anchor that is *behind* the DB's chain (has
-not yet seen the latest attestations) is a distinct, benign state --
-`DRIFT`, not `TAMPERED` -- because nothing about it indicates the
-history was rewritten, only that publishing has not caught up yet.
+published at least one seq and has not yet seen the latest ones) is a
+distinct, benign state -- `DRIFT`, not `TAMPERED` -- because nothing
+about it indicates the history was rewritten, only that publishing has
+not caught up yet.
+
+**An empty anchor is not a behind anchor** (2026-09-02 audit,
+`tamper-evident.md` M-3). `core.Anchor.Head`'s contract is "the highest
+seq, or 0 if empty", so "nothing was ever published here" and "what was
+published has been erased or rolled back" arrive as the same observation.
+Reading both as `DRIFT` -- whose own doc comment called it "a benign,
+expected inconsistency", and which `ledger-cli` exits 0 on -- made
+deleting the anchor a silent way to switch every external check off. One
+`rm` on the dev carrier; one `PutObject` with the ledger's own token on
+the R2 carrier. The classification is now:
+
+| observation | verdict |
+|---|---|
+| `anchorSeq == 0`, DB chain non-empty, no higher observation on record | `NOT_RUN` (fail-closed: no external check ran, and this run cannot tell erasure from a first read) |
+| `anchorSeq` lower than a recorded prior observation | `TAMPERED` (no benign mechanism moves an anchor backwards) |
+| `0 < anchorSeq < maxSeqSeen` | `DRIFT` (finite, self-healing publish backlog) |
+| `anchorSeq > maxSeqSeen` | `TAMPERED` (the anchor knows about attestations the DB does not) |
+
+Distinguishing the first two requires remembering what the anchor said
+before, and that memory cannot live in the anchor (the thing under
+suspicion). It lives in `anchor_observations` (migration 018,
+append-only, no UPDATE/DELETE grant), written by
+`AttestationService.catchUpAnchor` on every successful `Head` read and
+after every successful `Publish` -- see I-55.
 
 **Why**: I-27 alone is a closed system -- an attacker with DB write
 access (this wave's whole threat model, design doc §1) who can rewrite
@@ -1897,7 +1995,14 @@ does not also touch the anchor is caught by comparing the two.
 **Enforced by**:
 - `service.VerifyLedger` -- step 1 pulls the anchor's head before
   touching anything else, and step 2's per-seq loop compares the DB row
-  at `seq == anchorSeq` against it.
+  at `seq == anchorSeq` against it. Note what that comparison cannot see
+  on its own: with `anchorSeq == 0` (or any seq lower than the chain
+  reaches) it simply never fires, which is why the empty/regressed cases
+  above are classified separately rather than left to it.
+- `core.Anchor.Head`'s no-regression contract (I-56) -- "once Head has
+  returned seq N, no later call may return a seq lower than N". The DRIFT
+  vs TAMPERED split above is only meaningful if the carrier cannot walk
+  its own head backwards.
 - `service.AttestationService.catchUpAnchor` -- the "本地重试队列" design
   doc §8.3 calls for: the gap between `core.Anchor.Head` and the DB's
   latest seq IS the retry queue (no separate table), replayed on every
@@ -1918,8 +2023,14 @@ does not also touch the anchor is caught by comparing the two.
 - `service.TestAttestationService_CatchesUpAnchorAfterTransientFailure`
   -- a `Publish` failure on one run does not lose the seq; the next
   run's catch-up step republishes it before creating a new attestation.
-- `service.TestVerifyLedger_DriftWhenAnchorIsBehind` -- an anchor that
-  has not caught up classifies as `DRIFT`, not `TAMPERED` or `VERIFIED`.
+- `service.TestVerifyLedger_DriftOnlyWhenAnchorHasPublishedButLags` -- an
+  anchor that has published seq 1 while the DB chain reaches seq 2
+  classifies as `DRIFT`, not `TAMPERED` or `VERIFIED`.
+- `service.TestVerifyLedger_EmptyAnchorWithNonEmptyChainIsNotRun` /
+  `TestVerifyLedger_AnchorRollbackToAnOlderSeqIsTampered` /
+  `TestVerifyLedger_EmptyAnchorWithNoPriorObservationIsNotRun` /
+  `TestVerifyLedger_EmptyAnchorIsNotRunNotDrift` -- the three rows of the
+  table above that used to all collapse into `DRIFT`.
 - `service.TestVerifyLedger_NotRunWithoutAnchor` /
   `TestVerifyLedger_NotRunWithoutVerifier` /
   `TestVerifyLedger_NotRunWhenAnchorHeadErrors` -- the fail-closed red
@@ -2302,11 +2413,28 @@ pass; refuses outright on a transaction-bound clone);
 opt-in `Reserve` gate, run strictly before any transaction is opened —
 same placement rule as `Authorize`, since an `AuthVerifier` is permitted
 to be a remote call); `service.FullReconciliationService`'s
-`unauthorized_journals` check (fleet-wide, samples journals that claim a
-signature and confirms it still verifies; skips journals that were never
-signed at all — that is a coverage gap, not tamper evidence — and is
-itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
-`SetAuthCheck`).
+`unauthorized_journals` check (fleet-wide, samples the NEWEST page of
+journals that claim a signature and confirms it still verifies; skips
+journals that were never signed at all — that is a coverage gap, not tamper
+evidence).
+
+Two corrections to that check from the 2026-09-02 audit:
+
+- **When every journal it saw was skipped, the check records
+  `Complete=false`** (C-M8). It used to report `Passed=true, Complete=true`
+  in that case, which made `ReconcileCheckResult(name, Passed && Complete)`
+  emit green — so "the entire ledger is unverifiable" and "the entire
+  ledger verified clean" were the same machine-readable signal. `Passed`
+  deliberately stays true: finding no violation IS finding no violation.
+- **With no `core.AuthVerifier` wired, the check is not run at all** and
+  its name goes into `core.ReconcileReport.SkippedChecks` (C-m4). The
+  `Complete=false` placeholder it used to return made `FullCoverage`
+  permanently false for every deployment that never called
+  `ledger.WithAttestor` — the same dead vote that got check #8 deleted. It
+  also **scans the newest page, not the oldest**: it has no resume cursor,
+  so the single page it looks at must be the one where a row forged today
+  lands (the same shape as C-M1's sampling-direction bug in
+  `VerifyLedger`).
 
 **Pinned by**:
 - `postgres.TestVerifiedBalance_ZeroContributingJournalsIsDefinedZero` —
@@ -2336,7 +2464,9 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   transaction-bound clone refuses with `core.ErrInvalidInput` and the
   counting `AuthVerifier` records zero calls, so the guard is proven to
   fire *before* the external call, not after it.
-- `service.TestFullReconciliation_UnauthorizedJournals_SkippedWithoutSetAuthCheck` /
+- `service.TestFullReconciliation_WithoutAuthVerifier_StillReportsFullCoverage` /
+  `TestFullReconciliation_UnauthorizedJournals_ZeroSignedIsIncomplete` /
+  `TestFullReconciliation_UnauthorizedJournals_ScansTheNewestPage` /
   `TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid` /
   `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature` /
   `TestFullReconciliation_UnauthorizedJournals_SkipsNeverSignedJournal` /
@@ -4082,6 +4212,21 @@ fails `core.VerifyJournalAuth` produces one of two Finding shapes:
   key. It still sets `Passed=false` and is never silently dropped — see
   Why below for why a quiet skip here would be dangerous, not merely
   imprecise.
+
+  **"Register the key" is executable as of 2026-09-02** (`tamper-evident.md`
+  M-5). It was not before: `authdev.NewLocalVerifier` took exactly ONE
+  public key, `LocalVerifier.keys` is unexported, and there was no
+  `Register`/setter — so the action this Finding tells an operator to take
+  had no API behind it in the verifier the library ships, and a rotation
+  made `VerifiedBalance` UNDEFINED (I-32) for every holder with history,
+  i.e. refused withdrawals fleet-wide. `authdev.NewLocalVerifierSet(map[
+  string]ed25519.PublicKey)` now holds every generation at once; the set is
+  copied and immutable, so `Verify` needs no lock and nothing can widen the
+  trusted set at runtime. `docs/RUNBOOK.md`'s "P5 signing key rotation"
+  section is the procedure, including the part rotation does NOT fix: this
+  verifier has no `NotAfter`, so a retired-but-registered key (which point
+  1 above requires it to stay) can still sign a newly forged journal. A
+  leaked signing key is an incident, not a rotation.
 - anything else: reported exactly as before — "claims a signature but
   fails authorization verification" — real tamper evidence.
 
@@ -4135,7 +4280,11 @@ not wrap it when a known key's signature fails `ed25519.Verify`;
 (`service/reconcile.go`) — branches on `errors.Is(err,
 core.ErrUnknownAuthKey)` to choose the Finding wording, in both cases
 still setting `Passed=false` (never a silent skip, unlike the
-never-signed-at-all case this same function already handles per I-32).
+never-signed-at-all case this same function already handles per I-32);
+`authdev.NewLocalVerifierSet` (`authdev/ed25519.go`) — the multi-generation
+constructor that makes "register the retired key" a thing an operator can
+actually do, plus `LocalVerifier.KeyIDs` for a startup log or health
+endpoint answering "which generations can this process verify?".
 
 **Pinned by**:
 - `authdev.TestNewLocalAttestor_RejectsUnknownKeyID` — an unrecognized
@@ -4149,6 +4298,19 @@ never-signed-at-all case this same function already handles per I-32).
   and never overlapping, the forged-signature tamper wording
   `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature`
   already pins.
+- `authdev.TestLocalVerifier_MultiKeyVerifiesBothGenerations` — both
+  generations verify while both are registered; dropping the retired one
+  reports `ErrUnknownAuthKey` (a coverage gap, not tamper evidence).
+- `authdev.TestNewLocalVerifierSet_RejectsUnusableKeyMaterial` — an empty
+  set, an empty key id, or a wrong-length public key fails at construction
+  rather than later, inside the ledger, as "unauthorized journal".
+- `TestService_KeyRotation_OldGenerationMustStayRegistered` (root package,
+  cited bare per this doc's convention — see I-13) — the
+  end-to-end cost of getting it wrong, through `ledger.New` /
+  `ledger.WithAttestor`: with only the new key registered, a dimension
+  carrying pre-rotation history reports `ErrUnauthorizedJournal` and
+  `Reserve(RequireVerifiedBalance: true)` is refused; with both
+  registered, the balance resolves and the gate passes.
 ## I-46: A journal/attestation digest depends only on the `effective_at` instant a `TIMESTAMPTZ` column can actually store, never on sub-microsecond digits a signer's clock happened to produce
 
 (Board #51; digest-precision bug Team Lead reproduced locally 2026-08-27. CI
@@ -4879,3 +5041,135 @@ through `DBTX()` (all `ledger.go`).
   `TestService_Onchain_VisibleOnTxBoundClone` /
   `TestService_Ping_FollowsTheCloneTransaction` — each establishes a control
   on the top-level Service first, so the assertion isolates the guard.
+
+## I-55: What the anchor said before is remembered, so an erased or rolled-back anchor is not read as a benign backlog
+
+(2026-09-02 deep audit, `tamper-evident.md` M-3; remediation contract §7.7.)
+`core.Anchor.Head` answers `(0, nil, nil)` both for "nothing was ever
+published here" and for "what was published has been erased". Nothing in
+either answer distinguishes them, so the distinction has to come from
+somewhere else: `anchor_observations` (migration 018) is an append-only
+record of every `(seq, head)` this deployment has observed the anchor
+reporting, written by `service.AttestationService.catchUpAnchor` on each
+successful `Head` read and after each successful `Publish`.
+`service.VerifyLedger` compares the live head against `MAX(observed_seq)`:
+lower than something we recorded seeing is `TAMPERED`, not `DRIFT`. See
+I-28's table for the full classification.
+
+**Why**: `DRIFT`'s own doc comment defined it as "a benign, expected
+inconsistency" and `ledger-cli verify` exits 0 on it. So the cheapest
+possible attack on P6 was not to forge anything -- it was to remove the
+witness: `rm anchor.txt` on the dev carrier, or one `PutObject` with the
+ledger's own token on the R2 carrier, after which the DB chain verified
+against nothing and reported a benign catch-up. `working-agreements.md` §3
+names this shape exactly: "未运行 ≠ 通过". An external check that did not
+run must never resolve to the same verdict as one that ran and passed.
+
+The memory is deliberately modest about what it proves. A party who can
+rewrite `anchor_observations` can also erase the memory -- but that party
+is the database-credential holder the external anchor exists to defend
+against, the anchor still holds its own side of the evidence, and the
+append-only trigger plus the missing UPDATE/DELETE grant mean the
+application credential cannot do it at all. What this closes is the
+asymmetry where the attacker had to compromise **nothing** in the database
+to make an erased anchor look healthy.
+
+**Enforced by**:
+- Migration 018's `anchor_observations` -- `BIGSERIAL` + `uid`, two
+  `ledger_block_mutation()` triggers (no UPDATE, no DELETE), and an ACL
+  that grants `ledger_app` only `SELECT, INSERT` and `ledger_ro` only
+  `SELECT`. Owned by `ledger_owner`, transferred inside the same temporary
+  membership window 001 §14 uses.
+- `service.AttestationService.catchUpAnchor` -- records the observation
+  BEFORE acting on it, so a run that dies mid-catch-up still leaves the
+  observation behind.
+- `service.AttestationService.RunAttestBatch` -- records after a successful
+  `Publish` too. Without that, the memory always lagged one batch behind
+  and an anchor erased right after its first publish had nothing to
+  contradict it.
+- `service.VerifyLedger` -- reads `HighestObservedAnchorSeq` and fails
+  closed (`NOT_RUN`) if that read itself fails: with the memory unreadable,
+  this run cannot tell a rollback from a first read.
+- `postgres.AttestationStore.RecordAnchorObservation` /
+  `HighestObservedAnchorSeq`.
+
+**Pinned by** (`service/attest_verify_anchor_test.go`):
+- `TestVerifyLedger_AnchorRollbackToAnOlderSeqIsTampered` -- three
+  attestations published, then the carrier rewritten out of band to seq 1.
+  Pre-fix verdict: `DRIFT` ("anchor is behind the DB chain by 2
+  attestation(s) (catch-up pending)").
+- `TestVerifyLedger_EmptyAnchorWithNonEmptyChainIsNotRun` -- the anchor
+  deleted after publishing seq 2. Pre-fix verdict: `VERIFIED`.
+- `TestVerifyLedger_EmptyAnchorWithNoPriorObservationIsNotRun` -- the
+  honest ambiguity: no observation on record, so `NOT_RUN`, not `TAMPERED`.
+- `TestVerifyLedger_DriftOnlyWhenAnchorHasPublishedButLags` -- the control:
+  `DRIFT` still exists and still means what it says.
+
+## I-56: An anchor's head never regresses, and that is a machine-checked property of every implementation
+
+(2026-09-02 deep audit, `tamper-evident.md` M-4 / m-2; extends I-48.)
+`core.Anchor.Head`'s contract now includes: once `Head` has returned seq
+N, no later call may return a seq lower than N. "The highest seq ever
+published" is the contract; "the value of the last write" is not.
+`anchortest` checks both halves -- `HeadNeverRegressesOnAnOlderPublish`
+through the interface, and `HeadNeverRegressesAfterAnOutOfBandOlderWrite`
+using the implementation's own client via `anchortest.WithOutOfBandWrite`,
+because the attack does not go through `Publish`.
+
+**Why**: I-28's DRIFT-vs-TAMPERED split, and therefore I-55, are only
+meaningful if the carrier cannot walk its own head backwards. `anchortest`
+previously declared seq ordering explicitly out of scope ("this suite
+takes no position on that choice and does not test it") -- and under that
+licence this library's own production carrier shipped with a `Head` that
+read a single mutable object's CURRENT version. The object's past versions
+were protected by Object Lock and read by nothing, so one out-of-band
+`PutObject` of an older seq rolled the trusted head back. The property the
+library depends on was the property its conformance suite had promised not
+to check.
+
+`anchors/r2` now stores one immutable object per seq
+(`<Key>/seq-<20-digit>.json`, conditional create with
+`If-None-Match: "*"`, plus a read-back comparison so a server that ignores
+the header cannot turn a mismatched replay into a silent overwrite), and
+`Head` lists the prefix and resolves `MAX(seq)`. Two honest boundaries,
+both documented in that package and in `docs/RUNBOOK.md`:
+
+- **Forward injection stays possible and stays loud.** Writing
+  `seq-99999999.json` with garbage moves `Head` forward, and
+  `VerifyLedger` reports "anchor knows about seq X but the DB chain only
+  reaches Y" as `TAMPERED`. A forward jump cannot hide anything; only a
+  backward move can.
+- **Object Lock does not stop a delete marker.** Retention prevents
+  deleting a specific version, not a plain `DELETE` that writes a marker
+  and hides the object from a listing. The ledger-side credential
+  therefore must not carry `DeleteObject` -- and if it somehow does, I-55's
+  recorded observation still turns the resulting regression into
+  `TAMPERED`.
+
+**Enforced by**:
+- `core.Anchor.Head`'s doc comment (the contract text itself).
+- `anchortest`'s `HeadNeverRegressesOnAnOlderPublish` and
+  `HeadNeverRegressesAfterAnOutOfBandOlderWrite` phases; the latter is
+  SKIPPED (and reported as skipped, never as passed, via
+  `anchortest.Skipped`) when the caller supplies no out-of-band writer.
+- `anchors/r2.Anchor`'s one-object-per-seq layout and `ListObjectsV2`-based
+  `Head`, which also fails closed on a foreign object under its prefix
+  rather than skipping it.
+- `anchordev.LocalFileAnchor`'s existing refusal of any seq that is not
+  `Head()+1` or an exact replay.
+
+**Pinned by**:
+- `anchortest.TestCheck_CatchesHeadRegression` /
+  `TestCheck_CatchesOutOfBandHeadRegression` -- deliberately broken fakes
+  prove both phases can fail (I-48's lesson: a check that cannot fail is
+  not a check).
+- `anchortest.TestCheck_OutOfBandPhaseIsSkippedNotPassedWithoutTheHook` --
+  the phase must report as skipped, not silently pass.
+- `anchors/r2.TestAnchor_Conformance` -- runs the full suite, out-of-band
+  hook supplied, against MinIO with Object Lock AND a COMPLIANCE default
+  retention (before this round the test bucket set no retention at all, so
+  it ran plain S3 semantics while the code discussed WORM).
+- `anchors/r2.TestAnchor_ObjectLockRefusesDeletingAPublishedVersion` --
+  the retention is real and observable.
+- `anchors/r2.TestAnchor_PublishIsCreateOnlyPerSeq` /
+  `TestAnchor_HeadFailsClosedOnAForeignObject`.
