@@ -11,6 +11,10 @@ package postgres
 
 import (
 	"context"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
@@ -113,4 +117,57 @@ func (s *LedgerStore) PostJournalWithReplayFlaggedAuthForTest(ctx context.Contex
 	// the caller's row-count assertion sees what a real caller would have
 	// written.
 	return tx.Commit(ctx)
+}
+
+// AcquireClusterLockSharedForTest takes the cluster migration lock in SHARED
+// mode: many holders at once, but mutually exclusive with the EXCLUSIVE
+// holders (postgres.Migrate itself, and the two tests that elevate a
+// cluster-wide role attribute through AcquireClusterLockForTest).
+//
+// m-3 (W3 adversarial review of the gates): TestRoleAttributeHardening...
+// sets `ALTER ROLE ledger_app SUPERUSER` to prove migration 021 takes it
+// back. pg_authid is cluster-wide and postgrestest isolates by DATABASE, so
+// during that window every OTHER test asserting a permission-denied against
+// ledger_app can see a superuser and fail. The exclusive lock it holds makes
+// it mutually exclusive with concurrent Migrates -- which is what its comment
+// claims -- but nothing made it mutually exclusive with those ACL assertions,
+// and six files make them. The comment said "Both are fixed"; one was.
+//
+// Shared rather than exclusive so the ACL tests still run concurrently with
+// each other -- they only need to exclude the elevation window, not one
+// another. try_ + poll rather than the blocking variant, because
+// TestNoBlockingSessionAdvisoryLocks pins that this repository contains no
+// blocking session-level advisory lock (the property AcquireBalanceLock's
+// residual-risk note depends on).
+func AcquireClusterLockSharedForTest(databaseURL string) (func(), error) {
+	ctx := context.Background()
+	lockURL, err := maintenanceDatabaseURL(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("derive maintenance database url: %w", err)
+	}
+	conn, err := pgx.Connect(ctx, lockURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect to maintenance database: %w", err)
+	}
+	release := func() { _ = conn.Close(context.WithoutCancel(ctx)) }
+
+	cfg := newMigrateConfig(nil)
+	deadline := time.Now().Add(cfg.lockBudget)
+	for {
+		var got bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock_shared($1)", int64(clusterMigrationLockKey)).Scan(&got); err != nil {
+			release()
+			return nil, fmt.Errorf("pg_try_advisory_lock_shared: %w", err)
+		}
+		if got {
+			return release, nil
+		}
+		if time.Now().After(deadline) {
+			release()
+			return nil, fmt.Errorf(
+				"cluster migration lock (advisory key %d) held EXCLUSIVELY for longer than %s: a Migrate, or a test elevating a cluster-wide role attribute, has not finished",
+				clusterMigrationLockKey, cfg.lockBudget)
+		}
+		time.Sleep(clusterLockPollInterval)
+	}
 }

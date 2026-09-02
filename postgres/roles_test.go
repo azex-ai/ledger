@@ -473,8 +473,33 @@ func TestBalanceRolePromotion_RefusedOnceEntriesExist(t *testing.T) {
 // returns a fresh pool connected as ledger_app to the same (isolated)
 // database. Tests in this file never run t.Parallel(), so setting the
 // cluster-level role password sequentially per test is safe.
+// holdACLGuard takes the cluster migration lock in SHARED mode for the rest
+// of the test, so no ACL assertion made through the pools below can observe
+// the window in which TestRoleAttributeHardeningResetsPreExistingPrivileges
+// (or migrate_elevation_test.go) has deliberately elevated a cluster-wide
+// role attribute.
+//
+// m-3 (W3 adversarial review of the gates): that elevation test takes the
+// EXCLUSIVE lock and its comment says this makes it "mutually exclusive with
+// every concurrent Migrate" -- true -- and then concludes both halves of the
+// race are fixed. They were not: pg_authid is cluster-wide, postgrestest
+// isolates by database, and six other files assert permission-denied against
+// ledger_app without taking any lock at all. During the elevation window
+// ledger_app IS a superuser and every one of those assertions is a false red.
+//
+// This is the one place to fix it because it is the one place those tests
+// obtain a ledger_app/ledger_ro connection: a new ACL test inherits the guard
+// by construction rather than by remembering it.
+func holdACLGuard(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	unlock, err := postgres.AcquireClusterLockSharedForTest(pool.Config().ConnString())
+	require.NoError(t, err, "ACL assertions must exclude the cluster-wide role-attribute elevation window (m-3)")
+	t.Cleanup(unlock)
+}
+
 func newAppPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool {
 	t.Helper()
+	holdACLGuard(t, pool)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
 	require.NoError(t, err)
@@ -488,6 +513,7 @@ func newAppPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool
 // newRoPool is newAppPool's ledger_ro counterpart.
 func newRoPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool {
 	t.Helper()
+	holdACLGuard(t, pool)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_ro WITH PASSWORD '%s'", password))
 	require.NoError(t, err)
@@ -847,9 +873,15 @@ func TestLedgerRoCannotReadWebhookSecret(t *testing.T) {
 // permission-denied assertion it makes then fails) or could run its own
 // Migrate and reset the attribute out from under the sanity check below.
 //
-// Both are fixed by driving the real migration set and by holding the same
+// (a) is fixed by driving the real migration set. (b) is fixed by holding the
 // cluster-wide advisory lock Migrate holds for its whole run (I-47), which
-// makes this test and every concurrent Migrate mutually exclusive. The
+// makes this test and every concurrent Migrate mutually exclusive -- and, as
+// of m-3 (W3 adversarial review of the gates), by every ACL-asserting test
+// taking that same lock in SHARED mode through newAppPool/newRoPool. This
+// comment previously said (b) was fixed by the exclusive lock alone; it was
+// not. Migrate was excluded, the six files asserting permission-denied
+// against ledger_app were not, and during the window below ledger_app really
+// is a superuser to them. The
 // migration is driven through golang-migrate directly rather than through
 // postgres.Migrate for exactly one reason: postgres.Migrate would try to take
 // that same lock and deadlock against this test's own hold.
