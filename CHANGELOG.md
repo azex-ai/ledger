@@ -274,6 +274,56 @@ written because it was true when `[0.6.0]` shipped.
   state; if you need the intermediate one, lower `Confirmations` or drive
   ingestion from the webhook path.
 
+### Go module — Security (verified-balance gate: the hold term)
+
+- **A gated `Reserve` now holds conservatively, and an expired reservation
+  can no longer be settled** (Wave 3 C-1,
+  `docs/audits/2026-09-02-deep-audit/w3-review/money-path.md`). I-49 made the
+  *base* of the gated availability expression tamper-resistant and left the
+  term subtracted from it alone: the hold came from `reservations.status` /
+  `.settled_amount`, and `ledger_reservations_guard` permits
+  `active → settling/settled/released` and permits `settled_amount` to grow
+  because those are the legitimate transitions. `ledger_app` holds `UPDATE`,
+  so one permitted statement reported a live 1000 hold as zero and the gate
+  authorized 2000 against a balance of 1000.
+
+  Reading the discharge from the append-only settlement record instead does
+  not fix it — `ledger_app` must keep `INSERT` on those tables, and a forged
+  receipt discharges a hold at the same one-statement cost (measured). In
+  this threat model the application's credential *is* the attacker, so the
+  only claims it cannot manufacture are a signature and the passage of time.
+  So: **when `RequireVerifiedBalance` is set, the hold is the full
+  `reserved_amount` of every not-yet-expired reservation on the dimension,
+  with no credit for settlement or release**, and `Settle` / `SettlePartial`
+  return `core.ErrInvalidTransition` once `expires_at` has passed (without
+  that half, waiting out an expiry would double-authorize with no tampering
+  at all). `Release` and `FinalizeSettlement` still work on an expired
+  reservation — neither records a new amount, and both are what
+  `service.ExpirationService` calls to wind one down.
+
+  **What consumers must do.** If you set `RequireVerifiedBalance`: after a
+  `Settle` or `Release`, those funds stay unavailable *to gated calls* until
+  the reservation's `ExpiresAt` passes — set `ExpiresIn` to the real lifetime
+  of the operation (default 15 minutes) rather than leaving a long expiry on
+  a short-lived reservation. If you settle reservations late — after their
+  `ExpiresAt`, relying on the old behavior where `Settle` ignored expiry —
+  that call now fails; either extend `ExpiresIn` or release and re-reserve.
+  Consumers who never set the flag and never settle past expiry see no
+  change. The ungated `Reserve`, `HeldAmount` and `GetBalanceBreakdown` keep
+  reporting the state machine's own figure.
+
+  Not closed, recorded rather than implied away: signing the settlement
+  receipts (attested on write, verified before the transaction opens like V
+  is) would make the discharge unforgeable and restore immediate recycling.
+  That is a composition-root change and is deferred; I-49 carries the
+  analysis, including the residual boundary window between a settle
+  transaction and the gate.
+
+- Migration **025** (`gated_hold_expiry_index`) adds
+  `idx_reservations_account_currency_expiry` — a query that must not mention
+  `status` cannot use the `status = 'active'` partial index the ordinary
+  path uses.
+
 ### Go module — Fixed
 
 - **`SolvencyCheck` no longer reads `balance_checkpoints`** (W3 re-review,

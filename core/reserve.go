@@ -72,6 +72,29 @@ type ReserveInput struct {
 	//     recomputed base is ErrInsufficientBalance, not
 	//     ErrUnauthorizedJournal.
 	//
+	//   - It counts holds conservatively, and this one is visible in ordinary
+	//     use, not just under attack: a gated Reserve subtracts the full
+	//     ReservedAmount of every not-yet-expired reservation on the
+	//     dimension, giving no credit for one that has been settled or
+	//     released. So after Settle or Release the funds stay unavailable TO
+	//     GATED CALLS until the reservation's ExpiresAt passes. Set ExpiresIn
+	//     to the real lifetime of the operation if you need the balance back
+	//     sooner; the default is 15 minutes.
+	//
+	//     Why: every other signal that a reservation is over -- its status,
+	//     its settled_amount, its settlement legs, its operation receipts --
+	//     is writable or appendable with the application's own database
+	//     credential, which is exactly the credential this gate assumes an
+	//     attacker holds; one such statement used to zero a live hold and let
+	//     the gate authorize the same balance twice. ExpiresAt is the only
+	//     property of a reservation that credential cannot manufacture. See
+	//     docs/INVARIANTS.md I-49.
+	//
+	// Related consequence on the settlement side: a reservation that has
+	// expired can no longer be settled (Settle and SettlePartial return
+	// ErrInvalidTransition), because the gate has already stopped counting
+	// its hold. Release and FinalizeSettlement still work on it.
+	//
 	// Because the gate may call a (possibly remote) AuthVerifier, it runs
 	// before any transaction is opened -- setting this field on a Reserve
 	// issued from inside a RunInTx callback is refused with ErrInvalidInput
@@ -129,6 +152,16 @@ func (i ReserveInput) Validate() error {
 // the only thing left standing between a retry and a double charge. Generate
 // both keys outside the retry, not inside it.
 //
+// EXPIRY. A reservation that has passed its ExpiresAt can no longer be
+// settled: Settle returns ErrInvalidTransition, whether or not the
+// expiration sweeper has gotten to it. The verified-balance gate stops
+// counting an expired reservation's hold (see ReserveInput.
+// RequireVerifiedBalance for why expiry is the only discharge it trusts),
+// and letting an expired reservation still take money would mean the same
+// balance could be reserved twice and settled twice, with no tampering
+// involved. Release still works on an expired reservation; so does
+// FinalizeSettlement, which records no new amount.
+//
 // A second composition trap: a hold binds only OTHER RESERVATIONS (I-11). A
 // direct journal on the same dimension — lock_funds, transfer_out, any
 // template — can spend the reserved funds out from under an active
@@ -183,6 +216,11 @@ func (i ReleaseInput) Validate() error {
 // FinalizeSettlementInput is the input to complete a reservation that has
 // been partially settled via SettlePartial.
 //
+// Unlike Settle and SettlePartial, this still works after the reservation
+// has expired: it records no new amount (settling -> settled, settled_amount
+// untouched), and it is what service.ExpirationService calls to wind an
+// expired, partially-settled reservation down.
+//
 // IdempotencyKey is REQUIRED (I-3) for the same reason SettleInput's and
 // ReleaseInput's are: the settling -> settled transition is terminal, so a
 // lost-response retry used to land on ErrInvalidTransition. A replayed key
@@ -210,6 +248,9 @@ func (i FinalizeSettlementInput) Validate() error {
 // retry of a lost response would double-apply the amount. A replayed key
 // with the same amount succeeds without re-applying; a replayed key with a
 // different amount is ErrConflict.
+//
+// Like Settle, this is refused with ErrInvalidTransition once the
+// reservation has passed its ExpiresAt -- see SettleInput's EXPIRY note.
 type SettlePartialInput struct {
 	ReservationUID string          `json:"reservation_uid"`
 	Amount         decimal.Decimal `json:"amount"`

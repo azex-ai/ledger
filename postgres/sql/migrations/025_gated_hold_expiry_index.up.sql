@@ -1,0 +1,43 @@
+-- Index the dimension + lifetime lookup the verified-balance gate's hold
+-- query needs (2026-09-02 deep audit, w3-review/money-path.md C-1;
+-- docs/INVARIANTS.md I-49).
+--
+-- Background: the gated Reserve used to size a reservation against a hold
+-- read from reservations.status and reservations.settled_amount, and
+-- ledger_reservations_guard permits exactly the UPDATEs that zero a hold
+-- through those columns -- active -> settling/settled/released, and
+-- settled_amount growing -- because those are the legitimate transitions.
+-- ledger_app holds UPDATE on the table, so one permitted statement made a
+-- live 1000 hold report as zero and the gate authorized 2000 against a
+-- balance of 1000.
+--
+-- The replacement (SumUnexpiredReservationHolds) sums reserved_amount over
+-- the holder's reservations in the currency that have NOT yet expired, and
+-- credits nothing for settlement or release: every other signal -- status,
+-- settled_amount, settlement legs, operation receipts -- is either writable
+-- or appendable with ledger_app's own grants, and in this threat model that
+-- credential is the attacker. expires_at is the exception the guard already
+-- makes unwritable, so it is the only discharge the gate can trust.
+--
+-- That query filters on (account_holder, currency_id) with a range predicate
+-- on expires_at, and no existing index serves it:
+--
+--   idx_reservations_account_status  partial, WHERE status = 'active' -- the
+--                                    new query must not mention status
+--   idx_reservations_expired         (expires_at) alone, also partial on
+--                                    status = 'active'
+--   idx_reservations_account_created (account_holder, created_at) -- no
+--                                    currency_id, wrong third column
+--
+-- Column order: the two equality predicates first, the range predicate last,
+-- so the scan is one contiguous stretch of the index.
+--
+-- Not partial on `expires_at > now()`: now() is not IMMUTABLE, so Postgres
+-- cannot index on it. The predicate stays in the query.
+--
+-- Plain CREATE INDEX, not CONCURRENTLY: golang-migrate runs each migration in
+-- a transaction and CONCURRENTLY cannot run inside one (the same note 015 and
+-- 023 carry). Build it out-of-band first on a large deployment if the lock
+-- window matters.
+CREATE INDEX idx_reservations_account_currency_expiry
+    ON reservations (account_holder, currency_id, expires_at);

@@ -100,6 +100,16 @@ Starting points for a production money path — adjust to product reality and
    host application replicas behind the load balancer.
 4. Balance read p99 degrading while post latency is flat → checkpoint age
    (see RUNBOOK §4), not traffic.
+5. `Reserve` latency degrading **only for callers that set
+   `RequireVerifiedBalance`** → the gated hold query
+   (`SumUnexpiredReservationHolds`, I-49). It must not read
+   `reservations.status`, so unlike the ungated path it cannot use the
+   `status = 'active'` partial index; migration `025`'s
+   `idx_reservations_account_currency_expiry` covers the
+   `(account_holder, currency_id, expires_at > now())` lookup instead.
+   Expired reservations fall outside the range scan, so the rows visited are
+   bounded by concurrent, unexpired reservations rather than by history.
+   Ungated `Reserve` is unaffected.
 
 ## 5. Re-baselining
 

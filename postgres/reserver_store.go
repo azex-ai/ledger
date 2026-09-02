@@ -422,8 +422,31 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	//     V wins and the forgery buys nothing. This is why E alone is not
 	//     enough either.
 	//
-	// Holds are subtracted from either base identically: reservations are not
-	// part of what a checkpoint or an unsigned journal can misstate.
+	// The hold subtracted from that base follows the same rule, and used not
+	// to: it was read off reservations.status and reservations.settled_amount,
+	// which ledger_reservations_guard (001_baseline section 12) lets ledger_app
+	// write — active -> settling/settled/released and a growing settled_amount
+	// are the legitimate transitions, so the guard permits them by design. One
+	// such statement zeroed a hold that was still outstanding and the gate
+	// authorized 2000 against a balance of 1000 (2026-09-02 audit,
+	// docs/audits/2026-09-02-deep-audit/w3-review/money-path.md C-1).
+	//
+	// Under the gate the hold is therefore SumUnexpiredReservationHolds: the
+	// full reserved_amount of every not-yet-expired reservation on the
+	// dimension, crediting NOTHING for settlement or release. Not the
+	// append-only settlement record either — ledger_app must keep INSERT on
+	// those tables, so a forged receipt discharges a hold just as cheaply as
+	// the UPDATE did. expires_at is the only claim about a reservation a
+	// leaked credential cannot manufacture (the guard refuses to let anyone
+	// change it), so it is the only discharge this path accepts. The cost is
+	// paid in one direction only: a settled or released reservation keeps
+	// holding until it expires, which refuses reservations that a perfect
+	// reader would allow and never the reverse. See that query's doc comment
+	// and I-49.
+	//
+	// The ungated path keeps SumActiveReservations — the state machine's own
+	// answer, which is right for a consumer asking "what is held" and wrong
+	// as a basis for deciding how much money may leave.
 	var availableBase decimal.Decimal
 	if verifiedAvailableBase != nil {
 		entriesBase, err := s.sumAvailableFromEntriesWithQueries(ctx, qtx, input.AccountHolder, currencyID)
@@ -439,19 +462,31 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		availableBase = roleSums[core.BalanceRoleAvailable]
 	}
 
-	activeReserved, err := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
-		AccountHolder: input.AccountHolder,
-		CurrencyID:    currencyID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: sum active reservations: %w", err)
+	// Whichever query runs, it runs HERE, inside the (holder, currency)
+	// advisory lock — not alongside the pre-transaction verification. A
+	// reservation that commits in the gate's window has to be visible, which
+	// is the same over-sell race I-4/I-11 exist to close.
+	var heldRaw any
+	if verifiedAvailableBase != nil {
+		heldRaw, err = qtx.SumUnexpiredReservationHolds(ctx, sqlcgen.SumUnexpiredReservationHoldsParams{
+			AccountHolder: input.AccountHolder,
+			CurrencyID:    currencyID,
+		})
+	} else {
+		heldRaw, err = qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
+			AccountHolder: input.AccountHolder,
+			CurrencyID:    currencyID,
+		})
 	}
-	activeReservedDecimal, err := anyToDecimal(activeReserved)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: convert active reservations: %w", err)
+		return nil, fmt.Errorf("postgres: reserve: sum outstanding holds: %w", err)
+	}
+	heldDecimal, err := anyToDecimal(heldRaw)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reserve: convert outstanding holds: %w", err)
 	}
 
-	available := availableBase.Sub(activeReservedDecimal)
+	available := availableBase.Sub(heldDecimal)
 	if available.LessThan(input.Amount) {
 		return nil, fmt.Errorf("postgres: reserve: available %s < requested %s: %w", available.String(), input.Amount.String(), core.ErrInsufficientBalance)
 	}
@@ -522,6 +557,42 @@ func ensureReservationOperationReceiptMatches(receipt sqlcgen.ReservationOperati
 	}
 	if !receiptAmount.Equal(amount) {
 		return fmt.Errorf("postgres: %s: idempotency key %q payload mismatch (recorded %s, got %s): %w", operation, idempotencyKey, receiptAmount, amount, core.ErrConflict)
+	}
+	return nil
+}
+
+// refuseExpiredSettlement rejects an attempt to record new spend against a
+// reservation whose expires_at has passed (I-49).
+//
+// The gated Reserve stops counting a reservation's hold the moment it
+// expires, and expires_at is the ONLY discharge signal it accepts — the
+// guard makes the column unwritable, which is what makes the signal
+// trustworthy at all. That is only sound if an expired reservation can no
+// longer take money: otherwise a caller reserves 1000, waits out the expiry,
+// reserves 1000 again against the same balance (the gate having released the
+// hold), and settles both. No tampering required — the ExpirationService
+// that would have released the first one is opt-in, and Settle used not to
+// look at expires_at at all.
+//
+// Applies to Settle and SettlePartial, the two operations that record an
+// amount. Release and FinalizeSettlement deliberately keep working on an
+// expired reservation: neither records new spend (FinalizeSettlement moves
+// settling -> settled without touching settled_amount), the gate reads
+// neither status nor receipts, and both are exactly what
+// service.ExpirationService calls to wind an expired reservation down —
+// refusing them would leave every expired settling reservation stuck in
+// settling forever, failing on every sweep.
+//
+// Must be called AFTER the idempotent-replay short-circuit: a retry of a
+// settlement that succeeded before the expiry has to keep returning its
+// original success, not turn into an error because time passed.
+func refuseExpiredSettlement(ctx context.Context, qtx *sqlcgen.Queries, operation, reservationUID string, reservationID int64) error {
+	expired, err := qtx.ReservationExpiredNow(ctx, reservationID)
+	if err != nil {
+		return fmt.Errorf("postgres: %s: check expiry: %w", operation, err)
+	}
+	if expired {
+		return fmt.Errorf("postgres: %s: reservation %q has expired and can no longer be settled (release it, or reserve again): %w", operation, reservationUID, core.ErrInvalidTransition)
 	}
 	return nil
 }
@@ -623,6 +694,10 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		return ensureReservationOperationReceiptMatches(receipt, reservationID, reservationOpSettle, actualAmount, input.IdempotencyKey)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("postgres: settle: check idempotency: %w", err)
+	}
+
+	if err := refuseExpiredSettlement(ctx, qtx, "settle", reservationUID, reservationID); err != nil {
+		return err
 	}
 
 	status := core.ReservationStatus(res.Status)
@@ -749,6 +824,10 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 		return nil // already applied — do not accumulate again
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("postgres: settle partial: check idempotency: %w", err)
+	}
+
+	if err := refuseExpiredSettlement(ctx, qtx, "settle partial", reservationUID, reservationID); err != nil {
+		return err
 	}
 
 	// Business precision (I-16): the increment must respect the reservation
@@ -903,6 +982,14 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 // subtracts from balance when checking availability, exposed so consumers can
 // compute available = balance − held without reaching into the reservations
 // table.
+//
+// This is the state-machine answer (SumActiveReservations), which is what a
+// consumer asking "what is held right now" wants, and it reads two columns a
+// leaked ledger_app credential can write. It is deliberately NOT the figure a
+// gated Reserve sizes against — that one is SumUnexpiredReservationHolds
+// (I-49), which credits no discharge claim and is therefore larger once a
+// reservation has been settled or released. Do not use HeldAmount to decide
+// how much money may leave.
 func (s *ReserverStore) HeldAmount(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {

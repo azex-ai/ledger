@@ -116,3 +116,66 @@ RETURNING id, reservation_id, operation, idempotency_key, amount, created_at;
 SELECT id, reservation_id, operation, idempotency_key, amount, created_at
 FROM reservation_operation_receipts
 WHERE idempotency_key = $1;
+
+-- name: SumUnexpiredReservationHolds :one
+-- The hold Reserve subtracts when the caller opts into
+-- RequireVerifiedBalance (I-49). Deliberately the crudest possible sum: the
+-- full reserved_amount of every reservation on the dimension whose
+-- expires_at is still in the future, with no credit for anything that claims
+-- the reservation is over.
+--
+-- SumActiveReservations, its ordinary-path twin, reads reservations.status
+-- and reservations.settled_amount, and ledger_reservations_guard permits
+-- exactly the writes that zero a hold through those columns (active ->
+-- settling/settled/released, settled_amount growing) because those are the
+-- legitimate transitions. ledger_app holds UPDATE, so one permitted
+-- statement made a live 1000 hold report as zero and the gate authorized
+-- 2000 against a balance of 1000 (2026-09-02 audit,
+-- w3-review/money-path.md C-1).
+--
+-- Sourcing the discharge from the append-only settlement record instead
+-- (reservation_settlement_legs / reservation_operation_receipts) does not
+-- fix it: ledger_app must keep INSERT on both -- the application writes them
+-- -- so a forged INSERT discharges a hold at the same one-statement cost
+-- (measured 2026-09-03). In this threat model the application's credential
+-- IS the attacker, so every discharge the application can perform the
+-- attacker can perform, and no trigger or ACL can tell them apart.
+--
+-- expires_at is the one exception, and it is why this query has the shape it
+-- does: the guard refuses any UPDATE that changes it (verified: even a
+-- superuser statement is rejected), no INSERT can shorten another row's
+-- lifetime, and time passing is not a privilege. So "not expired yet" is the
+-- only claim about a reservation that a leaked credential cannot manufacture
+-- -- and it is therefore the only discharge signal this query accepts.
+--
+-- Consequence, intended and documented (core.ReserveInput.
+-- RequireVerifiedBalance, docs/INVARIANTS.md I-49): a settled or released
+-- reservation goes on holding its full reserved_amount under the gate until
+-- it expires. The settled portion is double-counted (it already left through
+-- its own journal, so E fell too) and a released one is counted at all. Both
+-- errors are conservative -- they refuse reservations, never allow them --
+-- and both self-heal at expires_at. Callers who need faster recycling set a
+-- shorter ExpiresIn.
+--
+-- now() is the transaction timestamp, i.e. the EARLIEST reading available in
+-- this transaction, so a row on the boundary is treated as still held. The
+-- settle path uses clock_timestamp() for the mirror-image reason (see
+-- ReservationExpiredNow).
+SELECT COALESCE(SUM(r.reserved_amount), 0) as total
+FROM reservations r
+WHERE r.account_holder = $1
+  AND r.currency_id = $2
+  AND r.expires_at > now();
+
+-- name: ReservationExpiredNow :one
+-- Whether this reservation is past its expires_at, evaluated by the database
+-- so an application clock that drifts from the database's cannot decide it.
+--
+-- clock_timestamp(), not now(): now() is fixed at transaction start, and a
+-- long-running settlement transaction that began before the expiry would
+-- read as not-yet-expired. Taking the LATEST reading makes the settle path
+-- refuse as early as possible, which is the opposite corner from
+-- SumUnexpiredReservationHolds' now() -- each picks the reading that errs
+-- toward "the funds are still held" (I-49).
+SELECT (expires_at <= clock_timestamp())::boolean AS expired
+FROM reservations WHERE id = $1;

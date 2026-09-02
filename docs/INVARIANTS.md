@@ -558,6 +558,28 @@ since migration `029`'s companion changes) holds its unsettled remainder
 would let a concurrent Reserve over-commit the moment the first partial
 settlement lands.
 
+**How that sum is computed is not one query.** The figure above is
+`SumActiveReservations`, and it reads `reservations.status` and
+`reservations.settled_amount` — two columns `ledger_reservations_guard`
+lets `ledger_app` write, because moving a reservation to `settling` and
+raising `settled_amount` *are* the legitimate transitions. Under this repo's
+standing threat model (an attacker holding the application's DB credential)
+the hold that query reports is therefore not trustworthy, and a single
+permitted `UPDATE` used to make the verified-balance gate authorize the same
+balance twice (2026-09-02 audit, `w3-review/money-path.md` C-1). Callers who
+opt into `RequireVerifiedBalance` get `SumUnexpiredReservationHolds`
+instead: the full `reserved_amount` of every not-yet-expired reservation,
+with no credit for settlement or release, because `expires_at` is the only
+claim about a reservation that credential cannot manufacture. That figure
+is **deliberately larger** than the one below once a reservation has been
+settled or released — see **I-49** for why, what it costs, and the paired
+rule that an expired reservation can no longer be settled.
+
+The ordinary path, the breakdown below and `HeldAmount` keep
+`SumActiveReservations`: they report what the ledger's own state machine
+says, which is the right answer for a consumer asking "what is held" and the
+wrong basis for deciding how much money to let out.
+
 The availability **base** is the sum of the holder's classifications tagged
 `balance_role = 'available'` (migration `032`) — not the sum of every
 classification. Pending deposits (`role=pending`), journal-locked funds
@@ -5101,9 +5123,11 @@ named `t.Run` subtests.
 
 **Rule**: When `core.ReserveInput.RequireVerifiedBalance` is set, the
 available base `Reserve` sizes the reservation against is `min(V, E)` minus
-that holder's active reservation holds, where both terms sum over every
+that holder's outstanding holds, where both terms sum over every
 `balance_role='available'` classification the holder has entries in and
-**neither reads `balance_checkpoints`**:
+**neither reads `balance_checkpoints`** — and where the hold that is
+subtracted reads neither `reservations.status` nor
+`reservations.settled_amount` (see **The hold term** below):
 
 - **V** = Σ `VerifiedBalance(holder, currency, cls)`, computed by the gate
   *before* the transaction opens (I-32 → an entries-only recompute plus an
@@ -5171,16 +5195,128 @@ the balance. Each figure is blind to exactly what the other sees:
 Taking the minimum is safe in both directions and needs no assumption about
 which kind of journal landed. It can refuse a reservation that a perfectly
 synchronized reader would have allowed; it cannot allow one that reader
-would have refused. Verifying under the lock instead is not an option: it
-would put the verifier call inside the transaction.
+would have refused *on the base* — the hold term needs its own argument,
+below.
 
-**Enforced by**: `postgres.ReserverStore.requireVerifiedAvailableBalance`
-(V, outside the transaction),
-`postgres.ReserverStore.sumAvailableFromEntriesWithQueries` (E, under the
-advisory lock, on the caller's transaction) and
-`postgres.ReserverStore.reserveWithQueries` (takes the minimum as
-`availableBase` whenever the gate ran, in place of
-`sumBalancesByRoleWithQueries`).
+**The hold term** (2026-09-02 audit, `w3-review/money-path.md` C-1). This
+invariant originally added, right here, that "holds are subtracted from
+either base identically: reservations are not part of what a checkpoint or
+an unsigned journal can misstate". That was false. The hold came from
+`SumActiveReservations`, which reads `reservations.status` and
+`reservations.settled_amount`; `ledger_reservations_guard` permits
+`active → settling/settled/released` and permits `settled_amount` to grow,
+because those are the legitimate transitions, and `ledger_app` holds
+`UPDATE` on the table. So `UPDATE reservations SET status='settling',
+settled_amount=reserved_amount` — one statement, of exactly the shape the
+guard exists to allow — reported a live 1000 hold as zero while leaving the
+reservation settleable, and the gate authorized 2000 against a balance of
+1000. `min(V, E)` was correct throughout; what was tampered with was the
+minus sign after it.
+
+Under the gate the hold is therefore `SumUnexpiredReservationHolds`:
+
+    Σ over the holder's reservations in the currency
+      whose expires_at is still in the future
+      of reserved_amount
+
+and nothing else. No credit for `status`, for `settled_amount`, for
+settlement legs, or for operation receipts.
+
+**Why nothing else can be credited.** The obvious repair — keep crediting
+settlement, but read it from the append-only record (`reservation_settlement_legs`
+/ `reservation_operation_receipts`, which migration `006` made refuse
+`UPDATE` and `DELETE`) — does not work, and understanding why bounds every
+future attempt at this. `ledger_app` must keep `INSERT` on both tables,
+because the application is what writes them. Append-only stops the
+credential from *rewriting* a settlement record; it does nothing about
+*appending* one, and `INSERT INTO reservation_operation_receipts
+(reservation_id, operation, idempotency_key, amount) VALUES (…, 'release',
+…, 0)` discharges a hold at exactly the same one-statement cost as the
+`UPDATE` this invariant closes (measured as `ledger_app` over a real socket,
+2026-09-03).
+
+Generalize it: in this threat model the application's credential *is* the
+attacker, so **any discharge the application can perform, the attacker can
+perform**, and no trigger, ACL or `SECURITY DEFINER` function can tell the
+two apart — they are the same role issuing the same statement. Only two
+kinds of signal escape that: a signature (a key the database credential does
+not have — this is how the base term V survives a forged journal), and the
+passage of time. `expires_at` is the second kind: the guard refuses every
+`UPDATE` that would change it (verified — even a superuser statement is
+rejected), no `INSERT` can shorten another row's lifetime, and a credential
+cannot make the clock run slower. That is the whole reason the rule above
+has the shape it has.
+
+**What it costs, deliberately.** A settled or released reservation goes on
+holding its full `reserved_amount` under the gate until it expires. For a
+settlement that double-counts (the money already left through the charge
+journal, so E fell too); for a release it counts funds that are not
+committed to anything. Both errors run in the same direction as `min(V, E)`:
+the gate refuses reservations a perfectly-informed reader would allow, and
+never allows one that reader would refuse. Both self-heal at `expires_at`,
+and the caller controls that through `ReserveInput.ExpiresIn` (default 15
+minutes) — the documented remedy for a consumer who needs faster recycling.
+Gated `Reserve` is opt-in and the ungated path is untouched, so this costs
+nothing to a consumer who has not asked for the gate.
+
+**The other half of the rule: an expired reservation can no longer be
+settled.** Dropping expired rows from the hold is only sound if they can no
+longer take money, and before this change `Settle` did not look at
+`expires_at` at all (measured: settling an expired reservation returned
+`nil`) — the `ExpirationService` sweeper that would have released it is
+opt-in. Without this half, no tampering would be needed: reserve 1000, wait
+out the expiry, reserve 1000 again against the same balance because the hold
+is gone, settle both. `Settle` and `SettlePartial` therefore return
+`core.ErrInvalidTransition` once `expires_at` has passed, checked after the
+idempotent-replay short-circuit so that a retry of a settlement that
+succeeded before the expiry still returns its original success.
+
+`Release` and `FinalizeSettlement` are deliberately **not** refused on an
+expired reservation: neither records a new amount (`FinalizeSettlement`
+moves `settling → settled` without touching `settled_amount`), the gate
+reads neither status nor receipts, and both are precisely what
+`service.ExpirationService` calls to wind an expired reservation down —
+refusing them would strand every expired `settling` reservation in
+`settling` forever, failing on every sweep.
+
+**Clock choice.** The hold query uses `now()` (transaction start, the
+earliest reading available in that transaction) so a row on the boundary is
+still counted as held; the settle path uses `clock_timestamp()` (the latest
+reading) so it refuses as early as possible. Each picks the corner that errs
+toward "the funds are still held". A residual window remains and is stated
+rather than implied away: a settlement transaction that passed its expiry
+check microseconds before `expires_at` can commit after a gated `Reserve`
+has already stopped counting the hold, because `Settle` takes only the
+reservation's row lock, not the `(holder, currency)` advisory lock the gate
+holds. Closing it entirely means putting the settle path under the balance
+lock too, which changes this store's lock ordering and was not done here.
+
+**Not closed: signing the settlement record.** The alternative to the
+conservative rule is to make the discharge unforgeable rather than
+unnecessary — attest each settlement receipt with `core.Attestor` when it is
+written and verify it before the transaction opens (where V is verified,
+since a verifier may be remote), counting anything unverified as still held.
+That would restore immediate recycling after `Settle`/`Release` without
+trusting a writable claim. It is a composition-root change (`ReserverStore`
+has no attestor today) and is recorded as a decision for a later wave, not
+an oversight.
+
+**Enforced by**: `postgres.ReserverStore.Reserve` — through
+`postgres.ReserverStore.requireVerifiedAvailableBalance` (V, outside the
+transaction), `postgres.ReserverStore.sumAvailableFromEntriesWithQueries`
+(E, under the advisory lock, on the caller's transaction) and
+`postgres.ReserverStore.reserveWithQueries`, which takes the minimum as
+`availableBase` whenever the gate ran (in place of
+`sumBalancesByRoleWithQueries`) and, on the same condition, sums the hold
+with the SumUnexpiredReservationHolds query in
+`postgres/sql/queries/reservations.sql` instead of SumActiveReservations.
+The settle-side half is `postgres.ReserverStore.Settle` and
+`postgres.ReserverStore.SettlePartial`, both routed through
+`refuseExpiredSettlement` and the ReservationExpiredNow query;
+`postgres.ReserverStore.Release` and
+`postgres.ReserverStore.FinalizeSettlement` deliberately do not call it.
+Migration `025` adds `idx_reservations_account_currency_expiry`, the only
+index that serves a lookup which must not mention `status`.
 
 **Pinned by**:
 - `postgres.TestReserve_RequireVerifiedBalance_RejectsInflatedCheckpoint` —
@@ -5200,6 +5336,44 @@ advisory lock, on the caller's transaction) and
   (the spend was uncommitted when the gate ran) and E is 50, so a 500
   reservation must be refused. Replacing the minimum with
   `*verifiedAvailableBase` reserves 500 against a balance of 50.
+- `postgres.TestReserve_RequireVerifiedBalance_HoldSurvivesStatusTamper` —
+  the hold term, in three shapes the schema permits: `status='settling'`
+  with `settled_amount` raised to `reserved_amount`, `status='released'`,
+  and an `INSERT` of a forged `'release'` row into
+  `reservation_operation_receipts`. Every tamper is issued over a real
+  socket **as `ledger_app`**, not as the test superuser, because the claim
+  is about what the application's own credential can reach. The first two
+  are red against the code this audit found; the third is red against the
+  append-only-record repair that replaced it, and exists so that repair
+  cannot be reintroduced as an optimization. Controls, same shape as the
+  checkpoint pin: the untampered hold already refuses the second
+  reservation, and (for the two `UPDATE` variants) the tampered hold really
+  is spendable on the ungated path.
+- `postgres.TestReserve_RequireVerifiedBalance_HoldClearsOnlyAtExpiry` — the
+  conservative semantics as behavior rather than as an accident: a
+  legitimate `Release` does **not** return the funds to a gated caller
+  (while the ungated path honors it immediately — the divergence is
+  asserted, not tolerated), a legitimate `Settle` of 400 leaves the whole
+  1000 held even though the balance is now 600, and only the passage of
+  `expires_at` gives the funds back. The last leg polls rather than sleeps,
+  so a slow or clock-skewed container cannot make it flaky.
+- `postgres.TestReserverStore_Settle_RefusesExpiredReservation` — the paired
+  settle-side rule, with a live reservation settling normally as the
+  control, and `Release` still working on the expired one (the sweeper's
+  path). Expiry is observed through the database's own
+  `expires_at <= clock_timestamp()` predicate rather than by probing with a
+  real `Settle`, which would settle the reservation and make every later
+  refusal "already terminal" instead of "expired".
+- `postgres.TestReserverStore_FinalizeSettlement_AllowedAfterExpiry` — the
+  carve-out from the other side: an expired, partially-settled reservation
+  must still be finalizable, because that is how `service.ExpirationService`
+  winds one down.
+- `postgres.TestReserve_RequireVerifiedBalance_HoldRecomputedUnderLock` —
+  the hold counterpart of `RechecksUnderLock`: a reservation committed by a
+  second transaction while it holds the `(holder, currency)` advisory lock
+  must be visible to the gated `Reserve` queued behind it. Moving the hold
+  recompute next to the pre-transaction verification re-opens I-4/I-11's
+  over-sell race.
 
 ---
 ## I-50: "the sign convention has one implementation" is checked by machine, not by a list somebody maintains
