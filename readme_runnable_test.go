@@ -678,15 +678,17 @@ func braceDepth(line string) int {
 		c := line[i]
 		switch {
 		case inString:
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == '"' {
+			case '"':
 				inString = false
 			}
 		case inRune:
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == '\'' {
+			case '\'':
 				inRune = false
 			}
 		case c == '"':
