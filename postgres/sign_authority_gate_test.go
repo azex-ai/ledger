@@ -1,6 +1,6 @@
 package postgres_test
 
-// I-49: the sign convention has exactly one implementation per runtime, and
+// I-50: the sign convention has exactly one implementation per runtime, and
 // THAT FACT IS CHECKED BY MACHINE.
 //
 // I-43 already said the convention is collapsed into core.Sign (Go) and

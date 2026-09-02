@@ -51,7 +51,7 @@ daily_flows AS (
     -- It was the eighteenth independent copy of the sign convention in the
     -- repository and the only one whose answer was wrong; two rounds of
     -- manual enumeration had missed the file. It is now enumerated by
-    -- machine instead -- see postgres/sign_authority_gate_test.go (I-49).
+    -- machine instead -- see postgres/sign_authority_gate_test.go (I-50).
     SELECT
         (je.effective_at AT TIME ZONE 'UTC')::date AS flow_date,
         COALESCE(SUM(GREATEST(ledger_signed_amount(c.normal_side, je.entry_type, je.amount), 0::numeric)), 0) AS inflow,

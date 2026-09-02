@@ -12,7 +12,7 @@ import (
 // A = L + E would suggest, and the reason is this ledger's own polarity rule
 // rather than a preference: a journal must satisfy sum(DR) == sum(CR), and a
 // leg increases its account when entry_type == normal_side (core.Sign,
-// docs/INVARIANTS.md I-43 / I-49). Two accounts that both INCREASE in the
+// docs/INVARIANTS.md I-43 / I-50). Two accounts that both INCREASE in the
 // same journal must therefore carry OPPOSITE normal_sides. A capital
 // injection increases custodial and equity together, and custodial is
 // credit-normal (presets/templates.go), so equity has to be debit-normal for

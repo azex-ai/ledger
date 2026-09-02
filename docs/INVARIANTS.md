@@ -3711,7 +3711,7 @@ reimplementing the comparison. `ledger_signed_amount` /
 `postgres/sql/queries/*.sql` calls one of these instead of reimplementing
 the `CASE`. **That list is no longer maintained by hand here.** It was, and
 the hand-maintained version silently omitted `balance_trends.sql` through two
-separate enumerations — see I-49, which makes the enumeration mechanical and
+separate enumerations — see I-50, which makes the enumeration mechanical and
 is what this claim now rests on. `ledger_signed_amount` is deliberately not
 `STRICT` (an explicit `WHEN p_entry_type IS NULL THEN NULL` branch handles
 the LEFT JOIN placeholder case instead) because a `STRICT` `LANGUAGE sql`
@@ -4305,7 +4305,7 @@ advisory lock, on the caller's transaction) and
   `*verifiedAvailableBase` reserves 500 against a balance of 50.
 
 ---
-## I-49: "the sign convention has one implementation" is checked by machine, not by a list somebody maintains
+## I-50: "the sign convention has one implementation" is checked by machine, not by a list somebody maintains
 
 (2026-09-02 audit A-M7 / A-M1 / A-N1 / A-M3 / A-N4,
 `docs/audits/2026-09-02-deep-audit/financial-correctness.md`.)
