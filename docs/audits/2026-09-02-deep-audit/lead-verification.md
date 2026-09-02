@@ -113,3 +113,4 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | 任务 | 分支 commit | lead 证伪 | 合入 | 备注 |
 |---|---|---|---|---|
 | W1-gate | `f48ae31` + `c7a8a7d` | 拆回基线两条 pin 红；复核发现闸开启路径把 availableBase 挪到锁外（stale-high 超卖），退回补 `min(V, E)`，mutation 实跑红 | `a9993fe` | 关 C-C1 / B-M2(store) / C-m7 / A-N6；新 I-49 |
+| W1-templates | `a4f1364` + `71d2d55` | 拆回基线：RefusesTheAuditedMintingCodes / UnknownTemplateCode / DepositTolerance 两条 pin 全红；server 包 -race 绿 | 见 merge commit | 关 D-C1 / D-m9 / H-M3(Go 侧) / §7.11 deposit-tolerance；`server_test.go` 既有形状测试显式 opt-in（登记） |
