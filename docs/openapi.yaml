@@ -1041,7 +1041,22 @@ paths:
                             properties:
                               status: { type: string, enum: [ignored] }
         "401": { description: HMAC verification failed. }
-        "403": { description: Channel/classification mismatch (design doc §5-5). }
+        "403":
+          description: >-
+            Two structural refusals on the legacy booking_uid path (design doc
+            §5-5): the booking's channel_name is not {channel}, or its
+            classification is not the deposit classification. The second is
+            what keeps a callback from ever transitioning a sweep booking,
+            which posts no journal and so would leave a forged "confirmed"
+            with no accounting trace.
+        "409":
+          description: >-
+            In-window replay, rejected by the inbound nonce cache. Reachable
+            only when the host installed one via
+            (*server.Server).SetWebhookNonceRecorder -- the library ships the
+            implementation (postgres.WebhookSubscriberStore.TryRecordNonce)
+            but wires nothing by default, so a deployment that skips that call
+            has no in-window replay protection and never answers 409 here.
         "503": { description: Crypto-deposit add-on not enabled on this server (evm sighting path only). }
 
   /classifications:
@@ -2345,13 +2360,17 @@ components:
         require_verified_balance:
           type: boolean
           description: >-
-            When true, Reserve additionally refuses (422) unless every
-            balance_role=available classification this holder has touched in
-            currency_uid passes the tamper-evident attestation check -- on
-            top of, not instead of, the normal balance-covers-amount check.
-            Off by default; mechanism lives in the library, the policy of
-            when to require it is the caller's (core.ReserveInput's doc
-            comment).
+            When true, Reserve refuses (422 / 14010, or 14011 for an
+            unrecognized signing key) unless every balance_role=available
+            classification this holder has touched in currency_uid passes the
+            tamper-evident authorization check. It is ALSO a stricter amount
+            check, not merely an extra one: a gated reservation is sized from
+            an entries-only recompute of the available base rather than from
+            balance_checkpoints, so an inflated checkpoint cannot raise what
+            it will lock. Insufficiency under that recomputed base answers
+            14001, not 14010. Off by default; the mechanism lives in the
+            library and the policy of when to require it is the caller's
+            (core.ReserveInput's doc comment, INVARIANTS I-32 / I-49).
     Reservation:
       type: object
       description: >-

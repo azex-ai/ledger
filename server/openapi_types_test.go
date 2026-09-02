@@ -70,7 +70,7 @@ var sharedOmitemptyFields = map[string]map[string]bool{
 // omitemptyExemptions returns the exemption set for a Go type, keyed the way
 // reflect spells it ("server.journalResponse").
 func omitemptyExemptions(typ reflect.Type) map[string]bool {
-	if typ.Kind() == reflect.Ptr {
+	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 	return sharedOmitemptyFields[typ.String()]
@@ -239,7 +239,7 @@ type compareOpts struct {
 func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string, sn specNode, typ reflect.Type, opts compareOpts) {
 	t.Helper()
 
-	ptr := typ.Kind() == reflect.Ptr
+	ptr := typ.Kind() == reflect.Pointer
 	if ptr {
 		typ = typ.Elem()
 	}
@@ -281,7 +281,7 @@ func assertSchemaMatchesGoType(t *testing.T, schemas map[string]any, path string
 					continue
 				}
 				child := resolveNode(t, schemas, prop)
-				if !opts.requestSide && f.typ.Kind() == reflect.Ptr && !child.nullable && !(f.omitempty && !required[name]) {
+				if !opts.requestSide && f.typ.Kind() == reflect.Pointer && !child.nullable && (!f.omitempty || required[name]) {
 					t.Errorf("%s.%s: Go type is a pointer (%s) but the spec neither allows null nor lets the field be absent (add \"null\" to its type, or drop it from `required` and give the Go field `omitempty`)", path, name, f.typ)
 				}
 				assertSchemaMatchesGoType(t, schemas, path+"."+name, child, f.typ,
@@ -370,7 +370,7 @@ func marshalsToJSONString(typ reflect.Type) bool {
 
 func canBeJSONNull(typ reflect.Type) bool {
 	switch typ.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
 		return true
 	default:
 		return false

@@ -4,7 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -97,10 +97,19 @@ func TestFreeformFieldLimits(t *testing.T) {
 // `source` field AND having a Validate method calls the shared check.
 func TestFreeformFieldLimits_EveryInputWithThoseFieldsChecksThem(t *testing.T) {
 	fset := token.NewFileSet()
-	pkg, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.SkipObjectResolution)
+	names, err := filepath.Glob("*.go")
 	require.NoError(t, err)
+
+	files := make([]*ast.File, 0, len(names))
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		require.NoError(t, parseErr, name)
+		files = append(files, file)
+	}
+	require.NotEmpty(t, files, "no non-test .go files found in package core")
 
 	// Types declaring a metadata or source json field.
 	freeform := map[string]bool{}
@@ -108,8 +117,8 @@ func TestFreeformFieldLimits_EveryInputWithThoseFieldsChecksThem(t *testing.T) {
 	validates := map[string]bool{}
 	checked := map[string]bool{}
 
-	for _, p := range pkg {
-		for _, file := range p.Files {
+	for _, file := range files {
+		{
 			for _, decl := range file.Decls {
 				switch d := decl.(type) {
 				case *ast.GenDecl:

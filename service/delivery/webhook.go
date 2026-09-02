@@ -198,7 +198,13 @@ func (d *WebhookDeliverer) ProcessBatch(ctx context.Context, batchSize int) (int
 func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, subs []WebhookSubscriber) error {
 	matched := d.matchSubscribers(evt, subs)
 	if len(matched) == 0 {
-		err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken)
+		// Detached ctx: "a subscriber existed and its filter chose not to
+		// receive this event" is a completed delivery decision, so the
+		// outcome must be recorded even if the parent was cancelled between
+		// the poll and here. See cleanupContext.
+		markCtx, cancel := cleanupContext(ctx)
+		err := d.poller.MarkDelivered(markCtx, evt.InternalID, evt.ClaimToken)
+		cancel()
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -218,7 +224,14 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, s
 			errMsg = truncateError(err.Error(), maxRecordedDeliveryErrorLen)
 			allOK = false
 		}
-		if recErr := d.subscribers.RecordDeliveryStatus(ctx, sub.ID, statusCode, errMsg); recErr != nil {
+		// Detached ctx: the POST above already left the process, so the
+		// subscriber's health record must survive a shutdown that landed
+		// while it was in flight. Losing it makes a failing endpoint look
+		// healthy. See cleanupContext.
+		recordCtx, cancel := cleanupContext(ctx)
+		recErr := d.subscribers.RecordDeliveryStatus(recordCtx, sub.ID, statusCode, errMsg)
+		cancel()
+		if recErr != nil {
 			d.logger.Error("delivery: webhook: record delivery status",
 				"subscriber", sub.Name,
 				"error", recErr,
@@ -227,7 +240,11 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, s
 	}
 
 	if allOK {
-		err := d.poller.MarkDelivered(ctx, evt.InternalID, evt.ClaimToken)
+		// Detached ctx: every matched subscriber has already been POSTed to.
+		// Dropping this mark redelivers events that all landed.
+		markCtx, cancel := cleanupContext(ctx)
+		err := d.poller.MarkDelivered(markCtx, evt.InternalID, evt.ClaimToken)
+		cancel()
 		if err == nil {
 			d.metrics.EventDelivered()
 		}
@@ -241,7 +258,13 @@ func (d *WebhookDeliverer) deliverEvent(ctx context.Context, evt PendingEvent, s
 	if evt.MaxAttempts > 0 && evt.Attempts+1 >= evt.MaxAttempts {
 		d.metrics.EventDead()
 	}
-	return d.poller.MarkRetry(ctx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts)))
+	// Detached ctx for the same reason: the attempt happened, so the attempt
+	// COUNT must advance. Losing it means the backoff never progresses and a
+	// permanently broken subscriber is retried at the lease interval forever
+	// instead of reaching max_attempts.
+	markCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	return d.poller.MarkRetry(markCtx, evt.InternalID, evt.ClaimToken, time.Now().Add(retryDelay(evt.Attempts)))
 }
 
 func (d *WebhookDeliverer) matchSubscribers(evt PendingEvent, subs []WebhookSubscriber) []WebhookSubscriber {

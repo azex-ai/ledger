@@ -374,7 +374,28 @@ resolved channel adapter implements it (I-20; see
 
 The handler verifies that `booking.channel_name` matches `{channel}` (defence against forged payloads pointing at a different booking) and applies the resulting transition. Responds with the emitted event (same shape as `POST /bookings/{uid}/transition`).
 
-Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (channel mismatch on booking), `404` (unknown channel or booking), `422` (transition rejected), `429`, `503`.
+Two separate `403` refusals, both structural rather than configurable:
+
+- **channel mismatch** — the booking's `channel_name` is not `{channel}`. The
+  channel→booking mapping in the database is trusted, never the `booking_uid`
+  in the payload.
+- **not a deposit booking** — the booking's classification is not the
+  `deposit` classification. A callback may only advance the deposit lifecycle
+  it exists to serve; most importantly it can never transition a `sweep`
+  booking, which posts no journal, so a forged `confirmed` there would leave
+  no accounting trace.
+
+**Replay.** The signature window (±5 min) rejects stale replays, but an
+identical request replayed *inside* the window still verifies. Rejecting that
+requires a nonce cache, which is a host-supplied dependency: call
+`(*server.Server).SetWebhookNonceRecorder(...)` at assembly time — the
+`postgres.WebhookSubscriberStore` implements it (`TryRecordNonce`). Until it
+is installed there is **no** in-window replay protection and the `409` below
+is unreachable; the library does not install one for you and does not fail
+closed on its absence, because an inbound channel that is not exposed does
+not need one.
+
+Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (the two refusals above), `404` (unknown channel or booking), `409` / `10901` (in-window replay — only when a nonce recorder is installed), `422` (transition rejected), `429`, `503`.
 
 Body cap: 1 MB regardless of `MAX_BODY_BYTES`.
 
@@ -663,7 +684,7 @@ Response `200 OK`:
     "list": [
       {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "balance": "404.50"}
     ],
-    "next_cursor": ""
+    "next_cursor": null
   }
 }
 ```
@@ -774,6 +795,31 @@ Response `201 Created`:
 `settled_amount` and `journal_uid` are omitted until the reservation has a settlement leg / a linked journal.
 
 Status codes: `201`, `400`, `401`, `422` (`14001` insufficient balance, `14002` duplicate), `429`, `503`.
+
+**`require_verified_balance` (optional, default `false`).** An opt-in gate,
+decided per call. When `true` the reservation is refused unless *every*
+`balance_role = available` classification this holder has touched in
+`currency_uid` passes the tamper-evident authorization check
+(`422` / `14010`; `14011` when the signing key on a journal is not one this
+deployment recognises).
+
+It is also a **stricter amount check**, which is the part easy to miss: a
+gated reservation is sized from an entries-only recompute of the available
+base, *not* from `balance_checkpoints`. An inflated checkpoint row therefore
+cannot raise what a gated reservation will lock, even when every journal is
+genuinely signed. Insufficiency under that recomputed base answers `14001`
+(insufficient balance), not `14010` — the two are different verdicts and
+should be handled differently: `14001` means "this holder does not have it",
+`14010`/`14011` means "this ledger cannot currently vouch for what it has"
+(see [INVARIANTS I-32](INVARIANTS.md) and I-49).
+
+Off by default and never inferred: the library provides the mechanism and
+takes no view on when the extra check is warranted — a caller that never
+sends the field sees no behaviour change. In library mode the same field on
+`core.ReserveInput` is refused with `400` / `ErrInvalidInput` when the
+`Reserve` is issued from inside a `RunInTx` callback, because the gate may
+call a remote verifier and must run before a transaction is opened; it is
+never silently downgraded to an ungated reservation.
 
 ### POST /reservations/{uid}/settle
 
@@ -1054,7 +1100,7 @@ the refresh time of the `system_rollups` table.
     "list": [
       {"currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "total_balance": "50000.00", "updated_at": "2026-04-17T12:00:00Z"}
     ],
-    "next_cursor": ""
+    "next_cursor": null
   }
 }
 ```
