@@ -2038,6 +2038,12 @@ does not also touch the anchor is caught by comparing the two.
   `Complete`/`FullCoverage`): a missing public key, missing anchor, or
   an anchor that errors on `Head` all produce `NOT_RUN`, never a
   folded-in `VERIFIED`.
+- `service.TestWorker_StartupLogNamesTheAnchorType` -- a dev file anchor and
+  a production-shaped one must not look identical at startup:
+  `StartupReport.AttestationAnchorType` names the type and the dev one
+  additionally warns. The compile-time half of the same guard is
+  `anchordev.NewLocalFileAnchorForDevelopment`'s name, which a composition
+  root cannot write without saying what it is wiring.
 - `anchordev.TestLocalFileAnchor_IdempotentReplay` /
   `TestLocalFileAnchor_RejectsMismatchedReplay` /
   `TestLocalFileAnchor_RejectsNonSequentialSeq` -- `core.Anchor.Publish`'s
