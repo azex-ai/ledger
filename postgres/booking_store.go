@@ -35,22 +35,42 @@ type BookingStore struct {
 	db   DBTX
 	q    *sqlcgen.Queries
 	dims *dimCache
+
+	// metrics is core.NopMetrics() unless WithMetrics is called (I-M1).
+	metrics core.Metrics
 }
 
 // NewBookingStore creates a new BookingStore backed by a connection pool. The
 // internal sqlc Queries instance is built from pool so library consumers don't
 // need to import the generated sqlcgen package.
 func NewBookingStore(pool *pgxpool.Pool) *BookingStore {
-	return &BookingStore{pool: pool, db: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool)}
+	return &BookingStore{pool: pool, db: pool, q: sqlcgen.New(pool), dims: dimCacheFor(pool), metrics: core.NopMetrics()}
+}
+
+// WithMetrics returns a clone of s configured to emit core.Metrics (I-M1).
+// The default (never calling this) is core.NopMetrics().
+func (s *BookingStore) WithMetrics(m core.Metrics) *BookingStore {
+	metrics := s.metrics
+	if m != nil {
+		metrics = m
+	}
+	return &BookingStore{
+		pool:    s.pool,
+		db:      s.db,
+		q:       s.q,
+		dims:    s.dims,
+		metrics: metrics,
+	}
 }
 
 // WithDB returns a clone of the BookingStore bound to an existing transaction.
 func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 	return &BookingStore{
-		pool: nil, // tx mode
-		db:   db,
-		q:    sqlcgen.New(db),
-		dims: dimCacheForTx(s.dims),
+		pool:    nil, // tx mode
+		db:      db,
+		q:       sqlcgen.New(db),
+		dims:    dimCacheForTx(s.dims),
+		metrics: s.metrics,
 	}
 }
 
@@ -203,7 +223,19 @@ func (s *BookingStore) Transition(ctx context.Context, input core.TransitionInpu
 	return evt, nil
 }
 
-func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TransitionInput) (*core.Event, error) {
+func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.TransitionInput) (evt *core.Event, err error) {
+	// I-M1: emitted only on a genuine transition, not either idempotent-replay
+	// short-circuit below (both reuse a PRIOR transition's already-counted
+	// event) -- classCode is filled in once the classification is loaded,
+	// and replay is set true at both short-circuit returns.
+	classCode := ""
+	replay := false
+	defer func() {
+		if err == nil && evt != nil && !replay {
+			s.metrics.BookingTransitioned(classCode, string(input.ToStatus))
+		}
+	}()
+
 	// Lock booking
 	pgUID, err := uidToPG(input.BookingUID)
 	if err != nil {
@@ -223,6 +255,7 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 	// covers a case that path cannot: a retry arriving after a LATER,
 	// legitimate transition has already moved the booking past ToStatus.
 	if receipt, err := qtx.GetBookingTransitionReceiptByIdempotencyKey(ctx, input.IdempotencyKey); err == nil {
+		replay = true
 		return s.ensureBookingTransitionReceiptMatches(ctx, qtx, receipt, op.ID, input)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: transition: check idempotency: %w", err)
@@ -236,6 +269,7 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 		}
 		return nil, fmt.Errorf("postgres: transition: get classification: %w", err)
 	}
+	classCode = class.Code
 
 	var lifecycle core.Lifecycle
 	if err := json.Unmarshal(class.Lifecycle, &lifecycle); err != nil {
@@ -277,6 +311,7 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 				return nil, reuseErr
 			}
 			if reused != nil {
+				replay = true
 				return reused, nil
 			}
 		}

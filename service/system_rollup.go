@@ -30,11 +30,12 @@ type PlatformBalanceQuerier interface {
 
 // SystemRollupService aggregates balance_checkpoints into system_rollups for O(1) queries.
 type SystemRollupService struct {
-	aggregator CheckpointAggregator
-	writer     SystemRollupWriter
-	pbQuerier  PlatformBalanceQuerier
-	logger     core.Logger
-	metrics    core.Metrics
+	aggregator    CheckpointAggregator
+	writer        SystemRollupWriter
+	pbQuerier     PlatformBalanceQuerier
+	healthQuerier core.HealthQuerier
+	logger        core.Logger
+	metrics       core.Metrics
 }
 
 // NewSystemRollupService creates a new SystemRollupService.
@@ -56,6 +57,18 @@ func NewSystemRollupService(
 // GetTotalLiabilityByAsset, or SolvencyCheck.
 func (s *SystemRollupService) WithPlatformBalanceQuerier(q PlatformBalanceQuerier) *SystemRollupService {
 	s.pbQuerier = q
+	return s
+}
+
+// WithHealthQuerier attaches an optional fleet-health reader (I-M1). When
+// set, each RefreshSystemRollups tick additionally emits
+// core.Metrics.ActiveReservations from GetHealthMetrics -- this gauge has no
+// natural per-request emission point (unlike ReserveCreated/ReserveSettled/
+// ReserveReleased, which fire on individual writes), so it is sampled once
+// per rollup cycle instead. Never calling this (the default) leaves
+// ActiveReservations unemitted, exactly as before this option existed.
+func (s *SystemRollupService) WithHealthQuerier(q core.HealthQuerier) *SystemRollupService {
+	s.healthQuerier = q
 	return s
 }
 
@@ -81,6 +94,18 @@ func (s *SystemRollupService) RefreshSystemRollups(ctx context.Context) error {
 		"count", len(rollups),
 		"duration", time.Since(start).String(),
 	)
+
+	if s.healthQuerier != nil {
+		if hm, err := s.healthQuerier.GetHealthMetrics(ctx); err != nil {
+			// Non-fatal: the rollup itself already succeeded above (its own
+			// writes are what every other job/reader depends on). Losing one
+			// tick's ActiveReservations sample is not worth failing the
+			// whole refresh over.
+			s.logger.Warn("service: system rollup: health metrics sample failed", "error", err.Error())
+		} else {
+			s.metrics.ActiveReservations(hm.ActiveReservations)
+		}
+	}
 
 	return nil
 }

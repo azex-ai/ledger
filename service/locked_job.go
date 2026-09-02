@@ -75,16 +75,26 @@ type LockedJob struct {
 	fn      func(ctx context.Context) error
 	locker  lockAcquirer // nil → skip locking (no pool configured)
 	logger  core.Logger
+	// metrics is core.NopMetrics() unless NewLockedJob is given a non-nil
+	// one (I-M10). Exactly one of JobTickCompleted/JobTickFailed/
+	// JobTickSkippedLocked is emitted per Run call.
+	metrics core.Metrics
 }
 
 // NewLockedJob creates a LockedJob. When pool is nil, locking is skipped and fn
 // runs unconditionally — suitable for single-instance deployments or tests.
-func NewLockedJob(name string, fn func(ctx context.Context) error, pool *pgxpool.Pool, logger core.Logger) *LockedJob {
+// metrics may be nil, in which case Run's per-tick outcome is not reported
+// (core.NopMetrics()).
+func NewLockedJob(name string, fn func(ctx context.Context) error, pool *pgxpool.Pool, logger core.Logger, metrics core.Metrics) *LockedJob {
+	if metrics == nil {
+		metrics = core.NopMetrics()
+	}
 	lj := &LockedJob{
 		name:    name,
 		lockKey: advisoryLockKey("job:" + name),
 		fn:      fn,
 		logger:  logger,
+		metrics: metrics,
 	}
 	if pool != nil {
 		lj.locker = &pgPoolLockAcquirer{pool: pool}
@@ -95,6 +105,13 @@ func NewLockedJob(name string, fn func(ctx context.Context) error, pool *pgxpool
 // Run acquires the advisory lock, executes fn, then releases the lock. Lock
 // acquisition errors fail closed: globally single-flight work must never run
 // without the coordination primitive that makes it safe.
+//
+// Exactly one of JobTickCompleted / JobTickFailed / JobTickSkippedLocked is
+// emitted per call (I-M10) -- a caller wrapping Run in its own scheduler must
+// not ALSO account for completed/failed from Run's return value, or the same
+// tick would be double-counted (see service/worker.go's runLoop, which
+// leaves accounting to Run for every locked job and only adds its own
+// panic-recovery layer around the call).
 func (lj *LockedJob) Run(ctx context.Context) error {
 	if lj.locker != nil {
 		release, acquired, err := lj.locker.tryAdvisoryLock(ctx, lj.lockKey)
@@ -103,11 +120,13 @@ func (lj *LockedJob) Run(ctx context.Context) error {
 				"job", lj.name,
 				"error", err,
 			)
+			lj.metrics.JobTickFailed(lj.name)
 			return fmt.Errorf("service: locked_job %s: acquire advisory lock: %w", lj.name, err)
 		} else if !acquired {
 			lj.logger.Info("service: locked_job: advisory lock held by another replica, skipping",
 				"job", lj.name,
 			)
+			lj.metrics.JobTickSkippedLocked(lj.name)
 			return nil
 		} else {
 			defer func() {
@@ -128,7 +147,9 @@ func (lj *LockedJob) Run(ctx context.Context) error {
 
 	if err := lj.fn(ctx); err != nil {
 		lj.logger.Error("service: locked_job: fn failed", "job", lj.name, "error", err)
+		lj.metrics.JobTickFailed(lj.name)
 		return fmt.Errorf("service: locked_job %s: run: %w", lj.name, err)
 	}
+	lj.metrics.JobTickCompleted(lj.name)
 	return nil
 }

@@ -49,11 +49,32 @@ func (q *Queries) AggregateCheckpointsByClassification(ctx context.Context) ([]A
 }
 
 const countPendingRollups = `-- name: CountPendingRollups :one
-SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL
+SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts < 10
 `
 
+// Excludes items that have exhausted their retry budget (failed_attempts >=
+// 10, the same threshold DequeueRollupBatch stops dequeuing at) -- see
+// CountStuckRollups for those. Before this exclusion, a single stuck item
+// kept this gauge (and the alert built on it) pinned above zero forever,
+// indistinguishable from ordinary queue depth that is still being drained
+// (B-m10, working-agreements §3: a permanently-stuck item and a healthy
+// backlog must not look the same).
 func (q *Queries) CountPendingRollups(ctx context.Context) (int64, error) {
 	row := q.db.QueryRow(ctx, countPendingRollups)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countStuckRollups = `-- name: CountStuckRollups :one
+SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts >= 10
+`
+
+// Items that exhausted their retry budget (failed_attempts >= 10) and will
+// never be dequeued again without manual intervention (see
+// ResetRollupClaim / docs/RUNBOOK.md "stuck rollup items", B-m10).
+func (q *Queries) CountStuckRollups(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countStuckRollups)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -626,6 +647,28 @@ type ReleaseRollupClaimParams struct {
 func (q *Queries) ReleaseRollupClaim(ctx context.Context, arg ReleaseRollupClaimParams) error {
 	_, err := q.db.Exec(ctx, releaseRollupClaim, arg.ID, arg.ClaimedUntil)
 	return err
+}
+
+const resetRollupClaim = `-- name: ResetRollupClaim :execrows
+UPDATE rollup_queue
+SET claimed_until = NULL,
+    failed_attempts = 0
+WHERE id = $1
+  AND processed_at IS NULL
+`
+
+// Operator escape hatch for a stuck rollup_queue item (B-m10): clears the
+// claim and resets failed_attempts so DequeueRollupBatch's `failed_attempts
+// < 10` filter picks it up again on the next tick. No claim-token check --
+// unlike ReleaseRollupClaim/MarkRollupProcessed, this is an explicit,
+// out-of-band operator action (via cmd/ledger-cli), not something a worker
+// calls as part of its own processing loop.
+func (q *Queries) ResetRollupClaim(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.Exec(ctx, resetRollupClaim, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const sumGlobalDebitCreditByCurrency = `-- name: SumGlobalDebitCreditByCurrency :many

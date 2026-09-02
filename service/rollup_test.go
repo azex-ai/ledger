@@ -22,7 +22,9 @@ type mockRollupQueuer struct {
 	released          []int64
 	enqueued          []RollupQueueItem
 	pending           int64
+	stuck             int64
 	enqueueErr        error // when set, EnqueueRollup returns it (after recording the call)
+	releaseErr        error // when set, ReleaseRollupClaim returns it (after recording the call)
 	lastReleaseCtxErr error // ctx.Err() observed by the most recent ReleaseRollupClaim call
 }
 
@@ -43,11 +45,18 @@ func (m *mockRollupQueuer) MarkRollupProcessed(_ context.Context, id int64, _ ti
 func (m *mockRollupQueuer) ReleaseRollupClaim(ctx context.Context, id int64, _ time.Time) error {
 	m.released = append(m.released, id)
 	m.lastReleaseCtxErr = ctx.Err()
+	if m.releaseErr != nil {
+		return m.releaseErr
+	}
 	return nil
 }
 
 func (m *mockRollupQueuer) CountPendingRollups(_ context.Context) (int64, error) {
 	return m.pending, nil
+}
+
+func (m *mockRollupQueuer) CountStuckRollups(_ context.Context) (int64, error) {
+	return m.stuck, nil
 }
 
 func (m *mockRollupQueuer) EnqueueRollup(_ context.Context, holder, currencyID, classificationID int64) error {
@@ -579,6 +588,36 @@ func TestRollupService_ReleasesClaimOnProcessError(t *testing.T) {
 	assert.Equal(t, 1, metrics.rollupItemFailed, "RollupItemFailed must be emitted when a claim is released after a failed processing attempt")
 }
 
+// TestRollupService_CountsFailureEvenWhenReleaseItselfFails pins I-M10's
+// third bullet: RollupItemFailed used to live in ReleaseRollupClaim's
+// success branch only, so the moment this signal matters most -- the
+// release call ITSELF failing (DB contention) -- produced no metric at
+// all. It must now fire regardless of whether the release succeeds.
+func TestRollupService_CountsFailureEvenWhenReleaseItselfFails(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items: []RollupQueueItem{
+			{ID: 4, AccountHolder: 400, CurrencyID: 1, ClassificationID: 40},
+		},
+		releaseErr: assert.AnError,
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &mockEntrySummer{err: assert.AnError}
+	cls := &mockClassificationLister{
+		classifications: []ClassificationDim{
+			{ID: 40, UID: "cls-40", Code: "asset", NormalSide: core.NormalSideDebit},
+		},
+	}
+
+	metrics := &recordingMetrics{}
+	engine := core.NewEngine(core.WithMetrics(metrics))
+	svc := NewRollupService(queue, cpRW, entries, cls, engine)
+
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Zero(t, processed)
+	assert.Equal(t, 1, metrics.rollupItemFailed, "RollupItemFailed must still be emitted when ReleaseRollupClaim itself errors")
+}
+
 // TestRollupService_ReleasesClaimAfterParentCtxCancelled verifies that the
 // claim-release cleanup path still runs (and succeeds) even when the parent
 // ctx passed to ProcessBatch was already cancelled — e.g. worker shutdown
@@ -624,30 +663,31 @@ type recordingMetrics struct {
 	negativeBalanceDetectedCalls int // count of NegativeBalanceDetected calls
 }
 
-func (m *recordingMetrics) JournalPosted(string)                  {}
-func (m *recordingMetrics) JournalFailed(string, string)          {}
-func (m *recordingMetrics) ReserveCreated()                       {}
-func (m *recordingMetrics) ReserveSettled()                       {}
-func (m *recordingMetrics) ReserveReleased()                      {}
-func (m *recordingMetrics) ReconcileCompleted(bool)               {}
-func (m *recordingMetrics) IdempotencyCollision(string)           {}
-func (m *recordingMetrics) TemplateFailed(string, string)         {}
-func (m *recordingMetrics) BookingTransitioned(string, string)    {}
-func (m *recordingMetrics) JournalLatency(time.Duration)          {}
-func (m *recordingMetrics) SnapshotLatency(time.Duration)         {}
-func (m *recordingMetrics) JournalEntryCount(string, int)         {}
-func (m *recordingMetrics) PendingRollups(int64)                  {}
-func (m *recordingMetrics) ActiveReservations(int64)              {}
-func (m *recordingMetrics) CheckpointAge(string, time.Duration)   {}
-func (m *recordingMetrics) ReconcileGap(int64, decimal.Decimal)   {}
-func (m *recordingMetrics) ReservedAmount(int64, decimal.Decimal) {}
-func (m *recordingMetrics) RollupProcessed(count int)             { m.rollupProcessed += count }
-func (m *recordingMetrics) RollupItemFailed()                     { m.rollupItemFailed++ }
-func (m *recordingMetrics) RollupLatency(time.Duration)           {}
-func (m *recordingMetrics) BalanceDrift(_ string, _ int64, delta decimal.Decimal) {
+func (m *recordingMetrics) JournalPosted(string)                   {}
+func (m *recordingMetrics) JournalFailed(string, string)           {}
+func (m *recordingMetrics) ReserveCreated()                        {}
+func (m *recordingMetrics) ReserveSettled()                        {}
+func (m *recordingMetrics) ReserveReleased()                       {}
+func (m *recordingMetrics) ReconcileCompleted(bool)                {}
+func (m *recordingMetrics) IdempotencyCollision(string)            {}
+func (m *recordingMetrics) TemplateFailed(string, string)          {}
+func (m *recordingMetrics) BookingTransitioned(string, string)     {}
+func (m *recordingMetrics) JournalLatency(time.Duration)           {}
+func (m *recordingMetrics) SnapshotLatency(time.Duration)          {}
+func (m *recordingMetrics) JournalEntryCount(string, int)          {}
+func (m *recordingMetrics) PendingRollups(int64)                   {}
+func (m *recordingMetrics) StuckRollups(int64)                     {}
+func (m *recordingMetrics) ActiveReservations(int64)               {}
+func (m *recordingMetrics) CheckpointAge(string, time.Duration)    {}
+func (m *recordingMetrics) ReconcileGap(string, decimal.Decimal)   {}
+func (m *recordingMetrics) ReservedAmount(string, decimal.Decimal) {}
+func (m *recordingMetrics) RollupProcessed(count int)              { m.rollupProcessed += count }
+func (m *recordingMetrics) RollupItemFailed()                      { m.rollupItemFailed++ }
+func (m *recordingMetrics) RollupLatency(time.Duration)            {}
+func (m *recordingMetrics) BalanceDrift(_ string, _ string, delta decimal.Decimal) {
 	m.balanceDriftCalled = true
 	m.balanceDriftCalls = append(m.balanceDriftCalls, delta)
 }
-func (m *recordingMetrics) NegativeBalanceDetected(string, int64) {
+func (m *recordingMetrics) NegativeBalanceDetected(string, string) {
 	m.negativeBalanceDetectedCalls++
 }

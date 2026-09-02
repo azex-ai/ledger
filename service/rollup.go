@@ -19,6 +19,10 @@ type RollupQueuer interface {
 	MarkRollupProcessed(ctx context.Context, id int64, claimToken time.Time) (bool, error)
 	ReleaseRollupClaim(ctx context.Context, id int64, claimToken time.Time) error
 	CountPendingRollups(ctx context.Context) (int64, error)
+	// CountStuckRollups reports items that exhausted their retry budget
+	// (failed_attempts >= 10) and are excluded from CountPendingRollups /
+	// DequeueRollupBatch until an operator resets them (B-m10).
+	CountStuckRollups(ctx context.Context) (int64, error)
 	EnqueueRollup(ctx context.Context, holder, currencyID, classificationID int64) error
 }
 
@@ -101,13 +105,17 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 			// detached, short-lived context so the claim doesn't leak until
 			// its lease expires. See cleanupContext.
 			cleanupCtx, cancel := cleanupContext(ctx)
+			// I-M10: counted regardless of whether the release itself
+			// succeeded -- a release failing (DB contention) is exactly the
+			// moment this signal matters most, and the previous code left
+			// the counter flat through it (the one branch most worth an
+			// alert was the one branch that produced no metric at all).
+			s.metrics.RollupItemFailed()
 			if releaseErr := s.queue.ReleaseRollupClaim(cleanupCtx, item.ID, item.ClaimedUntil); releaseErr != nil {
 				s.logger.Error("service: rollup: release claim failed",
 					"item_id", item.ID,
 					"error", releaseErr,
 				)
-			} else {
-				s.metrics.RollupItemFailed()
 			}
 			cancel()
 		}
@@ -124,13 +132,17 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	for _, item := range items {
 		if err := s.processItem(ctx, item, normalSides, classCodeMap); err != nil {
 			cleanupCtx, cancel := cleanupContext(ctx)
+			// I-M10: counted regardless of whether the release itself
+			// succeeded -- a release failing (DB contention) is exactly the
+			// moment this signal matters most, and the previous code left
+			// the counter flat through it (the one branch most worth an
+			// alert was the one branch that produced no metric at all).
+			s.metrics.RollupItemFailed()
 			if releaseErr := s.queue.ReleaseRollupClaim(cleanupCtx, item.ID, item.ClaimedUntil); releaseErr != nil {
 				s.logger.Error("service: rollup: release claim failed",
 					"item_id", item.ID,
 					"error", releaseErr,
 				)
-			} else {
-				s.metrics.RollupItemFailed()
 			}
 			cancel()
 			s.logger.Error("service: rollup: process item failed",
@@ -152,6 +164,12 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	pending, err := s.queue.CountPendingRollups(ctx)
 	if err == nil {
 		s.metrics.PendingRollups(pending)
+	}
+	// Report stuck count (B-m10) -- distinct gauge from PendingRollups above:
+	// pending clears as the queue drains, stuck never will without an
+	// operator resetting the item (see cmd/ledger-cli's rollup reset-claim).
+	if stuck, err := s.queue.CountStuckRollups(ctx); err == nil {
+		s.metrics.StuckRollups(stuck)
 	}
 
 	return processed, nil
@@ -215,6 +233,17 @@ func (s *RollupService) processItem(
 		classCode := classCodeMap[item.ClassificationID]
 		s.metrics.CheckpointAge(classCode, time.Since(cp.UpdatedAt))
 
+		// H-M9: core.Metrics labels currency by uid, never the internal
+		// currencies.id -- resolved once here, only on this (already rare:
+		// checkpoint exists AND balance moved) path, not on every item.
+		currencyUID, currencyUIDErr := s.classifications.CurrencyUIDByID(ctx, item.CurrencyID)
+		if currencyUIDErr != nil {
+			s.logger.Warn("service: rollup: resolve currency uid for metrics failed",
+				"currency_id", item.CurrencyID,
+				"error", currencyUIDErr,
+			)
+		}
+
 		// BalanceDrift reports the same point-in-time-for-the-item-currently-
 		// being-processed semantics as CheckpointAge just above: a reading for
 		// THIS item, not an aggregate across every holder sharing this (class,
@@ -256,9 +285,9 @@ func (s *RollupService) processItem(
 			// invisible the moment any other holder's item in the same
 			// bucket is processed. NegativeBalanceDetected is monotonic and
 			// cannot be masked that way; it is the signal to alert on.
-			s.metrics.NegativeBalanceDetected(classCode, item.CurrencyID)
+			s.metrics.NegativeBalanceDetected(classCode, currencyUID)
 		}
-		s.metrics.BalanceDrift(classCode, item.CurrencyID, drift)
+		s.metrics.BalanceDrift(classCode, currencyUID, drift)
 	}
 
 	// Upsert checkpoint

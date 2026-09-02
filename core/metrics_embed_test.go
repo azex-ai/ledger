@@ -44,7 +44,7 @@ func TestNoopMetrics_EmbeddableAsPartialImplementation(t *testing.T) {
 	// requiring 30 hand-written stubs for a consumer that only wants one.
 	assert.NotPanics(t, func() {
 		m.ReserveCreated()
-		m.BalanceDrift("deposit", 1, decimal.NewFromInt(-5))
+		m.BalanceDrift("deposit", "cur-1", decimal.NewFromInt(-5))
 		m.DepositReviewRequired(1, "over_ceiling")
 	})
 }

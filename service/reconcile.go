@@ -1689,7 +1689,7 @@ func (s *ReconciliationService) CheckAccountingEquation(ctx context.Context) (*c
 			"credit_total", total.Credit.String(),
 			"gap", gap.String(),
 		)
-		s.metrics.ReconcileGap(total.CurrencyID, gap)
+		s.metrics.ReconcileGap(currencyUID, gap)
 	}
 
 	s.metrics.ReconcileCompleted(result.Balanced)
@@ -1798,7 +1798,7 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 				"actual", actual.String(),
 				"drift", drift.String(),
 			)
-			s.metrics.ReconcileGap(currencyID, drift)
+			s.metrics.ReconcileGap(currencyUID, drift)
 		}
 	}
 

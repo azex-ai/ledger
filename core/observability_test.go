@@ -62,10 +62,10 @@ func TestNopMetrics_NeverPanics(t *testing.T) {
 		m.CheckpointAge("deposit", time.Hour)
 
 		// Financial
-		m.BalanceDrift("deposit", 1, decimal.NewFromInt(0))
-		m.BalanceDrift("deposit", 1, decimal.RequireFromString("-0.000000001"))
-		m.ReconcileGap(1, decimal.NewFromInt(0))
-		m.ReservedAmount(1, decimal.RequireFromString("123.456789"))
+		m.BalanceDrift("deposit", "cur-1", decimal.NewFromInt(0))
+		m.BalanceDrift("deposit", "cur-1", decimal.RequireFromString("-0.000000001"))
+		m.ReconcileGap("cur-1", decimal.NewFromInt(0))
+		m.ReservedAmount("cur-1", decimal.RequireFromString("123.456789"))
 	})
 }
 

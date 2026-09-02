@@ -640,23 +640,24 @@ http.Handle("/metrics", prom.Handler())
 go http.ListenAndServe(":9090", nil)
 ```
 
-Exposed metrics include `ledger_journals_posted_total`,
-`ledger_journal_latency_seconds`, `ledger_reservations_active`,
-`ledger_pending_rollups`, `ledger_balance_drift`, `ledger_reconcile_gap`, and
-more. Cardinality is bounded by design: `journalTypeCode` and `classCode` are
-stable enums, currency IDs are small integers.
+The full list of exported metric names is
+[`observability.NewPrometheusMetrics`](observability/prometheus.go) itself —
+that source is the single source of truth (a doc-vs-code drift test,
+`observability/doc_metric_names_test.go`, enforces this doc never lists a
+name that collector doesn't actually register). A few landmarks:
+`ledger_journals_posted_total`, `ledger_journal_post_seconds`,
+`ledger_reservations_active`, `ledger_rollups_pending`,
+`ledger_balance_drift_units`, `ledger_reconcile_gap_units`,
+`ledger_job_tick_completed_total` / `_failed_total` / `_skipped_locked_total`
+(one per background job — see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) for how to
+alert on a stalled job with it). Cardinality is bounded by design:
+`journalTypeCode` and `classCode` are stable enums, currency IDs are small
+integers.
 
 For OpenTelemetry, DataDog, or any other backend, write a thin adapter
-against `core.Metrics`. The interface is intentionally wide (32 methods, one
-per emitted signal, not grouped into a handful of generic Counter/Gauge/
-Histogram calls) so each call site names what it means — embed
-`core.NoopMetrics` and override only the handful of methods you care about
-rather than writing every method body by hand:
-
-```go
-type myMetrics struct{ core.NoopMetrics }
-func (m *myMetrics) JournalPosted(code string) { /* ... */ }
-```
+against `core.Metrics` (see its own doc comment in
+[`core/metrics.go`](core/metrics.go) for the full method count and the
+embed-`core.NoopMetrics`-and-override-a-few pattern).
 
 ### Distributed tracing
 
@@ -675,6 +676,21 @@ tp := trace.NewTracerProvider(/* exporter, sampler, ... */)
 otel.SetTracerProvider(tp)
 
 // All ledger operations now emit spans into your collector.
+```
+
+By default, span attributes are filtered to a minimal, uid/enum-only policy
+(`pkg/otel.PolicyMinimal`) — `amount`, `actual_amount`, `account_holder`,
+`actor_id`, and `idempotency_key` are dropped before a span ever reaches
+your exporter, so configuring a global tracer for any purpose does not, by
+itself, start leaking per-transaction amounts and holder ids to your APM
+vendor:
+
+```go
+import ledgerotel "github.com/azex-ai/ledger/pkg/otel"
+
+// Opt into the unfiltered set once you've confirmed your APM vendor's trust
+// boundary makes per-transaction amounts and account ids acceptable to export.
+ledgerotel.SetAttributePolicy(ledgerotel.PolicyFull)
 ```
 
 ## API Surface

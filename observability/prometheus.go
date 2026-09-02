@@ -98,6 +98,19 @@ type PrometheusMetrics struct {
 	sweepAddressUnreadable   *prometheus.CounterVec
 	registrationRescanFailed *prometheus.CounterVec
 	depositReviewRequired    *prometheus.CounterVec
+
+	// Background jobs (I-M10)
+	jobTickCompleted     *prometheus.CounterVec
+	jobTickFailed        *prometheus.CounterVec
+	jobTickSkippedLocked *prometheus.CounterVec
+	jobPanicked          *prometheus.CounterVec
+	stuckRollups         prometheus.Gauge
+	pendingEvents        prometheus.Gauge
+
+	// Tamper-evidence chain (C-M9 / I-M8)
+	attestationBatchResult *prometheus.CounterVec
+	anchorPublishResult    *prometheus.CounterVec
+	anchorLagSeqs          prometheus.Gauge
 }
 
 // NewPrometheusMetrics returns a Prometheus-backed core.Metrics implementation
@@ -230,22 +243,22 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Namespace: ns,
 			Name:      "balance_drift_units",
 			Help:      "Drift between expected and actual balance, labelled by class and currency.",
-		}, []string{"class", "currency_id"}),
+		}, []string{"class", "currency_uid"}),
 		negativeBalanceDetected: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Name:      "negative_balance_detected_total",
 			Help:      "Total rollup items found with a negative balance on a debit-normal classification, labelled by class and currency. Monotonic -- unlike balance_drift_units, cannot be masked by a different holder's healthy item sharing the same label.",
-		}, []string{"class", "currency_id"}),
+		}, []string{"class", "currency_uid"}),
 		reconcileGap: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "reconcile_gap_units",
 			Help:      "Reconciliation gap, labelled by currency.",
-		}, []string{"currency_id"}),
+		}, []string{"currency_uid"}),
 		reservedAmount: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "reserved_amount_units",
 			Help:      "Total reserved amount per currency.",
-		}, []string{"currency_id"}),
+		}, []string{"currency_uid"}),
 		chainCursorLag: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: ns,
 			Name:      "chain_cursor_lag_blocks",
@@ -276,6 +289,53 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "deposit_review_required_total",
 			Help:      "Total deposits routed to human review instead of auto-crediting, labelled by chain and reason.",
 		}, []string{"chain_id", "reason"}),
+
+		jobTickCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "job_tick_completed_total",
+			Help:      "Total background job ticks that returned without error, labelled by job name. Use increase(...)==0 to alert on a stalled job (see docs/RUNBOOK.md).",
+		}, []string{"job"}),
+		jobTickFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "job_tick_failed_total",
+			Help:      "Total background job ticks that returned an error, labelled by job name.",
+		}, []string{"job"}),
+		jobTickSkippedLocked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "job_tick_skipped_locked_total",
+			Help:      "Total background job ticks skipped because another replica held the advisory lock, labelled by job name.",
+		}, []string{"job"}),
+		jobPanicked: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "job_panicked_total",
+			Help:      "Total background job ticks that panicked (always recovered), labelled by job name.",
+		}, []string{"job"}),
+		stuckRollups: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "rollups_stuck",
+			Help:      "Rollup queue items that exhausted their retry budget and require manual intervention (see docs/RUNBOOK.md).",
+		}),
+		pendingEvents: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "events_pending",
+			Help:      "Current size of the outbound-event delivery queue.",
+		}),
+
+		attestationBatchResult: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "attestation_batch_result_total",
+			Help:      "Total P6 attestation batch attempts, labelled by success.",
+		}, []string{"success"}),
+		anchorPublishResult: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "anchor_publish_result_total",
+			Help:      "Total attempts to publish the attestation batch chain head to an external anchor, labelled by success.",
+		}, []string{"success"}),
+		anchorLagSeqs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "anchor_lag_seqs",
+			Help:      "Sequence numbers the last-published anchor head is behind the latest locally-signed attestation batch.",
+		}),
 	}
 
 	registry.MustRegister(
@@ -291,6 +351,9 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
 		m.sweepAddressUnreadable,
 		m.registrationRescanFailed, m.depositReviewRequired,
+		m.jobTickCompleted, m.jobTickFailed, m.jobTickSkippedLocked, m.jobPanicked,
+		m.stuckRollups, m.pendingEvents,
+		m.attestationBatchResult, m.anchorPublishResult, m.anchorLagSeqs,
 	)
 
 	return m
@@ -400,23 +463,26 @@ func (m *PrometheusMetrics) CheckpointAge(classCode string, age time.Duration) {
 // BalanceDrift records the latest drift for a (class, currency) pair.
 // We deliberately downcast the decimal to a float here — observability values
 // don't need 30 digits of precision; if precision matters, alert on the source.
-func (m *PrometheusMetrics) BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal) {
-	m.balanceDrift.WithLabelValues(safeLabel(classCode), int64Label(currencyID)).Set(decimalToFloat(delta))
+//
+// currencyUID, not the internal currencies.id (H-M9) -- see core.Metrics'
+// doc comment on this method.
+func (m *PrometheusMetrics) BalanceDrift(classCode string, currencyUID string, delta decimal.Decimal) {
+	m.balanceDrift.WithLabelValues(safeLabel(classCode), safeLabel(currencyUID)).Set(decimalToFloat(delta))
 }
 
 // NegativeBalanceDetected increments the monotonic negative-balance counter.
 // See the negativeBalanceDetected field doc for why this exists alongside
 // BalanceDrift instead of replacing it.
-func (m *PrometheusMetrics) NegativeBalanceDetected(classCode string, currencyID int64) {
-	m.negativeBalanceDetected.WithLabelValues(safeLabel(classCode), int64Label(currencyID)).Inc()
+func (m *PrometheusMetrics) NegativeBalanceDetected(classCode string, currencyUID string) {
+	m.negativeBalanceDetected.WithLabelValues(safeLabel(classCode), safeLabel(currencyUID)).Inc()
 }
 
-func (m *PrometheusMetrics) ReconcileGap(currencyID int64, gap decimal.Decimal) {
-	m.reconcileGap.WithLabelValues(int64Label(currencyID)).Set(decimalToFloat(gap))
+func (m *PrometheusMetrics) ReconcileGap(currencyUID string, gap decimal.Decimal) {
+	m.reconcileGap.WithLabelValues(safeLabel(currencyUID)).Set(decimalToFloat(gap))
 }
 
-func (m *PrometheusMetrics) ReservedAmount(currencyID int64, amount decimal.Decimal) {
-	m.reservedAmount.WithLabelValues(int64Label(currencyID)).Set(decimalToFloat(amount))
+func (m *PrometheusMetrics) ReservedAmount(currencyUID string, amount decimal.Decimal) {
+	m.reservedAmount.WithLabelValues(safeLabel(currencyUID)).Set(decimalToFloat(amount))
 }
 
 // --- Onchain (crypto deposit + sweep) ---
@@ -451,3 +517,37 @@ func (m *PrometheusMetrics) RegistrationRescanFailed(chainID int64) {
 func (m *PrometheusMetrics) DepositReviewRequired(chainID int64, reason string) {
 	m.depositReviewRequired.WithLabelValues(int64Label(chainID), safeLabel(reason)).Inc()
 }
+
+// --- Background jobs (I-M10) ---
+
+func (m *PrometheusMetrics) JobTickCompleted(job string) {
+	m.jobTickCompleted.WithLabelValues(safeLabel(job)).Inc()
+}
+
+func (m *PrometheusMetrics) JobTickFailed(job string) {
+	m.jobTickFailed.WithLabelValues(safeLabel(job)).Inc()
+}
+
+func (m *PrometheusMetrics) JobTickSkippedLocked(job string) {
+	m.jobTickSkippedLocked.WithLabelValues(safeLabel(job)).Inc()
+}
+
+func (m *PrometheusMetrics) JobPanicked(job string) {
+	m.jobPanicked.WithLabelValues(safeLabel(job)).Inc()
+}
+
+func (m *PrometheusMetrics) StuckRollups(count int64) { m.stuckRollups.Set(float64(count)) }
+
+func (m *PrometheusMetrics) PendingEvents(count int64) { m.pendingEvents.Set(float64(count)) }
+
+// --- Tamper-evidence chain (C-M9 / I-M8) ---
+
+func (m *PrometheusMetrics) AttestationBatchResult(ok bool) {
+	m.attestationBatchResult.WithLabelValues(strconv.FormatBool(ok)).Inc()
+}
+
+func (m *PrometheusMetrics) AnchorPublishResult(ok bool) {
+	m.anchorPublishResult.WithLabelValues(strconv.FormatBool(ok)).Inc()
+}
+
+func (m *PrometheusMetrics) AnchorLagSeqs(lag int64) { m.anchorLagSeqs.Set(float64(lag)) }

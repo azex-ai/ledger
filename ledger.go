@@ -210,7 +210,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 		opt(s)
 	}
 
-	s.ledgerStore = postgres.NewLedgerStore(pool)
+	s.ledgerStore = postgres.NewLedgerStore(pool).WithMetrics(s.metrics)
 	if s.attestor != nil {
 		s.ledgerStore = s.ledgerStore.WithAuth(s.attestor)
 	}
@@ -221,8 +221,8 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	// reserverStore because Reserve's optional RequireVerifiedBalance gate
 	// (contracts §W2-2) depends on it.
 	s.verifiedBalanceStore = postgres.NewVerifiedBalanceStore(pool, s.authVerifier)
-	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore, s.verifiedBalanceStore)
-	s.bookingStore = postgres.NewBookingStore(pool)
+	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore, s.verifiedBalanceStore).WithMetrics(s.metrics)
+	s.bookingStore = postgres.NewBookingStore(pool).WithMetrics(s.metrics)
 	s.eventStore = postgres.NewEventStore(pool)
 	// The composition root EventStore.SetLogger's own doc comment points at
 	// is this one. Until this line existed the setter had zero production
@@ -1088,7 +1088,7 @@ func (s *Service) Worker(cfg service.WorkerConfig) (*service.Worker, error) {
 	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.reserverStore, s.bookingStore, s.bookingStore, engine)
 	reconcileSvc := service.NewReconciliationService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	snapshotSvc := service.NewSnapshotService(rollupAdapter, rollupAdapter, engine)
-	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine)
+	systemRollupSvc := service.NewSystemRollupService(rollupAdapter, rollupAdapter, engine).WithHealthQuerier(s.queryStore)
 
 	w := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, cfg, engine)
 	// Partition management: keeps the journal_entries monthly-partition

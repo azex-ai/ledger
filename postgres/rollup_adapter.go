@@ -124,6 +124,28 @@ func (a *RollupAdapter) CountPendingRollups(ctx context.Context) (int64, error) 
 	return a.q.CountPendingRollups(ctx)
 }
 
+// CountStuckRollups reports rollup_queue items that exhausted their retry
+// budget (failed_attempts >= 10) and require an operator reset (B-m10; see
+// core.Metrics.StuckRollups and cmd/ledger-cli's rollup reset-claim).
+func (a *RollupAdapter) CountStuckRollups(ctx context.Context) (int64, error) {
+	return a.q.CountStuckRollups(ctx)
+}
+
+// ResetRollupClaim clears a stuck rollup_queue item's claim and
+// failed_attempts counter so it re-enters DequeueRollupBatch's eligible set
+// on the next tick (B-m10). Returns core.ErrNotFound if id does not name a
+// currently-unprocessed row.
+func (a *RollupAdapter) ResetRollupClaim(ctx context.Context, id int64) error {
+	rows, err := a.q.ResetRollupClaim(ctx, id)
+	if err != nil {
+		return wrapStoreError("postgres: reset rollup claim", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("postgres: reset rollup claim: id %d: %w", id, core.ErrNotFound)
+	}
+	return nil
+}
+
 // EnqueueRollup inserts a pending rollup for the dimension. If an unprocessed
 // row already exists it re-dirties it (ON CONFLICT DO UPDATE SET claimed_until =
 // NULL), so an enqueue landing while a worker is mid-processing forces a

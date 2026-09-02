@@ -130,7 +130,33 @@ WHERE id = $1
   AND claimed_until = $2;
 
 -- name: CountPendingRollups :one
-SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL;
+-- Excludes items that have exhausted their retry budget (failed_attempts >=
+-- 10, the same threshold DequeueRollupBatch stops dequeuing at) -- see
+-- CountStuckRollups for those. Before this exclusion, a single stuck item
+-- kept this gauge (and the alert built on it) pinned above zero forever,
+-- indistinguishable from ordinary queue depth that is still being drained
+-- (B-m10, working-agreements §3: a permanently-stuck item and a healthy
+-- backlog must not look the same).
+SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts < 10;
+
+-- name: CountStuckRollups :one
+-- Items that exhausted their retry budget (failed_attempts >= 10) and will
+-- never be dequeued again without manual intervention (see
+-- ResetRollupClaim / docs/RUNBOOK.md "stuck rollup items", B-m10).
+SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts >= 10;
+
+-- name: ResetRollupClaim :execrows
+-- Operator escape hatch for a stuck rollup_queue item (B-m10): clears the
+-- claim and resets failed_attempts so DequeueRollupBatch's `failed_attempts
+-- < 10` filter picks it up again on the next tick. No claim-token check --
+-- unlike ReleaseRollupClaim/MarkRollupProcessed, this is an explicit,
+-- out-of-band operator action (via cmd/ledger-cli), not something a worker
+-- calls as part of its own processing loop.
+UPDATE rollup_queue
+SET claimed_until = NULL,
+    failed_attempts = 0
+WHERE id = $1
+  AND processed_at IS NULL;
 
 -- name: GetCheckpointMaxAgeSeconds :one
 SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MIN(updated_at)))::bigint, 0)::bigint as max_age_seconds

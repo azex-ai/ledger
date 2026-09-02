@@ -1,4 +1,17 @@
-// Command ledger-cli is a read-only investigation tool for ops + auditors.
+// Command ledger-cli is an investigation tool for ops + auditors, read-only
+// with two narrow, explicit exceptions (I-M6):
+//
+//   - `reconcile --full` persists its resume cursor to
+//     reconcile_scan_cursors (service.FullReconciliationService's check #2
+//     lap tracking) -- it is not a pure read, and DR / forensic use against
+//     a suspect or restored database must run it against a CLONE, never the
+//     database being examined, exactly as any other write tool would
+//     (docs/DR.md).
+//   - `rollup reset-claim` is the one operator write action this tool
+//     exposes on purpose (B-m10): there is no other way to un-stick a
+//     rollup_queue item that exhausted its retry budget.
+//
+// Every other command only reads.
 //
 // Connects directly to the ledger Postgres database (DATABASE_URL) and runs
 // the same query interfaces the HTTP server uses. Useful for:
@@ -8,9 +21,7 @@
 //   - Trace a single booking end-to-end (`ledger-cli trace --booking-uid <uid>`).
 //   - List recent journals or events (`ledger-cli journals --limit 20`).
 //   - Pull a balance snapshot for one account (`ledger-cli balance --holder 42 --currency <uid>`).
-//
-// Read-only by design: the CLI never posts journals or mutates state.
-// For one-off corrections, use the HTTP API or write a migration.
+//   - Un-stick a rollup queue item (`ledger-cli rollup reset-claim --id <id>`).
 //
 // Build:
 //
@@ -23,7 +34,11 @@
 //	ledger-cli journals --limit 20
 //	ledger-cli trace --booking-uid <uid>
 //	ledger-cli reconcile --full
+//	ledger-cli reconcile --full --pubkey-hex <hex> --key-id <id>  # cover unauthorized_journals too
 //	ledger-cli solvency --currency <uid>
+//	ledger-cli currencies
+//	ledger-cli classifications
+//	ledger-cli rollup reset-claim --id <id>
 package main
 
 import (
@@ -62,28 +77,75 @@ func main() {
 // path. See TestReconcileFullFlagUsage_DoesNotHardcodeACheckCount.
 const reconcileFullFlagUsage = "run the full reconcile check suite (see the report's checks[] array for exactly which checks ran); default is just the global accounting equation"
 
-const usage = `ledger-cli — read-only ledger investigation tool
+const usage = `ledger-cli — ledger investigation tool (read-only except reconcile --full's resume cursor and rollup reset-claim; see package doc)
 
 usage:
   ledger-cli <command> [flags]
 
 commands:
-  balance     show balance for one account dimension
-  balances    show all balances for a holder
-  journals    list recent journals
-  journal     show one journal with entries
-  trace       trace a booking through events and journals
-  reconcile   run reconciliation checks
-  solvency    show solvency report for a currency
-  trial-balance  show trial balance report for a currency
-  health      show system health metrics
-  verify      verify the P6 batch attestation chain + a P5 journal signature sample
+  balance         show balance for one account dimension
+  balances        show all balances for a holder
+  journals        list recent journals
+  journal         show one journal with entries
+  trace           trace a booking through events and journals
+  reconcile       run reconciliation checks
+  solvency        show solvency report for a currency
+  trial-balance   show trial balance report for a currency
+  health          show system health metrics
+  verify          verify the P6 batch attestation chain + a P5 journal signature sample
+  currencies      list currencies
+  classifications list classifications
+  rollup          rollup queue admin (reset-claim)
 
 env:
   DATABASE_URL   postgres connection string (required)
 
+flags common to every command:
+  --timeout   overrides this command's default context deadline (Go duration, e.g. 90s, 10m)
+
 run "ledger-cli <command> -h" for command flags.
 `
+
+// defaultTimeoutForCmd returns the context deadline a command gets when
+// --timeout is not given (I-M7). The 30s the whole CLI used to share was
+// below service.FullReconciliationConfig's own default Check2Timeout (2m),
+// so a large fleet's `reconcile --full` was cancelled by the CLI's own
+// context before a single check finished, producing a report full of
+// timeout-shaped failures that had nothing to do with the ledger's health.
+// Commands whose underlying check(s) can legitimately run for minutes get a
+// longer default; simple point lookups keep the original budget.
+func defaultTimeoutForCmd(cmd string) time.Duration {
+	switch cmd {
+	case "reconcile", "verify", "solvency", "trial-balance":
+		return 10 * time.Minute
+	default:
+		return 30 * time.Second
+	}
+}
+
+// scanFlagValue looks up --name / --name=value / -name / -name=value
+// anywhere in args, without consuming or validating the rest of args --
+// each subcommand's own flag.FlagSet still parses (and validates) the same
+// flag normally. Used for the handful of values (--timeout, --pubkey-hex,
+// --key-id) needed before a subcommand's FlagSet exists yet: --timeout
+// determines the context passed into every cmdXxx function, and
+// --pubkey-hex/--key-id determine whether ledger.New is given a verifier
+// (reconcile's unauthorized_journals check needs one wired in at
+// construction time -- see I-R2).
+func scanFlagValue(args []string, name string) string {
+	eq1, eq2 := "--"+name+"=", "-"+name+"="
+	for i, a := range args {
+		switch {
+		case strings.HasPrefix(a, eq1):
+			return strings.TrimPrefix(a, eq1)
+		case strings.HasPrefix(a, eq2):
+			return strings.TrimPrefix(a, eq2)
+		case (a == "--"+name || a == "-"+name) && i+1 < len(args):
+			return args[i+1]
+		}
+	}
+	return ""
+}
 
 func run(args []string) error {
 	if len(args) == 0 {
@@ -97,8 +159,38 @@ func run(args []string) error {
 		return fmt.Errorf("DATABASE_URL is required")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	timeout := defaultTimeoutForCmd(cmd)
+	if raw := scanFlagValue(rest, "timeout"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("--timeout: %w", err)
+		}
+		timeout = parsed
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	// reconcile's unauthorized_journals check (contracts §W2-2) only runs
+	// when this Service was built WithAttestor's verifier half -- ledger-cli
+	// otherwise has no way to reach it at all (I-R2), leaving
+	// FullCoverage permanently false for every CLI-driven run regardless of
+	// how the ledger itself is configured.
+	var svcOpts []ledger.Option
+	if cmd == "reconcile" {
+		pubkeyHex := scanFlagValue(rest, "pubkey-hex")
+		keyID := scanFlagValue(rest, "key-id")
+		if pubkeyHex != "" && keyID != "" {
+			pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+			if err != nil {
+				return fmt.Errorf("--pubkey-hex: %w", err)
+			}
+			if len(pubkeyBytes) != ed25519.PublicKeySize {
+				return fmt.Errorf("--pubkey-hex must decode to %d bytes, got %d", ed25519.PublicKeySize, len(pubkeyBytes))
+			}
+			verifier := authdev.NewLocalVerifier(ed25519.PublicKey(pubkeyBytes), keyID)
+			svcOpts = append(svcOpts, ledger.WithAttestor(nil, verifier))
+		}
+	}
 
 	var pool *pgxpool.Pool
 	var svc *ledger.Service
@@ -109,7 +201,7 @@ func run(args []string) error {
 			return fmt.Errorf("pgxpool: %w", err)
 		}
 		defer pool.Close()
-		svc, err = ledger.New(pool)
+		svc, err = ledger.New(pool, svcOpts...)
 		if err != nil {
 			return fmt.Errorf("ledger.New: %w", err)
 		}
@@ -139,6 +231,12 @@ func run(args []string) error {
 		return cmdHealth(ctx, svc)
 	case "verify":
 		return cmdVerify(ctx, pool, svc, rest)
+	case "currencies":
+		return cmdCurrencies(ctx, svc, rest)
+	case "classifications":
+		return cmdClassifications(ctx, svc, rest)
+	case "rollup":
+		return cmdRollup(ctx, pool, rest)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
@@ -238,6 +336,12 @@ func cmdTrace(ctx context.Context, svc *ledger.Service, args []string) error {
 func cmdReconcile(ctx context.Context, svc *ledger.Service, args []string) error {
 	fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
 	full := fs.Bool("full", false, reconcileFullFlagUsage)
+	// pubkey-hex/key-id are read by run() (via scanFlagValue) BEFORE this
+	// FlagSet exists, because they must be known at ledger.New time (I-R2).
+	// Declared here too, unused, purely so `-h` documents them and Parse
+	// does not choke on an unrecognized flag.
+	_ = fs.String("pubkey-hex", "", "hex-encoded ed25519 public key -- when given with --key-id, covers the unauthorized_journals check too")
+	_ = fs.String("key-id", "", "the key id --pubkey-hex corresponds to")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -251,7 +355,19 @@ func cmdReconcile(ctx context.Context, svc *ledger.Service, args []string) error
 	if err != nil {
 		return err
 	}
-	return jsonOut(report)
+	if err := jsonOut(report); err != nil {
+		return err
+	}
+	if !report.FullCoverage {
+		// I-R2: point at the reason instead of leaving the operator to find
+		// it themselves inside checks[].findings -- most commonly this means
+		// --pubkey-hex/--key-id were not given, so unauthorized_journals had
+		// no core.AuthVerifier to run with (see that check's own finding for
+		// the exact reason in THIS report).
+		fmt.Fprintln(os.Stderr, "note: full_coverage=false -- see the checks[] entry whose findings explain why "+
+			"(commonly: pass --pubkey-hex and --key-id to also cover unauthorized_journals)")
+	}
+	return nil
 }
 
 func cmdSolvency(ctx context.Context, svc *ledger.Service, args []string) error {
@@ -303,6 +419,73 @@ func cmdHealth(ctx context.Context, svc *ledger.Service) error {
 		return err
 	}
 	return jsonOut(hm)
+}
+
+// cmdCurrencies lists currencies (I-M4: `solvency --currency` and
+// `balance --currency` both take a currency UID, not a numeric id -- this
+// is where an operator who only has the id finds the uid).
+func cmdCurrencies(ctx context.Context, svc *ledger.Service, args []string) error {
+	fs := flag.NewFlagSet("currencies", flag.ExitOnError)
+	activeOnly := fs.Bool("active-only", false, "only list active currencies")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	list, err := svc.Currencies().ListCurrencies(ctx, *activeOnly)
+	if err != nil {
+		return err
+	}
+	return jsonOut(list)
+}
+
+// cmdClassifications lists classifications (I-M4, same reasoning as
+// cmdCurrencies: `balance --class` takes a code, but the uid this prints
+// alongside it is what other commands and the HTTP API expect elsewhere).
+func cmdClassifications(ctx context.Context, svc *ledger.Service, args []string) error {
+	fs := flag.NewFlagSet("classifications", flag.ExitOnError)
+	activeOnly := fs.Bool("active-only", false, "only list active classifications")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	list, err := svc.Classifications().ListClassifications(ctx, *activeOnly)
+	if err != nil {
+		return err
+	}
+	return jsonOut(list)
+}
+
+// cmdRollup is the rollup_queue admin surface (B-m10). reset-claim is the
+// only write action anywhere in this CLI: a rollup_queue item with
+// failed_attempts >= 10 is excluded from DequeueRollupBatch forever
+// (postgres/sql/queries/checkpoints.sql) and, before this, had no path back
+// in short of hand-written SQL. Takes *pgxpool.Pool directly rather than
+// *ledger.Service because core.Metrics.StuckRollups' write counterpart
+// (ResetRollupClaim) is a postgres.RollupAdapter method, not something the
+// facade exposes -- ledger.Service intentionally has no admin/write
+// surface beyond the ordinary financial operations every consumer already
+// has (see CLAUDE.md's package contract on postgres.* direct use from this
+// binary).
+func cmdRollup(ctx context.Context, pool *pgxpool.Pool, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ledger-cli rollup reset-claim --id <rollup_queue.id>")
+	}
+	switch args[0] {
+	case "reset-claim":
+		fs := flag.NewFlagSet("rollup reset-claim", flag.ExitOnError)
+		id := fs.Int64("id", 0, "rollup_queue row id to reset (see docs/RUNBOOK.md's stuck-rollup-items section)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *id == 0 {
+			return fmt.Errorf("--id is required")
+		}
+		adapter := postgres.NewRollupAdapter(pool)
+		if err := adapter.ResetRollupClaim(ctx, *id); err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"reset": true, "id": *id})
+	default:
+		return fmt.Errorf("unknown rollup subcommand %q (want: reset-claim)", args[0])
+	}
 }
 
 // cmdVerify runs the P6 five-step verification (design doc §8.4):
@@ -421,7 +604,3 @@ func jsonOut(v any) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
-
-// keep imported types referenced so the file fails fast if any drift.
-var _ = strings.TrimSpace
-var _ = core.NormalSideDebit

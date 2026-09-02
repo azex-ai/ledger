@@ -73,8 +73,9 @@ func TestLockedJob_RunsWhenLockAcquired(t *testing.T) {
 			called.Add(1)
 			return nil
 		},
-		locker: locker,
-		logger: engine.Logger(),
+		locker:  locker,
+		logger:  engine.Logger(),
+		metrics: engine.Metrics(),
 	}
 
 	require.NoError(t, lj.Run(context.Background()))
@@ -98,8 +99,9 @@ func TestLockedJob_SkipsWhenLockHeld(t *testing.T) {
 			called.Add(1)
 			return nil
 		},
-		locker: locker,
-		logger: engine.Logger(),
+		locker:  locker,
+		logger:  engine.Logger(),
+		metrics: engine.Metrics(),
 	}
 
 	require.NoError(t, lj.Run(context.Background()))
@@ -121,8 +123,9 @@ func TestLockedJob_NilLocker_RunsUnconditionally(t *testing.T) {
 			called.Add(1)
 			return nil
 		},
-		locker: nil,
-		logger: engine.Logger(),
+		locker:  nil,
+		logger:  engine.Logger(),
+		metrics: engine.Metrics(),
 	}
 
 	require.NoError(t, lj.Run(context.Background()))
@@ -144,8 +147,9 @@ func TestLockedJob_LockErrorFailsClosed(t *testing.T) {
 			called.Add(1)
 			return nil
 		},
-		locker: &errorLock{},
-		logger: engine.Logger(),
+		locker:  &errorLock{},
+		logger:  engine.Logger(),
+		metrics: engine.Metrics(),
 	}
 
 	err := lj.Run(context.Background())
@@ -172,8 +176,9 @@ func TestLockedJob_ReleasesLockAfterCtxCancelledDuringFn(t *testing.T) {
 			cancel() // simulate shutdown firing while the job is running
 			return nil
 		},
-		locker: locker,
-		logger: engine.Logger(),
+		locker:  locker,
+		logger:  engine.Logger(),
+		metrics: engine.Metrics(),
 	}
 
 	require.NoError(t, lj.Run(ctx))
@@ -212,8 +217,9 @@ func TestLockedJob_DoubleConcurrentRun(t *testing.T) {
 				runCount.Add(1)
 				return nil
 			},
-			locker: &mockLockAcquirer{tryFn: tryFn},
-			logger: engine.Logger(),
+			locker:  &mockLockAcquirer{tryFn: tryFn},
+			logger:  engine.Logger(),
+			metrics: engine.Metrics(),
 		}
 	}
 

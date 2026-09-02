@@ -21,6 +21,15 @@ const cleanupCtxTimeout = 5 * time.Second
 // of the ctx that was just cancelled — passing the cancelled ctx directly
 // means the release call fails immediately (ctx.Err() != nil), leaking the
 // claim/lock until its lease expires.
+//
+// service/delivery carries a second copy of this helper
+// (service/delivery/cleanup_context.go) and uses it at LocalDispatcher's
+// MarkRetry / MarkDelivered. The duplication is a package boundary, not
+// drift: delivery is a sub-package and cannot reach this unexported
+// function. Both copies are the same
+// context.WithTimeout(context.WithoutCancel(parent), 5s) with the same
+// rationale. If a third site appears, hoist to an internal package rather
+// than adding a third copy.
 func cleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), cleanupCtxTimeout)
 }

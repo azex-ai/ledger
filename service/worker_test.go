@@ -149,4 +149,5 @@ func (c *countingRollupQueuer) ReleaseRollupClaim(_ context.Context, _ int64, _ 
 	return nil
 }
 func (c *countingRollupQueuer) CountPendingRollups(_ context.Context) (int64, error) { return 0, nil }
+func (c *countingRollupQueuer) CountStuckRollups(_ context.Context) (int64, error)   { return 0, nil }
 func (c *countingRollupQueuer) EnqueueRollup(_ context.Context, _, _, _ int64) error { return nil }

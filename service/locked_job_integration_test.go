@@ -28,7 +28,7 @@ func TestLockedJob_RealPool_LockReleasedAcrossRuns(t *testing.T) {
 	lj := service.NewLockedJob("affinity_regression", func(ctx context.Context) error {
 		ran++
 		return nil
-	}, pool, engine.Logger())
+	}, pool, engine.Logger(), engine.Metrics())
 
 	for i := 0; i < 5; i++ {
 		require.NoError(t, lj.Run(ctx))

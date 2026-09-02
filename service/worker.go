@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -106,6 +107,7 @@ type Worker struct {
 	pool          *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
 	config        WorkerConfig
 	logger        core.Logger
+	metrics       core.Metrics
 	// allowSilent opts out of Run's refusal to start under core.NopLogger --
 	// see AllowSilent.
 	allowSilent bool
@@ -135,6 +137,7 @@ func NewWorker(
 		systemRollup: systemRollup,
 		config:       config,
 		logger:       engine.Logger(),
+		metrics:      engine.Metrics(),
 	}
 }
 
@@ -425,7 +428,10 @@ func (w *Worker) Run(ctx context.Context) error {
 		return w.runLoop(ctx, "rollup", w.config.RollupInterval, func(ctx context.Context) {
 			if _, err := w.rollup.ProcessBatch(ctx, w.config.RollupBatchSize); err != nil {
 				w.logger.Error("worker: rollup batch failed", "error", err)
+				w.metrics.JobTickFailed("rollup")
+				return
 			}
+			w.metrics.JobTickCompleted("rollup")
 		})
 	})
 
@@ -442,6 +448,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	// NewLockedJob, like its five siblings, means only one replica ever
 	// runs the batch per tick).
 	expirationJob := NewLockedJob("expiration", func(ctx context.Context) error {
+		// Errors from either sweep are logged here, individually, rather than
+		// returned: the two operate on independent domains (reservations vs
+		// bookings) and one failing must not skip the other. LockedJob.Run
+		// therefore always sees nil from this closure and always counts the
+		// tick as JobTickCompleted -- each individual Release/FinalizeSettlement
+		// this sweep drives is still separately counted (ReserveReleased /
+		// ReserveSettled), because those are emitted by postgres.ReserverStore
+		// itself (I-M1), not by this closure.
 		if _, err := w.expiration.ExpireStaleReservations(ctx, w.config.ExpirationBatchSize); err != nil {
 			w.logger.Error("worker: expire reservations failed", "error", err)
 		}
@@ -449,7 +463,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			w.logger.Error("worker: expire bookings failed", "error", err)
 		}
 		return nil
-	}, w.pool, w.logger)
+	}, w.pool, w.logger, w.metrics)
 	g.Go(func() error {
 		return w.runLoop(ctx, "expiration", w.config.ExpirationInterval, func(ctx context.Context) {
 			if err := expirationJob.Run(ctx); err != nil {
@@ -462,7 +476,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	reconcileJob := NewLockedJob("reconcile", func(ctx context.Context) error {
 		_, err := w.reconcile.CheckAccountingEquation(ctx)
 		return err
-	}, w.pool, w.logger)
+	}, w.pool, w.logger, w.metrics)
 	g.Go(func() error {
 		return w.runLoop(ctx, "reconcile", w.config.ReconcileInterval, func(ctx context.Context) {
 			if err := reconcileJob.Run(ctx); err != nil {
@@ -477,14 +491,17 @@ func (w *Worker) Run(ctx context.Context) error {
 			yesterday := time.Now().UTC().AddDate(0, 0, -1)
 			if err := w.snapshot.CreateDailySnapshot(ctx, yesterday); err != nil {
 				w.logger.Error("worker: snapshot failed", "error", err)
+				w.metrics.JobTickFailed("snapshot")
+				return
 			}
+			w.metrics.JobTickCompleted("snapshot")
 		})
 	})
 
 	// system_rollup — advisory-locked so only one replica runs per tick.
 	sysRollupJob := NewLockedJob("system_rollup", func(ctx context.Context) error {
 		return w.systemRollup.RefreshSystemRollups(ctx)
-	}, w.pool, w.logger)
+	}, w.pool, w.logger, w.metrics)
 	g.Go(func() error {
 		return w.runLoop(ctx, "system_rollup", w.config.SystemRollupInterval, func(ctx context.Context) {
 			if err := sysRollupJob.Run(ctx); err != nil {
@@ -498,7 +515,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		fullReconcileJob := NewLockedJob("full_reconcile", func(ctx context.Context) error {
 			_, err := w.fullReconcile.RunFullReconciliation(ctx)
 			return err
-		}, w.pool, w.logger)
+		}, w.pool, w.logger, w.metrics)
 		g.Go(func() error {
 			return w.runLoop(ctx, "full_reconcile", w.config.FullReconcileInterval, func(ctx context.Context) {
 				if err := fullReconcileJob.Run(ctx); err != nil {
@@ -512,7 +529,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		// Advisory-locked: partition DDL must run on a single replica.
 		partitionJob := NewLockedJob("partition", func(ctx context.Context) error {
 			return w.partition.EnsureUpcoming(ctx, time.Now(), w.config.PartitionMonthsAhead)
-		}, w.pool, w.logger)
+		}, w.pool, w.logger, w.metrics)
 		g.Go(func() error {
 			return w.runLoop(ctx, "partition", w.config.PartitionInterval, func(ctx context.Context) {
 				if err := partitionJob.Run(ctx); err != nil {
@@ -529,7 +546,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		attestJob := NewLockedJob("attestation", func(ctx context.Context) error {
 			_, _, err := w.attestation.RunAttestBatch(ctx, w.config.AttestBatchSize)
 			return err
-		}, w.pool, w.logger)
+		}, w.pool, w.logger, w.metrics)
 		g.Go(func() error {
 			return w.runLoop(ctx, "attestation", w.config.AttestInterval, func(ctx context.Context) {
 				if err := attestJob.Run(ctx); err != nil {
@@ -544,7 +561,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.runLoop(ctx, "event_delivery", w.config.EventDeliveryInterval, func(ctx context.Context) {
 				if _, err := w.eventDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
 					w.logger.Error("worker: event delivery failed", "error", err)
+					w.metrics.JobTickFailed("event_delivery")
+					return
 				}
+				w.metrics.JobTickCompleted("event_delivery")
 			})
 		})
 	}
@@ -560,7 +580,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.runLoop(ctx, "event_callback", w.config.EventDeliveryInterval, func(ctx context.Context) {
 				if _, err := localDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
 					w.logger.Error("worker: event callback delivery failed", "error", err)
+					w.metrics.JobTickFailed("event_callback")
+					return
 				}
+				w.metrics.JobTickCompleted("event_callback")
 			})
 		})
 	}
@@ -591,7 +614,31 @@ func (w *Worker) runLoop(ctx context.Context, name string, interval time.Duratio
 			w.logger.Info("worker: stopped", "job", name)
 			return nil
 		case <-ticker.C:
-			fn(ctx)
+			w.safeRun(ctx, name, fn)
 		}
 	}
+}
+
+// safeRun executes fn, recovering any panic so a single job's bug cannot take
+// down the whole Worker -- or, since Run is typically launched with `go
+// worker.Run(ctx)`, the whole process (I-M9). Before this, a panicking
+// Subscribe handler or job function propagated straight through errgroup.Wait
+// and out of Run.
+//
+// Completed/failed accounting for the tick itself is each job closure's own
+// responsibility (see the Run's doc comment on LockedJob for why this cannot
+// be centralized here without double-counting); safeRun only ever adds the
+// JobPanicked signal, which nothing else emits.
+func (w *Worker) safeRun(ctx context.Context, name string, fn func(context.Context)) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("worker: job panicked",
+				"job", name,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+			w.metrics.JobPanicked(name)
+		}
+	}()
+	fn(ctx)
 }

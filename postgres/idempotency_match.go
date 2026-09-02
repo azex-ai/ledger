@@ -43,6 +43,7 @@ func (s *LedgerStore) ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.
 		!mustNumericToDecimal(existing.TotalDebit).Equal(totalDebit(input.Entries)) ||
 		!mustNumericToDecimal(existing.TotalCredit).Equal(totalCredit(input.Entries)) ||
 		string(metadataToJSON(existingCore.Metadata)) != string(metadataToJSON(input.Metadata)) {
+		s.metrics.IdempotencyCollision(idempotencyCollisionJournalTypeCode(ctx, s.dims, q, input.JournalTypeUID))
 		return nil, fmt.Errorf("postgres: post journal: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
@@ -55,10 +56,24 @@ func (s *LedgerStore) ensureJournalMatchesInput(ctx context.Context, q *sqlcgen.
 		return nil, err
 	}
 	if !same {
+		s.metrics.IdempotencyCollision(idempotencyCollisionJournalTypeCode(ctx, s.dims, q, input.JournalTypeUID))
 		return nil, fmt.Errorf("postgres: post journal: idempotency key %q entries mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 
 	return existingCore, nil
+}
+
+// idempotencyCollisionJournalTypeCode resolves journalTypeUID to its code for
+// IdempotencyCollision's label, falling back to "" (a bounded, deliberate
+// label -- never the free-form uid) if the lookup itself fails: a collision
+// on an already-persisted journal referencing an unresolvable journal type
+// would be a second, stranger bug, and must not crash this metric emission.
+func idempotencyCollisionJournalTypeCode(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, journalTypeUID string) string {
+	jt, err := dims.jtByUIDOrErr(ctx, q, journalTypeUID)
+	if err != nil {
+		return ""
+	}
+	return jt.Code
 }
 
 func (s *ReserverStore) ensureReservationMatchesInput(ctx context.Context, q *sqlcgen.Queries, existing sqlcgen.Reservation, input core.ReserveInput, currencyID int64) (*core.Reservation, error) {

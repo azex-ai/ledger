@@ -72,7 +72,14 @@ type Metrics interface {
 	// (class, currency) label. Do not alert on this alone -- see
 	// NegativeBalanceDetected's doc for why a healthy item can mask a real,
 	// still-open violation under the same label. Fine for dashboards.
-	BalanceDrift(classCode string, currencyID int64, delta decimal.Decimal)
+	//
+	// currencyUID (not the internal currencies.id) -- H-M9: core.Metrics is a
+	// port every consumer's exporter/dashboard config keys off of, and an
+	// internal BIGSERIAL id has no meaning outside this database and is not
+	// stable across a restore-from-backup (api-contract.md: uid is the only
+	// identifier that crosses a boundary). Every other currency-labelled
+	// metric on this interface follows the same rule.
+	BalanceDrift(classCode string, currencyUID string, delta decimal.Decimal)
 	// NegativeBalanceDetected is a monotonic counter incremented every time a
 	// rollup item's recomputed balance is found negative on a debit-normal
 	// classification -- the same trigger condition BalanceDrift's non-zero
@@ -86,9 +93,9 @@ type Metrics interface {
 	// anything, so `increase(negative_balance_detected_total[window]) > 0`
 	// stays a reliable alert even while BalanceDrift's own reading bounces
 	// back to zero in between (working-agreements §3; I-41 point 3).
-	NegativeBalanceDetected(classCode string, currencyID int64)
-	ReconcileGap(currencyID int64, gap decimal.Decimal)
-	ReservedAmount(currencyID int64, amount decimal.Decimal)
+	NegativeBalanceDetected(classCode string, currencyUID string)
+	ReconcileGap(currencyUID string, gap decimal.Decimal)
+	ReservedAmount(currencyUID string, amount decimal.Decimal)
 
 	// Onchain (crypto deposit + sweep, design doc §6)
 
@@ -125,6 +132,66 @@ type Metrics interface {
 	// chain and reason ("over_ceiling" | "reconcile_mismatch" -- a bounded
 	// set, safe for Prometheus cardinality).
 	DepositReviewRequired(chainID int64, reason string)
+
+	// Background jobs (Worker.runLoop / LockedJob, I-M10)
+	//
+	// job is the fixed, bounded job name already used for logging (e.g.
+	// "rollup", "expiration", "reconcile", "snapshot", "system_rollup",
+	// "partition", "attest", or an onchain job's name) -- never a free-form
+	// string.
+
+	// JobTickCompleted is emitted after a scheduled job's tick function
+	// returns without error, regardless of whether it did any work.
+	JobTickCompleted(job string)
+	// JobTickFailed is emitted whenever a scheduled job's tick function
+	// returns an error. Use increase(ledger_job_tick_completed_total{job=...})
+	// == 0 to alert on a stalled job -- see docs/RUNBOOK.md.
+	JobTickFailed(job string)
+	// JobTickSkippedLocked is emitted whenever a LockedJob's tick is skipped
+	// because another replica currently holds the advisory lock. A healthy
+	// fleet emits this frequently; use it to distinguish "another replica is
+	// doing the work" from "nobody is" -- JobTickCompleted staying flat to
+	// zero across every replica, with JobTickSkippedLocked also flat, is the
+	// single-replica-stuck signal, not either counter alone.
+	JobTickSkippedLocked(job string)
+	// JobPanicked is emitted whenever a job's tick function panics. The
+	// panic is always recovered (a job bug must not take down the process),
+	// but a panic is a stronger signal than an ordinary JobTickFailed and is
+	// worth alerting on separately.
+	JobPanicked(job string)
+
+	// StuckRollups reports rollup_queue items that have exhausted their
+	// retry budget (failed_attempts >= the worker's max) and will never be
+	// dequeued again without manual intervention (see
+	// docs/RUNBOOK.md "stuck rollup items"). Distinct from PendingRollups,
+	// which reports items still being retried -- conflating the two turns a
+	// permanently-stuck item into a gauge that never clears, i.e. an alarm
+	// nailed to ON that looks identical to ordinary backlog (B-m10).
+	StuckRollups(count int64)
+
+	// PendingEvents reports the current size of the outbound-event delivery
+	// queue (events with delivery_status = 'pending' or 'retry'), sampled
+	// once per delivery job tick. Complements EventDelivered/
+	// EventDeliveryFailed/EventDead, which are edge-triggered counters that
+	// cannot by themselves show a growing backlog.
+	PendingEvents(count int64)
+
+	// Tamper-evidence chain (design doc 2026-08-21 §7/§8, P5/P6)
+
+	// AttestationBatchResult is emitted after every RunAttestBatch attempt,
+	// success or failure -- the P6 batch-signing job has otherwise had zero
+	// metrics coverage since it was introduced.
+	AttestationBatchResult(ok bool)
+	// AnchorPublishResult is emitted after every attempt to publish the
+	// latest attestation batch to an external core.Anchor, success or
+	// failure. A consumer with no Anchor configured never calls this.
+	AnchorPublishResult(ok bool)
+	// AnchorLagSeqs reports how many attestation-chain sequence numbers the
+	// last-published anchor head is behind the latest locally-signed batch.
+	// A monotonically growing lag with AnchorPublishResult(false) readings
+	// is the alerting signal for "the tamper-evidence chain's external
+	// witness has stopped advancing".
+	AnchorLagSeqs(lag int64)
 }
 
 // NoopMetrics is a Metrics implementation where every method is a no-op.
@@ -135,32 +202,32 @@ type Metrics interface {
 // callers that just want a working default with no customization.
 type NoopMetrics struct{}
 
-func (NoopMetrics) JournalPosted(string)                        {}
-func (NoopMetrics) JournalFailed(string, string)                {}
-func (NoopMetrics) ReserveCreated()                             {}
-func (NoopMetrics) ReserveSettled()                             {}
-func (NoopMetrics) ReserveReleased()                            {}
-func (NoopMetrics) RollupProcessed(int)                         {}
-func (NoopMetrics) ReconcileCompleted(bool)                     {}
-func (NoopMetrics) IdempotencyCollision(string)                 {}
-func (NoopMetrics) TemplateFailed(string, string)               {}
-func (NoopMetrics) BookingTransitioned(string, string)          {}
-func (NoopMetrics) EventDelivered()                             {}
-func (NoopMetrics) EventDeliveryFailed()                        {}
-func (NoopMetrics) EventDead()                                  {}
-func (NoopMetrics) RollupItemFailed()                           {}
-func (NoopMetrics) ReconcileCheckResult(string, bool)           {}
-func (NoopMetrics) JournalLatency(time.Duration)                {}
-func (NoopMetrics) RollupLatency(time.Duration)                 {}
-func (NoopMetrics) SnapshotLatency(time.Duration)               {}
-func (NoopMetrics) JournalEntryCount(string, int)               {}
-func (NoopMetrics) PendingRollups(int64)                        {}
-func (NoopMetrics) ActiveReservations(int64)                    {}
-func (NoopMetrics) CheckpointAge(string, time.Duration)         {}
-func (NoopMetrics) BalanceDrift(string, int64, decimal.Decimal) {}
-func (NoopMetrics) NegativeBalanceDetected(string, int64)       {}
-func (NoopMetrics) ReconcileGap(int64, decimal.Decimal)         {}
-func (NoopMetrics) ReservedAmount(int64, decimal.Decimal)       {}
+func (NoopMetrics) JournalPosted(string)                         {}
+func (NoopMetrics) JournalFailed(string, string)                 {}
+func (NoopMetrics) ReserveCreated()                              {}
+func (NoopMetrics) ReserveSettled()                              {}
+func (NoopMetrics) ReserveReleased()                             {}
+func (NoopMetrics) RollupProcessed(int)                          {}
+func (NoopMetrics) ReconcileCompleted(bool)                      {}
+func (NoopMetrics) IdempotencyCollision(string)                  {}
+func (NoopMetrics) TemplateFailed(string, string)                {}
+func (NoopMetrics) BookingTransitioned(string, string)           {}
+func (NoopMetrics) EventDelivered()                              {}
+func (NoopMetrics) EventDeliveryFailed()                         {}
+func (NoopMetrics) EventDead()                                   {}
+func (NoopMetrics) RollupItemFailed()                            {}
+func (NoopMetrics) ReconcileCheckResult(string, bool)            {}
+func (NoopMetrics) JournalLatency(time.Duration)                 {}
+func (NoopMetrics) RollupLatency(time.Duration)                  {}
+func (NoopMetrics) SnapshotLatency(time.Duration)                {}
+func (NoopMetrics) JournalEntryCount(string, int)                {}
+func (NoopMetrics) PendingRollups(int64)                         {}
+func (NoopMetrics) ActiveReservations(int64)                     {}
+func (NoopMetrics) CheckpointAge(string, time.Duration)          {}
+func (NoopMetrics) BalanceDrift(string, string, decimal.Decimal) {}
+func (NoopMetrics) NegativeBalanceDetected(string, string)       {}
+func (NoopMetrics) ReconcileGap(string, decimal.Decimal)         {}
+func (NoopMetrics) ReservedAmount(string, decimal.Decimal)       {}
 
 func (NoopMetrics) ChainCursorLag(int64, int64)         {}
 func (NoopMetrics) DepositReorgDetected(int64)          {}
@@ -168,6 +235,17 @@ func (NoopMetrics) SweepUnattributed(int64)             {}
 func (NoopMetrics) SweepAddressUnreadable(int64, int)   {}
 func (NoopMetrics) RegistrationRescanFailed(int64)      {}
 func (NoopMetrics) DepositReviewRequired(int64, string) {}
+
+func (NoopMetrics) JobTickCompleted(string)     {}
+func (NoopMetrics) JobTickFailed(string)        {}
+func (NoopMetrics) JobTickSkippedLocked(string) {}
+func (NoopMetrics) JobPanicked(string)          {}
+func (NoopMetrics) StuckRollups(int64)          {}
+func (NoopMetrics) PendingEvents(int64)         {}
+
+func (NoopMetrics) AttestationBatchResult(bool) {}
+func (NoopMetrics) AnchorPublishResult(bool)    {}
+func (NoopMetrics) AnchorLagSeqs(int64)         {}
 
 // NopMetrics returns a no-op metrics collector.
 func NopMetrics() Metrics { return NoopMetrics{} }

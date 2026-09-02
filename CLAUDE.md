@@ -51,7 +51,7 @@ make vet        # go vet ./...
 make lint       # golangci-lint run
 make sqlc       # cd postgres && sqlc generate
 make sqlc-diff  # cd postgres && sqlc diff   (CI gate: generated code must match queries)
-make docker     # docker compose up --build
+make docker     # docker compose up -d postgres
 make openapi-check # cd web && npm run -w @azex/ledger-react codegen:check (docs/openapi.yaml vs. web/packages/ledger-react's generated schema.ts; needs `npm ci` in web/ once)
 
 # Unit tests only (no DB needed)
@@ -143,7 +143,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `server/handler_events.go` | Event query endpoints |
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
-| `cmd/ledger-cli/` | Read-only investigation CLI (balance, journals, trace, reconcile, solvency) |
+| `cmd/ledger-cli/` | Investigation CLI (balance, journals, trace, reconcile, solvency, currencies, classifications, verify), read-only except `reconcile --full`'s resume cursor and `rollup reset-claim` (see the package doc) |
 | `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `tamper-evident` (signing + attestation + the withdrawal gate, forges a row to show what it stops), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
 | `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag). Three consumption surfaces: root = shadcn-style skin (self-contained scoped preflight + tokens in `dist/styles.css`), `./heroui` = HeroUI v3 skin (optional peer `@heroui/react`, host owns theme, layout classes in `dist/heroui.css`), `./headless` = client + hooks + provider only. Both skins share the headless core; page logic must stay mirrored |
 | `docs/INVARIANTS.md` | The 34 invariants the ledger guarantees (canonical contract) |
@@ -190,3 +190,4 @@ POST   /api/v1/dev/credits                   — Credit a holder with no custodi
 - To consume the local checkout from a sibling module, use a parent-directory `go.work` (see README "Local Development with go.work") — no `replace` directives.
 - Lifecycle is optional on Classification — nil means label-only (no bookings).
 - `failed` is NOT terminal in withdrawal preset (has retry path to `reserved`).
+- `chains/evm`'s e2e tests are tagged `//go:build e2e` — `make test-e2e` or an explicit `-tags e2e` is required to compile/run them; plain `make test` / `go test ./...` never touches them.

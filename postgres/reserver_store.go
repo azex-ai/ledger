@@ -40,6 +40,9 @@ type ReserverStore struct {
 	// so this field being unusable is exactly the caller-opted-in-without-
 	// signing-enabled case, not a nil-pointer bug.
 	verifiedBalance *VerifiedBalanceStore
+
+	// metrics is core.NopMetrics() unless WithMetrics is called (I-M1).
+	metrics core.Metrics
 }
 
 // NewReserverStore creates a new ReserverStore backed by a connection pool.
@@ -51,6 +54,25 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore, verifiedBalance *
 		ledger:          ledger,
 		dims:            dimCacheFor(pool),
 		verifiedBalance: verifiedBalance,
+		metrics:         core.NopMetrics(),
+	}
+}
+
+// WithMetrics returns a clone of s configured to emit core.Metrics (I-M1).
+// The default (never calling this) is core.NopMetrics().
+func (s *ReserverStore) WithMetrics(m core.Metrics) *ReserverStore {
+	metrics := s.metrics
+	if m != nil {
+		metrics = m
+	}
+	return &ReserverStore{
+		pool:            s.pool,
+		db:              s.db,
+		q:               s.q,
+		ledger:          s.ledger,
+		dims:            s.dims,
+		verifiedBalance: s.verifiedBalance,
+		metrics:         metrics,
 	}
 }
 
@@ -69,6 +91,7 @@ func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 		q:               sqlcgen.New(db),
 		ledger:          ledger,
 		verifiedBalance: s.verifiedBalance,
+		metrics:         s.metrics,
 	}
 }
 
@@ -155,6 +178,9 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		// Tx mode: use the caller's transaction directly.
 		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID, verifiedAvailableBase)
 		ledgerotel.RecordError(span, err)
+		if err == nil {
+			s.metrics.ReserveCreated()
+		}
 		return res, err
 	}
 
@@ -178,6 +204,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 		return nil, fmt.Errorf("postgres: reserve: commit: %w", err)
 	}
 
+	s.metrics.ReserveCreated()
 	return res, nil
 }
 
@@ -543,6 +570,9 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 		// Tx mode: use the caller's transaction directly.
 		err := s.settleWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
+		if err == nil {
+			s.metrics.ReserveSettled()
+		}
 		return err
 	}
 
@@ -563,6 +593,7 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 		return fmt.Errorf("postgres: settle: commit: %w", err)
 	}
 
+	s.metrics.ReserveSettled()
 	return nil
 }
 
@@ -910,6 +941,9 @@ func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) er
 		// Tx mode: use the caller's transaction directly.
 		err := s.releaseWithQueries(ctx, s.q, input)
 		ledgerotel.RecordError(span, err)
+		if err == nil {
+			s.metrics.ReserveReleased()
+		}
 		return err
 	}
 
@@ -930,6 +964,7 @@ func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) er
 		return fmt.Errorf("postgres: release: commit: %w", err)
 	}
 
+	s.metrics.ReserveReleased()
 	return nil
 }
 

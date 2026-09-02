@@ -44,9 +44,9 @@ func TestPrometheusMetrics_EndToEnd(t *testing.T) {
 	m.PendingRollups(42)
 	m.ActiveReservations(7)
 	m.CheckpointAge("deposit", time.Hour)
-	m.BalanceDrift("deposit", 1, decimal.RequireFromString("0.0001"))
-	m.ReconcileGap(1, decimal.RequireFromString("12.34"))
-	m.ReservedAmount(1, decimal.RequireFromString("999.99"))
+	m.BalanceDrift("deposit", "cur-1", decimal.RequireFromString("0.0001"))
+	m.ReconcileGap("cur-1", decimal.RequireFromString("12.34"))
+	m.ReservedAmount("cur-1", decimal.RequireFromString("999.99"))
 
 	// Scrape /metrics and verify a representative subset of metrics surfaced.
 	rec := httptest.NewRecorder()
@@ -70,8 +70,8 @@ func TestPrometheusMetrics_EndToEnd(t *testing.T) {
 		`ledger_rollups_pending 42`,
 		`ledger_reservations_active 7`,
 		`ledger_checkpoint_age_seconds{class="deposit"} 3600`,
-		`ledger_reconcile_gap_units{currency_id="1"} 12.34`,
-		`ledger_reserved_amount_units{currency_id="1"} 999.99`,
+		`ledger_reconcile_gap_units{currency_uid="cur-1"} 12.34`,
+		`ledger_reserved_amount_units{currency_uid="cur-1"} 999.99`,
 	}
 	for _, want := range wantSubstrings {
 		assert.True(t, strings.Contains(body, want), "missing in /metrics: %s", want)

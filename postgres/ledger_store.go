@@ -57,6 +57,11 @@ type LedgerStore struct {
 	// journal's auth_digest/auth_signature/auth_key_id stay empty. Set via
 	// WithAuth, never by mutating a live store.
 	attestor core.Attestor
+
+	// metrics is core.NopMetrics() unless WithMetrics is called (I-M1). Every
+	// PostJournal/ExecuteTemplate/ExecuteTemplateBatch outcome and every
+	// idempotency-key collision detected here flows through it.
+	metrics core.Metrics
 }
 
 // balancePair identifies a (holder, currency_id) pair targeted by an advisory
@@ -188,10 +193,30 @@ func acquireIdempotencyLock(ctx context.Context, q *sqlcgen.Queries, key string)
 // READ isolation for GetBalance.
 func NewLedgerStore(pool *pgxpool.Pool) *LedgerStore {
 	return &LedgerStore{
-		pool: pool,
-		db:   pool,
-		q:    sqlcgen.New(pool),
-		dims: dimCacheFor(pool),
+		pool:    pool,
+		db:      pool,
+		q:       sqlcgen.New(pool),
+		dims:    dimCacheFor(pool),
+		metrics: core.NopMetrics(),
+	}
+}
+
+// WithMetrics returns a clone of s configured to emit core.Metrics (I-M1).
+// The default (never calling this) is core.NopMetrics() -- every metrics
+// call below is then a no-op, byte-for-byte the same as before this option
+// existed.
+func (s *LedgerStore) WithMetrics(m core.Metrics) *LedgerStore {
+	metrics := s.metrics
+	if m != nil {
+		metrics = m
+	}
+	return &LedgerStore{
+		pool:     s.pool,
+		db:       s.db,
+		q:        s.q,
+		dims:     s.dims,
+		attestor: s.attestor,
+		metrics:  metrics,
 	}
 }
 
@@ -212,6 +237,7 @@ func (s *LedgerStore) WithDB(db DBTX) *LedgerStore {
 		q:        sqlcgen.New(db),
 		dims:     dimCacheForTx(s.dims),
 		attestor: s.attestor,
+		metrics:  s.metrics,
 	}
 }
 
@@ -238,6 +264,7 @@ func (s *LedgerStore) WithAuth(attestor core.Attestor) *LedgerStore {
 		q:        s.q,
 		dims:     dimCacheForTx(s.dims),
 		attestor: attestor,
+		metrics:  s.metrics,
 	}
 }
 
@@ -469,7 +496,13 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 
 	if err := input.Validate(); err != nil {
 		ledgerotel.RecordError(span, err)
-		return nil, fmt.Errorf("postgres: post journal: %w", err)
+		err = fmt.Errorf("postgres: post journal: %w", err)
+		// I-M1: postJournalWithQueries is never reached on this branch (it is
+		// the choke point for everything past input validation), so this is
+		// the one PostJournal exit that must emit JournalFailed itself rather
+		// than relying on that function's own defer.
+		s.metrics.JournalFailed("", classifyJournalFailureReason(err))
+		return nil, err
 	}
 
 	if s.pool == nil {
@@ -494,13 +527,16 @@ func (s *LedgerStore) PostJournal(ctx context.Context, input core.JournalInput) 
 	auth, err := s.attestJournal(ctx, input, effectiveAt)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
+		s.metrics.JournalFailed("", classifyJournalFailureReason(err))
 		return nil, err
 	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
-		return nil, fmt.Errorf("postgres: post journal: begin tx: %w", err)
+		err = fmt.Errorf("postgres: post journal: begin tx: %w", err)
+		s.metrics.JournalFailed("", classifyJournalFailureReason(err))
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -541,11 +577,15 @@ func (s *LedgerStore) ExecuteTemplate(ctx context.Context, templateCode string, 
 	input, err := s.renderTemplate(ctx, s.q, templateCode, params)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
+		s.metrics.TemplateFailed(templateCode, classifyJournalFailureReason(err))
 		return nil, err
 	}
 
 	j, err := s.PostJournal(ctx, *input)
 	ledgerotel.RecordError(span, err)
+	if err != nil {
+		s.metrics.TemplateFailed(templateCode, classifyJournalFailureReason(err))
+	}
 	return j, err
 }
 
@@ -932,7 +972,40 @@ func (s *LedgerStore) renderTemplate(ctx context.Context, q *sqlcgen.Queries, te
 // persisted verbatim as journals.auth_status and must never be the Go zero
 // value ("") on this path -- every caller sets it explicitly (see
 // journalAuth's doc comment).
-func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput, effectiveAt time.Time, auth journalAuth) (*core.Journal, error) {
+func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Queries, input core.JournalInput, effectiveAt time.Time, auth journalAuth) (journal *core.Journal, err error) {
+	// I-M1: single choke point both PostJournal branches (pool mode and tx
+	// mode) converge on, so this is where JournalPosted/JournalFailed/
+	// JournalLatency/JournalEntryCount are emitted regardless of mode.
+	// journalTypeCode stays "" (a bounded, deliberate label) for failures
+	// that occur before the journal type is resolved below -- resolving it
+	// would mean doing the lookup twice on every call just to label a
+	// failure metric.
+	//
+	// Known imprecision (accepted -- this is an observability signal, not a
+	// financial one): in PostJournal's pool-mode branch this function
+	// returns success once the journal + entries are written into the
+	// still-open transaction PostJournal owns; if that transaction's
+	// subsequent tx.Commit then fails (rare: connection dropped mid-commit),
+	// JournalPosted has already fired for a journal that was in fact rolled
+	// back. The alternative -- moving all accounting to the outermost
+	// PostJournal, which would need this function to surface journalTypeCode
+	// on every path including failures deep inside entry resolution -- is a
+	// larger refactor than this metric's value justifies; the same
+	// overcounting-on-a-vanishingly-rare-failure trade-off is accepted
+	// elsewhere in this file (ReserveCreated/Settled/Released on an
+	// idempotent replay, see reserver_store.go).
+	start := time.Now()
+	journalTypeCode := ""
+	defer func() {
+		s.metrics.JournalLatency(time.Since(start))
+		if err != nil {
+			s.metrics.JournalFailed(journalTypeCode, classifyJournalFailureReason(err))
+			return
+		}
+		s.metrics.JournalPosted(journalTypeCode)
+		s.metrics.JournalEntryCount(journalTypeCode, len(input.Entries))
+	}()
+
 	if err := input.Validate(); err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
 	}
@@ -968,6 +1041,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	if err != nil {
 		return nil, fmt.Errorf("postgres: post journal: %w", err)
 	}
+	journalTypeCode = jt.Code
 	eventID := int64(0)
 	if input.EventUID != "" {
 		pgUID, err := uidToPG(input.EventUID)

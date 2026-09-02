@@ -26,6 +26,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 13. [Large / unreconciled deposit parked in review](#13-large--unreconciled-deposit-parked-in-review)
 14. [Onchain money-path metrics -- this library ships none of the alerting](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)
 15. [A chain's sweep collection has stopped moving](#15-a-chains-sweep-collection-has-stopped-moving)
+16. [P5 signing key rotation](#16-p5-signing-key-rotation)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -208,16 +209,23 @@ Reconciliation drift is *symptom*, not cause. Always:
 ## 2. Solvency check failed
 
 **Alert source**: `SolvencyCheck` returning `solvent: false` (margin < 0). Either
-via `POST /api/v1/system/solvency` (when wired) or the system rollup query.
+via `GET /api/v1/platform/solvency` (a permanent route, not conditional on
+anything being "wired") or the system rollup query. This library ships no
+Prometheus metric for solvency itself (`core.Metrics`' 40+ methods have no
+solvency-shaped signal) — a deployment that wants to alert on this must run
+`SolvencyCheck` on its own schedule and emit its own metric from the result.
 
 **Severity**: P0. The platform's ledger says it can't cover user liabilities.
 
 ### Confirm
 
 ```bash
-ledger-cli solvency --currency 1
+# --currency takes the currency UID, not the internal numeric id -- if you
+# only have the id, `ledger-cli currencies` lists uid alongside it.
+ledger-cli currencies
+ledger-cli solvency --currency <currency-uid>
 # or
-curl http://ledger/api/v1/system/balances | jq '.rollups[] | select(.classification_code=="custodial")'
+curl http://ledger/api/v1/system/balances | jq '.data.list[] | select(.classification_uid=="custodial")'
 ```
 
 Compare:
@@ -250,7 +258,7 @@ its own books only. Three plausible causes:
 
 ## 3. Rollup queue is backlogged
 
-**Alert source**: `PendingRollups` gauge climbing, or
+**Alert source**: `ledger_rollups_pending` gauge climbing, or
 `GET /api/v1/system/health` reporting `rollup_queue_depth > 1000`.
 
 **Severity**: P2. Reads are still correct (real-time delta), but checkpoints
@@ -259,8 +267,8 @@ are getting stale, which slows balance reads.
 ### Confirm
 
 ```sql
-SELECT COUNT(*) FROM checkpoint_rollup_queue;
-SELECT MAX(now() - created_at) FROM checkpoint_rollup_queue;
+SELECT COUNT(*) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts < 10;
+SELECT MAX(now() - created_at) FROM rollup_queue WHERE processed_at IS NULL AND failed_attempts < 10;
 ```
 
 ### Investigate
@@ -287,11 +295,54 @@ The critical fact: **balance reads stay correct** — the checkpoint+delta path
 ensures that. Only checkpoint freshness (and rollup-table read latency) are
 affected.
 
+### Stuck rollup items (B-m10)
+
+A rollup_queue item that fails `failed_attempts` times (currently 10) stops
+being dequeued at all — `DequeueRollupBatch` filters `failed_attempts < 10`,
+so a permanently-broken item does not retry forever, but it also does not
+disappear from anywhere on its own. It is excluded from
+`ledger_rollups_pending` above (so an actually-draining backlog and a
+permanently-stuck item don't read as the same alert), and counted instead by
+its own gauge:
+
+```
+ledger_rollups_stuck > 0
+```
+
+**Confirm and diagnose**:
+
+```sql
+SELECT id, account_holder, currency_id, classification_id, failed_attempts, created_at
+FROM rollup_queue
+WHERE processed_at IS NULL AND failed_attempts >= 10;
+```
+
+Check worker logs for that `(account_holder, currency_id, classification_id)`
+around the time `failed_attempts` climbed — the underlying cause is whatever
+made `RollupService.processItem` fail 10 times in a row (a poisoned
+checkpoint row, a classification with a corrupted `normal_side`, a
+long-running DB contention issue). Fix the underlying cause first; resetting
+the claim without fixing it just spends the next 10 attempts the same way.
+
+**Resolution** — once the underlying cause is fixed, put the item back into
+the eligible set:
+
+```bash
+ledger-cli rollup reset-claim --id <rollup_queue.id>
+```
+
+This clears `claimed_until` and resets `failed_attempts` to 0. There is no
+other way back in short of hand-written SQL — this is the one write action
+`ledger-cli` exposes outside `reconcile --full`'s resume cursor (see its
+package doc, `cmd/ledger-cli/main.go`).
+
 ---
 
 ## 4. Checkpoint age is climbing
 
-**Alert source**: `CheckpointAge{class_code="..."}` histogram >1h for any class.
+**Alert source**: `ledger_checkpoint_age_seconds{class="..."}` gauge (not a
+histogram — see [§14](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)'s
+doc-vs-code note) >1h for any class.
 
 **Severity**: P3. Same as §3 with a different symptom — usually the same fix.
 
@@ -366,9 +417,12 @@ Webhook delivery is **at-least-once**, not exactly-once and not ordered:
 
 ### Dead-letter handling & retention
 
-Dead-lettered events (`delivery_status = 'dead'`, alert
-`LedgerEventDeliveryDead`) are **parked, not lost** — the event row is the
-system of record, delivery bookkeeping just marks it undeliverable.
+Dead-lettered events (`delivery_status = 'dead'`) are **parked, not lost** —
+the event row is the system of record, delivery bookkeeping just marks it
+undeliverable. This library ships no alert rule named `LedgerEventDeliveryDead`
+or anything else — that name does not exist anywhere in this repository.
+Build your own alert on `increase(ledger_events_dead_total[window]) > 0`
+(I-N17: a rule name a search cannot find is worse than an inline expression).
 
 1. Find them:
    ```sql
@@ -395,8 +449,8 @@ archive detached partitions (RUNBOOK §11) — not `DELETE`.
 
 ## 6. Idempotency collision spike
 
-**Alert source**: `IdempotencyCollision{journal_type_code="..."}` counter
-spiking for a journal type.
+**Alert source**: `ledger_idempotency_collisions_total{journal_type="..."}`
+counter spiking for a journal type.
 
 **Severity**: P3 by default; P1 if the type is `withdraw_confirm` or anything
 that moves real money.
@@ -425,17 +479,28 @@ was reused with a different payload. Causes:
 
 ## 7. Journal posting failures
 
-**Alert source**: `JournalFailed{journal_type_code, reason}` counter.
+**Alert source**: `ledger_journals_failed_total{journal_type, reason}` counter.
 
 **Severity**: depends on `reason`.
 
-| reason | likely cause | action |
-|--------|--------------|--------|
-| `unbalanced` | bug in caller building entries | reproduce, file ticket on caller |
-| `unauthorised_classification` | classification deactivated mid-flight | check `classifications.is_active` |
-| `insufficient_balance` | user-side overdraft attempted | expected when caller didn't `Reserve` first |
-| `currency_mismatch` | template params crossed currencies | bug in caller; check FX flow |
-| `db_error` | pool exhausted / postgres down | check `system/health` and PG dashboards |
+`reason` is a bounded set of Go constants, not free text -- the single
+source of truth is `classifyJournalFailureReason` in
+`postgres/metrics_reasons.go`. This table exists to save a code lookup on
+call, not the other way around; if it and the code ever disagree, the code
+wins.
+
+| reason | means | likely cause | action |
+|--------|-------|--------------|--------|
+| `unbalanced` | `core.ErrUnbalancedJournal` | bug in caller building entries, or a genuine per-currency imbalance caught before any DB write | reproduce, file ticket on caller |
+| `account_policy` | `core.ErrAccountFrozen` / `core.ErrAccountClosed` | the holder's account was frozen/closed mid-flight (see `AccountPolicyStore`) | check `account_policies` for that holder; confirm the freeze was intentional |
+| `insufficient_balance` | `core.ErrInsufficientBalance` | user-side overdraft attempted | expected when caller didn't `Reserve` first |
+| `period_closed` | `core.ErrPeriodClosed` | journal's `effective_at` is before the active accounting period close line (I-15) | caller is backdating into a closed period; fix the caller's `effective_at`, do not reopen the period |
+| `unauthorized` | `core.ErrUnauthorizedJournal` / `ErrUnknownAuthKey` / `ErrAttestorUnavailable` | signing failed (WithAttestor's KMS call errored) or a verifier rejected a signature | check the Attestor/KMS's own health; see [§16](#16-p5-signing-key-rotation) for a rotation-shaped cause |
+| `duplicate` | `core.ErrDuplicateJournal` | the `journals_idempotency_key_key` unique constraint fired directly (rare -- usually caught earlier as an idempotency replay, not a failure) | investigate as a possible race in the caller's retry logic |
+| `conflict` | `core.ErrConflict` | idempotency key reused with a divergent payload (also emits `IdempotencyCollision`, see §6), or an `event_uid` already linked to another journal | see §6's investigation steps |
+| `not_found` | `core.ErrNotFound` | journal referenced an unresolvable currency/classification/event/reversal-target uid | check the caller passed a real uid, not a stale one |
+| `validation` | `core.ErrInvalidInput` / `core.ErrPrecisionExceeded` | malformed request: empty entries, non-positive amount, amount exceeding the currency's configured exponent | bug in caller; check request shape against `core.JournalInput.Validate` |
+| `db_error` | anything else (unclassified) | pool exhausted / postgres down / an unmapped driver error | check `system/health` and PG dashboards |
 
 ---
 
@@ -647,29 +712,73 @@ Operational notes:
 - **The connection that runs `001_baseline` must be able to `CREATE ROLE`**
   (superuser, or a role with the `CREATEROLE` attribute) — this is the
   install-time prerequisite for a fresh database (README "Quick Start").
-  Every migration after `001` runs as `ledger_owner` and needs no elevated
-  privilege beyond what it already holds.
+  If any of `ledger_owner` / `ledger_app` / `ledger_ro` already exists on
+  this cluster carrying `SUPERUSER`, `CREATEDB`, `CREATEROLE`,
+  `REPLICATION` or `BYPASSRLS`, migration `007` clears it — or, if the
+  migration credential lacks the authority to clear that particular
+  attribute, **stops the install with an actionable error naming the role
+  and the attribute**. Postgres gates each of those attributes on the
+  altering role holding the same one, so a `CREATEROLE`-only credential
+  genuinely cannot strip `SUPERUSER`. Fix it with a superuser connection
+  and re-run; do not work around it by granting the migration credential
+  superuser.
+- **Every migration after `001` needs `ledger_owner`'s privileges**,
+  because `001`'s last act transfers every object it created to that
+  role. `Migrate()` arranges this itself: it applies `001` alone, grants
+  the migration credential `ledger_owner WITH INHERIT TRUE` for the
+  remainder of the run, and revokes it on every exit path. That grant
+  uses the `ADMIN OPTION` Postgres permanently gives the creator of a
+  role — it is not a privilege the credential did not already command,
+  only a bounded, explicit window instead of a permission error two
+  migrations in. A superuser, or a connection as `ledger_owner` itself,
+  skips the whole step.
 - **`Migrate()` also needs `CONNECT` on the cluster's `postgres` maintenance
-  database** (`docs/INVARIANTS.md` I-47) — it takes a `pg_advisory_lock`
-  there before touching the target database, to serialize against every
-  other `Migrate()` call on the same cluster. `001_baseline`'s
-  `CREATE ROLE`/role-membership statements and `007`'s `ALTER ROLE`
-  statements write cluster-wide shared catalog rows (`pg_authid`,
-  `pg_auth_members`), not database-local ones, so two installs running at
-  once on the same cluster — Aaron's shared local `dev-postgres`
-  (`infra.md`), CI's shared Postgres service container, or a
-  multi-replica deployment migrating from more than one pod — race those
-  rows unless something outside the target database serializes them.
-  `CONNECT` on `postgres` is granted to `PUBLIC` by default; if your
-  cluster revokes it, grant it back to whichever role runs `Migrate()`.
+  database** (`docs/INVARIANTS.md` I-47) — it acquires a cluster-wide
+  migration lock there before touching the target database, to serialize
+  against every other `Migrate()` call on the same cluster (this is a
+  real, non-optional prerequisite: `CONNECT` failing surfaces as
+  "connect to maintenance database", which does not point at the root
+  cause on its own — if you see that error, check `CONNECT` on
+  `postgres` first). `001_baseline`'s `CREATE ROLE`/role-membership
+  statements and `007`'s `ALTER ROLE` statements write cluster-wide
+  shared catalog rows (`pg_authid`, `pg_auth_members`), not
+  database-local ones, so two installs running at once on the same
+  cluster — Aaron's shared local `dev-postgres` (`infra.md`), CI's shared
+  Postgres service container, or a multi-replica deployment migrating
+  from more than one pod — race those rows unless something outside the
+  target database serializes them. `CONNECT` on `postgres` is granted to
+  `PUBLIC` by default; if your cluster revokes it, grant it back to
+  whichever role runs `Migrate()`.
+  The lock acquisition is a **poll with a bounded budget** (default 5
+  minutes, configurable via `postgres.WithMigrateLockBudget`), not an
+  unbounded block — each retry logs an Info line "postgres: migrate:
+  waiting for cluster migration lock" (falls back to `slog.Default()` if
+  no logger was injected). If the budget is exhausted, `Migrate()` fails
+  and names the advisory key in the error. To check who's actually
+  holding it:
+  ```sql
+  -- run against the cluster's postgres maintenance database
+  SELECT * FROM pg_locks WHERE locktype = 'advisory' AND objid = 2573143714;
+  ```
+  Use `postgres.MigrateContext(ctx, url, opts...)` instead of `Migrate`
+  when you need the wait itself to be cancellable (e.g. from a shutdown
+  signal).
 - **No passwords are set by any of these migrations.** Set them out-of-band
   (`ALTER ROLE ledger_app WITH PASSWORD '...'`) through whatever secrets
   pipeline you already use for `DATABASE_URL` — never commit one to a
   migration file or to git (`infra.md`).
-- **Partition creation runs as `ledger_owner`.** `CREATE TABLE ... PARTITION
-  OF` is DDL; whatever process runs `PartitionService.EnsureUpcoming`
-  (today: the same in-process worker as everything else) needs a
-  `ledger_owner`-backed connection, not the app pool.
+- **Partition maintenance runs as `ledger_app`, through two `SECURITY
+  DEFINER` functions** (`ledger_create_monthly_partition` /
+  `ledger_rebalance_default_partition`, `docs/INVARIANTS.md` I-35).
+  Whatever process runs `PartitionService.EnsureUpcoming` uses the
+  ordinary app pool; `postgres/partition_store.go` issues no DDL of its
+  own. **Do not give the serving pool a `ledger_owner` connection.** That
+  was this runbook's previous instruction and it is the one thing
+  migration `007` exists to make unnecessary: an owner-privileged pool
+  can `TRUNCATE journal_entries_default`, and `TRUNCATE` does not fire
+  row-level triggers, so it walks straight past `journal_entries`'
+  no-DELETE guard. A deployment that followed the old text turned I-2's
+  append-only guarantee back into a convention — by the book.
 - `ledger_app`'s grant on `journal_entries` covers the parent table and
   every partition that exists at install time. Partitions created *after*
   that inherit access through the parent table name — Postgres checks
@@ -709,6 +818,46 @@ Operational notes:
   rest of this table describes — if a "fourth" read-only role is ever
   introduced, it needs its own `GRANT EXECUTE` on these three functions, not
   just table `SELECT`.
+
+### Config tampering forensics: who changed the rule that decides where money goes (D-M5)
+
+Three tables record who changed a configuration row, distinct from the
+money-path journals themselves:
+
+| Table | Written by | `changed_by` / actor |
+|---|---|---|
+| `config_table_changes` | DB trigger, on every table carrying a partial (whitelisted-column) guard — 11 tables as of D-m10, not just the original 4 | the authenticated role; `ledger_app` has no `INSERT` on this table (D-M4), so this column cannot be forged by a compromised app credential |
+| `reconcile_scan_cursor_changes` | DB trigger, every write to `reconcile_scan_cursors` | same as above |
+| `account_policy_changes` | **application code** (`UpsertAccountPolicy`), not a trigger | business `actor_id` — this is the row that says WHO in the product initiated the freeze/limit change |
+
+**Read them together, not separately.** A `config_table_changes` row with
+`table_name = 'account_policies'` that has no corresponding row in
+`account_policy_changes` for the same change means the row was modified
+without going through the application layer — this is the exact signature
+of the D-M3 attack (unfreeze + `min_balance = -1000000` set directly).
+That attack still succeeds today — the trigger's column whitelist has to
+permit those columns because `UpsertAccountPolicy` needs to write them —
+but it can no longer happen without leaving this cross-table
+inconsistency as a trace.
+
+**Read access**: `svc.ConfigHistory()` (`core.ConfigChangeReader`, exposed
+on the facade) or `postgres.NewConfigHistoryStore(pool)` directly:
+
+```go
+ListConfigChanges(ctx, core.ConfigChangeFilter)        ([]core.ConfigChange, nextCursor string, err error)
+ListScanCursorChanges(ctx, core.ConfigChangeFilter)    ([]core.ScanCursorChange, nextCursor string, err error)
+ListAccountPolicyChanges(ctx, core.ConfigChangeFilter) ([]core.AccountPolicyChange, nextCursor string, err error)
+```
+
+`core.ConfigChangeFilter{TableName, CheckName, AccountHolder, Since, Until, Cursor, Limit}`
+— zero value means unfiltered; results are newest-first; `nextCursor == ""`
+means you've reached the end. From the CLI:
+
+```bash
+ledger-cli config-history --table account_policies --since 30d
+ledger-cli config-history --check checkpoint_balance --since 7d
+ledger-cli config-history --holder 42
+```
 
 ---
 
@@ -949,40 +1098,76 @@ composition root:**
    side needs — never one token shared by both:**
    - **Ledger-side token** (the one `r2.Config.AccessKeyID` /
      `SecretAccessKey` holds in the ledger's own deployment, driving
-     `Publish`): scope to `GetObject` + `PutObject` on the anchor's bucket
-     — ideally further restricted to the single object key
-     `r2.Config.Key` names, via the bucket's object-key prefix if the R2
-     token UI/API supports it. `GetObject` is required alongside
-     `PutObject` because `Publish` reads the current head **before**
-     writing (see `anchors/r2/r2.go`'s `Publish` doc comment) — under
-     Object Lock a bad write cannot be undone, so the mismatch check has
-     to happen on the read side, never discovered after the fact. This
-     token must never carry `DeleteObject`, `PutBucketPolicy`, or any
-     other administrative scope; Object Lock's retention already blocks
-     overwriting a past version regardless of what the IAM policy says,
-     but the token should not rely on that alone.
+     `Publish`): scope to `GetObject` + `PutObject` + **`ListBucket`** on
+     the anchor's bucket — ideally restricted to the object-key prefix
+     `r2.Config.Key` names. `GetObject` is required because `Publish`
+     reads the seq's own object back before treating a repeat as an
+     idempotent replay; `ListBucket` is required because `Head` resolves
+     the highest published seq by listing the prefix (one object per seq —
+     see below). This token must never carry `DeleteObject`,
+     `PutBucketPolicy`, or any other administrative scope. ⚠️ Object Lock
+     retention does NOT make that optional: retention prevents deleting a
+     specific object VERSION, but a plain `DELETE` writes a delete marker,
+     which is permitted under retention and hides the object from a
+     listing — i.e. it can lower `Head`. Not granting `DeleteObject` is
+     the actual defence; `anchor_observations` (I-55) is the backstop that
+     turns such a regression into TAMPERED instead of a benign backlog.
    - **Verification-side token** (whatever reads the anchor independently
-     — `ledger-cli verify`, an auditor's own tooling, design doc §8.4):
-     **read-only** — `GetObject` (and `ListBucket`/`ListObjectVersions` if
-     your verification tooling wants to enumerate history rather than
-     just the current head). This token must never carry `PutObject`.
+     — an auditor's own tooling, or the `verify-with-r2` example under
+     `examples/`, design doc §8.4): **read-only** — `GetObject` +
+     `ListBucket` (and `ListObjectVersions` if your verification tooling
+     wants to enumerate version history rather than just the seq
+     objects). This token must never carry `PutObject`. `ledger-cli
+     verify`'s `--anchor-file` flag is the local-file anchor only, not the
+     production verification entry point for R2 — `cmd/ledger-cli` lives
+     in the root module and `anchors/r2` is a separate module (its AWS SDK
+     must not become a dependency of every consumer's binary); a consumer
+     that wants CLI-driven R2 verification calls
+     `service.VerifyLedger(ctx, r2Anchor, cfg)` from its own composition
+     root, no library change needed.
 4. **Wire `r2.Config`** in the consumer's composition root with the
    ledger-side token's credentials, the bucket name, the R2 endpoint
-   (`https://<account-id>.r2.cloudflarestorage.com`), and the single
-   object key to publish to — then pass the constructed `*r2.Anchor` as
+   (`https://<account-id>.r2.cloudflarestorage.com`), and the object-key
+   **prefix** to publish under — then pass the constructed `*r2.Anchor` as
    the `core.Anchor` the P6 worker publishes through. Nothing in
    `anchors/r2` reads the environment itself (mirrors `chains/evm`'s
    `ClientSet` — see that package's doc comment); all of the above is
    explicit `r2.Config` fields the composition root supplies.
 
-`anchors/r2` stores only the **current** `(seq, head)` pair, as one JSON
-object at `r2.Config.Key` — not one object per `seq`. This is enough to
-satisfy `core.Anchor`'s full contract (`anchortest.RunConformance` proves
-it, `anchors/r2/r2_test.go`): the bucket's versioning (mandatory alongside
-Object Lock) keeps every past version of that key retained and
-un-overwritable even though only the latest version is ever read by
-`Head`, so the audit trail survives without this package needing to
-enumerate history itself.
+`anchors/r2` stores **one immutable object per `seq`**, at
+`<r2.Config.Key>/seq-<20-digit-zero-padded>.json`. `Publish` creates the
+seq's object with a conditional write (`If-None-Match: "*"`) and never
+overwrites an existing one; `Head` lists the prefix and resolves the
+HIGHEST seq present, not the most recent write. That is what makes
+`core.Anchor.Head`'s no-regression contract (I-56) true against the
+credential this token actually holds — the previous single-mutable-key
+layout did not: one out-of-band `PutObject` of an older seq rolled the
+published head backwards, and the Object-Lock-protected older versions
+that held the truth were read by nothing.
+
+Object versioning (mandatory alongside Object Lock) is still useful, but
+be precise about what for: it is a **post-hoc forensic record a human can
+read**, not something any verification path consults. `VerifyLedger` never
+enumerates version history. Retention's operational value here is that a
+published seq's object cannot be destroyed version-by-version.
+
+**Verify status semantics** (narrowed since the above was first written —
+align any dashboard/alert built on `ledger-cli verify`'s exit status to
+this):
+- `NOT_RUN` — the anchor reports empty while the DB chain is non-empty
+  (and no higher historical observation exists) — external verification
+  did not run at all. Non-zero CLI exit.
+- `TAMPERED` — the anchor is below a previously observed value (rollback
+  or erasure), or the anchor is ahead of the DB chain.
+- `DRIFT` — **only** two benign, self-healing backlog shapes: the anchor
+  has published before but is currently behind, or entries exist that
+  are not yet covered by an attestation batch but all carry a valid
+  authorization. `DRIFT` still exits 0; the report's `uncovered_entries` /
+  `anchor_seq` / `last_observed_anchor_seq` fields let a scheduled job
+  decide whether to page on it. Because `DRIFT` no longer includes "anchor
+  reported empty" (that is `NOT_RUN` now), a scheduled verification job can
+  safely treat a nonzero `DRIFT` as opt-in-alertable without risking a
+  false page on every anchor cold-start.
 
 ---
 
@@ -1237,8 +1422,10 @@ control being wrong — investigate the primary source before touching
 | `ledger_chain_cursor_lag_blocks{chain_id}` | Blocks behind the chain tip the deposit watcher's cursor currently is. | A transient bump (RPC hiccup, a slightly slow block) is normal. A monotonically climbing lag means the watcher loop (`Onchain.scanChainOnce`) is stuck or too slow for that chain's block rate -- check watcher logs for repeated errors; same shape of triage as [§3](#3-rollup-queue-is-backlogged)'s worker-liveness check, different loop. |
 | `ledger_rollup_items_failed_total` | A rollup queue item's claim was released after a failed processing attempt (`RollupService.processItem` returned an error). | Check `RollupItemFailed`-adjacent logs (`"service: rollup: process item failed"`) for the specific `holder`/`currency_id`/`classification_id` and the underlying error. That dimension's checkpoint stops advancing until a retry succeeds -- balance reads stay correct via the delta path meanwhile ([§3](#3-rollup-queue-is-backlogged)'s "critical fact"), so this is urgency-by-volume, not an immediate correctness incident. |
 | `ledger_template_failed_total{template, reason}` | An `entry_templates` execution failed (`TemplateFailed`). | The triggering business operation did not get its accounting posted. Cross-reference `reason` against [§7](#7-journal-posting-failures)'s table (same reason vocabulary) and find the caller that invoked the template. |
+| `ledger_sweep_address_unreadable_total{chain_id}` | `ChainScanner.ScanBalances` could not read one or more deposit addresses' on-chain balance this sweep round. | Those addresses are excluded from that round's sweep-eligible set (not defaulted to zero) and simply retry next cycle. A single occurrence is an RPC hiccup; a sustained nonzero rate means that chain's RPC provider is degraded -- check node/provider health for that chain. |
+| `ledger_deposit_review_required_total{chain_id, reason}` | A deposit reached its confirmation threshold but was routed to human review instead of auto-crediting (M3 compensating controls, design doc §9). `reason` is `over_ceiling` or `reconcile_mismatch`. | Go straight to [§13](#13-large--unreconciled-deposit-parked-in-review) -- this metric is that section's alert source. |
 
-### `balance_drift_units{class, currency_id}` -- read this together with `reconcile_gap_units`
+### `balance_drift_units{class, currency_uid}` -- read this together with `reconcile_gap_units`
 
 This gauge reports the magnitude of a debit-normal account going negative,
 as observed by the rollup worker (`service.RollupService.processItem`) --
@@ -1270,14 +1457,14 @@ belong in **independent alert rules** even so.
 **M-3 fix (`.local/independent-review-2026-08-26.md`, board #43, same date as
 this document but a later batch than the paragraph above): even fixed,
 `balance_drift_units` is still not safe to alert on alone.** Its label set
-is `(class, currency_id)` WITHOUT holder (kept deliberately bounded), so a
+is `(class, currency_uid)` WITHOUT holder (kept deliberately bounded), so a
 HEALTHY item for a DIFFERENT holder sharing that label legitimately
 `.Set()`s the same series back to 0 immediately after a genuinely-still-open
 violation for a FIRST holder was reported -- the exact self-clearing
 behavior the paragraph above describes as "fixed" is also what makes a real,
 ongoing violation invisible the moment any other holder in the same bucket
 is next processed. **Alert on `ledger_negative_balance_detected_total{class,
-currency_id}` instead** (`core.Metrics.NegativeBalanceDetected`, a monotonic
+currency_uid}` instead** (`core.Metrics.NegativeBalanceDetected`, a monotonic
 counter incremented on the same violation branch `balance_drift_units`
 reads from): `increase(ledger_negative_balance_detected_total[window]) > 0`
 cannot be un-incremented by an unrelated holder's healthy item the way the
@@ -1378,6 +1565,46 @@ work, not done in this pass.
   `PendingNonceAt`, so any earlier unconfirmed nonce for the signing key --
   including a manually-sent transaction outside this library -- blocks
   everything after it).
+
+---
+
+## 16. P5 signing key rotation
+
+The library's own verifier (`authdev.LocalVerifier`) now holds a SET of
+public keys. Rotation is additive: register the new key alongside every
+retired one.
+
+```go
+verifier, err := authdev.NewLocalVerifierSet(map[string]ed25519.PublicKey{
+    "prod-2026-01": oldPub, // retired, MUST stay registered
+    "prod-2026-09": newPub, // current
+})
+```
+
+`ledger-cli verify` takes the same set: pass `--pubkey` once per key, as
+`keyID:hex` (repeatable).
+
+Three things an operator has to know before rotating:
+
+1. **Retired public keys must stay registered forever.** Journals are
+   append-only and carry the key id they were signed with. Drop a retired
+   key and every journal signed under it fails verification with
+   `ErrUnknownAuthKey` -- which means, with `RequireVerifiedBalance=true`,
+   that withdrawals are refused for every holder with history. That is
+   fail-closed by design, not a bug, and it is not a small blast radius: it
+   is every existing user.
+2. **Register before you sign.** Deploy the verifier holding both keys
+   first; only then switch the Attestor to the new private key. The reverse
+   order leaves a window where freshly signed journals cannot be verified.
+3. **Rotation does not shrink a leaked key's power.** `authdev.LocalVerifier`
+   has no validity window: a key id it holds verifies any digest, forever.
+   Because the retired key must stay registered (point 1), rotating a
+   COMPROMISED key out does not stop it from signing a newly forged journal
+   that this verifier will accept. Containing a leaked signing key needs a
+   verifier that checks the journal's `effective_at` against a per-key
+   `NotAfter` -- the dev implementation deliberately does not, and says so
+   in its own doc comment. Treat a leaked signing key as an incident, not a
+   rotation.
 
 ---
 

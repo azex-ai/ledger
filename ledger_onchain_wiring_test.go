@@ -165,7 +165,7 @@ func TestServiceEnableOnchain_WiresTheAdvisoryLockPool(t *testing.T) {
 		close(held)
 		<-release
 		return nil
-	}, pool, core.NopLogger())
+	}, pool, core.NopLogger(), core.NopMetrics())
 	holderDone := make(chan error, 1)
 	go func() { holderDone <- holder.Run(ctx) }()
 	select {

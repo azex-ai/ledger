@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -2702,7 +2703,14 @@ func (o *Onchain) Run(ctx context.Context) error {
 	return g.Wait()
 }
 
-// runLoop mirrors Worker.runLoop's ticker + ctx.Done() exit convention.
+// runLoop mirrors Worker.runLoop's ticker + ctx.Done() exit convention,
+// including its panic recovery (I-M9, d-tamper handoff C-M7 part 3): none of
+// this Onchain's five jobs (registration_rescan, watch, recheck,
+// reorg_recheck, sweep) route through service.Worker's runLoop -- Onchain
+// keeps its own copy -- so without a recover here a single tick's panic
+// (e.g. a ChainReader/ChainScanner/Sweeper implementation bug) propagated
+// straight through errgroup.Wait and out of Run, taking the whole process
+// down with it.
 func (o *Onchain) runLoop(ctx context.Context, name string, interval time.Duration, fn func(context.Context)) error {
 	if interval <= 0 {
 		o.log().Warn("service: onchain: skipping job: interval is non-positive", "job", name)
@@ -2719,9 +2727,28 @@ func (o *Onchain) runLoop(ctx context.Context, name string, interval time.Durati
 			o.log().Info("service: onchain: stopped", "job", name)
 			return nil
 		case <-ticker.C:
-			fn(ctx)
+			o.safeRunTick(ctx, name, fn)
 		}
 	}
+}
+
+// safeRunTick executes fn, recovering any panic so a single onchain job tick
+// cannot take down the whole process. Metrics are the same shape as
+// service.Worker.safeRun's JobPanicked -- see that method's doc comment for
+// why accounting for completed/failed is left to each job closure instead of
+// centralized here.
+func (o *Onchain) safeRunTick(ctx context.Context, name string, fn func(context.Context)) {
+	defer func() {
+		if r := recover(); r != nil {
+			o.log().Error("service: onchain: job panicked",
+				"job", name,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+			o.deps.Metrics.JobPanicked(name)
+		}
+	}()
+	fn(ctx)
 }
 
 // newSweepLockedJob wraps one policy's sweepTick in a per-chain advisory
@@ -2757,7 +2784,7 @@ func (o *Onchain) runLoop(ctx context.Context, name string, interval time.Durati
 func newWatchLockedJob(chainID int64, o *Onchain, pool *pgxpool.Pool) func(context.Context) {
 	lj := NewLockedJob(fmt.Sprintf("onchain_watch:%d", chainID), func(ctx context.Context) error {
 		return o.scanChainOnce(ctx, chainID)
-	}, pool, o.deps.Logger)
+	}, pool, o.deps.Logger, o.deps.Metrics)
 	return func(ctx context.Context) {
 		if err := lj.Run(ctx); err != nil {
 			o.log().Error("service: onchain: watcher tick failed", "chain_id", chainID, "error", err)
@@ -2769,7 +2796,7 @@ func newSweepLockedJob(policy core.SweepPolicy, o *Onchain, pool *pgxpool.Pool) 
 	lockName := fmt.Sprintf("sweep:%d", policy.ChainID)
 	lj := NewLockedJob(lockName, func(ctx context.Context) error {
 		return o.sweepTick(ctx, policy)
-	}, pool, o.deps.Logger)
+	}, pool, o.deps.Logger, o.deps.Metrics)
 	return func(ctx context.Context) {
 		if err := lj.Run(ctx); err != nil {
 			o.log().Error("service: onchain: sweep job failed", "chain_id", policy.ChainID, "error", err)
