@@ -26,6 +26,19 @@ import { describe, expect, it } from "vitest";
  * "readFileSync + regex" in the style of the existing test/styles.test.ts,
  * test/mutation-feedback.test.ts and test/skin-parity.test.ts — no parser
  * needed for a heuristic this exact (audit's own suggested design).
+ *
+ * M-13 (W3 adversarial review of the gates) widened it twice, both from
+ * reproduced mutations:
+ *
+ *   - both cases matched `const` only. Changing one page to
+ *     `let { data, isLoading } = useCurrencies()` and deleting its
+ *     <ErrorState> branch passed all 203 tests, and a failed request rendered
+ *     as "No currencies yet" — J-1/J-2/J-3's exact shape.
+ *   - destructuring `isError` was enough to satisfy the rule even if nothing
+ *     ever read it. A binding that is named and then ignored renders a
+ *     failure identically to an empty result, which is the thing being
+ *     prevented; so isError must also be USED (a condition, a JSX branch,
+ *     a prop), not merely declared.
  */
 
 const pkgRoot = path.resolve(
@@ -102,6 +115,27 @@ function isAllowlisted(text: string, callIndex: number): boolean {
   return ownLineSoFar.includes(ALLOW_MARKER) || priorLine.includes(ALLOW_MARKER);
 }
 
+/**
+ * Does the file USE this identifier, beyond declaring it? Counts an
+ * occurrence that is not part of the destructuring pattern itself: a
+ * condition (`isError ?`, `isError &&`, `if (isError`), a prop
+ * (`error={isError}`), a return, or a negation. Deliberately loose about the
+ * SHAPE of the use -- pages legitimately render failure inline, through
+ * <ErrorState>, or by passing a flag down -- and exact about there being
+ * one at all.
+ */
+function consumesIdentifier(text: string, ident: string): boolean {
+  const uses = [
+    new RegExp(`\\b${ident}\\s*(\\?|&&|\\|\\|)`),
+    new RegExp(`(\\(|!|=|,|\\{)\\s*${ident}\\b\\s*(\\)|\\?|&&|\\|\\||\\}|,|:)`),
+    new RegExp(`\\breturn\\s+${ident}\\b`),
+  ];
+  // Remove the destructuring patterns first, so the declaration itself never
+  // counts as a use.
+  const withoutPatterns = text.replace(/(?:const|let|var)\s*\{[^}]*\}\s*=\s*use[A-Z]\w*\(/g, "");
+  return uses.some((re) => re.test(withoutPatterns));
+}
+
 interface Violation {
   file: string;
   line: number;
@@ -117,7 +151,8 @@ function findViolations(file: string): Violation[] {
   // between `{` and the closing `}`, so this must be matched in two steps:
   // find `const {`, extract the balanced brace group, THEN check what
   // immediately follows it is `= useXxx(`.
-  const constBraceRe = /const\s*\{/g;
+  // (?:const|let|var): a re-assignable binding is still a binding (M-13).
+  const constBraceRe = /(?:const|let|var)\s*\{/g;
   let braceMatch: RegExpExecArray | null;
   while ((braceMatch = constBraceRe.exec(text)) !== null) {
     const braceStart = braceMatch.index + braceMatch[0].indexOf("{");
@@ -126,15 +161,27 @@ function findViolations(file: string): Violation[] {
     const afterMatch = /^\s*=\s*use[A-Z]\w*\(/.exec(rest);
     if (!afterMatch) continue;
     const keys = destructuredKeys(snippet);
-    if (keys.includes("data") && !keys.includes("isError")) {
+    if (!keys.includes("data")) continue;
+    const line = text.slice(0, braceMatch.index).split("\n").length;
+    if (!keys.includes("isError")) {
       if (!isAllowlisted(text, braceMatch.index)) {
-        const line = text.slice(0, braceMatch.index).split("\n").length;
         violations.push({
           file,
           line,
           detail: `destructures data without isError: ${snippet.slice(0, 80)}`,
         });
       }
+      continue;
+    }
+    // isError is destructured -- but is it read? A binding declared and then
+    // ignored renders a failed request exactly like an empty one (M-13).
+    if (!consumesIdentifier(text, "isError") && !isAllowlisted(text, braceMatch.index)) {
+      violations.push({
+        file,
+        line,
+        detail:
+          "destructures isError but never uses it in a condition or JSX -- a failed request still renders as empty data",
+      });
     }
   }
 
@@ -142,7 +189,7 @@ function findViolations(file: string): Violation[] {
   // whether `.data` is read anywhere and, if so, whether `.isError` ever is
   // too, anywhere in the file (the binding may be threaded through several
   // components/functions before either is read).
-  const identRe = /const\s+([A-Za-z_$][\w$]*)\s*=\s*use[A-Z]\w*\(/g;
+  const identRe = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*use[A-Z]\w*\(/g;
   let identMatch: RegExpExecArray | null;
   while ((identMatch = identRe.exec(text)) !== null) {
     const ident = identMatch[1];

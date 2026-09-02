@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { readDistFile } from "./dist-freshness";
 
 /*
  * Build-output assertion for the styling pipeline (Phase 5.1).
@@ -12,23 +11,14 @@ import { describe, expect, it } from "vitest";
  *   (c) free of Tailwind's global preflight reset (so importing it never
  *       clobbers a host app's global elements).
  *
- * Requires `npm run build` first. The build runs in CI before tests.
+ * Requires `npm run build` first. The build runs in CI before tests, and
+ * readDistFile enforces the precondition rather than trusting it: a missing
+ * dist throws, and so does a dist older than src/ (m-4) -- otherwise this
+ * suite silently asserts against the previous build.
  */
 
-const pkgRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-const stylesPath = path.join(pkgRoot, "dist", "styles.css");
-
 function readStyles(): string {
-  try {
-    return readFileSync(stylesPath, "utf8");
-  } catch {
-    throw new Error(
-      `dist/styles.css not found at ${stylesPath}. Run \`npm run build\` before tests.`,
-    );
-  }
+  return readDistFile("styles.css");
 }
 
 // --- C2a (decision B) global-token gates ---------------------------------
@@ -191,16 +181,7 @@ describe("dist/styles.css", () => {
 });
 
 describe("dist/heroui.css", () => {
-  const herouiPath = path.join(pkgRoot, "dist", "heroui.css");
-  const css = (() => {
-    try {
-      return readFileSync(herouiPath, "utf8");
-    } catch {
-      throw new Error(
-        `dist/heroui.css not found at ${herouiPath}. Run \`npm run build\` before tests.`,
-      );
-    }
-  })();
+  const css = readDistFile("heroui.css");
 
   it("exists and emits layout utilities the heroui skin uses", () => {
     expect(css.length).toBeGreaterThan(0);

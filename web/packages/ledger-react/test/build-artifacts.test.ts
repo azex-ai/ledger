@@ -1,7 +1,6 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+import { readDistFile } from "./dist-freshness";
 
 /*
  * Build-output assertion (J-9, 2026-09-02 web audit): `formatAmount` and
@@ -17,20 +16,12 @@ import { describe, expect, it } from "vitest";
  * point in CI rather than only in that later shell step.
  *
  * Requires `npm run build` first, same precondition as test/styles.test.ts.
+ * readDistFile enforces that precondition rather than trusting it: a missing
+ * dist throws, and so does a dist older than src/ (m-4).
  */
 
-const pkgRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-
 function readDts(name: string): string {
-  const p = path.join(pkgRoot, "dist", name);
-  try {
-    return readFileSync(p, "utf8");
-  } catch {
-    throw new Error(`dist/${name} not found at ${p}. Run \`npm run build\` before tests.`);
-  }
+  return readDistFile(name);
 }
 
 describe("dist/*.d.ts export formatAmount from every entry that ships display helpers", () => {
