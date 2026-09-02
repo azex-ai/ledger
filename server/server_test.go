@@ -542,6 +542,12 @@ func (m *mockQueryProvider) ListJournals(ctx context.Context, cursor string, lim
 	}, "", nil
 }
 
+func (m *mockQueryProvider) ListRecentJournals(ctx context.Context, limit int32) ([]core.Journal, error) {
+	return []core.Journal{
+		{UID: "jr-1", JournalTypeUID: "jt-1", IdempotencyKey: "j1", TotalDebit: decimal.NewFromInt(100), TotalCredit: decimal.NewFromInt(100), CreatedAt: time.Now()},
+	}, nil
+}
+
 func (m *mockQueryProvider) ListEntriesByAccount(ctx context.Context, holder int64, currencyUID, cursor string, limit int32) ([]core.Entry, string, error) {
 	return []core.Entry{
 		{JournalUID: "jr-1", AccountHolder: holder, CurrencyUID: currencyUID, ClassificationUID: "cls-1", EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100), CreatedAt: time.Now()},

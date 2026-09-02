@@ -187,11 +187,20 @@ func TestVerifyLedger_TamperedOnDeletedEntry(t *testing.T) {
 	require.NotEmpty(t, report.Reasons)
 }
 
-// TestVerifyLedger_DriftWhenAnchorIsBehind pins the DRIFT classification:
-// the DB chain has advanced past what the anchor has recorded, but
-// nothing else is inconsistent -- a benign, catch-up-pending state, not
-// tampering.
-func TestVerifyLedger_DriftWhenAnchorIsBehind(t *testing.T) {
+// TestVerifyLedger_EmptyAnchorIsNotRunNotDrift pins the RECLASSIFICATION of
+// this exact scenario (2026-09-02 audit, tamper-evident.md M-3 / C-M3).
+//
+// It used to assert DRIFT -- "the DB chain has advanced past what the anchor
+// has recorded, a benign catch-up-pending state". But the anchor here is
+// EMPTY, not behind: Head() answers (0, nil, nil), which is also what it
+// answers after someone deletes it. Classifying that as benign (and exiting
+// 0 in ledger-cli) meant erasing the anchor silently disabled every external
+// check. An empty anchor over a non-empty chain is now NOT_RUN, and a real
+// lagging anchor (published >= 1, behind by a finite number) is what DRIFT
+// now means -- pinned by
+// TestVerifyLedger_DriftOnlyWhenAnchorHasPublishedButLags in
+// attest_verify_anchor_test.go.
+func TestVerifyLedger_EmptyAnchorIsNotRunNotDrift(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -209,7 +218,7 @@ func TestVerifyLedger_DriftWhenAnchorIsBehind(t *testing.T) {
 	anchor := anchordev.NewLocalFileAnchor(filepath.Join(t.TempDir(), "anchor.txt")) // empty
 	queries := postgres.NewQueryStore(pool)
 	report := service.VerifyLedger(ctx, attestStore, anchor, verifier, queries, service.VerifyConfig{})
-	require.Equal(t, service.VerifyStatusDrift, report.Status)
+	require.Equal(t, service.VerifyStatusNotRun, report.Status, "report: %+v", report)
 }
 
 // ed25519KeyPair returns a fresh Attestor/AuthVerifier pair over a

@@ -88,6 +88,7 @@ func fetchJournalAuthMaterial(ctx context.Context, q *sqlcgen.Queries, dims *dim
 			AuthDigest:    j.AuthDigest,
 			AuthSignature: j.AuthSignature,
 			AuthKeyID:     j.AuthKeyID,
+			AuthStatus:    core.AuthStatus(j.AuthStatus),
 		}
 	}
 	return out, nil

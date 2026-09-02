@@ -56,6 +56,17 @@ type AttestationStore interface {
 	// ListAttestationsFrom is a paginated ascending chain walk starting at
 	// fromSeq (inclusive).
 	ListAttestationsFrom(ctx context.Context, fromSeq int64, limit int32) ([]core.Attestation, error)
+	// RecordAnchorObservation appends one row remembering what
+	// core.Anchor.Head just reported (migration 018). Append-only: this is
+	// the memory service.VerifyLedger compares a live head against, so that
+	// "the anchor went backwards" is provable rather than
+	// indistinguishable from "the anchor was never published to"
+	// (tamper-evident.md M-3). seq == 0 is a legal, meaningful observation.
+	RecordAnchorObservation(ctx context.Context, seq int64, head []byte) error
+	// HighestObservedAnchorSeq returns the highest seq this deployment has
+	// ever recorded seeing the anchor report, or 0 if no observation has
+	// been recorded yet.
+	HighestObservedAnchorSeq(ctx context.Context) (int64, error)
 	// JournalAuthMaterial batch-fetches everything core.VerifyJournalAuth
 	// needs to reconstruct and verify each of journalIDs, in as few round
 	// trips as the store can manage (design doc §4.5's batched-fetch
@@ -231,6 +242,13 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 			// journal 写入" extends to not blocking attestation either.
 			// catchUpAnchor retries this on the next run.
 			s.logger.Error("service: attestation: anchor publish failed, will retry next run", "seq", result.Seq, "error", err)
+		} else if err := s.store.RecordAnchorObservation(ctx, result.Seq, result.RootHash); err != nil {
+			// A successful Publish is knowledge that the anchor holds this
+			// seq -- as much an observation as a Head() read, and recorded
+			// for the same reason (migration 018): without it, the memory
+			// would always lag one batch behind, and an anchor erased right
+			// after its first publish would have nothing to contradict it.
+			s.logger.Error("service: attestation: recording the anchor observation failed", "seq", result.Seq, "error", err)
 		}
 	}
 
@@ -314,10 +332,25 @@ func (s *AttestationService) catchUpAnchor(ctx context.Context) {
 	if s.anchor == nil {
 		return
 	}
-	anchorSeq, _, err := s.anchor.Head(ctx)
+	anchorSeq, anchorHead, err := s.anchor.Head(ctx)
 	if err != nil {
 		s.logger.Error("service: attestation: anchor head unavailable, skipping catch-up this run", "error", err)
 		return
+	}
+
+	// Remember what the anchor said, before doing anything about it. This is
+	// the only writer of anchor_observations (migration 018): it turns a
+	// later, LOWER head into evidence of a rollback instead of an
+	// indistinguishable "behind, catch-up pending" (tamper-evident.md M-3).
+	// Recorded on every successful read, including seq 0 -- "reachable and
+	// empty" is exactly the observation a later erasure has to contradict.
+	//
+	// A failure to record is logged, not fatal: the anchor catch-up below is
+	// what keeps the external evidence current, and skipping it because the
+	// bookkeeping insert failed would trade a real defence for a
+	// bookkeeping one.
+	if err := s.store.RecordAnchorObservation(ctx, anchorSeq, anchorHead); err != nil {
+		s.logger.Error("service: attestation: recording the anchor observation failed", "seq", anchorSeq, "error", err)
 	}
 
 	latest, err := s.store.LatestAttestation(ctx)

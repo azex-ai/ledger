@@ -34,7 +34,8 @@ SELECT
     j.effective_at,
     j.auth_digest,
     j.auth_signature,
-    j.auth_key_id
+    j.auth_key_id,
+    j.auth_status
 FROM journals j
 JOIN journal_types jt ON jt.id = j.journal_type_id
 LEFT JOIN journals rev ON rev.id = j.reversal_of

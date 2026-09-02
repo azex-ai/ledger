@@ -129,7 +129,8 @@ SELECT
     j.effective_at,
     j.auth_digest,
     j.auth_signature,
-    j.auth_key_id
+    j.auth_key_id,
+    j.auth_status
 FROM journals j
 JOIN journal_types jt ON jt.id = j.journal_type_id
 LEFT JOIN journals rev ON rev.id = j.reversal_of
@@ -148,6 +149,7 @@ type ListJournalsForAuthCheckRow struct {
 	AuthDigest     []byte      `json:"auth_digest"`
 	AuthSignature  []byte      `json:"auth_signature"`
 	AuthKeyID      string      `json:"auth_key_id"`
+	AuthStatus     string      `json:"auth_status"`
 }
 
 // T4 of the integrity-hardening wave (docs/plans/2026-08-21-integrity-hardening-contracts.md
@@ -194,6 +196,7 @@ func (q *Queries) ListJournalsForAuthCheck(ctx context.Context, journalIds []int
 			&i.AuthDigest,
 			&i.AuthSignature,
 			&i.AuthKeyID,
+			&i.AuthStatus,
 		); err != nil {
 			return nil, err
 		}

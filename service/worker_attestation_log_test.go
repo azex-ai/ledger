@@ -41,6 +41,12 @@ func (unreachableAttestationStore) ListAttestationsFrom(context.Context, int64, 
 func (unreachableAttestationStore) JournalAuthMaterial(context.Context, []int64) (map[int64]core.JournalAuthMaterial, error) {
 	panic("unreachableAttestationStore: not expected to be called in this test")
 }
+func (unreachableAttestationStore) RecordAnchorObservation(context.Context, int64, []byte) error {
+	panic("unreachableAttestationStore: not expected to be called in this test")
+}
+func (unreachableAttestationStore) HighestObservedAnchorSeq(context.Context) (int64, error) {
+	panic("unreachableAttestationStore: not expected to be called in this test")
+}
 
 type stubAttestor struct{}
 

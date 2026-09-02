@@ -200,6 +200,44 @@ func (s *AttestationStore) LeafHashesForAttestation(ctx context.Context, seq int
 	return out, nil
 }
 
+// RecordAnchorObservation implements service.AttestationStore: appends one
+// row remembering what core.Anchor.Head just reported (migration 018,
+// tamper-evident.md M-3 / C-M3).
+//
+// Why the ledger's own database is the right place for it, given that the
+// whole point of an anchor is not trusting that database: the anchor cannot
+// remember its own history in a way this deployment can check (its API is
+// "current head", and a carrier that rolled back has no reason to admit it),
+// and the memory only has to be good enough to turn "the anchor now reports
+// less than it once did" into evidence. An attacker who erases these rows as
+// well is no longer able to do the whole attack with zero database writes,
+// and the append-only trigger plus the missing UPDATE/DELETE grant mean the
+// application credential cannot do it at all.
+func (s *AttestationStore) RecordAnchorObservation(ctx context.Context, seq int64, head []byte) error {
+	if seq < 0 {
+		return fmt.Errorf("postgres: record anchor observation: negative seq %d: %w", seq, core.ErrInvalidInput)
+	}
+	if err := s.q.InsertAnchorObservation(ctx, sqlcgen.InsertAnchorObservationParams{
+		Uid:          newUID(),
+		ObservedSeq:  seq,
+		ObservedHead: head,
+	}); err != nil {
+		return fmt.Errorf("postgres: record anchor observation: %w", err)
+	}
+	return nil
+}
+
+// HighestObservedAnchorSeq implements service.AttestationStore: the highest
+// seq this deployment has ever recorded seeing the anchor report, or 0 if
+// nothing has been recorded yet.
+func (s *AttestationStore) HighestObservedAnchorSeq(ctx context.Context) (int64, error) {
+	seq, err := s.q.GetHighestObservedAnchorSeq(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: highest observed anchor seq: %w", err)
+	}
+	return seq, nil
+}
+
 func attestationFromRow(row sqlcgen.LedgerAttestation) core.Attestation {
 	return core.Attestation{
 		UID:               pgToUID(row.Uid),

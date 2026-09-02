@@ -430,6 +430,21 @@ type JournalAuthMaterial struct {
 	AuthDigest    []byte
 	AuthSignature []byte
 	AuthKeyID     string
+	// AuthStatus is the journal's stored journals.auth_status. It is NOT an
+	// input to VerifyJournalAuth (which deliberately answers only "does this
+	// signature check out", see its scope note) -- it is here so a caller
+	// that gets a NEGATIVE answer can tell the three unsigned cases apart:
+	//   - AuthStatusUnsignedTxMode: legitimate (posted inside a caller's
+	//     transaction, where there was no safe point to sign), and must not
+	//     be reported as tamper evidence.
+	//   - AuthStatusUnsignedNoAttestor: signing was off system-wide -- or the
+	//     row never went through PostJournal at all, which is what a forged
+	//     INSERT looks like, since this is auth_status's column default.
+	//   - AuthStatusSigned but failing verification: real tamper evidence.
+	// service.VerifyLedger's uncovered-entry check (design doc §8.4 step 3)
+	// needs exactly this distinction; without it, every journal a consumer
+	// legitimately posted via RunInTx would read as a forgery.
+	AuthStatus AuthStatus
 }
 
 // ---------------------------------------------------------------------------

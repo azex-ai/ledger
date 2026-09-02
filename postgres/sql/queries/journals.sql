@@ -99,6 +99,25 @@ WHERE id > sqlc.arg(cursor_id)::bigint
 ORDER BY id ASC
 LIMIT sqlc.arg(page_limit)::int;
 
+-- name: ListRecentJournals :many
+-- The NEWEST page_limit journals, newest first -- deliberately a separate
+-- query from ListJournalsCursor above, which walks ASCENDING from a cursor
+-- (the audit-pagination shape the HTTP list endpoint needs).
+--
+-- service.VerifyLedger's step 4 samples "the most recent journals" for a
+-- valid P5 signature (design doc §8.4). Before this query existed it called
+-- ListJournalsCursor with an empty cursor, i.e. id > 0 ORDER BY id ASC --
+-- the OLDEST page, which on any ledger with more than page_limit journals
+-- can never contain a freshly forged row (2026-09-02 audit,
+-- tamper-evident.md M-1). Sampling has to look where a forgery would land.
+--
+-- No cursor argument: this is a fixed-size head sample, not a paginated
+-- walk. A caller that needs to page through history uses
+-- ListJournalsCursor.
+SELECT * FROM journals
+ORDER BY id DESC
+LIMIT sqlc.arg(page_limit)::int;
+
 -- name: SumGlobalDebitCredit :many
 SELECT
   entry_type,

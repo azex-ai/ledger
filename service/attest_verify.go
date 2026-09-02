@@ -4,7 +4,7 @@
 // §8.4, P6): pull the external anchor's head (never trust the DB alone),
 // walk the attestation chain checking seq continuity / prev_root linkage /
 // signatures, recompute each batch's digest from live entries, sample
-// P5's per-journal signatures, and report one of
+// P5's per-journal signatures over the NEWEST journals, and report one of
 // VERIFIED | DRIFT | TAMPERED | NOT_RUN.
 package service
 
@@ -22,10 +22,22 @@ type VerifyStatus string
 const (
 	// VerifyStatusVerified means every check that ran passed.
 	VerifyStatusVerified VerifyStatus = "VERIFIED"
-	// VerifyStatusDrift means a benign, expected inconsistency was found
-	// -- currently only "the external anchor is behind the DB's chain"
-	// (catch-up pending, not evidence of tampering: nothing else in the
-	// chain failed).
+	// VerifyStatusDrift means a benign, SELF-HEALING backlog was found and
+	// nothing else in the chain failed. Exactly two shapes qualify, both of
+	// which the next attestation run closes on its own:
+	//
+	//   - the external anchor is behind the DB's chain by a finite number of
+	//     seqs, having published at least one (anchorSeq > 0);
+	//   - entries exist that no attestation covers yet, and every journal
+	//     they belong to is legitimately accounted for.
+	//
+	// Deliberately NOT drift, since the 2026-09-02 audit (tamper-evident.md
+	// M-3): an anchor reporting seq 0 while the DB chain is non-empty. That
+	// is indistinguishable from an ERASED anchor, so it is NOT_RUN
+	// (fail-closed) -- and if a previous observation recorded a higher seq,
+	// it is TAMPERED. "The anchor is behind" and "the anchor is gone" are
+	// not the same finding, and reading the second as benign made deleting
+	// the anchor a silent way to switch external verification off.
 	VerifyStatusDrift VerifyStatus = "DRIFT"
 	// VerifyStatusTampered means a check found concrete evidence of
 	// forgery, deletion, or history rewrite.
@@ -65,17 +77,44 @@ type VerifyReport struct {
 	// attempted or found nothing usable, not that nothing was found --
 	// see Reasons for that seq's text.
 	MismatchedEntryIDs map[int64][]int64 `json:"mismatched_entry_ids,omitempty"`
+	// UncoveredEntries counts entries that no attestation covers yet, as
+	// found by step 3b (design doc §8.4 step 3's "LEFT JOIN 找未覆盖 entry",
+	// missing until the 2026-09-02 audit -- tamper-evident.md M-2). A
+	// non-zero count is never VERIFIED: either the journals behind those
+	// entries are legitimate and the attestation job simply has not caught
+	// up (DRIFT), or one of them is not, in which case it is TAMPERED. The
+	// count is capped by VerifyConfig.UncoveredProbeLimit; when it equals
+	// that limit the true number may be higher, and Reasons says so.
+	UncoveredEntries int64 `json:"uncovered_entries"`
+	// AnchorSeq is the seq core.Anchor.Head reported for this run, and
+	// LastObservedAnchorSeq the highest seq this deployment had ever
+	// previously recorded seeing (migration 018's anchor_observations).
+	// Reported side by side because their RELATION is the finding:
+	// AnchorSeq < LastObservedAnchorSeq is a rollback, which no benign
+	// mechanism produces.
+	AnchorSeq             int64 `json:"anchor_seq"`
+	LastObservedAnchorSeq int64 `json:"last_observed_anchor_seq"`
 }
 
 // VerifyConfig tunes VerifyLedger. Zero value uses sensible defaults via
 // DefaultVerifyConfig.
 type VerifyConfig struct {
 	// JournalSampleSize is how many of the most recent journals step 4
-	// samples for a valid P5 signature. default: 20
+	// samples for a valid P5 signature -- newest first
+	// (core.JournalQuerier.ListRecentJournals), which is where a row forged
+	// today lands. default: 20
 	JournalSampleSize int32
 	// ChainPageSize is the page size for walking the attestation chain in
 	// step 2. default: 500
 	ChainPageSize int32
+	// UncoveredProbeLimit caps how many uncovered entries step 3b fetches
+	// before it stops counting. It is a probe, not an exhaustive scan: the
+	// question it answers ("is anything sitting outside attestation
+	// coverage, and is any of it unaccounted for") does not need the full
+	// set, and an unbounded read here would be an easy way to turn
+	// verification into a table scan on a busy ledger. Hitting the limit is
+	// reported (never silently truncated). default: 1000
+	UncoveredProbeLimit int32
 	// ReferenceEntries is the FALLBACK localization path, used only when
 	// the self-contained one (migration 048's entry_attestations.leaf_hash,
 	// tried first) is unavailable for a seq -- e.g. a row that predates the
@@ -94,7 +133,7 @@ type VerifyConfig struct {
 
 // DefaultVerifyConfig returns VerifyConfig's defaults.
 func DefaultVerifyConfig() VerifyConfig {
-	return VerifyConfig{JournalSampleSize: 20, ChainPageSize: 500}
+	return VerifyConfig{JournalSampleSize: 20, ChainPageSize: 500, UncoveredProbeLimit: 1000}
 }
 
 // VerifyLedger runs the five-step verification (design doc §8.4).
@@ -107,6 +146,9 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	}
 	if cfg.ChainPageSize <= 0 {
 		cfg.ChainPageSize = DefaultVerifyConfig().ChainPageSize
+	}
+	if cfg.UncoveredProbeLimit <= 0 {
+		cfg.UncoveredProbeLimit = DefaultVerifyConfig().UncoveredProbeLimit
 	}
 
 	// Step 1: pull the anchor's head. Never trust the DB for this value.
@@ -122,9 +164,19 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	}
 
 	report := VerifyReport{}
+	// reasons is TAMPER EVIDENCE only -- anything appended here makes the
+	// report TAMPERED. driftReasons is the benign, self-healing backlog
+	// (anchor catch-up, attestation catch-up): reported, never silent, but
+	// not evidence of forgery. Keeping them in two slices is what stops a
+	// "your attestation job is a bit behind" note from reading as tampering,
+	// and equally stops it from being dropped so the run can look VERIFIED.
 	var reasons []string
+	var driftReasons []string
 	tampered := func(format string, args ...any) {
 		reasons = append(reasons, fmt.Sprintf(format, args...))
+	}
+	drifted := func(format string, args ...any) {
+		driftReasons = append(driftReasons, fmt.Sprintf(format, args...))
 	}
 
 	// Step 2 + 3 combined per seq: chain continuity, prev_root linkage,
@@ -396,10 +448,119 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 		tampered("anchor knows about seq %d but the DB chain only reaches seq %d", anchorSeq, maxSeqSeen)
 	}
 
-	// Step 4: sample the most recent journals' P5 signatures.
-	journalList, _, err := journals.ListJournals(ctx, "", cfg.JournalSampleSize)
+	// Anchor ROLLBACK (design doc §8.4, tamper-evident.md M-3): the checks
+	// above can only compare the anchor against the DB. Neither can see that
+	// the anchor itself went backwards -- Head's contract is "the highest
+	// seq I know about, or 0 if empty", so an erased or rolled-back anchor
+	// answers exactly like one nothing was ever published to. The only thing
+	// that distinguishes them is what this deployment recorded seeing
+	// before (migration 018's anchor_observations, written by
+	// AttestationService.catchUpAnchor).
+	//
+	// A read failure here is NOT_RUN, not a shrug: if the memory is
+	// unreadable, this run cannot tell a rollback from a first read, and
+	// "cannot tell" must never resolve to VERIFIED.
+	lastObserved, err := store.HighestObservedAnchorSeq(ctx)
 	if err != nil {
-		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("list journals for sampling: %v", err)}}
+		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("highest observed anchor seq unavailable: %v", err)}}
+	}
+	report.AnchorSeq = anchorSeq
+	report.LastObservedAnchorSeq = lastObserved
+	if anchorSeq < lastObserved {
+		tampered("anchor head regressed: it now reports seq %d but this deployment previously recorded seeing seq %d -- "+
+			"no benign mechanism moves an anchor backwards; the carrier's own version history is the forensic record",
+			anchorSeq, lastObserved)
+	}
+
+	// Step 3b: entries no attestation covers (design doc §8.4 step 3's
+	// "LEFT JOIN 找未覆盖 entry"). Missing entirely until the 2026-09-02
+	// audit (tamper-evident.md M-2): every check above walks the chain and
+	// re-derives what the chain SAYS it covers, so an entry the chain never
+	// mentioned was invisible to all of them -- which is precisely the shape
+	// of a row inserted by direct SQL after the last batch.
+	//
+	// Two outcomes, deliberately different:
+	//   - a journal behind an uncovered entry that is not legitimately
+	//     accounted for (unsigned where signing is wired, or claiming a
+	//     signature that does not verify) is TAMPERED;
+	//   - everything accounted for is a benign attestation backlog: DRIFT,
+	//     never VERIFIED. The next RunAttestBatch closes it.
+	uncovered, err := store.UncoveredEntries(ctx, cfg.UncoveredProbeLimit)
+	if err != nil {
+		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("probe uncovered entries: %v", err)}}
+	}
+	report.UncoveredEntries = int64(len(uncovered))
+	if len(uncovered) > 0 {
+		uncoveredJournalIDs := make([]int64, 0, len(uncovered))
+		seenUncovered := make(map[int64]struct{}, len(uncovered))
+		for _, e := range uncovered {
+			if _, ok := seenUncovered[e.JournalID]; !ok {
+				seenUncovered[e.JournalID] = struct{}{}
+				uncoveredJournalIDs = append(uncoveredJournalIDs, e.JournalID)
+			}
+		}
+		materials, err := store.JournalAuthMaterial(ctx, uncoveredJournalIDs)
+		if err != nil {
+			return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("auth material for uncovered entries: %v", err)}}
+		}
+		var unaccounted []int64
+		var uncoveredTxMode int
+		for _, id := range uncoveredJournalIDs {
+			material, ok := materials[id]
+			if !ok {
+				// journal_entries.journal_id is FK-enforced, so this should
+				// not happen -- and an entry whose journal cannot be read is
+				// the least trustworthy row in the table, not the most.
+				unaccounted = append(unaccounted, id)
+				continue
+			}
+			switch material.AuthStatus {
+			case core.AuthStatusUnsignedTxMode:
+				// Legitimate: posted inside a caller's transaction, where
+				// there is no safe point to call a signer (core/auth.go).
+				// Counted, not flagged -- the same treatment step 4 gives it.
+				uncoveredTxMode++
+			case core.AuthStatusSigned:
+				if err := core.VerifyJournalAuth(ctx, verifier, material.Input, material.EffectiveAt, material.AuthDigest, material.AuthSignature, material.AuthKeyID); err != nil {
+					unaccounted = append(unaccounted, id)
+				}
+			default:
+				// unsigned_no_attestor. VerifyLedger has already returned
+				// NOT_RUN if no verifier was configured, so signing IS wired
+				// for this deployment -- and this is auth_status's column
+				// DEFAULT, i.e. what a row that never went through
+				// PostJournal carries. Same reading as step 4's
+				// unsigned_no_attestor branch, which is the whole point of
+				// keeping the two consistent.
+				unaccounted = append(unaccounted, id)
+			}
+		}
+		if len(unaccounted) > 0 {
+			tampered("%d of the %d entries no attestation covers belong to %d journal(s) with no valid authorization "+
+				"(internal journal ids %v) -- an unattested, unauthorized entry is what a direct-SQL forgery looks like",
+				len(uncovered), len(uncovered), len(unaccounted), unaccounted)
+		}
+		drifted("%d entr(ies) across %d journal(s) are not covered by any attestation yet (%d of those journals were posted in tx mode); "+
+			"the next attestation run covers them",
+			len(uncovered), len(uncoveredJournalIDs), uncoveredTxMode)
+		if int32(len(uncovered)) >= cfg.UncoveredProbeLimit {
+			drifted("uncovered-entry probe hit its limit of %d, so the real number may be higher -- "+
+				"this run can only speak for the %d it looked at", cfg.UncoveredProbeLimit, len(uncovered))
+		}
+	}
+
+	// Step 4: sample the most recent journals' P5 signatures.
+	//
+	// ListRecentJournals, never ListJournals: the latter pages ASCENDING
+	// from a cursor, so an empty cursor returns the OLDEST page. This step
+	// spent its whole existence sampling the oldest 20 journals while
+	// claiming to sample the newest (2026-09-02 audit, tamper-evident.md
+	// M-1) -- on any ledger with more than JournalSampleSize journals, a
+	// row forged today is structurally outside that window, which is the
+	// one place a forgery is guaranteed NOT to be.
+	journalList, err := journals.ListRecentJournals(ctx, cfg.JournalSampleSize)
+	if err != nil {
+		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("list recent journals for sampling: %v", err)}}
 	}
 	// Journals in the sample that were never signed. Silence here was the
 	// original behaviour and it was wrong: a forged row inserted by direct
@@ -458,13 +619,37 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	}
 	report.JournalsUnsignedTxMode = unsignedTxMode
 
+	if anchorSeq > 0 && anchorSeq < maxSeqSeen {
+		drifted("anchor is behind the DB chain by %d attestation(s) (catch-up pending)", maxSeqSeen-anchorSeq)
+	}
+
+	// Classification, in strict precedence order.
+	//
+	// TAMPERED first: concrete evidence outranks everything, including the
+	// empty-anchor case below -- an operator handed NOT_RUN would go looking
+	// at their anchor plumbing while a forged row sat in the ledger.
+	//
+	// Then the empty anchor. anchorSeq == 0 with a non-empty DB chain means
+	// the one party this whole mechanism does not trust (whoever holds the
+	// database) cannot be contradicted by anything external, and no external
+	// check ran at all. NOT_RUN, never VERIFIED and never DRIFT
+	// (tamper-evident.md M-3: reading it as DRIFT made `rm anchor.txt` a
+	// silent, exit-code-0 way to disable P6). If a previous observation
+	// recorded a higher seq, the regression check above has already made
+	// this TAMPERED instead.
 	switch {
 	case len(reasons) > 0:
 		report.Status = VerifyStatusTampered
-		report.Reasons = reasons
-	case anchorSeq < maxSeqSeen:
+		report.Reasons = append(reasons, driftReasons...)
+	case anchorSeq == 0 && maxSeqSeen > 0:
+		report.Status = VerifyStatusNotRun
+		report.Reasons = append([]string{fmt.Sprintf(
+			"anchor reports empty while the DB chain reaches seq %d: nothing external corroborates the chain, "+
+				"and an erased anchor is indistinguishable from one that was never published to "+
+				"(no prior observation recorded a higher seq)", maxSeqSeen)}, driftReasons...)
+	case len(driftReasons) > 0:
 		report.Status = VerifyStatusDrift
-		report.Reasons = []string{fmt.Sprintf("anchor is behind the DB chain by %d attestation(s) (catch-up pending)", maxSeqSeen-anchorSeq)}
+		report.Reasons = driftReasons
 	default:
 		report.Status = VerifyStatusVerified
 	}

@@ -12,6 +12,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getHighestObservedAnchorSeq = `-- name: GetHighestObservedAnchorSeq :one
+SELECT COALESCE(MAX(observed_seq), 0)::bigint AS highest_observed_seq
+FROM anchor_observations
+`
+
+// The highest seq this deployment has ever SEEN the anchor report. 0 means
+// no observation has been recorded yet -- which is why a live Head() of 0 is
+// NOT_RUN (indistinguishable from "never published") rather than TAMPERED
+// until there is a recorded observation above it to contradict.
+func (q *Queries) GetHighestObservedAnchorSeq(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, getHighestObservedAnchorSeq)
+	var highest_observed_seq int64
+	err := row.Scan(&highest_observed_seq)
+	return highest_observed_seq, err
+}
+
 const getLatestLedgerAttestation = `-- name: GetLatestLedgerAttestation :one
 
 SELECT id, uid, seq, entry_count, batch_digest, prev_root, root_hash, signature, key_id, created_at, merkle_root, auth_verdict_digest FROM ledger_attestations ORDER BY seq DESC LIMIT 1
@@ -64,6 +80,27 @@ func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (Led
 		&i.AuthVerdictDigest,
 	)
 	return i, err
+}
+
+const insertAnchorObservation = `-- name: InsertAnchorObservation :exec
+INSERT INTO anchor_observations (uid, observed_seq, observed_head)
+VALUES ($1, $2, $3)
+`
+
+type InsertAnchorObservationParams struct {
+	Uid          pgtype.UUID `json:"uid"`
+	ObservedSeq  int64       `json:"observed_seq"`
+	ObservedHead []byte      `json:"observed_head"`
+}
+
+// Records one successful core.Anchor.Head read (migration 018,
+// tamper-evident.md M-3). Append-only: the table has no UPDATE/DELETE grant
+// and carries ledger_block_mutation() triggers, so every observation the
+// attestation job ever made stays on record. observed_seq = 0 is a legal,
+// meaningful row ("the anchor was reachable and reported empty").
+func (q *Queries) InsertAnchorObservation(ctx context.Context, arg InsertAnchorObservationParams) error {
+	_, err := q.db.Exec(ctx, insertAnchorObservation, arg.Uid, arg.ObservedSeq, arg.ObservedHead)
+	return err
 }
 
 const insertEntryAttestations = `-- name: InsertEntryAttestations :exec

@@ -33,6 +33,14 @@ type AccountPolicyChange struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type AnchorObservation struct {
+	ID           int64       `json:"id"`
+	Uid          pgtype.UUID `json:"uid"`
+	ObservedSeq  int64       `json:"observed_seq"`
+	ObservedHead []byte      `json:"observed_head"`
+	ObservedAt   time.Time   `json:"observed_at"`
+}
+
 type BalanceCheckpoint struct {
 	AccountHolder    int64          `json:"account_holder"`
 	CurrencyID       int64          `json:"currency_id"`

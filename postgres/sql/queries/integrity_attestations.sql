@@ -94,3 +94,20 @@ SELECT entry_id, leaf_hash
 FROM entry_attestations
 WHERE seq = $1
 ORDER BY entry_id ASC;
+
+-- name: InsertAnchorObservation :exec
+-- Records one successful core.Anchor.Head read (migration 018,
+-- tamper-evident.md M-3). Append-only: the table has no UPDATE/DELETE grant
+-- and carries ledger_block_mutation() triggers, so every observation the
+-- attestation job ever made stays on record. observed_seq = 0 is a legal,
+-- meaningful row ("the anchor was reachable and reported empty").
+INSERT INTO anchor_observations (uid, observed_seq, observed_head)
+VALUES ($1, $2, $3);
+
+-- name: GetHighestObservedAnchorSeq :one
+-- The highest seq this deployment has ever SEEN the anchor report. 0 means
+-- no observation has been recorded yet -- which is why a live Head() of 0 is
+-- NOT_RUN (indistinguishable from "never published") rather than TAMPERED
+-- until there is a recorded observation above it to contradict.
+SELECT COALESCE(MAX(observed_seq), 0)::bigint AS highest_observed_seq
+FROM anchor_observations;

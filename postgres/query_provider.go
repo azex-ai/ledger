@@ -108,6 +108,26 @@ func (s *QueryStore) ListJournals(ctx context.Context, cursor string, limit int3
 	return result, nextAuditCursor(rows, limit), nil
 }
 
+// ListRecentJournals implements core.JournalQuerier: the newest journals
+// first, no cursor. See that method's doc comment for why it is separate
+// from ListJournals -- and postgres/sql/queries/journals.sql's
+// ListRecentJournals for the query itself.
+func (s *QueryStore) ListRecentJournals(ctx context.Context, limit int32) ([]core.Journal, error) {
+	rows, err := s.q.ListRecentJournals(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list recent journals: %w", err)
+	}
+	result := make([]core.Journal, len(rows))
+	for i, j := range rows {
+		journal, err := journalFromRow(ctx, s.dims, s.q, j)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = *journal
+	}
+	return result, nil
+}
+
 // --- EntryQuerier ---
 
 func (s *QueryStore) ListEntriesByAccount(ctx context.Context, holder int64, currencyUID string, cursor string, limit int32) ([]core.Entry, string, error) {
