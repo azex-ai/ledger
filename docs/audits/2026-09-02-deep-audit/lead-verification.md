@@ -157,3 +157,4 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | `w3-review/gates.md` | 34 次 mutation，23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿/恒 skip | w3-gates-fixes |
 
 复审证明了契约 §0「兄弟扫描」在执行上仍被形态描述框住：C-1 的兄弟被描述成「读 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」。这条写进最终 README 的方法教训。
+| W3-citations | `8a50bf5` 系列（7 commit） | core 全绿；白名单常量已为空（代码事实）。lead 两次 mutation（I-2 去掉全部反引号；I-2 前三个引用改成不存在的符号）**均绿** —— 证实 gates 复审的 C-2：leaves=0 静默跳过、且只要任一引用匹配即通过。已交 w3-gates-fixes 修门禁本身 | merge commit | 28 条 pin 因门禁看不穿本地 helper 被降为 Related tests：后续让门禁追一层本地 helper 后再升回（W3 后续） |

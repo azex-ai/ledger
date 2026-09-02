@@ -1813,3 +1813,4 @@
 | Critical | 两条破坏性变更门禁在 CI 不可能红（diff vs HEAD；`--depth 1` 下 skip） | w3-gates-fixes：对照 merge-base / release tag；`fetch-depth: 0`；拿不到历史→红 |
 | Major | `TestPostJournal_IdempotentReplayNeverInsertsUnsignedRow` 拆掉实现仍绿 | w3-gates-fixes 重写 |
 | 19 处 | 其余门禁盲区（见 `w3-review/gates.md` 逐条表） | w3-gates-fixes，同一 mutation 修后必红 |
+| w3-citations | 28 条真实 pin 因门禁 AST 只看被引用函数自身函数体（不追本地 helper / raw SQL 探测）被降为「Related tests」；门禁追一层本地 helper 后再升回 Pinned by | W3 后续 |
