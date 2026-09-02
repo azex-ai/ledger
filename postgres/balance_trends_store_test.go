@@ -118,6 +118,26 @@ func TestBalanceTrends_GapFill(t *testing.T) {
 	liveBalance := points[4].Balance
 	assert.True(t, liveBalance.Equal(decimal.NewFromInt(500)),
 		"today live balance override: expected 500, got %s", liveBalance)
+
+	// Direction (2026-09-02 audit A-M1). The fixture above is exactly the one
+	// that exposed it and it was already here -- a debit-normal, available
+	// wallet with a DR of 500 -- but the only Inflow/Outflow assertion in the
+	// repository was on an EMPTY account (TestBalanceTrends_EmptyAccount
+	// below), where both are trivially zero. So the columns were never
+	// checked for direction at all, and they reported this deposit of 500 as
+	// an OUTFLOW of 500: the query tested entry_type without joining
+	// classifications, which is backwards for every debit-normal role account
+	// (main_wallet, locked) and accidentally right only for credit-normal
+	// pending.
+	//
+	// "Inflow" means "made this dimension's balance go up", the same
+	// definition holder.sql states for its net_amount. Two user-facing
+	// surfaces describing one deposit must not disagree about which way it
+	// went.
+	assert.True(t, points[4].Inflow.Equal(decimal.NewFromInt(500)),
+		"a 500 deposit into a debit-normal wallet is an INFLOW of 500, got %s", points[4].Inflow)
+	assert.True(t, points[4].Outflow.IsZero(),
+		"nothing left the wallet, so outflow must be 0, got %s", points[4].Outflow)
 }
 
 func TestBalanceTrends_NoSnapshots(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	ledger "github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
@@ -34,7 +35,7 @@ type holderFixture struct {
 	wallet  string // available role
 	locked  string // locked role
 	pending string // pending role
-	feeExp  string // role-less holder-side tracker
+	feeExp  string // memo-tagged holder-side cost tracker (the shipped preset's configuration)
 	system  string // system custodial
 }
 
@@ -56,8 +57,16 @@ func seedHolderFixture(t *testing.T) (holderFixture, context.Context) {
 		wallet:  postgrestest.SeedClassificationWithRole(t, pool, "main_wallet", "Main Wallet", "debit", false, "available"),
 		locked:  postgrestest.SeedClassificationWithRole(t, pool, "locked", "Locked", "debit", false, "locked"),
 		pending: postgrestest.SeedClassificationWithRole(t, pool, "pending", "Pending", "credit", false, "pending"),
-		feeExp:  postgrestest.SeedClassification(t, pool, "fee_expense", "Fee Expense", "debit", false),
-		system:  postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true),
+		// balance_role='memo', matching presets/templates.go's shipped
+		// fee_expense. It used to be SeedClassification, whose INSERT omits
+		// balance_role and lands '' -- the configuration the product stopped
+		// using when the 2026-08-26 M-4 fix retagged it. The test therefore
+		// went on passing against a setup no deployment had, while the real
+		// one silently dropped withdrawal fees from user statements
+		// (2026-09-02 audit A-M3). A fixture that is not what the presets
+		// install is not a fixture, it is a second product.
+		feeExp: postgrestest.SeedClassificationWithRole(t, pool, "fee_expense", "Fee Expense", "debit", false, "memo"),
+		system: postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true),
 	}
 
 	// Seed the deposit journal type's display label directly (the store
@@ -95,8 +104,11 @@ func TestHolderTransactionsProjection(t *testing.T) {
 	// (1) Simple inbound deposit: +100 USD.
 	jDeposit := f.deposit(t, ctx, "ht-dep", 100)
 
-	// (2) Fee charge: wallet -5, role-less fee_expense +5 — the role filter
-	// must keep this visible as out/5 (not net it to zero).
+	// (2) Fee charge: wallet -5, memo-tagged fee_expense +5 — the role filter
+	// must keep this visible as out/5 (not net it to zero). This is the case
+	// that broke: 'memo' passed the old `balance_role <> ''` filter, the two
+	// holder-side legs netted to exactly zero, and holder_store.go's
+	// net.IsZero() guard dropped the row entirely.
 	f.post(t, ctx, f.jtPlain, "ht-fee", []core.EntryInput{
 		{AccountHolder: f.holder, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(5)},
 		{AccountHolder: f.holder, CurrencyUID: f.usdUID, ClassificationUID: f.feeExp, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(5)},
@@ -143,7 +155,7 @@ func TestHolderTransactionsProjection(t *testing.T) {
 	assert.True(t, decimal.NewFromInt(20).Equal(items[2].Amount))
 
 	assert.Equal(t, core.HolderTransactionOut, items[3].Direction)
-	assert.True(t, decimal.NewFromInt(5).Equal(items[3].Amount), "fee stays visible despite role-less counter-entry")
+	assert.True(t, decimal.NewFromInt(5).Equal(items[3].Amount), "fee stays visible despite memo-tagged counter-entry")
 
 	assert.Equal(t, jDeposit.UID, items[4].UID)
 	assert.Equal(t, core.HolderTransactionIn, items[4].Direction)
@@ -314,4 +326,117 @@ func TestHolderBalancesAndHolds(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, only, 1)
 	assert.Equal(t, "EUR", only[0].CurrencyCode)
+}
+
+// TestHolderStatement_ExplainsEveryMovementOfTheBalance is the structural pin
+// for the 2026-09-02 audit's A-M3, and it is deliberately stated as a property
+// rather than as a list of expected rows.
+//
+// The defect was not "one row is missing". It was that a holder's balance and
+// a holder's statement are produced by two different queries over two
+// different classification scopes, and the scopes were allowed to drift: the
+// M-4 fix retagged fee_expense to 'memo' in one of them and not the other, so
+// a withdrawal fee left the balance while leaving no line item anywhere.
+// Measured: breakdown total 395, statement lines summing to 400, five units
+// unexplained.
+//
+// Asserting sum(statement) == breakdown.Total closes the whole class: any
+// future divergence between "money the holder has" and "money the holder can
+// see move" fails here, whatever caused it. It runs the shipped withdrawal
+// flow through the facade, so it is measuring the presets a consumer actually
+// installs and not a hand-built fixture.
+func TestHolderStatement_ExplainsEveryMovementOfTheBalance(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	require.NoError(t, svc.InstallDefaultPresets(ctx))
+
+	curUID := postgrestest.SeedCurrency(t, pool, "USD-STMT", "US Dollar Statement")
+	const holder = int64(9401)
+
+	steps := []struct {
+		template string
+		amounts  map[string]decimal.Decimal
+	}{
+		{"deposit_confirm", map[string]decimal.Decimal{"amount": decimal.NewFromInt(500)}},
+		{"lock_funds", map[string]decimal.Decimal{"amount": decimal.NewFromInt(105)}},
+		{"withdraw_fee", map[string]decimal.Decimal{"fee": decimal.NewFromInt(5)}},
+		{"withdraw_confirm", map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)}},
+	}
+	for i, st := range steps {
+		_, err := svc.JournalWriter().ExecuteTemplate(ctx, st.template, core.TemplateParams{
+			HolderID:       holder,
+			CurrencyUID:    curUID,
+			IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("stmt-%d-%s", i, st.template)),
+			Amounts:        st.amounts,
+			Source:         "holder_statement_test",
+		})
+		require.NoErrorf(t, err, "step %d (%s)", i, st.template)
+	}
+
+	breakdown, err := svc.BalanceReader().GetBalanceBreakdown(ctx, holder, curUID)
+	require.NoError(t, err)
+
+	items, next, err := svc.HolderReader().ListHolderTransactions(ctx, holder, "", 50)
+	require.NoError(t, err)
+	require.Empty(t, next, "the fixture fits on one page")
+
+	statementNet := decimal.Zero
+	for _, it := range items {
+		switch it.Direction {
+		case core.HolderTransactionIn:
+			statementNet = statementNet.Add(it.Amount)
+		case core.HolderTransactionOut:
+			statementNet = statementNet.Sub(it.Amount)
+		default:
+			t.Fatalf("transaction %s has no direction", it.UID)
+		}
+	}
+
+	assert.Truef(t, statementNet.Equal(breakdown.Total),
+		"the statement must account for the balance exactly: breakdown.Total=%s but the statement nets to %s "+
+			"(%s unexplained). Every classification that moves the holder's total must be inside the statement's "+
+			"scope, and only those.",
+		breakdown.Total, statementNet, breakdown.Total.Sub(statementNet))
+
+	// And the fee is a line the user can point at, not just arithmetic that
+	// happens to add up.
+	var sawFee bool
+	for _, it := range items {
+		if it.Direction == core.HolderTransactionOut && it.Amount.Equal(decimal.NewFromInt(5)) {
+			sawFee = true
+		}
+	}
+	assert.True(t, sawFee, "the 5-unit withdrawal fee must appear as its own outgoing line: %+v", items)
+}
+
+// TestHolderCurrencies_IgnoresMemoOnlyCurrencies is A-N4: ListHolderCurrencies
+// shared the statement's `balance_role <> ”` predicate, so a currency in
+// which the holder had nothing but a memo-tagged cost entry was offered to
+// them as one of "their" currencies -- a wallet tab whose balance is zero and
+// always will be.
+func TestHolderCurrencies_IgnoresMemoOnlyCurrencies(t *testing.T) {
+	f, ctx := seedHolderFixture(t)
+
+	// EUR: only a memo-tagged fee_expense entry, no spendable position.
+	f.post(t, ctx, f.jtPlain, "cur-memo-only", []core.EntryInput{
+		{AccountHolder: f.holder, CurrencyUID: f.eurUID, ClassificationUID: f.feeExp, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(7)},
+		{AccountHolder: -f.holder, CurrencyUID: f.eurUID, ClassificationUID: f.system, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(7)},
+	})
+	// USD: a real deposit.
+	f.deposit(t, ctx, "cur-real", 100)
+
+	// ListHolderBalances fans out over exactly the currency list this
+	// predicate produces, so it is the consumer-visible face of the query.
+	balances, err := f.ledger.ListHolderBalances(ctx, f.holder, "")
+	require.NoError(t, err)
+
+	codes := make([]string, 0, len(balances))
+	for _, b := range balances {
+		codes = append(codes, b.CurrencyCode)
+	}
+	assert.Equal(t, []string{"USD"}, codes,
+		"a currency the holder only ever paid a memo-tracked cost in is not a currency they hold")
 }

@@ -191,6 +191,43 @@ WHERE account_holder = $1
   AND classification_id = $3
   AND effective_at < $4;
 
+-- name: GetMaxEntryCreatedAtForHolderCurrencyBefore :one
+-- The dimension-agnostic sibling of GetMaxEntryCreatedAtForDimensionBefore:
+-- the latest created_at among ALL of one (account_holder, currency_id)'s
+-- entries whose effective_at is before cutoff.
+--
+-- The per-dimension version can only ask "was this row invalidated", which is
+-- unanswerable for a dimension that HAS no row. Backdating a journal into an
+-- already-snapshotted date can introduce a classification that did not exist
+-- when the snapshot ran, and that dimension is then absent from the cached
+-- set entirely -- an as-of read silently short by the whole position rather
+-- than wrong by some amount. A missing row is harder to notice than a wrong
+-- number, and the sparse snapshot mode (snapshot_extra_store.go writes no row
+-- when a balance did not change) makes "no row" the normal case. Comparing
+-- this value against the OLDEST snapshot row of the date tells the reader
+-- that something backdated landed at all, which is when the whole dimension
+-- set has to be recomputed rather than patched row by row.
+SELECT COALESCE(MAX(created_at), 'epoch'::timestamptz) AS max_created_at
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND effective_at < $3;
+
+-- name: ListBalancesAtForHolderCurrency :many
+-- ListBalancesAt narrowed to one (account_holder, currency_id). The unscoped
+-- version aggregates the whole table and is filtered in Go, which is fine for
+-- the rollup worker's periodic pass and wasteful on a per-request as-of read.
+SELECT
+  je.classification_id,
+  COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0)::numeric AS balance
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.account_holder = $1
+  AND je.currency_id = $2
+  AND je.effective_at < $3
+GROUP BY je.classification_id
+ORDER BY je.classification_id;
+
 -- name: ListAllBalanceCheckpoints :many
 SELECT account_holder, currency_id, classification_id, balance, last_entry_id, last_entry_at, updated_at
 FROM balance_checkpoints

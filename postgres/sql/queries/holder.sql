@@ -17,9 +17,27 @@
 -- its entry_type equals the classification's normal_side. Positive net = "in".
 --
 -- Only role-bearing classifications (available/pending/locked) participate —
--- the same "spendable money" scope as BalanceBreakdown. Role-less holder-side
--- trackers (fee_expense, ...) are bookkeeping detail: including them would
--- net a fee charge to zero and hide it from the user.
+-- the same "spendable money" scope as BalanceBreakdown. Holder-side trackers
+-- that carry no spendable role (fee_expense, ...) are bookkeeping detail:
+-- including them would net a fee charge to zero and hide it from the user.
+--
+-- That prediction came true on 2026-08-26 and this filter is the reason. The
+-- M-4 fix retagged fee_expense from balance_role='' to 'memo' so solvency
+-- would stop counting it as a liability, and updated the liability predicate
+-- in platform_balances.sql — but not the three copies here, which still read
+-- `<> ''`. 'memo' is not '', so fee_expense joined this aggregate, withdraw_fee's
+-- two holder-side legs (+5 memo, -5 locked) netted to exactly zero, and
+-- holder_store.go's `net.IsZero()` filter dropped the whole row: the user's
+-- balance fell by 5 with no line in their statement to explain it
+-- (2026-09-02 audit A-M3).
+--
+-- The predicate is therefore `balance_role NOT IN ('', 'memo')` and it is
+-- the SAME predicate platform_balances.sql uses for "what counts as a
+-- liability". Those two questions — what the platform owes, and what money
+-- the holder can see — are answered by one expression on purpose. Any new
+-- core.BalanceRole value has to be reviewed against both meanings at once;
+-- postgres/sign_authority_gate_test.go fails the build if the four copies of
+-- this predicate ever stop being character-for-character identical.
 --
 -- kind_label fallback chain (§3.5): single classification with a non-empty
 -- display_label -> that label; else journal type display_label; else journal
@@ -30,7 +48,7 @@ WITH page_journals AS (
     JOIN journals j ON j.id = je.journal_id
     JOIN classifications pc ON pc.id = je.classification_id
     WHERE je.account_holder = $1
-      AND pc.balance_role <> ''
+      AND pc.balance_role NOT IN ('', 'memo')
       AND (sqlc.arg(cursor_id)::bigint = 0 OR j.id < sqlc.arg(cursor_id)::bigint)
     ORDER BY j.id DESC
     LIMIT sqlc.arg(page_limit)::bigint
@@ -85,7 +103,7 @@ JOIN journal_types jt  ON jt.id = j.journal_type_id
 JOIN classifications c ON c.id = je.classification_id
 JOIN currencies cur    ON cur.id = je.currency_id
 WHERE je.account_holder = $1
-  AND c.balance_role <> ''
+  AND c.balance_role NOT IN ('', 'memo')
 GROUP BY j.id, j.uid, jt.id, cur.id, rj.uid
 ORDER BY j.id DESC, cur.code;
 
@@ -115,5 +133,5 @@ FROM journal_entries je
 JOIN currencies cur ON cur.id = je.currency_id
 JOIN classifications c ON c.id = je.classification_id
 WHERE je.account_holder = $1
-  AND c.balance_role <> ''
+  AND c.balance_role NOT IN ('', 'memo')
 ORDER BY cur.code;

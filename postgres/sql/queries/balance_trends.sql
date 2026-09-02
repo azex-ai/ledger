@@ -37,11 +37,27 @@ daily_flows AS (
     -- date). effective_at is denormalized onto journal_entries so this no
     -- longer needs to join journals — see
     -- docs/plans/2026-07-02-financial-core-hardening-design.md §1.
+    --
+    -- inflow / outflow are normal_side-aware and go through the ledger's
+    -- single sign authority (ledger_signed_amount, migration 009,
+    -- docs/INVARIANTS.md I-43). "inflow" means "made this dimension's balance
+    -- go UP", the same definition holder.sql:17 states for its net_amount.
+    --
+    -- These two columns used to test entry_type directly -- credit = inflow,
+    -- debit = outflow -- without joining classifications at all. For
+    -- main_wallet (debit-normal, the canonical user wallet) that is exactly
+    -- backwards: the 2026-09-02 audit measured one JSON row reading
+    -- balance=395 inflow=105 outflow=500 for a holder who had DEPOSITED 500.
+    -- It was the eighteenth independent copy of the sign convention in the
+    -- repository and the only one whose answer was wrong; two rounds of
+    -- manual enumeration had missed the file. It is now enumerated by
+    -- machine instead -- see postgres/sign_authority_gate_test.go (I-49).
     SELECT
         (je.effective_at AT TIME ZONE 'UTC')::date AS flow_date,
-        COALESCE(SUM(CASE WHEN je.entry_type = 'credit' THEN je.amount ELSE 0::numeric END), 0) AS inflow,
-        COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE 0::numeric END), 0) AS outflow
+        COALESCE(SUM(GREATEST(ledger_signed_amount(c.normal_side, je.entry_type, je.amount), 0::numeric)), 0) AS inflow,
+        COALESCE(SUM(GREATEST(-ledger_signed_amount(c.normal_side, je.entry_type, je.amount), 0::numeric)), 0) AS outflow
     FROM journal_entries je
+    INNER JOIN classifications c ON c.id = je.classification_id
     WHERE je.account_holder = sqlc.arg(holder)::bigint
       AND je.currency_id    = sqlc.arg(currency_id)::bigint
       AND (sqlc.arg(classification_id)::bigint = 0 OR je.classification_id = sqlc.arg(classification_id)::bigint)
@@ -76,3 +92,67 @@ SELECT
     outflow
 FROM joined
 ORDER BY day;
+
+-- name: ListBalanceTrendSnapshotStaleness :many
+-- Per calendar day in [from_date, until_date]: when the day's snapshot rows
+-- were written, and the latest write of any entry that BELONGS to that day
+-- (effective_at < day + 1).
+--
+-- GetBalanceTrendGapFill reads balance_snapshots directly, so it inherits
+-- none of the self-healing RollupAdapter.GetSnapshotBalances does. That was
+-- not a theoretical gap: /holders/{h}/trends is a user-facing endpoint and it
+-- returned pre-backdating values for every day except today, while the
+-- as-of endpoint next to it returned the corrected ones -- two reads of the
+-- same business date disagreeing, with only one of them documented as
+-- self-healing (docs/INVARIANTS.md I-14, audit A-M5).
+--
+-- A day is stale when max_entry_created_at > snapshot_created_at: an entry
+-- dated into that day was WRITTEN after the snapshot that was supposed to
+-- summarise it. Days with no snapshot row are not stale -- they are
+-- forward-filled from the last known value, which is the gap-fill contract,
+-- not a cache.
+SELECT
+    ds.day::date                AS day,
+    s.snapshot_created_at,
+    e.max_entry_created_at
+FROM (
+    SELECT d::date AS day
+    FROM generate_series(
+        sqlc.arg(from_date)::date,
+        sqlc.arg(until_date)::date,
+        interval '1 day'
+    ) AS d
+) ds
+LEFT JOIN LATERAL (
+    -- Deliberately NOT filtered by classification. A snapshot is taken for a
+    -- whole (holder, currency) at once, so its timestamp is the baseline for
+    -- every dimension of that day -- including a dimension that has no row of
+    -- its own. Filtering here would make the query blind to exactly the case
+    -- that motivated it: a backdated journal opening a position that did not
+    -- exist when the snapshot ran has nothing to compare against, so it would
+    -- read as "not cached, therefore not stale" and gap-fill to zero.
+    SELECT MIN(bs.created_at) AS snapshot_created_at
+    FROM balance_snapshots bs
+    WHERE bs.account_holder = sqlc.arg(holder)::bigint
+      AND bs.currency_id    = sqlc.arg(currency_id)::bigint
+      AND bs.snapshot_date  = ds.day
+) s ON TRUE
+LEFT JOIN LATERAL (
+    SELECT MAX(je.created_at) AS max_entry_created_at
+    FROM journal_entries je
+    WHERE je.account_holder = sqlc.arg(holder)::bigint
+      AND je.currency_id    = sqlc.arg(currency_id)::bigint
+      AND je.effective_at   < (ds.day + 1)
+) e ON TRUE
+ORDER BY ds.day;
+
+-- name: GetBalanceAtForTrendDimension :one
+-- The live, snapshot-free balance for one trend dimension as of cutoff. Used
+-- to replace a stale cached day in the series.
+SELECT COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0)::numeric AS balance
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.account_holder = sqlc.arg(holder)::bigint
+  AND je.currency_id    = sqlc.arg(currency_id)::bigint
+  AND (sqlc.arg(classification_id)::bigint = 0 OR je.classification_id = sqlc.arg(classification_id)::bigint)
+  AND je.effective_at   < sqlc.arg(cutoff)::timestamptz;

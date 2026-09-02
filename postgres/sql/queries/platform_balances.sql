@@ -97,30 +97,51 @@ LEFT JOIN LATERAL (
 ) d ON TRUE;
 
 -- name: GetSystemSideCustodialBalance :one
--- Returns the realtime sum of system-side (holder < 0) balances for the
--- "custodial" classification for the given currency.
+-- Returns the realtime sum of system-side (holder < 0) balances for every
+-- classification in the caller's custodial scope, for the given currency.
+--
+-- The scope is a parameter, not the string literal 'custodial' it used to be.
+-- Two things broke because it was hardcoded (2026-09-02 audit A-N3 / A-M6):
+-- a deployment that named its custody classification anything else silently
+-- got Custodial = 0 and permanent insolvency, and every deployment running
+-- the FX presets read solvent=false forever on each currency it bought,
+-- because the asset backing a bought currency sits in `settlement`, not in
+-- `custodial` (presets/fx.go). PlatformBalanceStore defaults the scope to
+-- {custodial, settlement} and refuses to report at all when no classification
+-- matches -- see CountClassificationsWithCodes below.
 WITH active AS (
-  SELECT DISTINCT je.account_holder
+  SELECT DISTINCT je.account_holder, je.classification_id
   FROM journal_entries je
   INNER JOIN classifications c ON c.id = je.classification_id
-  WHERE je.currency_id      = $1
-    AND je.account_holder < 0
-    AND c.code              = 'custodial'
+  WHERE je.currency_id      = sqlc.arg(currency_id)::bigint
+    AND je.account_holder   < 0
+    AND c.code              = ANY(sqlc.arg(custodial_codes)::text[])
 )
 SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
 FROM active a
-INNER JOIN classifications c ON c.code = 'custodial'
+INNER JOIN classifications c ON c.id = a.classification_id
 LEFT JOIN balance_checkpoints bc
        ON bc.account_holder    = a.account_holder
-      AND bc.currency_id       = $1
-      AND bc.classification_id = c.id
+      AND bc.currency_id       = sqlc.arg(currency_id)::bigint
+      AND bc.classification_id = a.classification_id
 LEFT JOIN LATERAL (
   SELECT COALESCE(SUM(
     ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
   ), 0)::numeric AS delta
   FROM journal_entries je
   WHERE je.account_holder    = a.account_holder
-    AND je.currency_id       = $1
-    AND je.classification_id = c.id
+    AND je.currency_id       = sqlc.arg(currency_id)::bigint
+    AND je.classification_id = a.classification_id
     AND je.id                > COALESCE(bc.last_entry_id, 0)
 ) d ON TRUE;
+
+-- name: CountClassificationsWithCodes :one
+-- How many of the given classification codes actually exist. The solvency
+-- read uses it as a fail-loud check on its own scope: a scope that matches
+-- nothing can only produce Custodial = 0, which is indistinguishable from a
+-- genuinely empty custody position and reads as total insolvency
+-- (working-agreements.md §3 -- a misconfiguration must not look like a
+-- measurement).
+SELECT COUNT(*)::bigint AS total
+FROM classifications
+WHERE code = ANY(sqlc.arg(codes)::text[]);

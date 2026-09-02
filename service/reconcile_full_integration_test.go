@@ -561,7 +561,13 @@ func TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification(t *
 	// check exists to make visible: holderA's 100 is invisible to
 	// SolvencyReport.Liability (I-37's balance_role filter), which is the
 	// silent understatement this check now surfaces as a Finding instead.
-	pbStore := postgres.NewPlatformBalanceStore(pgpool)
+	// WithCustodialClassCodes is required, not decoration: this fixture names
+	// its custody classification "custodial_m4", and the custodial scope used
+	// to be the string literal 'custodial' buried in SQL -- so Custodial read
+	// 0 here and nobody noticed, which is precisely the coupling A-N3
+	// describes. The scope now refuses to report rather than return a zero it
+	// cannot justify, so the fixture has to say what its custody account is.
+	pbStore := postgres.NewPlatformBalanceStore(pgpool).WithCustodialClassCodes("custodial_m4")
 	solvency, err := pbStore.SolvencyCheck(ctx, currencyUID)
 	require.NoError(t, err)
 	assert.True(t, solvency.Liability.Equal(decimal.NewFromInt(200)),
@@ -659,7 +665,9 @@ func TestFullReconciliation_RoleLessLiability_UntaggedDebitNormalIsFlagged(t *te
 
 	// Confirms the actual consequence: SolvencyCheck.Liability stays blind
 	// to this holder's real 300 balance.
-	pbStore := postgres.NewPlatformBalanceStore(pgpool)
+	// See the note in the sibling test above: the fixture's custody account
+	// is "custodial_m4dg", and the scope has to be told so.
+	pbStore := postgres.NewPlatformBalanceStore(pgpool).WithCustodialClassCodes("custodial_m4dg")
 	solvency, err := pbStore.SolvencyCheck(ctx, currencyUID)
 	require.NoError(t, err)
 	assert.True(t, solvency.Liability.IsZero(),

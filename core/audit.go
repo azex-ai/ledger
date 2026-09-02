@@ -11,7 +11,18 @@ import (
 )
 
 // BalanceTrendPoint is one day's snapshot in a historical balance series.
-// Inflow and Outflow represent the net credit/debit posted for that day.
+//
+// Inflow is the total that made this dimension's balance go UP on that day,
+// Outflow the total that made it go DOWN -- the same direction semantics
+// HolderTransaction.Direction uses, and the only ones a consumer can draw a
+// cash-flow chart from. They are NOT "credits" and "debits": whether a credit
+// raises or lowers a balance depends on the classification's normal_side, and
+// describing them mechanically (this doc comment used to say "the net
+// credit/debit posted for that day") is what let the query behind them ship
+// reporting deposits into a debit-normal wallet as outflows.
+//
+// Balance is the closing balance for the day, self-healed against journals
+// posted retroactively into it (docs/INVARIANTS.md I-14).
 type BalanceTrendPoint struct {
 	Date    time.Time       `json:"date"`
 	Balance decimal.Decimal `json:"balance"`

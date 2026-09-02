@@ -437,53 +437,106 @@ func (a *RollupAdapter) GetSnapshotBalances(ctx context.Context, holder int64, c
 	// "as of the end of `date`" == effective_at < date+1.
 	cutoff := date.AddDate(0, 0, 1)
 
-	result := make([]core.Balance, len(rows))
-	var live map[int64]decimal.Decimal // classification_id -> recomputed balance; fetched at most once, lazily
-	for i, r := range rows {
-		cls, err := a.dims.classByIDOrErr(ctx, a.q, r.ClassificationID)
+	if len(rows) == 0 {
+		return []core.Balance{}, nil
+	}
+
+	// Staleness is decided for the whole (holder, currency) at once, against
+	// the OLDEST snapshot row of the date, rather than row by row.
+	//
+	// The row-by-row version could only ever ask "was this cached row
+	// overtaken", which is unanswerable for a dimension that has no cached
+	// row at all -- and backdating a journal into an already-snapshotted date
+	// can introduce a classification that did not exist when the snapshot
+	// ran. Measured: a backdated write that raised main_wallet from 100 to
+	// 150 and opened a pending position of 70 produced the corrected 150 and
+	// no pending row whatsoever. A missing dimension is worse than a wrong
+	// number: an as-of position short by 70 looks exactly like a position
+	// that was never taken. Sparse snapshots (snapshot_extra_store.go writes
+	// no row when a balance did not move) make "no row" routine, so this is
+	// the common shape rather than an edge (audit A-M5).
+	oldestSnapshotAt := rows[0].CreatedAt
+	for _, r := range rows[1:] {
+		if r.CreatedAt.Before(oldestSnapshotAt) {
+			oldestSnapshotAt = r.CreatedAt
+		}
+	}
+	stale, err := a.snapshotIsStale(ctx, holder, cur.ID, cutoff, oldestSnapshotAt)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get snapshot balances: staleness check: %w", err)
+	}
+
+	if !stale {
+		result := make([]core.Balance, len(rows))
+		for i, r := range rows {
+			cls, err := a.dims.classByIDOrErr(ctx, a.q, r.ClassificationID)
+			if err != nil {
+				return nil, err
+			}
+			result[i] = core.Balance{
+				AccountHolder:     r.AccountHolder,
+				CurrencyUID:       currencyUID,
+				ClassificationUID: cls.UID,
+				Balance:           mustNumericToDecimal(r.Balance),
+			}
+		}
+		return result, nil
+	}
+
+	// Full outer join of the cached dimension set against the live one:
+	// cached-but-no-longer-live reads zero, live-but-not-cached is added.
+	live, err := a.liveBalancesByClassificationAt(ctx, holder, cur.ID, cutoff)
+	if err != nil {
+		return nil, err
+	}
+
+	classificationIDs := make([]int64, 0, len(rows)+len(live))
+	seen := make(map[int64]struct{}, len(rows)+len(live))
+	for _, r := range rows {
+		if _, ok := seen[r.ClassificationID]; ok {
+			continue
+		}
+		seen[r.ClassificationID] = struct{}{}
+		classificationIDs = append(classificationIDs, r.ClassificationID)
+	}
+	extra := make([]int64, 0, len(live))
+	for id := range live {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		extra = append(extra, id)
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i] < extra[j] })
+	classificationIDs = append(classificationIDs, extra...)
+
+	result := make([]core.Balance, 0, len(classificationIDs))
+	for _, id := range classificationIDs {
+		cls, err := a.dims.classByIDOrErr(ctx, a.q, id)
 		if err != nil {
 			return nil, err
 		}
-
-		balance := mustNumericToDecimal(r.Balance)
-		stale, err := a.snapshotDimensionIsStale(ctx, holder, cur.ID, r.ClassificationID, cutoff, r.CreatedAt)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: get snapshot balances: staleness check: %w", err)
-		}
-		if stale {
-			if live == nil {
-				live, err = a.liveBalancesByClassificationAt(ctx, holder, cur.ID, cutoff)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if v, ok := live[r.ClassificationID]; ok {
-				balance = v
-			} else {
-				balance = decimal.Zero // no entries remain for this dimension as of cutoff
-			}
-		}
-
-		result[i] = core.Balance{
-			AccountHolder:     r.AccountHolder,
+		result = append(result, core.Balance{
+			AccountHolder:     holder,
 			CurrencyUID:       currencyUID,
 			ClassificationUID: cls.UID,
-			Balance:           balance,
-		}
+			Balance:           live[id], // zero value when the dimension no longer has entries as of cutoff
+		})
 	}
 	return result, nil
 }
 
-// snapshotDimensionIsStale reports whether a journal_entries write for this
-// exact (holder, currency, classification) dimension, backdated (effective_at
-// < cutoff) into the snapshotted window, landed after the snapshot row itself
-// was written -- i.e. after a value that could not have included it.
-func (a *RollupAdapter) snapshotDimensionIsStale(ctx context.Context, holder, currencyID, classificationID int64, cutoff, snapshotCreatedAt time.Time) (bool, error) {
-	raw, err := a.q.GetMaxEntryCreatedAtForDimensionBefore(ctx, sqlcgen.GetMaxEntryCreatedAtForDimensionBeforeParams{
-		AccountHolder:    holder,
-		CurrencyID:       currencyID,
-		ClassificationID: classificationID,
-		EffectiveAt:      cutoff,
+// snapshotIsStale reports whether ANY journal_entries write for this
+// (holder, currency), backdated (effective_at < cutoff) into the snapshotted
+// window, landed after the date's snapshot was written -- i.e. after a value
+// that could not have included it. Deliberately dimension-agnostic; see
+// GetSnapshotBalances for why a per-dimension test cannot see a dimension
+// that the backdated write itself created.
+func (a *RollupAdapter) snapshotIsStale(ctx context.Context, holder, currencyID int64, cutoff, snapshotCreatedAt time.Time) (bool, error) {
+	raw, err := a.q.GetMaxEntryCreatedAtForHolderCurrencyBefore(ctx, sqlcgen.GetMaxEntryCreatedAtForHolderCurrencyBeforeParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+		EffectiveAt:   cutoff,
 	})
 	if err != nil {
 		return false, err
@@ -503,15 +556,16 @@ func (a *RollupAdapter) snapshotDimensionIsStale(ctx context.Context, holder, cu
 // audit that found this bug separately flagged 17 independent copies of that
 // exact convention as its own Minor; this fix must not add an 18th.
 func (a *RollupAdapter) liveBalancesByClassificationAt(ctx context.Context, holder, currencyID int64, cutoff time.Time) (map[int64]decimal.Decimal, error) {
-	rows, err := a.q.ListBalancesAt(ctx, cutoff)
+	rows, err := a.q.ListBalancesAtForHolderCurrency(ctx, sqlcgen.ListBalancesAtForHolderCurrencyParams{
+		AccountHolder: holder,
+		CurrencyID:    currencyID,
+		EffectiveAt:   cutoff,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get snapshot balances: live recompute: %w", err)
 	}
-	out := make(map[int64]decimal.Decimal)
+	out := make(map[int64]decimal.Decimal, len(rows))
 	for _, row := range rows {
-		if row.AccountHolder != holder || row.CurrencyID != currencyID {
-			continue
-		}
 		out[row.ClassificationID] = mustNumericToDecimal(row.Balance)
 	}
 	return out, nil

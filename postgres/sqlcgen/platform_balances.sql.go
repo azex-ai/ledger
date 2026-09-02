@@ -11,6 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countClassificationsWithCodes = `-- name: CountClassificationsWithCodes :one
+SELECT COUNT(*)::bigint AS total
+FROM classifications
+WHERE code = ANY($1::text[])
+`
+
+// How many of the given classification codes actually exist. The solvency
+// read uses it as a fail-loud check on its own scope: a scope that matches
+// nothing can only produce Custodial = 0, which is indistinguishable from a
+// genuinely empty custody position and reads as total insolvency
+// (working-agreements.md §3 -- a misconfiguration must not look like a
+// measurement).
+func (q *Queries) CountClassificationsWithCodes(ctx context.Context, codes []string) (int64, error) {
+	row := q.db.QueryRow(ctx, countClassificationsWithCodes, codes)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
 const getPlatformBalancesByHolder = `-- name: GetPlatformBalancesByHolder :many
 
 WITH active AS (
@@ -94,36 +113,51 @@ func (q *Queries) GetPlatformBalancesByHolder(ctx context.Context, currencyID in
 
 const getSystemSideCustodialBalance = `-- name: GetSystemSideCustodialBalance :one
 WITH active AS (
-  SELECT DISTINCT je.account_holder
+  SELECT DISTINCT je.account_holder, je.classification_id
   FROM journal_entries je
   INNER JOIN classifications c ON c.id = je.classification_id
-  WHERE je.currency_id      = $1
-    AND je.account_holder < 0
-    AND c.code              = 'custodial'
+  WHERE je.currency_id      = $1::bigint
+    AND je.account_holder   < 0
+    AND c.code              = ANY($2::text[])
 )
 SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
 FROM active a
-INNER JOIN classifications c ON c.code = 'custodial'
+INNER JOIN classifications c ON c.id = a.classification_id
 LEFT JOIN balance_checkpoints bc
        ON bc.account_holder    = a.account_holder
-      AND bc.currency_id       = $1
-      AND bc.classification_id = c.id
+      AND bc.currency_id       = $1::bigint
+      AND bc.classification_id = a.classification_id
 LEFT JOIN LATERAL (
   SELECT COALESCE(SUM(
     ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
   ), 0)::numeric AS delta
   FROM journal_entries je
   WHERE je.account_holder    = a.account_holder
-    AND je.currency_id       = $1
-    AND je.classification_id = c.id
+    AND je.currency_id       = $1::bigint
+    AND je.classification_id = a.classification_id
     AND je.id                > COALESCE(bc.last_entry_id, 0)
 ) d ON TRUE
 `
 
-// Returns the realtime sum of system-side (holder < 0) balances for the
-// "custodial" classification for the given currency.
-func (q *Queries) GetSystemSideCustodialBalance(ctx context.Context, currencyID int64) (pgtype.Numeric, error) {
-	row := q.db.QueryRow(ctx, getSystemSideCustodialBalance, currencyID)
+type GetSystemSideCustodialBalanceParams struct {
+	CurrencyID     int64    `json:"currency_id"`
+	CustodialCodes []string `json:"custodial_codes"`
+}
+
+// Returns the realtime sum of system-side (holder < 0) balances for every
+// classification in the caller's custodial scope, for the given currency.
+//
+// The scope is a parameter, not the string literal 'custodial' it used to be.
+// Two things broke because it was hardcoded (2026-09-02 audit A-N3 / A-M6):
+// a deployment that named its custody classification anything else silently
+// got Custodial = 0 and permanent insolvency, and every deployment running
+// the FX presets read solvent=false forever on each currency it bought,
+// because the asset backing a bought currency sits in `settlement`, not in
+// `custodial` (presets/fx.go). PlatformBalanceStore defaults the scope to
+// {custodial, settlement} and refuses to report at all when no classification
+// matches -- see CountClassificationsWithCodes below.
+func (q *Queries) GetSystemSideCustodialBalance(ctx context.Context, arg GetSystemSideCustodialBalanceParams) (pgtype.Numeric, error) {
+	row := q.db.QueryRow(ctx, getSystemSideCustodialBalance, arg.CurrencyID, arg.CustodialCodes)
 	var total pgtype.Numeric
 	err := row.Scan(&total)
 	return total, err

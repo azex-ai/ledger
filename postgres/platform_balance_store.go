@@ -29,20 +29,61 @@ var (
 // reads (SolvencyCheck) wrap in REPEATABLE READ to keep the liability and
 // custodial figures from drifting against each other.
 type PlatformBalanceStore struct {
-	pool *pgxpool.Pool
-	db   DBTX
-	q    *sqlcgen.Queries
-	dims *dimCache
+	pool           *pgxpool.Pool
+	db             DBTX
+	q              *sqlcgen.Queries
+	dims           *dimCache
+	custodialCodes []string
 }
 
-// NewPlatformBalanceStore creates a new PlatformBalanceStore bound to a pool.
+// DefaultCustodialClassCodes is the classification scope SolvencyCheck treats
+// as the platform's custodied asset position when the consumer does not name
+// one explicitly.
+//
+// It is a set, not the single literal "custodial" it used to be hardcoded as
+// in SQL, for two reasons the 2026-09-02 audit measured:
+//
+//   - "settlement" holds the platform's per-currency FX inventory
+//     (presets/fx.go). Leaving it out made every currency a holder bought
+//     report solvent=false forever, on a position that was in fact perfectly
+//     backed -- an alarm nailed to ON, which is worse than no alarm
+//     (working-agreements.md §3). It is also the transit account for
+//     transfers, where it nets to zero, so including it is free there.
+//   - A deployment naming its custody classification something else got
+//     Custodial = 0 with no error at all; the coupling to a string literal
+//     was not visible from any interface.
+//
+// Deliberately NOT everything system-side: "equity", "fees", "fee_revenue"
+// and "spread" are the platform's own money rather than assets backing holder
+// claims, and "dev_credit" is by design an UNBACKED counterparty -- counting
+// it would make the shortfall it exists to expose disappear
+// (presets/devcredit.go, TestDevCredit_SolvencyShortfallEqualsDevCreditBalance).
+var DefaultCustodialClassCodes = []string{"custodial", "settlement"}
+
+// NewPlatformBalanceStore creates a new PlatformBalanceStore bound to a pool,
+// with the default custodial scope (see DefaultCustodialClassCodes).
 func NewPlatformBalanceStore(pool *pgxpool.Pool) *PlatformBalanceStore {
 	return &PlatformBalanceStore{
-		pool: pool,
-		db:   pool,
-		q:    sqlcgen.New(pool),
-		dims: dimCacheFor(pool),
+		pool:           pool,
+		db:             pool,
+		q:              sqlcgen.New(pool),
+		dims:           dimCacheFor(pool),
+		custodialCodes: append([]string(nil), DefaultCustodialClassCodes...),
 	}
+}
+
+// WithCustodialClassCodes returns a clone whose solvency reports treat exactly
+// these classification codes as the custodied asset position. Deployments that
+// name their custody accounts differently, or that hold reserves across more
+// than the shipped presets' classifications, declare the scope here rather
+// than discovering it as a permanent, silent zero.
+//
+// A scope that matches no classification is rejected at read time, not
+// reported as an empty custody position.
+func (s *PlatformBalanceStore) WithCustodialClassCodes(codes ...string) *PlatformBalanceStore {
+	clone := *s
+	clone.custodialCodes = append([]string(nil), codes...)
+	return &clone
 }
 
 // WithDB returns a clone bound to db (a *pgxpool.Pool or pgx.Tx). When passed
@@ -50,10 +91,11 @@ func NewPlatformBalanceStore(pool *pgxpool.Pool) *PlatformBalanceStore {
 // skips its own REPEATABLE READ wrap (the caller's isolation applies).
 func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
 	return &PlatformBalanceStore{
-		pool: nil, // tx mode — disables inner BeginTx
-		db:   db,
-		q:    sqlcgen.New(db),
-		dims: s.dims,
+		pool:           nil, // tx mode — disables inner BeginTx
+		db:             db,
+		q:              sqlcgen.New(db),
+		dims:           s.dims,
+		custodialCodes: s.custodialCodes,
 	}
 }
 
@@ -116,7 +158,10 @@ func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, cur
 // SolvencyCheck computes a solvency report for the given currency.
 //
 // Liability = realtime sum of user-side (holder > 0) balances.
-// Custodial = realtime sum of system-side (holder < 0) balances for code="custodial".
+// Custodial = realtime sum of system-side (holder < 0) balances for the
+//
+//	store's custodial scope (see WithCustodialClassCodes).
+//
 // Solvent   = Custodial >= Liability.
 // Margin    = Custodial - Liability (positive = surplus, negative = shortfall).
 //
@@ -160,7 +205,24 @@ func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *
 		return nil, fmt.Errorf("postgres: platform balance: solvency liability convert: %w", err)
 	}
 
-	custodialRaw, err := q.GetSystemSideCustodialBalance(ctx, currencyID)
+	// Fail-loud on a scope that cannot possibly resolve. Custodial = 0 from a
+	// misconfigured scope is indistinguishable from Custodial = 0 on an empty
+	// ledger, and it reports as total insolvency either way.
+	matched, err := q.CountClassificationsWithCodes(ctx, s.custodialCodes)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: platform balance: solvency custodial scope currency=%s: %w", currencyUID, err)
+	}
+	if matched == 0 {
+		return nil, fmt.Errorf(
+			"postgres: platform balance: solvency: custodial scope %v matches no classification, so the custodial figure could only ever be zero: %w",
+			s.custodialCodes, core.ErrInvalidInput,
+		)
+	}
+
+	custodialRaw, err := q.GetSystemSideCustodialBalance(ctx, sqlcgen.GetSystemSideCustodialBalanceParams{
+		CurrencyID:     currencyID,
+		CustodialCodes: s.custodialCodes,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: platform balance: solvency custodial currency=%d: %w", currencyID, err)
 	}

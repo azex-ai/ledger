@@ -262,6 +262,42 @@ func (q *Queries) GetMaxEntryCreatedAtForDimensionBefore(ctx context.Context, ar
 	return max_created_at, err
 }
 
+const getMaxEntryCreatedAtForHolderCurrencyBefore = `-- name: GetMaxEntryCreatedAtForHolderCurrencyBefore :one
+SELECT COALESCE(MAX(created_at), 'epoch'::timestamptz) AS max_created_at
+FROM journal_entries
+WHERE account_holder = $1
+  AND currency_id = $2
+  AND effective_at < $3
+`
+
+type GetMaxEntryCreatedAtForHolderCurrencyBeforeParams struct {
+	AccountHolder int64     `json:"account_holder"`
+	CurrencyID    int64     `json:"currency_id"`
+	EffectiveAt   time.Time `json:"effective_at"`
+}
+
+// The dimension-agnostic sibling of GetMaxEntryCreatedAtForDimensionBefore:
+// the latest created_at among ALL of one (account_holder, currency_id)'s
+// entries whose effective_at is before cutoff.
+//
+// The per-dimension version can only ask "was this row invalidated", which is
+// unanswerable for a dimension that HAS no row. Backdating a journal into an
+// already-snapshotted date can introduce a classification that did not exist
+// when the snapshot ran, and that dimension is then absent from the cached
+// set entirely -- an as-of read silently short by the whole position rather
+// than wrong by some amount. A missing row is harder to notice than a wrong
+// number, and the sparse snapshot mode (snapshot_extra_store.go writes no row
+// when a balance did not change) makes "no row" the normal case. Comparing
+// this value against the OLDEST snapshot row of the date tells the reader
+// that something backdated landed at all, which is when the whole dimension
+// set has to be recomputed rather than patched row by row.
+func (q *Queries) GetMaxEntryCreatedAtForHolderCurrencyBefore(ctx context.Context, arg GetMaxEntryCreatedAtForHolderCurrencyBeforeParams) (interface{}, error) {
+	row := q.db.QueryRow(ctx, getMaxEntryCreatedAtForHolderCurrencyBefore, arg.AccountHolder, arg.CurrencyID, arg.EffectiveAt)
+	var max_created_at interface{}
+	err := row.Scan(&max_created_at)
+	return max_created_at, err
+}
+
 const getMaxEntryForAccountCurrencySince = `-- name: GetMaxEntryForAccountCurrencySince :one
 SELECT
   COALESCE(MAX(id), 0)::bigint AS max_entry_id,
@@ -372,6 +408,53 @@ func (q *Queries) ListBalancesAt(ctx context.Context, effectiveAt time.Time) ([]
 			&i.ClassificationID,
 			&i.Balance,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listBalancesAtForHolderCurrency = `-- name: ListBalancesAtForHolderCurrency :many
+SELECT
+  je.classification_id,
+  COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0)::numeric AS balance
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.account_holder = $1
+  AND je.currency_id = $2
+  AND je.effective_at < $3
+GROUP BY je.classification_id
+ORDER BY je.classification_id
+`
+
+type ListBalancesAtForHolderCurrencyParams struct {
+	AccountHolder int64     `json:"account_holder"`
+	CurrencyID    int64     `json:"currency_id"`
+	EffectiveAt   time.Time `json:"effective_at"`
+}
+
+type ListBalancesAtForHolderCurrencyRow struct {
+	ClassificationID int64          `json:"classification_id"`
+	Balance          pgtype.Numeric `json:"balance"`
+}
+
+// ListBalancesAt narrowed to one (account_holder, currency_id). The unscoped
+// version aggregates the whole table and is filtered in Go, which is fine for
+// the rollup worker's periodic pass and wasteful on a per-request as-of read.
+func (q *Queries) ListBalancesAtForHolderCurrency(ctx context.Context, arg ListBalancesAtForHolderCurrencyParams) ([]ListBalancesAtForHolderCurrencyRow, error) {
+	rows, err := q.db.Query(ctx, listBalancesAtForHolderCurrency, arg.AccountHolder, arg.CurrencyID, arg.EffectiveAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListBalancesAtForHolderCurrencyRow{}
+	for rows.Next() {
+		var i ListBalancesAtForHolderCurrencyRow
+		if err := rows.Scan(&i.ClassificationID, &i.Balance); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

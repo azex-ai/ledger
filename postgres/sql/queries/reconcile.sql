@@ -37,15 +37,22 @@ ORDER BY je.currency_id, je.classification_id;
 -- Check #5: per-currency net balance of a named classification,
 -- excluding entries within the given window (in minutes) to tolerate in-flight transactions.
 -- Returns only rows where the net is non-zero (violations).
+--
+-- net_balance goes through ledger_signed_amount (docs/INVARIANTS.md I-43), not
+-- a bare debit-minus-credit CASE. The zero test is unaffected either way, but
+-- the figure is written verbatim into the Finding an operator reads
+-- (service/reconcile.go, "net=%s"), and settlement is credit-normal: the bare
+-- expression handed them the sign backwards from what GetBalance reports for
+-- the same classification (2026-09-02 audit A-N1).
 SELECT
   je.currency_id,
-  COALESCE(SUM(CASE WHEN je.entry_type = 'debit'  THEN je.amount ELSE -je.amount END), 0)::numeric AS net_balance
+  COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0)::numeric AS net_balance
 FROM journal_entries je
 INNER JOIN classifications c ON c.id = je.classification_id
 WHERE c.code = sqlc.arg(classification_code)::text
   AND je.created_at < now() - (sqlc.arg(window_minutes)::int * INTERVAL '1 minute')
 GROUP BY je.currency_id
-HAVING COALESCE(SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE -je.amount END), 0) != 0
+HAVING COALESCE(SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount)), 0) != 0
 ORDER BY je.currency_id;
 
 -- name: ReconcileNonNegativeBalances :many
@@ -244,6 +251,10 @@ JOIN journal_entries je ON je.journal_id = j.id
 JOIN classifications c ON c.id = je.classification_id
 WHERE jt.holder_kind = ''
   AND je.account_holder > 0
-  AND c.balance_role <> ''
+  -- Same predicate as holder.sql: a journal type whose only holder-side legs
+  -- are memo trackers never surfaces in a user's transaction list, so it does
+  -- not need a holder_kind tag and must not be reported as missing one
+  -- (2026-09-02 audit A-N4).
+  AND c.balance_role NOT IN ('', 'memo')
 ORDER BY jt.uid
 LIMIT sqlc.arg(page_limit)::int;
