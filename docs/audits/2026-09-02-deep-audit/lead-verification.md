@@ -127,3 +127,4 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | 任务 | 分支 commit | lead 证伪 | 合入 | 备注 |
 |---|---|---|---|---|
 | D-tests（第一版） | `d2940b7` | 删掉 I-6 的**一条** pin bullet → 绿（预期，仍有其余 pin）；删光 I-6 **全部** bullet 只留 `**Pinned by**` 标题 → **仍绿**：新 gate 只查标题存在（`invariants_pins_test.go:290`），是「守形状不守语义」形态在 gate 自身上重现。已退回加强 | 待 | F-m2 advisory 32 条要求改成显式只缩不扩白名单；I-7 Exceptions 扩写 → W3-lead |
+| D-surface | `798e2e3` | README 代码块改错方法名 → `TestREADMECustomLifecycleRuns` 红；根包 gate 全跑 | merge commit + lead 在 main 删 CLAUDE.md 的 helm 行（I-N22 半条，已知会 d-ops） | 5 个新 gate；examples 全部 exit 0（worker 记录） |
