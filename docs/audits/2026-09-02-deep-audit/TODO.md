@@ -1737,3 +1737,6 @@
 | d-tests | I-7 Exceptions 正文未列 `deposits`/`withdrawals` 死表与 `rollup_queue`/`registration_rescans` 的 claim-lease 可空列（新 NOT NULL 门禁按既有设计分类通过） | W3-lead |
 | d-web 发现 | main 上 `POST /journals/{uid}/reverse` 对任何 `Idempotency-Key` 400，ledger-react client 默认注入 → 真实调用必 400；旧 MSW 测试不模拟 header 别名中间件所以一直绿 | D-web（client 已修）/ D-contract（openapi 收口，H-M3b 取消） |
 | d-threat | 修改已合入 migration 007（契约 §8 勘误）；migrate.go 安装机制变更待 W3 对抗式复审 | D-threat / W3-review |
+| d-web | 根 `CLAUDE.md`「page logic must stay mirrored」补 a11y 标注写法可不同的例外注记 | W3-lead |
+| d-web | J-23 的 CI 步骤 `npm audit --omit=dev --audit-level=high` 加进 `.github/workflows/ledger-react.yml` | W3-lead（D-tests 已合入） |
+| d-web | d-contract 改 openapi 后 `web/packages/ledger-react` 需 `codegen` 再生成 `schema.ts` 并过 `codegen:check` | W3-lead（d-contract 合入后） |
