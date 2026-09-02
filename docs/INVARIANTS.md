@@ -51,11 +51,17 @@ is meaningless — debits and credits in different currencies are not comparable
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
 - `core.FuzzJournalValidate` (Go fuzz target)
+
+**Related tests** (exercise this invariant's DB-trigger mechanism, but not
+cited above as a pin: the mechanism is a Postgres trigger with no Go symbol
+to reference, and the test reaches it only through this file's local
+`postBalancedJournal`/`withBalanceTriggerDisabled` helpers, so nothing in its
+own function body names an app-layer symbol this doc can hold it to):
 - `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates to
   schema v41 (pre-044), proves a direct SQL insert that unbalances an
   existing journal by currency succeeds with nothing to stop it, then
   migrates up through 044 and proves the identical attack on a fresh journal
-  now fails at commit.
+  now fails at commit. See I-24, where this is the primary pin.
 
 ## I-2: Append-only journals; corrections via reversal only
 
@@ -264,7 +270,8 @@ holder over-committed.
 **Enforced by**:
 - Advisory lock in `postgres.ReserverStore.Reserve` (acquired before balance read).
 - `SELECT ... FOR UPDATE` on the reservation row in `Settle` / `Release`.
-- Reservation FSM transition table in `core/reserve.go` rejects illegal moves.
+- Reservation FSM transition table, `core.ReservationStatus.CanTransitionTo`
+  (`core/reserve.go`), rejects illegal moves.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (10
@@ -294,6 +301,8 @@ isolation give us a balance that's consistent and current.
 **Enforced by**:
 - `postgres.LedgerStore.GetBalance` (transaction-wrapped).
 - `postgres.PlatformBalanceStore.GetPlatformBalances` (LATERAL JOIN with delta).
+- `postgres.QueryStore.GetSystemRollups` (the same checkpoint + delta shape,
+  for system-side rollups rather than a single holder dimension).
 - Rollup worker advances checkpoints lazily.
 
 **Load-bearing prerequisite**: every `journal_entries` write goes through the
@@ -305,7 +314,7 @@ lets the rollup use `MAX(id)` as a safe checkpoint watermark and lets
 path that inserts entries without `acquireBalanceLocks` silently reopens
 this visibility race — do not add one. This was, until 2026-08-26, a prose-only
 warning with no machine gate (docs/audits/2026-08-25-financial-engineering/financial-correctness.md);
-`postgres.TestInsertJournalEntry_SingleChokePoint` now makes it one — it
+`TestInsertJournalEntry_SingleChokePoint` (postgres package) now makes it one — it
 parses this package's AST and fails if `InsertJournalEntry` ever gets a second
 call site, or if its one call site stops calling `acquireBalanceLocks`.
 
@@ -352,7 +361,7 @@ delta for a holder with 9,600 entries**, and exactly 10x that for 10x the
 history. The query is now a loose index scan for the dimension set plus a
 LATERAL for the delta (the shape `platform_balances.sql` already used); the
 same fixture touches **102 rows, independent of history**.
-`postgres.TestBalanceRead_CostDoesNotGrowWithHistory` holds it there.
+`TestBalanceRead_CostDoesNotGrowWithHistory` (postgres package) holds it there.
 
 Still open, deliberately: `journal_entries` is `PARTITION BY RANGE (created_at)`
 and no balance read carries a `created_at` predicate, so **every read visits
@@ -369,8 +378,6 @@ justify taking it now.
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
 - `postgres.TestPlatformBalance_RealtimeReflectsUnrolledJournal`
 - `postgres.TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal`
-- `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing prerequisite,
-  now a machine gate)
 - `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-42's
   pin — the same forged-id attack, now asserted refused under a real
   `ledger_app` credential)
@@ -379,6 +386,14 @@ justify taking it now.
   for a dimension with no checkpoint row and one whose watermark was reset to
   zero. This is the invariant's own equation, checked against the read path
   rather than against the read path's previous output.
+
+**Related tests** (hold the "Load-bearing prerequisite" and "Cost" paragraphs
+above, but not cited as pins: both work by parsing this repo's own source —
+one this package's AST, the other the SQL `EXPLAIN` plan — rather than by
+calling `GetBalance` / `GetPlatformBalances` / `GetSystemRollups`, so neither
+test's own function body names a symbol this doc can hold it to):
+- `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing
+  prerequisite, now a machine gate)
 - `postgres.TestBalanceRead_CostDoesNotGrowWithHistory` — the cost half above,
   in both directions: rows read must not scale with history, and the partition
   count visited is asserted to still be *all* of them, so if pruning ever
@@ -597,7 +612,10 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert),
 `postgres.LedgerStore.sumBalancesByRoleWithQueries` (shared basis),
-`classifications.balance_role` CHECK constraint (migration `032`).
+`classifications.balance_role` CHECK constraint (migration `032`), tagged
+onto each classification by `presets.InstallDefaultTemplatePresets` (and any
+direct `CreateClassification` / `SetBalanceRole` call) — the basis the two
+bullets above sum over.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (see I-4:
@@ -721,19 +739,19 @@ still be numerically wrong in storage; only reads through
 **Enforced by**:
 - `core.JournalInput.Validate` rejects `effective_at` beyond the future
   tolerance.
-- `postgres.LedgerStore.postJournalWithQueries` defaults a zero `effective_at`
-  to `now()` and writes the same resolved value to the journal row and every
-  entry row in the same transaction.
-- Reversal journals (`ReverseJournal`) never copy the original journal's
-  `effective_at` — they always default to "now" (open period), which is the
-  standard close-then-correct pattern (see I-15).
+- `postgres.LedgerStore.PostJournal` (internally `postJournalWithQueries`)
+  defaults a zero `effective_at` to `now()` and writes the same resolved
+  value to the journal row and every entry row in the same transaction.
+- Reversal journals (`postgres.LedgerStore.ReverseJournal`) never copy the
+  original journal's `effective_at` — they always default to "now" (open
+  period), which is the standard close-then-correct pattern (see I-15).
 - `postgres.RollupAdapter.GetSnapshotBalances`'s staleness check and live
-  recompute (see above).
+  recompute (see above), and `postgres.RollupAdapter.ListBalancesAt`, the
+  as-of read this staleness check falls back to.
 
 **Pinned by**:
 - `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
   `..._Past_OK`, `..._WithinTolerance_OK`, `..._FarFuture_Rejected`
-- `postgres.TestEffectiveAtColumnsExist` (schema pin)
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow`
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_Backdated` (also pins
   entry/journal `effective_at` equality)
@@ -744,6 +762,13 @@ still be numerically wrong in storage; only reads through
 - `postgres.TestRollupAdapter_GetSnapshotBalances_BackdatedEntryInvalidatesCache`
   (the Major #2 fix: a snapshot written before a backdated entry lands must
   read back the corrected total, not the stale cached one)
+
+**Related tests** (schema shape, not application behavior — queries
+`information_schema`/`pg_indexes` directly, so nothing in its body names a
+Go symbol this doc can hold it to):
+- `postgres.TestEffectiveAtColumnsExist` — `journals.effective_at` and
+  `journal_entries.effective_at` are `NOT NULL`, and
+  `idx_entries_currency_effective` exists.
 
 ## I-15: The accounting period close line is a hard write barrier
 
@@ -776,13 +801,18 @@ current (open) date, never by rewriting history — consistent with I-2
 
 **Enforced by**: `postgres.LedgerStore.postJournalWithQueries` reads the
 active close line (`GetActivePeriodClose`) inside the same transaction as
-every write path (direct `PostJournal`, `ExecuteTemplate`,
-`ExecuteTemplateBatch`, and `ReverseJournal`, since they all funnel through
-this method) and rejects with `core.ErrPeriodClosed` when
+every write path (direct `postgres.LedgerStore.PostJournal`,
+`ExecuteTemplate`, `ExecuteTemplateBatch`, and
+`postgres.LedgerStore.ReverseJournal`, since they all funnel through this
+method) and rejects with `core.ErrPeriodClosed` when
 `effective_at < close_before` — **and, since 2026-09-02, does so under the
-shared half of the period-close advisory barrier, with `ClosePeriod` taking
-the exclusive half.** See I-59 for that mechanism and for the
-`period_close_violations` reconciliation check that can falsify it.
+shared half of the period-close advisory barrier, with
+`postgres.PeriodCloseStore.ClosePeriod` taking the exclusive half.** See I-59
+for that mechanism and for the `period_close_violations` reconciliation
+check that can falsify it. `postgres.PeriodCloseStore.ActiveCloseLine` is the
+same read exposed to callers outside a write path (e.g. the API). A close
+request with no `close_before` never reaches any of this:
+`core.ClosePeriodInput.Validate` rejects it first.
 
 > Enforcement gap closed 2026-09-02 (`concurrency.md` B-M5). Reading the line
 > "inside the same transaction as every write path" was the whole of the
@@ -801,7 +831,6 @@ first and then asserts a later posting is refused. That is the whole reason
 B-M5 went unnoticed for as long as it did: the hole was purely a matter of
 two transactions' relative timing, which no sequential test can express. The
 concurrency pins live on I-59):
-- `postgres.TestPeriodClosesTableExists` (schema pin)
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
   enforce before the first close
 - `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` — a posting whose
@@ -813,6 +842,12 @@ concurrency pins live on I-59):
 - `postgres.TestPeriodClosesGuard_NoUpdateNoDelete` — the close log itself is
   append-only (migration 045, attack path A5)
 - `core.TestClosePeriodInput_Validate_RequiresCloseBefore`
+
+**Related tests** (schema shape, not application behavior — queries
+`information_schema` directly, so nothing in its body names a Go symbol this
+doc can hold it to):
+- `postgres.TestPeriodClosesTableExists` — `period_closes`' columns are
+  `NOT NULL`.
 
 > Corrected 2026-08-21: this section previously cited two
 > PartitionBoundary tests (names deliberately unquoted here so the pin checker
@@ -842,23 +877,25 @@ reconciliation time (or in an external settlement mismatch).
   default to 18 (the loosest setting) so no historical data is invalidated.
 - `postgres.validateEntriesPrecision` (`postgres/precision.go`), called from
   `LedgerStore.postJournalWithQueries` — the single choke point behind
-  `PostJournal`, `ExecuteTemplate`, `ExecuteTemplateBatch`, and
-  `ReverseJournal`. `PendingStore.AddPending/ConfirmPending/CancelPending`
-  inherit the check for free because they all post through
-  `LedgerStore.PostJournal` rather than writing entries directly.
+  `postgres.LedgerStore.PostJournal`, `ExecuteTemplate`,
+  `ExecuteTemplateBatch`, and `postgres.LedgerStore.ReverseJournal`.
+  `PendingStore.AddPending/ConfirmPending/CancelPending` inherit the check
+  for free because they all post through `postgres.LedgerStore.PostJournal`
+  rather than writing entries directly.
 - `postgres.validateSingleAmountPrecision` / `checkAmountPrecision`, called
   from every amount-bearing write path that does **not** flow through
-  `PostJournal`: `ReserverStore.Reserve`, `ReserverStore.Settle`,
-  `ReserverStore.SettlePartial`, `BookingStore.CreateBooking`, and
-  `BookingStore.Transition` (non-zero settled amounts).
+  `PostJournal`: `postgres.ReserverStore.Reserve`,
+  `postgres.ReserverStore.Settle`, `postgres.ReserverStore.SettlePartial`,
+  `postgres.BookingStore.CreateBooking`, and `postgres.BookingStore.Transition`
+  (non-zero settled amounts).
 - The check is `amount.Equal(amount.Truncate(exponent))` — over-precise
   amounts are rejected with `core.ErrPrecisionExceeded` (bizcode 14006),
   **never** silently rounded or truncated. Rounding is the caller's explicit
   decision (`core.Round` / `core.ConvertAt` in `core/money.go`), not something
   the ledger does on the caller's behalf.
 - `core.CurrencyInput.Validate` rejects `Exponent` outside `[0, 18]` before a
-  currency is even created; the DB `CHECK` is defense-in-depth for the same
-  bound.
+  currency is even created (called from `postgres.CurrencyStore.CreateCurrency`);
+  the DB `CHECK` is defense-in-depth for the same bound.
 
 **Not enforced by**: `core.Allocate` (`core/money.go`) — it requires its
 `total` argument to already be exact at the target exponent (returns
@@ -880,6 +917,14 @@ database.
 - `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
 - `core.TestCurrencyInput_Validate`
 - `core.TestRound_HalfUp` / `TestRound_HalfEven` / `TestRound_Down` / `TestRound_Up`
+- `core.TestConvertAt_MatchesHandCalculation`
+
+**Related tests** (as the "**Not enforced by**" paragraph above says,
+`core.Allocate` requires and guarantees exactness at a given exponent, but
+does so as a pure function with no currency lookup — it is not part of the
+store-level check that actually gates what reaches the database, so these
+don't reference `ErrPrecisionExceeded`/`Round`/`ConvertAt`/`Validate` and
+aren't pins for this invariant):
 - `core.TestAllocate_SumEqualsTotal_KnownCases` and friends
   (`TestAllocate_RejectsNegativeWeight`, `TestAllocate_RejectsAllZeroWeights`,
   `TestAllocate_RejectsEmptyWeights`, `TestAllocate_RejectsOverPrecisionTotal`,
@@ -888,7 +933,6 @@ database.
 - `core.TestAllocateInvariant_SumAlwaysEqualsTotal` (500 random trials)
 - `core.FuzzAllocate` (Go fuzz target — sum(shares) == total for any valid
   total/weights/exponent)
-- `core.TestConvertAt_MatchesHandCalculation`
 
 ---
 
