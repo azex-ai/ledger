@@ -1770,3 +1770,7 @@
 | d-web | d-contract 改 openapi 后 `web/packages/ledger-react` 需 `codegen` 再生成 `schema.ts` 并过 `codegen:check` | W3-lead（d-contract 合入后） |
 | d-threat 接手 | migration 018 尾部照抄 001 的 `REVOKE ledger_owner FROM <runner>` 会撤掉 `Migrate` 的提权窗口（非 superuser 安装死在 020）；`Migrate` 已改逐 migration 开窗口绕过。需：清掉 018 那段 + 静态门禁「001 之外不得出现 `REVOKE ledger_owner FROM`」 | W3-lead |
 | d-threat 接手 | `docs/RUNBOOK.md` 安装前提（CREATE ROLE + public CREATE；`postgres` 库 CONNECT；superuser / ledger_owner 本人 / 对 ledger_owner 的 ADMIN OPTION 三者之一）落后于 `Migrate` godoc | D-ops |
+| d-ops 拍板 | B-m12（sweep 是唯一无 DB 兜底的 job，LockedJob 执行期不复核锁）需新 migration + 改 `chains/evm/sweeper.go`，Effort L，跨 onchain | W3 后续单独立项 |
+| d-ops 拍板 | E-m16「16/26 store 不调 normalizeStoreError」：既定约定是只归一化 mutating 语句（`GetBalance` 都不 wrap 自己的 SELECT），PLAUSIBLE 不成立 | 不修（结论记录） |
+| d-ops 拍板 | I-M7 ②③④（`reconcile.go` 内部 partialReason 归因、`SetScanCursor` 用 detached ctx） | W3-lead |
+| d-ops | `core.Metrics` 新增的 `PendingEvents` / 改签名的 `ReservedAmount` 声明未发射（需新查询），已在 `observability/emission_coverage_test.go` 的 `crossBranchExclusions` 登记 | W3-lead |
