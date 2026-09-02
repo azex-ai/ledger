@@ -107,3 +107,9 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | C-6 `dev_credit` 经 `/journals/template` | **复现**：HTTP 201，`ExecuteTemplate` 被调 |
 
 三条 Critical 的实跑结论不受污染窗口影响。B 的 40P01 死锁复现与 A 的仓外容器实跑未由 lead 重跑，但两者的代码依据（`pending_store.go:248` 锁序、`capital.go:35` 方向）均已独立读码核实。
+
+# 整改合并记录（Wave 1 起）
+
+| 任务 | 分支 commit | lead 证伪 | 合入 | 备注 |
+|---|---|---|---|---|
+| W1-gate | `f48ae31` + `c7a8a7d` | 拆回基线两条 pin 红；复核发现闸开启路径把 availableBase 挪到锁外（stale-high 超卖），退回补 `min(V, E)`，mutation 实跑红 | `a9993fe` | 关 C-C1 / B-M2(store) / C-m7 / A-N6；新 I-49 |
