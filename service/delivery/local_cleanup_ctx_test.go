@@ -73,7 +73,7 @@ func onePendingEvent() []PendingEvent {
 // site" rule -- lost the outcome and let the lease expire into a redelivery.
 func TestLocalDispatcher_MarkDeliveredSurvivesCancelledParent(t *testing.T) {
 	poller := &ctxRecordingPoller{events: onePendingEvent()}
-	d := NewLocalDispatcher(poller, core.NopLogger())
+	d := NewLocalDispatcher(poller, core.NopLogger(), core.NopMetrics())
 	d.OnEvent(func(context.Context, core.Event) error { return nil })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,7 +91,7 @@ func TestLocalDispatcher_MarkDeliveredSurvivesCancelledParent(t *testing.T) {
 // schedule rather than left to the lease.
 func TestLocalDispatcher_MarkRetrySurvivesCancelledParent(t *testing.T) {
 	poller := &ctxRecordingPoller{events: onePendingEvent()}
-	d := NewLocalDispatcher(poller, core.NopLogger())
+	d := NewLocalDispatcher(poller, core.NopLogger(), core.NopMetrics())
 	d.OnEvent(func(context.Context, core.Event) error { return errors.New("handler failed") })
 
 	ctx, cancel := context.WithCancel(context.Background())

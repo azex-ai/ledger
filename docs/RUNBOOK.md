@@ -510,7 +510,7 @@ wins.
 ### Trace a booking end-to-end
 
 ```bash
-ledger-cli trace --booking-id 12345
+ledger-cli trace --booking-uid <booking-uid>
 ```
 
 Or:
@@ -695,7 +695,7 @@ table below describes.
 
 | Role | Can do | Used by |
 |---|---|---|
-| `ledger_owner` | Owns every table/sequence — the only role with DDL (`ALTER`/`DROP`/`TRUNCATE`/trigger management/partition create). Has schema `USAGE`+`CREATE` | Schema migrations, once `migrations.job.databaseUrlKey` (Helm) points at it |
+| `ledger_owner` | Owns every table/sequence — the only role with DDL (`ALTER`/`DROP`/`TRUNCATE`/trigger management/partition create). Has schema `USAGE`+`CREATE` | Schema migrations, once your composition root's `postgres.Migrate(databaseURL)` call is pointed at it -- this library ships no Helm chart or migration job of its own |
 | `ledger_app` | `SELECT`/`INSERT`/`UPDATE` on ordinary tables; `SELECT`/`INSERT` only on `journal_entries` (never `UPDATE`/`DELETE` — append-only). No DDL of any kind | the host application's serving processes, once their `DATABASE_URL` points at it |
 | `ledger_ro` | `SELECT` everywhere (full tables, not scoped views yet — see follow-up below) | Metabase / BI / reporting — this is the role a credential leak should cost you, not a superuser session |
 

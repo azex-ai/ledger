@@ -111,14 +111,24 @@ get re-created. Ask upstream channels to replay events from T-onwards
 
 ## 5. Verification: prove the restored ledger is whole
 
-A restored ledger must pass the same invariant checks the live system runs
-(this is the reason `cmd/ledger-cli` is read-only — point it anywhere):
+A restored ledger must pass the same invariant checks the live system runs.
+`cmd/ledger-cli` is safe to point at a restored/suspect instance for this,
+but it is **not** purely read-only (I-M6): `reconcile --full` persists its
+resume cursor to `reconcile_scan_cursors`, a real write. That write is
+harmless evidence-wise (it advances the *check's own* bookkeeping, not
+ledger data), but if you are examining a database that is itself under
+forensic hold for an unrelated incident, run `reconcile --full` (and only
+that command) against a **clone**, per the same rule any other write tool
+would follow. Every other `ledger-cli` command (`solvency`, `journals`,
+`balance`, `trace`, ...) only reads.
 
 ```bash
 export DATABASE_URL=<restored instance>
 
-# 1. Full reconciliation — the complete check suite (I-1..I-13 + I-23/I-24/I-32 coverage):
-ledger-cli reconcile --full          # must print PASS on every check
+# 1. Full reconciliation — the complete check suite (I-1..I-13 + I-23/I-24/I-32 coverage).
+# jsonOut prints the raw report to stdout (no HTTP envelope) — overall_passed
+# is true only when every check in checks[] passed:
+ledger-cli reconcile --full | jq -e '.overall_passed == true'
 
 # 2. Solvency per active currency:
 ledger-cli solvency --currency <uid> # custodial >= user liability
@@ -187,11 +197,18 @@ Results:
   `pg_stat_archiver` on the primary showed `failed_count=0` throughout —
   this is the metric §6 says to alert on for a production RPO number; the
   drill validated the *mechanism* reads correctly, not a live-lag figure.
-- **Verification (§5)**: `ledger-cli reconcile --full` — **all 13 runnable
-  checks `passed: true`**, `overall_passed: true`.
-  (`full_coverage: false` only because `unauthorized_journals` needs an
-  `AuthVerifier` this throwaway seed script never wired via
-  `ledger.WithAttestor` — a seed-script gap, not a restore defect.)
+- **Verification (§5)**: `ledger-cli reconcile --full` — **every runnable
+  check `passed: true`**, `overall_passed: true` (a literal check count
+  is deliberately not given here: the suite has grown from 13 to 15 checks
+  since this drill was run, and would drift again — see
+  `TestReconcileFullFlagUsage_DoesNotHardcodeACheckCount`).
+  `full_coverage: false` at drill time (2026-08-26) because `reconcile --full`
+  had no flag to wire an `AuthVerifier` at all, so `unauthorized_journals`
+  could never run from the CLI regardless of how the seed script was
+  written — a product gap (I-R2), not a one-off seed-script omission as
+  first assumed here. Fixed 2026-09-02: `ledger-cli reconcile --full
+  --pubkey-hex <hex> --key-id <id>` now covers it (see the CLI's own
+  `-h` output).)
   `ledger-cli solvency --currency <USDT uid>` → `"solvent": true`.
   `ledger-cli journals --limit 50` → all 40 expected journals present
   (20 good + 20 good), the 20 "bad" batch correctly absent — PITR cut
@@ -277,13 +294,17 @@ itself be reachable for ad hoc writes outside a migration?), not a
 here rather than pursued further to avoid manufacturing a scenario no real
 restore path produces.
 
-**Recommendation**: migration 008's comment should be corrected — the
-"sequence that regresses after a PITR restore" clause is not supported by
-evidence and overstates 008's own justification (the `ledger_app`
-explicit-`id` fix stands on its own merits without it). No code or
-`reconcile` check changes are proposed here: there is no verified failure
-mode for either checks or restore steps to guard against. Left to Team Lead
-per this task's instructions to report before touching code.
+**Already decided (2026-08-26)**: migration 008's comment is left
+as-written — already-applied migrations are never edited
+(`deployment.md`) — but the "sequence that regresses after a PITR restore"
+clause it names as a trigger is corrected in
+[`docs/INVARIANTS.md`](./INVARIANTS.md)'s I-42 "Correction (2026-08-26)"
+section: that claim is false (PostgreSQL WAL-logs sequence advancement
+*ahead* of `nextval()` consumption, so a restored sequence comes back at or
+ahead of the highest id in the table, never behind — measured directly on
+this drill's restored instance, see I-42). No code or `reconcile` check
+changes were needed: there is no verified failure mode for either checks or
+restore steps to guard against.
 
 Alert on these (wire into the same alerting as the RUNBOOK scenarios):
 
