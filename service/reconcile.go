@@ -1497,8 +1497,8 @@ func (s *FullReconciliationService) runCheckSnapshotIntegrity(ctx context.Contex
 // as passing it, which is why the name is reported rather than dropped.
 //
 // Called with journals/verifier wired, it still reports Complete=false for
-// any coverage it did not achieve (page limit hit, or nothing signed to
-// check).
+// any coverage it did not achieve: the page limit was hit, or the page held
+// journals it could not verify at all (skipped_unsigned=N in the findings).
 func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Context) core.CheckResult {
 	result := core.CheckResult{Name: "unauthorized_journals", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
@@ -1569,24 +1569,40 @@ func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Con
 		}
 	}
 
-	if checked == 0 && len(journalList) > 0 {
-		// C-M8 (tamper-evident.md M-8): this check skips journals with an
+	if skippedUnsigned := len(journalList) - checked; skippedUnsigned > 0 {
+		// C-M8 (tamper-evident.md M-8) + W3-M7 (w3-review/money-path.md M-7),
+		// one criterion instead of two. This check skips journals with an
 		// empty auth_key_id, because on a fleet with pre-P5 history flagging
-		// them would drown out the signal. But when EVERY journal it saw was
-		// skipped, the check verified nothing at all -- and it reported
-		// Passed=true, Complete=true, which made
-		// ReconcileCheckResult(name, passed && complete) emit GREEN. "The
-		// entire ledger is unverifiable" and "the entire ledger verified
-		// clean" were the same machine-readable signal.
+		// them would drown out the signal. C-M8 made the ALL-skipped case
+		// report Complete=false; M-7 measured what that left behind: a single
+		// genuinely signed journal anywhere in the page set checked=1, and
+		// every forged, never-signed journal beside it stayed a silent
+		// `continue` -- no Finding, no count, Complete=true, so 1-of-200
+		// coverage and 200-of-200 coverage produced the identical
+		// machine-readable output, and any fleet with signing history meets
+		// that condition permanently.
+		//
+		// So coverage is now checked == len(journalList), and the shortfall
+		// is DATA (skipped_unsigned=N), not just a boolean: the alerting side
+		// can pick its own threshold instead of being told "green" by a
+		// single signature.
 		//
 		// Passed stays true deliberately (finding nothing IS finding no
 		// violation); only Complete moves, matching check #2's
 		// partial-coverage semantics.
 		result.Complete = false
-		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("unauthorized journals scan verified nothing: %d journal(s) scanned, none of which carry a signature -- "+
-				"either signing was never wired into the write path, or these journals predate it", len(journalList)),
-		})
+		if checked == 0 {
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("unauthorized journals scan verified nothing: %d journal(s) scanned, none of which carry a signature (skipped_unsigned=%d) -- "+
+					"either signing was never wired into the write path, or these journals predate it", len(journalList), skippedUnsigned),
+			})
+		} else {
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf("unauthorized journals scan is partial: verified %d of %d journal(s) scanned (skipped_unsigned=%d) -- "+
+					"a journal carrying no signature cannot be checked here, and a direct-SQL forgery is exactly that shape; "+
+					"service.VerifyLedger's uncovered-entry step is what speaks for these", checked, len(journalList), skippedUnsigned),
+			})
+		}
 	}
 
 	if len(journalList) >= s.cfg.UnauthorizedJournalsPageLimit {
@@ -1599,7 +1615,7 @@ func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Con
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("unauthorized journals scan incomplete: hit page limit (%d journals, newest-first, no resume cursor yet)", s.cfg.UnauthorizedJournalsPageLimit),
 		})
-	} else if result.Passed && checked > 0 {
+	} else if result.Passed && checked > 0 && checked == len(journalList) {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("unauthorized journals scan: %d signed journal(s) verified out of %d scanned", checked, len(journalList)),
 		})

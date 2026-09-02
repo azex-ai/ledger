@@ -142,11 +142,22 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// reading the schema, and the day someone wires one into a read path it
 	// would have arrived pre-granted, unguarded and unaudited. This is
 	// deployment.md's migrate stage; the DROP is a later release.
+	//
+	// anchor_observations (w3-review/money-path.md m-4) is the third of the
+	// first kind. It is the memory VerifyLedger compares every live anchor
+	// head against, and it is append-only for everyone -- so a single
+	// ledger_app INSERT at observed_seq = 999999 made
+	// `anchorSeq < lastObserved` true forever: TAMPERED with no forensic
+	// content and no way back, on a table that refuses UPDATE and DELETE.
+	// Migration 024 moves the legitimate write into
+	// ledger_record_anchor_observation() (SECURITY DEFINER, refuses any seq
+	// ahead of the local attestation chain) and takes the grant away.
 	insertRevoked := map[string]bool{
 		"config_table_changes":          true,
 		"reconcile_scan_cursor_changes": true,
 		"deposits":                      true,
 		"withdrawals":                   true,
+		"anchor_observations":           true,
 	}
 
 	// Column-name patterns that make a table's contents a credential rather
@@ -480,9 +491,15 @@ func TestGrantCoverage_EverySequenceHasExpectedGrants(t *testing.T) {
 	// them; leaving USAGE behind would have made the INSERT revoke a narrowing
 	// on paper only. Named here rather than loosening the assertion, same
 	// contract as deleteAllowed above.
+	//
+	// anchor_observations_id_seq joins them for the same reason as of
+	// migration 024: its rows are now drawn inside
+	// ledger_record_anchor_observation(), a SECURITY DEFINER function, so a
+	// nextval() left behind would be a capability with no caller.
 	appSequenceRevoked := map[string]bool{
 		"config_table_changes_id_seq":          true,
 		"reconcile_scan_cursor_changes_id_seq": true,
+		"anchor_observations_id_seq":           true,
 	}
 
 	for _, seq := range sequences {

@@ -53,10 +53,18 @@ func TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist(t *testing.T) {
 	// ledger_ro runs the same read queries and so needs the same three
 	// helpers, and must NOT reach the partition functions: they are DDL, and
 	// a BI credential creating tables is the opposite of what read-only means.
+	// ledger_record_anchor_observation is migration 024's replacement for
+	// ledger_app's direct INSERT on anchor_observations: the row is the
+	// permanent memory VerifyLedger compares every future anchor head
+	// against, so one forged 999999 used to weld the report to TAMPERED for
+	// good (w3-review/money-path.md m-4). The function is the only door, it
+	// runs as its owner, and it refuses any seq ahead of the local
+	// attestation chain.
 	want := map[string][]string{
 		"ledger_app": {
 			"ledger_create_monthly_partition(text,date,date)",
 			"ledger_rebalance_default_partition(date,date)",
+			"ledger_record_anchor_observation(uuid,bigint,bytea)",
 			"ledger_reject_unknown_normal_side(text)",
 			"ledger_signed_amount(text,text,numeric)",
 			"ledger_signed_delta(text,numeric,numeric)",

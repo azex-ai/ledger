@@ -101,8 +101,16 @@ ORDER BY entry_id ASC;
 -- and carries ledger_block_mutation() triggers, so every observation the
 -- attestation job ever made stays on record. observed_seq = 0 is a legal,
 -- meaningful row ("the anchor was reachable and reported empty").
-INSERT INTO anchor_observations (uid, observed_seq, observed_head)
-VALUES ($1, $2, $3);
+--
+-- Goes through migration 024's SECURITY DEFINER function rather than a direct
+-- INSERT: ledger_app no longer holds INSERT on the table. One forged row at
+-- seq 999999 used to weld VerifyLedger to TAMPERED forever, on a table that
+-- refuses UPDATE and DELETE to everybody (w3-review/money-path.md m-4). The
+-- function refuses any seq ahead of this deployment's own attestation chain,
+-- which bounds the damage to a false red the anchor's own catch-up heals.
+SELECT ledger_record_anchor_observation(
+  sqlc.arg(uid)::uuid, sqlc.arg(observed_seq)::bigint, sqlc.arg(observed_head)::bytea
+);
 
 -- name: GetHighestObservedAnchorSeq :one
 -- The highest seq this deployment has ever SEEN the anchor report. 0 means

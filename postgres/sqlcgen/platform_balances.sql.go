@@ -11,25 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const countClassificationsWithCodes = `-- name: CountClassificationsWithCodes :one
-SELECT COUNT(*)::bigint AS total
-FROM classifications
-WHERE code = ANY($1::text[])
-`
-
-// How many of the given classification codes actually exist. The solvency
-// read uses it as a fail-loud check on its own scope: a scope that matches
-// nothing can only produce Custodial = 0, which is indistinguishable from a
-// genuinely empty custody position and reads as total insolvency
-// (working-agreements.md §3 -- a misconfiguration must not look like a
-// measurement).
-func (q *Queries) CountClassificationsWithCodes(ctx context.Context, codes []string) (int64, error) {
-	row := q.db.QueryRow(ctx, countClassificationsWithCodes, codes)
-	var total int64
-	err := row.Scan(&total)
-	return total, err
-}
-
 const getPlatformBalancesByHolder = `-- name: GetPlatformBalancesByHolder :many
 
 WITH active AS (
@@ -90,6 +71,19 @@ type GetPlatformBalancesByHolderRow struct {
 // Each query is a single SQL statement, so PostgreSQL gives it a single
 // snapshot (no phantom reads between checkpoint and entries). Multi-statement
 // callers (e.g. SolvencyCheck) must wrap in REPEATABLE READ themselves.
+//
+// ⚠️ The two SOLVENCY queries below (GetTotalUserSideBalance,
+// GetSystemSideCustodialBalance) are the exception to the paragraph above:
+// they never reference balance_checkpoints at all. I-49 settled that a
+// checkpoint is an untrusted derived cache -- ledger_app INSERTs into it
+// freely and nothing in it is signed -- and one forged row used to move
+// SolvencyCheck from solvent=false to solvent=true, silencing the library's
+// only unbacked-issuance alarm (w3-review/money-path.md M-2). They now sum
+// journal_entries from the beginning of history, the same trusted basis
+// integrity_checkpoint.sql's RecomputeCheckpointFromEntries uses for I-23.
+// That costs a full scan of the currency's entries per call; solvency is a
+// periodic report, and being cheap in the direction of "no alarm" is not a
+// trade this library makes.
 // Returns the realtime balance per (classification_code, holder_side) for a currency.
 func (q *Queries) GetPlatformBalancesByHolder(ctx context.Context, currencyID int64) ([]GetPlatformBalancesByHolderRow, error) {
 	rows, err := q.db.Query(ctx, getPlatformBalancesByHolder, currencyID)
@@ -112,31 +106,14 @@ func (q *Queries) GetPlatformBalancesByHolder(ctx context.Context, currencyID in
 }
 
 const getSystemSideCustodialBalance = `-- name: GetSystemSideCustodialBalance :one
-WITH active AS (
-  SELECT DISTINCT je.account_holder, je.classification_id
-  FROM journal_entries je
-  INNER JOIN classifications c ON c.id = je.classification_id
-  WHERE je.currency_id      = $1::bigint
-    AND je.account_holder   < 0
-    AND c.code              = ANY($2::text[])
-)
-SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
-FROM active a
-INNER JOIN classifications c ON c.id = a.classification_id
-LEFT JOIN balance_checkpoints bc
-       ON bc.account_holder    = a.account_holder
-      AND bc.currency_id       = $1::bigint
-      AND bc.classification_id = a.classification_id
-LEFT JOIN LATERAL (
-  SELECT COALESCE(SUM(
-    ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
-  ), 0)::numeric AS delta
-  FROM journal_entries je
-  WHERE je.account_holder    = a.account_holder
-    AND je.currency_id       = $1::bigint
-    AND je.classification_id = a.classification_id
-    AND je.id                > COALESCE(bc.last_entry_id, 0)
-) d ON TRUE
+SELECT COALESCE(SUM(
+  ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
+), 0)::numeric AS total
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.currency_id    = $1::bigint
+  AND je.account_holder < 0
+  AND c.code            = ANY($2::text[])
 `
 
 type GetSystemSideCustodialBalanceParams struct {
@@ -144,8 +121,10 @@ type GetSystemSideCustodialBalanceParams struct {
 	CustodialCodes []string `json:"custodial_codes"`
 }
 
-// Returns the realtime sum of system-side (holder < 0) balances for every
-// classification in the caller's custodial scope, for the given currency.
+// Returns the sum of system-side (holder < 0) balances for every
+// classification in the caller's custodial scope, for the given currency,
+// recomputed from journal_entries alone (see the ⚠️ note in this file's
+// header).
 //
 // The scope is a parameter, not the string literal 'custodial' it used to be.
 // Two things broke because it was hardcoded (2026-09-02 audit A-N3 / A-M6):
@@ -155,7 +134,8 @@ type GetSystemSideCustodialBalanceParams struct {
 // because the asset backing a bought currency sits in `settlement`, not in
 // `custodial` (presets/fx.go). PlatformBalanceStore defaults the scope to
 // {custodial, settlement} and refuses to report at all when no classification
-// matches -- see CountClassificationsWithCodes below.
+// matches, and refuses a scope naming a classification that is not a
+// custodied asset -- see ListClassificationScopeAttributes below.
 func (q *Queries) GetSystemSideCustodialBalance(ctx context.Context, arg GetSystemSideCustodialBalanceParams) (pgtype.Numeric, error) {
 	row := q.db.QueryRow(ctx, getSystemSideCustodialBalance, arg.CurrencyID, arg.CustodialCodes)
 	var total pgtype.Numeric
@@ -164,35 +144,19 @@ func (q *Queries) GetSystemSideCustodialBalance(ctx context.Context, arg GetSyst
 }
 
 const getTotalUserSideBalance = `-- name: GetTotalUserSideBalance :one
-WITH active AS (
-  SELECT DISTINCT je.account_holder, je.classification_id
-  FROM journal_entries je
-  INNER JOIN classifications c ON c.id = je.classification_id
-  WHERE je.currency_id = $1
-    AND je.account_holder > 0
-    AND c.balance_role NOT IN ('', 'memo')
-)
-SELECT COALESCE(SUM(COALESCE(bc.balance, 0) + COALESCE(d.delta, 0)), 0)::numeric AS total
-FROM active a
-INNER JOIN classifications c ON c.id = a.classification_id
-LEFT JOIN balance_checkpoints bc
-       ON bc.account_holder    = a.account_holder
-      AND bc.currency_id       = $1
-      AND bc.classification_id = a.classification_id
-LEFT JOIN LATERAL (
-  SELECT COALESCE(SUM(
-    ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
-  ), 0)::numeric AS delta
-  FROM journal_entries je
-  WHERE je.account_holder    = a.account_holder
-    AND je.currency_id       = $1
-    AND je.classification_id = a.classification_id
-    AND je.id                > COALESCE(bc.last_entry_id, 0)
-) d ON TRUE
+SELECT COALESCE(SUM(
+  ledger_signed_amount(c.normal_side, je.entry_type, je.amount)
+), 0)::numeric AS total
+FROM journal_entries je
+INNER JOIN classifications c ON c.id = je.classification_id
+WHERE je.currency_id = $1
+  AND je.account_holder > 0
+  AND c.balance_role NOT IN ('', 'memo')
 `
 
-// Returns the realtime sum of all user-side (holder > 0) LIABILITY balances
-// for a currency — what the platform owes users in aggregate.
+// Returns the sum of all user-side (holder > 0) LIABILITY balances for a
+// currency — what the platform owes users in aggregate — recomputed from
+// journal_entries alone (see the ⚠️ note in this file's header).
 //
 // "Liability" is scoped to classifications tagged with balance_role
 // available/pending/locked, the same basis GetBalanceBreakdown uses for a
@@ -213,4 +177,56 @@ func (q *Queries) GetTotalUserSideBalance(ctx context.Context, currencyID int64)
 	var total pgtype.Numeric
 	err := row.Scan(&total)
 	return total, err
+}
+
+const listClassificationScopeAttributes = `-- name: ListClassificationScopeAttributes :many
+SELECT code, is_system, balance_role
+FROM classifications
+WHERE code = ANY($1::text[])
+`
+
+type ListClassificationScopeAttributesRow struct {
+	Code        string `json:"code"`
+	IsSystem    bool   `json:"is_system"`
+	BalanceRole string `json:"balance_role"`
+}
+
+// The attributes that decide whether a classification may stand in the
+// custodial (asset) side of the solvency report, for each of the given codes.
+// A code that exists comes back exactly once; a code that does not exist does
+// not come back at all, which is how the caller names the missing ones.
+//
+// This replaced a COUNT(*). The count answered "did ANY of these codes exist",
+// which caught a scope that matched nothing and passed a scope with one typo
+// in it: WithCustodialClassCodes("custodial", "setlement") matched one, and
+// the entire settlement position (FX inventory, transit) went missing from
+// the asset side with no error (w3-review/money-path.md m-1). Multi-code
+// scopes are what §7.3 introduced, so "matched some" is the case that needed
+// catching.
+//
+// is_system and balance_role are here for m-2: which classifications count as
+// custodied assets was reasoning that existed only in
+// DefaultCustodialClassCodes' doc comment, so one line of consumer config
+// could put an unbacked or holder-facing classification on the asset side and
+// make the shortfall this report exists to expose disappear. §7.3 moved that
+// judgement from a hardcoded code to a classification property; the caller
+// enforces the property.
+func (q *Queries) ListClassificationScopeAttributes(ctx context.Context, codes []string) ([]ListClassificationScopeAttributesRow, error) {
+	rows, err := q.db.Query(ctx, listClassificationScopeAttributes, codes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListClassificationScopeAttributesRow{}
+	for rows.Next() {
+		var i ListClassificationScopeAttributesRow
+		if err := rows.Scan(&i.Code, &i.IsSystem, &i.BalanceRole); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

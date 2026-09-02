@@ -1109,6 +1109,11 @@ func (s *Service) Worker(cfg service.WorkerConfig) (*service.Worker, error) {
 	if s.attestor != nil {
 		w.SetAttestor(s.attestationServiceUnchecked(nil))
 	}
+	// Not a dependency the Worker calls -- it is what makes "this deployment
+	// has no way to verify its own journals" a line in StartupReport instead
+	// of an absence nobody can observe (w3-review/money-path.md M-6). Passed
+	// unconditionally, nil included: nil is the case worth reporting.
+	w.SetAuthVerifier(s.authVerifier)
 	if s.silentWorker {
 		w.AllowSilent()
 	}

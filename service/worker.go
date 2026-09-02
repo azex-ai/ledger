@@ -105,9 +105,12 @@ type Worker struct {
 	partition     *PartitionService   // nil = skip partition management
 	attestation   *AttestationService // nil = skip the P6 batch attestation job
 	pool          *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
-	config        WorkerConfig
-	logger        core.Logger
-	metrics       core.Metrics
+	// authVerifier is never CALLED by the Worker -- it is held so
+	// StartupReport can report its absence. See SetAuthVerifier.
+	authVerifier core.AuthVerifier
+	config       WorkerConfig
+	logger       core.Logger
+	metrics      core.Metrics
 	// allowSilent opts out of Run's refusal to start under core.NopLogger --
 	// see AllowSilent.
 	allowSilent bool
@@ -190,6 +193,21 @@ func (w *Worker) SetAttestor(a *AttestationService) {
 // StartupReport surfaces it as LeaderElection.
 func (w *Worker) SetPool(pool *pgxpool.Pool) {
 	w.pool = pool
+}
+
+// SetAuthVerifier records the core.AuthVerifier this deployment verifies
+// journal signatures with (ledger.WithAttestor's second argument). The Worker
+// never calls it: the verifier's consumers are the withdrawal gate
+// (postgres.VerifiedBalanceStore), the unauthorized_journals reconcile check
+// and VerifyLedger. It is here so StartupReport can say that there ISN'T one
+// -- which is what "this deployment cannot verify anything it wrote" looks
+// like from outside, and which reported as nothing at all until the
+// 2026-09-02 adversarial re-review (w3-review/money-path.md M-6).
+//
+// ledger.Service.Worker calls this for you, with whatever WithAttestor was
+// given (nil included).
+func (w *Worker) SetAuthVerifier(v core.AuthVerifier) {
+	w.authVerifier = v
 }
 
 // AllowSilent opts this Worker out of Run's refusal to start when its logger
@@ -284,6 +302,15 @@ type StartupReport struct {
 	// never heard of.
 	AttestationAnchorType string `json:"attestation_anchor_type"`
 	Partition             bool   `json:"partition"`
+	// VerifiedBalanceVerifier reports whether a core.AuthVerifier is
+	// configured (ledger.WithAttestor's second argument, handed over by
+	// Worker.SetAuthVerifier). False means the withdrawal gate
+	// (RequireVerifiedBalance) has nothing to verify signatures against, the
+	// unauthorized_journals reconcile check does not run, and VerifyLedger
+	// returns NOT_RUN -- i.e. nothing in this deployment can tell a journal
+	// this library wrote from one inserted by whoever holds the database
+	// credential.
+	VerifiedBalanceVerifier bool `json:"verified_balance_verifier"`
 	// LeaderElection reports whether a *pgxpool.Pool was attached (SetPool),
 	// which is what makes every LockedJob single-runner across replicas.
 	// False means all six locked jobs run on every replica each tick.
@@ -309,9 +336,28 @@ func (w *Worker) StartupReport() StartupReport {
 		AttestationAnchorType:      attestationAnchorTypeName(w),
 		Partition:                  w.partition != nil,
 		LeaderElection:             w.pool != nil,
+		VerifiedBalanceVerifier:    w.authVerifier != nil,
+	}
+	// Every subsystem that is OFF gets its own warning, naming what is not
+	// happening and how to turn it on (w3-review/money-path.md M-6). Before
+	// this, the default install -- ledger.New(pool) with no options, which is
+	// the whole tamper-evidence stack switched off -- produced
+	// Warnings: [], while the strictly milder "attesting without an anchor"
+	// produced one. A degraded mode that reports nothing is the exact shape
+	// I-54 property 2 forbids.
+	if !r.Attestation {
+		r.Warnings = append(r.Warnings, noAttestorWarning)
 	}
 	if r.Attestation && !r.AttestationAnchor {
 		r.Warnings = append(r.Warnings, anchorlessAttestationWarning)
+	} else if !r.AttestationAnchor {
+		r.Warnings = append(r.Warnings, noAnchorWarning)
+	}
+	if !r.VerifiedBalanceVerifier {
+		r.Warnings = append(r.Warnings, noAuthVerifierWarning)
+	}
+	if !r.FullReconcile {
+		r.Warnings = append(r.Warnings, noFullReconcilerWarning)
 	}
 	if !r.LeaderElection {
 		r.Warnings = append(r.Warnings, noLeaderElectionWarning)
@@ -349,6 +395,26 @@ const anchorlessAttestationWarning = "worker: batch attestation is running with 
 	"the batch chain will advance and every batch will be signed, but VerifyLedger " +
 	"cannot detect a wholesale history rewrite until an anchor is wired in via " +
 	"Worker.SetAttestor (see service/attestation.go's anchor field comment)"
+
+const noAttestorWarning = "worker: no Attestor is configured (ledger.WithAttestor was never called) -- " +
+	"every journal is written with auth_status=unsigned_no_attestor, the P6 batch attestation job " +
+	"does not run, and nothing in this deployment can distinguish a journal this library wrote from " +
+	"one inserted directly by whoever holds the database credential. Wire one with " +
+	"ledger.New(pool, ledger.WithAttestor(attestor, verifier))"
+
+const noAnchorWarning = "worker: no attestation anchor is configured -- there is no external witness " +
+	"to this ledger's history, so VerifyLedger has nothing to compare the DB against and returns " +
+	"NOT_RUN. Wire a core.Anchor (anchors/r2 in production) through Worker.SetAttestor"
+
+const noAuthVerifierWarning = "worker: no core.AuthVerifier is configured -- the withdrawal gate " +
+	"(core.ReserveInput.RequireVerifiedBalance) refuses every dimension that has journals, the " +
+	"unauthorized_journals reconcile check is skipped, and VerifyLedger returns NOT_RUN. It is " +
+	"ledger.WithAttestor's second argument"
+
+const noFullReconcilerWarning = "worker: no core.FullReconciler is configured (Worker.SetFullReconciler " +
+	"was never called) -- the full reconciliation suite does not run, so none of its checks " +
+	"(checkpoint_balance, unauthorized_journals, orphan rows, ...) will ever report. " +
+	"ledger.Service.Worker wires this automatically"
 
 const noLeaderElectionWarning = "worker: no connection pool attached (Worker.SetPool was never called) -- " +
 	"every advisory-locked job (expiration, reconcile, system_rollup, full_reconcile, " +
@@ -417,6 +483,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		"attestation_anchor_type", report.AttestationAnchorType,
 		"partition", report.Partition,
 		"leader_election", report.LeaderElection,
+		"verified_balance_verifier", report.VerifiedBalanceVerifier,
 	)
 	for _, warning := range report.Warnings {
 		w.logger.Warn(warning)

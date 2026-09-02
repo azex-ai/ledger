@@ -418,3 +418,63 @@ func TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitH
 	check := findCheck(t, report, "unauthorized_journals")
 	assert.False(t, check.Complete, "hitting the page limit must not claim full coverage")
 }
+
+// TestFullReconciliation_UnauthorizedJournals_PartialCoverageIsIncomplete is
+// W3-M7's pin (2026-09-02 adversarial re-review, w3-review/money-path.md M-7).
+// C-M8 above made "ZERO journals carried a signature" report Complete=false,
+// but left the skip itself untouched: one genuinely signed journal in the page
+// was enough to set checked=1, and every forged, never-signed journal beside
+// it was silently dropped -- no Finding, no count, Complete=true, the check's
+// alertable signal GREEN. On any fleet with signing history that condition is
+// always met, so 1-of-200 coverage and 200-of-200 coverage were the same
+// machine-readable output.
+//
+// The rule is now checked == len(journalList): anything this check did not
+// verify is reported as skipped_unsigned=N and costs Complete, never Passed
+// (skipping is a coverage gap, not a violation).
+func TestFullReconciliation_UnauthorizedJournals_PartialCoverageIsIncomplete(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupAttestFixture(t, pool, ctx)
+
+	attestor, verifier, err := ed25519KeyPair(t, "verify-key-uj-partial")
+	require.NoError(t, err)
+
+	// One real, correctly signed journal -- the single row that used to buy
+	// the whole page a green light.
+	signedStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
+	_, err = signedStore.PostJournal(ctx, f.journalInput(9301, postgrestest.UniqueKey("uj-partial-signed")))
+	require.NoError(t, err)
+
+	// Three journals inserted the way a leaked ledger_app credential inserts
+	// them: no signature at all (auth_key_id = '').
+	for i := 0; i < 3; i++ {
+		insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("uj-partial-forged"))
+	}
+
+	rollup := postgres.NewRollupAdapter(pool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pool)
+	queries := postgres.NewQueryStore(pool)
+	engine := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, engine)
+	full.SetAuthCheck(queries, verifier)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "unauthorized_journals")
+
+	assert.True(t, check.Passed, "an unsigned journal is a coverage gap, not a violation: %+v", check.Findings)
+	assert.False(t, check.Complete,
+		"3 of the 4 journals on this page were never verified; claiming full coverage is the M-7 hole: %+v", check)
+	assert.False(t, report.FullCoverage, "the report must carry that incompleteness up")
+
+	var found bool
+	for _, finding := range check.Findings {
+		if strings.Contains(finding.Description, "skipped_unsigned=3") {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"the number of journals this check could not verify must be in the output, not only in Complete; findings: %+v", check.Findings)
+}

@@ -64,9 +64,13 @@ written because it was true when `[0.6.0]` shipped.
   equity). Migration 016 runs as owner, disables the mutation guard for the
   one statement, and forces a full rollup/snapshot recompute for `equity`.
   **If your deployment has posted through these two templates before
-  upgrading**: those journals are append-only and read with the OLD
-  polarity after the migration — reverse them and re-post under the new
-  templates. Amount keys are unchanged. Deployments that never used these
+  upgrading**: those journals are append-only, and every read of them
+  (`ledger_signed_amount` takes `normal_side` from `classifications`, live)
+  now interprets them under the NEW polarity — so their meaning flips, which
+  is exactly why they must be reversed and re-posted under the new
+  templates. (This paragraph used to say "read with the OLD polarity", which
+  described the opposite mechanism and made the required action look
+  optional — w3-review/money-path.md m-5.) Amount keys are unchanged. Deployments that never used these
   two templates need no action.
 - **`checkout_settlement_gross` / `_net` sign correction** (A-M2):
   `checkout_settlement_gross` legs reversed (merchant `main_wallet` is now
@@ -257,8 +261,48 @@ written because it was true when `[0.6.0]` shipped.
   `BookingStore` each gained a `WithMetrics(core.Metrics)` chain method,
   defaulting to `core.NopMetrics()`; `ledger.New` wires them automatically.
 
+- **Watcher-path deposits no longer pass through `pending` / `confirming`**
+  (W3 re-review, w3-review/money-path.md m-6; a behavioural consequence of
+  I-53's confirmation-depth lower bound). The forward scan's window now ends
+  at `latest - Confirmations + 1`, so every sighting handed to
+  `IngestDeposit` already meets the confirmation threshold and
+  `advanceConfirmation` takes it straight to `confirmed`. The
+  `deposit_confirm_pending` template and the two intermediate booking states
+  therefore no longer occur on the **watcher** path (the webhook path is
+  unchanged, and both states remain part of the model). Consumers whose UX
+  shows "pending → confirmed" for on-chain deposits will see only the final
+  state; if you need the intermediate one, lower `Confirmations` or drive
+  ingestion from the webhook path.
+
 ### Go module — Fixed
 
+- **`SolvencyCheck` no longer reads `balance_checkpoints`** (W3 re-review,
+  w3-review/money-path.md M-2). Both of its figures are recomputed from
+  `journal_entries` (the I-23 basis) instead of `checkpoint + delta`. A
+  checkpoint is a derived cache the application credential may INSERT into,
+  and one forged row moved the library's only unbacked-issuance alarm from
+  `solvent=false` to `solvent=true`. Same values on a healthy ledger, higher
+  read cost (a scan per currency, on a periodic report).
+- **`unauthorized_journals` reports partial coverage** (M-7). `Complete` is
+  now `checked == len(page)` rather than `checked > 0`, and the findings
+  carry `skipped_unsigned=N`. One genuinely signed journal in the page used
+  to make the check report GREEN with any number of unsigned, direct-SQL
+  journals beside it. `Passed` is unchanged (an unsigned journal is a
+  coverage gap, not a violation), so alerting on `Passed && Complete` gets
+  stricter — a fleet with pre-signing history will now see this check
+  incomplete, which is the honest reading.
+- **`VerifyLedger` stops treating `auth_status` as a trust signal** (M-4).
+  `journals.auth_status` is a plain column the app credential writes, so a
+  forged journal claiming `unsigned_tx_mode` used to be counted as a benign
+  backlog forever while the identical row under the column default was
+  TAMPERED. Step 3b now accounts for an uncovered entry only on a valid
+  signature; anything else is DRIFT for `VerifyConfig.UncoveredGracePeriod`
+  (new, default 5m) and TAMPERED after, with no grace at all for a
+  future-dated `effective_at`. `unsigned_no_attestor` keeps its immediate
+  TAMPERED. **Deployments whose attestation job is not actually running will
+  now go TAMPERED** once the window passes — that is the intended reading
+  (nothing is verifying anything), but raise `UncoveredGracePeriod` if your
+  attest interval is longer than a few minutes.
 - Claim-lost warnings inside `EventStore` now go through the injected
   `core.Logger` (via `SetLogger`, wired automatically by `ledger.New` and
   `(*Service).Worker`) instead of `slog.Default()` (I-R1 / B-m1). If you
@@ -275,7 +319,25 @@ written because it was true when `[0.6.0]` shipped.
 ### Go module — Added
 
 - `ledger.WithCustodialClassCodes(codes ...string)` — see the
-  `SolvencyCheck` entry above.
+  `SolvencyCheck` entry above. As of the W3 re-review (m-1 / m-2) a scope
+  the CONSUMER declares is validated per code: every code must name an
+  existing classification, and each must be `is_system` with no
+  `balance_role` (a custodied asset, not a holder liability and not the
+  deliberately-unbacked `dev_credit`). Any violation is `ErrInvalidInput`
+  naming the offending codes. The library's own default scope keeps its
+  older, looser rule (it fails only when NO code matches), because
+  `{custodial, settlement}` is a guess about your install, not your
+  declaration.
+- `service.StartupReport.VerifiedBalanceVerifier` + `Worker.SetAuthVerifier`
+  (M-6): the default install — `ledger.New(pool)` with no options — has the
+  whole tamper-evidence stack switched off and used to report
+  `Warnings: []`, while the strictly milder "attesting without an anchor"
+  warned. Every absent subsystem (Attestor, anchor, `AuthVerifier`,
+  `FullReconciler`, leader election) now emits its own warning saying what
+  is off and how to turn it on, in the report and in `Run`'s log.
+- `service.VerifyConfig.UncoveredGracePeriod` and
+  `service.VerifyReport.UncoveredUnverifiedJournals` — see the
+  `VerifyLedger` entry above.
 - `ledger.RetryIdempotent(ctx, scope, attempts, fn)` — retries `fn` with the
   same idempotency key on every attempt, closing the other half of the
   library-mode retry contract (`core.IsRetryable` shipped in `[0.6.0]`; this
@@ -285,6 +347,14 @@ written because it was true when `[0.6.0]` shipped.
 - New migrations **016** (`preset_sign_correction`, owner-run polarity
   correction + forced rollup/snapshot recompute) and **017**
   (`deposit_reorgs`, durable reorg-anomaly table + monotonic scan cursor).
+- Migration **024** (`owner_written_anchor_observations`, W3 re-review m-4):
+  `ledger_app` loses `INSERT` on `anchor_observations` and gains `EXECUTE`
+  on `ledger_record_anchor_observation(uuid, bigint, bytea)`, a
+  `SECURITY DEFINER` writer that refuses any observation ahead of this
+  deployment's own attestation chain. One forged row at `observed_seq =
+  999999` used to pin `VerifyLedger` to TAMPERED permanently, on a table
+  that refuses `UPDATE` and `DELETE` to everybody. Consumers using the
+  shipped `postgres.AttestationStore` need no change.
 
 ### anchors/r2 (separate Go module)
 

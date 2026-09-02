@@ -1727,6 +1727,19 @@ docs/plans/2026-08-21-tamper-evident-ledger-design.md §6 (A1-A5):
   deployment that genuinely means to promote a classification with history
   does it as `ledger_owner` with the guard dropped, which is deliberately more
   than one statement from an application credential.
+
+  ⚠️ Reading `003_config_table_guards.up.sql` alone gives the opposite
+  answer: that file's version of `ledger_classifications_guard` permits
+  `'' -> <role>` unconditionally, and `004` REPLACED the function rather than
+  editing 003. The 2026-09-02 adversarial re-review
+  (`w3-review/money-path.md` m-3) reported the promotion as an open hole on
+  the strength of 003's text; re-running its exact scenario as `ledger_app`
+  -- a role-less classification holding a real, correctly signed balance --
+  showed 004 refusing it. `postgres.TestBalanceRolePromotion_RefusedForLedgerApp`
+  now pins that under the leaked-credential threat model (the older pin runs
+  as the container superuser), so the next reader does not have to re-derive
+  it and a future migration that re-replaces the guard without the history
+  clause goes red.
 - `reservations.account_holder`/`currency_id`/`reserved_amount`/
   `idempotency_key`/`expires_at`/`created_at`/`uid` are immutable.
   `settled_amount` may only increase (a decrease can only be tampering,
@@ -2231,10 +2244,39 @@ NULL`), not an id-range assumption, so the late entry is simply
   Step 3b now probes `UncoveredEntries` (bounded by
   `VerifyConfig.UncoveredProbeLimit`, default 1000, with the cap reported
   when hit) and splits the result by the journal behind each entry: no
-  valid authorization -> `TAMPERED`; legitimately signed or
-  `unsigned_tx_mode` -> `DRIFT` with the count in
-  `VerifyReport.UncoveredEntries`. A non-zero count is never `VERIFIED`:
-  this run cannot testify about entries no signed attestation covers.
+  valid authorization -> `TAMPERED`; legitimately signed -> `DRIFT` with
+  the count in `VerifyReport.UncoveredEntries`. A non-zero count is never
+  `VERIFIED`: this run cannot testify about entries no signed attestation
+  covers.
+
+  **`auth_status` is not part of that judgement** (2026-09-02 adversarial
+  re-review, `w3-review/money-path.md` M-4). Step 3b originally read
+  `journals.auth_status = 'unsigned_tx_mode'` as an account of the journal
+  ("legitimate, posted inside a caller's transaction"). That column is a
+  plain `CHECK` column with no guard trigger, written by the same
+  credential this whole threat model assumes is leaked, so the identical
+  forged 1,000,000 journal reported `TAMPERED` under the column default and
+  "benign backlog, the next run covers them" one word later -- and the
+  attacker picked which. Worse, that DRIFT was permanent wherever the
+  attestation job is not actually running (`WithAttestor` wires the signer;
+  the batch job is a `Worker` job), and `ledger-cli verify` exits 0 on
+  DRIFT.
+
+  What accounts for an uncovered entry is therefore a **valid signature**,
+  and nothing else. Journals that genuinely cannot carry one -- `RunInTx`
+  posts them, there is no safe point to call a signer inside a caller's
+  transaction -- are tolerated for `VerifyConfig.UncoveredGracePeriod`
+  (default 5m, comfortably above `DefaultWorkerConfig`'s 60s
+  `AttestInterval`) measured from the journal's `effective_at`, and are
+  `TAMPERED` after it: by then any running attestation job would have
+  covered them, and coverage hands the question to the per-journal auth
+  verdict recheck (I-33) instead. An entry dated in the FUTURE gets no
+  grace at all -- `effective_at` is a column the forger writes, so a future
+  date would otherwise buy permanent immunity. `unsigned_no_attestor` keeps
+  its immediate `TAMPERED`. The count of uncovered journals no signature
+  speaks for is reported as `VerifyReport.UncoveredUnverifiedJournals`, so
+  an attestation job that stopped running is visible as a number before it
+  becomes an alarm.
 
 **Pinned by** (`service/attestation_test.go` unless noted):
 - `TestAttestationService_LateArrivingEntryIsEventuallyCoveredExactlyOnce`
@@ -2266,6 +2308,14 @@ NULL`), not an id-range assumption, so the late entry is simply
   forged journal's entries inserted after full coverage are `TAMPERED`;
   entries legitimately posted after the last batch are `DRIFT` with a
   count, never `VERIFIED`.
+- `service.TestVerifyLedger_UncoveredTxModeClaimBeyondGraceIsTampered` /
+  `TestVerifyLedger_UncoveredTxModeWithinGraceIsDriftWithACount` /
+  `TestVerifyLedger_FutureDatedUncoveredEntryIsTamperedImmediately`
+  (`service/attest_verify_uncovered_txmode_test.go`) -- the M-4 half: the
+  same forgery relabelled `unsigned_tx_mode` is `TAMPERED` once it is older
+  than `UncoveredGracePeriod` and immediately if it is future-dated, while
+  a genuinely fresh one is `DRIFT` carrying
+  `UncoveredUnverifiedJournals`.
 
 **Related tests** (deliberately does NOT exercise this invariant's real
 mechanism -- it runs the REJECTED alternative design instead, so nothing in
@@ -2770,12 +2820,24 @@ evidence), reachable only through
 
 Two corrections to that check from the 2026-09-02 audit:
 
-- **When every journal it saw was skipped, the check records
-  `Complete=false`** (C-M8). It used to report `Passed=true, Complete=true`
-  in that case, which made `ReconcileCheckResult(name, Passed && Complete)`
-  emit green — so "the entire ledger is unverifiable" and "the entire
-  ledger verified clean" were the same machine-readable signal. `Passed`
-  deliberately stays true: finding no violation IS finding no violation.
+- **Coverage is `checked == len(page)`, and the shortfall is reported as
+  `skipped_unsigned=N`** (C-M8, tightened by the 2026-09-02 adversarial
+  re-review's M-7). C-M8 first made the ALL-skipped case record
+  `Complete=false`: reporting `Passed=true, Complete=true` there made
+  `ReconcileCheckResult(name, Passed && Complete)` emit green, so "the
+  entire ledger is unverifiable" and "the entire ledger verified clean"
+  were the same machine-readable signal. M-7 measured what that still left
+  behind — the skip itself was untouched, so ONE genuinely signed journal
+  anywhere in the page set `checked = 1` and every forged, never-signed
+  journal beside it stayed a silent `continue`: 1-of-200 coverage and
+  200-of-200 coverage were again the same output, and any fleet with
+  signing history meets that condition permanently. Anything this check did
+  not verify now costs `Complete` and appears as a count, so the alerting
+  side can pick its own threshold instead of being told "green" by a single
+  signature. `Passed` deliberately stays true in both cases: finding no
+  violation IS finding no violation, and an unsigned journal is a coverage
+  gap. What speaks for those journals is `VerifyLedger`'s uncovered-entry
+  step (I-27), not this one.
 - **With no `core.AuthVerifier` wired, the check is not run at all** and
   its name goes into `core.ReconcileReport.SkippedChecks` (C-m4). The
   `Complete=false` placeholder it used to return made `FullCoverage`
@@ -2820,9 +2882,12 @@ Two corrections to that check from the 2026-09-02 audit:
   `TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid` /
   `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature` /
   `TestFullReconciliation_UnauthorizedJournals_SkipsNeverSignedJournal` /
-  `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` —
+  `TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit` /
+  `TestFullReconciliation_UnauthorizedJournals_PartialCoverageIsIncomplete` —
   the fleet-wide check's skip / pass / flag / coverage-gap-vs-tamper-
-  evidence / page-limit-honesty behavior. (A signed-but-unrecognized-key
+  evidence / page-limit-honesty / partial-coverage behavior (the last one is
+  M-7's: one signed journal plus three unsigned forgeries must report
+  `Complete=false` and `skipped_unsigned=3`, not green). (A signed-but-unrecognized-key
   journal — e.g. one signed before a key rotation — is also flagged, never
   silently skipped like a never-signed journal, but with wording distinct
   from tamper evidence: see I-45's
@@ -3239,18 +3304,56 @@ to it is worse than no check, because it also **hides** a real deficit of the
 same magnitude behind the same-looking number (`Margin=-5` from fees alone is
 indistinguishable from `Margin=-5` from an actual unbacked issuance).
 
+Two further properties, from the 2026-09-02 adversarial re-review
+(`w3-review/money-path.md` M-2 / m-1 / m-2):
+
+- **Both figures are recomputed from `journal_entries` alone.** Neither side
+  reads `balance_checkpoints`. I-49 established that a checkpoint is an
+  untrusted derived cache — the application credential INSERTs into it
+  freely and nothing in it is signed — and that conclusion had landed on
+  exactly one consumer, the withdrawal gate. `SolvencyCheck`, the only alarm
+  in this library that says "credit was issued with nothing behind it", still
+  read `COALESCE(bc.balance,0) + delta` on both sides, so one INSERT on a
+  custodial dimension moved it from `solvent=false` to `solvent=true`. It is
+  a periodic report; a scan of the currency's entries is an acceptable price
+  for an answer a forged cache row cannot move.
+- **The custodial scope is validated per code, and every code in it must
+  name a custodied asset.** A scope the CONSUMER declares
+  (`WithCustodialClassCodes`) is checked code by code — the previous
+  `COUNT(*) > 0` passed `("custodial", "setlement")`, leaving the entire
+  settlement position silently out of the asset side — and each classification
+  it names must be `is_system` with an empty `balance_role`, plus not be one
+  of the deliberately-unbacked codes (`dev_credit`). The reasoning for that
+  set existed only in `DefaultCustodialClassCodes`' doc comment, so one line
+  of consumer configuration could move unbacked issuance onto the asset side
+  and net away the very shortfall the report exists to expose. The library's
+  OWN default scope keeps the looser rule (it fails only when NO code
+  matches): `{custodial, settlement}` is a guess about the deployment, not
+  the deployment's declaration, and a install that only ever ran the deposit
+  bundle legitimately has no `settlement` classification.
+
 **Enforced by**:
 - `postgres/sql/queries/platform_balances.sql`'s `GetTotalUserSideBalance`
-  joins `classifications` and filters `c.balance_role <> ''` before summing.
+  joins `classifications` and filters `c.balance_role NOT IN ('', 'memo')`
+  before summing, over `journal_entries` with no `balance_checkpoints` join.
+- `GetSystemSideCustodialBalance` (same file, same entries-only basis) and
+  `ListClassificationScopeAttributes` (the per-code scope check).
 - `postgres.PlatformBalanceStore.SolvencyCheck` /
-  `GetTotalLiabilityByAsset` consume that query unchanged — the fix is
-  entirely in the query's `active` CTE.
+  `GetTotalLiabilityByAsset` / `validateCustodialScope`.
 
 **Pinned by**:
 - `postgres.TestSolvencyCheck_WithdrawFee_DoesNotManufactureDeficit` — the
   exact repro above: before the fix this test's own numbers show
   `Liability=400, Margin=-5, Solvent=false`; after, `Liability=395, Margin=0,
   Solvent=true`, and `GetTotalLiabilityByAsset` agrees with `SolvencyCheck`.
+- `postgres.TestSolvencyCheck_IgnoresTamperedCheckpoints` — 1250 of claims
+  against 1000 of custody, then one `INSERT INTO balance_checkpoints` on the
+  custodial dimension: `solvent` must stay false and both figures unchanged.
+- `postgres.TestSolvencyCheck_RejectsAScopeCodeThatDoesNotExist` /
+  `TestSolvencyCheck_RejectsANonAssetClassificationInScope` /
+  `TestSolvencyCheck_RejectsAnEmptyScope` — a typo'd code, `dev_credit`,
+  `main_wallet` and an empty scope are each `ErrInvalidInput` naming the
+  offender, while the shipped default scope still resolves.
 
 > **Addendum (M-4 fix, `.local/independent-review-2026-08-26.md`,
 > docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
@@ -5391,6 +5494,17 @@ included from the mempool by the replacement — had never been scanned and
 never would be. One consequence for alerting: `Metrics.ChainCursorLag`'s
 healthy baseline is `Confirmations`, not 0.
 
+**Consequence for the deposit lifecycle** (2026-09-02 adversarial re-review,
+`w3-review/money-path.md` m-6 — registered here and in the CHANGELOG because
+it is a behaviour change nothing else records): every sighting this scan
+hands to `IngestDeposit` is already `Confirmations` deep, so
+`advanceConfirmation` takes it straight to `confirmed`. On the WATCHER path
+the `pending` and `confirming` states — and the `deposit_confirm_pending`
+template with them — therefore no longer occur. Both states remain part of
+the model and the webhook path still produces them; a consumer whose UX
+depends on seeing "pending → confirmed" for on-chain deposits either lowers
+`Confirmations` or drives ingestion from the webhook path.
+
 **Enforced by**:
 - `service.Onchain.scanChainOnce` / `processRegistrationRescan` via
   `confirmationDepth(cfg)` (`service/onchain.go`).
@@ -5423,10 +5537,19 @@ healthy baseline is `Confirmations`, not 0.
    never booted.
 2. What that startup log says is also available as data:
    `Worker.StartupReport()` returns the same facts (including
-   `AttestationAnchor` and `LeaderElection`) plus a `Warnings` list, readable
-   before `Run` and with no logger involved. A degraded-but-permitted mode —
-   attestation with a nil anchor, no advisory-lock pool — is never reported
-   only by a log line.
+   `AttestationAnchor`, `VerifiedBalanceVerifier` and `LeaderElection`) plus a
+   `Warnings` list, readable before `Run` and with no logger involved. A
+   degraded-but-permitted mode is never reported only by a log line — and
+   **every absent subsystem produces its own warning**: no `Attestor`, no
+   anchor, no `core.AuthVerifier`, no `core.FullReconciler`, no advisory-lock
+   pool. The 2026-09-02 adversarial re-review (`w3-review/money-path.md` M-6)
+   measured the gap this closes: `ledger.New(pool)` with no options — the
+   default install, in which nothing is signed, every gated `Reserve` on a
+   dimension with journals refuses, `unauthorized_journals` is skipped and
+   `VerifyLedger` is permanently `NOT_RUN` — reported `Warnings: []`, while
+   the strictly milder "attesting without an anchor" reported one. The
+   deepest degradation was the quietest. Each warning names what is off and
+   the call that turns it on.
 3. Violating a documented ordering constraint returns an error rather than
    logging one: `Worker.Subscribe` after `Run` is refused, because the
    `event_callback` loop's existence was decided at startup and the handler
@@ -5548,12 +5671,37 @@ application credential cannot do it at all. What this closes is the
 asymmetry where the attacker had to compromise **nothing** in the database
 to make an erased anchor look healthy.
 
+**The memory is written by its owner, and never ahead of the chain**
+(2026-09-02 adversarial re-review, `w3-review/money-path.md` m-4; migration
+024). The dangerous direction was always closed -- `MAX(observed_seq)` only
+rises, so no INSERT can make a rollback look like progress -- but the
+harmless-looking direction was open and permanent: one
+`INSERT ... observed_seq = 999999` as `ledger_app` made
+`anchorSeq < lastObserved` true on every future run, i.e. `TAMPERED` with no
+forensic content, on a table that refuses UPDATE and DELETE to everybody and
+with no runbook path back. Fail-closed is right; a red light one statement
+can weld on is not. `ledger_app` therefore no longer holds INSERT on the
+table: the write goes through `ledger_record_anchor_observation(uuid,
+bigint, bytea)`, a `SECURITY DEFINER` function owned by `ledger_owner` (the
+same shape 020 used for the audit tables, I-58) which refuses any
+`observed_seq` above `MAX(seq)` of the local attestation chain. An anchor
+claiming a seq this deployment never produced is reported as tamper
+evidence on the spot by `VerifyLedger`'s own `anchorSeq > maxSeqSeen` check
+and does not need a permanent record to say so. The worst a leaked
+credential can now record is the true current chain height, which the
+anchor's own catch-up reaches on its own -- a false red that heals rather
+than one an operator has to cut out of an append-only table. `observed_seq
+= 0` stays legal and meaningful.
+
 **Enforced by**:
 - Migration 018's `anchor_observations` -- `BIGSERIAL` + `uid`, two
   `ledger_block_mutation()` triggers (no UPDATE, no DELETE), and an ACL
-  that grants `ledger_app` only `SELECT, INSERT` and `ledger_ro` only
-  `SELECT`. Owned by `ledger_owner`, transferred inside the same temporary
-  membership window 001 §14 uses.
+  that grants `ledger_ro` only `SELECT`. Owned by `ledger_owner`,
+  transferred inside the same temporary membership window 001 §14 uses.
+- Migration 024's `ledger_record_anchor_observation` -- `SECURITY DEFINER`,
+  owned by `ledger_owner`, `EXECUTE` granted to `ledger_app` only, refusing
+  any seq ahead of `ledger_attestations`. `ledger_app`'s direct INSERT on
+  the table and its `nextval()` on the sequence are revoked.
 - `service.AttestationService.catchUpAnchor` -- records the observation
   BEFORE acting on it, so a run that dies mid-catch-up still leaves the
   observation behind.
@@ -5578,6 +5726,11 @@ to make an erased anchor look healthy.
   honest ambiguity: no observation on record, so `NOT_RUN`, not `TAMPERED`.
 - `TestVerifyLedger_DriftOnlyWhenAnchorHasPublishedButLags` -- the control:
   `DRIFT` still exists and still means what it says.
+- `postgres.TestMigration024_AnchorObservationsAreOwnerWritten`
+  (`postgres/migration_024_test.go`) -- as `ledger_app`: the direct INSERT
+  is refused (42501), the function refuses seq 999999 against an empty
+  chain, a legitimate seq-0 observation records, and `MAX(observed_seq)`
+  never learns the forged value.
 
 ## I-56: An anchor's head never regresses, and that is a machine-checked property of every implementation
 

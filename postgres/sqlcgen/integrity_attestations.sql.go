@@ -83,8 +83,9 @@ func (q *Queries) GetLedgerAttestationBySeq(ctx context.Context, seq int64) (Led
 }
 
 const insertAnchorObservation = `-- name: InsertAnchorObservation :exec
-INSERT INTO anchor_observations (uid, observed_seq, observed_head)
-VALUES ($1, $2, $3)
+SELECT ledger_record_anchor_observation(
+  $1::uuid, $2::bigint, $3::bytea
+)
 `
 
 type InsertAnchorObservationParams struct {
@@ -98,6 +99,13 @@ type InsertAnchorObservationParams struct {
 // and carries ledger_block_mutation() triggers, so every observation the
 // attestation job ever made stays on record. observed_seq = 0 is a legal,
 // meaningful row ("the anchor was reachable and reported empty").
+//
+// Goes through migration 024's SECURITY DEFINER function rather than a direct
+// INSERT: ledger_app no longer holds INSERT on the table. One forged row at
+// seq 999999 used to weld VerifyLedger to TAMPERED forever, on a table that
+// refuses UPDATE and DELETE to everybody (w3-review/money-path.md m-4). The
+// function refuses any seq ahead of this deployment's own attestation chain,
+// which bounds the damage to a false red the anchor's own catch-up heals.
 func (q *Queries) InsertAnchorObservation(ctx context.Context, arg InsertAnchorObservationParams) error {
 	_, err := q.db.Exec(ctx, insertAnchorObservation, arg.Uid, arg.ObservedSeq, arg.ObservedHead)
 	return err

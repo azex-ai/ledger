@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/azex-ai/ledger/core"
 )
@@ -61,10 +62,13 @@ type VerifyReport struct {
 	ChainSeqsChecked int64    `json:"chain_seqs_checked"`
 	EntriesRechecked int64    `json:"entries_rechecked"`
 	JournalsSampled  int64    `json:"journals_sampled"`
-	// JournalsUnsignedTxMode counts sampled journals posted inside a
-	// caller's transaction, where no safe point to sign exists. Reported
-	// rather than flagged -- legitimate, but a consumer relying on
-	// verification should know how much of the ledger it cannot speak for.
+	// JournalsUnsignedTxMode counts sampled journals whose auth_status CLAIMS
+	// they were posted inside a caller's transaction, where no safe point to
+	// sign exists. Reported rather than flagged, because this step cannot see
+	// attestation coverage and the claim itself is unverifiable -- step 3b
+	// (coverage plus age) and step 2's auth-verdict recheck are what actually
+	// decide. Treat it as "how much of the sample carries no signature",
+	// never as "how much of the sample is fine".
 	JournalsUnsignedTxMode int64 `json:"journals_unsigned_tx_mode"`
 	// MismatchedEntryIDs maps seq -> the specific entry ids
 	// core.LocateMismatches found within that batch (design doc §9.1/§9.4),
@@ -86,6 +90,15 @@ type VerifyReport struct {
 	// count is capped by VerifyConfig.UncoveredProbeLimit; when it equals
 	// that limit the true number may be higher, and Reasons says so.
 	UncoveredEntries int64 `json:"uncovered_entries"`
+	// UncoveredUnverifiedJournals counts the journals behind those uncovered
+	// entries that carry no signature this verifier could check -- including
+	// the ones whose auth_status claims `unsigned_tx_mode`. They are reported
+	// as a number rather than merely tolerated because auth_status is a plain
+	// column the app credential writes (w3-review/money-path.md M-4): within
+	// the grace window they are DRIFT, past it they are TAMPERED, and either
+	// way an operator watching this number sees an attestation job that
+	// stopped running before verification starts calling it tampering.
+	UncoveredUnverifiedJournals int64 `json:"uncovered_unverified_journals"`
 	// AnchorSeq is the seq core.Anchor.Head reported for this run, and
 	// LastObservedAnchorSeq the highest seq this deployment had ever
 	// previously recorded seeing (migration 018's anchor_observations).
@@ -115,6 +128,27 @@ type VerifyConfig struct {
 	// verification into a table scan on a busy ledger. Hitting the limit is
 	// reported (never silently truncated). default: 1000
 	UncoveredProbeLimit int32
+	// UncoveredGracePeriod is how long an uncovered entry whose journal
+	// carries no verifiable signature is read as an attestation backlog
+	// (DRIFT) rather than as a forgery (TAMPERED). Measured against the
+	// journal's effective_at; an entry dated in the FUTURE gets no grace at
+	// all, since effective_at is a column the forger writes and a future date
+	// would otherwise buy permanent immunity.
+	//
+	// It exists because `unsigned_tx_mode` is not a trust signal: journals.
+	// auth_status is a plain CHECK column with no guard trigger, so the
+	// credential this threat model assumes is leaked picks its value freely,
+	// and a forged row claiming tx mode used to be counted as legitimate
+	// forever (w3-review/money-path.md M-4). The only honest thing that
+	// distinguishes a real RunInTx journal from that forgery is time: the
+	// attestation job covers the real one on its next tick, after which the
+	// per-journal auth verdict speaks for it.
+	//
+	// default: 5 minutes -- comfortably above service.DefaultWorkerConfig's
+	// 60s AttestInterval, including a few missed ticks. Deployments that run
+	// the attestation job less often must raise it, or they will read their
+	// own backlog as tampering.
+	UncoveredGracePeriod time.Duration
 	// ReferenceEntries is the FALLBACK localization path, used only when
 	// the self-contained one (migration 048's entry_attestations.leaf_hash,
 	// tried first) is unavailable for a seq -- e.g. a row that predates the
@@ -133,7 +167,7 @@ type VerifyConfig struct {
 
 // DefaultVerifyConfig returns VerifyConfig's defaults.
 func DefaultVerifyConfig() VerifyConfig {
-	return VerifyConfig{JournalSampleSize: 20, ChainPageSize: 500, UncoveredProbeLimit: 1000}
+	return VerifyConfig{JournalSampleSize: 20, ChainPageSize: 500, UncoveredProbeLimit: 1000, UncoveredGracePeriod: 5 * time.Minute}
 }
 
 // VerifyLedger runs the five-step verification (design doc §8.4).
@@ -149,6 +183,9 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	}
 	if cfg.UncoveredProbeLimit <= 0 {
 		cfg.UncoveredProbeLimit = DefaultVerifyConfig().UncoveredProbeLimit
+	}
+	if cfg.UncoveredGracePeriod <= 0 {
+		cfg.UncoveredGracePeriod = DefaultVerifyConfig().UncoveredGracePeriod
 	}
 
 	// Step 1: pull the anchor's head. Never trust the DB for this value.
@@ -485,6 +522,20 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	//     signature that does not verify) is TAMPERED;
 	//   - everything accounted for is a benign attestation backlog: DRIFT,
 	//     never VERIFIED. The next RunAttestBatch closes it.
+	//
+	// What counts as "accounted for" is a VALID SIGNATURE, and nothing else.
+	// This step used to accept the journal's own auth_status = unsigned_tx_mode
+	// as an account of itself, which handed the classification to the forger:
+	// journals.auth_status is a plain CHECK column with no guard trigger
+	// (001_baseline §3), so the same forged 1,000,000 journal read as
+	// TAMPERED under the column default and as "benign backlog" one word
+	// later (w3-review/money-path.md M-4). Journals that genuinely cannot be
+	// signed -- RunInTx posts them, there is no safe point to call a signer
+	// inside a caller's transaction -- are still tolerated, but only for
+	// cfg.UncoveredGracePeriod, which is the window the attestation job needs
+	// to cover them and let the per-journal auth verdict speak for them
+	// instead. Past that window an uncovered, unverifiable entry is what a
+	// direct-SQL forgery looks like, whatever it calls itself.
 	uncovered, err := store.UncoveredEntries(ctx, cfg.UncoveredProbeLimit)
 	if err != nil {
 		return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("probe uncovered entries: %v", err)}}
@@ -504,7 +555,8 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 			return VerifyReport{Status: VerifyStatusNotRun, Reasons: []string{fmt.Sprintf("auth material for uncovered entries: %v", err)}}
 		}
 		var unaccounted []int64
-		var uncoveredTxMode int
+		var withinGrace int64
+		now := time.Now()
 		for _, id := range uncoveredJournalIDs {
 			material, ok := materials[id]
 			if !ok {
@@ -514,35 +566,43 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 				unaccounted = append(unaccounted, id)
 				continue
 			}
-			switch material.AuthStatus {
-			case core.AuthStatusUnsignedTxMode:
-				// Legitimate: posted inside a caller's transaction, where
-				// there is no safe point to call a signer (core/auth.go).
-				// Counted, not flagged -- the same treatment step 4 gives it.
-				uncoveredTxMode++
-			case core.AuthStatusSigned:
+			if material.AuthStatus == core.AuthStatusSigned {
 				if err := core.VerifyJournalAuth(ctx, verifier, material.Input, material.EffectiveAt, material.AuthDigest, material.AuthSignature, material.AuthKeyID); err != nil {
 					unaccounted = append(unaccounted, id)
 				}
-			default:
-				// unsigned_no_attestor. VerifyLedger has already returned
-				// NOT_RUN if no verifier was configured, so signing IS wired
-				// for this deployment -- and this is auth_status's column
-				// DEFAULT, i.e. what a row that never went through
-				// PostJournal carries. Same reading as step 4's
-				// unsigned_no_attestor branch, which is the whole point of
-				// keeping the two consistent.
-				unaccounted = append(unaccounted, id)
+				continue
 			}
+			// Everything else -- unsigned_tx_mode, unsigned_no_attestor, and
+			// any value a future migration adds -- carries no signature this
+			// verifier can check, so nothing about it is verified. The only
+			// question left is whether the attestation job has had time to
+			// cover it.
+			//
+			// unsigned_no_attestor keeps its old zero-grace treatment: with a
+			// verifier configured (VerifyLedger returned NOT_RUN otherwise)
+			// PostJournal always signs, so that value is either a forged
+			// INSERT taking the column default or history from before the key
+			// -- an operator has to look either way, and softening it would be
+			// a regression against C-M2's pin.
+			age := now.Sub(material.EffectiveAt)
+			withinGraceWindow := material.AuthStatus != core.AuthStatusUnsignedNoAttestor &&
+				age >= 0 && age < cfg.UncoveredGracePeriod
+			if withinGraceWindow {
+				withinGrace++
+				continue
+			}
+			unaccounted = append(unaccounted, id)
 		}
+		report.UncoveredUnverifiedJournals = withinGrace + int64(len(unaccounted))
 		if len(unaccounted) > 0 {
 			tampered("%d of the %d entries no attestation covers belong to %d journal(s) with no valid authorization "+
-				"(internal journal ids %v) -- an unattested, unauthorized entry is what a direct-SQL forgery looks like",
+				"(internal journal ids %v) -- an unattested, unauthorized entry is what a direct-SQL forgery looks like, "+
+				"and a journal's own auth_status is not an account of itself: it is a plain column the app credential writes",
 				len(uncovered), len(uncovered), len(unaccounted), unaccounted)
 		}
-		drifted("%d entr(ies) across %d journal(s) are not covered by any attestation yet (%d of those journals were posted in tx mode); "+
-			"the next attestation run covers them",
-			len(uncovered), len(uncoveredJournalIDs), uncoveredTxMode)
+		drifted("%d entr(ies) across %d journal(s) are not covered by any attestation yet (%d of those journals cannot be verified by signature "+
+			"and are inside the %s grace window); the next attestation run covers them",
+			len(uncovered), len(uncoveredJournalIDs), withinGrace, cfg.UncoveredGracePeriod)
 		if int32(len(uncovered)) >= cfg.UncoveredProbeLimit {
 			drifted("uncovered-entry probe hit its limit of %d, so the real number may be higher -- "+
 				"this run can only speak for the %d it looked at", cfg.UncoveredProbeLimit, len(uncovered))
@@ -568,9 +628,15 @@ func VerifyLedger(ctx context.Context, store AttestationStore, anchor core.Ancho
 	// this branch used to skip -- verification could report VERIFIED with a
 	// forged credit live in the ledger.
 	//
-	// unsigned_tx_mode is genuinely legitimate: those journals were posted
-	// inside a caller's transaction, where there is no safe point left to
-	// call out to a signer. They are counted, not flagged.
+	// unsigned_tx_mode is counted, not flagged, HERE -- but not because the
+	// column is believed: auth_status is written by the same credential that
+	// writes the row (w3-review/money-path.md M-4). This step samples recent
+	// journals without knowing which of them an attestation covers, so it is
+	// the wrong place to decide. Step 3b is the one that decides, on coverage
+	// plus age rather than on the label, and a covered journal that cannot be
+	// verified is caught a third time by the per-journal auth verdict recheck
+	// in step 2. The count below is reported so a consumer can see how much
+	// of the sample carries no signature at all.
 	//
 	// unsigned_no_attestor is not legitimate here. VerifyLedger has already
 	// returned NOT_RUN if no verifier is configured, so reaching this line

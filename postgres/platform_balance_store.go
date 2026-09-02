@@ -19,21 +19,34 @@ var (
 )
 
 // PlatformBalanceStore reads structured platform-wide balance breakdowns in
-// real time. Every query computes `checkpoint.balance + delta` where delta is
-// the net of journal_entries past the checkpoint's last_entry_id, so reads
-// reflect every committed write immediately — no waiting for the rollup
-// worker.
+// real time.
 //
-// Single-statement queries (GetPlatformBalances, GetTotalLiabilityByAsset)
-// rely on PostgreSQL statement-level snapshot consistency. Multi-statement
-// reads (SolvencyCheck) wrap in REPEATABLE READ to keep the liability and
-// custodial figures from drifting against each other.
+// GetPlatformBalances computes `checkpoint.balance + delta` where delta is the
+// net of journal_entries past the checkpoint's last_entry_id, so reads reflect
+// every committed write immediately — no waiting for the rollup worker.
+//
+// The two figures behind SolvencyCheck (and GetTotalLiabilityByAsset, which
+// shares the liability query) do NOT read balance_checkpoints at all: they are
+// recomputed from journal_entries alone. A checkpoint is a derived cache the
+// app credential can INSERT into, and one forged row used to move solvency
+// from insolvent to solvent (w3-review/money-path.md M-2, the sibling of
+// I-49's finding about the withdrawal gate). Full scan per call, on a periodic
+// report — see platform_balances.sql's header.
+//
+// Single-statement queries rely on PostgreSQL statement-level snapshot
+// consistency. Multi-statement reads (SolvencyCheck) wrap in REPEATABLE READ
+// to keep the liability and custodial figures from drifting against each
+// other.
 type PlatformBalanceStore struct {
 	pool           *pgxpool.Pool
 	db             DBTX
 	q              *sqlcgen.Queries
 	dims           *dimCache
 	custodialCodes []string
+	// custodialScopeDeclared distinguishes a scope the CONSUMER named
+	// (WithCustodialClassCodes) from DefaultCustodialClassCodes. Only the
+	// first is held to "every code must exist" -- see validateCustodialScope.
+	custodialScopeDeclared bool
 }
 
 // DefaultCustodialClassCodes is the classification scope SolvencyCheck treats
@@ -83,6 +96,7 @@ func NewPlatformBalanceStore(pool *pgxpool.Pool) *PlatformBalanceStore {
 func (s *PlatformBalanceStore) WithCustodialClassCodes(codes ...string) *PlatformBalanceStore {
 	clone := *s
 	clone.custodialCodes = append([]string(nil), codes...)
+	clone.custodialScopeDeclared = true
 	return &clone
 }
 
@@ -96,6 +110,8 @@ func (s *PlatformBalanceStore) WithDB(db DBTX) *PlatformBalanceStore {
 		q:              sqlcgen.New(db),
 		dims:           dimCacheForTx(s.dims),
 		custodialCodes: s.custodialCodes,
+
+		custodialScopeDeclared: s.custodialScopeDeclared,
 	}
 }
 
@@ -136,8 +152,8 @@ func (s *PlatformBalanceStore) GetPlatformBalances(ctx context.Context, currency
 	return pb, nil
 }
 
-// GetTotalLiabilityByAsset returns the realtime sum of all user-side
-// (holder > 0) balances for the given currency, across all classifications.
+// GetTotalLiabilityByAsset returns the sum of all user-side (holder > 0)
+// liability balances for the given currency, recomputed from journal_entries.
 // This is the aggregate liability — what the platform owes users in total.
 func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, currencyUID string) (decimal.Decimal, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
@@ -165,8 +181,9 @@ func (s *PlatformBalanceStore) GetTotalLiabilityByAsset(ctx context.Context, cur
 // Solvent   = Custodial >= Liability.
 // Margin    = Custodial - Liability (positive = surplus, negative = shortfall).
 //
-// Both figures come from one REPEATABLE READ transaction so they describe a
-// single point in time. Comparing the custodial figure to an off-chain custody
+// Both figures are recomputed from journal_entries -- never from
+// balance_checkpoints (see the type's doc comment) -- inside one REPEATABLE
+// READ transaction, so they describe a single point in time. Comparing the custodial figure to an off-chain custody
 // position is the consumer's responsibility.
 func (s *PlatformBalanceStore) SolvencyCheck(ctx context.Context, currencyUID string) (*core.SolvencyReport, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
@@ -205,18 +222,8 @@ func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *
 		return nil, fmt.Errorf("postgres: platform balance: solvency liability convert: %w", err)
 	}
 
-	// Fail-loud on a scope that cannot possibly resolve. Custodial = 0 from a
-	// misconfigured scope is indistinguishable from Custodial = 0 on an empty
-	// ledger, and it reports as total insolvency either way.
-	matched, err := q.CountClassificationsWithCodes(ctx, s.custodialCodes)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: platform balance: solvency custodial scope currency=%s: %w", currencyUID, err)
-	}
-	if matched == 0 {
-		return nil, fmt.Errorf(
-			"postgres: platform balance: solvency: custodial scope %v matches no classification, so the custodial figure could only ever be zero: %w",
-			s.custodialCodes, core.ErrInvalidInput,
-		)
+	if err := s.validateCustodialScope(ctx, q); err != nil {
+		return nil, err
 	}
 
 	custodialRaw, err := q.GetSystemSideCustodialBalance(ctx, sqlcgen.GetSystemSideCustodialBalanceParams{
@@ -240,3 +247,101 @@ func (s *PlatformBalanceStore) solvencyCheckWithQueries(ctx context.Context, q *
 		Margin:      margin,
 	}, nil
 }
+
+// validateCustodialScope refuses to report at all unless every code in the
+// scope names a classification that can actually stand for a custodied asset.
+// Two failures it did not use to catch, both from the 2026-09-02 adversarial
+// re-review (w3-review/money-path.md m-1 and m-2):
+//
+//   - The old check was COUNT(*) > 0, so one typo in a multi-code scope
+//     ("custodial", "setlement") passed with the entire settlement position --
+//     FX inventory, transit -- silently absent from the asset side. §7.3
+//     introduced multi-code scopes, so "matched some" is the case that
+//     mattered.
+//   - Nothing said a classification named as custody had to BE an asset.
+//     DefaultCustodialClassCodes' doc comment explains precisely why equity,
+//     fees, spread and dev_credit are excluded (they are the platform's own
+//     money, or -- for dev_credit -- deliberately unbacked), but that
+//     reasoning lived only in the comment: one line of consumer config could
+//     move the unbacked issuance this report exists to expose onto the asset
+//     side and net the shortfall away. §7.3 made "what is a custodied asset"
+//     a classification property; this enforces the property.
+//
+// The property: is_system = true (a platform-side account, not a holder's)
+// AND balance_role = ” (role-bearing classifications are the LIABILITY side
+// -- available/pending/locked is a holder's own money -- and 'memo' accounts
+// are reporting artifacts). That is exactly what custodial and settlement
+// are, and exactly what main_wallet and fee_expense are not. dev_credit is
+// is_system with no role, so it passes the shape test and is refused by name:
+// its whole purpose is to be an unbacked counterparty.
+func (s *PlatformBalanceStore) validateCustodialScope(ctx context.Context, q *sqlcgen.Queries) error {
+	if len(s.custodialCodes) == 0 {
+		return fmt.Errorf(
+			"postgres: platform balance: solvency: custodial scope is empty, so the custodial figure could only ever be zero: %w",
+			core.ErrInvalidInput,
+		)
+	}
+
+	rows, err := q.ListClassificationScopeAttributes(ctx, s.custodialCodes)
+	if err != nil {
+		return fmt.Errorf("postgres: platform balance: solvency custodial scope: %w", err)
+	}
+	byCode := make(map[string]sqlcgen.ListClassificationScopeAttributesRow, len(rows))
+	for _, r := range rows {
+		byCode[r.Code] = r
+	}
+
+	var missing, notAnAsset []string
+	for _, code := range s.custodialCodes {
+		row, ok := byCode[code]
+		if !ok {
+			missing = append(missing, code)
+			continue
+		}
+		if !row.IsSystem || row.BalanceRole != "" {
+			notAnAsset = append(notAnAsset, fmt.Sprintf("%s (is_system=%t, balance_role=%q)", code, row.IsSystem, row.BalanceRole))
+			continue
+		}
+		if _, unbacked := unbackedCustodialCodes[code]; unbacked {
+			notAnAsset = append(notAnAsset, fmt.Sprintf("%s (deliberately unbacked -- see presets/devcredit.go)", code))
+		}
+	}
+
+	switch {
+	case s.custodialScopeDeclared && len(missing) > 0:
+		// A scope the consumer wrote down: every code in it is a claim about
+		// this deployment, and a claim that resolves to nothing is a typo,
+		// not a position.
+		return fmt.Errorf(
+			"postgres: platform balance: solvency: custodial scope names %v, which match no classification -- "+
+				"whatever they were meant to cover would be silently absent from the asset side: %w",
+			missing, core.ErrInvalidInput,
+		)
+	case len(missing) == len(s.custodialCodes):
+		// DefaultCustodialClassCodes is the library's guess, not the
+		// consumer's declaration: a deployment that installed only the
+		// deposit bundle has no `settlement` classification and is not
+		// misconfigured for it. Missing ALL of them is still fatal -- that is
+		// A-N3's original fail-loud, and it can only produce Custodial = 0.
+		return fmt.Errorf(
+			"postgres: platform balance: solvency: custodial scope %v matches no classification, so the custodial figure could only ever be zero: %w",
+			s.custodialCodes, core.ErrInvalidInput,
+		)
+	}
+	if len(notAnAsset) > 0 {
+		return fmt.Errorf(
+			"postgres: platform balance: solvency: custodial scope names %v, which are not custodied assets backing holder claims "+
+				"(a custody classification is is_system with no balance_role) -- counting them would net away the very shortfall this report exists to expose: %w",
+			notAnAsset, core.ErrInvalidInput,
+		)
+	}
+	return nil
+}
+
+// unbackedCustodialCodes are shipped classifications that pass the structural
+// test (is_system, no balance_role) but must never be counted as custody: the
+// dev-credit counterparty exists precisely to make unbacked issuance show up
+// as a shortfall (presets/devcredit.go), so putting it on the asset side
+// deletes the signal. Named rather than derived because "unbacked" is a fact
+// about what the preset MEANS, and the schema carries no column for it.
+var unbackedCustodialCodes = map[string]struct{}{"dev_credit": {}}

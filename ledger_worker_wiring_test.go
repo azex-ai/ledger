@@ -373,3 +373,66 @@ func TestServiceWorker_SubscribeAfterRunIsAnError(t *testing.T) {
 			"handler would never be invoked and the events would stay pending forever")
 	require.ErrorIs(t, subErr, core.ErrInvalidInput)
 }
+
+// TestServiceWorker_DefaultInstallWarnsThatTamperEvidenceIsOff is W3-M6's pin
+// (2026-09-02 adversarial re-review, w3-review/money-path.md M-6). Measured
+// against the default install before the fix:
+//
+//	DEFAULT StartupReport = {... Attestation:false AttestationAnchor:false
+//	                         LeaderElection:true Warnings:[]}
+//	DEFAULT Warnings      = [] (len=0)
+//
+// ledger.New(pool) with no options posts every journal unsigned, builds a
+// VerifiedBalanceStore with a nil verifier (so every gated Reserve on a
+// dimension with journals refuses), skips unauthorized_journals entirely and
+// makes VerifyLedger permanently NOT_RUN. That is a strictly deeper
+// degradation than "attesting without an anchor", which does warn -- and it
+// said nothing at all, in a report whose entire reason for existing is
+// I-54 property 2 ("a degraded-but-permitted mode is never reported only by
+// a log line").
+func TestServiceWorker_DefaultInstallWarnsThatTamperEvidenceIsOff(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	worker, err := svc.Worker(service.DefaultWorkerConfig())
+	require.NoError(t, err)
+
+	report := worker.StartupReport()
+	require.False(t, report.Attestation)
+	require.False(t, report.AttestationAnchor)
+	require.False(t, report.VerifiedBalanceVerifier,
+		"no WithAttestor means no AuthVerifier, so the withdrawal gate has nothing to verify with")
+	require.NotEmpty(t, report.Warnings,
+		"the whole tamper-evidence stack is off in this install; an empty Warnings list is the M-6 hole")
+
+	joined := strings.Join(report.Warnings, "\n")
+	for _, want := range []string{
+		"no Attestor is configured",
+		"no attestation anchor is configured",
+		"no core.AuthVerifier is configured",
+	} {
+		require.Contains(t, joined, want,
+			"each thing that is off must say so in its own warning, with how to turn it on: %v", report.Warnings)
+	}
+}
+
+// TestWorker_BareWiringWarnsForEveryAbsentSubsystem is M-6's other half: the
+// two subsystems ledger.Service.Worker always wires (the full reconciliation
+// suite and the advisory-lock pool) can only be absent on a Worker assembled
+// directly, so the facade pin above cannot see them. Absent means "the job
+// does not run" in both cases, which is exactly the shape that must not be
+// silent.
+func TestWorker_BareWiringWarnsForEveryAbsentSubsystem(t *testing.T) {
+	w := service.NewWorker(nil, nil, nil, nil, nil, service.DefaultWorkerConfig(), core.NewEngine())
+
+	report := w.StartupReport()
+	require.False(t, report.FullReconcile)
+	require.False(t, report.LeaderElection)
+
+	joined := strings.Join(report.Warnings, "\n")
+	require.Contains(t, joined, "no core.FullReconciler is configured",
+		"the whole reconciliation suite is off: %v", report.Warnings)
+	require.Contains(t, joined, "Worker.SetPool was never called",
+		"%v", report.Warnings)
+}
