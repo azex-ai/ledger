@@ -69,25 +69,158 @@ func TestNoInternalIDFieldsInCoreTypes(t *testing.T) {
 // that the scan above actually works -- a scanner that silently matches
 // nothing (e.g. because migration parsing regressed, or the glob pattern
 // stopped matching core/*.go) would make TestNoInternalIDFieldsInCoreTypes
-// vacuously green. Plants a fixture struct carrying a known-banned key
-// (classification_id) in a temp directory and asserts the scan catches it.
+// vacuously green. Plants fixture structs carrying a known-banned key
+// (classification_id) in a temp directory and asserts the scan catches them.
+//
+// H-m1: the untagged fixture below is the one that matters. The old scan was
+// a regex over `json:"..."`, so it could only ever see the TAGGED case --
+// and the fixture it planted was tagged, which is why the pin "proved" a
+// scanner that was blind to every untagged exported field. An untagged
+// exported field still serializes (pkg/httpx snake_cases it, encoding/json
+// names it), and core.AttestedEntry sat in exactly that blind spot in-tree
+// with the gate green.
 func TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation(t *testing.T) {
 	banned := bannedInternalIDKeysForCore(t)
 	if !banned["classification_id"] {
 		t.Fatal("classification_id must be in the schema-derived banned set for this regression test to mean anything")
 	}
 
+	cases := []struct {
+		name    string
+		fixture string
+	}{
+		{
+			name: "tagged",
+			fixture: "package fixture\n\n" +
+				"type leakedInternalID struct {\n" +
+				"\tClassificationID int64 `json:\"classification_id\"`\n" +
+				"}\n",
+		},
+		{
+			// No tag at all: the shape the previous regex-based scan could
+			// not see.
+			name: "untagged",
+			fixture: "package fixture\n\n" +
+				"type LeakedInternalID struct {\n" +
+				"\tClassificationID int64\n" +
+				"}\n",
+		},
+		{
+			// A tag that names something else entirely, with no json entry.
+			name: "tagged without a json entry",
+			fixture: "package fixture\n\n" +
+				"type LeakedInternalID struct {\n" +
+				"\tClassificationID int64 `db:\"classification_id\"`\n" +
+				"}\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(tc.fixture), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			hits := scanCoreGoFilesForBannedJSONKeys(t, dir, banned)
+			if len(hits) != 1 || hits[0].Key != "classification_id" {
+				t.Errorf("scan did not flag the planted classification_id violation -- got %v", hits)
+			}
+		})
+	}
+}
+
+// TestNoInternalIDsInCoreInterfaceSignatures pins the half of I-18 its own
+// text always claimed ("core types AND INTERFACES speak uids exclusively")
+// and no gate ever checked: an interface method parameter is not a struct
+// field and carries no json tag, so a tag-based scan is structurally unable
+// to see it. core.Metrics took currencyID int64 on four methods -- an
+// internal BIGSERIAL primary key handed to every consumer implementing the
+// interface, and published by the library's own implementation as a
+// Prometheus label (H-M9).
+// knownInterfaceInternalIDLeaks are the four Metrics methods this gate found
+// on the day it was written (H-M9). They are recorded here rather than
+// silently tolerated because fixing them is a signature change to
+// core.Metrics -- a breaking change for every consumer implementing it,
+// owned by a separate task in this remediation wave (see
+// docs/plans/2026-09-02-remediation-contracts.md §4, D-ops) and carrying a
+// BREAKING.md entry.
+//
+// The list is self-invalidating in BOTH directions: a new violation is red
+// (it is not in the list), and fixing a listed one is also red (the entry
+// no longer describes a real leak, so it must be deleted in the same commit
+// as the fix). An empty map is the end state -- do not add to it to make a
+// gate quiet.
+var knownInterfaceInternalIDLeaks = map[string]string{
+	"Metrics.BalanceDrift":            "currency_id",
+	"Metrics.NegativeBalanceDetected": "currency_id",
+	"Metrics.ReconcileGap":            "currency_id",
+	"Metrics.ReservedAmount":          "currency_id",
+}
+
+func TestNoInternalIDsInCoreInterfaceSignatures(t *testing.T) {
+	banned := bannedInternalIDKeysForCore(t)
+
+	hits, err := idschema.ScanInterfaceParamsForBannedKeys(".", banned)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := map[string]string{}
+	for _, hit := range hits {
+		if knownInterfaceInternalIDLeaks[hit.Owner] == hit.Key {
+			found[hit.Owner] = hit.Key
+			continue
+		}
+		t.Errorf("%s:%d: %s takes parameter %q, an internal storage id (I-18: core interfaces speak uids exclusively) -- take the uid instead",
+			hit.File, hit.Line, hit.Owner, hit.Key)
+	}
+
+	for owner, key := range knownInterfaceInternalIDLeaks {
+		if found[owner] != key {
+			t.Errorf("knownInterfaceInternalIDLeaks records %s taking %q, which no longer leaks -- delete the entry (the whole point of the list is that it shrinks to nothing)", owner, key)
+		}
+	}
+}
+
+// TestNoInternalIDsInCoreInterfaceSignatures_CatchesPlantedViolation is the
+// regression pin for the scan above: it must actually flag a planted
+// interface parameter, or the test is decorative.
+func TestNoInternalIDsInCoreInterfaceSignatures_CatchesPlantedViolation(t *testing.T) {
+	banned := bannedInternalIDKeysForCore(t)
+
 	dir := t.TempDir()
 	fixture := "package fixture\n\n" +
-		"type leakedInternalID struct {\n" +
-		"\tClassificationID int64 `json:\"classification_id\"`\n" +
+		"type Leaky interface {\n" +
+		"\tObserve(classCode string, currencyID int64)\n" +
 		"}\n"
 	if err := os.WriteFile(filepath.Join(dir, "fixture.go"), []byte(fixture), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	hits := scanCoreGoFilesForBannedJSONKeys(t, dir, banned)
-	if len(hits) != 1 || hits[0].Key != "classification_id" {
-		t.Errorf("scan did not flag the planted classification_id violation -- got %v", hits)
+	hits, err := idschema.ScanInterfaceParamsForBannedKeys(dir, banned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Key != "currency_id" {
+		t.Errorf("scan did not flag the planted currencyID parameter -- got %v", hits)
+	}
+}
+
+// TestInternalIDAllowlistIsAccurate keeps idschema.AllowedInternalIDTypes
+// from outliving the types it exempts: a stale entry would silently exempt a
+// future type that reuses the name. Every allowlisted type must exist in
+// core, and every entry must carry a reason.
+func TestInternalIDAllowlistIsAccurate(t *testing.T) {
+	missing, err := idschema.VerifyAllowlist(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) > 0 {
+		t.Errorf("idschema.AllowedInternalIDTypes exempts type(s) %v that core no longer declares -- delete the entries", missing)
+	}
+	for name, reason := range idschema.AllowedInternalIDTypes {
+		if reason == "" {
+			t.Errorf("allowlisted type %q carries no reason -- an exemption without a stated reason is indistinguishable from an oversight", name)
+		}
 	}
 }

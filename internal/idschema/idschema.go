@@ -44,11 +44,18 @@ package idschema
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/azex-ai/ledger/internal/wirejson"
 )
 
 // BannedKeys parses every *.up.sql file directly in migrationsDir and
@@ -131,39 +138,251 @@ func BannedKeys(migrationsDir string) (map[string]bool, error) {
 	return banned, nil
 }
 
-// Hit is one JSON-tagged field whose key is in a BannedKeys set.
+// Hit is one struct field or interface method parameter whose derived key
+// is in a BannedKeys set.
 type Hit struct {
 	File string
 	Line int
 	Key  string
+	// Owner is the declaration the hit was found on ("core.AttestedEntry",
+	// "Metrics.BalanceDrift"), so an error message says what to fix rather
+	// than only where.
+	Owner string
+}
+
+// AllowedInternalIDTypes are the type names permitted to carry internal ids,
+// with the reason. They exist because a digest must bind the exact stored
+// rows it attests to -- an attestation over uids would not detect a swapped
+// row id (core/attestation.go:129-131). They never cross the wire: no
+// handler serializes them, and their fields carry no json tags.
+//
+// This allowlist replaces an accident. Before H-m1 the scan was a regex over
+// `json:"..."` tags, so these two types were invisible to it merely because
+// they are untagged -- indistinguishable from "someone forgot a tag on a new
+// core type carrying an internal id", which the same blindness would also
+// have let through. VerifyAllowlist keeps the list from outliving the types.
+var AllowedInternalIDTypes = map[string]string{
+	"AttestedEntry": "digest input: the attestation must bind the stored entry row ids it signs (core/attestation.go)",
+	"AttestedLeaf":  "digest input: Merkle leaf identity is the stored entry row id (core/attestation.go)",
+}
+
+// VerifyAllowlist reports allowlisted type names that no longer exist in dir.
+// A stale entry is a hole: it would silently exempt a future type that
+// happens to reuse the name.
+func VerifyAllowlist(dir string) ([]string, error) {
+	files, err := goFilesIn(dir)
+	if err != nil {
+		return nil, err
+	}
+	declared := map[string]bool{}
+	for _, file := range files {
+		parsed, err := parseGoFile(file)
+		if err != nil {
+			return nil, err
+		}
+		forEachTypeSpec(parsed, func(ts *ast.TypeSpec) {
+			declared[ts.Name.Name] = true
+		})
+	}
+	var missing []string
+	for name := range AllowedInternalIDTypes {
+		if !declared[name] {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	return missing, nil
 }
 
 // ScanGoFilesForBannedKeys scans every non-test *.go file directly in dir
-// (not recursive -- matches each pin's own package directory) for a
-// `json:"<key>"` struct tag whose key is in banned.
+// (not recursive -- matches each pin's own package directory) for a struct
+// field whose wire key is in banned.
+//
+// H-m1: this used to be a regex over `json:"<key>"`, which made its real
+// coverage "fields that carry a json tag" while docs/INVARIANTS.md claimed
+// it scanned every exported type. An exported field with NO tag still
+// serializes -- pkg/httpx's snake_case extension names it, and
+// encoding/json names it too -- so the key checked here is the json tag when
+// there is one, and the snake_cased field name when there is not. That
+// derivation is the wire truth, not a new rule.
+//
+// Types named in AllowedInternalIDTypes are skipped (see that variable).
 func ScanGoFilesForBannedKeys(dir string, banned map[string]bool) ([]Hit, error) {
-	jsonKey := regexp.MustCompile(`json:"([a-z0-9_]+)[,"]`)
-
-	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	files, err := goFilesIn(dir)
 	if err != nil {
-		return nil, fmt.Errorf("idschema: glob %s: %w", dir, err)
+		return nil, err
 	}
 	var hits []Hit
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
+	for _, file := range files {
+		parsed, err := parseGoFile(file)
+		if err != nil {
+			return nil, err
+		}
+		forEachTypeSpec(parsed, func(ts *ast.TypeSpec) {
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok || AllowedInternalIDTypes[ts.Name.Name] != "" {
+				return
+			}
+			for _, field := range st.Fields.List {
+				for _, key := range fieldWireKeys(field) {
+					if banned[key] {
+						hits = append(hits, Hit{
+							File:  file,
+							Line:  parsed.fset.Position(field.Pos()).Line,
+							Key:   key,
+							Owner: ts.Name.Name,
+						})
+					}
+				}
+			}
+		})
+	}
+	sortHits(hits)
+	return hits, nil
+}
+
+// ScanInterfaceParamsForBannedKeys scans every interface method's parameter
+// NAMES in dir, snake_cased, for keys in banned.
+//
+// H-M9: core.Metrics took `currencyID int64` on four methods and the library's
+// own implementation published it as the Prometheus label currency_id -- an
+// internal BIGSERIAL primary key, handed to every consumer implementing that
+// interface and welded into their dashboards, exactly what I-18 forbids. The
+// two I-18 pins could not see it: an interface method parameter is not a
+// struct field and has no json tag, so it was structurally invisible to a
+// tag-based scan. I-18's own text says "core types AND INTERFACES speak uids
+// exclusively"; this is the interfaces half.
+func ScanInterfaceParamsForBannedKeys(dir string, banned map[string]bool) ([]Hit, error) {
+	files, err := goFilesIn(dir)
+	if err != nil {
+		return nil, err
+	}
+	var hits []Hit
+	for _, file := range files {
+		parsed, err := parseGoFile(file)
+		if err != nil {
+			return nil, err
+		}
+		forEachTypeSpec(parsed, func(ts *ast.TypeSpec) {
+			it, ok := ts.Type.(*ast.InterfaceType)
+			if !ok {
+				return
+			}
+			for _, method := range it.Methods.List {
+				fn, ok := method.Type.(*ast.FuncType)
+				if !ok || fn.Params == nil || len(method.Names) == 0 {
+					continue
+				}
+				for _, param := range fn.Params.List {
+					for _, name := range param.Names {
+						key := wirejson.SnakeCase(name.Name)
+						if banned[key] {
+							hits = append(hits, Hit{
+								File:  file,
+								Line:  parsed.fset.Position(param.Pos()).Line,
+								Key:   key,
+								Owner: ts.Name.Name + "." + method.Names[0].Name,
+							})
+						}
+					}
+				}
+			}
+		})
+	}
+	sortHits(hits)
+	return hits, nil
+}
+
+// fieldWireKeys returns the wire key(s) a struct field serializes under: the
+// json tag name when tagged, the snake_cased field name when an exported
+// field is untagged. `json:"-"` fields and untagged unexported fields never
+// reach the wire and yield nothing.
+func fieldWireKeys(field *ast.Field) []string {
+	tag := structTagValue(field, "json")
+	if tag != "" {
+		name := strings.Split(tag, ",")[0]
+		if name == "-" || name == "" {
+			return nil
+		}
+		return []string{name}
+	}
+	// No json tag at all, or a tag with no json entry: both encoding/json
+	// and pkg/httpx's snake_case extension fall back to the field name.
+	var keys []string
+	for _, name := range field.Names {
+		if !name.IsExported() {
 			continue
 		}
-		src, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf("idschema: read %s: %w", f, err)
+		keys = append(keys, wirejson.SnakeCase(name.Name))
+	}
+	if len(field.Names) == 0 {
+		// An embedded field: its own fields are promoted, and they are
+		// scanned when the embedded type itself is scanned.
+		return nil
+	}
+	return keys
+}
+
+func structTagValue(field *ast.Field, key string) string {
+	if field.Tag == nil {
+		return ""
+	}
+	unquoted, err := strconv.Unquote(field.Tag.Value)
+	if err != nil {
+		return ""
+	}
+	return reflect.StructTag(unquoted).Get(key)
+}
+
+type parsedFile struct {
+	file *ast.File
+	fset *token.FileSet
+}
+
+func parseGoFile(path string) (*parsedFile, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, fmt.Errorf("idschema: parse %s: %w", path, err)
+	}
+	return &parsedFile{file: file, fset: fset}, nil
+}
+
+func forEachTypeSpec(p *parsedFile, fn func(*ast.TypeSpec)) {
+	for _, decl := range p.file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
 		}
-		for i, line := range strings.Split(string(src), "\n") {
-			for _, m := range jsonKey.FindAllStringSubmatch(line, -1) {
-				if banned[m[1]] {
-					hits = append(hits, Hit{File: f, Line: i + 1, Key: m[1]})
-				}
+		for _, spec := range gen.Specs {
+			if ts, ok := spec.(*ast.TypeSpec); ok {
+				fn(ts)
 			}
 		}
 	}
-	return hits, nil
+}
+
+func goFilesIn(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil {
+		return nil, fmt.Errorf("idschema: glob %s: %w", dir, err)
+	}
+	var files []string
+	for _, f := range matches {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func sortHits(hits []Hit) {
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].File != hits[j].File {
+			return hits[i].File < hits[j].File
+		}
+		return hits[i].Line < hits[j].Line
+	})
 }

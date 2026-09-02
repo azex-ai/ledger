@@ -931,6 +931,26 @@ library-mode Go API (`core` types and interfaces speak uids exclusively).
 Pagination cursors that encode an internal position are opaque base64
 strings.
 
+"Not in the Go API" covers a `core` interface's **method parameters**, not
+only struct fields: a consumer implementing `core.Metrics` or any other port
+must never be handed a `currencies.id`. (H-M9, 2026-09-02: four `Metrics`
+methods took `currencyID int64` and the library's own implementation
+published it as a Prometheus label, welding operator dashboards to an
+internal primary key. Neither I-18 pin could see it — an interface parameter
+has no json tag.)
+
+**Explicit exception**: `core.AttestedEntry` and `core.AttestedLeaf` carry
+`EntryID` / `JournalID` / `CurrencyID` / `ClassificationID` deliberately.
+They are digest INPUTS: an attestation must bind the exact stored rows it
+signs, and a digest over uids would not detect a swapped row id
+(`core/attestation.go`). They are never serialized to any consumer. The
+exception is machine-registered in `idschema.AllowedInternalIDTypes` with
+its reason, and `core.TestInternalIDAllowlistIsAccurate` fails if an entry
+outlives the type it exempts — before H-m1 these two types were exempt only
+by accident (they carry no json tags, and the scan was a regex over json
+tags), which is indistinguishable from "someone forgot a tag on a new
+type".
+
 The rollup/reconcile engine's internal, id-keyed working representations
 (`service.BalanceCheckpoint`, `service.RollupQueueItem`, keyed on
 `CurrencyID`/`ClassificationID int64` for that engine's hot path) live in
@@ -965,16 +985,30 @@ every external reference stable across dump/restore.
   derivation, called directly by both `server` and `core`'s test packages —
   board #28 (test-credibility.md) found this used to be an independent
   ~55-line copy in each package, since `core` cannot import `server`'s test
-  file without a cycle; `internal/idschema` is a dependency-free package
-  neither `core` nor `server` production code imports, so both test files
-  can share the ONE implementation with no cycle — scans every exported type
-  declared in `core/*.go` directly, so a `core` type carrying an internal id
-  is caught even before anyone wires it into an HTTP handler, matching this
-  invariant's "`core` types ... speak uids exclusively" clause literally
-  rather than only its HTTP-wire consequence;
-  `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation`
-  regression-pins that the scan itself still fires against a planted
-  fixture)
+  file without a cycle; `internal/idschema` is a package neither `core` nor
+  `server` production code imports, so both test files can share the ONE
+  implementation with no cycle. **Coverage, stated precisely** (H-m1
+  corrected an overstatement here: this used to read "scans every exported
+  type declared in `core/*.go` directly", while the mechanism was a regex
+  over `json:"…"` tags and therefore saw only TAGGED fields): the scan is
+  `go/ast`-based and checks, for every struct field in the package, the json
+  tag name when there is one and the snake_cased field name when there is
+  not — which is what both `encoding/json` and `pkg/httpx`'s snake_case
+  extension actually put on the wire. `json:"-"` and untagged unexported
+  fields are correctly out of scope.
+  `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation` plants a
+  tagged, an untagged and a non-json-tagged fixture; the untagged one is the
+  case the previous scanner was structurally unable to fail on)
+- `core.TestNoInternalIDsInCoreInterfaceSignatures` (the interfaces half of
+  this invariant: `idschema.ScanInterfaceParamsForBannedKeys` reads every
+  `core` interface method's parameter NAMES, snake_cased, against the same
+  schema-derived banned set. `knownInterfaceInternalIDLeaks` in that file
+  records the four `core.Metrics` methods H-M9 found, whose fix is a
+  breaking signature change tracked in `docs/BREAKING.md`; the list is red
+  in both directions — a new leak is not in it, and a fixed one must be
+  deleted from it)
+- `core.TestInternalIDAllowlistIsAccurate` (the digest-input exception above
+  cannot outlive its types, and every entry must state a reason)
 - `service.TestReconcileFindings_NoInternalIDPatternsInSource` (the reconcile
   report is an API response body; its free-text Description/Detail strings
   carry uids/codes, never internal ids — per-row forensics go to server logs)
