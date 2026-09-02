@@ -3009,7 +3009,8 @@ mode `~/.claude/rules/working-agreements.md` §3 names.
 split out of the `ScopeWrite` group; `parseScopeAndCapabilities` (API_KEYS
 `+`-joined capability parsing). `service.Onchain.reviewGate`'s
 `recordReconcileFailure`/`clearReconcileFailure` and the
-`reviewReasonReconcileUnavailable` branch; `core.TokenConfig.ReconcileFailureLimit`;
+`reviewReasonReconcileUnavailable` branch, reached through
+`service.Onchain.IngestDeposit`; `core.TokenConfig.ReconcileFailureLimit`;
 `service.Onchain.validateReconcileFailureLimits` /
 `ValidateReconcileFailureLimits`, called from `Run()` and
 `ledger.Service.EnableOnchain` (same two call sites as I-26's
@@ -3507,11 +3508,15 @@ function both `handlePostTemplate` and `handlePostDepositTolerance` call,
 combining `rejectSystemClassificationTemplate` (which shares
 `systemClassificationUIDs` with the handwritten path's
 `rejectSystemClassificationEntries`) with
-`presets.ProtectedTemplateCodes()` (`presets/protected_templates.go`) merged
+`presets.ProtectedTemplateCodes` (`presets/protected_templates.go`,
+including `presets.DepositConfirmTemplateCode`/`DepositConfirmPendingTemplateCode`
+and `presets.DevCreditTemplateCode`) merged
 with `server.Config.ProtectedTemplateCodes` and reduced by
 `Config.AllowGenericTemplatePost` into `server.Server.protectedTemplateCodes`
 (`server/server.go`), both checked in `handlePostTemplate`
-(`server/handler_journals.go`); `server/openapi_contract_test.go`'s
+(`server/handler_journals.go`) against the `core.Journal` /
+`core.TemplateParams` shape `core.JournalWriter.ExecuteTemplate` takes and
+returns; `server/openapi_contract_test.go`'s
 `TestOpenAPIContract_RequestBodiesMatchGoStructs` /
 `TestOpenAPIContract_ResponseEnvelopesMatchGoStructs` /
 `TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs` /
@@ -3521,6 +3526,11 @@ with `server.Config.ProtectedTemplateCodes` and reduced by
 unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publish.yml`'s
 `verify` job now also runs `codegen:check` before publishing (previously only
 `ledger-react.yml` did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
+Also cross-cited from I-34/I-21, whose own mechanism this section's Pinned
+by list dual-pins (F-P34): `server.Capability` / `server.CapabilityDepositReview`
+(`server/middleware_auth.go`), constructed from `server.APIKey` /
+`server.ScopeWrite` / `server.ScopeAdmin`; `service.Onchain.IngestDeposit`
+and `service.Onchain.Run`.
 
 **Pinned by**:
 - `server.TestDepositReview_SelfMintSelfApprove_MI2` — the end-to-end mi2
@@ -3564,20 +3574,15 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   control for the above: installed templates whose legs are all holder-side
   (`lock_funds`, `unlock_funds`) still execute, so the rule is not a blanket
   deny of the endpoint.
-- `server.TestPostTemplate_RefusesTheAuditedMintingCodes` — the three codes
-  the 2026-09-02 audit's own httptest reproduction posted successfully,
-  named as literals: `dev_credit`, `capital_injection`, `fee_charge`.
-- `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` /
-  `TestPostTemplate_UnknownTemplateCodeNeverReachesExecuteTemplate` — the two
-  layers are independent and the order is load-bearing: a protected code is
-  refused even when the template table answers `ErrNotFound` for everything,
-  and an unknown code fails closed at the guard rather than reaching
-  `ExecuteTemplate`.
+- `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` — a
+  protected code is refused even when the template table answers
+  `ErrNotFound` for everything (the order is load-bearing: the name-list
+  layer runs first).
 - `server.TestPostTemplate_DefaultProtectsDepositCodes` — M-2's own pin:
   an unconfigured `Config.ProtectedTemplateCodes` still refuses every code in
   the library's hardcoded set; verified red before that revision (all four
   posted 201, not 403). Written as literals rather than ranged over
-  `presets.ProtectedTemplateCodes()` (D-m9): a table driven by the
+  `presets.ProtectedTemplateCodes` (D-m9): a table driven by the
   implementation's own return value cannot fail because a dangerous code is
   absent from that return value.
 - `server.TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes` — the
@@ -3585,16 +3590,11 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   and outside `Config.ProtectedTemplateCodes` is not refused by it.
 - `server.TestPostTemplate_AllowGenericTemplatePostIsTheOnlyWayPastTheSystemLegRule`
   — the structural rule's single opt-out, per-code and explicit.
-- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` /
-  `TestPostDepositTolerance_RequiresAdminScope` — §7.11's own pins: all five
-  outcomes that would execute a step are refused under default config
-  (verified red 2026-09-02: all five posted 201 with `ExecuteTemplate`
-  reached), and a `write`-scope key is refused by the route's scope even with
-  the step codes opted in (verified red before the route moved).
-- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` /
-  `TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` — the
-  controls: the gate refuses executions, not the endpoint, and the same
-  single escape hatch opts a deployment back in.
+- `server.TestPostDepositTolerance_RequiresAdminScope` — a `write`-scope key
+  is refused by the route's scope even with the step codes opted in
+  (verified red before the route moved).
+- `server.TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` —
+  the control: the same single escape hatch opts a deployment back in.
 - `server.TestReverseJournal_RejectsClientSuppliedIdempotencyKey` /
   `TestReverseJournal_RejectsIdempotencyKeyHeader` /
   `TestReverseJournal_WithoutIdempotencyKeyPostsTheReversal` — H-M3's Go
@@ -3607,6 +3607,23 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   hatch opts a specific default-protected code back in without opening the
   others, answering whether defaulting protection on could brick a
   deployment with a reviewed reason to post one of these codes generically.
+
+**Related tests** (exercise real mechanism -- the httptest harness, the
+openapi.yaml-vs-registry cross-check -- entirely through local test-package
+helpers or unexported package-level vars/funcs, so nothing in their own
+function bodies names a symbol this doc can hold them to):
+- `server.TestPostTemplate_RefusesTheAuditedMintingCodes` — the three codes
+  the 2026-09-02 audit's own httptest reproduction posted successfully,
+  named as literals: `dev_credit`, `capital_injection`, `fee_charge`.
+- `server.TestPostTemplate_UnknownTemplateCodeNeverReachesExecuteTemplate` —
+  an unknown code fails closed at the guard rather than reaching
+  `ExecuteTemplate`.
+- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` —
+  all five outcomes that would execute a step are refused under default
+  config (verified red 2026-09-02: all five posted 201 with
+  `ExecuteTemplate` reached).
+- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` — the gate
+  refuses executions, not the endpoint.
 - `server.TestOpenAPIContract_EveryRequestBodySchemaIsRegistered` /
   `TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered` — M-8's own
   pins: verified red by construction (delete any single entry from
@@ -3616,6 +3633,7 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   `JournalWithEntriesEnvelope`, `ReconcileEnvelope`, and
   `ReconcileReportEnvelope` to make these two tests pass is what surfaced
   the three real drifts the revision note above describes.
+
 ## I-39: Advisory-lock coordination is structurally safe, not conventionally safe
 
 (`docs/audits/2026-08-25-financial-engineering/concurrency.md`, board #30/#24,
