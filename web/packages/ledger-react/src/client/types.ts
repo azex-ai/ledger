@@ -94,7 +94,8 @@ export interface Booking {
   journal_uid?: string;
   idempotency_key: string;
   metadata: Record<string, unknown>;
-  expires_at: string;
+  /** RFC3339 UTC, or null when the booking carries no expiry (H-M2, 2026-09-02 audit: the wire used to send "" here). */
+  expires_at: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -142,7 +142,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List journals (cursor-paginated, descending id). */
+        /**
+         * List journals (cursor-paginated, newest first).
+         * @description Ordered by internal id descending, so the first page is the most recent journals. `next_cursor` walks strictly older. The same direction as GET /entries, GET /audit/journals and GET /holder/transactions.
+         */
         get: {
             parameters: {
                 query?: {
@@ -220,7 +223,7 @@ export interface paths {
         put?: never;
         /**
          * Render a template into a journal and post it.
-         * @description Answers 403 when template_code is in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
+         * @description Answers 403 for any template with a leg on an is_system classification -- derived from the template's own lines, so a deployment's own system-side template is covered without being named -- and for any template_code in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
          */
         post: {
             parameters: {
@@ -244,7 +247,7 @@ export interface paths {
                         "application/json": components["schemas"]["JournalEnvelope"];
                     };
                 };
-                /** @description template_code is in this deployment's Config.ProtectedTemplateCodes. */
+                /** @description Refused: the template has a leg on an is_system classification (structurally derived from its own lines, whoever defined it), or template_code is in the effective protected set (presets.ProtectedTemplateCodes() plus Config.ProtectedTemplateCodes). ALLOW_GENERIC_TEMPLATE_POST is the single per-code opt-out for both rules. */
                 403: {
                     headers: {
                         [name: string]: unknown;
@@ -272,7 +275,14 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Resolve deposit shortfall / overage atomically. */
+        /**
+         * Resolve deposit shortfall / overage atomically (admin scope; 403 by default).
+         * @description ⚠️ Requires the **admin** scope, not write, and answers **403 under the default configuration** (contract §7.11).
+         *
+         *     This endpoint takes no template_code, but it turns caller-supplied expected/actual amounts into executions of deposit_confirm_pending / deposit_confirm / deposit_release_pending / deposit_record_overage -- the same deposit-shaped accounting POST /journals/template refuses by name. A write-scope key could therefore mint through here what it could not mint next door. Every template the plan would execute now passes the same gate as /journals/template, and the route moved to the admin group (alongside POST /dev/credits).
+         *
+         *     A deployment that genuinely resolves deposit tolerance over HTTP opts the four codes into ALLOW_GENERIC_TEMPLATE_POST and calls this with an admin key. The library's own path is presets.BuildDepositTolerancePlan + ExecuteDepositTolerancePlan in the consumer's Go orchestration, with no HTTP-reachable key involved.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -293,6 +303,15 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["DepositToleranceEnvelope"];
+                    };
+                };
+                /** @description One of the templates the plan would execute is in the effective protected set -- the default answer for every caller until the codes are opted in via ALLOW_GENERIC_TEMPLATE_POST. Also returned when the key lacks the admin scope. */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["ErrorResponse"];
                     };
                 };
                 422: components["responses"]["DomainError"];
@@ -355,6 +374,8 @@ export interface paths {
         /**
          * Post the full reversal of an existing journal.
          * @description Rejected (409) once the journal has any reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
+         *
+         *     The idempotency key of a full reversal is derived server-side as `reversal:{uid}:{reason}`, so this endpoint takes none: supplying `idempotency_key` (in the body, or via the `Idempotency-Key` header, which the alias middleware folds into the body) is answered 400 rather than accepted and ignored, which is what an earlier revision of this spec advertised as `required` (H-M3). Callers that need to choose the key use reverse-partial with `num` == `den` == 1.
          */
         post: {
             parameters: {
@@ -369,7 +390,8 @@ export interface paths {
                 content: {
                     "application/json": {
                         reason: string;
-                        idempotency_key: string;
+                        /** @description Must be absent or empty. Present and non-empty is a 400 — see this operation's description. */
+                        idempotency_key?: string;
                     };
                 };
             };
@@ -467,12 +489,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List entries on one account dimension (cursor-paginated). */
+        /**
+         * List entries on one account dimension (cursor-paginated, newest first).
+         * @description Ordered newest first, the same direction as GET /journals: an account's entry list is a statement, and two reads a consumer pages side by side must not start from opposite ends.
+         */
         get: {
             parameters: {
                 query: {
                     holder: number;
-                    currency: string;
+                    currency_uid: string;
                     cursor?: string;
                     limit?: number;
                 };
@@ -508,10 +533,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** All balances for one holder across currencies. */
+        /**
+         * All of one holder's balances in one currency.
+         * @description One Balance per classification the holder has touched in `currency_uid`. `currency_uid` is required -- there is no across-currencies form of this endpoint (an earlier revision of this spec said there was, while the handler answered 400; H-M1).
+         */
         get: {
             parameters: {
-                query?: never;
+                query: {
+                    currency_uid: string;
+                };
                 header?: never;
                 path: {
                     holder: number;
@@ -658,13 +688,13 @@ export interface paths {
                     content: {
                         "application/json": components["schemas"]["Envelope"] & {
                             data?: {
-                                list?: {
+                                list: {
                                     /** Format: int64 */
                                     holder_id: number;
                                     balances: components["schemas"]["Balance"][];
                                 }[];
                                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                                next_cursor?: string | null;
+                                next_cursor: string | null;
                             };
                         };
                     };
@@ -684,7 +714,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List reservations. */
+        /**
+         * List reservations (cursor-paginated, newest first).
+         * @description Ordered by internal id descending, like the ledger reads.
+         */
         get: {
             parameters: {
                 query?: {
@@ -1280,7 +1313,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List bookings. */
+        /**
+         * List bookings (cursor-paginated, oldest first).
+         * @description Ordered by internal id ascending: a booking list is worked through like a queue (see also GET /deposits/reviews), so the first page is the oldest. Deliberately the opposite of the ledger reads (GET /journals, GET /entries, GET /audit/journals), which are statements and page newest first (H-m3).
+         */
         get: {
             parameters: {
                 query?: {
@@ -1428,7 +1464,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List events. */
+        /**
+         * List events (cursor-paginated, oldest first).
+         * @description Ordered by internal id ascending -- an event stream is consumed in occurrence order. Deliberately the opposite of the ledger reads, which page newest first (see GET /journals).
+         */
         get: {
             parameters: {
                 query?: {
@@ -1547,8 +1586,15 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Channel/classification mismatch (design doc §5-5). */
+                /** @description Three structural refusals on the legacy booking_uid path; a valid signature is necessary and never sufficient. (1) The booking's channel_name is not {channel}. (2) Its classification is not the deposit classification -- this is what keeps a callback from ever transitioning a sweep booking, which posts no journal and so would leave a forged "confirmed" with no accounting trace (design doc §5-5). (3) status is "confirmed": confirming a deposit posts accounting, and INVARIANTS I-21 holds that the journal comes from exactly one place, the service-layer orchestration that writes it in the same transaction as the transition. This path posts nothing, so a "confirmed" here would produce a settled-looking deposit with no entries behind it. Implement channel.SightingParser to ingest a confirmation; the server routes a sighting-capable adapter to the deposit-ingestion path automatically. Any other lifecycle status is accepted normally. */
                 403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description In-window replay, rejected by the inbound nonce cache. The cache is host-wired, not automatic -- `srv.SetWebhookNonceRecorder( svc.WebhookNonceRecorder())` at assembly time. Until that call is made there is no in-window replay protection and this response cannot occur; the library ships the implementation (postgres.WebhookSubscriberStore.TryRecordNonce) but installs nothing by default, because an inbound channel that is not exposed does not need one. */
+                409: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -1579,7 +1625,10 @@ export interface paths {
         /** List classifications. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description When exactly "true", deactivated rows are omitted. Any other value (including absent) lists both active and deactivated. */
+                    active_only?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1682,7 +1731,10 @@ export interface paths {
         /** List journal types. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description When exactly "true", deactivated rows are omitted. Any other value (including absent) lists both active and deactivated. */
+                    active_only?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1749,6 +1801,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Deactivate a journal type. */
         post: {
             parameters: {
                 query?: never;
@@ -1792,7 +1845,10 @@ export interface paths {
         /** List entry templates. */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description When exactly "true", deactivated rows are omitted. Any other value (including absent) lists both active and deactivated. */
+                    active_only?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1893,6 +1949,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** Deactivate an entry template. */
         post: {
             parameters: {
                 query?: never;
@@ -1935,7 +1992,10 @@ export interface paths {
         };
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    /** @description When exactly "true", deactivated rows are omitted. Any other value (including absent) lists both active and deactivated. */
+                    active_only?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -1954,6 +2014,7 @@ export interface paths {
             };
         };
         put?: never;
+        /** Create a currency. */
         post: {
             parameters: {
                 query?: never;
@@ -2170,9 +2231,9 @@ export interface paths {
             parameters: {
                 query: {
                     holder: number;
-                    currency: string;
-                    from?: string;
-                    to?: string;
+                    currency_uid: string;
+                    start: string;
+                    end: string;
                 };
                 header?: never;
                 path?: never;
@@ -2188,7 +2249,7 @@ export interface paths {
                     content: {
                         "application/json": components["schemas"]["Envelope"] & {
                             data?: {
-                                list?: {
+                                list: {
                                     /** Format: int64 */
                                     account_holder: number;
                                     /** Format: uuid */
@@ -2200,7 +2261,7 @@ export interface paths {
                                     balance: components["schemas"]["Decimal"];
                                 }[];
                                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                                next_cursor?: string | null;
+                                next_cursor: string | null;
                             };
                         };
                     };
@@ -2229,6 +2290,9 @@ export interface paths {
          *     `from`/`to`) to list journals touching that account dimension; pass
          *     `from`/`to` alone to scan a global time range instead. Providing
          *     neither, or `holder` without `currency_uid`, is a 400.
+         *
+         *     Both modes are cursor-paginated **newest first** (H-m3), the same
+         *     direction as GET /journals and GET /holder/transactions.
          */
         get: {
             parameters: {
@@ -2613,10 +2677,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The token-bound holder's outstanding holds. */
+        /**
+         * The token-bound holder's outstanding holds (cursor-paginated, newest first).
+         * @description Cursor-paginated since H-m9: this endpoint used to return the holder's entire hold set with no limit, an unbounded body from an unbounded scan. Same cursor shape and direction as GET /holder/transactions.
+         */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -2941,6 +3011,8 @@ export interface components {
         HolderBalanceListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list: components["schemas"]["HolderBalance"][];
+                /** @description Always null: this endpoint returns its full result set. Present so every list envelope in this API carries the same comparable sentinel (api-contract.md §6). */
+                next_cursor: string | null;
             };
         };
         HolderTransaction: {
@@ -2996,6 +3068,8 @@ export interface components {
         HolderHoldListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list: components["schemas"]["HolderHold"][];
+                /** @description Opaque cursor for the next (older) page; null when exhausted (api-contract.md §6). */
+                next_cursor: string | null;
             };
         };
         Envelope: {
@@ -3101,9 +3175,9 @@ export interface components {
         };
         EntryListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Entry"][];
+                list: components["schemas"]["Entry"][];
                 /** @description Opaque cursor; null when exhausted. */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         JournalEnvelope: components["schemas"]["Envelope"] & {
@@ -3111,9 +3185,9 @@ export interface components {
         };
         JournalListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Journal"][];
+                list: components["schemas"]["Journal"][];
                 /** @description Opaque cursor; null when exhausted or when the endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         /** @description GET /journals/{uid}'s data is a Journal with entries appended as a sibling field, not journal/entries nested under separate keys (server/handler_journals.go's handleGetJournal returns a single journalResponse whose Entries field carries them). */
@@ -3154,9 +3228,9 @@ export interface components {
         };
         PeriodCloseListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["PeriodClose"][];
+                list: components["schemas"]["PeriodClose"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         TrialBalanceRow: {
@@ -3193,9 +3267,9 @@ export interface components {
         };
         BalancesEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Balance"][];
+                list: components["schemas"]["Balance"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         BalanceByCurrencyEnvelope: components["schemas"]["Envelope"] & {
@@ -3228,9 +3302,9 @@ export interface components {
         };
         SystemRollupsEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["SystemRollup"][];
+                list: components["schemas"]["SystemRollup"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         ReserveInput: {
@@ -3245,7 +3319,7 @@ export interface components {
              * @description Seconds until the reservation expires. Omitted/0 = no expiry.
              */
             expires_in_sec?: number;
-            /** @description When true, Reserve additionally refuses (422) unless every balance_role=available classification this holder has touched in currency_uid passes the tamper-evident attestation check -- on top of, not instead of, the normal balance-covers-amount check. Off by default; mechanism lives in the library, the policy of when to require it is the caller's (core.ReserveInput's doc comment). */
+            /** @description When true, Reserve refuses (422 / 14010, or 14011 for an unrecognized signing key) unless every balance_role=available classification this holder has touched in currency_uid passes the tamper-evident authorization check. It is ALSO a stricter amount check, not merely an extra one: a gated reservation is sized from an entries-only recompute of the available base rather than from balance_checkpoints, so an inflated checkpoint cannot raise what it will lock. Insufficiency under that recomputed base answers 14001, not 14010. Off by default; the mechanism lives in the library and the policy of when to require it is the caller's (core.ReserveInput's doc comment, INVARIANTS I-32 / I-49). */
             require_verified_balance?: boolean;
         };
         /** @description settled_amount and journal_uid are the only genuinely optional fields here (reservationResponse.go: `*string`/`omitempty` — the field is absent from the wire, not present-as-empty, until a settlement/journal exists). Every other field is always populated. */
@@ -3257,6 +3331,7 @@ export interface components {
             /** Format: uuid */
             currency_uid: string;
             reserved_amount: components["schemas"]["Decimal"];
+            /** @description Absent from the wire until a settlement exists (reservationResponse.SettledAmount is *string + omitempty, and settled_amount is deliberately not in `required`). It is never JSON null -- an earlier revision carried OpenAPI 3.0's `nullable: true` here, which 3.1 ignores, so the declaration promised a value the handler does not produce (H-m6). */
             settled_amount?: components["schemas"]["Decimal"];
             /** @enum {string} */
             status: "active" | "settling" | "settled" | "released";
@@ -3275,9 +3350,9 @@ export interface components {
         };
         ReservationListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Reservation"][];
+                list: components["schemas"]["Reservation"][];
                 /** @description Opaque cursor; null when exhausted. */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         AccountPolicyInput: {
@@ -3302,29 +3377,29 @@ export interface components {
         };
         AccountPolicy: {
             /** Format: uuid */
-            uid?: string;
+            uid: string;
             /** Format: int64 */
-            account_holder?: number;
+            account_holder: number;
             /** Format: uuid */
             currency_uid?: string;
             /** Format: uuid */
             classification_uid?: string;
             /** @enum {string} */
-            status?: "active" | "frozen" | "closed";
-            min_balance?: components["schemas"]["Decimal"];
-            enforce_min_balance?: boolean;
-            note?: string;
-            updated_at?: components["schemas"]["Timestamp"];
-            created_at?: components["schemas"]["Timestamp"];
+            status: "active" | "frozen" | "closed";
+            min_balance: components["schemas"]["Decimal"];
+            enforce_min_balance: boolean;
+            note: string;
+            updated_at: components["schemas"]["Timestamp"];
+            created_at: components["schemas"]["Timestamp"];
         };
         AccountPolicyEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["AccountPolicy"];
         };
         AccountPolicyListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["AccountPolicy"][];
+                list: components["schemas"]["AccountPolicy"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         CreateBookingInput: {
@@ -3336,8 +3411,9 @@ export interface components {
             amount: components["schemas"]["Decimal"];
             idempotency_key: string;
             channel_name?: string;
+            /** @description Free-form string tags; values are strings, never nested JSON. */
             metadata?: {
-                [key: string]: unknown;
+                [key: string]: string;
             };
             expires_at?: components["schemas"]["Timestamp"];
         };
@@ -3345,8 +3421,9 @@ export interface components {
             to_status: string;
             channel_ref?: string;
             amount?: components["schemas"]["Decimal"];
+            /** @description Free-form string tags; values are strings, never nested JSON. */
             metadata?: {
-                [key: string]: unknown;
+                [key: string]: string;
             };
             /** Format: int64 */
             actor_id?: number;
@@ -3380,10 +3457,12 @@ export interface components {
              */
             journal_uid?: string;
             idempotency_key: string;
+            /** @description Free-form string tags; values are strings, never nested JSON. */
             metadata: {
-                [key: string]: unknown;
+                [key: string]: string;
             };
-            expires_at: components["schemas"]["Timestamp"];
+            /** @description Null when the booking has no expiry (the ordinary case for a booking created without one). Always present as a key; never an empty string, which is what an earlier revision emitted (H-M2). */
+            expires_at: null | components["schemas"]["Timestamp"];
             created_at: components["schemas"]["Timestamp"];
             updated_at: components["schemas"]["Timestamp"];
         };
@@ -3392,9 +3471,9 @@ export interface components {
         };
         BookingListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Booking"][];
+                list: components["schemas"]["Booking"][];
                 /** @description Opaque cursor; null when exhausted. */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         /** @description The CREATE2 derivation fingerprint (factory/init_hash) is an internal audit-only detail and is deliberately not part of this wire shape. */
@@ -3417,6 +3496,43 @@ export interface components {
                 next_cursor: string | null;
             };
         };
+        /**
+         * @description The body of an outbound webhook POST (service/delivery's WebhookDeliverer), which is core.Event's own json shape -- NOT the Event schema above, which is server/handler_bookings.go's eventResponse and reaches consumers through the REST surface.
+         *
+         *     Two different Go types serialize to these two schemas, so they are documented separately rather than shared: core.Event.occurred_at is a time.Time and its amounts are decimal.Decimal, while eventResponse's are pre-formatted strings. api-contract.md §1 exempts pushed payloads from the {code, message, data} envelope -- this body is the bare event -- but every field rule still applies: snake_case names, string amounts, RFC3339 UTC timestamps.
+         *
+         *     Delivery headers: `X-Ledger-Event-UID` (the event uid, for receiver-side deduplication -- delivery is at-least-once), `X-Ledger-Timestamp` (unix seconds, covered by the signature) and `X-Ledger-Signature` (`t=<timestamp>,v1=<hex hmac-sha256>` over `<timestamp>.<raw body>` with the subscriber's secret). A subscriber with no secret is never delivered to, rather than delivered to unsigned.
+         *
+         *     Consumers must tolerate unknown fields (api-contract.md §8): this payload is the shape of a domain type, so a field added there appears here.
+         */
+        OutboundEvent: {
+            /** Format: uuid */
+            uid: string;
+            classification_code: string;
+            /** Format: uuid */
+            booking_uid: string;
+            /** Format: int64 */
+            account_holder: number;
+            /** Format: uuid */
+            currency_uid: string;
+            from_status: string;
+            to_status: string;
+            amount: components["schemas"]["Decimal"];
+            settled_amount: components["schemas"]["Decimal"];
+            /**
+             * Format: uuid
+             * @description Absent from the wire until a journal is linked to the event.
+             */
+            journal_uid?: string;
+            /** @description Free-form string tags; values are strings, never nested JSON. */
+            metadata: {
+                [key: string]: string;
+            };
+            occurred_at: components["schemas"]["Timestamp"];
+            /** Format: int64 */
+            actor_id: number;
+            source: string;
+        };
         /** @description journal_uid is the only genuinely optional field here (eventResponse.go: `omitempty` — absent from the wire, not present-as-empty, until a journal is linked). Every other field is always populated. */
         Event: {
             /** Format: uuid */
@@ -3437,8 +3553,9 @@ export interface components {
              * @description Empty when no journal linked.
              */
             journal_uid?: string;
+            /** @description Free-form string tags; values are strings, never nested JSON. */
             metadata: {
-                [key: string]: unknown;
+                [key: string]: string;
             };
             occurred_at: components["schemas"]["Timestamp"];
             /** Format: int64 */
@@ -3450,12 +3567,14 @@ export interface components {
         };
         EventListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Event"][];
+                list: components["schemas"]["Event"][];
                 /** @description Opaque cursor; null when exhausted. */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         Lifecycle: {
+            /** @description Shape version of this lifecycle JSON (0 and 1 are equivalent today). Absent from the wire when 0 -- core.Lifecycle.Version has `omitempty`. */
+            version?: number;
             initial: string;
             terminal?: string[];
             transitions: {
@@ -3468,7 +3587,8 @@ export interface components {
             normal_side: components["schemas"]["NormalSide"];
             is_system?: boolean;
             balance_role?: components["schemas"]["BalanceRole"];
-            lifecycle?: components["schemas"]["Lifecycle"];
+            /** @description Omit or send null for a label-only classification (no bookings). The Go request field is a non-omitempty pointer, so the wire form of "no lifecycle" is a literal null, not an absent key. */
+            lifecycle?: null | components["schemas"]["Lifecycle"];
         };
         /** @description lifecycle is the only genuinely optional field here (classificationResponse.go: `omitempty` — absent from the wire, not present-as-empty, for a label-only classification with no lifecycle). Every other field is always populated. */
         Classification: {
@@ -3488,9 +3608,9 @@ export interface components {
         };
         ClassificationListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Classification"][];
+                list: components["schemas"]["Classification"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         JournalType: {
@@ -3511,9 +3631,9 @@ export interface components {
         };
         JournalTypeListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["JournalType"][];
+                list: components["schemas"]["JournalType"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         TemplateLineInput: {
@@ -3555,9 +3675,9 @@ export interface components {
         };
         TemplateListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Template"][];
+                list: components["schemas"]["Template"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         Currency: {
@@ -3573,9 +3693,9 @@ export interface components {
         };
         CurrencyListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["Currency"][];
+                list: components["schemas"]["Currency"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         TemplateParams: {
@@ -3660,13 +3780,13 @@ export interface components {
         };
         DepositTolerancePlanResult: {
             /** @enum {string} */
-            outcome?: "exact_match" | "shortfall_auto_released" | "shortfall_pending_review" | "overage_auto_credited" | "overage_recorded_for_review";
-            expected_amount?: components["schemas"]["Decimal"];
-            actual_amount?: components["schemas"]["Decimal"];
-            tolerance?: components["schemas"]["Decimal"];
-            delta?: components["schemas"]["Decimal"];
-            requires_manual_review?: boolean;
-            journals?: components["schemas"]["Journal"][];
+            outcome: "exact_match" | "shortfall_auto_released" | "shortfall_pending_review" | "overage_auto_credited" | "overage_recorded_for_review";
+            expected_amount: components["schemas"]["Decimal"];
+            actual_amount: components["schemas"]["Decimal"];
+            tolerance: components["schemas"]["Decimal"];
+            delta: components["schemas"]["Decimal"];
+            requires_manual_review: boolean;
+            journals: components["schemas"]["Journal"][];
         };
         DepositToleranceEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["DepositTolerancePlanResult"];
@@ -3692,22 +3812,22 @@ export interface components {
             data?: components["schemas"]["ReconcileResult"];
         };
         BookingTrace: {
-            booking?: components["schemas"]["Booking"];
-            events?: components["schemas"]["Event"][];
-            journals?: components["schemas"]["Journal"][];
+            booking: components["schemas"]["Booking"];
+            events: components["schemas"]["Event"][];
+            journals: components["schemas"]["Journal"][];
         };
         BookingTraceEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["BookingTrace"];
         };
         PlatformBalance: {
             /** Format: uuid */
-            currency_uid?: string;
+            currency_uid: string;
             /** @description classification code → total (holder > 0). */
-            user_side?: {
+            user_side: {
                 [key: string]: components["schemas"]["Decimal"];
             };
             /** @description classification code → total (holder < 0). */
-            system_side?: {
+            system_side: {
                 [key: string]: components["schemas"]["Decimal"];
             };
         };
@@ -3716,49 +3836,52 @@ export interface components {
         };
         SolvencyReport: {
             /** Format: uuid */
-            currency_uid?: string;
-            liability?: components["schemas"]["Decimal"];
-            custodial?: components["schemas"]["Decimal"];
-            solvent?: boolean;
+            currency_uid: string;
+            liability: components["schemas"]["Decimal"];
+            custodial: components["schemas"]["Decimal"];
+            solvent: boolean;
             /** @description custodial - liability; negative = under-collateralised. */
-            margin?: components["schemas"]["Decimal"];
+            margin: components["schemas"]["Decimal"];
         };
         SolvencyEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["SolvencyReport"];
         };
         BalanceTrendPoint: {
             /** Format: date */
-            date?: string;
-            balance?: components["schemas"]["Decimal"];
-            inflow?: components["schemas"]["Decimal"];
-            outflow?: components["schemas"]["Decimal"];
+            date: string;
+            balance: components["schemas"]["Decimal"];
+            inflow: components["schemas"]["Decimal"];
+            outflow: components["schemas"]["Decimal"];
         };
         BalanceTrendListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
-                list?: components["schemas"]["BalanceTrendPoint"][];
+                list: components["schemas"]["BalanceTrendPoint"][];
                 /** @description Always null -- this endpoint returns its full result set (not paginated). */
-                next_cursor?: string | null;
+                next_cursor: string | null;
             };
         };
         ReconcileReport: {
             /** @description True when no check found a violation. Reports violations found, not coverage achieved — this alone is NOT a clean bill of health. Require overall_passed AND full_coverage for that. */
-            overall_passed?: boolean;
+            overall_passed: boolean;
             /** @description True only when every check covered its full intended scope. False means at least one check was capped, timed out, or skipped, so the run cannot testify about what it never examined. */
-            full_coverage?: boolean;
-            run_at?: components["schemas"]["Timestamp"];
-            checks?: {
-                /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity */
-                name?: string;
-                /** @description False if any finding was detected. Reports only on what the check actually examined — read together with `complete`. */
-                passed?: boolean;
-                /** @description False when the check could not cover its full scope (capped or timed-out scan, or a check skipped outright). Partial coverage never reads as a pass. */
-                complete?: boolean;
-                checked_at?: components["schemas"]["Timestamp"];
-                findings?: {
-                    description?: string;
-                    detail?: string;
-                }[];
-            }[];
+            full_coverage: boolean;
+            run_at: components["schemas"]["Timestamp"];
+            checks: components["schemas"]["ReconcileCheck"][];
+        };
+        ReconcileCheck: {
+            /** @description e.g. orphan_entries, checkpoint_balance, accounting_equation, system_rollup_integrity, snapshot_integrity */
+            name: string;
+            /** @description False if any finding was detected. Reports only on what the check actually examined — read together with `complete`. */
+            passed: boolean;
+            /** @description False when the check could not cover its full scope (capped or timed-out scan, or a check skipped outright). Partial coverage never reads as a pass. */
+            complete: boolean;
+            checked_at: components["schemas"]["Timestamp"];
+            findings: components["schemas"]["ReconcileFinding"][];
+        };
+        ReconcileFinding: {
+            description: string;
+            /** @description Optional structured context. Absent from the wire when the check recorded none (server's wire struct has `omitempty`). */
+            detail?: string;
         };
         ReconcileReportEnvelope: components["schemas"]["Envelope"] & {
             data?: components["schemas"]["ReconcileReport"];
