@@ -80,7 +80,15 @@ func isolatedConnection(t testing.TB) string {
 	t.Helper()
 	ctx := context.Background()
 	base := baseConnection(t)
-	name := fmt.Sprintf("ledger_test_%d", databaseCounter.Add(1))
+	// The counter alone is process-scoped (resets to 1 in every test binary),
+	// which collides in shared-Postgres mode: `go test ./...` runs one binary
+	// per package, and CI's DATABASE_URL points every one of them at the same
+	// server, so package A's "ledger_test_1" and package B's "ledger_test_1"
+	// race the same CREATE DATABASE. os.Getpid() is unique per test binary
+	// (each package's test process is a distinct OS process), so pairing it
+	// with the counter makes the name unique across the whole `go test ./...`
+	// run, not just within one package (F-X1, 2026-09-02 audit).
+	name := fmt.Sprintf("ledger_test_%d_%d", os.Getpid(), databaseCounter.Add(1))
 	admin, err := pgxpool.New(ctx, base)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { return admin.Ping(ctx) == nil }, 15*time.Second, 250*time.Millisecond)

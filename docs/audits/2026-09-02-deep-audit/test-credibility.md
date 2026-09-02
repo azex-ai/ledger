@@ -574,7 +574,7 @@ CI 侧最要紧的一条：`chains/evm/e2e_test.go` 与 `e2e_artifacts.go` 带 `
 | I-47 | `postgres.TestMigrate_ConcurrentAcrossDatabases` | ⬜ 真证伪（实现侧 `migrate.go:133-149` 连到 `postgres` 维护库取锁，与 pin 命题一致） |
 | I-48 | 7 条（`anchortest` 的元测试：故意造 head 恒零 / 只在内存里的假实现，验证 conformance suite 自己抓得住） | ⬜ 真证伪（我实跑了 `anchors/r2` 的 `TestAnchor_Conformance` 6 个子 case） |
 
-**统计**：真证伪 39 · 部分 5（I-4 / I-10 / I-11 / I-13 / I-32+33 算一组）· 空洞 1（I-6）· 无 pin 2（I-7 / I-34）。
+**统计**：真证伪 39 · 部分 6（I-4 / I-10 / I-11 / I-12 / I-13 / I-32+33 算一组，F-P12 订正：原「部分 5」漏计 I-12，其判定行本身标的就是【部分】）· 空洞 1（I-6）· 无 pin 2（I-7 / I-34）。
 其中 ⚪「未独立验证」7 条（I-26~I-30、I-45、I-46），移交 territory C 复核，不要把它们当成我背书过。
 
 ---

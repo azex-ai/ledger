@@ -136,11 +136,17 @@ func TestService_Ping_NilPool(t *testing.T) {
 	}
 }
 
-// TestService_Ping_Integration is intentionally skipped when no DB is
-// available — the testcontainers integration suite covers the live path.
+// TestService_Ping_Integration was a permanently-skipped placeholder (F-m9,
+// 2026-09-02 audit): t.Skip followed by nothing but a discarded
+// context.Background() call. It occupied a slot in the test count and never
+// executed an assertion, while claiming a live Ping path that the facade
+// itself never actually calls elsewhere. Replaced with a real smoke test
+// from the facade's own entry point.
 func TestService_Ping_Integration(t *testing.T) {
-	t.Skip("requires PostgreSQL; covered by postgres integration tests")
-	_ = context.Background()
+	pool := postgrestest.SetupDB(t)
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	require.NoError(t, svc.Ping(context.Background()))
 }
 
 // ---------------------------------------------------------------------------

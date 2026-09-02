@@ -162,3 +162,87 @@ func TestExpirationService_NonExpiredUntouched(t *testing.T) {
 	assert.Equal(t, 0, count)
 	assert.Empty(t, releaser.released)
 }
+
+// --- F-M3 (2026-09-02 audit): ExpireStaleBookings had zero test coverage
+// anywhere in the repo -- its sibling ExpireStaleReservations (above) had
+// four; ExpireStaleBookings had none. The whole method could be swapped for
+// `return 0, nil` and `go test ./...` stayed green. ---
+
+type mockExpiredBookingFinder struct {
+	bookings []core.Booking
+}
+
+func (m *mockExpiredBookingFinder) ListExpiredBookings(_ context.Context, limit int) ([]core.Booking, error) {
+	if limit > len(m.bookings) {
+		limit = len(m.bookings)
+	}
+	return m.bookings[:limit], nil
+}
+
+type mockBookingTransitioner struct {
+	transitioned []string
+	failUIDs     map[string]bool
+}
+
+func (m *mockBookingTransitioner) Transition(_ context.Context, input core.TransitionInput) (*core.Event, error) {
+	if m.failUIDs != nil && m.failUIDs[input.BookingUID] {
+		return nil, fmt.Errorf("transition failed for %s", input.BookingUID)
+	}
+	m.transitioned = append(m.transitioned, input.BookingUID)
+	return &core.Event{}, nil
+}
+
+// TestExpirationService_ExpireStaleBookings pins F-M3: a real implementation
+// must (a) call Transition("expired") for every expired booking found and
+// (b) count only the ones that actually succeeded. A no-op implementation
+// (`return 0, nil` without calling ListExpiredBookings/Transition at all)
+// goes red here on both counts.
+func TestExpirationService_ExpireStaleBookings(t *testing.T) {
+	finder := &mockExpiredBookingFinder{
+		bookings: []core.Booking{
+			{UID: "bkg-1", Status: "processing"},
+			{UID: "bkg-2", Status: "processing"},
+		},
+	}
+	transitioner := &mockBookingTransitioner{}
+	engine := core.NewEngine()
+	svc := NewExpirationService(nil, nil, nil, finder, transitioner, engine)
+
+	count, err := svc.ExpireStaleBookings(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+	assert.Equal(t, []string{"bkg-1", "bkg-2"}, transitioner.transitioned)
+}
+
+// TestExpirationService_ExpireStaleBookings_PartialFailureDoesNotCountFailed
+// pins that a Transition failure on one booking does not inflate the
+// returned count, and does not stop the rest of the batch from expiring.
+func TestExpirationService_ExpireStaleBookings_PartialFailureDoesNotCountFailed(t *testing.T) {
+	finder := &mockExpiredBookingFinder{
+		bookings: []core.Booking{
+			{UID: "bkg-1", Status: "processing"},
+			{UID: "bkg-2", Status: "processing"},
+		},
+	}
+	transitioner := &mockBookingTransitioner{failUIDs: map[string]bool{"bkg-1": true}}
+	engine := core.NewEngine()
+	svc := NewExpirationService(nil, nil, nil, finder, transitioner, engine)
+
+	count, err := svc.ExpireStaleBookings(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only the successful transition should count")
+	assert.Equal(t, []string{"bkg-2"}, transitioner.transitioned)
+}
+
+// TestExpirationService_ExpireStaleBookings_NoFinderIsANoOp pins the
+// documented nil-finder short-circuit (consumers that don't wire booking
+// expiration at all) -- distinct from a bug that no-ops despite a finder
+// being configured, which the two tests above catch.
+func TestExpirationService_ExpireStaleBookings_NoFinderIsANoOp(t *testing.T) {
+	engine := core.NewEngine()
+	svc := NewExpirationService(nil, nil, nil, nil, nil, engine)
+
+	count, err := svc.ExpireStaleBookings(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}

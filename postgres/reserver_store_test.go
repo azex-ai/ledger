@@ -159,7 +159,12 @@ func TestReserverStore_Reserve_Concurrent(t *testing.T) {
 	curID := postgrestest.SeedCurrency(t, pool, "USDT", "Tether USD")
 	seedReservableBalance(t, ctx, ledger, pool, 10, curID, decimal.NewFromInt(100))
 
-	// Both should succeed (advisory lock serializes)
+	// Both should succeed regardless of locking: 50+30=80 stays under the
+	// funded balance of 100, so this is true with or without the advisory
+	// lock. The real TOCTOU claim (concurrent reserves that together
+	// OVER-commit must not both succeed) is
+	// TestReserverStore_Reserve_Concurrent_RejectsOverCommit below -- see its
+	// doc comment for the mutation-testing evidence (F-m1, 2026-09-02 audit).
 	var wg sync.WaitGroup
 	var res1, res2 *core.Reservation
 	var err1, err2 error
