@@ -1,0 +1,33 @@
+-- Index journal_entries (account_holder, journal_id) so the holder statement's
+-- page_journals CTE can find one page of journal ids without reading the
+-- holder's whole entry history (2026-09-02 deep audit,
+-- structure-and-contract.md H-m9).
+--
+-- page_journals (holder.sql) is `SELECT DISTINCT j.id FROM journal_entries je
+-- JOIN journals j … WHERE je.account_holder = $1 AND j.id < cursor ORDER BY
+-- j.id DESC LIMIT n`. The existing index on this table is
+-- idx_entries_account_id (account_holder, currency_id, classification_id, id)
+-- — journal_id is not in it, so nothing could serve the filter, the
+-- duplicate-elimination and the j.id DESC ordering together: every page,
+-- including page 10, read all of the holder's entries and sorted them to
+-- return 20 journals. Pagination that does not get cheaper with depth is
+-- pagination in name only.
+--
+-- With (account_holder, journal_id) the CTE walks the index backwards from the
+-- cursor within one holder's range and stops after n distinct journal_ids.
+--
+-- The column order matters: account_holder first because it is the equality
+-- predicate, journal_id second because it is both the DISTINCT key and the
+-- sort key (a B-tree scans either direction, so DESC needs no separate
+-- index).
+--
+-- journal_entries is partitioned by created_at; an index created on the
+-- partitioned parent is created on every existing partition and inherited by
+-- every future one (013's partition function does not need to know about it).
+--
+-- Plain CREATE INDEX, not CONCURRENTLY: golang-migrate runs each migration in
+-- a transaction and CONCURRENTLY cannot run inside one -- the same note 015
+-- carries. On a large existing deployment, build it out-of-band with
+-- CONCURRENTLY before applying the release if the lock window matters.
+CREATE INDEX idx_entries_account_journal
+    ON journal_entries (account_holder, journal_id);

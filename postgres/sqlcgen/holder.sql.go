@@ -29,6 +29,20 @@ type ListHolderCurrenciesRow struct {
 
 // Every currency the holder has ever touched (any journal entry implies a
 // balance history). Feeds the per-currency BalanceBreakdown fan-out.
+//
+// H-m9 (cost, documented rather than changed): this is a DISTINCT over the
+// holder's whole entry history. It resolves as an index-only scan on
+// idx_entries_account_id's (account_holder, currency_id) prefix, so it does
+// not read table pages, but it does read every index entry for the holder.
+// The obvious rewrite -- read the currency set out of balance_checkpoints,
+// which holds one row per dimension -- was considered and rejected as
+// written: a dimension with entries but no checkpoint row yet (rollup lag,
+// or a first write) is invisible there, and no cheap watermark makes the
+// fallback provably complete, because each dimension carries its own
+// last_entry_id. Silently dropping a currency from a holder wallet is a
+// worse defect than the scan, so the scan stays until there is a bounded
+// form that is provably complete. The RESULT is bounded by the deployment's
+// currency count, not by the holder's history length.
 func (q *Queries) ListHolderCurrencies(ctx context.Context, accountHolder int64) ([]ListHolderCurrenciesRow, error) {
 	rows, err := q.db.Query(ctx, listHolderCurrencies, accountHolder)
 	if err != nil {
@@ -51,6 +65,7 @@ func (q *Queries) ListHolderCurrencies(ctx context.Context, accountHolder int64)
 
 const listHolderHolds = `-- name: ListHolderHolds :many
 SELECT
+    r.id,
     r.uid,
     (CASE WHEN r.status = 'active' THEN r.reserved_amount
           ELSE r.reserved_amount - COALESCE(r.settled_amount, 0)
@@ -62,10 +77,19 @@ SELECT
 FROM reservations r
 JOIN currencies cur ON cur.id = r.currency_id
 WHERE r.account_holder = $1 AND r.status IN ('active', 'settling')
+  AND ($2::bigint = 0 OR r.id < $2::bigint)
 ORDER BY r.id DESC
+LIMIT $3::int
 `
 
+type ListHolderHoldsParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CursorID      int64 `json:"cursor_id"`
+	PageLimit     int32 `json:"page_limit"`
+}
+
 type ListHolderHoldsRow struct {
+	ID           int64          `json:"id"`
 	Uid          pgtype.UUID    `json:"uid"`
 	HeldAmount   pgtype.Numeric `json:"held_amount"`
 	CurrencyUid  pgtype.UUID    `json:"currency_uid"`
@@ -77,8 +101,19 @@ type ListHolderHoldsRow struct {
 // Outstanding reservation holds for the holder, newest first. Same hold
 // semantics as SumActiveReservations: 'active' holds the full reserved
 // amount, 'settling' holds the unsettled remainder.
-func (q *Queries) ListHolderHolds(ctx context.Context, accountHolder int64) ([]ListHolderHoldsRow, error) {
-	rows, err := q.db.Query(ctx, listHolderHolds, accountHolder)
+//
+// Keyset-paginated on r.id DESC (H-m9): this used to return the holder's
+// entire hold set with no LIMIT at all, so one holder with a runaway number
+// of active reservations produced an unbounded response body from an
+// unbounded scan. Same cursor shape and direction as page_journals above and
+// ListReservationsByAccount: cursor_id = 0 is the first page, and the caller
+// encodes the last row's id as the opaque next_cursor.
+//
+// r.id (not created_at) is the cursor key: it is unique, so a page boundary
+// can never split or repeat a row that shares a timestamp with its
+// neighbour.
+func (q *Queries) ListHolderHolds(ctx context.Context, arg ListHolderHoldsParams) ([]ListHolderHoldsRow, error) {
+	rows, err := q.db.Query(ctx, listHolderHolds, arg.AccountHolder, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +122,7 @@ func (q *Queries) ListHolderHolds(ctx context.Context, accountHolder int64) ([]L
 	for rows.Next() {
 		var i ListHolderHoldsRow
 		if err := rows.Scan(
+			&i.ID,
 			&i.Uid,
 			&i.HeldAmount,
 			&i.CurrencyUid,

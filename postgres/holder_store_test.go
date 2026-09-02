@@ -314,8 +314,9 @@ func TestHolderBalancesAndHolds(t *testing.T) {
 	assert.True(t, decimal.NewFromInt(25).Equal(usd.Locked), "hold counts as locked")
 	assert.True(t, usd.Total.Equal(usd.Available.Add(usd.Pending).Add(usd.Locked)), "total invariant")
 
-	holds, err := f.ledger.ListHolderHolds(ctx, f.holder)
+	holds, holdsCursor, err := f.ledger.ListHolderHolds(ctx, f.holder, "", 0)
 	require.NoError(t, err)
+	assert.Empty(t, holdsCursor, "a single hold fits in one page")
 	require.Len(t, holds, 1)
 	assert.Equal(t, res.UID, holds[0].UID)
 	assert.True(t, decimal.NewFromInt(25).Equal(holds[0].Amount))

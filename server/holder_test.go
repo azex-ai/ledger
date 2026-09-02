@@ -23,7 +23,9 @@ import (
 // canned data — the store-side projection is pinned by postgres tests; here
 // we pin auth, scoping, and wire shape.
 type stubHolderReader struct {
-	lastHolder int64
+	lastHolder      int64
+	lastHoldsCursor string
+	lastHoldsLimit  int32
 }
 
 func (s *stubHolderReader) ListHolderBalances(_ context.Context, holder int64, currencyUID string) ([]core.HolderBalance, error) {
@@ -53,9 +55,11 @@ func (s *stubHolderReader) ListHolderTransactions(_ context.Context, holder int6
 	}}, "next-1", nil
 }
 
-func (s *stubHolderReader) ListHolderHolds(_ context.Context, holder int64) ([]core.HolderHold, error) {
+func (s *stubHolderReader) ListHolderHolds(_ context.Context, holder int64, cursor string, limit int32) ([]core.HolderHold, string, error) {
 	s.lastHolder = holder
-	return nil, nil
+	s.lastHoldsCursor = cursor
+	s.lastHoldsLimit = limit
+	return nil, "", nil
 }
 
 const testHolderSecret = "0123456789abcdef0123456789abcdef" // 32 bytes

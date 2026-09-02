@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -95,4 +96,86 @@ func TestListJournals_CursorOrderIsNewestFirst(t *testing.T) {
 	require.Len(t, entries, 2)
 	assert.Equal(t, third.UID, entries[0].JournalUID,
 		"GET /entries must page in the same direction as GET /journals")
+}
+
+// TestListHolderHolds_IsBounded is H-m9's pin for the unbounded list.
+//
+// ListHolderHolds had no LIMIT and no cursor: it returned every outstanding
+// hold the holder had, so one holder with a runaway number of active
+// reservations produced an unbounded response body from an unbounded scan.
+// api-contract.md §6 gives list endpoints a cursor shape; an endpoint with no
+// bound at all is outside it.
+//
+// Reverting either the SQL LIMIT or the store's cursor handling makes this
+// red: the first assertion catches a page larger than the limit, the second
+// catches a cursor that does not advance.
+func TestListHolderHolds_IsBounded(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	ledgerStore := postgres.NewLedgerStore(pool)
+	classStore := postgres.NewClassificationStore(pool)
+	currencyStore := postgres.NewCurrencyStore(pool)
+	reserver := postgres.NewReserverStore(pool, ledgerStore, postgres.NewVerifiedBalanceStore(pool, nil))
+
+	cur, err := currencyStore.CreateCurrency(ctx, core.CurrencyInput{Code: "USDT-HOLD", Name: "Hold USDT", Exponent: 18})
+	require.NoError(t, err)
+	wallet, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "wallet_hold", Name: "Wallet Hold", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleAvailable,
+	})
+	require.NoError(t, err)
+	_, err = classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "locked_hold", Name: "Locked Hold", NormalSide: core.NormalSideDebit,
+		BalanceRole: core.BalanceRoleLocked,
+	})
+	require.NoError(t, err)
+	sys, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code: "sys_hold", Name: "System Hold", NormalSide: core.NormalSideCredit, IsSystem: true,
+	})
+	require.NoError(t, err)
+	jt, err := classStore.CreateJournalType(ctx, core.JournalTypeInput{Code: "jt_hold", Name: "Hold JT"})
+	require.NoError(t, err)
+
+	holder := int64(7202)
+	// Fund the holder so the reservations below can be taken.
+	_, err = ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jt.UID,
+		IdempotencyKey: postgrestest.UniqueKey("hold-fund"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: cur.UID, ClassificationUID: wallet.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+			{AccountHolder: -holder, CurrencyUID: cur.UID, ClassificationUID: sys.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+		},
+		Source: "hold_test",
+	})
+	require.NoError(t, err)
+
+	for i := 0; i < 3; i++ {
+		_, err := reserver.Reserve(ctx, core.ReserveInput{
+			AccountHolder:  holder,
+			CurrencyUID:    cur.UID,
+			Amount:         decimal.NewFromInt(1),
+			IdempotencyKey: postgrestest.UniqueKey("hold-res"),
+			ExpiresIn:      time.Hour,
+		})
+		require.NoError(t, err)
+	}
+
+	// A limit of 1 must return exactly one hold and a cursor.
+	page, next, err := ledgerStore.ListHolderHolds(ctx, holder, "", 1)
+	require.NoError(t, err)
+	require.Len(t, page, 1, "the store must not return more rows than the requested limit")
+	require.NotEmpty(t, next, "a full page must hand back a cursor")
+
+	// The cursor must advance to a different hold, newest first.
+	page2, _, err := ledgerStore.ListHolderHolds(ctx, holder, next, 1)
+	require.NoError(t, err)
+	require.Len(t, page2, 1)
+	require.NotEqual(t, page[0].UID, page2[0].UID, "the cursor must advance instead of repeating the first page")
+	require.True(t, page2[0].CreatedAt.Compare(page[0].CreatedAt) <= 0, "holds page newest first")
+
+	// A garbage cursor is an explicit rejection, never a silent restart at
+	// page one (working-agreements §3).
+	_, _, err = ledgerStore.ListHolderHolds(ctx, holder, "not-a-cursor", 1)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
 }

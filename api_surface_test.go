@@ -72,6 +72,24 @@ var surfaceSkipDirs = map[string]bool{
 	".github":  true,
 }
 
+// generatedPackages stay IN the snapshot (so a regeneration is still an
+// explicit, reviewable diff) but are exempt from the BREAKING.md
+// requirement: postgres/sqlcgen is generated from the .sql files ("do not
+// edit" -- CLAUDE.md) and its query parameter/row structs are storage
+// plumbing, not a consumption contract. Requiring a breaking-change entry
+// for each one would make every `sqlc generate` write paperwork nobody
+// consumes, which is how a gate teaches people to route around it.
+//
+// Deliberately an exemption from the DOC requirement rather than a scope
+// exclusion: dropping a package out of the snapshot entirely would also
+// make deleting that package invisible.
+var generatedPackages = map[string]bool{"sqlcgen": true}
+
+func isGeneratedSymbol(sym string) bool {
+	pkg, _, _ := strings.Cut(sym, ".")
+	return generatedPackages[pkg]
+}
+
 // TestAPISurface_MatchesSnapshot is the "changing the public API is an
 // explicit act" half.
 func TestAPISurface_MatchesSnapshot(t *testing.T) {
@@ -129,6 +147,9 @@ func TestAPISurface_BreakingChangesAreDocumented(t *testing.T) {
 
 	var undocumented []string
 	for _, sym := range append(removed, changed...) {
+		if isGeneratedSymbol(sym) {
+			continue
+		}
 		if !strings.Contains(doc, sym) {
 			undocumented = append(undocumented, sym)
 		}

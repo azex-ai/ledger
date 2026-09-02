@@ -162,17 +162,43 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 // ListHolderHolds returns the holder's outstanding reservation holds
 // (active = full reserved amount, settling = unsettled remainder — the same
 // figures the balance breakdown counts as locked).
-func (s *LedgerStore) ListHolderHolds(ctx context.Context, holder int64) ([]core.HolderHold, error) {
+func (s *LedgerStore) ListHolderHolds(ctx context.Context, holder int64, cursor string, limit int32) ([]core.HolderHold, string, error) {
 	ctx, span := ledgerotel.StartSpan(ctx, "ledger.holder.list_holds",
 		attribute.Int64("account_holder", holder),
 	)
 	defer span.End()
 
-	rows, err := s.q.ListHolderHolds(ctx, holder)
+	if limit <= 0 {
+		limit = holderTxDefaultLimit
+	}
+	if limit > holderTxMaxLimit {
+		limit = holderTxMaxLimit
+	}
+
+	// Same cursor spelling as ListHolderTransactions right above (a plain
+	// decimal id, not the base64 form the API-key surface uses): the two
+	// holder lists are paged by the same client, and a bad cursor is an
+	// explicit ErrInvalidInput rather than a silent restart at page one.
+	var cursorID int64
+	if cursor != "" {
+		id, err := strconv.ParseInt(cursor, 10, 64)
+		if err != nil || id <= 0 {
+			err = fmt.Errorf("postgres: list holder holds: bad cursor %q: %w", cursor, core.ErrInvalidInput)
+			ledgerotel.RecordError(span, err)
+			return nil, "", err
+		}
+		cursorID = id
+	}
+
+	rows, err := s.q.ListHolderHolds(ctx, sqlcgen.ListHolderHoldsParams{
+		AccountHolder: holder,
+		CursorID:      cursorID,
+		PageLimit:     limit,
+	})
 	if err != nil {
 		err = fmt.Errorf("postgres: list holder holds: %w", err)
 		ledgerotel.RecordError(span, err)
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]core.HolderHold, 0, len(rows))
 	for _, r := range rows {
@@ -180,7 +206,7 @@ func (s *LedgerStore) ListHolderHolds(ctx context.Context, holder int64) ([]core
 		if err != nil {
 			err = fmt.Errorf("postgres: list holder holds: reservation %s: %w", pgToUID(r.Uid), err)
 			ledgerotel.RecordError(span, err)
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, core.HolderHold{
 			UID:          pgToUID(r.Uid),
@@ -191,5 +217,11 @@ func (s *LedgerStore) ListHolderHolds(ctx context.Context, holder int64) ([]core
 			ExpiresAt:    r.ExpiresAt,
 		})
 	}
-	return out, nil
+	// A full page means "there may be more": hand back the last (oldest) row's
+	// id, the same convention as every other keyset list here.
+	nextCursor := ""
+	if int32(len(rows)) == limit && len(rows) > 0 {
+		nextCursor = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+	}
+	return out, nextCursor, nil
 }

@@ -1594,9 +1594,21 @@ paths:
   /holder/holds:
     get:
       tags: [Holder]
-      summary: The token-bound holder's outstanding holds.
+      summary: The token-bound holder's outstanding holds (cursor-paginated, newest first).
+      description: >-
+        Cursor-paginated since H-m9: this endpoint used to return the
+        holder's entire hold set with no limit, an unbounded body from an
+        unbounded scan. Same cursor shape and direction as
+        GET /holder/transactions.
       security:
         - holderToken: []
+      parameters:
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, format: int32, default: 20, maximum: 100 }
       responses:
         "200":
           description: Active holds (locked amounts with expiry).
@@ -1890,9 +1902,8 @@ components:
                 next_cursor:
                   type: [string, "null"]
                   description: >-
-                    Always null: this endpoint returns its full result set.
-                    Present so every list envelope in this API carries the
-                    same comparable sentinel (api-contract.md §6).
+                    Opaque cursor for the next (older) page; null when
+                    exhausted (api-contract.md §6).
 
     Envelope:
       type: object

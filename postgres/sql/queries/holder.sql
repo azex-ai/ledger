@@ -111,7 +111,19 @@ ORDER BY j.id DESC, cur.code;
 -- Outstanding reservation holds for the holder, newest first. Same hold
 -- semantics as SumActiveReservations: 'active' holds the full reserved
 -- amount, 'settling' holds the unsettled remainder.
+--
+-- Keyset-paginated on r.id DESC (H-m9): this used to return the holder's
+-- entire hold set with no LIMIT at all, so one holder with a runaway number
+-- of active reservations produced an unbounded response body from an
+-- unbounded scan. Same cursor shape and direction as page_journals above and
+-- ListReservationsByAccount: cursor_id = 0 is the first page, and the caller
+-- encodes the last row's id as the opaque next_cursor.
+--
+-- r.id (not created_at) is the cursor key: it is unique, so a page boundary
+-- can never split or repeat a row that shares a timestamp with its
+-- neighbour.
 SELECT
+    r.id,
     r.uid,
     (CASE WHEN r.status = 'active' THEN r.reserved_amount
           ELSE r.reserved_amount - COALESCE(r.settled_amount, 0)
@@ -123,11 +135,27 @@ SELECT
 FROM reservations r
 JOIN currencies cur ON cur.id = r.currency_id
 WHERE r.account_holder = $1 AND r.status IN ('active', 'settling')
-ORDER BY r.id DESC;
+  AND (sqlc.arg(cursor_id)::bigint = 0 OR r.id < sqlc.arg(cursor_id)::bigint)
+ORDER BY r.id DESC
+LIMIT sqlc.arg(page_limit)::int;
 
 -- name: ListHolderCurrencies :many
 -- Every currency the holder has ever touched (any journal entry implies a
 -- balance history). Feeds the per-currency BalanceBreakdown fan-out.
+--
+-- H-m9 (cost, documented rather than changed): this is a DISTINCT over the
+-- holder's whole entry history. It resolves as an index-only scan on
+-- idx_entries_account_id's (account_holder, currency_id) prefix, so it does
+-- not read table pages, but it does read every index entry for the holder.
+-- The obvious rewrite -- read the currency set out of balance_checkpoints,
+-- which holds one row per dimension -- was considered and rejected as
+-- written: a dimension with entries but no checkpoint row yet (rollup lag,
+-- or a first write) is invisible there, and no cheap watermark makes the
+-- fallback provably complete, because each dimension carries its own
+-- last_entry_id. Silently dropping a currency from a holder wallet is a
+-- worse defect than the scan, so the scan stays until there is a bounded
+-- form that is provably complete. The RESULT is bounded by the deployment's
+-- currency count, not by the holder's history length.
 SELECT DISTINCT cur.uid, cur.code
 FROM journal_entries je
 JOIN currencies cur ON cur.id = je.currency_id

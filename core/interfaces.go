@@ -391,8 +391,17 @@ type HolderReader interface {
 	// first, cursor-paginated at journal granularity (a journal's rows are
 	// never split across pages). Empty cursor starts from the newest.
 	ListHolderTransactions(ctx context.Context, holder int64, cursor string, limit int32) ([]HolderTransaction, string, error)
-	// ListHolderHolds returns the holder's outstanding reservation holds.
-	ListHolderHolds(ctx context.Context, holder int64) ([]HolderHold, error)
+	// ListHolderHolds returns the holder's outstanding reservation holds,
+	// newest first, cursor-paginated on the same shape as
+	// ListHolderTransactions. Empty cursor starts from the newest; an empty
+	// returned cursor means the last page.
+	//
+	// It takes a cursor and a limit because it used to take neither (H-m9):
+	// the implementation returned the holder's entire hold set with no LIMIT,
+	// so a holder with a runaway number of active reservations produced an
+	// unbounded response body from an unbounded scan. A collection endpoint
+	// without an explicit bound is a contract defect, not a convenience.
+	ListHolderHolds(ctx context.Context, holder int64, cursor string, limit int32) ([]HolderHold, string, error)
 }
 
 // TemplateStore manages entry templates.

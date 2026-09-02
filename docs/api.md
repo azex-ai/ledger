@@ -175,6 +175,9 @@ recent rows and the cursor walks strictly older. The queue-shaped reads —
 `GET /bookings`, `GET /events`, `GET /deposits/reviews` — page **oldest
 first**, because they are worked through in occurrence order.
 
+`GET /holder/holds` is cursor-paginated as well (since H-m9); it used to
+return the holder's entire hold set in one response.
+
 ### Rate limits
 
 In-memory per-IP token bucket (single-instance only):

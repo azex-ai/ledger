@@ -173,6 +173,22 @@ type mintHolderTokenResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
+// holderPageLimit reads the holder surface's "limit" query param. 0 means
+// "let the store apply its default"; a non-numeric or non-positive value is a
+// 400 rather than a silent fallback, so a caller mis-spelling its own
+// pagination learns about it.
+func holderPageLimit(r *http.Request) (int32, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n <= 0 {
+		return 0, httpx.ErrField("limit", "must be a positive integer")
+	}
+	return int32(n), nil
+}
+
 // ---- Handlers ----
 
 func (hs *holderSurface) handleMintHolderToken(w http.ResponseWriter, r *http.Request) {
@@ -252,14 +268,10 @@ func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http
 		httpx.Error(w, bizcode.New(10101, "unauthenticated"))
 		return
 	}
-	limit := int32(0)
-	if v := r.URL.Query().Get("limit"); v != "" {
-		n, err := strconv.ParseInt(v, 10, 32)
-		if err != nil || n <= 0 {
-			httpx.Error(w, httpx.ErrBadRequest("invalid limit"))
-			return
-		}
-		limit = int32(n)
+	limit, err := holderPageLimit(r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
 	}
 	items, next, err := hs.holders.ListHolderTransactions(r.Context(), holder, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
@@ -290,7 +302,12 @@ func (hs *holderSurface) handleHolderHolds(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, bizcode.New(10101, "unauthenticated"))
 		return
 	}
-	holds, err := hs.holders.ListHolderHolds(r.Context(), holder)
+	limit, err := holderPageLimit(r)
+	if err != nil {
+		httpx.Error(w, err)
+		return
+	}
+	holds, next, err := hs.holders.ListHolderHolds(r.Context(), holder, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		httpx.Error(w, err)
 		return
@@ -307,8 +324,9 @@ func (hs *holderSurface) handleHolderHolds(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	// PagedResponse rather than a bare {"list": ...} map -- see
-	// handleHolderBalances (H-m4).
-	httpx.OK(w, PagedResponse[holderHoldResponse]{List: out})
+	// handleHolderBalances (H-m4). Unlike balances, this list is genuinely
+	// paginated (H-m9), so next_cursor carries a value when more pages exist.
+	httpx.OK(w, PagedResponse[holderHoldResponse]{List: out, NextCursor: cursorPtr(next)})
 }
 
 // handleHolderGetDepositAddress looks up the token-bound holder's

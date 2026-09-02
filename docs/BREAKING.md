@@ -50,6 +50,22 @@ updated.
 in `knownInterfaceInternalIDLeaks`; that list must be emptied in the same
 commit as the fix.
 
+### `core.HolderReader.ListHolderHolds` is paginated (H-m9)
+
+`ListHolderHolds(ctx, holder)` → `ListHolderHolds(ctx, holder, cursor string,
+limit int32) ([]HolderHold, string, error)`. It returned every outstanding
+hold with no `LIMIT` and no cursor, so one holder with a runaway number of
+active reservations produced an unbounded response body from an unbounded
+scan — a collection endpoint outside api-contract.md §6's shape entirely.
+
+Consumers implementing `core.HolderReader` must update the method, and the
+adapter method `postgres.LedgerStore.ListHolderHolds` changed with it (a
+consumer calling the store directly rather than through the port passes the
+two new arguments and reads the extra return value).
+`GET /holder/holds` gains `cursor` and `limit` query parameters (defaults 20,
+max 100) and its `next_cursor` is now a real value instead of always null —
+a client that read the whole list in one call must page.
+
 ### `GET /journals`, `GET /entries`, `GET /audit/journals` now page newest first (H-m3)
 
 `ListJournalsCursor`, `ListEntriesByAccount`, `ListJournalsByAccount` and
