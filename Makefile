@@ -1,13 +1,36 @@
-.PHONY: build test test-short vet lint sqlc sqlc-diff db openapi-check
+.PHONY: build test test-short test-submodules test-e2e vet lint sqlc sqlc-diff db openapi-check
 
 build:
 	go build ./...
 
+# -count=1 disables the test result cache (F-m5, 2026-09-02 audit): without
+# it, `go test` can print a fully green run without touching Postgres at
+# all -- a cached PASS from a previous invocation, not evidence the current
+# tree passes. ci.yml's test job has always passed -count=1; this target
+# didn't, so it was a weaker gate than CI under the same name. `./...` also
+# does not cross module boundaries (go.work notwithstanding) -- see
+# test-submodules for chains/evm and anchors/r2, which this target does not
+# touch, same as CI's separate steps for them.
 test:
-	go test -race -timeout 5m ./...
+	go test -race -timeout 5m -count=1 ./...
 
 test-short:
-	go test -short -race ./...
+	go test -short -race -count=1 ./...
+
+# chains/evm and anchors/r2 are separate Go modules (kept out of the root
+# module's dependency graph deliberately -- see CLAUDE.md's Gotchas); `go
+# test ./...` from the repo root never sees them. Mirrors ci.yml's test job.
+test-submodules:
+	cd chains/evm && go test -race -timeout 5m -count=1 ./...
+	cd anchors/r2 && go test -race -timeout 5m -count=1 ./...
+
+# chains/evm/e2e_test.go and e2e_artifacts.go carry `//go:build e2e` and are
+# excluded from every other target above -- `go build`/`go vet`/`go test`
+# without `-tags e2e` do not even compile them (F-M5, 2026-09-02 audit: the
+# files sat uncompiled long enough that nothing would have noticed a broken
+# signature). Requires anvil (foundry) on PATH; skips itself otherwise.
+test-e2e:
+	cd chains/evm && go test -tags e2e -race -timeout 5m -count=1 -run TestE2E ./...
 
 vet:
 	go vet ./...

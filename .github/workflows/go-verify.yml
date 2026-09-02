@@ -1,0 +1,199 @@
+name: go-verify
+
+# The full Go verify gate, extracted into a reusable workflow (F-M6,
+# 2026-09-02 audit) so ci.yml and go-release.yml cannot structurally
+# diverge -- copying these jobs a second time into go-release.yml is
+# exactly how that workflow ended up years behind ci.yml (missing lint,
+# sqlc-diff, govulncheck, and both submodules entirely). Both callers
+# `uses: ./.github/workflows/go-verify.yml`; there is now only one place
+# these checks are defined, so a step added here reaches both without
+# anyone remembering to copy it twice.
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          # check-latest: runner manifests lag new patch releases; vulncheck
+          # fails on stdlib CVEs already fixed in the newest patch without it.
+          check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go vet ./...
+      # Submodules need their own invocation -- see the test job's note.
+      - run: go vet ./...
+        working-directory: chains/evm
+      - run: go vet ./...
+        working-directory: anchors/r2
+      # F-m8 (2026-09-02 audit): internal/postgrestest and
+      # anchors/r2/internal/miniotest are separate workspace modules (kept
+      # out of the root module's go.sum on purpose -- see CLAUDE.md's
+      # Gotchas) but had zero go vet / golangci-lint / go build coverage of
+      # their own. Neither has a _test.go file, so there is no test loss --
+      # but they are the fixture layer every DB/MinIO integration test in
+      # this repo depends on, and a break here surfaces as "everything else
+      # mysteriously fails or skips", which is the wrong place to start
+      # debugging.
+      - run: go vet ./...
+        working-directory: internal/postgrestest
+      - run: go vet ./...
+        working-directory: anchors/r2/internal/miniotest
+      # F-M5 (2026-09-02 audit): chains/evm/e2e_test.go and e2e_artifacts.go
+      # carry `//go:build e2e` and were not compiled by ANY step anywhere in
+      # this repo (CI, Makefile, or docs) -- not "skipped", not covered at
+      # all, at the compile level. go vet without -tags e2e cannot see them;
+      # a broken signature in Sweeper/Scanner would pass every check that
+      # existed before this line.
+      - run: go vet -tags e2e ./...
+        working-directory: chains/evm
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: chains/evm
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: anchors/r2
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: internal/postgrestest
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: anchors/r2/internal/miniotest
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: ledger_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          # check-latest: runner manifests lag new patch releases; vulncheck
+          # fails on stdlib CVEs already fixed in the newest patch without it.
+          check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go test -race -timeout 5m -count=1 ./...
+        env:
+          DATABASE_URL: postgres://test:test@localhost:5432/ledger_test?sslmode=disable
+      # Submodules are invisible to the root module's ./... -- go does not
+      # cross module boundaries, workspace or not. Without these steps
+      # chains/evm and anchors/r2 ship with tests that CI never runs, which
+      # is the shape this repo keeps paying for: the check exists, nothing
+      # executes it. Each runs in its own directory against its own go.mod.
+      - name: Test chains/evm
+        run: go test -race -timeout 5m -count=1 ./...
+        working-directory: chains/evm
+      - name: Test anchors/r2
+        run: go test -race -timeout 5m -count=1 ./...
+        working-directory: anchors/r2
+      # F-m3 (2026-09-02 audit): docs/INVARIANTS.md's own "How to add a new
+      # invariant" rule #5 says a fuzz-target pin gets run for a few seconds
+      # in CI -- until this step existed, `go test` only ever ran the
+      # seeded corpus (f.Add calls) for these three targets, never actually
+      # fuzzed. Short, bounded fuzztime: this is a smoke pass, not a fuzzing
+      # campaign. Any crasher becomes a testdata/fuzz/ file the job uploads
+      # as an artifact for a human to review and commit -- this step never
+      # commits on its own.
+      - name: Fuzz FuzzJournalValidate (30s)
+        run: go test ./core/ -run '^$' -fuzz='^FuzzJournalValidate$' -fuzztime=30s
+      - name: Fuzz FuzzLifecycleValidate (30s)
+        run: go test ./core/ -run '^$' -fuzz='^FuzzLifecycleValidate$' -fuzztime=30s
+      - name: Fuzz FuzzAllocate (30s)
+        run: go test ./core/ -run '^$' -fuzz='^FuzzAllocate$' -fuzztime=30s
+      - name: Upload new fuzz corpus (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus
+          path: core/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 14
+      # F-M5: the e2e suite behind `-tags e2e` exercises the full CREATE2
+      # deposit-address derivation -> DepositFactory deploy -> Transfer log
+      # decode -> sweep construct/sign/broadcast/confirm -> Scanner re-check
+      # path against a real chain (anvil). It self-skips when anvil isn't on
+      # PATH, so installing foundry here is what turns that skip into an
+      # actual run.
+      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Test chains/evm e2e
+        run: go test -tags e2e -race -timeout 5m -count=1 -run TestE2E ./...
+        working-directory: chains/evm
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          # check-latest: runner manifests lag new patch releases; vulncheck
+          # fails on stdlib CVEs already fixed in the newest patch without it.
+          check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+
+  sqlc-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: sqlc-dev/setup-sqlc@v5
+        with:
+          sqlc-version: '1.31.1'
+      - name: sqlc diff
+        working-directory: postgres
+        run: sqlc diff
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          # check-latest: runner manifests lag new patch releases; vulncheck
+          # fails on stdlib CVEs already fixed in the newest patch without it.
+          check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
+      - run: go build ./...
+      - run: go build ./...
+        working-directory: chains/evm
+      - run: go build ./...
+        working-directory: anchors/r2
+      # F-m8: see the lint job's note -- same two fixture modules.
+      - run: go build ./...
+        working-directory: internal/postgrestest
+      - run: go build ./...
+        working-directory: anchors/r2/internal/miniotest
+      # F-M5: prove the e2e-tagged files at least compile even where anvil
+      # (and therefore the test job's e2e run) isn't available.
+      - run: go build -tags e2e ./...
+        working-directory: chains/evm

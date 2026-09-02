@@ -147,3 +147,78 @@ func TestPartitions_RebalanceStrandedDefaultRows(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM "+strandedPart).Scan(&n))
 	assert.Equal(t, 2, n, "both entries of the stranded journal must live in %s", strandedPart)
 }
+
+// TestPartitions_RebalanceDefault_DirectCall pins F-m7 (2026-09-02 audit):
+// PartitionStore.RebalanceDefault had zero direct callers in the whole test
+// suite -- the test above only reaches it indirectly, through
+// EnsureMonthlyPartitions' fallback branch, and I-13's Pinned by cited this
+// file's own test as covering RebalanceDefault when it actually never calls
+// it. PartitionService.EnsureUpcoming (service/partition_test.go) calls it
+// directly on its self-heal path; this test exercises the same call one
+// layer down, against the real store.
+func TestPartitions_RebalanceDefault_DirectCall(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	store := postgres.NewPartitionStore(pool)
+
+	ledgerStore, deps := setupInvariantsFixture(t, pool, ctx)
+
+	orig, err := ledgerStore.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: deps.JournalType,
+		IdempotencyKey: postgrestest.UniqueKey("part-rebal-direct-orig"),
+		Source:         "partition-test",
+		Entries: []core.EntryInput{
+			{AccountHolder: 8103, CurrencyUID: deps.Currency, ClassificationUID: deps.MainWallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(40)},
+			{AccountHolder: core.SystemAccountHolder(8103), CurrencyUID: deps.Currency, ClassificationUID: deps.Custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(40)},
+		},
+	})
+	require.NoError(t, err)
+
+	// Same "clone into a far-future unpartitioned month" technique as above,
+	// to strand rows in the default partition without waiting for the
+	// horizon to actually lapse.
+	stranded := time.Date(time.Now().UTC().Year()+4, 9, 10, 8, 0, 0, 0, time.UTC)
+	require.NoError(t, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var origID int64
+		if err := tx.QueryRow(ctx, "SELECT id FROM journals WHERE uid = $1", orig.UID).Scan(&origID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "CREATE TEMP TABLE j_copy2 ON COMMIT DROP AS SELECT * FROM journals WHERE id = $1", origID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE j_copy2 SET id = nextval(pg_get_serial_sequence('journals','id')),
+			                    uid = gen_random_uuid(),
+			                    idempotency_key = idempotency_key || '-stranded2',
+			                    created_at = $1`, stranded); err != nil {
+			return err
+		}
+		var newID int64
+		if err := tx.QueryRow(ctx, "WITH ins AS (INSERT INTO journals SELECT * FROM j_copy2 RETURNING id) SELECT id FROM ins").Scan(&newID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, created_at, effective_at)
+			 SELECT $1, account_holder, currency_id, classification_id, entry_type, amount, $2, effective_at
+			   FROM journal_entries WHERE journal_id = $3`, newID, stranded, origID)
+		return err
+	}))
+
+	hasRows, err := store.DefaultPartitionHasRows(ctx)
+	require.NoError(t, err)
+	require.True(t, hasRows, "rows dated %s must land in default (no partition covers it)", stranded)
+
+	// Call RebalanceDefault directly -- not through EnsureMonthlyPartitions.
+	rebalanced, err := store.RebalanceDefault(ctx, stranded, 1)
+	require.NoError(t, err)
+	assert.NotEmpty(t, rebalanced, "RebalanceDefault must return the partitions it moved rows into")
+
+	hasRows, err = store.DefaultPartitionHasRows(ctx)
+	require.NoError(t, err)
+	assert.False(t, hasRows, "direct RebalanceDefault call must empty the default partition")
+
+	strandedPart := fmt.Sprintf("journal_entries_y%04dm%02d", stranded.Year(), int(stranded.Month()))
+	var n int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM "+strandedPart).Scan(&n))
+	assert.Equal(t, 2, n, "both entries of the stranded journal must live in %s after a direct RebalanceDefault call", strandedPart)
+}

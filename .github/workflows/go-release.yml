@@ -1,54 +1,115 @@
 name: go-release
 
-# Cuts a GitHub release for the Go module on a SemVer tag (e.g. v0.1.0).
-# React package releases use the separate ledger-react-v* namespace, so the
-# 'v*' filter here never collides with them. Go module distribution itself is
-# automatic once the tag exists (the Go proxy pulls it) — this workflow re-runs
-# the full verify gate so a tag can never point at code that doesn't pass CI,
-# then publishes a GitHub release with notes drawn from CHANGELOG.md.
+# Cuts a GitHub release for a Go module on a SemVer tag. Three independent
+# modules, three tag namespaces, so they never collide:
+#   - root module:     'v*'              (e.g. v0.7.0)
+#   - anchors/r2:       'anchors/r2/v*'   (e.g. anchors/r2/v0.1.0)
+#   - chains/evm:       'chains/evm/v*'   (e.g. chains/evm/v0.1.0)
+# React package releases use the separate ledger-react-v* namespace (see
+# ledger-react-publish.yml), so none of these ever collide with it either.
+#
+# F-M6 (2026-09-02 audit): the root verify job used to be three bare steps
+# (vet/build/test) hand-copied from ci.yml, which is exactly how it fell
+# behind -- missing lint, sqlc-diff, govulncheck, and both submodules
+# entirely, so a tag could point at code none of those checked. It now
+# `uses: ./.github/workflows/go-verify.yml`, the same reusable workflow
+# ci.yml calls: the two callers cannot structurally diverge again. The two
+# submodules previously had NO release workflow at all (their own tag
+# namespace didn't even match this workflow's old 'v*'-only filter) -- each
+# now gets its own scoped verify (vet/lint/build/test in its own directory
+# only; go-verify.yml is root-module-shaped and does not apply to them) and
+# its own release, gated on its own tag namespace via `if:`.
 on:
   push:
     tags:
       - 'v*'
+      - 'anchors/r2/v*'
+      - 'chains/evm/v*'
 
 jobs:
   verify:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/go-verify.yml
+
+  release:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_DB: ledger_test
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+
+  verify-anchors-r2:
+    if: startsWith(github.ref, 'refs/tags/anchors/r2/v')
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          # Must track ci.yml, not a pinned patch: go.work sets a minimum
-          # (currently 1.26.6) and GOTOOLCHAIN=local means a runner with an
-          # older patch refuses to build rather than downloading one. A pin
-          # here silently rots the moment go.work's minimum moves -- and it
-          # only surfaces when someone cuts a tag, which is the worst moment
-          # to find out. check-latest for the same reason ci.yml gives.
           go-version: '1.26.x'
           check-latest: true
           cache: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: anchors/r2/go.sum
       - run: go vet ./...
+        working-directory: anchors/r2
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: anchors/r2
       - run: go build ./...
+        working-directory: anchors/r2
       - run: go test -race -timeout 5m -count=1 ./...
-        env:
-          DATABASE_URL: postgres://test:test@localhost:5432/ledger_test?sslmode=disable
+        working-directory: anchors/r2
 
-  release:
-    needs: verify
+  release-anchors-r2:
+    needs: verify-anchors-r2
+    if: startsWith(github.ref, 'refs/tags/anchors/r2/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+
+  verify-chains-evm:
+    if: startsWith(github.ref, 'refs/tags/chains/evm/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: true
+          cache-dependency-path: chains/evm/go.sum
+      # Same -tags e2e reasoning as go-verify.yml: without it these two
+      # files aren't even compiled, and a release tag is the worst moment to
+      # find that out.
+      - run: go vet -tags e2e ./...
+        working-directory: chains/evm
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: chains/evm
+      - run: go build -tags e2e ./...
+        working-directory: chains/evm
+      - run: go test -race -timeout 5m -count=1 ./...
+        working-directory: chains/evm
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: go test -tags e2e -race -timeout 5m -count=1 -run TestE2E ./...
+        working-directory: chains/evm
+
+  release-chains-evm:
+    needs: verify-chains-evm
+    if: startsWith(github.ref, 'refs/tags/chains/evm/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

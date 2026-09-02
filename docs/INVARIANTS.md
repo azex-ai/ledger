@@ -232,14 +232,18 @@ holder over-committed.
 - Reservation FSM transition table in `core/reserve.go` rejects illegal moves.
 
 **Pinned by**:
-- `postgres.TestReserverStore_Reserve_Concurrent` (2 concurrent reserves that
-  together stay under the funded balance -- proves no crash/deadlock, but
-  NOT over-commit rejection; see doc comment)
 - `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (10
   concurrent reserves that together exceed the funded balance -- the actual
   TOCTOU claim; mutation-tested against the advisory lock)
 - `core.TestReservationStatus_AllTransitions`
 - `core.TestReservationStatus_TerminalStatesAreSticky`
+
+(`postgres.TestReserverStore_Reserve_Concurrent` was removed from this list
+in the 2026-09-02 audit's F-m1: 2 concurrent reserves that together stay
+under the funded balance succeed identically with or without the advisory
+lock, so it is empty for this invariant's actual claim -- see that test's own
+doc comment. The test itself is kept for its "doesn't crash/deadlock" value,
+just not cited as a pin here.)
 
 ## I-5: Real-time balance = checkpoint + delta
 
@@ -329,6 +333,15 @@ financial sums is unacceptable. 18 digits accommodates Ethereum wei
 **Pinned by**:
 - `core.TestJournalInvariant_HighPrecisionAmounts` (1e-18 round-trip)
 - `pkg/httpx.TestDecode_*` (string→decimal decode path)
+- `postgres.TestSchema_NumericColumnsAreExactly30_18` (F-M4/F-P6, 2026-09-02
+  audit: the schema half of this invariant had never been checked -- the two
+  pins above are both Go-side and never touch the database. Queries
+  `information_schema.columns` for every `numeric`-typed column in the
+  `public` schema and asserts precision 30 / scale 18, mechanically derived
+  from the full column set rather than a hand-maintained table allowlist.)
+- `postgres.TestSchema_NoFloatTypedColumns` (financial.md's float ban,
+  checked at the schema layer: no `double precision`/`real`/`float` column
+  anywhere in `public`.)
 
 ## I-7: NOT NULL by default; documented exceptions only
 
@@ -358,6 +371,17 @@ this one, as `pgtype.Int8`; `core.Journal` exposes it as `EventUID string`).
 - Migration `017_no_null_cleanup` for the bulk move.
 - Migration `018_restore_referential_integrity` for the four exceptions.
 - Migration `045_mutation_guards` for `journals.event_id`.
+
+**Pinned by** (F-P7, 2026-09-02 audit: this section had no Pinned by at all):
+- `postgres.TestSchema_NullableColumnsExactlyMatchI7Exceptions` — queries
+  `information_schema.columns` for the entire `public` schema and asserts
+  the nullable-column set is exactly the six exceptions above, plus two
+  categories this document does not yet mention (flagged separately, not
+  new drift): the dead `deposits`/`withdrawals` tables (`001_baseline.up.sql`
+  says outright they predate this convention) and four claim-lease columns
+  (`rollup_queue`/`registration_rescans`, `claimed_until`/`processed_at`/
+  `last_error`). A NOT NULL dropped anywhere else in the schema, or one of
+  the six exceptions removed, goes red either direction.
 
 ## I-8: Lifecycle FSM is well-formed
 
@@ -416,8 +440,15 @@ also holds: an audit trail starting from the journal can always find its
 - `ledger.Service.RunInTx` provides the shared transaction boundary.
 
 **Pinned by**:
-- `postgres.TestAudit_TraceBooking` (booking → events → journals stitch)
+- `postgres.TestAudit_TraceBooking` (booking → events → journals stitch --
+  the `events.journal_id` direction)
 - `postgres.TestIntegration_FullLedgerFlow`
+- `postgres.TestJournalsGuard_EventIDSetOnce` (F-P10, 2026-09-02 audit: the
+  `journals.event_id` direction -- the two pins above cover
+  `events.journal_id` but neither one's assertions go red when
+  `journals.event_id` is forced to always be null; this one does, because
+  its `j.EventUID` comes from a genuine `journals.event_id` round-trip via
+  `GetEventUIDByID`, not an echo of the input)
 
 ## I-11: Reservation cannot exceed available balance
 
@@ -487,8 +518,9 @@ must be checked **inside** the advisory lock (see I-4), not before.
 `classifications.balance_role` CHECK constraint (migration `032`).
 
 **Pinned by**:
-- `postgres.TestReserverStore_Reserve_Concurrent`
-- `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit`
+- `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (see I-4:
+  `TestReserverStore_Reserve_Concurrent` was removed from this list in the
+  2026-09-02 audit's F-m1 -- empty for this invariant too, same reason)
 - `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
 - `postgres.TestGetBalanceBreakdown_RolesPlusHolds`
 - `postgres.TestReserve_AvailableBasisExcludesPendingLockedAndRoleless`
@@ -513,6 +545,13 @@ deleted).
   sequence)
 - `service.TestReconciliationService_BalancedSystem`
 - `service.TestCheck4AccountingEquation_Balanced` and the per-currency variant
+- `service.TestFullReconciliation_DetectsGlobalImbalance` (F-P12, 2026-09-02
+  audit: the three pins above are all happy-path "the system is balanced"
+  assertions -- every other check in `RunFullReconciliation` had a sibling
+  test proving it catches real drift except check1
+  ("global_dr_cr_equality"), which had none. This one injects a
+  currency-level debit/credit gap via a mock `GlobalSummer` and asserts
+  `Passed=false` at the `RunFullReconciliation` layer.)
 
 ## I-13: Partition coverage is total
 
@@ -548,6 +587,17 @@ partitions lives in `RUNBOOK.md` §11.
 `TestPartitions_RebalanceStrandedDefaultRows`
 (postgres/partition_store_test.go), plus the pre-existing I-13
 cross-partition read pin in postgres/invariants_test.go.
+
+(F-m7, 2026-09-02 audit: `TestPartitions_RebalanceStrandedDefaultRows` above
+calls `EnsureMonthlyPartitions`, not `RebalanceDefault` -- it was previously
+the only pin cited for `RebalanceDefault` despite never calling it. Two new
+pins close that gap and the service-layer gap alongside it:
+`postgres.TestPartitions_RebalanceDefault_DirectCall` calls
+`PartitionStore.RebalanceDefault` directly; `service.TestPartitionService_EnsureUpcoming_StrandedRowsTriggersRebalance`
+covers the worker-facing `PartitionService.EnsureUpcoming` self-heal branch
+that calls it, which had zero coverage of its own — see also
+`service.TestPartitionService_EnsureUpcoming_HealthyHorizon` for the common
+no-stranded-rows path.)
 
 ## I-14: Effective date consistency
 
@@ -1000,6 +1050,13 @@ instead of creating a duplicate.
   that key must resolve to the same booking, not `ErrConflict`; test-credibility.md
   flagged this as PLAUSIBLE-but-unverified since only `block_number` had a
   dedicated test -- verified real, now covered)
+- `postgres.TestBookingMetadataMatches_ObservationVariantKeys_TableDriven`
+  (F-P20, 2026-09-02 audit: the two pins above cover the keys someone
+  remembered to write a test for; this one is derived FROM
+  `bookingMetadataObservationVariantKeys` itself, at the pure-function
+  `bookingMetadataMatches` layer, so a sixth key added to that list without
+  test data is automatically exercised, both directions -- ignored on its
+  own, still conflicts on any other field)
 - `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
   re-observing the same sighting is a pure no-op; a second Transfer log in
   the same tx with a different `txlog_seq` does not collide)
@@ -2478,6 +2535,23 @@ split out of the `ScopeWrite` group; `parseScopeAndCapabilities` (API_KEYS
 `ledger.Service.EnableOnchain` (same two call sites as I-26's
 `AutoCreditCeiling` fence, same rationale: a push-only/webhook-only
 consumer that never calls `Run()` must not skip the check).
+
+**Pinned by** (F-P34, 2026-09-02 audit: these four tests genuinely cover
+both properties above, but were only cited under I-38's Pinned by list --
+deleting this whole section previously left nothing that would go red,
+because nothing here was actually checking that it was pinned):
+- `server.TestCapabilityIndependentOfScope` — property 1's capability-vs-scope
+  independence (also cited under I-38, where the same test additionally
+  supports the openapi/write-scope contract).
+- `server.TestDepositReview_SelfMintSelfApprove_MI2` — property 1's
+  end-to-end claim: a `ScopeWrite`-only key cannot approve its own review
+  (also cited under I-38).
+- `service.TestOnchain_IngestDeposit_ReconcileError_EscalatesToReviewAfterFailureLimit` —
+  property 2: consecutive reconcile failures past `ReconcileFailureLimit`
+  route to `review`, not an infinite error loop.
+- `service.TestOnchain_IngestDeposit_ReconcileError_FailsClosedStaysConfirming` —
+  property 2's complement: below the limit, the booking stays `confirming`
+  (fails closed) rather than either auto-crediting or escalating early.
 
 ## I-35: Partition maintenance never requires the serving credential to hold DDL or table ownership
 
@@ -4126,6 +4200,14 @@ construct `effective_at` with an explicit non-zero nanosecond remainder
 (`time.Date(..., 123456789, time.UTC)`), never `time.Now()`, so they fail
 on every platform -- including macOS -- before `canonicalTimestamp` exists,
 not just in Linux CI.
+`postgres.TestPostJournal_SignedAtSubMicrosecondEffectiveAtStillVerifies`
+(C-R2, 2026-09-02 audit: the core-package pin above simulates the
+`TIMESTAMPTZ` floor with `.Truncate(time.Microsecond)` in Go; this one signs
+a real `PostJournal` call with a sub-microsecond `EffectiveAt`, reads the
+stored digest/timestamp back through an actual `TIMESTAMPTZ` column via
+`AttestationStore.JournalAuthMaterial`, and requires `core.VerifyJournalAuth`
+to still pass -- a platform-independent DB round trip, not a clock-dependent
+one).
 
 ## I-47: `Migrate()` serializes against every other `Migrate()` call on the same Postgres cluster, not just against callers targeting the same database
 
