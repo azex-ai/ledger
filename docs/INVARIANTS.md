@@ -4109,7 +4109,14 @@ named `t.Run` subtests.
 
 ---
 
-## I-51: Every `reversal_of` link is a real reversal — the chain's integrity is checked at the input, not assumed from the caller
+## I-51: A caller-supplied link on a journal is a claim the store verifies, never a label it records
+
+`core.JournalInput` carries two links a caller can set by hand —
+`ReversalOfUID` and `EventUID`. Both are read downstream as statements of
+fact, so both are validated before anything is written, from every entry
+point (library facade and HTTP alike).
+
+### Rules 1–3: `reversal_of`
 
 A journal carrying `reversal_of = J` must actually be a reversal of `J`:
 
@@ -4160,11 +4167,36 @@ never accepted it. No attacker is needed — a consumer that runs its own
 correction flow and tags the correcting journal with `reversal_of` for
 auditability, which is what the field is for, lands on this.
 
+### Rule 4: `event_uid`
+
+A journal carrying `event_uid = E` must be about what `E` happened to:
+
+4. **The event's dimension is present, and the link is free.** `E`'s booking's
+   `(account_holder, currency)` must appear among this journal's entries, and
+   `events.journal_id` must not already be set (`ErrInvalidInput` /
+   `ErrConflict` respectively). Amounts and classifications are deliberately
+   *not* constrained — fees, spreads and multi-leg settlements legitimately
+   post more than the booking's own amount.
+
+Same failure shape, wider reach: `event_uid` is a field on `POST /journals`,
+so this one needs no library-mode consumer at all. Posting fills
+`events.journal_id` and through it the booking's **set-once** `journal_id`
+(see CLAUDE.md, "Event-Journal atomicity"), so before this rule any journal
+could claim any stranger's event — after which the booking's real settling
+transition fails with `ErrConflict` **permanently**, and an unrelated journal
+stands as that booking's accounting record. Nothing detects it: the claiming
+journal is balanced, and the booking simply never settles.
+
 **Enforced by**:
 - `validateReversalOfInput` (`postgres/reversal_fraction_store.go`), called
   from `postJournalWithQueries` (`postgres/ledger_store.go`) — the single
   choke point every journal insert passes through, so the reversal APIs
   re-validate their own derived entries there too.
+- The `event_uid` branch of `postJournalWithQueries`, which resolves the
+  event, refuses an already-linked one, and requires the booking's
+  `(holder, currency)` pair among `balancePairsFromEntries(resolved)` —
+  all before the first INSERT, so a refused claim leaves both `journal_id`
+  columns untouched.
 - `GetJournalForUpdateByUID` on the referenced journal, taken while resolving
   `reversal_of` and **before** the balance advisory locks, so the entries and
   reversal history the rules above read cannot change before this journal
@@ -4179,3 +4211,7 @@ auditability, which is what the field is for, lands on this.
 - `postgres.TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining` —
   including the positive case: a correctly shaped hand-written reversal within
   the remaining amount must still post.
+- `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` (rule 4) — a
+  stranger's journal is refused, and then the booking's OWN journal still
+  posts against the same event, proving the refusal consumed neither
+  `journal_id`; a second claim on the now-linked event is refused too.

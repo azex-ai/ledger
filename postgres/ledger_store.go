@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 
@@ -981,6 +982,25 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 			return nil, fmt.Errorf("postgres: post journal: resolve event: %w", err)
 		}
 		eventID = event.ID
+		// Set-once, checked at the gate (I-51, rule 4). This was previously
+		// only caught by linkJournalToEventAndBooking, at the very end of
+		// this function -- after the journal and every entry had been
+		// inserted and the whole transaction had to unwind. More importantly,
+		// checking it here is what makes the dimension rule below meaningful:
+		// both halves of "may this journal claim this event" are decided in
+		// one place, before anything is written.
+		if event.JournalID.Valid {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q is already linked to a journal: %w",
+				input.EventUID, core.ErrConflict,
+			)
+		}
+
+		// The event's own dimension, used when the event carries no booking.
+		// No writer produces such an event today (Booker.Transition is the
+		// only INSERT site and always copies its booking's holder/currency),
+		// so this is the defensive branch, not the normal one.
+		linkHolder, linkCurrencyID := event.AccountHolder, event.CurrencyID
 		if event.BookingID != 0 {
 			// Take the booking's row lock HERE, before acquireBalanceLocks
 			// below (concurrency.md 2026-09-02 Minor). linkJournalToEventAndBooking
@@ -996,12 +1016,41 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 			// touching Go. Locking here makes both paths
 			// booking row -> balance; re-entrant for the Transition path,
 			// which already holds this row's lock in the same transaction.
-			if _, err := q.GetBookingForUpdate(ctx, event.BookingID); err != nil {
+			booking, err := q.GetBookingForUpdate(ctx, event.BookingID)
+			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return nil, fmt.Errorf("postgres: post journal: booking %d from event %q: %w", event.BookingID, input.EventUID, core.ErrNotFound)
 				}
 				return nil, fmt.Errorf("postgres: post journal: lock booking %d: %w", event.BookingID, normalizeStoreError(err))
 			}
+			// The booking is authoritative for the dimension; the event's own
+			// copy is written from it.
+			linkHolder, linkCurrencyID = booking.AccountHolder, booking.CurrencyID
+		}
+
+		// This journal must actually be about the thing the event happened to
+		// (I-51, rule 4). event_uid was previously an existence check only,
+		// and the link it creates is consumed as a semantic fact: it fills
+		// events.journal_id and, through it, the booking's SET-ONCE
+		// journal_id. So a journal touching nobody related to that booking
+		// could claim it, and the booking's real settling transition would
+		// then fail with ErrConflict forever -- with the wrong journal
+		// standing as its accounting record. Requiring the booking's
+		// (account_holder, currency) to appear among this journal's entries
+		// is the weakest rule that makes the claim mean something; it does
+		// not constrain amounts or classifications, which legitimately vary
+		// (fees, spreads, multi-leg settlements).
+		if linkHolder == 0 || linkCurrencyID == 0 {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q has no account dimension to link against: %w",
+				input.EventUID, core.ErrInvalidInput,
+			)
+		}
+		if !slices.Contains(balancePairsFromEntries(resolved), balancePair{holder: linkHolder, currencyID: linkCurrencyID}) {
+			return nil, fmt.Errorf(
+				"postgres: post journal: event %q belongs to (holder %d, currency %d), which none of this journal's entries touch: %w",
+				input.EventUID, linkHolder, linkCurrencyID, core.ErrInvalidInput,
+			)
 		}
 	}
 	if err := validateEntriesPrecision(ctx, s.dims, q, resolved); err != nil {

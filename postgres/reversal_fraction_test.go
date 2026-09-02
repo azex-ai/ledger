@@ -570,3 +570,113 @@ func TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, bal.IsZero(), "half by API + half by hand must leave nothing, got %s", bal)
 }
+
+// --- I-51 rule 4: the event_uid link ---------------------------------------
+
+// TestPostJournal_EventUID_RejectsUnrelatedJournal pins the same shape as the
+// three reversal_of tests above, on the other caller-supplied link.
+// `event_uid` was an existence check only, and the link it creates is
+// consumed as a semantic fact: posting fills events.journal_id and, through
+// it, the booking's SET-ONCE journal_id. So any journal could claim any
+// stranger's event, and the booking's real settling transition would then be
+// refused forever, with the wrong journal standing as its accounting record.
+//
+// Unlike reversal_of this one is reachable over HTTP -- `event_uid` is a
+// field on POST /journals -- so it needs no library-mode consumer at all.
+//
+// The second half of the test is the one that matters: after the bad claim
+// is rejected, the booking's own journal must still post. A pin that only
+// asserted the rejection would stay green if the rejection happened after
+// the link was already written.
+func TestPostJournal_EventUID_RejectsUnrelatedJournal(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	writer := svc.JournalWriter()
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	bookingStore := postgres.NewBookingStore(pool)
+
+	curUID := postgrestest.SeedCurrencyWithExponent(t, pool, "EVL", "Event Link Unit", 2)
+	jtUID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const owner = int64(4601)    // the booking's holder
+	const outsider = int64(4602) // an unrelated holder
+	d := decimal.RequireFromString
+
+	cls, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "event_link_booking",
+		Name:       "Event Link Booking",
+		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
+		Lifecycle: &core.Lifecycle{
+			Initial:     "pending",
+			Terminal:    []core.Status{"confirmed"},
+			Transitions: map[core.Status][]core.Status{"pending": {"confirmed"}},
+		},
+	})
+	require.NoError(t, err)
+
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: cls.Code,
+		AccountHolder:      owner,
+		CurrencyUID:        curUID,
+		Amount:             d("100"),
+		IdempotencyKey:     postgrestest.UniqueKey("evl-booking"),
+		ChannelName:        "test",
+	})
+	require.NoError(t, err)
+
+	evt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID:     booking.UID,
+		ToStatus:       "confirmed",
+		IdempotencyKey: postgrestest.UniqueKey("evl-transition"),
+	})
+	require.NoError(t, err)
+
+	// A perfectly valid journal about a completely different holder, claiming
+	// this booking's event.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtUID,
+		IdempotencyKey: postgrestest.UniqueKey("evl-stranger"),
+		EventUID:       evt.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: outsider, CurrencyUID: curUID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("10")},
+			{AccountHolder: -outsider, CurrencyUID: curUID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("10")},
+		},
+	})
+	require.Error(t, err, "a journal touching nobody related to the event's booking must not be allowed to claim it")
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// The booking's own accounting must still be postable -- i.e. the
+	// rejection consumed neither events.journal_id nor the booking's
+	// set-once journal_id.
+	real, err := writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtUID,
+		IdempotencyKey: postgrestest.UniqueKey("evl-real"),
+		EventUID:       evt.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: owner, CurrencyUID: curUID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("100")},
+			{AccountHolder: -owner, CurrencyUID: curUID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("100")},
+		},
+	})
+	require.NoError(t, err, "the booking's own journal must still be able to claim its event after the bad claim was refused")
+	require.Equal(t, evt.UID, real.EventUID)
+
+	// And the link is set-once: a second journal cannot take an event that
+	// now belongs to one.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtUID,
+		IdempotencyKey: postgrestest.UniqueKey("evl-second"),
+		EventUID:       evt.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: owner, CurrencyUID: curUID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("5")},
+			{AccountHolder: -owner, CurrencyUID: curUID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("5")},
+		},
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, core.ErrConflict)
+}
