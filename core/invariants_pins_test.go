@@ -55,15 +55,16 @@ var testFuncDecl = regexp.MustCompile(`(?m)^func ((?:Test|Fuzz|Benchmark)[A-Za-z
 //
 // Also checks the package qualifier, so moving a test between packages without
 // updating the doc is caught too.
-func TestInvariantsDocPinsAllExist(t *testing.T) {
-	raw, err := os.ReadFile("../docs/INVARIANTS.md")
-	if err != nil {
-		t.Fatalf("read INVARIANTS.md: %v", err)
-	}
-
-	// funcName -> set of package directories declaring it.
+// buildDeclaredTestIndex maps every declared Test/Fuzz/Benchmark function
+// name to the set of package directories that declare it. Shared by
+// TestInvariantsDocPinsAllExist (existence + package-placement checks) and
+// TestInvariantsDocEveryInvariantHasPinnedBy (per-section "does this
+// citation resolve to anything real" check) so both consume the identical
+// resolution logic rather than two copies that could drift apart.
+func buildDeclaredTestIndex(t *testing.T) map[string]map[string]bool {
+	t.Helper()
 	declared := map[string]map[string]bool{}
-	err = filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -97,6 +98,16 @@ func TestInvariantsDocPinsAllExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk repo for test declarations: %v", err)
 	}
+	return declared
+}
+
+func TestInvariantsDocPinsAllExist(t *testing.T) {
+	raw, err := os.ReadFile("../docs/INVARIANTS.md")
+	if err != nil {
+		t.Fatalf("read INVARIANTS.md: %v", err)
+	}
+
+	declared := buildDeclaredTestIndex(t)
 
 	refs := pinReference.FindAllStringSubmatch(string(raw), -1)
 	if len(refs) == 0 {
@@ -279,23 +290,75 @@ func stripBlockquoteLines(block string) string {
 // by") as a machine check instead of a rule nobody runs. Before F-m2, I-7
 // and I-34 had gone their entire existence with no Pinned by section at all
 // and nothing here said so.
+// pinnedBlockHasResolvableCitation reports whether a section's Pinned by
+// text contains at least one citation (package-qualified, bare, or a
+// `Prefix_*` family) that TestInvariantsDocPinsAllExist's own resolution
+// logic would find a real declared test for. Existence only -- package
+// placement is that other test's job; this one only asks "is there
+// anything here at all".
+func pinnedBlockHasResolvableCitation(pinnedBlock string, declared map[string]map[string]bool) bool {
+	for _, m := range pinReference.FindAllStringSubmatch(pinnedBlock, -1) {
+		if _, ok := declared[m[2]]; ok {
+			return true
+		}
+	}
+	for _, m := range bareReference.FindAllStringSubmatch(pinnedBlock, -1) {
+		if _, ok := declared[m[1]]; ok {
+			return true
+		}
+	}
+	for _, m := range prefixReference.FindAllStringSubmatch(pinnedBlock, -1) {
+		prefix := m[2] + "_"
+		for fn := range declared {
+			if strings.HasPrefix(fn, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestInvariantsDocEveryInvariantHasPinnedBy pins docs/INVARIANTS.md's own
+// "How to add a new invariant" rule #4 ("add at least one test under Pinned
+// by") as a machine check instead of a rule nobody runs. Before F-m2, I-7
+// and I-34 had gone their entire existence with no Pinned by section at all
+// and nothing here said so.
+//
+// A **Pinned by** heading with the bullets deleted out from under it read as
+// pinned here under the first version of this check (team-lead's mutation,
+// 2026-09-02 merge review: emptied I-6's Pinned by list down to the bare
+// heading, gate stayed green) -- checking for the heading string alone is
+// exactly the "gate that verifies its own shape, not what it promises"
+// pattern this whole file exists to catch, reproduced inside the file a
+// second time. Now requires the section's Pinned by BLOCK to contain at
+// least one citation that resolves to a real declared test (via the same
+// resolution TestInvariantsDocPinsAllExist uses, including `Prefix_*`
+// family citations resolving to >=1 real function) -- a heading with zero
+// bullets, or bullets that are all typos/renamed tests, is treated the same
+// as no Pinned by section at all.
 func TestInvariantsDocEveryInvariantHasPinnedBy(t *testing.T) {
 	raw, err := os.ReadFile("../docs/INVARIANTS.md")
 	if err != nil {
 		t.Fatalf("read INVARIANTS.md: %v", err)
 	}
 
+	declared := buildDeclaredTestIndex(t)
+
 	var missing []string
 	for _, sec := range splitInvariantSections(string(raw)) {
 		if !strings.Contains(sec.body, "**Pinned by**") {
-			missing = append(missing, sec.number)
+			missing = append(missing, sec.number+" (no **Pinned by** heading at all)")
+			continue
+		}
+		pinned := blockBetween(sec.body, "**Pinned by**")
+		if !pinnedBlockHasResolvableCitation(pinned, declared) {
+			missing = append(missing, sec.number+" (**Pinned by** heading present, but no bullet under it resolves to a real test)")
 		}
 	}
 	sort.Strings(missing)
 	for _, n := range missing {
-		t.Errorf("%s has no **Pinned by** section -- docs/INVARIANTS.md's own "+
-			"\"How to add a new invariant\" rule #4 requires one; a promise "+
-			"nothing verifies is worse than an admitted gap", n)
+		t.Errorf("%s -- docs/INVARIANTS.md's own \"How to add a new invariant\" rule #4 "+
+			"requires at least one real pin; a promise nothing verifies is worse than an admitted gap", n)
 	}
 }
 
