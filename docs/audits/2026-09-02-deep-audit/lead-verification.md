@@ -164,3 +164,4 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | 任务 | commit | lead 证伪 | 备注 |
 |---|---|---|---|
 | W3-fixes（复审 M-2/M-4/M-6/M-7 + m-1/2/4/5/6） | `86d6888`（rebase 后 ff） | `unauthorized_journals` 的 `Complete = false` 改 true → 三条 pin 红（前两次 mutation 分别打在注释行与文案分支，不算数，已作废）；service/postgres -race、make test 18 包绿 | m-3 判已由 004 修（新增 ledger_app 视角 pin）；默认 custodial scope 保持「全不命中才报错」、显式 scope 逐 code 严格（接受）；migration 024 = `anchor_observations` SECURITY DEFINER 写入且拒 seq > 链高；M-4 新增 `UncoveredGracePeriod`（默认 5m）与 `UncoveredUnverifiedJournals` |
+| W3-holds（复审 C-1） | `55b3731`（v2，(B)+完全保守；v1 的 migration 024 撤掉，改 025） | 生成 SQL 给闸内 hold 加回 `status <> 'released'` 依赖 → `HoldSurvivesStatusTamper` 红；恢复后 7 条 pin -race 绿；make test 18 包绿（worker） | ff | 闸内 hold = Σ 未过期预留 `reserved_amount`，不读 status/settled/receipt/leg；`Settle`/`SettlePartial` 拒绝过期，`FinalizeSettlement`/`Release` 不拒（过期回收依赖它）；(A) 签名 receipt 待 Aaron（§7.14）；worker 自查出一版假绿 pin（用真 Settle 探测过期）并修正 |
