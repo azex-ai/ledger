@@ -81,13 +81,17 @@ func (q *Queries) CreateTemplateLine(ctx context.Context, arg CreateTemplateLine
 	return i, err
 }
 
-const deactivateTemplate = `-- name: DeactivateTemplate :exec
+const deactivateTemplate = `-- name: DeactivateTemplate :execrows
 UPDATE entry_templates SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateTemplate(ctx context.Context, uid pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deactivateTemplate, uid)
-	return err
+// :execrows -- see DeactivateClassification in classifications.sql.
+func (q *Queries) DeactivateTemplate(ctx context.Context, uid pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deactivateTemplate, uid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getTemplateByCode = `-- name: GetTemplateByCode :one

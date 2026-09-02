@@ -160,14 +160,25 @@ func (s *ClassificationStore) GetByCode(ctx context.Context, code string) (*core
 	return classificationFromRow(row), nil
 }
 
-// DeactivateClassification marks a classification as inactive.
+// DeactivateClassification marks a classification as inactive: a soft
+// delete that keeps history and its foreign keys intact but refuses the
+// classification in NEW journals (assertDimsActive, B-X1).
+//
+// Returns core.ErrNotFound when uid matches nothing. It used to return nil
+// for a uid that does not exist, so "deactivate" reported success for a row
+// it never touched -- and, until B-X1, reported success for a row it did
+// touch without changing any behaviour either (working-agreements §3).
 func (s *ClassificationStore) DeactivateClassification(ctx context.Context, uid string) error {
 	pgUID, err := uidToPG(uid)
 	if err != nil {
 		return err
 	}
-	if err := s.q.DeactivateClassification(ctx, pgUID); err != nil {
+	rows, err := s.q.DeactivateClassification(ctx, pgUID)
+	if err != nil {
 		return wrapStoreError("postgres: deactivate classification", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("postgres: deactivate classification %q: %w", uid, core.ErrNotFound)
 	}
 	return nil
 }
@@ -237,14 +248,21 @@ func (s *ClassificationStore) GetJournalTypeByCode(ctx context.Context, code str
 	return journalTypeFromRow(row), nil
 }
 
-// DeactivateJournalType marks a journal type as inactive.
+// DeactivateJournalType marks a journal type as inactive: a soft delete
+// that refuses the type in NEW journals (assertDimsActive, B-X1) while
+// leaving history intact. Returns core.ErrNotFound when uid matches nothing
+// -- see DeactivateClassification for why that is not a nil.
 func (s *ClassificationStore) DeactivateJournalType(ctx context.Context, uid string) error {
 	pgUID, err := uidToPG(uid)
 	if err != nil {
 		return err
 	}
-	if err := s.q.DeactivateJournalType(ctx, pgUID); err != nil {
+	rows, err := s.q.DeactivateJournalType(ctx, pgUID)
+	if err != nil {
 		return wrapStoreError("postgres: deactivate journal type", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("postgres: deactivate journal type %q: %w", uid, core.ErrNotFound)
 	}
 	return nil
 }

@@ -14,7 +14,8 @@ WHERE uid = $1;
 SELECT * FROM currencies
 WHERE id = ANY(sqlc.arg(ids)::bigint[]);
 
--- name: DeactivateCurrency :exec
+-- name: DeactivateCurrency :execrows
+-- :execrows -- see DeactivateClassification in classifications.sql.
 UPDATE currencies SET is_active = false WHERE uid = $1;
 
 -- name: ListCurrencies :many

@@ -116,14 +116,23 @@ func (s *TemplateStore) createTemplateWithQueries(ctx context.Context, qtx *sqlc
 	return templateFromRow(ctx, s.dims, qtx, tmpl, sqlcLines)
 }
 
-// DeactivateTemplate marks a template as inactive.
+// DeactivateTemplate marks a template as inactive. The flag is enforced in
+// core.EntryTemplate.Render, so this has always had teeth -- unlike its
+// three sibling Deactivate* methods before B-X1.
+//
+// Returns core.ErrNotFound when uid matches nothing; it used to return nil,
+// reporting success for a row it never touched.
 func (s *TemplateStore) DeactivateTemplate(ctx context.Context, uid string) error {
 	pgUID, err := uidToPG(uid)
 	if err != nil {
 		return err
 	}
-	if err := s.q.DeactivateTemplate(ctx, pgUID); err != nil {
+	rows, err := s.q.DeactivateTemplate(ctx, pgUID)
+	if err != nil {
 		return wrapStoreError("postgres: deactivate template", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("postgres: deactivate template %q: %w", uid, core.ErrNotFound)
 	}
 	return nil
 }

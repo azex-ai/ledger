@@ -21,7 +21,11 @@ UPDATE classifications SET balance_role = $2 WHERE uid = $1;
 -- re-install must never clobber a lifecycle an operator has since customized.
 UPDATE classifications SET lifecycle = $2 WHERE uid = $1 AND lifecycle = '{}'::jsonb;
 
--- name: DeactivateClassification :exec
+-- name: DeactivateClassification :execrows
+-- :execrows, not :exec -- the store turns 0 affected rows into ErrNotFound.
+-- Deactivating a uid that does not exist used to succeed silently, which
+-- reported "hidden" for a row that was never touched
+-- (working-agreements §3).
 UPDATE classifications SET is_active = false WHERE uid = $1;
 
 -- name: GetClassification :one
@@ -55,7 +59,8 @@ SELECT id, code, name, is_active, created_at, uid, display_label, holder_kind
 FROM journal_types
 WHERE code = $1;
 
--- name: DeactivateJournalType :exec
+-- name: DeactivateJournalType :execrows
+-- :execrows -- see DeactivateClassification above.
 UPDATE journal_types SET is_active = false WHERE uid = $1;
 
 -- name: ListJournalTypes :many

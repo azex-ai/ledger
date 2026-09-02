@@ -43,13 +43,17 @@ func (q *Queries) CreateCurrency(ctx context.Context, arg CreateCurrencyParams) 
 	return i, err
 }
 
-const deactivateCurrency = `-- name: DeactivateCurrency :exec
+const deactivateCurrency = `-- name: DeactivateCurrency :execrows
 UPDATE currencies SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateCurrency(ctx context.Context, uid pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deactivateCurrency, uid)
-	return err
+// :execrows -- see DeactivateClassification in classifications.sql.
+func (q *Queries) DeactivateCurrency(ctx context.Context, uid pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deactivateCurrency, uid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getCurrenciesByIDs = `-- name: GetCurrenciesByIDs :many

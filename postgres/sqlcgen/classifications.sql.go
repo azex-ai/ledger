@@ -92,22 +92,33 @@ func (q *Queries) CreateJournalType(ctx context.Context, arg CreateJournalTypePa
 	return i, err
 }
 
-const deactivateClassification = `-- name: DeactivateClassification :exec
+const deactivateClassification = `-- name: DeactivateClassification :execrows
 UPDATE classifications SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateClassification(ctx context.Context, uid pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deactivateClassification, uid)
-	return err
+// :execrows, not :exec -- the store turns 0 affected rows into ErrNotFound.
+// Deactivating a uid that does not exist used to succeed silently, which
+// reported "hidden" for a row that was never touched
+// (working-agreements §3).
+func (q *Queries) DeactivateClassification(ctx context.Context, uid pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deactivateClassification, uid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const deactivateJournalType = `-- name: DeactivateJournalType :exec
+const deactivateJournalType = `-- name: DeactivateJournalType :execrows
 UPDATE journal_types SET is_active = false WHERE uid = $1
 `
 
-func (q *Queries) DeactivateJournalType(ctx context.Context, uid pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deactivateJournalType, uid)
-	return err
+// :execrows -- see DeactivateClassification above.
+func (q *Queries) DeactivateJournalType(ctx context.Context, uid pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deactivateJournalType, uid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getClassification = `-- name: GetClassification :one

@@ -8,7 +8,8 @@ INSERT INTO entry_template_lines (template_id, classification_id, entry_type, ho
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING id, template_id, classification_id, entry_type, holder_role, amount_key, sort_order;
 
--- name: DeactivateTemplate :exec
+-- name: DeactivateTemplate :execrows
+-- :execrows -- see DeactivateClassification in classifications.sql.
 UPDATE entry_templates SET is_active = false WHERE uid = $1;
 
 -- name: GetTemplateByCode :one

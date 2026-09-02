@@ -37,6 +37,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -253,4 +254,56 @@ func (c *dimCache) jtByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id int64
 		return dimJournalType{}, fmt.Errorf("postgres: journal type id %d: %w", id, core.ErrNotFound)
 	}
 	return v, nil
+}
+
+// assertDimsActive refuses a write whose dimensions include a soft-deleted
+// currency, classification or journal type (B-X1).
+//
+// DeactivateCurrency / DeactivateClassification / DeactivateJournalType
+// existed, were documented as soft deletes that "hide a row from pickers",
+// and were checked by nothing on the write path: after deactivating a
+// currency you could keep posting journals in it forever. The one dimension
+// that DID enforce its flag was entry_templates.is_active, refused in
+// core.EntryTemplate.Render -- this brings the other three to the same
+// shape, at the one choke point every journal passes through.
+//
+// Existing balances and history are untouched: is_active is a soft delete
+// precisely so journal_entries can keep its foreign keys. This gate is about
+// NEW writes, the same way the period close line is.
+func assertDimsActive(ctx context.Context, q *sqlcgen.Queries, journalTypeID int64, entries []resolvedEntry) error {
+	currencyIDs := make([]int64, 0, len(entries))
+	classIDs := make([]int64, 0, len(entries))
+	seenCur := make(map[int64]struct{}, len(entries))
+	seenCls := make(map[int64]struct{}, len(entries))
+	for _, e := range entries {
+		if _, ok := seenCur[e.currencyID]; !ok {
+			seenCur[e.currencyID] = struct{}{}
+			currencyIDs = append(currencyIDs, e.currencyID)
+		}
+		if _, ok := seenCls[e.classificationID]; !ok {
+			seenCls[e.classificationID] = struct{}{}
+			classIDs = append(classIDs, e.classificationID)
+		}
+	}
+
+	rows, err := q.InactiveDims(ctx, sqlcgen.InactiveDimsParams{
+		CurrencyIds:       currencyIDs,
+		ClassificationIds: classIDs,
+		JournalTypeIds:    []int64{journalTypeID},
+	})
+	if err != nil {
+		return fmt.Errorf("postgres: dims: check active: %w", normalizeStoreError(err))
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	refs := make([]string, len(rows))
+	for i, r := range rows {
+		refs[i] = fmt.Sprintf("%s %q", r.Kind, r.Code)
+	}
+	return fmt.Errorf(
+		"postgres: %s is deactivated and cannot be used in a new journal: %w",
+		strings.Join(refs, ", "), core.ErrInvalidInput,
+	)
 }

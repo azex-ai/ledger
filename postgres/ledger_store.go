@@ -1056,6 +1056,13 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 	if err := validateEntriesPrecision(ctx, s.dims, q, resolved); err != nil {
 		return nil, err
 	}
+	// Soft-deleted dimensions are refused here, at the one choke point every
+	// journal passes through (B-X1). is_active is the only mutable column on
+	// the config tables and is deliberately not cached, so this is a read
+	// rather than a cache consult; see assertDimsActive.
+	if err := assertDimsActive(ctx, q, jt.ID, resolved); err != nil {
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
 	reversalOfID := int64(0)
 	if input.ReversalOfUID != "" {
 		pgUID, err := uidToPG(input.ReversalOfUID)

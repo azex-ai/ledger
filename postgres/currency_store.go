@@ -58,14 +58,21 @@ func (s *CurrencyStore) CreateCurrency(ctx context.Context, input core.CurrencyI
 	return currencyFromRow(row), nil
 }
 
-// DeactivateCurrency soft-deletes a currency by setting is_active = false.
+// DeactivateCurrency soft-deletes a currency by setting is_active = false:
+// history and its foreign keys stay, but the currency is refused in NEW
+// journals (assertDimsActive, B-X1). Returns core.ErrNotFound when uid
+// matches nothing -- see DeactivateClassification for why that is not a nil.
 func (s *CurrencyStore) DeactivateCurrency(ctx context.Context, uid string) error {
 	pgUID, err := uidToPG(uid)
 	if err != nil {
 		return err
 	}
-	if err := s.q.DeactivateCurrency(ctx, pgUID); err != nil {
+	rows, err := s.q.DeactivateCurrency(ctx, pgUID)
+	if err != nil {
 		return wrapStoreError("postgres: deactivate currency", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("postgres: deactivate currency %q: %w", uid, core.ErrNotFound)
 	}
 	return nil
 }
