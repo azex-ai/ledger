@@ -137,3 +137,13 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 
 **lead 事故（2026-09-03）**：合 d-lock 时 `reconcile_full_test.go` 的冲突我取了 main 侧整个 hunk，丢掉 d-lock 对 check 计数（14→15 / 15→16）的 bump；合并后只跑了 `-run 'PeriodClose|Reconcile'` 过滤集，漏掉 `TestFullReconciliation_AllPass` / `FullCoverageCanBeTrue`，main 红了约一小时，由 d-ops 发现。已修（`4c569ea`）。规矩：**手工解过冲突的包，合并后跑整包不跑过滤集**。
 | D-ops | 前任 WIP + 接手 `0cadc16`（6 commit，rebase 后） | worker 的 `recover()` 分支置 false → `TestWorker_JobPanic_DoesNotCrashProcess` 红；postgres 非测试文件的删行核为 struct 字面量重排与 metrics 包装（无语义删除）；main 合并后 make vet/lint/test + 两子模块全绿 | ff | 关 I 全部（I-M7 ②③④、B-m12 转 W3；E-m16 不修）；I-60 I-61；`core.Metrics` 32→41 且改 4 个签名（破坏性，已进 CHANGELOG）；`ledger-cli config-history` |
+
+# Wave 3（lead 直接在 main 上做的收口，每条自带 mutation 证据）
+
+| 项 | commit | 证据 |
+|---|---|---|
+| 018 自提权 GRANT/REVOKE 移除 + 静态门禁 `TestMigrationsDoNotManageLedgerOwnerMembership` | `c8a2802` | 往 018 追加一条 REVOKE 语句 → 门禁红；非 superuser bootstrap 安装 pin 与 ownership pin 绿 |
+| ledger-react CI `npm audit --omit=dev --audit-level=high`；CLAUDE.md 不再硬编码 invariant 数、a11y 写法例外；web/CLAUDE.md dist 门禁先 build | `1ba825e` | 根包 doc gate 绿 |
+| I-M7 ②③（scan 停止原因归因、游标持久化用 detached ctx）；INVARIANTS 重复「How to add」标题 | `a88fc29` | — |
+| I-M7 pin `TestCheck2GlobalBalance_CallerCancellationIsIncompleteNotFailed`；I-7 Exceptions 补全；I-62 I-63 | `88dd59b` | `scanStopReason` 去掉 caller 分支 → pin 红；INVARIANTS 四条门禁绿（480 处 pin 引用） |
+| Makefile / go-verify 超时 5m→15m | `deafc4c` | postgres 包 -race 211s；并行下 302s 曾撞超时假红 |
