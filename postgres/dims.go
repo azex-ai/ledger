@@ -4,10 +4,34 @@
 // contract (api-contract §3); internal BIGSERIAL ids are storage details, so
 // every store boundary crossing resolves through here.
 //
-// Cache safety: config rows are insert-only for the cached fields (id, uid,
-// code, normal_side, exponent are all immutable after creation; only
-// is_active mutates, and it is deliberately NOT cached). A miss triggers one
-// full-table refresh — these tables are small by design.
+// Cache safety has two independent dimensions, and only the first used to be
+// argued here:
+//
+//  1. Field immutability. Config rows are insert-only for the cached fields
+//     (id, uid, code, normal_side, exponent are all immutable after
+//     creation; only is_active mutates, and it is deliberately NOT cached,
+//     so a stale entry can never report the wrong id, code or precision).
+//
+//  2. Entry EXISTENCE. A cached entry asserts "this row exists", and that is
+//     a claim about committed state. The shared cache is keyed by pool and
+//     inherited by every tx-bound clone, so a refresh driven from inside a
+//     caller's open transaction used to publish that transaction's
+//     uncommitted config rows to the whole process. If the transaction then
+//     rolled back, the row was gone but the cache entry stayed — and because
+//     a cache HIT never re-validates, nothing ever healed it: every later
+//     request on any connection resolved that uid to a burnt BIGSERIAL id
+//     and failed on a foreign key, until the process restarted
+//     (concurrency.md 2026-09-02 B-m5).
+//
+// The shared cache is therefore refreshed through the POOL, never through
+// the caller's Queries, so it can only ever contain committed rows. A uid
+// that is still missing after that refresh is resolved once through the
+// caller's own Queries into a throwaway cache — so a row created earlier in
+// the same open transaction still resolves, without being published. That
+// second read only happens on a genuine miss (a not-found error, or an
+// in-transaction creation), never on the hot path.
+//
+// A miss triggers one full-table refresh — these tables are small by design.
 package postgres
 
 import (
@@ -44,6 +68,12 @@ type dimJournalType struct {
 type dimCache struct {
 	mu sync.RWMutex
 
+	// pool is the connection pool this cache belongs to, or nil for a
+	// throwaway cache (see dimLookup's overlay). Non-nil means "refresh
+	// through the pool, ignoring whatever Queries the caller handed in" —
+	// that is what keeps uncommitted rows out of process-wide state.
+	pool *pgxpool.Pool
+
 	currencyByUID map[string]dimCurrency
 	currencyByID  map[int64]dimCurrency
 	classByUID    map[string]dimClassification
@@ -64,11 +94,21 @@ func dimCacheFor(pool *pgxpool.Pool) *dimCache {
 	if c, ok := dimCaches.Load(pool); ok {
 		return c.(*dimCache)
 	}
-	c, _ := dimCaches.LoadOrStore(pool, &dimCache{})
+	c, _ := dimCaches.LoadOrStore(pool, &dimCache{pool: pool})
 	return c.(*dimCache)
 }
 
+// refresh reloads all three dimension tables.
+//
+// When this cache belongs to a pool (the shared, process-wide case) the read
+// goes through the pool and q is deliberately ignored: q may be a caller's
+// open transaction, and publishing its uncommitted rows into shared state is
+// the B-m5 bug (see the package doc). q is used only by the throwaway
+// overlay cache in dimLookup, whose contents are discarded.
 func (c *dimCache) refresh(ctx context.Context, q *sqlcgen.Queries) error {
+	if c.pool != nil {
+		q = sqlcgen.New(c.pool)
+	}
 	curs, err := q.ListCurrencyDims(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: dims: list currencies: %w", err)
@@ -108,12 +148,20 @@ func (c *dimCache) refresh(ctx context.Context, q *sqlcgen.Queries) error {
 	return nil
 }
 
-// lookup runs get under the read lock; on a miss it refreshes once and
-// retries. The second miss is the caller's ErrNotFound.
-func dimLookup[K comparable, V any](ctx context.Context, c *dimCache, q *sqlcgen.Queries, pick func() map[K]V, key K) (V, bool, error) {
+// dimLookup runs pick under the read lock; on a miss it refreshes the shared
+// cache once (through the pool — committed rows only) and retries. If the key
+// is STILL missing, it resolves once through the caller's own Queries into a
+// throwaway cache and returns that result WITHOUT caching it: a config row
+// created earlier in the caller's still-open transaction has to resolve, but
+// it must not become visible to the rest of the process before it commits
+// (see the package doc, dimension 2). A miss on that read is the caller's
+// ErrNotFound.
+//
+// pick takes the cache to read from precisely so the overlay can be
+// consulted with the same accessor as the shared cache.
+func dimLookup[K comparable, V any](ctx context.Context, c *dimCache, q *sqlcgen.Queries, pick func(*dimCache) map[K]V, key K) (V, bool, error) {
 	c.mu.RLock()
-	m := pick()
-	v, ok := m[key]
+	v, ok := pick(c)[key]
 	c.mu.RUnlock()
 	if ok {
 		return v, true, nil
@@ -123,14 +171,26 @@ func dimLookup[K comparable, V any](ctx context.Context, c *dimCache, q *sqlcgen
 		return zero, false, err
 	}
 	c.mu.RLock()
-	m = pick()
-	v, ok = m[key]
+	v, ok = pick(c)[key]
 	c.mu.RUnlock()
+	if ok || c.pool == nil {
+		// c.pool == nil means c IS a throwaway cache (or a store built
+		// without a pool): refresh already read through q, so there is
+		// nothing further to try.
+		return v, ok, nil
+	}
+
+	overlay := &dimCache{}
+	if err := overlay.refresh(ctx, q); err != nil {
+		var zero V
+		return zero, false, err
+	}
+	v, ok = pick(overlay)[key]
 	return v, ok, nil
 }
 
 func (c *dimCache) currencyByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid string) (dimCurrency, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[string]dimCurrency { return c.currencyByUID }, uid)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[string]dimCurrency { return dc.currencyByUID }, uid)
 	if err != nil {
 		return dimCurrency{}, err
 	}
@@ -141,7 +201,7 @@ func (c *dimCache) currencyByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, u
 }
 
 func (c *dimCache) currencyByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id int64) (dimCurrency, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[int64]dimCurrency { return c.currencyByID }, id)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[int64]dimCurrency { return dc.currencyByID }, id)
 	if err != nil {
 		return dimCurrency{}, err
 	}
@@ -152,7 +212,7 @@ func (c *dimCache) currencyByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id
 }
 
 func (c *dimCache) classByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid string) (dimClassification, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[string]dimClassification { return c.classByUID }, uid)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[string]dimClassification { return dc.classByUID }, uid)
 	if err != nil {
 		return dimClassification{}, err
 	}
@@ -163,7 +223,7 @@ func (c *dimCache) classByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid 
 }
 
 func (c *dimCache) classByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id int64) (dimClassification, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[int64]dimClassification { return c.classByID }, id)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[int64]dimClassification { return dc.classByID }, id)
 	if err != nil {
 		return dimClassification{}, err
 	}
@@ -174,7 +234,7 @@ func (c *dimCache) classByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id in
 }
 
 func (c *dimCache) jtByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid string) (dimJournalType, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[string]dimJournalType { return c.jtByUID }, uid)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[string]dimJournalType { return dc.jtByUID }, uid)
 	if err != nil {
 		return dimJournalType{}, err
 	}
@@ -185,7 +245,7 @@ func (c *dimCache) jtByUIDOrErr(ctx context.Context, q *sqlcgen.Queries, uid str
 }
 
 func (c *dimCache) jtByIDOrErr(ctx context.Context, q *sqlcgen.Queries, id int64) (dimJournalType, error) {
-	v, ok, err := dimLookup(ctx, c, q, func() map[int64]dimJournalType { return c.jtByID }, id)
+	v, ok, err := dimLookup(ctx, c, q, func(dc *dimCache) map[int64]dimJournalType { return dc.jtByID }, id)
 	if err != nil {
 		return dimJournalType{}, err
 	}
