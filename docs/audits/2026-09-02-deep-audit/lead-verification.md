@@ -158,3 +158,9 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 
 复审证明了契约 §0「兄弟扫描」在执行上仍被形态描述框住：C-1 的兄弟被描述成「读 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」。这条写进最终 README 的方法教训。
 | W3-citations | `8a50bf5` 系列（7 commit） | core 全绿；白名单常量已为空（代码事实）。lead 两次 mutation（I-2 去掉全部反引号；I-2 前三个引用改成不存在的符号）**均绿** —— 证实 gates 复审的 C-2：leaves=0 静默跳过、且只要任一引用匹配即通过。已交 w3-gates-fixes 修门禁本身 | merge commit | 28 条 pin 因门禁看不穿本地 helper 被降为 Related tests：后续让门禁追一层本地 helper 后再升回（W3 后续） |
+
+# W3 修复合并
+
+| 任务 | commit | lead 证伪 | 备注 |
+|---|---|---|---|
+| W3-fixes（复审 M-2/M-4/M-6/M-7 + m-1/2/4/5/6） | `86d6888`（rebase 后 ff） | `unauthorized_journals` 的 `Complete = false` 改 true → 三条 pin 红（前两次 mutation 分别打在注释行与文案分支，不算数，已作废）；service/postgres -race、make test 18 包绿 | m-3 判已由 004 修（新增 ledger_app 视角 pin）；默认 custodial scope 保持「全不命中才报错」、显式 scope 逐 code 严格（接受）；migration 024 = `anchor_observations` SECURITY DEFINER 写入且拒 seq > 链高；M-4 新增 `UncoveredGracePeriod`（默认 5m）与 `UncoveredUnverifiedJournals` |
