@@ -145,17 +145,30 @@ describe("skin parity (M6 gate)", () => {
     }
   });
 
-  // Hardening ratchet (M3, web audit): the aria-label / truncate / min-w-0
-  // census per skin can only go UP. The shadcn (default) skin was the
-  // less-hardened one; the M3 pass raised it from 8 to the baseline below.
+  // Hardening ratchet (M3, web audit; tightened J-12, 2026-09-02 web audit).
+  // The aria-label / truncate / min-w-0 census per skin can only go UP.
   // These are floors, not targets — RAISE a baseline when a page adds more
-  // hardening, NEVER lower one to make a regression pass. (Full shadcn↔heroui
-  // token equality is still a longer-term goal; this gate just stops backslide.)
+  // hardening, NEVER lower one to make a regression pass.
+  //
+  // J-12 found that the ORIGINAL per-skin-independent floors (21 / 63) were
+  // a ratchet that had frozen a 21:63 (1:3) gap in place — commit body
+  // language called that "parity" while the gate's own comment admitted
+  // "full … token equality is still a longer-term goal". A per-skin-only
+  // floor can never catch shadcn falling proportionally further behind a
+  // heroui that keeps gaining hardening (raising heroui's floor doesn't
+  // raise shadcn's). The SHADCN_MIN_RATIO_OF_HEROUI assertion below closes
+  // that gap: it's computed against heroui's CURRENT count, not a frozen
+  // baseline, so shadcn's bar rises automatically whenever heroui's does.
+  // The J-12 pass itself closed real gaps (13 table aria-labels, TemplatesPage's
+  // unlabeled inputs, WithdrawalsPage's un-associated <Label>s, BalancesPage's
+  // placeholder-only search field, and TemplatesPage's missing overflow
+  // handling), raising shadcn from 21 to 55 against heroui's unchanged 63.
   const HARDENING_TOKENS = ["aria-label", "truncate", "min-w-0"];
   const CENSUS_BASELINE: Record<string, number> = {
-    "src/components/pages": 21,
+    "src/components/pages": 55,
     "src/heroui/pages": 63,
   };
+  const SHADCN_MIN_RATIO_OF_HEROUI = 0.8;
 
   function censusFor(dir: string): number {
     let total = 0;
@@ -175,5 +188,15 @@ describe("skin parity (M6 gate)", () => {
     expect(censusFor(HEROUI_DIR)).toBeGreaterThanOrEqual(
       CENSUS_BASELINE["src/heroui/pages"],
     );
+  });
+
+  it("shadcn does not fall proportionally behind heroui's CURRENT hardening level (J-12 gate)", () => {
+    const shadcnCount = censusFor(SHADCN_DIR);
+    const herouiCount = censusFor(HEROUI_DIR);
+    const minRequired = herouiCount * SHADCN_MIN_RATIO_OF_HEROUI;
+    expect(
+      shadcnCount,
+      `shadcn=${shadcnCount} heroui=${herouiCount} — shadcn must be >= ${SHADCN_MIN_RATIO_OF_HEROUI * 100}% of heroui's CURRENT count (${minRequired}), not just its own frozen baseline`,
+    ).toBeGreaterThanOrEqual(minRequired);
   });
 });

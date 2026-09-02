@@ -44,6 +44,20 @@ function collectAppRoutes(dir: string, segments: string[] = []): string[] {
   return routes;
 }
 
+// Routes that legitimately have no sidebar entry (J-25, 2026-09-02 web
+// audit): the original C1 gate only checked nav→route, so a route added to
+// the app with no nav entry — dead code the user can only reach by typing
+// the URL — would pass silently. Each entry here needs a reason, same
+// discipline as the other `*-allow` markers in this suite.
+const EXPECTED_UNLISTED = new Set([
+  "/", // dashboard — nav's "/" entry IS this route; kept out of navHrefs by
+  // the filter above only in the sense that "/" appears both as a nav href
+  // and an app route, so it's already covered — listed here defensively in
+  // case that ever changes.
+  "/login", // auth entry point, reached by redirect, not sidebar navigation
+  "/journals/[id]", // detail route, reached by clicking a row in /journals, not the sidebar
+]);
+
 describe("sidebar nav contract vs. dogfood app routes", () => {
   const appRoutes = new Set(collectAppRoutes(appRoot));
   const navHrefs = LEDGER_NAV_ITEMS.filter(
@@ -53,5 +67,15 @@ describe("sidebar nav contract vs. dogfood app routes", () => {
   it("every nav href has a page.tsx in web/src/app", () => {
     const missing = navHrefs.filter((h) => !appRoutes.has(h));
     expect(missing).toEqual([]);
+  });
+
+  // J-25: the reverse direction — a route with no nav entry is dead code a
+  // user can only reach by typing the URL; the original gate was blind to it.
+  it("every app route either has a nav entry or is explicitly allowlisted with a reason", () => {
+    const navHrefSet = new Set(navHrefs);
+    const unlisted = [...appRoutes].filter(
+      (r) => !navHrefSet.has(r) && !EXPECTED_UNLISTED.has(r),
+    );
+    expect(unlisted).toEqual([]);
   });
 });
