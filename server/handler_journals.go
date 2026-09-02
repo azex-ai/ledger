@@ -264,6 +264,30 @@ func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries 
 // (404 for an unknown code) and ExecuteTemplate is never reached, so "the
 // check could not run" never reads as "the check passed"
 // (working-agreements.md §3).
+// refuseProtectedTemplate is the whole of the "a caller must not be able to
+// name a system-side template and have it posted" rule: the hardcoded name
+// set, then the structural is_system-leg rule, with
+// Config.AllowGenericTemplatePost as the single per-code opt-out from both.
+//
+// Every endpoint that executes a template the caller named -- directly
+// (handlePostTemplate) or by handing the server amounts it turns into
+// template executions (handlePostDepositTolerance) -- goes through this one
+// function. Contract §7.11: /journals/deposit-tolerance was the second shape
+// of the same finding, executing deposit_confirm_pending / deposit_confirm /
+// deposit_release_pending / deposit_record_overage with caller-supplied
+// expected/actual amounts, so a write-scope key could mint accounting
+// indistinguishable from a verified deposit through it while the very same
+// codes were refused next door.
+func (s *Server) refuseProtectedTemplate(ctx context.Context, code string) error {
+	if s.allowGenericTemplatePost[code] {
+		return nil
+	}
+	if s.protectedTemplateCodes[code] {
+		return httpx.ErrForbidden("template_code " + code + " is protected: post it through its dedicated orchestration, not this generic endpoint")
+	}
+	return s.rejectSystemClassificationTemplate(ctx, code)
+}
+
 func (s *Server) rejectSystemClassificationTemplate(ctx context.Context, code string) error {
 	tmpl, err := s.templates.GetTemplate(ctx, code)
 	if err != nil {
@@ -289,29 +313,14 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Two layers, both defaulting closed, with Config.AllowGenericTemplatePost
-	// as the single opt-out for either (contract §7.5):
-	//
-	//  1. s.protectedTemplateCodes -- presets.ProtectedTemplateCodes() plus
-	//     whatever Config.ProtectedTemplateCodes adds. A name list, which
-	//     therefore still answers when the template table cannot be read at
-	//     all, and covers a code before its rows exist.
-	//  2. rejectSystemClassificationTemplate -- the structural rule: any
-	//     template with a leg on an is_system classification is refused,
-	//     whether this library shipped it or the deployment defined it.
-	//
-	// This endpoint refuses those templates no matter how the caller got a
-	// write-scope key, same as POST /dev/credits being hardcoded to a single
-	// narrow template rather than accepting an arbitrary code
-	// (handler_devcredit.go).
-	if s.protectedTemplateCodes[req.TemplateCode] {
-		httpx.Error(w, httpx.ErrForbidden("template_code "+req.TemplateCode+" is protected: post it through its dedicated orchestration, not this generic endpoint"))
+	// as the single opt-out for either (contract §7.5) -- see
+	// refuseProtectedTemplate. This endpoint refuses those templates no
+	// matter how the caller got a write-scope key, same as POST /dev/credits
+	// being hardcoded to a single narrow template rather than accepting an
+	// arbitrary code (handler_devcredit.go).
+	if err := s.refuseProtectedTemplate(r.Context(), req.TemplateCode); err != nil {
+		httpx.Error(w, err)
 		return
-	}
-	if !s.allowGenericTemplatePost[req.TemplateCode] {
-		if err := s.rejectSystemClassificationTemplate(r.Context(), req.TemplateCode); err != nil {
-			httpx.Error(w, err)
-			return
-		}
 	}
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
@@ -372,6 +381,20 @@ func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		httpx.Error(w, err)
 		return
+	}
+
+	// Contract §7.11: this endpoint does not take a template_code, but it
+	// does execute templates chosen from caller-supplied amounts -- which is
+	// the same act, and was reachable with a plain write-scope key while
+	// /journals/template refused the identical codes. Every step the plan
+	// would execute passes the same gate; a plan with no steps (a shortfall
+	// held for manual review with nothing confirmed) executes nothing and is
+	// unaffected.
+	for _, step := range plan.Steps {
+		if err := s.refuseProtectedTemplate(r.Context(), step.TemplateCode); err != nil {
+			httpx.Error(w, err)
+			return
+		}
 	}
 
 	journals, err := presets.ExecuteDepositTolerancePlan(r.Context(), s.journals, core.TemplateParams{

@@ -2762,6 +2762,13 @@ renamed; update this doc.
    system-only codes). `Config.AllowGenericTemplatePost` is the single,
    per-code, explicit opt-out from BOTH layers. A deployment does not need to
    enumerate anything to get this protection.
+   The same two-layer check applies to `POST /journals/deposit-tolerance`,
+   which takes no `template_code` but turns caller-supplied expected/actual
+   amounts into executions of those very codes: every step the plan would
+   execute passes the same gate, and the route sits in the admin group rather
+   than the write group (contract §7.11). Under default configuration that
+   endpoint therefore answers 403; a plan with no steps executes nothing and
+   is unaffected.
    **Revision note (M-2, 2026-08-26 independent review, second pass):** the
    first revision of this guarantee left `ProtectedTemplateCodes` empty by
    default, on the theory that "this library does not know which of a
@@ -2790,6 +2797,18 @@ renamed; update this doc.
    as well. This tightening is a wire-behavior break -- see the 2026-09-02
    audit TODO's breaking-change list for the codes that changed from 201 to
    403 and what a deployment does about it.
+   **Revision note (§7.11, 2026-09-02, found while sibling-scanning D-C1):**
+   closing the named-template endpoint left a second spelling of the same
+   mint wide open. `POST /journals/deposit-tolerance` sat in the `write`
+   scope group and executed `deposit_confirm_pending` / `deposit_confirm` /
+   `deposit_release_pending` / `deposit_record_overage` from
+   `expected_amount` / `actual_amount` the caller supplies -- so
+   `expected == actual == 1000000` posted a full deposit confirmation for a
+   million, by a plain write-scope key, while the identical code was refused
+   by name one route above. Every planned step now goes through the same
+   `refuseProtectedTemplate`, and the route moved to the admin group next to
+   `POST /dev/credits`. This is the guarantee's real shape: the rule is about
+   what gets executed, not about which field named it.
 
 3. `POST /journals` (the handwritten-entry endpoint) refuses, by default, any
    entry that touches a classification flagged `is_system` (custodial,
@@ -2832,9 +2851,11 @@ for a deployment that remembered to opt in; the current revision closes it
 by default.
 
 **Enforced by**: `server.PagedResponse` / `cursorPtr` (`server/response.go`);
-`handlePostTemplate`'s `rejectSystemClassificationTemplate`
-(`server/handler_journals.go`, sharing `systemClassificationUIDs` with the
-handwritten path's `rejectSystemClassificationEntries`), plus
+`refuseProtectedTemplate` (`server/handler_journals.go`) -- the single
+function both `handlePostTemplate` and `handlePostDepositTolerance` call,
+combining `rejectSystemClassificationTemplate` (which shares
+`systemClassificationUIDs` with the handwritten path's
+`rejectSystemClassificationEntries`) with
 `presets.ProtectedTemplateCodes()` (`presets/protected_templates.go`) merged
 with `server.Config.ProtectedTemplateCodes` and reduced by
 `Config.AllowGenericTemplatePost` into `server.Server.protectedTemplateCodes`
@@ -2913,6 +2934,16 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   and outside `Config.ProtectedTemplateCodes` is not refused by it.
 - `server.TestPostTemplate_AllowGenericTemplatePostIsTheOnlyWayPastTheSystemLegRule`
   — the structural rule's single opt-out, per-code and explicit.
+- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` /
+  `TestPostDepositTolerance_RequiresAdminScope` — §7.11's own pins: all five
+  outcomes that would execute a step are refused under default config
+  (verified red 2026-09-02: all five posted 201 with `ExecuteTemplate`
+  reached), and a `write`-scope key is refused by the route's scope even with
+  the step codes opted in (verified red before the route moved).
+- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` /
+  `TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` — the
+  controls: the gate refuses executions, not the endpoint, and the same
+  single escape hatch opts a deployment back in.
 - `server.TestReverseJournal_RejectsClientSuppliedIdempotencyKey` /
   `TestReverseJournal_RejectsIdempotencyKeyHeader` /
   `TestReverseJournal_WithoutIdempotencyKeyPostsTheReversal` — H-M3's Go

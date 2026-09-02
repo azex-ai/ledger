@@ -107,7 +107,6 @@ func (s *Server) setupRoutes() {
 
 			r.Post("/journals", s.handlePostJournal)
 			r.Post("/journals/template", s.handlePostTemplate)
-			r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
 			r.Post("/journals/{uid}/reverse", s.handleReverseJournal)
 			r.Post("/journals/{uid}/reverse-partial", s.handleReverseJournalFraction)
 
@@ -160,6 +159,21 @@ func (s *Server) setupRoutes() {
 			r.Post("/currencies/{uid}/deactivate", s.handleDeactivateCurrency)
 
 			r.Put("/accounts/{holder}/policy", s.handleSetAccountPolicy)
+
+			// Deliberately NOT in the ScopeWrite group above (contract
+			// §7.11): this endpoint takes no template_code, but it turns
+			// caller-supplied expected/actual amounts into executions of
+			// deposit_confirm_pending / deposit_confirm /
+			// deposit_release_pending / deposit_record_overage -- the same
+			// deposit-shaped accounting POST /journals/template refuses by
+			// name. A write-scope key could therefore mint through it what
+			// it could not mint next door. Each planned step now also passes
+			// handlePostTemplate's gate (refuseProtectedTemplate), so under
+			// default configuration this endpoint answers 403 for everyone;
+			// a deployment that genuinely resolves deposit tolerance over
+			// HTTP opts the codes in via Config.AllowGenericTemplatePost and
+			// calls it with an admin key.
+			r.Post("/journals/deposit-tolerance", s.handlePostDepositTolerance)
 
 			r.Post("/reconcile", s.handleReconcileGlobal)
 			r.Post("/reconcile/account", s.handleReconcileAccount)

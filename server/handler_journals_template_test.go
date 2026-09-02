@@ -741,3 +741,174 @@ func TestReverseJournal_WithoutIdempotencyKeyPostsTheReversal(t *testing.T) {
 	assert.Equal(t, "j-1", gotUID)
 	assert.Equal(t, "operator error", gotReason)
 }
+
+// --- POST /journals/deposit-tolerance (contract §7.11) --------------------
+
+func depositToleranceBody(expected, actual, tolerance string) map[string]any {
+	return map[string]any{
+		"holder_id":       42,
+		"currency_uid":    "cur-1",
+		"idempotency_key": "dep-tol-gate",
+		"expected_amount": expected,
+		"actual_amount":   actual,
+		"tolerance":       tolerance,
+	}
+}
+
+// toleranceStepCodes are the template codes BuildDepositTolerancePlan can
+// emit. Kept as literals next to the cases that provoke each outcome so this
+// pin does not derive its expectation from the plan builder it is checking.
+var toleranceStepCodes = []string{
+	presets.DepositConfirmPendingTemplateCode,
+	presets.DepositConfirmTemplateCode,
+	presets.DepositReleasePendingTemplateCode,
+	presets.DepositRecordOverageTemplateCode,
+}
+
+// TestPostDepositTolerance_RefusesProtectedTemplatesByDefault pins contract
+// §7.11. This endpoint takes no template_code, so the protected-code check on
+// /journals/template never saw it -- yet it executes exactly those codes with
+// caller-supplied expected/actual amounts, which made it a second, unguarded
+// spelling of the same mint. Every outcome that would execute a step is now
+// refused under default configuration.
+//
+// Verified red 2026-09-02 before the fix: all five cases answered 201 with
+// ExecuteTemplate reached (expected=actual=100 posted deposit_confirm_pending
+// for the full amount).
+func TestPostDepositTolerance_RefusesProtectedTemplatesByDefault(t *testing.T) {
+	cases := []struct {
+		name                        string
+		expected, actual, tolerance string
+	}{
+		{"exact_match", "100", "100", "5"},
+		{"shortfall_auto_released", "100", "98", "5"},
+		{"shortfall_pending_review_with_partial_confirm", "100", "50", "5"},
+		{"overage_auto_credited", "100", "103", "5"},
+		{"overage_recorded_for_review", "100", "200", "5"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := newProtectedTemplateServer(nil, nil, refuseExecuteTemplate(t))
+			w := doRequest(srv, http.MethodPost, "/api/v1/journals/deposit-tolerance",
+				depositToleranceBody(c.expected, c.actual, c.tolerance))
+			assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+		})
+	}
+}
+
+// TestPostDepositTolerance_PlanWithNoStepsIsUnaffected: the gate refuses
+// planned executions, not the endpoint. A shortfall beyond tolerance with
+// nothing received confirms nothing, executes nothing, and still reports the
+// manual-review outcome.
+func TestPostDepositTolerance_PlanWithNoStepsIsUnaffected(t *testing.T) {
+	srv := newProtectedTemplateServer(nil, nil, refuseExecuteTemplate(t))
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/deposit-tolerance",
+		depositToleranceBody("100", "0", "5"))
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Equal(t, "shortfall_pending_review", data["outcome"])
+	assert.Equal(t, true, data["requires_manual_review"])
+	journals, ok := data["journals"].([]any)
+	require.True(t, ok)
+	assert.Empty(t, journals, "a plan with no steps must post nothing")
+}
+
+// TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn: the same
+// single escape hatch. A deployment that resolves deposit tolerance over HTTP
+// names the step codes and the endpoint works as before.
+func TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn(t *testing.T) {
+	var calls []string
+	srv := newProtectedTemplateServer(nil, toleranceStepCodes, &mockJournalWriter{
+		templateFn: func(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+			calls = append(calls, code)
+			return &core.Journal{UID: "j-" + code, IdempotencyKey: params.IdempotencyKey}, nil
+		},
+	})
+
+	w := doRequest(srv, http.MethodPost, "/api/v1/journals/deposit-tolerance",
+		depositToleranceBody("100", "98", "5"))
+	require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+	assert.Equal(t, []string{
+		presets.DepositConfirmPendingTemplateCode,
+		presets.DepositReleasePendingTemplateCode,
+	}, calls)
+}
+
+// newScopedToleranceServer is newScopedTestServer plus an explicit
+// AllowGenericTemplatePost, so a scope test can reach the handler instead of
+// stopping at the template gate (both answer 403, which would make the two
+// indistinguishable).
+func newScopedToleranceServer(allowed []string, journals core.JournalWriter, keys ...server.APIKey) *server.Server {
+	return server.NewWithConfig(
+		&server.Config{
+			Env:                      "dev",
+			CORSAllowOrigin:          "*",
+			MaxBodyBytes:             256 * 1024,
+			APIKeys:                  keys,
+			AllowGenericTemplatePost: allowed,
+		},
+		journals,
+		&mockBalanceReader{},
+		&mockReserver{},
+		&mockBooker{},
+		&mockBookingReader{},
+		&mockEventReader{},
+		&mockClassificationStore{},
+		&mockJournalTypeStore{},
+		&mockTemplateStore{},
+		&mockCurrencyStore{},
+		nil,
+		&mockReconciler{},
+		&mockQueryProvider{},
+		&mockAuditQuerier{},
+		&mockPlatformBalanceReader{},
+		&mockSolvencyChecker{},
+		&mockBalanceTrendReader{},
+		&mockFullReconciler{},
+		&mockAccountPolicyStore{},
+		&mockPeriodCloser{},
+		&mockTrialBalanceReader{},
+	)
+}
+
+// TestPostDepositTolerance_RequiresAdminScope pins the second half of
+// contract §7.11: minting-shaped accounting is a control-plane act, so this
+// endpoint moved out of the ScopeWrite group (where POST /journals and POST
+// /journals/template live) into the admin group, alongside POST /dev/credits.
+// Verified red before the route moved: the write key posted 201.
+func TestPostDepositTolerance_RequiresAdminScope(t *testing.T) {
+	writeKey := server.APIKey{Name: "app", Scope: server.ScopeWrite, Secret: []byte("write-key-secret")}
+	adminKey := server.APIKey{Name: "ops", Scope: server.ScopeAdmin, Secret: []byte("admin-key-secret")}
+
+	t.Run("write scope is refused", func(t *testing.T) {
+		srv := newScopedToleranceServer(toleranceStepCodes, refuseExecuteTemplate(t), writeKey, adminKey)
+		w := doAuthedRequest(t, srv, http.MethodPost, "/api/v1/journals/deposit-tolerance",
+			"write-key-secret", depositToleranceBody("100", "98", "5"))
+		// The 403 is the scope check's, not the template gate's: this server
+		// opts every tolerance step code into AllowGenericTemplatePost, and
+		// the admin sub-test below proves that same config reaches the
+		// handler and posts 201. The wire body cannot tell the two apart --
+		// both are bizcode 10150 rendered as a sanitized "You don't have
+		// permission" (user-facing-surfaces.md) -- so the pair of sub-tests
+		// is the discriminator. refuseExecuteTemplate also asserts nothing
+		// was executed on the way to the refusal.
+		assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	})
+
+	t.Run("admin scope passes", func(t *testing.T) {
+		var calls []string
+		srv := newScopedToleranceServer(toleranceStepCodes, &mockJournalWriter{
+			templateFn: func(_ context.Context, code string, params core.TemplateParams) (*core.Journal, error) {
+				calls = append(calls, code)
+				return &core.Journal{UID: "j-" + code, IdempotencyKey: params.IdempotencyKey}, nil
+			},
+		}, writeKey, adminKey)
+		w := doAuthedRequest(t, srv, http.MethodPost, "/api/v1/journals/deposit-tolerance",
+			"admin-key-secret", depositToleranceBody("100", "98", "5"))
+		require.Equal(t, http.StatusCreated, w.Code, "body: %s", w.Body.String())
+		assert.Len(t, calls, 2)
+	})
+}
