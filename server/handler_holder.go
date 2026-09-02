@@ -225,7 +225,14 @@ func (hs *holderSurface) handleHolderBalances(w http.ResponseWriter, r *http.Req
 			Total:        b.Total.String(),
 		}
 	}
-	httpx.OK(w, map[string]any{"list": out})
+	// PagedResponse, not map[string]any{"list": out} (H-m4): the map form
+	// emitted no next_cursor key at all, so a consumer's generic "is there a
+	// next page" helper saw undefined here and null on every other list
+	// route -- two spellings of api-contract.md §6's one comparable
+	// sentinel -- and the envelope layer had no Go type for the openapi gate
+	// to reflect on. NextCursor stays nil: this route genuinely has no next
+	// page, ever, which is what null says.
+	httpx.OK(w, PagedResponse[holderBalanceResponse]{List: out})
 }
 
 func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http.Request) {
@@ -288,7 +295,9 @@ func (hs *holderSurface) handleHolderHolds(w http.ResponseWriter, r *http.Reques
 			ExpiresAt:    h.ExpiresAt.UTC().Format(time.RFC3339),
 		}
 	}
-	httpx.OK(w, map[string]any{"list": out})
+	// PagedResponse rather than a bare {"list": ...} map -- see
+	// handleHolderBalances (H-m4).
+	httpx.OK(w, PagedResponse[holderHoldResponse]{List: out})
 }
 
 // handleHolderGetDepositAddress looks up the token-bound holder's

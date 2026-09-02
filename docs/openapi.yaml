@@ -1802,11 +1802,17 @@ components:
           properties:
             data:
               type: object
-              required: [list]
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
                   items: { $ref: "#/components/schemas/HolderBalance" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: >-
+                    Always null: this endpoint returns its full result set.
+                    Present so every list envelope in this API carries the
+                    same comparable sentinel (api-contract.md §6).
 
     HolderTransaction:
       type: object
@@ -1853,11 +1859,17 @@ components:
           properties:
             data:
               type: object
-              required: [list]
+              required: [list, next_cursor]
               properties:
                 list:
                   type: array
                   items: { $ref: "#/components/schemas/HolderHold" }
+                next_cursor:
+                  type: [string, "null"]
+                  description: >-
+                    Always null: this endpoint returns its full result set.
+                    Present so every list envelope in this API carries the
+                    same comparable sentinel (api-contract.md §6).
 
     Envelope:
       type: object

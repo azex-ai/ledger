@@ -316,17 +316,23 @@ func LoadConfig() (*Config, error) {
 
 	protectedTemplateCodes := parseCommaSeparated(os.Getenv("PROTECTED_TEMPLATE_CODES"))
 	allowGenericTemplatePost := parseCommaSeparated(os.Getenv("ALLOW_GENERIC_TEMPLATE_POST"))
+	// H-m5: this variable was named in Config.AllowSystemClassificationPost's
+	// doc comment but never read here, so a deployment that set it got the
+	// default (guard on) and believed it had opted out. The direction was
+	// safe; the documented switch simply did not exist.
+	allowSystemClassPost := os.Getenv("ALLOW_SYSTEM_CLASSIFICATION_POST") == "true"
 
 	cfg := &Config{
-		Env:                      env,
-		CORSAllowOrigin:          corsOrigin,
-		APIKeys:                  keys,
-		MaxBodyBytes:             maxBytes,
-		TrustedProxyCIDRs:        trustedCIDRs,
-		HolderTokenSecret:        holderSecret,
-		DevCreditEnabled:         devCredit,
-		ProtectedTemplateCodes:   protectedTemplateCodes,
-		AllowGenericTemplatePost: allowGenericTemplatePost,
+		Env:                           env,
+		CORSAllowOrigin:               corsOrigin,
+		APIKeys:                       keys,
+		MaxBodyBytes:                  maxBytes,
+		TrustedProxyCIDRs:             trustedCIDRs,
+		HolderTokenSecret:             holderSecret,
+		DevCreditEnabled:              devCredit,
+		ProtectedTemplateCodes:        protectedTemplateCodes,
+		AllowGenericTemplatePost:      allowGenericTemplatePost,
+		AllowSystemClassificationPost: allowSystemClassPost,
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

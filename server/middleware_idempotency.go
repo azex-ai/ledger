@@ -20,8 +20,7 @@ import (
 // bound to the persisted body. The header is an alias at the HTTP boundary:
 //
 //   - header set, body field absent/empty → the header value is injected into
-//     the body before decoding (top-level "idempotency_key"; for template
-//     execution, the nested "params" object)
+//     the body before decoding, always at the top level
 //   - header and body both set and equal → pass through
 //   - header and body disagree → 400, never a silent pick
 //
@@ -60,12 +59,18 @@ func idempotencyHeaderAliasMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Template execution nests the key under "params"; everything else
-		// uses the top-level field.
+		// Always the top level (H-m10). This used to redirect the injection
+		// into a nested "params" object whenever the body happened to have
+		// one, for a template-execution shape that no longer exists:
+		// postTemplateRequest carries idempotency_key flat, and no route on
+		// this surface reads a nested params.idempotency_key. The branch was
+		// unconditional, so ANY body with a top-level object named "params"
+		// got the header buried where its handler does not look, and the
+		// request failed with "idempotency_key is required" -- a mine armed
+		// by a field-name collision. A future batch endpoint that genuinely
+		// nests the key gets an explicit per-route rule, not a guess from
+		// the body's shape.
 		target := m
-		if params, ok := m["params"].(map[string]any); ok {
-			target = params
-		}
 
 		if existing, _ := target["idempotency_key"].(string); existing != "" {
 			if existing != key {
