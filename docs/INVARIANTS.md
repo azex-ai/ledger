@@ -3708,9 +3708,11 @@ practically unreachable today.
 reimplementing the comparison. `ledger_signed_amount` /
 `ledger_signed_delta` / `ledger_reject_unknown_normal_side`
 (migration `009_normal_side_sign_convergence`) — every sign expression in
-`checkpoints.sql`, `integrity_checkpoint.sql`, `platform_balances.sql`,
-`holder.sql`, and `reconcile.sql` calls one of these instead of
-reimplementing the `CASE`. `ledger_signed_amount` is deliberately not
+`postgres/sql/queries/*.sql` calls one of these instead of reimplementing
+the `CASE`. **That list is no longer maintained by hand here.** It was, and
+the hand-maintained version silently omitted `balance_trends.sql` through two
+separate enumerations — see I-49, which makes the enumeration mechanical and
+is what this claim now rests on. `ledger_signed_amount` is deliberately not
 `STRICT` (an explicit `WHEN p_entry_type IS NULL THEN NULL` branch handles
 the LEFT JOIN placeholder case instead) because a `STRICT` `LANGUAGE sql`
 function is never inlined by the planner — see the migration's comment and
@@ -4303,6 +4305,109 @@ advisory lock, on the caller's transaction) and
   `*verifiedAvailableBase` reserves 500 against a balance of 50.
 
 ---
+## I-49: "the sign convention has one implementation" is checked by machine, not by a list somebody maintains
+
+(2026-09-02 audit A-M7 / A-M1 / A-N1 / A-M3 / A-N4,
+`docs/audits/2026-09-02-deep-audit/financial-correctness.md`.)
+
+I-43 collapsed seventeen copies of the normal_side sign convention into
+`core.Sign` and `ledger_signed_amount`. What it did not do was make the
+collapse *stay* collapsed: its "Enforced by" was a hand-written list of five
+SQL files, and a hand-written list cannot notice the file nobody thought to
+look at.
+
+Two independent enumerations — the 2026-08-25 audit's "10 SQL expressions"
+and commit `15d110e`'s "9" — both missed `postgres/sql/queries/balance_trends.sql`.
+That file was the eighteenth copy and the only one whose *answer* was wrong:
+it decided inflow-versus-outflow from `entry_type` alone, never joining
+`classifications`, so for every debit-normal role account (`main_wallet`,
+`locked` — the canonical user wallet) the direction was inverted. One JSON
+row read `balance=395 inflow=105 outflow=500` for a holder who had deposited
+500. `/holders/{h}/trends` served that to every consumer, while
+`ListHolderTransactions` — reading the same entries through
+`ledger_signed_amount` — reported the same deposit as an inflow. Two
+user-facing surfaces of one ledger, disagreeing about which way the money
+went, with only one of them protected.
+
+The same failure mode, in a different expression: `balance_role NOT IN ('',
+'memo')` is the predicate that answers both "what does the platform owe" and
+"what money can the holder see". Four copies existed. The 2026-08-26 M-4 fix
+updated one. Retagging `fee_expense` to `'memo'` then pulled it *into* the
+three unfixed aggregates (`'memo' <> ''` is true), where `withdraw_fee`'s two
+holder-side legs netted to exactly zero and the row was dropped as empty: a
+holder's balance fell by 5 with no line anywhere in their statement to
+account for it.
+
+**Rule**: Neither the sign convention nor the holder-visible-money predicate
+may acquire a second implementation without a human explicitly classifying
+it. Concretely, all three of the following are enforced mechanically and fail
+the build on anything unclassified:
+
+1. **SQL.** No query in `postgres/sql/queries/*.sql` may derive an amount
+   from `entry_type` outside `ledger_signed_amount` / `ledger_signed_delta`,
+   unless the `(file, query name)` it appears in carries a written exemption
+   AND the exemption's expression count still matches. Every current
+   exemption has the same justification: the expression computes
+   *debits minus credits*, or splits them into two columns, which is a
+   statement about a journal balancing and is independent of any
+   classification's `normal_side` by construction.
+2. **Go.** No non-test file may branch on `core.NormalSideDebit` /
+   `core.NormalSideCredit` outside `core.Sign`, unless the file carries a
+   written exemption. Declaring a classification's polarity
+   (`NormalSide: core.NormalSideCredit`, all of `presets/`) is the *input* to
+   the convention, not a copy of it, and is not a branch.
+3. **The predicate.** Every query filtering on `balance_role` to mean "money
+   the holder can see / money the platform owes" spells it
+   `balance_role NOT IN ('', 'memo')`, character for character, and the set
+   of queries doing so is itself pinned. (`ReconcileRoleLessLiabilities`'s
+   `balance_role = ''` is the deliberate inverse — a detector for *untagged*
+   classifications — and is a different question, not a fork of this one.)
+
+A stale exemption fails too: an exemption whose expression no longer exists
+silently pre-approves whatever is written there next.
+
+The list in I-43's "Enforced by" is now this gate's *output*, not its source
+of truth. That inversion is the invariant.
+
+**Enforced by**: `postgres/sign_authority_gate_test.go` — `sqlSignExemptions`
+and `goSignExemptions` are the classification tables; anything not in them
+fails. Runs under plain `go test ./...` with no path filter or build tag, so
+it cannot be skipped by a CI job that forgot it.
+
+**Pinned by**:
+- `postgres.TestSignAuthorityGate_SQLHasNoUnclassifiedEntryTypeArithmetic` —
+  self-proved by reverting `balance_trends.sql`'s two columns to the bare
+  `CASE` they shipped with: the gate names the file, line and query.
+- `postgres.TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch` —
+  self-proved by adding a `NormalSide` comparison to `service/rollup.go` with
+  its exemption removed.
+- `postgres.TestSignAuthorityGate_HolderVisibleMoneyPredicateHasOneSpelling` —
+  the four copies, counted per file, compared literally.
+- `postgres.TestBalanceTrends_GapFill` — the direction itself, on the fixture
+  that exposed it: a DR of 500 into a debit-normal available wallet is an
+  inflow of 500 and an outflow of 0. (Before the fix: inflow 0, outflow 500.)
+- `postgres.TestSettlementNettingViolations_ReportsTheSameSignAsGetBalance` —
+  the reconciler's Finding and `GetBalance` describe one settlement position
+  with the same sign. (Before the fix: `net=-40` against a balance of `40`.)
+- `postgres.TestHolderStatement_ExplainsEveryMovementOfTheBalance` — stated
+  as a property rather than a row list: the statement's net must equal
+  `GetBalanceBreakdown().Total`, so ANY future divergence between the two
+  scopes fails here whatever causes it. (Before the fix: total 395 against a
+  statement netting 400.)
+- `postgres.TestHolderCurrencies_IgnoresMemoOnlyCurrencies` — a currency the
+  holder only ever paid a memo-tracked cost in is not one of their
+  currencies.
+- `postgres.TestPresetSolvency_EveryShippedTemplate` — one row per shipped
+  template stating its exact effect on the solvency report. The sign errors
+  this gate exists for were all found by *measuring solvency*, and the
+  reason they survived was that `solvency_test.go` had a single case
+  covering only the withdrawal path.
+
+**Deliberately not enforced**: the gate matches text, not parsed SQL or Go
+ASTs. It is tuned to be noisy about anything shaped like the bug and to force
+a classification, not to be exact. Someone determined to evade it can, by
+writing the expression in a shape it does not recognise — but they cannot do
+it *by accident*, which is how all eighteen copies got there.
 
 ## How to add a new invariant
 
