@@ -5154,13 +5154,15 @@ both documented in that package and in `docs/RUNBOOK.md`:
 
 **Enforced by**:
 - `core.Anchor.Head`'s doc comment (the contract text itself).
-- `anchortest`'s `HeadNeverRegressesOnAnOlderPublish` and
+- `anchortest.Check` / `anchortest.RunConformance` run the
+  `HeadNeverRegressesOnAnOlderPublish` and
   `HeadNeverRegressesAfterAnOutOfBandOlderWrite` phases; the latter is
   SKIPPED (and reported as skipped, never as passed, via
   `anchortest.Skipped`) when the caller supplies no out-of-band writer.
-- `anchors/r2.Anchor`'s one-object-per-seq layout and `ListObjectsV2`-based
-  `Head`, which also fails closed on a foreign object under its prefix
-  rather than skipping it.
+- `anchors/r2.New` (with `anchors/r2.Config`) builds the `Anchor` whose
+  one-object-per-seq layout and `ListObjectsV2`-based `Head` make a
+  regression impossible to publish; `Head` also fails closed on a foreign
+  object under its prefix rather than skipping it.
 - `anchordev.LocalFileAnchor`'s existing refusal of any seq that is not
   `Head()+1` or an exact replay.
 
