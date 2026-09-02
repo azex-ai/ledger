@@ -755,7 +755,7 @@ pageLoop:
 		pairs, err := s.querier.ListCheckpointAccountsPage(scanCtx, afterHolder, afterCurrency, pageSize)
 		if err != nil {
 			if scanCtx.Err() != nil {
-				partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+				partialReason = s.scanStopReason(ctx)
 				break pageLoop
 			}
 			result.Passed = false
@@ -771,7 +771,7 @@ pageLoop:
 
 		for _, p := range pairs {
 			if scanCtx.Err() != nil {
-				partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+				partialReason = s.scanStopReason(ctx)
 				break pageLoop
 			}
 
@@ -782,7 +782,7 @@ pageLoop:
 			}
 			if err != nil {
 				if scanCtx.Err() != nil {
-					partialReason = fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
+					partialReason = s.scanStopReason(ctx)
 					break pageLoop
 				}
 				result.Passed = false
@@ -857,7 +857,15 @@ pageLoop:
 			Description: fmt.Sprintf("checkpoint scan incomplete: %s", partialReason),
 			Detail:      fmt.Sprintf("scanned %d account/currency pairs before stopping; the next run resumes from the persisted cursor (holder %d)", scanned, afterHolder),
 		})
-		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty, lapScanned); setErr != nil {
+		// Persist the cursor on a detached, bounded context (I-M7 ③, 2026-09-02
+		// audit): the parent ctx is the caller's -- a CLI's per-command deadline
+		// or a worker's shutdown -- and its cancellation is the very reason the
+		// scan stopped early, so reusing it here would lose the position the
+		// next run must resume from.
+		persistCtx, cancelPersist := cleanupContext(ctx)
+		setErr := s.querier.SetScanCursor(persistCtx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty, lapScanned)
+		cancelPersist()
+		if setErr != nil {
 			result.Passed = false
 			result.Findings = append(result.Findings, core.Finding{
 				Description: "checkpoint scan cursor persist failed",
@@ -1874,4 +1882,16 @@ func (s *FullReconciliationService) runCheckPeriodCloseViolations(ctx context.Co
 	}
 
 	return result
+}
+
+// scanStopReason names the deadline that actually stopped a paged scan: the
+// check's own Check2Timeout, or the caller's context (a CLI per-command
+// deadline, a worker shutdown). The message used to blame Check2Timeout
+// unconditionally, which was false whenever the parent expired first (I-M7 ②,
+// 2026-09-02 audit).
+func (s *FullReconciliationService) scanStopReason(parent context.Context) string {
+	if err := parent.Err(); err != nil {
+		return fmt.Sprintf("caller context ended before the scan finished (%v)", err)
+	}
+	return fmt.Sprintf("scan timed out after %s", s.cfg.Check2Timeout)
 }

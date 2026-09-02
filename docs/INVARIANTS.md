@@ -5151,8 +5151,6 @@ healthy baseline is `Confirmations`, not 0.
   `FetchDeposits` ends at 989 at the latest, and the cursor never claims
   more)
 
-## How to add a new invariant
-
 ---
 
 
