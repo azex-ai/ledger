@@ -31,6 +31,51 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `anchordev.NewLocalFileAnchor` -> `anchordev.NewLocalFileAnchorForDevelopment`
+
+Renamed, no compatibility shim. The local-file anchor writes to the same
+machine as the database it exists to be independent of, so a deployment that
+reached for the shortest constructor name got an anchor that a compromised
+host can rewrite alongside the ledger. The name now says so at every call
+site, which is the only place the mistake is visible.
+
+Consumers: rename the call. Nothing else changes.
+
+### `anchortest.Check`, `anchortest.RunConformance`, `anchortest.Skipped`
+
+Each gains a trailing `opts ...Option`. Source-compatible for existing calls
+(a variadic added to the end); a consumer that stored one of these in a
+function variable of the old type must widen that type.
+
+The options exist so an anchor implementation can hand the suite an
+out-of-band write (`WithOutOfBandWrite`) and have the tamper and
+head-rollback phases actually run instead of being skipped -- a conformance
+run that skips the phases that matter must not read as a pass.
+
+### `postgres.Migrate` and `ledger.Migrate` gain `opts ...MigrateOption`
+
+`Migrate(databaseURL string)` becomes
+`Migrate(databaseURL string, opts ...MigrateOption)`, with a new
+`postgres.MigrateContext(ctx, databaseURL, opts...)`,
+`WithMigrateLogger` and `WithMigrateLockBudget`. Source-compatible.
+
+Run-time behaviour DOES change: the cluster migration lock is now a bounded
+poll (5-minute default budget) rather than a blocking `pg_advisory_lock`, so
+a stuck `Migrate` elsewhere in the cluster now fails with an explanatory
+error instead of hanging every other `Migrate` forever.
+
+Consumers: no action for a normal install. A migration window longer than
+five minutes needs `WithMigrateLockBudget`; routing "waiting for the cluster
+migration lock" into your own logs needs `WithMigrateLogger`.
+
+Also part of the same install path (D-M2): `Migrate` now runs `001` on its
+own and then grants `ledger_owner` to the migrating credential for the rest
+of the run, revoking on every exit path. Most deployments need no action,
+but running `Migrate` as a third-party role with no ADMIN OPTION on
+`ledger_owner` now fails up front with the three ways out listed, where it
+previously died at `002` with a bare `42501` and left the database marked
+dirty.
+
 ### `core.Metrics.BalanceDrift`, `core.Metrics.NegativeBalanceDetected`, `core.Metrics.ReconcileGap`, `core.Metrics.ReservedAmount`
 
 **Planned in this remediation wave (H-M9), not yet landed.** These four methods

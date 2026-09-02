@@ -74,11 +74,21 @@ func TestVerifyLedger_SamplesTheNewestJournalsNotTheOldest(t *testing.T) {
 }
 
 // TestListRecentJournals_ReturnsNewestFirst pins the adapter half directly:
-// core.JournalQuerier.ListRecentJournals must order DESCENDING and must not
-// be confused with ListJournals's ascending cursor walk. Without this,
+// core.JournalQuerier.ListRecentJournals must order DESCENDING. Without this,
 // swapping the query back to ASC would only fail the (much more expensive)
 // VerifyLedger pin above, with a failure message that points at
 // verification rather than at the query.
+//
+// The two methods are no longer distinguished by DIRECTION. H-m3 (2026-09-02
+// audit) found ListJournals paginating ascending while its own openapi
+// summary promised "descending id", and inverted it, so both are now
+// newest-first. What still separates them -- and the reason a second method
+// exists at all -- is that ListRecentJournals is a fixed-size head SAMPLE
+// with no cursor, while ListJournals is a paginated walk. Conflating "a
+// sample of the newest rows" with "the newest page of a paginated read" is
+// the root of the audit's M-1 finding, so the assertion below now pins the
+// property that actually differs: ListJournals hands back a cursor to
+// continue with, ListRecentJournals does not take or return one.
 //
 // Pinned symbol: postgres.QueryStore.ListRecentJournals /
 // postgres.QueryStore.ListJournals.
@@ -103,9 +113,13 @@ func TestListRecentJournals_ReturnsNewestFirst(t *testing.T) {
 	require.Equal(t, []string{uids[4], uids[3], uids[2]}, []string{recent[0].UID, recent[1].UID, recent[2].UID},
 		"ListRecentJournals must return the newest journals, newest first")
 
-	oldest, _, err := queries.ListJournals(ctx, "", 3)
+	page, next, err := queries.ListJournals(ctx, "", 3)
 	require.NoError(t, err)
-	require.Len(t, oldest, 3)
-	require.Equal(t, uids[0], oldest[0].UID,
-		"sanity: ListJournals with an empty cursor is still the OLDEST page -- that is why a second method exists")
+	require.Len(t, page, 3)
+	require.Equal(t, uids[4], page[0].UID,
+		"since H-m3 both reads are newest-first; ListJournals's first page starts at the newest journal too")
+	require.NotEmpty(t, next,
+		"the difference that matters: ListJournals is a paginated walk and hands back a cursor, while "+
+			"ListRecentJournals is a fixed-size head sample with none. A sample must never be mistaken for "+
+			"a page (audit M-1)")
 }

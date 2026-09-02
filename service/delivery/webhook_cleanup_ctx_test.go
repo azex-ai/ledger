@@ -207,21 +207,21 @@ var bookkeepingCalls = map[string]bool{
 	"RecordDeliveryStatus": true,
 }
 
-// pendingAttachedBookkeeping is the shrink-only registry of call sites that
-// are known to still pass the live ctx, keyed by file and method.
+// pendingAttachedBookkeeping is the shrink-only registry of call sites known
+// to still pass the live ctx, keyed by file and method.
 //
-// Its only entry is local.go, whose fix is the D-lock branch of this same
-// wave (commit "fix(delivery): record a delivery's outcome on a detached
-// context") -- reported to this task rather than applied here because
-// local.go is that task's exclusive face. The registry is red in BOTH
-// directions: a call site that is not listed must be detached, and a listed
-// one that has BECOME detached must be deleted from the list in the same
-// commit. So it can only shrink to nothing, which is what makes it a
-// hand-off rather than permanent tolerance (contracts §8: "advisory 集合必须
-// 是显式、只缩不扩的白名单常量").
-var pendingAttachedBookkeeping = map[string]map[string]bool{
-	"local.go": {"MarkDelivered": true, "MarkRetry": true},
-}
+// It is empty, and it earned the right to be: it held local.go's two sites
+// while their fix sat on the D-lock branch (that task's exclusive face, so
+// they were reported here rather than edited), and when D-lock merged the
+// gate went red naming both -- "now detached, delete it from the registry" --
+// instead of quietly tolerating them forever. That is what "red in both
+// directions" buys: an entry that is not listed must be detached, and a
+// listed one that has BECOME detached must be deleted in the same commit, so
+// the registry can only shrink to nothing (contracts §8's rule for advisory
+// sets: explicit, shrink-only).
+//
+// Keep it, empty, for the next hand-off across a package boundary.
+var pendingAttachedBookkeeping = map[string]map[string]bool{}
 
 // TestDeliveryBookkeeping_AlwaysUsesCleanupContext is the structural half.
 //
