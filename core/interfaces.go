@@ -596,16 +596,38 @@ type Sweeper interface {
 	// the last fee it used -- that memory does not survive a restart, while
 	// a hash sourced from durable storage does (onchain-money-path.md).
 	BatchSweep(ctx context.Context, chainID int64, token string, targets []SweepTarget, signerNonce uint64, priorTxHash string) (txHash string, err error)
-	// GasPrice returns the current gas price (gwei) on chainID, for the
-	// caller to compare against SweepPolicy.GasCeiling before broadcasting
-	// or gas-bumping. An implementation MUST report the same basis it will
+	// GasPrice returns the current gas price (GWEI) on chainID, for the
+	// caller to compare against SweepPolicy.GasCeiling before a FIRST
+	// dispatch. An implementation MUST report the same basis it will
 	// actually pay in BatchSweep's non-retry fee cap -- reporting a
 	// different, lower-tending estimate here (e.g. a legacy suggested gas
 	// price when the real payment uses a wider EIP-1559 fee-cap formula)
 	// makes GasCeiling a soft threshold instead of the upper bound its own
 	// doc comment (core.SweepPolicy.GasCeiling) promises
 	// (onchain-money-path.md Minor).
+	//
+	// The unit is gwei, and it MUST be the same unit
+	// SweepPolicy.GasCeiling is documented in -- these two doc comments are
+	// a matched pair, so changing the unit in one without the other
+	// silently scales the only gate bounding sweep spend by 10^9 (G-M3;
+	// GasCeiling's comment said wei until then, while every implementation
+	// and every comparison had always been gwei).
 	GasPrice(ctx context.Context, chainID int64) (decimal.Decimal, error)
+	// ReplacementGasPrice returns the gas price (GWEI, same unit as
+	// GasPrice) a gas-bump of priorTxHash at signerNonce would ACTUALLY bid
+	// on chainID, without broadcasting anything.
+	//
+	// It exists because GasPrice is the wrong quantity to gate a retry on
+	// (G-M4). A replacement must beat what is still pending by the
+	// mempool's replacement margin, so an implementation's bid is
+	// max(market basis, prior fee x margin) -- which is unbounded above by
+	// the market basis GasPrice reports. Gating a bump on GasPrice
+	// therefore let the retry path bid 1.125^n up a gas spike while the
+	// ceiling that was supposed to stop exactly that read as satisfied.
+	// The caller compares THIS against SweepPolicy.GasCeiling before every
+	// gas-bump; an implementation MUST return the same figure the ensuing
+	// BatchSweep at the same (signerNonce, priorTxHash) would pay.
+	ReplacementGasPrice(ctx context.Context, chainID int64, signerNonce uint64, priorTxHash string) (decimal.Decimal, error)
 }
 
 // DepositConfirmer is the deposit path's second, independent data source for

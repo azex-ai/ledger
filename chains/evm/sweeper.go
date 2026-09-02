@@ -95,6 +95,17 @@ func (s *Sweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Decimal,
 	if err != nil {
 		return decimal.Decimal{}, err
 	}
+	return gasPriceFrom(ctx, client, chainID)
+}
+
+// gasPriceFrom is GasPrice's body over the narrowed quoteFeeClient, so the
+// unit it returns is directly pinnable without a live RPC connection
+// (TestSweeper_GasPrice_IsGweiNotWei). core.SweepPolicy.GasCeiling is
+// configured in gwei and compared against this value in
+// service/onchain.go's sweep gate; before G-M3 the only statement of that
+// unit was a comment on the ceiling's own field, which said wei -- a 10^9
+// error in the one gate bounding what a sweep may spend.
+func gasPriceFrom(ctx context.Context, client quoteFeeClient, chainID int64) (decimal.Decimal, error) {
 	tip, err := client.SuggestGasTipCap(ctx)
 	if err != nil {
 		return decimal.Decimal{}, fmt.Errorf("evm: sweeper: gas price: suggest gas tip cap: chain %d: %w", chainID, err)
@@ -108,6 +119,38 @@ func (s *Sweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Decimal,
 		baseFee = big.NewInt(0)
 	}
 	return normalizeAmount(feeCapBasis(baseFee, tip), weiGweiDecimals), nil
+}
+
+// ReplacementGasPrice reports, in gwei, the gas fee cap a BatchSweep at
+// (signerNonce, priorTxHash) would actually bid right now -- i.e. exactly
+// what quoteFee below will hand to the transaction, including the >=12.5%
+// replacement bump over whatever is still pending. Read-only: it issues the
+// same RPC reads quoteFee does and broadcasts nothing.
+//
+// This is the quantity core.SweepPolicy.GasCeiling has to be compared
+// against on the retry path (G-M4). GasPrice reports only the market basis,
+// and a replacement bid is max(basis, prior x 1.125): gating a gas-bump on
+// the basis let the retry path escalate 1.125^n up a gas spike with the
+// ceiling reading as satisfied the whole way, which is precisely the spend
+// GasCeiling exists to bound.
+func (s *Sweeper) ReplacementGasPrice(ctx context.Context, chainID int64, signerNonce uint64, priorTxHash string) (decimal.Decimal, error) {
+	client, err := s.clients.client(chainID)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return s.replacementGasPriceFrom(ctx, client, chainID, signerNonce, priorTxHash)
+}
+
+// replacementGasPriceFrom is ReplacementGasPrice's body over the narrowed
+// quoteFeeClient, so both the escalation and the gwei unit are pinnable
+// without a live RPC connection (TestSweeper_ReplacementGasPrice_*). Same
+// seam as gasPriceFrom.
+func (s *Sweeper) replacementGasPriceFrom(ctx context.Context, client quoteFeeClient, chainID int64, signerNonce uint64, priorTxHash string) (decimal.Decimal, error) {
+	fee, err := s.quoteFee(ctx, client, chainID, signerNonce, priorTxHash)
+	if err != nil {
+		return decimal.Decimal{}, err
+	}
+	return normalizeAmount(fee.gasFeeCap, weiGweiDecimals), nil
 }
 
 // feeCapBasis is 2*baseFee + tip -- the conventional EIP-1559 headroom (a
@@ -299,11 +342,26 @@ func (s *Sweeper) priorFeeFloor(ctx context.Context, client quoteFeeClient, chai
 	return prior, ok
 }
 
+// recordFee remembers the fee this process just broadcast at (chainID,
+// signerNonce) so a later gas-bump for the SAME nonce has a floor to beat
+// even when the chain no longer answers for the replaced hash (priorFeeFloor).
+//
+// It also prunes every entry below signerNonce for that chain: priorFeeFloor
+// only ever reads the nonce currently being replaced, and a nonce lower than
+// the one we are broadcasting now has necessarily been mined or replaced, so
+// its quote can never be read again. Without the prune this map grew one
+// entry per sweep broadcast for the life of the process, unbounded and with
+// no TTL (concurrency.md Minor, B-m8).
 func (s *Sweeper) recordFee(chainID int64, signerNonce uint64, fee feeQuote) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastFee[chainID] == nil {
 		s.lastFee[chainID] = make(map[uint64]feeQuote)
+	}
+	for n := range s.lastFee[chainID] {
+		if n < signerNonce {
+			delete(s.lastFee[chainID], n)
+		}
 	}
 	s.lastFee[chainID][signerNonce] = fee
 }

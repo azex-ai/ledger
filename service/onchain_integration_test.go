@@ -82,10 +82,30 @@ type fakeChainReader struct {
 	mu       sync.Mutex
 	included map[string]bool // key: "chainID:txHash"
 	latest   map[int64]int64 // key: chainID -- see setLatestBlock
+	// sightings is what FetchDeposits returns per chain (see setSightings),
+	// and fetchCalls records every window it was asked to scan.
+	sightings  map[int64][]core.DepositSighting
+	fetchCalls []fakeFetchCall
+	fetchErr   error
+	// includedErr, when set for a (chain, tx), makes TxIncluded fail rather
+	// than answer -- the case that must never be read as "not on chain".
+	includedErr map[string]error
+}
+
+type fakeFetchCall struct {
+	chainID   int64
+	fromBlock int64
+	toBlock   int64
+	addresses []string
 }
 
 func newFakeChainReader() *fakeChainReader {
-	return &fakeChainReader{included: make(map[string]bool), latest: make(map[int64]int64)}
+	return &fakeChainReader{
+		included:    make(map[string]bool),
+		latest:      make(map[int64]int64),
+		sightings:   make(map[int64][]core.DepositSighting),
+		includedErr: make(map[string]error),
+	}
 }
 
 func (f *fakeChainReader) LatestBlock(ctx context.Context, chainID int64) (int64, error) {
@@ -106,14 +126,64 @@ func (f *fakeChainReader) setLatestBlock(chainID, block int64) {
 	f.latest[chainID] = block
 }
 
+// FetchDeposits returns whatever setSightings seeded for chainID and records
+// the window it was asked about.
+//
+// It used to return (nil, nil) unconditionally, which meant the entire pull
+// ingestion path -- scanChainOnce's loop, its cursor semantics, its failure
+// handling -- was never executed by any test: deleting the loop outright left
+// the suite green (onchain-money-path.md Critical #1, test-credibility.md's
+// hand-off). The G-C1 and G-M2 pins below need it to actually produce
+// sightings and to expose the block range it was given.
 func (f *fakeChainReader) FetchDeposits(ctx context.Context, chainID, fromBlock, toBlock int64, addresses []string) ([]core.DepositSighting, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fetchCalls = append(f.fetchCalls, fakeFetchCall{chainID: chainID, fromBlock: fromBlock, toBlock: toBlock, addresses: addresses})
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
+	return f.sightings[chainID], nil
+}
+
+// setSightings makes chainID's next FetchDeposits return sightings.
+func (f *fakeChainReader) setSightings(chainID int64, sightings ...core.DepositSighting) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sightings == nil {
+		f.sightings = make(map[int64][]core.DepositSighting)
+	}
+	f.sightings[chainID] = sightings
+}
+
+func (f *fakeChainReader) fetchWindows() []fakeFetchCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeFetchCall, len(f.fetchCalls))
+	copy(out, f.fetchCalls)
+	return out
 }
 
 func (f *fakeChainReader) TxIncluded(ctx context.Context, chainID int64, txHash string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.includedErr[chainTxKey(chainID, txHash)]; err != nil {
+		return false, err
+	}
 	return f.included[chainTxKey(chainID, txHash)], nil
+}
+
+// setIncludedErr makes TxIncluded FAIL for (chainID, txHash) rather than
+// answer. Passing nil clears it. An erroring inclusion check is the case that
+// must never be read as "the tx is gone" -- see
+// TestOnchain_Recheck_TxIncludedErrorIsNotEvidence.
+func (f *fakeChainReader) setIncludedErr(chainID int64, txHash string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		delete(f.includedErr, chainTxKey(chainID, txHash))
+		return
+	}
+	f.includedErr[chainTxKey(chainID, txHash)] = err
 }
 
 func (f *fakeChainReader) setIncluded(chainID int64, txHash string, included bool) {
@@ -156,6 +226,30 @@ type fakeSweeper struct {
 	gasPrice      decimal.Decimal
 	batchSweeps   []fakeBatchSweepCall
 	txHashSeq     int
+	batchSweepErr error
+	// txHashes[i] is the hash BatchSweep returned for call i, so a pin can
+	// assert that the NEXT call's priorTxHash is that exact value (G-M10).
+	txHashes []string
+	// replacementGasPrice overrides what ReplacementGasPrice quotes; zero
+	// means "same as the market price". replacementQuotes records every
+	// (nonce, priorTxHash) it was asked about, so a pin can assert the
+	// ceiling was checked against the pair BatchSweep is then called with.
+	replacementGasPrice decimal.Decimal
+	replacementQuotes   []fakeReplacementQuoteCall
+}
+
+type fakeReplacementQuoteCall struct {
+	chainID     int64
+	nonce       uint64
+	priorTxHash string
+}
+
+func (f *fakeSweeper) lastTxHash(t *testing.T, call int) string {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	require.Greater(t, len(f.txHashes), call, "BatchSweep call %d has not happened", call)
+	return f.txHashes[call]
 }
 
 type fakeBatchSweepCall struct {
@@ -166,20 +260,33 @@ type fakeBatchSweepCall struct {
 	priorTxHash string
 }
 
+// NextNonce models PendingNonceAt: it reports the signer EOA's next unused
+// nonce and does NOT consume it. Only a broadcast does (see BatchSweep) --
+// the previous fake incremented on every read, which made "this nonce is
+// already spent on chain" inexpressible and so left G-M5's orphaned-broadcast
+// path untestable.
 func (f *fakeSweeper) NextNonce(ctx context.Context, chainID int64) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextNonceCall++
-	n := f.nonceSeq
-	f.nonceSeq++
-	return n, nil
+	return f.nonceSeq, nil
 }
 
 func (f *fakeSweeper) BatchSweep(ctx context.Context, chainID int64, token string, targets []core.SweepTarget, nonce uint64, priorTxHash string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.batchSweepErr != nil {
+		return "", f.batchSweepErr
+	}
 	f.txHashSeq++
 	f.batchSweeps = append(f.batchSweeps, fakeBatchSweepCall{chainID, token, targets, nonce, priorTxHash})
+	f.txHashes = append(f.txHashes, "0xsweep"+decimal.NewFromInt(int64(f.txHashSeq)).String())
+	// A broadcast consumes the nonce it used: the signer EOA's pending nonce
+	// moves past it, which is exactly how advanceSweep detects that an
+	// earlier broadcast happened whose tx hash was lost (G-M5).
+	if nonce >= f.nonceSeq {
+		f.nonceSeq = nonce + 1
+	}
 	return "0xsweep" + decimal.NewFromInt(int64(f.txHashSeq)).String(), nil
 }
 
@@ -187,6 +294,31 @@ func (f *fakeSweeper) GasPrice(ctx context.Context, chainID int64) (decimal.Deci
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.gasPrice, nil
+}
+
+// ReplacementGasPrice models what a real adapter bids on a gas-bump:
+// max(market basis, prior fee x replacement margin), i.e. a number the
+// market price alone does not bound. replacementGasPrice, when set,
+// substitutes that escalated quote so a pin can put it above GasCeiling
+// while the market price stays comfortably below it -- the exact
+// configuration under which the ceiling used to be checked against the
+// wrong quantity (G-M4).
+func (f *fakeSweeper) ReplacementGasPrice(ctx context.Context, chainID int64, signerNonce uint64, priorTxHash string) (decimal.Decimal, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replacementQuotes = append(f.replacementQuotes, fakeReplacementQuoteCall{chainID, signerNonce, priorTxHash})
+	if f.replacementGasPrice.IsPositive() {
+		return f.replacementGasPrice, nil
+	}
+	return f.gasPrice, nil
+}
+
+func (f *fakeSweeper) replacementQuoteCalls() []fakeReplacementQuoteCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]fakeReplacementQuoteCall, len(f.replacementQuotes))
+	copy(out, f.replacementQuotes)
+	return out
 }
 
 // fakeDepositConfirmer implements service.DepositConfirmer for the M3
@@ -230,6 +362,37 @@ func (f *fakeDepositConfirmer) ConfirmDeposit(ctx context.Context, chainID int64
 	return r.amount, r.included, nil
 }
 
+// flakyBooker wraps the real postgres BookingStore so a single Transition can
+// be made to fail on demand. Everything else goes to the real store: the
+// point of the G-M5 pin is what the ORCHESTRATION does after a broadcast
+// succeeded and its persistence did not, so the persistence has to be real
+// right up to the injected failure.
+type flakyBooker struct {
+	core.Booker
+	mu sync.Mutex
+	// failTransitionTo makes the next Transition to that status fail once.
+	failTransitionTo core.Status
+	failErr          error
+}
+
+func (b *flakyBooker) Transition(ctx context.Context, input core.TransitionInput) (*core.Event, error) {
+	b.mu.Lock()
+	if b.failTransitionTo != "" && input.ToStatus == b.failTransitionTo {
+		b.failTransitionTo = ""
+		err := b.failErr
+		b.mu.Unlock()
+		return nil, err
+	}
+	b.mu.Unlock()
+	return b.Booker.Transition(ctx, input)
+}
+
+func (b *flakyBooker) failNextTransition(to core.Status, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failTransitionTo, b.failErr = to, err
+}
+
 // --- test harness ---
 
 type onchainHarness struct {
@@ -242,7 +405,12 @@ type onchainHarness struct {
 	scanner     *fakeChainScanner
 	sweeper     *fakeSweeper
 	deadLetters *postgres.IngestDeadLetterStore
+	reorgs      *postgres.DepositReorgStore
+	booker      *flakyBooker
+	cursors     *postgres.ChainCursorStore
 	metrics     *recordingOnchainMetrics
+	log         core.Logger
+	deps        service.OnchainDeps
 
 	// pool is the raw connection, for tests that need to assert DB state no
 	// store interface exposes (e.g. events.journal_id cross-links, I-21).
@@ -293,12 +461,15 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 	scanner := &fakeChainScanner{balances: make(map[string]decimal.Decimal)}
 	sweeper := &fakeSweeper{gasPrice: decimal.NewFromInt(1)}
 	deadLetters := postgres.NewIngestDeadLetterStore(pool)
+	reorgs := postgres.NewDepositReorgStore(pool)
+	cursors := postgres.NewChainCursorStore(pool)
+	booker := &flakyBooker{Booker: bookingStore}
 	metrics := &recordingOnchainMetrics{}
 
 	deps := service.OnchainDeps{
 		Registry:            postgres.NewDepositAddressStore(pool),
-		Cursors:             postgres.NewChainCursorStore(pool),
-		Booker:              bookingStore,
+		Cursors:             cursors,
+		Booker:              booker,
 		BookingReader:       bookingStore,
 		Journals:            ledgerStore,
 		TxComposer:          &testTxComposer{pool: pool, bookingStore: bookingStore, ledgerStore: ledgerStore},
@@ -307,11 +478,17 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		Scanner:             scanner,
 		Sweeper:             sweeper,
 		DeadLetters:         deadLetters,
+		ReorgRecorder:       reorgs,
 		Currencies:          currencyStore,
 		Classifications:     classStore,
 		Metrics:             metrics,
+		Logger:              newRecordingServiceLogger(),
 	}
-	onchain := service.NewOnchain(deps, chains, opts...)
+	// WithPool first, so a caller-supplied option can still override it:
+	// the advisory-lock single-flight around the watch and sweep jobs is
+	// part of what these tests exercise (B-m7), and ledger.EnableOnchain
+	// wires a pool too.
+	onchain := service.NewOnchain(deps, chains, append([]service.OnchainOption{service.WithPool(pool)}, opts...)...)
 
 	return &onchainHarness{
 		svc:         onchain,
@@ -322,9 +499,22 @@ func setupOnchain(t *testing.T, chains core.ChainSet, currencyCodes []string, op
 		scanner:     scanner,
 		sweeper:     sweeper,
 		deadLetters: deadLetters,
+		reorgs:      reorgs,
+		booker:      booker,
+		cursors:     cursors,
 		metrics:     metrics,
+		log:         deps.Logger,
+		deps:        deps,
 		pool:        pool,
 	}
+}
+
+// rewire builds a second service.Onchain over the SAME database and the same
+// dependencies but a different ChainSet -- what a config change plus a
+// restart looks like to already-persisted bookings (G-M6).
+func (h *onchainHarness) rewire(t *testing.T, chains core.ChainSet, opts ...service.OnchainOption) *service.Onchain {
+	t.Helper()
+	return service.NewOnchain(h.deps, chains, append([]service.OnchainOption{service.WithPool(h.pool)}, opts...)...)
 }
 
 func (h *onchainHarness) classificationUID(t *testing.T, code string) string {
@@ -1301,7 +1491,17 @@ func TestOnchain_Run_RejectsUnconfiguredAutoCreditCeiling(t *testing.T) {
 	chains := chainSetWithToken(1, "0xusdttoken", "USDT-run-reject", 2) // AutoCreditCeiling left at zero
 	h := setupOnchain(t, chains, []string{"USDT-run-reject"})
 
-	err := h.svc.Run(context.Background())
+	// Pre-cancel, exactly like the sibling *_Allows* tests below (F-m4,
+	// test-credibility.md Minor). The gate under test runs at the very top
+	// of Run, before any loop starts, so pre-cancelling cannot mask it --
+	// but it changes what happens WHEN THE GATE REGRESSES: with
+	// context.Background() the four background loops block forever, the
+	// whole package hangs to -timeout, and 500 lines of goroutine dump take
+	// every other test's result down with them. With a cancelled context the
+	// same regression is one clean require.Error.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := h.svc.Run(ctx)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 	assert.Contains(t, err.Error(), "AutoCreditCeiling")
@@ -1338,7 +1538,10 @@ func TestOnchain_Run_RejectsUnconfiguredReconcileFailureLimit(t *testing.T) {
 	chains := chainSetWithCeilings(1, "0xusdttoken", "USDT-run-reconcile-reject", 2, core.UnboundedAutoCredit, decimal.NewFromInt(10)) // ReconcileFailureLimit left at zero
 	h := setupOnchain(t, chains, []string{"USDT-run-reconcile-reject"}, service.WithDepositConfirmer(confirmer))
 
-	err := h.svc.Run(context.Background())
+	// Pre-cancelled for the same reason as its sibling above (F-m4).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := h.svc.Run(ctx)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrInvalidInput)
 	assert.Contains(t, err.Error(), "ReconcileFailureLimit")

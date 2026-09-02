@@ -746,11 +746,31 @@ func (s *Service) EnableOnchain(chains core.ChainSet, reader core.ChainReader, s
 		Scanner:             scanner,
 		Sweeper:             sweeper,
 		DeadLetters:         postgres.NewIngestDeadLetterStore(s.pool),
-		Currencies:          s.currencyStore,
-		Classifications:     s.classStore,
-		Logger:              s.logger,
-		Metrics:             s.metrics,
+		// ReorgRecorder is the durable half of reorg handling (W1-onchain
+		// G-M8): without it service.Onchain.Run refuses to start whenever a
+		// ChainReader is configured, because a detector whose verdict is
+		// only a log line that goes quiet after the recheck window leaves
+		// on-call nothing to act on. Wired here rather than left to the
+		// consumer so the facade's own deployments are never in that state.
+		ReorgRecorder:   postgres.NewDepositReorgStore(s.pool),
+		Currencies:      s.currencyStore,
+		Classifications: s.classStore,
+		Logger:          s.logger,
+		Metrics:         s.metrics,
 	}
+	// WithPool FIRST, so a caller-supplied option can still override it.
+	//
+	// Without this line every advisory-lock single-flight inside Onchain is
+	// inert for facade consumers: service.NewLockedJob treats a nil pool as
+	// "skip locking and run unconditionally", and EnableOnchain never
+	// passed one. So the per-chain sweep lock -- and, as of B-m7, the
+	// per-chain watch lock -- existed in service/ and did nothing here,
+	// which is the same "the mechanism is implemented, the wiring is
+	// absent" shape as F-M1 (SetPartitionService) and I-R1
+	// (EventStore.SetLogger). Multi-replica deployments were therefore
+	// broadcasting duplicate sweeps at the same nonce and racing the
+	// forward-scan cursor that I-52 now relies on holding still.
+	opts = append([]service.OnchainOption{service.WithPool(s.pool)}, opts...)
 	onchain := service.NewOnchain(deps, chains, opts...)
 	if err := onchain.ValidateAutoCreditCeilings(); err != nil {
 		return nil, fmt.Errorf("ledger: EnableOnchain: %w", err)

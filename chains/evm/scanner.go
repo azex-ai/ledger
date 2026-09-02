@@ -86,21 +86,40 @@ func (s *Scanner) tokenDecimals(chainID int64, token string) (int32, error) {
 	return 0, fmt.Errorf("evm: scanner: chain %d token %q: %w", chainID, token, ErrTokenNotConfigured)
 }
 
-func (s *Scanner) probeMulticall(ctx context.Context, client *ethclient.Client, chainID int64) (bool, error) {
+// codeAtClient is the subset of *ethclient.Client probeMulticall needs --
+// narrowed (like quoteFeeClient in sweeper.go) so the caching behaviour below
+// is unit-testable without a live RPC connection.
+type codeAtClient interface {
+	CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error)
+}
+
+// probeMulticall reports whether Multicall3 is deployed on chainID.
+//
+// Only a POSITIVE result is cached: a contract cannot be un-deployed, so
+// "present" is permanent, whereas "absent" may just as well be a transient
+// wrong answer (an out-of-sync or briefly broken node returning empty code).
+// Caching that answer used to pin the whole chain to the N-single-calls
+// fallback for the entire process lifetime with no way back
+// (onchain-money-path.md Minor, G-m3). One extra eth_getCode per scan round
+// on a chain genuinely without Multicall3 is negligible next to the N
+// balanceOf calls that round is about to issue anyway.
+func (s *Scanner) probeMulticall(ctx context.Context, client codeAtClient, chainID int64) (bool, error) {
 	s.mu.Lock()
-	known, ok := s.multicallKnown[chainID]
+	known := s.multicallKnown[chainID]
 	s.mu.Unlock()
-	if ok {
-		return known, nil
+	if known {
+		return true, nil
 	}
 	code, err := client.CodeAt(ctx, multicall3Address, nil)
 	if err != nil {
 		return false, fmt.Errorf("evm: scanner: probe multicall3: chain %d: %w", chainID, err)
 	}
 	has := len(code) > 0
-	s.mu.Lock()
-	s.multicallKnown[chainID] = has
-	s.mu.Unlock()
+	if has {
+		s.mu.Lock()
+		s.multicallKnown[chainID] = has
+		s.mu.Unlock()
+	}
 	return has, nil
 }
 

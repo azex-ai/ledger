@@ -31,4 +31,17 @@ var (
 	// support no longer changes what a broken read means, and no longer
 	// changes how many OTHER addresses pay for it.
 	ErrBalanceUnreadable = errors.New("evm: balance unreadable")
+	// ErrTokenDecimalsMismatch is returned by ClientSet.VerifyTokenDecimals
+	// when a configured core.TokenConfig.Decimals disagrees with the token
+	// contract's own decimals() -- the configuration would credit every
+	// deposit of that token at the wrong order of magnitude (G-M7).
+	ErrTokenDecimalsMismatch = errors.New("evm: token decimals mismatch")
+	// ErrTokenDecimalsUnreadable is returned by
+	// ClientSet.VerifyTokenDecimals when a token's decimals() could not be
+	// read at all (RPC failure, the address is not an ERC-20, a proxy that
+	// reverts). Deliberately distinct from ErrTokenDecimalsMismatch: "we
+	// could not check" is not "we checked and it disagrees", and a consumer
+	// may reasonably treat the two differently -- but neither is silently
+	// ignored inside this package (working-agreements §3: 未运行 ≠ 通过).
+	ErrTokenDecimalsUnreadable = errors.New("evm: token decimals unreadable")
 )

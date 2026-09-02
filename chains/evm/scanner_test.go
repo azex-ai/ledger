@@ -1,6 +1,7 @@
 package evm
 
 import (
+	"context"
 	"errors"
 	"math/big"
 	"testing"
@@ -126,4 +127,47 @@ func TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn(t *testing.T) {
 	raw, err := decodeERC20BalanceOf("0x70997970C51812dc3A010C7d01b50e0d17dc79C8", mustAmount32(0))
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), raw.Int64())
+}
+
+// fakeCodeAtClient satisfies codeAtClient, answering CodeAt from a queue so
+// a transient empty answer followed by a real one is expressible.
+type fakeCodeAtClient struct {
+	answers [][]byte
+	calls   int
+}
+
+func (f *fakeCodeAtClient) CodeAt(_ context.Context, _ common.Address, _ *big.Int) ([]byte, error) {
+	i := f.calls
+	f.calls++
+	if i < len(f.answers) {
+		return f.answers[i], nil
+	}
+	return f.answers[len(f.answers)-1], nil
+}
+
+// TestScanner_ProbeMulticall_DoesNotCacheANegativeProbe pins G-m3
+// (onchain-money-path.md Minor): a "Multicall3 is not deployed here" answer
+// must not be cached. A contract cannot be un-deployed, so a positive answer
+// is permanent; a negative one may just be an out-of-sync node, and caching
+// it pinned the chain to the N-single-calls fallback for the whole process
+// lifetime with no way back.
+func TestScanner_ProbeMulticall_DoesNotCacheANegativeProbe(t *testing.T) {
+	client := &fakeCodeAtClient{answers: [][]byte{{}, {0x60, 0x60}}}
+	scanner := NewScanner(&ClientSet{chains: core.ChainSet{1: {ChainID: 1}}}, 0)
+	ctx := context.Background()
+
+	has, err := scanner.probeMulticall(ctx, client, 1)
+	require.NoError(t, err)
+	require.False(t, has, "first probe sees no code")
+
+	has, err = scanner.probeMulticall(ctx, client, 1)
+	require.NoError(t, err)
+	assert.True(t, has, "a negative probe must be re-tried, not cached forever")
+	assert.Equal(t, 2, client.calls, "the second call must actually reach the chain")
+
+	// The positive answer, by contrast, is cached: no third RPC.
+	has, err = scanner.probeMulticall(ctx, client, 1)
+	require.NoError(t, err)
+	assert.True(t, has)
+	assert.Equal(t, 2, client.calls, "a positive probe is permanent and must not be re-issued")
 }
