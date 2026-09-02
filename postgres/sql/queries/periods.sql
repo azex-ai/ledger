@@ -16,3 +16,94 @@ LIMIT 1;
 SELECT * FROM period_closes
 ORDER BY created_at DESC, id DESC
 LIMIT $1;
+
+-- name: AcquirePeriodReadBarrier :exec
+-- The read half of the period-close barrier (I-61). Every journal write path
+-- takes this SHARED advisory lock in its own transaction immediately before
+-- reading the active close line, and holds it until COMMIT/ROLLBACK.
+--
+-- Reading the close line "inside the same transaction as the write" (I-15's
+-- pre-2026-09-02 wording) has no exclusive effect at all: under READ
+-- COMMITTED, ClosePeriod could INSERT and COMMIT a new line at any point
+-- between this read and the writer's COMMIT, and the journal would land
+-- behind a line that was already active when it committed. The window is not
+-- microseconds -- a consumer's RunInTx holds the transaction for as long as
+-- its own callback runs.
+--
+-- Shared, not exclusive: concurrent journals do not need to serialize against
+-- each other here (they only need to serialize against a close), so any
+-- number of writers hold this simultaneously and the barrier costs a journal
+-- post nothing but one round trip.
+--
+-- Namespace: hashed with the literal prefix 'period:' so it cannot alias the
+-- 'bal:' / 'idem:' key spaces AcquireBalanceLock and AcquireIdempotencyLock
+-- hash into (see AcquireBalanceLock's comment in journals.sql), regardless of
+-- any caller-supplied string, and it is a distinct 64-bit value from
+-- service.advisoryLockKey's job names by the same argument used there.
+SELECT pg_advisory_xact_lock_shared(hashtextextended('period:close', 0));
+
+-- name: TryAcquirePeriodCloseBarrier :one
+-- The write half of the period-close barrier (I-61). ClosePeriod takes this
+-- EXCLUSIVE advisory lock before its INSERT, so the new line cannot become
+-- active while any journal write that already read the previous line is
+-- still in flight: it waits for every in-flight writer to COMMIT or ROLLBACK.
+--
+-- try_, not the blocking pg_advisory_xact_lock, and this is the whole reason
+-- the caller polls: a *waiting* exclusive request would be queued in
+-- PostgreSQL's lock manager AHEAD of subsequent shared requests, so a journal
+-- writer that already holds some other lock (a balance lock, an idempotency
+-- lock, a journal row lock) and then asks for this shared barrier would block
+-- behind the pending close. That turns the order in which each write path
+-- happens to take its locks into a deadlock question, for every path, forever
+-- (postJournalWithQueries, preacquireBatchLocks, PendingStore and
+-- ReverseJournalFraction do not all take their locks in the same order, and
+-- they should not have to care about this one). A non-blocking request never
+-- enters the wait queue, so it can neither block a shared requester nor
+-- participate in a wait-for cycle: with try_, the barrier is order-free and
+-- no write path needs to know it exists beyond the one line that takes it.
+--
+-- Residual, accepted: a caller who composes ClosePeriod into a RunInTx that
+-- ALSO takes ledger locks holds this exclusive barrier while waiting for
+-- them, and a concurrent writer holding one of those locks while waiting for
+-- the shared barrier then closes a genuine cycle. PostgreSQL's deadlock
+-- detector reports it (40P01 -> normalizeStoreError -> core.ErrTransient), so
+-- the outcome is a retryable error, never a journal that slipped past a
+-- committed close line.
+SELECT pg_try_advisory_xact_lock(hashtextextended('period:close', 0));
+
+-- name: PeriodCloseViolations :many
+-- The observable that can falsify the barrier above (I-61): journals whose
+-- effective_at precedes the active close line AND that were written after
+-- that line was committed. Drives the period_close_violations reconciliation
+-- check.
+--
+-- The second predicate is what makes this a violation rather than the normal
+-- state of every closed period: closing August means every August journal
+-- has effective_at < close_before. Only a journal WRITTEN after the line
+-- became active is evidence the barrier (or the gate) failed.
+--
+-- Resolution limit, stated because it would otherwise be assumed away:
+-- journals.created_at and period_closes.created_at both default to now(),
+-- which in PostgreSQL is the *transaction start* time, not the commit time.
+-- A writer whose transaction started before the close line's transaction but
+-- committed after it therefore compares as "written before the close" and is
+-- not reported. That is exactly the TOCTOU shape the barrier itself closes,
+-- and this check cannot independently confirm it -- doing so would need
+-- either commit timestamps (track_commit_timestamp, off by default) or a
+-- per-journal record of the close line it was checked against. What this
+-- check does catch, and what nothing else in the system did, is any journal
+-- that reached the table without passing the gate at all: a raw INSERT, a
+-- future write path that forgets the check, or a reopen/re-close sequence
+-- that leaves history on the wrong side of the line.
+WITH active AS (
+    SELECT close_before, created_at
+    FROM period_closes
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+)
+SELECT j.uid, j.effective_at, j.created_at, a.close_before, a.created_at AS closed_at
+FROM journals j, active a
+WHERE j.effective_at < a.close_before
+  AND j.created_at > a.created_at
+ORDER BY j.id
+LIMIT sqlc.arg(page_limit);

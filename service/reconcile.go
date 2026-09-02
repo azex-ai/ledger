@@ -171,6 +171,26 @@ type SnapshotDriftRow struct {
 	RecomputedBalance decimal.Decimal
 }
 
+// PeriodCloseViolation is a journal that sits on the closed side of the
+// active period-close line AND was written after that line was committed
+// (I-15, I-61). Identified by uid only -- reconciliation findings never
+// carry internal ids (I-18).
+//
+// This is the observable that can falsify the period-close barrier. Its
+// resolution limit is stated on the PeriodCloseViolations query in
+// postgres/sql/queries/periods.sql and repeated on
+// runCheckPeriodCloseViolations: created_at is a transaction-start
+// timestamp, so it cannot see a writer whose transaction began before the
+// close line's and committed after it. It does see any journal that reached
+// the table without passing the gate at all.
+type PeriodCloseViolation struct {
+	JournalUID  string
+	EffectiveAt time.Time
+	CreatedAt   time.Time
+	CloseBefore time.Time
+	ClosedAt    time.Time
+}
+
 // ---------------------------------------------------------------------------
 // ReconcileQuerier — the port consumed by FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -250,6 +270,11 @@ type ReconcileQuerier interface {
 	// entries-based recompute as of that date, up to pageLimit rows
 	// (M4/I-23).
 	LatestSnapshotDrift(ctx context.Context, pageLimit int) ([]SnapshotDriftRow, error)
+	// period_close_violations (I-61) — journals on the closed side of the
+	// active close line that were written after that line was committed.
+	// Independent of the advisory barrier that is supposed to make this
+	// impossible: a barrier still needs an observable that can falsify it.
+	PeriodCloseViolations(ctx context.Context, pageLimit int) ([]PeriodCloseViolation, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +338,12 @@ type FullReconciliationConfig struct {
 	// entries -- deployments rarely have more than a few dozen -- so
 	// reaching the cap is not expected in practice.
 	UntaggedHolderKindPageLimit int
+
+	// PeriodCloseViolationPageLimit caps the number of period-close
+	// violations fetched per run (default 200, mirroring
+	// NegativeBalancePageLimit). Reaching the cap marks the check incomplete
+	// rather than silently truncating the finding list.
+	PeriodCloseViolationPageLimit int
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -346,6 +377,9 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	}
 	if out.UntaggedHolderKindPageLimit == 0 {
 		out.UntaggedHolderKindPageLimit = 200
+	}
+	if out.PeriodCloseViolationPageLimit == 0 {
+		out.PeriodCloseViolationPageLimit = 200
 	}
 	return out
 }
@@ -525,6 +559,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 		skippedChecks = append(skippedChecks, "unauthorized_journals")
 		s.logger.Info("reconcile: unauthorized_journals skipped: no AuthVerifier configured (ledger.WithAttestor was never called)")
 	}
+
+	// --- period_close_violations: journals written behind an already-active close line (I-61) ---
+	checks = append(checks, s.runCheckPeriodCloseViolations(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -1767,4 +1804,74 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 
 	s.metrics.ReconcileCompleted(result.Balanced)
 	return result, nil
+}
+
+// runCheckPeriodCloseViolations is the period_close_violations check
+// (docs/INVARIANTS.md I-15, I-61): it counts journals whose effective_at
+// falls on the closed side of the active close line AND that were written
+// after that line was committed.
+//
+// It exists as a check independent of the advisory barrier that is supposed
+// to make this impossible. Before 2026-09-02 the close line was enforced by
+// a single READ COMMITTED read inside the writer's transaction and nothing
+// in the reconciliation suite compared journals.effective_at against
+// period_closes.close_before at all -- so a journal that slipped past the
+// line left no trace anywhere. A barrier with no observable that can falsify
+// it is an assertion, not a control (working-agreements §3).
+//
+// The second predicate (written after the line was committed) is what makes
+// this a violation rather than the normal state of every closed period:
+// closing August means every August journal has effective_at < close_before.
+// Only a journal WRITTEN after the line became active is evidence that the
+// gate or the barrier failed.
+//
+// Resolution limit, restated here because a check whose blind spot is only
+// documented in SQL will be read as unconditional: both timestamps default
+// to now(), which in PostgreSQL is the transaction-start time. A writer
+// whose transaction began before the close line's transaction but committed
+// after it compares as "written before the close" and is NOT reported --
+// precisely the TOCTOU the barrier closes, which this check therefore cannot
+// independently confirm. What it does catch is any journal that reached the
+// table without passing the gate: a raw INSERT, a future write path that
+// forgets the check, or a reopen/re-close sequence that leaves history on
+// the wrong side of the line.
+func (s *FullReconciliationService) runCheckPeriodCloseViolations(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "period_close_violations", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rows, err := s.querier.PeriodCloseViolations(ctx, s.cfg.PeriodCloseViolationPageLimit)
+	if err != nil {
+		result.Passed = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "period close violation query failed",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	for _, r := range rows {
+		result.Passed = false
+		s.logger.Warn("service: reconcile: journal written behind an active period close line",
+			"journal_uid", r.JournalUID,
+			"effective_at", r.EffectiveAt,
+			"close_before", r.CloseBefore,
+		)
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("journal %s: effective_at %s is behind the active close line %s, and it was written after that line was committed",
+				r.JournalUID, r.EffectiveAt.UTC().Format(time.RFC3339), r.CloseBefore.UTC().Format(time.RFC3339)),
+			Detail: fmt.Sprintf("journal_created_at=%s close_created_at=%s", r.CreatedAt.UTC().Format(time.RFC3339Nano), r.ClosedAt.UTC().Format(time.RFC3339Nano)),
+		})
+	}
+
+	if len(rows) >= s.cfg.PeriodCloseViolationPageLimit {
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("period close violation scan incomplete: hit page limit (%d rows)", s.cfg.PeriodCloseViolationPageLimit),
+		})
+	} else if len(result.Findings) == 0 {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "period close: no journal was written behind the active close line",
+		})
+	}
+
+	return result
 }

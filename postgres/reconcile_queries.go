@@ -417,3 +417,26 @@ func (a *ReconcileAdapter) DuplicateIdempotencyKeys(ctx context.Context) ([]serv
 	}
 	return result, nil
 }
+
+// PeriodCloseViolations returns journals that sit on the closed side of the
+// active period-close line AND were written after that line was committed
+// (the period_close_violations check, I-61). See the query's own comment in
+// sql/queries/periods.sql for the resolution limit of the created_at
+// comparison.
+func (a *ReconcileAdapter) PeriodCloseViolations(ctx context.Context, pageLimit int) ([]service.PeriodCloseViolation, error) {
+	rows, err := a.q.PeriodCloseViolations(ctx, int32(pageLimit)) //nolint:gosec // page limits are small, bounded internally
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: period close violations: %w", err)
+	}
+	result := make([]service.PeriodCloseViolation, len(rows))
+	for i, r := range rows {
+		result[i] = service.PeriodCloseViolation{
+			JournalUID:  pgToUID(r.Uid),
+			EffectiveAt: r.EffectiveAt,
+			CreatedAt:   r.CreatedAt,
+			CloseBefore: r.CloseBefore,
+			ClosedAt:    r.ClosedAt,
+		}
+	}
+	return result, nil
+}

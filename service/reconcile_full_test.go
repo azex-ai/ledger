@@ -66,24 +66,27 @@ type mockReconcileQuerier struct {
 	systemRollups  []SystemRollupRow
 	snapshotDrifts []SnapshotDriftRow
 
+	periodCloseViolations []PeriodCloseViolation
+
 	// force errors
-	errOrphanCount         error
-	errOrphanSample        error
-	errEquation            error
-	errSettlement          error
-	errNegBal              error
-	errRoleLessLiabilities error
-	errUntaggedHolderKind  error
-	errOrphanReservs       error
-	errDupeKeys            error
-	errStaleItems          error
-	errCheckpointPage      error
-	errUnbalancedCount     error
-	errUnbalancedSample    error
-	errGetScanCursor       error
-	errSetScanCursor       error
-	errSystemRollups       error
-	errSnapshotDrifts      error
+	errOrphanCount           error
+	errOrphanSample          error
+	errEquation              error
+	errSettlement            error
+	errNegBal                error
+	errRoleLessLiabilities   error
+	errUntaggedHolderKind    error
+	errOrphanReservs         error
+	errDupeKeys              error
+	errStaleItems            error
+	errCheckpointPage        error
+	errUnbalancedCount       error
+	errUnbalancedSample      error
+	errGetScanCursor         error
+	errSetScanCursor         error
+	errSystemRollups         error
+	errSnapshotDrifts        error
+	errPeriodCloseViolations error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -189,6 +192,16 @@ func (m *mockReconcileQuerier) LatestSnapshotDrift(_ context.Context, pageLimit 
 		return m.snapshotDrifts[:pageLimit], nil
 	}
 	return m.snapshotDrifts, nil
+}
+
+func (m *mockReconcileQuerier) PeriodCloseViolations(_ context.Context, pageLimit int) ([]PeriodCloseViolation, error) {
+	if m.errPeriodCloseViolations != nil {
+		return nil, m.errPeriodCloseViolations
+	}
+	if len(m.periodCloseViolations) > pageLimit {
+		return m.periodCloseViolations[:pageLimit], nil
+	}
+	return m.periodCloseViolations, nil
 }
 
 // ---------------------------------------------------------------------------

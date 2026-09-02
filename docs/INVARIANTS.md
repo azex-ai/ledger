@@ -665,10 +665,24 @@ still be numerically wrong in storage; only reads through
 
 ## I-15: The accounting period close line is a hard write barrier
 
-There is no journal whose `effective_at` is earlier than the currently active
-period-close line (`period_closes`, latest-`created_at`-row-wins). Real-time
-balances (`checkpoint + delta`) are unaffected — the close line only gates
-*new writes*, it never rewrites or hides history.
+No journal is *written* behind a close line that was already active when the
+write happened: once a `period_closes` line is committed
+(latest-`created_at`-row-wins), no transaction can afterwards land a journal
+whose `effective_at` precedes it. Real-time balances
+(`checkpoint + delta`) are unaffected — the close line only gates *new
+writes*, it never rewrites or hides history.
+
+> Wording corrected 2026-09-02. This section previously read "There is no
+> journal whose `effective_at` is earlier than the currently active
+> period-close line" — a universal claim that is false after every ordinary
+> close: closing August makes every August journal's `effective_at` earlier
+> than the line, which is the *point* of closing a period, not a violation.
+> Stated that way the invariant was unfalsifiable in the wrong direction: any
+> check written against its letter would fire on healthy fleets, which is
+> presumably part of why no check was ever written. The property that is
+> actually worth guaranteeing, and that the barrier below delivers, is the
+> one now stated: the line is a barrier against *later writes*, not a claim
+> about existing history.
 
 **Why**: without a close line, any historical report can be silently changed
 by a later retroactive posting — "the books for last month are final" has no
@@ -683,9 +697,28 @@ active close line (`GetActivePeriodClose`) inside the same transaction as
 every write path (direct `PostJournal`, `ExecuteTemplate`,
 `ExecuteTemplateBatch`, and `ReverseJournal`, since they all funnel through
 this method) and rejects with `core.ErrPeriodClosed` when
-`effective_at < close_before`.
+`effective_at < close_before` — **and, since 2026-09-02, does so under the
+shared half of the period-close advisory barrier, with `ClosePeriod` taking
+the exclusive half.** See I-61 for that mechanism and for the
+`period_close_violations` reconciliation check that can falsify it.
 
-**Pinned by**:
+> Enforcement gap closed 2026-09-02 (`concurrency.md` B-M5). Reading the line
+> "inside the same transaction as every write path" was the whole of the
+> enforcement, and it is not exclusion: `PeriodCloseStore.ClosePeriod` took
+> no lock of any kind, so under READ COMMITTED it could INSERT and COMMIT a
+> new line at any point between a writer's read and that writer's COMMIT.
+> The window is not microseconds — a consumer's `RunInTx` holds the
+> transaction open for as long as its own callback runs, which
+> `ledger.Service.RunInTx`'s doc actively encourages. Nothing in the
+> reconciliation suite compared `journals.effective_at` against
+> `period_closes.close_before`, so a journal that slipped through left no
+> trace anywhere.
+
+**Pinned by** (every pin below is single-threaded — it closes the period
+first and then asserts a later posting is refused. That is the whole reason
+B-M5 went unnoticed for as long as it did: the hole was purely a matter of
+two transactions' relative timing, which no sequential test can express. The
+concurrency pins live on I-61):
 - `postgres.TestPeriodClosesTableExists` (schema pin)
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
   enforce before the first close
@@ -5479,3 +5512,92 @@ unforgeable. Read together, that asymmetry is itself the signal: a
   tamper back through `ledger.New(pool)` → `ConfigHistory()`, not off the
   tables. The first also asserts the absence described above: the same edit
   leaves no `account_policy_changes` row.
+
+## I-61: A period close serializes against in-flight journal writes, and a journal that lands behind an active close line is observable
+
+(2026-09-02 second-round audit: `concurrency.md` B-M5. Contract
+`docs/plans/2026-09-02-remediation-contracts.md` Wave 2 D-lock.)
+
+**Rule** (two halves, and the second is not optional):
+
+1. **Barrier.** Every journal write path takes the *shared* period-close
+   advisory lock (`AcquirePeriodReadBarrier`, key
+   `hashtextextended('period:close', 0)`) in its own transaction immediately
+   before reading the active close line, and holds it until that transaction
+   ends. `PeriodCloseStore.ClosePeriod` takes the *exclusive* half before its
+   INSERT. A close line therefore cannot become active while a writer that
+   has already passed the gate is still in flight — the close waits for
+   every such writer to COMMIT or ROLLBACK.
+2. **Observable.** The `period_close_violations` reconciliation check counts
+   journals whose `effective_at` is behind the active close line *and* whose
+   `created_at` is later than that line's — non-zero is a finding. A barrier
+   with nothing that can falsify it is an assertion, not a control
+   (`working-agreements.md` §3).
+
+**Why**: I-15 promised that last month's books are final. Its enforcement was
+one plain READ COMMITTED read, and `ClosePeriod` participated in no lock at
+all, so "the books are closed" held only for writers whose transactions had
+not yet started. Real money follows: a backdated journal landing behind a
+committed close silently changes a period whose reports were already
+published, and the correction path I-2 mandates (reverse at the current open
+date) was never taken because nobody knew.
+
+**Enforced by**:
+- `postgres/sql/queries/periods.sql` — `AcquirePeriodReadBarrier` (shared)
+  and `TryAcquirePeriodCloseBarrier` (exclusive). The exclusive half is the
+  non-blocking `pg_try_advisory_xact_lock`, polled by
+  `postgres.acquirePeriodCloseBarrier` within
+  `periodCloseBarrierBudget`. This is deliberate, not a shortcut: a
+  *waiting* exclusive request is queued in PostgreSQL's lock manager ahead
+  of subsequent shared requests, which would make every write path's
+  internal lock order (balance locks, idempotency locks, journal row locks —
+  and they do not all agree) a deadlock question with respect to this
+  barrier. A non-blocking request never enters the wait queue, so the
+  barrier is order-free: `postJournalWithQueries` is the only place that
+  needs to know it exists.
+- `postgres.LedgerStore.postJournalWithQueries` — takes the shared barrier
+  immediately before `GetActivePeriodClose`; every write path funnels
+  through this method.
+- `postgres.PeriodCloseStore.ClosePeriod` — opens its own transaction in
+  pool mode (the barrier is transaction-scoped; a bare autocommit INSERT
+  would release the lock before the INSERT it is meant to protect) and
+  returns `core.ErrTransient` naming the reason if the budget expires. The
+  close line is **not** appended in that case.
+- `service.FullReconciliationService.runCheckPeriodCloseViolations` — the
+  `period_close_violations` check, backed by the `PeriodCloseViolations`
+  query.
+
+**Known resolution limit of the check** (stated because a blind spot
+documented only in SQL will be read as unconditional): `journals.created_at`
+and `period_closes.created_at` both default to `now()`, which in PostgreSQL
+is the *transaction start* time. A writer whose transaction began before the
+close line's transaction but committed after it compares as "written before
+the close" and is not reported — precisely the TOCTOU the barrier closes,
+which the check therefore cannot independently confirm. Confirming it would
+need commit timestamps (`track_commit_timestamp`, off by default) or a
+per-journal record of the close line it was checked against. What the check
+does catch, and what nothing in the suite did before, is any journal that
+reached the table without passing the gate at all: a raw INSERT, a future
+write path that forgets the check, or a reopen/re-close sequence that leaves
+history on the wrong side of the line.
+
+**Residual, accepted**: a caller who composes `ClosePeriod` into a `RunInTx`
+that also takes ledger locks holds the exclusive barrier while waiting for
+them; a concurrent writer holding one of those locks while waiting for the
+shared barrier then closes a genuine wait-for cycle. PostgreSQL's deadlock
+detector reports it (40P01 → `normalizeStoreError` → `core.ErrTransient`), so
+the outcome is a retryable error — never a journal that slipped past a
+committed close line.
+
+**Pinned by**:
+- `TestClosePeriod_WaitsForInFlightBackdatedJournal` — the
+  concurrency pin, driven from `ledger.New(pool)` + `RunInTx`: a close racing
+  an in-flight backdated posting must not return before that writer's
+  transaction resolves. Removing either half of the barrier makes it red.
+- `TestClosePeriod_RejectsAfterBarrier` — the barrier does not change
+  the ordinary path: a close with nothing in flight still succeeds promptly,
+  and a later backdated posting is still refused.
+- `TestReconcile_PeriodCloseViolations_ReportsForgedBackdatedJournal`
+  — the check is registered in the suite, stays green for the normal state
+  of a closed period, and reports a journal forged straight into the table
+  behind the line.

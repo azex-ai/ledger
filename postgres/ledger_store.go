@@ -1087,9 +1087,24 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		reversalOfID = orig.ID
 	}
 
-	// Period close (I-15): reject postings whose effective date falls before
-	// the active close line. GetActivePeriodClose returns pgx.ErrNoRows when
-	// the period has never been closed — nothing to enforce in that case.
+	// Period close (I-15, I-61): reject postings whose effective date falls
+	// before the active close line. GetActivePeriodClose returns
+	// pgx.ErrNoRows when the period has never been closed — nothing to
+	// enforce in that case.
+	//
+	// The SHARED period barrier is taken FIRST and held until this
+	// transaction ends. Without it this gate was a plain READ COMMITTED read:
+	// ClosePeriod took no lock at all, so it could INSERT and COMMIT a new
+	// line at any point between this read and this transaction's COMMIT, and
+	// the journal landed behind a line that was already active. Reading the
+	// line "in the same transaction as the write" (I-15's original Enforced
+	// by) is not exclusion. Order-free by construction — the exclusive half
+	// polls instead of queueing — so every write path funnelling through
+	// here inherits the barrier without having to reason about where it sits
+	// among its own locks (see queries/periods.sql).
+	if err := acquirePeriodReadBarrier(ctx, q); err != nil {
+		return nil, fmt.Errorf("postgres: post journal: %w", err)
+	}
 	activeClose, err := q.GetActivePeriodClose(ctx)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: post journal: get active period close: %w", err)
