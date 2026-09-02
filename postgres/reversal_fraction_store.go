@@ -139,7 +139,13 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		if !existing.ReversalOf.Valid || existing.ReversalOf.Int64 != journalID {
 			return nil, fmt.Errorf("postgres: reverse journal fraction: idempotency key %q already used for a different journal: %w", idempotencyKey, core.ErrConflict)
 		}
-		existingMeta := jsonToMetadata(existing.Metadata)
+		existingMeta, metaErr := jsonToMetadata(existing.Metadata)
+		if metaErr != nil {
+			// An unparseable stored blob cannot be compared, and treating it
+			// as absent used to make a DIFFERENT payload compare equal
+			// (operability I-23). Fail closed on the conflict side.
+			return nil, fmt.Errorf("postgres: reverse journal fraction: idempotency key %q: stored metadata unreadable: %w: %w", idempotencyKey, metaErr, core.ErrConflict)
+		}
 		if existingMeta["reason"] != reason || existingMeta["reversal_fraction"] != expectedFraction {
 			return nil, fmt.Errorf("postgres: reverse journal fraction: idempotency key %q payload mismatch: %w", idempotencyKey, core.ErrConflict)
 		}

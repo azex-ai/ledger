@@ -90,6 +90,16 @@ func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen
 		return nil, fmt.Errorf("postgres: create booking: %w", err)
 	}
 
+	// Parsed before the comparison rather than inside it: an unparseable
+	// stored blob must not degrade to nil, which is the same value a row
+	// with no metadata produces and would make a DIFFERENT payload compare
+	// EQUAL -- resolving a genuine conflict into "already done, here is the
+	// original result" (operability I-23). Fail closed on the conflict side.
+	existingMetadata, metaErr := jsonToStringMetadata(existing.Metadata)
+	if metaErr != nil {
+		return nil, fmt.Errorf("postgres: create booking: idempotency key %q: stored metadata unreadable: %w: %w", input.IdempotencyKey, metaErr, core.ErrConflict)
+	}
+
 	if class.Code != input.ClassificationCode ||
 		existing.AccountHolder != input.AccountHolder ||
 		existing.CurrencyID != cur.ID ||
@@ -108,7 +118,7 @@ func (s *BookingStore) ensureBookingMatchesInput(ctx context.Context, q *sqlcgen
 		// as Go maps -- and, per bookingMetadataMatches's doc comment,
 		// tolerate "block_number" changing across replays (design doc §3 /
 		// I-20).
-		!bookingMetadataMatches(jsonToStringMetadata(existing.Metadata), input.Metadata) {
+		!bookingMetadataMatches(existingMetadata, input.Metadata) {
 		return nil, fmt.Errorf("postgres: create booking: idempotency key %q payload mismatch: %w", input.IdempotencyKey, core.ErrConflict)
 	}
 

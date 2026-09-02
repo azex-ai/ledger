@@ -9,6 +9,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,18 @@ import (
 	"github.com/azex-ai/ledger/service"
 )
 
-func TestFullReconciliation_UnauthorizedJournals_SkippedWithoutSetAuthCheck(t *testing.T) {
+// TestFullReconciliation_WithoutAuthVerifier_StillReportsFullCoverage pins
+// C-m4 (2026-09-02 audit, tamper-evident.md m-4). Previously this check ran
+// unconditionally and returned a Complete=false placeholder when no
+// AuthVerifier was configured, which made report.FullCoverage permanently
+// false for every consumer that never called ledger.WithAttestor -- and
+// ReconcileCheckResult("unauthorized_journals", passed && complete)
+// permanently red. That is the same dead vote that got check #8 deleted: a
+// signal that can never be true carries no information.
+//
+// Now the check is not run at all and its name goes into SkippedChecks:
+// absent-and-named, which is neither "passed" nor a permanent alarm.
+func TestFullReconciliation_WithoutAuthVerifier_StillReportsFullCoverage(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
@@ -34,9 +46,15 @@ func TestFullReconciliation_UnauthorizedJournals_SkippedWithoutSetAuthCheck(t *t
 
 	report, err := full.RunFullReconciliation(ctx)
 	require.NoError(t, err)
-	check := findCheck(t, report, "unauthorized_journals")
-	assert.True(t, check.Passed, "a skipped check must not report a violation")
-	assert.False(t, check.Complete, "a skipped check must never look like full coverage")
+
+	for _, c := range report.Checks {
+		require.NotEqual(t, "unauthorized_journals", c.Name,
+			"a check that cannot run in this deployment must not cast a vote")
+	}
+	assert.Contains(t, report.SkippedChecks, "unauthorized_journals",
+		"skipping must be reported, not silent -- otherwise it is indistinguishable from having run")
+	assert.True(t, report.FullCoverage,
+		"an unrunnable check must not poison FullCoverage for every deployment that never enabled signing; report: %+v", report)
 }
 
 func TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid(t *testing.T) {
@@ -239,7 +257,137 @@ func TestFullReconciliation_UnauthorizedJournals_SkipsNeverSignedJournal(t *test
 	require.NoError(t, err)
 	check := findCheck(t, report, "unauthorized_journals")
 	assert.True(t, check.Passed, "a never-signed journal must not be flagged as unauthorized: %+v", check.Findings)
-	assert.True(t, check.Complete)
+	// C-M8 (tamper-evident.md M-8): the only journal in the ledger was
+	// skipped, so this run verified NOTHING. It used to report
+	// Complete=true here, which made the check's metric green while the
+	// whole ledger was unverifiable.
+	assert.False(t, check.Complete,
+		"a run in which every journal was skipped verified nothing and must not claim full coverage: %+v", check)
+	assert.False(t, report.FullCoverage, "the report must carry that incompleteness up")
+}
+
+// TestFullReconciliation_UnauthorizedJournals_ZeroSignedIsIncomplete is
+// C-M8's dedicated pin: several journals, none of them signed, an
+// AuthVerifier wired. Passed stays true (finding nothing IS finding no
+// violation) but Complete must be false, so that
+// ReconcileCheckResult(name, Passed && Complete) -- the alertable signal --
+// does not go green on a ledger nothing could be verified in.
+func TestFullReconciliation_UnauthorizedJournals_ZeroSignedIsIncomplete(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupAttestFixture(t, pool, ctx)
+
+	// Three journals through the real write path with NO attestor wired:
+	// auth_status='unsigned_no_attestor', auth_key_id=''. This is the shape
+	// of a deployment whose verifier is configured but whose write path
+	// never got an Attestor -- and of a fleet whose entire history predates
+	// P5.
+	ledgerStore := postgres.NewLedgerStore(pool)
+	for i := 0; i < 3; i++ {
+		_, err := ledgerStore.PostJournal(ctx, f.journalInput(int64(9200+i), postgrestest.UniqueKey("uj-zero-signed")))
+		require.NoError(t, err)
+	}
+
+	_, verifier, err := ed25519KeyPair(t, "verify-key-uj-zero")
+	require.NoError(t, err)
+
+	rollup := postgres.NewRollupAdapter(pool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pool)
+	queries := postgres.NewQueryStore(pool)
+	engine := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{}, engine)
+	full.SetAuthCheck(queries, verifier)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "unauthorized_journals")
+	assert.True(t, check.Passed, "no violation was found, and that part is honest")
+	assert.False(t, check.Complete,
+		"scanning 3 journals and verifying 0 of them must not report full coverage; check: %+v", check)
+	assert.False(t, report.FullCoverage)
+
+	var found bool
+	for _, finding := range check.Findings {
+		if strings.Contains(finding.Description, "verified nothing") {
+			found = true
+		}
+	}
+	assert.True(t, found, "the finding must say the check verified nothing; findings: %+v", check.Findings)
+}
+
+// TestFullReconciliation_UnauthorizedJournals_ScansTheNewestPage pins the
+// sibling of C-M1 found in this check (contract §0's "fix the shape, not the
+// instance"): with no resume cursor it only ever looks at one page, and that
+// page used to be the OLDEST journals -- the one place a row forged today
+// cannot be. A forged signature among the NEWEST journals must be found even
+// when older journals fill the page limit.
+func TestFullReconciliation_UnauthorizedJournals_ScansTheNewestPage(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupAttestFixture(t, pool, ctx)
+
+	attestor, verifier, err := ed25519KeyPair(t, "verify-key-uj-newest")
+	require.NoError(t, err)
+	ledgerStore := postgres.NewLedgerStore(pool).WithAuth(attestor)
+
+	// Five legitimately signed journals...
+	for i := 0; i < 5; i++ {
+		_, err = ledgerStore.PostJournal(ctx, f.journalInput(int64(9300+i), postgrestest.UniqueKey("uj-newest-legit")))
+		require.NoError(t, err)
+	}
+	// ...then, as the NEWEST row, one that CLAIMS a signature but carries
+	// garbage: same insert shape as
+	// TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature (a
+	// forged row does not go through PostJournal, so it is inserted
+	// directly, entries included so the ledger stays balanced).
+	var forgedID int64
+	var forgedUID string
+	var effectiveAt time.Time
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	require.NoError(t, tx.QueryRow(ctx, `
+		INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, metadata, actor_id, source, effective_at, uid, auth_digest, auth_signature, auth_key_id, auth_status)
+		VALUES ($1, $2, 1::numeric, 1::numeric, '{}'::jsonb, 0, 'newest-page-forgery', now(), gen_random_uuid(), decode('deadbeef','hex'), decode('deadbeef','hex'), $3, 'signed')
+		RETURNING id, uid, effective_at
+	`, f.journalTypeID, postgrestest.UniqueKey("uj-newest-forged"), "forged-key-id").Scan(&forgedID, &forgedUID, &effectiveAt))
+	_, err = tx.Exec(ctx, `
+		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
+		VALUES ($1, $2, $3, $4, 'debit', 1::numeric, $5, now())
+	`, forgedID, int64(9399), f.currencyID, f.classificationID, effectiveAt)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount, effective_at, created_at)
+		VALUES ($1, $2, $3, $4, 'credit', 1::numeric, $5, now())
+	`, forgedID, core.SystemAccountHolder(9399), f.currencyID, f.classificationID, effectiveAt)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	rollup := postgres.NewRollupAdapter(pool)
+	reconcileAdapter := postgres.NewReconcileAdapter(pool)
+	queries := postgres.NewQueryStore(pool)
+	engine := core.NewEngine()
+	basic := service.NewReconciliationService(rollup, rollup, rollup, rollup, engine)
+	// Page limit of 2: an oldest-first scan would see only the two earliest
+	// (valid) journals and report clean.
+	full := service.NewFullReconciliationService(basic, reconcileAdapter, service.FullReconciliationConfig{
+		UnauthorizedJournalsPageLimit: 2,
+	}, engine)
+	full.SetAuthCheck(queries, verifier)
+
+	report, err := full.RunFullReconciliation(ctx)
+	require.NoError(t, err)
+	check := findCheck(t, report, "unauthorized_journals")
+	assert.False(t, check.Passed,
+		"the forged signature is among the NEWEST journals; a one-page scan has to look there. check: %+v", check)
+	var namedTheForgery bool
+	for _, finding := range check.Findings {
+		if containsUID(finding.Description, forgedUID) {
+			namedTheForgery = true
+		}
+	}
+	assert.True(t, namedTheForgery, "the finding must name the forged journal; findings: %+v", check.Findings)
 }
 
 func TestFullReconciliation_UnauthorizedJournals_ReportsIncompleteWhenPageLimitHit(t *testing.T) {

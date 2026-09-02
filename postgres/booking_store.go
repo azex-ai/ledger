@@ -286,7 +286,10 @@ func (s *BookingStore) transitionWithQueries(ctx context.Context, qtx *sqlcgen.Q
 	}
 
 	// Merge metadata
-	metadata := jsonToStringMetadata(op.Metadata)
+	metadata, metaErr := jsonToStringMetadata(op.Metadata)
+	if metaErr != nil {
+		return nil, fmt.Errorf("postgres: transition: booking %s: stored metadata unreadable: %w", input.BookingUID, metaErr)
+	}
 	if metadata == nil {
 		metadata = make(map[string]string)
 	}

@@ -50,6 +50,21 @@ type ReconcileReport struct {
 	// check was capped, timed out, or skipped, so the run cannot testify
 	// about the parts it never looked at.
 	FullCoverage bool `json:"full_coverage"`
+	// SkippedChecks names the checks that were not RUN in this deployment
+	// because they are structurally unrunnable here -- currently only
+	// unauthorized_journals, when no core.AuthVerifier is configured.
+	//
+	// Such a check is deliberately absent from Checks rather than present
+	// with Complete=false: a permanently-incomplete vote makes FullCoverage
+	// permanently false, which is how the previous generation of this report
+	// ended up carrying a signal that could never be true (the deleted
+	// check #8). Absent-and-named is not the same as passed, which is why
+	// the name is here instead of nowhere (working-agreements §3).
+	//
+	// A consumer that requires a check to be ACTIVE (e.g. one that has
+	// enabled signing and wants proof the signature check is running) should
+	// assert on this field being empty, not merely on FullCoverage.
+	SkippedChecks []string `json:"skipped_checks,omitempty"`
 	// RunAt is when the reconciliation run started.
 	RunAt time.Time `json:"run_at"`
 }

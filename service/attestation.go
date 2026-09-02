@@ -77,6 +77,46 @@ type AttestationStore interface {
 	JournalAuthMaterial(ctx context.Context, journalIDs []int64) (map[int64]core.JournalAuthMaterial, error)
 }
 
+// AttestationMetrics is the observability port AttestationService needs
+// (2026-09-02 audit, tamper-evident.md M-9 / I-M8). Before it existed, a
+// persistently failing anchor publish produced exactly one signal -- an
+// ERROR log line -- and nothing at all in metrics, so "the ledger's history
+// has had no external witness for three days" was not an alertable fact.
+//
+// Defined here, at the consumer, rather than as a widening of core.Metrics:
+// core.Metrics is implemented by consumers, and this package cannot add
+// methods to it without breaking them (golang.md: interfaces belong to the
+// consumer, 1-3 methods). core.Metrics is EXPECTED to satisfy this
+// interface -- NewAttestationService checks whether the configured
+// implementation does, and says so when it does not.
+//
+// See docs/RUNBOOK.md for the alert thresholds these three feed.
+type AttestationMetrics interface {
+	// AttestationBatchResult reports whether one RunAttestBatch pass
+	// completed. ok=false means the DB-side hash chain did not advance this
+	// run.
+	AttestationBatchResult(ok bool)
+	// AnchorPublishResult reports whether publishing one attestation to the
+	// external anchor succeeded. Repeated failures mean the ledger's own
+	// database is the only remaining witness to its own history.
+	AnchorPublishResult(ok bool)
+	// AnchorLagSeqs reports how many attestations the anchor is behind the
+	// DB chain (0 = caught up). Emitted on every run, success or failure, so
+	// a stuck anchor shows up as a rising number rather than as an absence
+	// of events.
+	AnchorLagSeqs(lag int64)
+}
+
+// nopAttestationMetrics is the fallback when the configured core.Metrics
+// does not satisfy AttestationMetrics. It is deliberately paired with a
+// startup Warn in NewAttestationService: silently discarding these three
+// would recreate the blind spot this port exists to close.
+type nopAttestationMetrics struct{}
+
+func (nopAttestationMetrics) AttestationBatchResult(bool) {}
+func (nopAttestationMetrics) AnchorPublishResult(bool)    {}
+func (nopAttestationMetrics) AnchorLagSeqs(int64)         {}
+
 // AttestationService creates new attestations and keeps the external
 // anchor caught up.
 type AttestationService struct {
@@ -96,8 +136,9 @@ type AttestationService struct {
 	// unresolved deployment choice; the library ships no production
 	// adapter, so tolerating nil here is what lets P6 ship at all before
 	// Aaron picks one).
-	anchor core.Anchor
-	logger core.Logger
+	anchor  core.Anchor
+	logger  core.Logger
+	metrics AttestationMetrics
 }
 
 // NewAttestationService creates an AttestationService. attestor is
@@ -109,13 +150,41 @@ type AttestationService struct {
 // (may be nil -- see the AttestationService.verifier field doc comment).
 // anchor may be nil (see the AttestationService.anchor field doc comment).
 func NewAttestationService(store AttestationStore, attestor core.Attestor, verifier core.AuthVerifier, anchor core.Anchor, engine *core.Engine) *AttestationService {
+	logger := engine.Logger()
+
+	// The configured core.Metrics is asked whether it can carry the three
+	// attestation/anchor observations (see AttestationMetrics). An
+	// implementation that predates them keeps working -- but the loss of
+	// those three signals is logged rather than absorbed, because "no
+	// anchor_publish_total time series exists" and "publishing is fine" look
+	// identical on a dashboard (working-agreements.md §3).
+	var metrics AttestationMetrics = nopAttestationMetrics{}
+	if am, ok := engine.Metrics().(AttestationMetrics); ok {
+		metrics = am
+	} else {
+		logger.Warn("service: attestation: the configured core.Metrics does not implement service.AttestationMetrics -- " +
+			"attestation/anchor metrics (batch result, publish result, anchor lag) will not be emitted; " +
+			"anchor failures will only appear in logs")
+	}
+
 	return &AttestationService{
 		store:    store,
 		attestor: attestor,
 		verifier: verifier,
 		anchor:   anchor,
-		logger:   engine.Logger(),
+		logger:   logger,
+		metrics:  metrics,
 	}
+}
+
+// SetMetrics overrides the metrics sink NewAttestationService resolved from
+// the engine -- for a consumer whose core.Metrics implementation cannot be
+// widened, or a test that needs to observe the emissions.
+func (s *AttestationService) SetMetrics(m AttestationMetrics) {
+	if m == nil {
+		return
+	}
+	s.metrics = m
 }
 
 // RunAttestBatch creates exactly one new attestation covering up to
@@ -132,6 +201,13 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 	if s.attestor == nil {
 		return 0, 0, fmt.Errorf("service: attestation: no Attestor configured: %w", core.ErrInvalidInput)
 	}
+
+	// Reported on EVERY exit path below, including the early error returns
+	// (M-9): a run that failed before it could sign is exactly as much a
+	// "the chain did not advance" event as one that failed to publish, and a
+	// counter that only increments on success cannot distinguish "nothing to
+	// do" from "broken for a week".
+	defer func() { s.metrics.AttestationBatchResult(err == nil) }()
 
 	s.catchUpAnchor(ctx)
 
@@ -242,6 +318,7 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 			// journal 写入" extends to not blocking attestation either.
 			// catchUpAnchor retries this on the next run.
 			s.logger.Error("service: attestation: anchor publish failed, will retry next run", "seq", result.Seq, "error", err)
+			s.metrics.AnchorPublishResult(false)
 		} else if err := s.store.RecordAnchorObservation(ctx, result.Seq, result.RootHash); err != nil {
 			// A successful Publish is knowledge that the anchor holds this
 			// seq -- as much an observation as a Head() read, and recorded
@@ -249,6 +326,9 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 			// would always lag one batch behind, and an anchor erased right
 			// after its first publish would have nothing to contradict it.
 			s.logger.Error("service: attestation: recording the anchor observation failed", "seq", result.Seq, "error", err)
+			s.metrics.AnchorPublishResult(true)
+		} else {
+			s.metrics.AnchorPublishResult(true)
 		}
 	}
 
@@ -358,6 +438,18 @@ func (s *AttestationService) catchUpAnchor(ctx context.Context) {
 		s.logger.Error("service: attestation: catch-up: latest attestation failed", "error", err)
 		return
 	}
+
+	// Emitted on every run, caught up or not (M-9): a gauge that only
+	// appears when something is wrong is indistinguishable from a scrape
+	// that failed. 0 is the healthy, expected value.
+	lag := latest.Seq - anchorSeq
+	if lag < 0 {
+		// The anchor claims more than the DB has. VerifyLedger reports that
+		// as TAMPERED; here it is not a negative "lag".
+		lag = 0
+	}
+	s.metrics.AnchorLagSeqs(lag)
+
 	if latest.Seq <= anchorSeq {
 		return
 	}
@@ -371,7 +463,12 @@ func (s *AttestationService) catchUpAnchor(ctx context.Context) {
 	for _, a := range missing {
 		if err := s.anchor.Publish(ctx, a.Seq, a.RootHash); err != nil {
 			s.logger.Error("service: attestation: catch-up: publish failed, will retry next run", "seq", a.Seq, "error", err)
+			s.metrics.AnchorPublishResult(false)
 			return // the anchor is likely still down; don't hammer it with the rest of the page.
+		}
+		s.metrics.AnchorPublishResult(true)
+		if err := s.store.RecordAnchorObservation(ctx, a.Seq, a.RootHash); err != nil {
+			s.logger.Error("service: attestation: recording the anchor observation failed", "seq", a.Seq, "error", err)
 		}
 	}
 }

@@ -510,7 +510,21 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 	checks = append(checks, s.runCheckSnapshotIntegrity(ctx))
 
 	// --- unauthorized_journals: per-journal P5 signature validity (contracts §W2-2, I-32) ---
-	checks = append(checks, s.runCheckUnauthorizedJournals(ctx))
+	//
+	// Conditionally, not unconditionally (C-m4): with no AuthVerifier wired
+	// this check is structurally unrunnable in this deployment, and the
+	// Complete=false placeholder it used to return made FullCoverage
+	// permanently false for every consumer that never called
+	// ledger.WithAttestor -- exactly the dead vote that got check #8
+	// removed. Recorded in SkippedChecks so "not applicable here" stays
+	// distinguishable from "ran and passed" (working-agreements §3).
+	var skippedChecks []string
+	if s.journals != nil && s.verifier != nil {
+		checks = append(checks, s.runCheckUnauthorizedJournals(ctx))
+	} else {
+		skippedChecks = append(skippedChecks, "unauthorized_journals")
+		s.logger.Info("reconcile: unauthorized_journals skipped: no AuthVerifier configured (ledger.WithAttestor was never called)")
+	}
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -545,6 +559,7 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 		Checks:        checks,
 		OverallPassed: overallPassed,
 		FullCoverage:  fullCoverage,
+		SkippedChecks: skippedChecks,
 		RunAt:         now,
 	}, nil
 }
@@ -1427,10 +1442,18 @@ func (s *FullReconciliationService) runCheckSnapshotIntegrity(ctx context.Contex
 // unsigned journals get above, would let a journal forged under a made-up
 // keyID evade this check entirely (I-45).
 //
-// If SetAuthCheck was never called (journals or verifier nil), the check
-// is skipped outright (Complete=false) -- there is nothing to verify
-// against, and reporting Passed=true would be indistinguishable from
-// "everything was checked and found clean" (working-agreements §3).
+// If SetAuthCheck was never called (journals or verifier nil), RunFull does
+// not run this check AT ALL and records its name in
+// core.ReconcileReport.SkippedChecks (C-m4). It used to run and return a
+// Complete=false placeholder, which permanently poisoned FullCoverage for
+// every deployment that never configured signing -- the same dead-vote
+// problem that got check #8 deleted: a check that cannot possibly run in
+// this deployment should not be casting a vote. Skipping it is not the same
+// as passing it, which is why the name is reported rather than dropped.
+//
+// Called with journals/verifier wired, it still reports Complete=false for
+// any coverage it did not achieve (page limit hit, or nothing signed to
+// check).
 func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Context) core.CheckResult {
 	result := core.CheckResult{Name: "unauthorized_journals", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
 
@@ -1442,7 +1465,15 @@ func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Con
 		return result
 	}
 
-	journalList, _, err := s.journals.ListJournals(ctx, "", int32(s.cfg.UnauthorizedJournalsPageLimit))
+	// ListRecentJournals, not ListJournals: the same sibling instance of
+	// C-M1 (tamper-evident.md M-1) that step 4 of VerifyLedger had. This
+	// check has no resume cursor, so it only ever looks at ONE page -- and
+	// with ListJournals's empty cursor that page was the OLDEST journals in
+	// the table, i.e. the one place a row forged today cannot be. The
+	// coverage gap is disclosed either way (Complete=false when the page
+	// limit is hit), but the page it does look at should be the one where
+	// the evidence would land.
+	journalList, err := s.journals.ListRecentJournals(ctx, int32(s.cfg.UnauthorizedJournalsPageLimit))
 	if err != nil {
 		result.Passed = false
 		result.Findings = append(result.Findings, core.Finding{
@@ -1493,17 +1524,37 @@ func (s *FullReconciliationService) runCheckUnauthorizedJournals(ctx context.Con
 		}
 	}
 
+	if checked == 0 && len(journalList) > 0 {
+		// C-M8 (tamper-evident.md M-8): this check skips journals with an
+		// empty auth_key_id, because on a fleet with pre-P5 history flagging
+		// them would drown out the signal. But when EVERY journal it saw was
+		// skipped, the check verified nothing at all -- and it reported
+		// Passed=true, Complete=true, which made
+		// ReconcileCheckResult(name, passed && complete) emit GREEN. "The
+		// entire ledger is unverifiable" and "the entire ledger verified
+		// clean" were the same machine-readable signal.
+		//
+		// Passed stays true deliberately (finding nothing IS finding no
+		// violation); only Complete moves, matching check #2's
+		// partial-coverage semantics.
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("unauthorized journals scan verified nothing: %d journal(s) scanned, none of which carry a signature -- "+
+				"either signing was never wired into the write path, or these journals predate it", len(journalList)),
+		})
+	}
+
 	if len(journalList) >= s.cfg.UnauthorizedJournalsPageLimit {
 		// No resume cursor exists yet, so this is not "partial progress
 		// through the fleet" like checkpoint_balance's C4b -- it is the
-		// SAME oldest slice every run. Complete=false says so honestly
+		// SAME newest slice every run. Complete=false says so honestly
 		// instead of implying broader coverage than this check can
 		// currently provide.
 		result.Complete = false
 		result.Findings = append(result.Findings, core.Finding{
-			Description: fmt.Sprintf("unauthorized journals scan incomplete: hit page limit (%d journals, oldest-first, no resume cursor yet)", s.cfg.UnauthorizedJournalsPageLimit),
+			Description: fmt.Sprintf("unauthorized journals scan incomplete: hit page limit (%d journals, newest-first, no resume cursor yet)", s.cfg.UnauthorizedJournalsPageLimit),
 		})
-	} else if result.Passed {
+	} else if result.Passed && checked > 0 {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: fmt.Sprintf("unauthorized journals scan: %d signed journal(s) verified out of %d scanned", checked, len(journalList)),
 		})

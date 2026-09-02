@@ -225,22 +225,21 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	report, err := svc.RunFullReconciliation(context.Background())
 	require.NoError(t, err)
 	assert.True(t, report.OverallPassed)
-	assert.Len(t, report.Checks, 15, "should run exactly 15 checks (M-4 added role_less_liability, M-7 added untagged_holder_kind)")
 
-	// OverallPassed reports violations found; it is NOT a clean bill of
-	// health. unauthorized_journals is skipped (buildFullSvc never calls
-	// SetAuthCheck, contracts §W2-2's own "skip rather than run with no
-	// verifier" contract) -- so the run must admit incomplete coverage
-	// rather than let a never-executed check count as verified.
-	assert.False(t, report.FullCoverage,
-		"unauthorized_journals is skipped, so the suite cannot claim full coverage")
-	skippedChecks := map[string]bool{"unauthorized_journals": true}
+	// 14, not 15: buildFullSvc never calls SetAuthCheck, so
+	// unauthorized_journals is structurally unrunnable in this wiring and is
+	// no longer RUN at all (C-m4). It used to be run and report a
+	// Complete=false placeholder, which made FullCoverage permanently false
+	// for every deployment that never enabled signing -- the same dead vote
+	// that got check #8 deleted.
+	assert.Len(t, report.Checks, 14, "should run exactly 14 checks when no AuthVerifier is wired")
+	assert.Equal(t, []string{"unauthorized_journals"}, report.SkippedChecks,
+		"a check that could not run must be NAMED, not silently absent")
+	assert.True(t, report.FullCoverage,
+		"every check that could run ran to completion; an unrunnable one must not poison coverage")
 	for _, c := range report.Checks {
-		if skippedChecks[c.Name] {
-			assert.False(t, c.Complete, "a skipped check is never complete")
-		} else {
-			assert.True(t, c.Complete, "check %s ran but did not report coverage", c.Name)
-		}
+		assert.True(t, c.Complete, "check %s ran but did not report coverage", c.Name)
+		assert.NotEqual(t, "unauthorized_journals", c.Name)
 	}
 }
 
@@ -265,6 +264,8 @@ func TestFullReconciliation_FullCoverageCanBeTrue(t *testing.T) {
 	assert.True(t, report.OverallPassed)
 	assert.True(t, report.FullCoverage,
 		"every check ran to completion with nothing capped or skipped -- FullCoverage must be able to be true")
+	assert.Empty(t, report.SkippedChecks, "with the auth check wired, nothing should be skipped")
+	assert.Len(t, report.Checks, 15, "with SetAuthCheck wired, all 15 checks run")
 	for _, c := range report.Checks {
 		assert.True(t, c.Complete, "check %s: expected Complete=true", c.Name)
 	}
@@ -280,6 +281,10 @@ type fakeJournalQueryProvider struct{ core.QueryProvider }
 
 func (fakeJournalQueryProvider) ListJournals(_ context.Context, _ string, _ int32) ([]core.Journal, string, error) {
 	return nil, "", nil
+}
+
+func (fakeJournalQueryProvider) ListRecentJournals(_ context.Context, _ int32) ([]core.Journal, error) {
+	return nil, nil
 }
 
 func (fakeJournalQueryProvider) GetJournal(_ context.Context, _ string) (*core.Journal, []core.Entry, error) {

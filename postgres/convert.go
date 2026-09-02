@@ -48,6 +48,20 @@ func numericToDecimal(n pgtype.Numeric) (decimal.Decimal, error) {
 	return d, nil
 }
 
+// mustNumericToDecimal panics on an unconvertible numeric. Do NOT use it on
+// a read path a caller can reach with attacker-influenced data (2026-09-02
+// audit, tamper-evident.md M-7): NUMERIC accepts 'NaN', which until
+// migration 018 no CHECK in this schema rejected, so a single
+// INSERT of a NaN amount panicked every reader of that row -- including
+// service.VerifyLedger's journal sampling and the worker's reconcile loop,
+// i.e. the verification side itself. Migration 018 now rejects NaN at the
+// column, and the read paths in this file propagate the error instead of
+// panicking (discipline.md §6: errors are data), so the two defences are
+// independent.
+//
+// Remaining legitimate uses are values this process just computed or
+// round-tripped through decimalToNumeric, where a failure really is a
+// programming error rather than a row someone wrote.
 func mustNumericToDecimal(n pgtype.Numeric) decimal.Decimal {
 	d, err := numericToDecimal(n)
 	if err != nil {
@@ -57,12 +71,20 @@ func mustNumericToDecimal(n pgtype.Numeric) decimal.Decimal {
 	return d
 }
 
-func numericPtrToDecimalPtr(n pgtype.Numeric) *decimal.Decimal {
+// numericPtrToDecimalPtrOrErr converts a nullable numeric to a nullable
+// decimal, propagating an unconvertible value as an error rather than
+// panicking. (Its panicking predecessor, numericPtrToDecimalPtr, is gone:
+// its only caller was reservationFromRow, a read path -- see
+// mustNumericToDecimal's doc comment.)
+func numericPtrToDecimalPtrOrErr(n pgtype.Numeric) (*decimal.Decimal, error) {
 	if !n.Valid {
-		return nil
+		return nil, nil
 	}
-	d := mustNumericToDecimal(n)
-	return &d
+	d, err := numericToDecimal(n)
+	if err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 // --- pgtype nullable helpers ---
@@ -101,7 +123,7 @@ func metadataToJSON(m map[string]string) []byte {
 // rather than degrade to nil — this map feeds ensureJournalMatchesInput's
 // idempotency payload comparison, where a nil left-hand side turned a
 // legitimate replay into ErrConflict.
-func jsonToMetadata(b []byte) map[string]string {
+func jsonToMetadata(b []byte) (map[string]string, error) {
 	return jsonToStringMetadata(b)
 }
 
@@ -188,13 +210,25 @@ func journalFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row
 		}
 		eventUID = pgToUID(u)
 	}
+	totalDebit, err := numericToDecimal(row.TotalDebit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: journal %s: total_debit: %w", pgToUID(row.Uid), err)
+	}
+	totalCredit, err := numericToDecimal(row.TotalCredit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: journal %s: total_credit: %w", pgToUID(row.Uid), err)
+	}
+	metadata, err := jsonToMetadata(row.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: journal %s: metadata: %w", pgToUID(row.Uid), err)
+	}
 	return &core.Journal{
 		UID:            pgToUID(row.Uid),
 		JournalTypeUID: jt.UID,
 		IdempotencyKey: row.IdempotencyKey,
-		TotalDebit:     mustNumericToDecimal(row.TotalDebit),
-		TotalCredit:    mustNumericToDecimal(row.TotalCredit),
-		Metadata:       jsonToMetadata(row.Metadata),
+		TotalDebit:     totalDebit,
+		TotalCredit:    totalCredit,
+		Metadata:       metadata,
 		ActorID:        row.ActorID,
 		Source:         row.Source,
 		ReversalOfUID:  reversalOfUID,
@@ -220,13 +254,17 @@ func entryCore(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, journalU
 	if err != nil {
 		return nil, err
 	}
+	amountDecimal, err := numericToDecimal(amount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: entry of journal %s: amount: %w", pgToUID(journalUID), err)
+	}
 	return &core.Entry{
 		JournalUID:        pgToUID(journalUID),
 		AccountHolder:     accountHolder,
 		CurrencyUID:       cur.UID,
 		ClassificationUID: cls.UID,
 		EntryType:         core.EntryType(entryType),
-		Amount:            mustNumericToDecimal(amount),
+		Amount:            amountDecimal,
 		EffectiveAt:       effectiveAt,
 		CreatedAt:         createdAt,
 	}, nil
@@ -321,12 +359,20 @@ func reservationFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries,
 		}
 		journalUID = pgToUID(u)
 	}
+	reservedAmount, err := numericToDecimal(row.ReservedAmount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reservation %s: reserved_amount: %w", pgToUID(row.Uid), err)
+	}
+	settledAmount, err := numericPtrToDecimalPtrOrErr(row.SettledAmount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reservation %s: settled_amount: %w", pgToUID(row.Uid), err)
+	}
 	return &core.Reservation{
 		UID:            pgToUID(row.Uid),
 		AccountHolder:  row.AccountHolder,
 		CurrencyUID:    cur.UID,
-		ReservedAmount: mustNumericToDecimal(row.ReservedAmount),
-		SettledAmount:  numericPtrToDecimalPtr(row.SettledAmount),
+		ReservedAmount: reservedAmount,
+		SettledAmount:  settledAmount,
 		Status:         core.ReservationStatus(row.Status),
 		JournalUID:     journalUID,
 		IdempotencyKey: row.IdempotencyKey,
@@ -361,20 +407,32 @@ func bookingFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row
 		}
 		journalUID = pgToUID(u)
 	}
+	amount, err := numericToDecimal(row.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: booking %s: amount: %w", pgToUID(row.Uid), err)
+	}
+	settledAmount, err := numericToDecimal(row.SettledAmount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: booking %s: settled_amount: %w", pgToUID(row.Uid), err)
+	}
+	metadata, err := jsonToStringMetadata(row.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: booking %s: metadata: %w", pgToUID(row.Uid), err)
+	}
 	return &core.Booking{
 		UID:               pgToUID(row.Uid),
 		ClassificationUID: cls.UID,
 		AccountHolder:     row.AccountHolder,
 		CurrencyUID:       cur.UID,
-		Amount:            mustNumericToDecimal(row.Amount),
-		SettledAmount:     mustNumericToDecimal(row.SettledAmount),
+		Amount:            amount,
+		SettledAmount:     settledAmount,
 		Status:            core.Status(row.Status),
 		ChannelName:       row.ChannelName,
 		ChannelRef:        row.ChannelRef,
 		ReservationUID:    reservationUID,
 		JournalUID:        journalUID,
 		IdempotencyKey:    row.IdempotencyKey,
-		Metadata:          jsonToStringMetadata(row.Metadata),
+		Metadata:          metadata,
 		ExpiresAt:         row.ExpiresAt,
 		CreatedAt:         row.CreatedAt,
 		UpdatedAt:         row.UpdatedAt,
@@ -402,6 +460,18 @@ func eventFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row s
 		}
 		journalUID = pgToUID(u)
 	}
+	amount, err := numericToDecimal(row.Amount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: event %s: amount: %w", pgToUID(row.Uid), err)
+	}
+	settledAmount, err := numericToDecimal(row.SettledAmount)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: event %s: settled_amount: %w", pgToUID(row.Uid), err)
+	}
+	metadata, err := jsonToStringMetadata(row.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: event %s: metadata: %w", pgToUID(row.Uid), err)
+	}
 	return &core.Event{
 		UID:                pgToUID(row.Uid),
 		BookingUID:         bookingUID,
@@ -411,9 +481,9 @@ func eventFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Queries, row s
 		AccountHolder:      row.AccountHolder,
 		FromStatus:         core.Status(row.FromStatus),
 		ToStatus:           core.Status(row.ToStatus),
-		Amount:             mustNumericToDecimal(row.Amount),
-		SettledAmount:      mustNumericToDecimal(row.SettledAmount),
-		Metadata:           jsonToStringMetadata(row.Metadata),
+		Amount:             amount,
+		SettledAmount:      settledAmount,
+		Metadata:           metadata,
 		OccurredAt:         row.OccurredAt,
 		ActorID:            row.ActorID,
 		Source:             row.Source,
@@ -440,13 +510,17 @@ func accountPolicyFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Querie
 		}
 		classUID = d.UID
 	}
+	minBalance, err := numericToDecimal(row.MinBalance)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: account policy %s: min_balance: %w", pgToUID(row.Uid), err)
+	}
 	return &core.AccountPolicy{
 		UID:               pgToUID(row.Uid),
 		AccountHolder:     row.AccountHolder,
 		CurrencyUID:       currencyUID,
 		ClassificationUID: classUID,
 		Status:            core.AccountPolicyStatus(row.Status),
-		MinBalance:        mustNumericToDecimal(row.MinBalance),
+		MinBalance:        minBalance,
 		EnforceMinBalance: row.EnforceMinBalance,
 		Note:              row.Note,
 		UpdatedAt:         row.UpdatedAt,
@@ -459,14 +533,22 @@ func accountPolicyFromRow(ctx context.Context, dims *dimCache, q *sqlcgen.Querie
 // may carry non-string values (numbers, bools, nested objects) — those are
 // rendered to their compact JSON text rather than dropped, so old data stays
 // readable without a data migration.
-func jsonToStringMetadata(b []byte) map[string]string {
+func jsonToStringMetadata(b []byte) (map[string]string, error) {
 	if len(b) == 0 {
-		return nil
+		return nil, nil
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
-		slog.Warn("postgres: jsonToStringMetadata: unmarshal failed", "error", err, "raw", string(b[:min(len(b), 200)]))
-		return nil
+		// Was: log a Warn and return nil (2026-09-02 audit, operability
+		// I-23). nil is the same value a row with NO metadata produces, and
+		// this function's result feeds
+		// postgres/idempotency_match.go's three-state idempotency
+		// comparison -- so an unparseable blob made a replay with DIFFERENT
+		// metadata compare EQUAL to the stored row, i.e. resolved to
+		// "already done, here is the original result" instead of
+		// ErrConflict. A parse failure is now an error the caller
+		// propagates (discipline.md §6).
+		return nil, fmt.Errorf("postgres: metadata is not a JSON object: %w", err)
 	}
 	m := make(map[string]string, len(raw))
 	for k, v := range raw {
@@ -477,7 +559,7 @@ func jsonToStringMetadata(b []byte) map[string]string {
 		}
 		m[k] = string(v)
 	}
-	return m
+	return m, nil
 }
 
 func stringMetadataToJSON(m map[string]string) []byte {
