@@ -105,3 +105,99 @@ type AuditQuerier interface {
 	// journal plus any journals that reverse it, transitively).
 	ListReversals(ctx context.Context, journalUID string) ([]Journal, error)
 }
+
+// ConfigChange is one recorded mutation of a table whose contents decide
+// where money goes or whether tampering with it can be seen: the guarded
+// configuration tables (currencies, classifications, journal_types,
+// entry_templates) and, since the 2026-09-02 audit, every table carrying a
+// partial guard -- account_policies, bookings, events, reservations, journals,
+// deposit_addresses, entry_template_lines.
+//
+// OldRow and NewRow are the whole row before and after, as JSON. They are
+// deliberately untyped here: the trail spans eleven tables with different
+// shapes and its value during an incident is that it captured everything, not
+// that somebody predicted which column would matter.
+//
+// ChangedBy is the *database role* that made the change, taken from
+// session_user inside the trigger -- not a business actor. It is the one
+// attribution a leaked application credential cannot forge: the trigger writes
+// it, the trigger's grants are the only path into the table, and session_user
+// is fixed at authentication. AccountPolicyChange carries the business actor
+// for the one table that has one.
+type ConfigChange struct {
+	TableName string    `json:"table_name"`
+	OldRow    []byte    `json:"old_row"`
+	NewRow    []byte    `json:"new_row"`
+	ChangedBy string    `json:"changed_by"`
+	ChangedAt time.Time `json:"changed_at"`
+}
+
+// ScanCursorChange is one recorded write to a reconciliation check's keyset
+// cursor. Moving a cursor forward makes the next scan see fewer rows, so
+// forging one is how a full reconciliation is made to report a clean bill of
+// health over ledger it never looked at (migration 010's header, I-41).
+type ScanCursorChange struct {
+	CheckName        string    `json:"check_name"`
+	OldAfterHolder   int64     `json:"old_after_holder"`
+	OldAfterCurrency int64     `json:"old_after_currency"`
+	OldLapDirty      bool      `json:"old_lap_dirty"`
+	NewAfterHolder   int64     `json:"new_after_holder"`
+	NewAfterCurrency int64     `json:"new_after_currency"`
+	NewLapDirty      bool      `json:"new_lap_dirty"`
+	ChangedBy        string    `json:"changed_by"`
+	ChangedAt        time.Time `json:"changed_at"`
+}
+
+// AccountPolicyChange is one recorded edit to an account's freeze status or
+// overdraft floor, written by the application inside the caller's transaction.
+//
+// ActorID is what makes this trail different from ConfigChange: it identifies
+// the operator, which no database trigger can. It is also what makes it
+// incomplete on its own -- an edit made with raw SQL never reaches this table
+// at all. The two trails answer different halves and are meant to be read
+// together: a config_table_changes row for account_policies with no matching
+// row here is a change nobody in the application made.
+type AccountPolicyChange struct {
+	AccountHolder    int64     `json:"account_holder"`
+	CurrencyID       int64     `json:"currency_id"`
+	ClassificationID int64     `json:"classification_id"`
+	OldState         []byte    `json:"old_state"`
+	NewState         []byte    `json:"new_state"`
+	ActorID          int64     `json:"actor_id"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// ConfigChangeFilter narrows a forensic query. Zero values mean "no filter".
+type ConfigChangeFilter struct {
+	// TableName filters ListConfigChanges; CheckName filters
+	// ListScanCursorChanges; AccountHolder filters ListAccountPolicyChanges.
+	// Each is ignored by the other two.
+	TableName     string
+	CheckName     string
+	AccountHolder int64
+
+	Since time.Time // inclusive lower bound on the change's timestamp
+	Until time.Time // inclusive upper bound
+
+	// Cursor is the opaque keyset cursor from the previous page ("" = start).
+	Cursor string
+	Limit  int32
+}
+
+// ConfigChangeReader reads the forensic trail: who changed the rules that
+// decide where money goes, and when.
+//
+// This port exists because migration 006 built the trail and nothing read it.
+// A ledger that records evidence into a table with no query, no store method
+// and no operator-facing command has not made tampering visible -- it has made
+// it visible to whoever thinks to go schema-diving during an incident, which
+// is not a control (working-agreements §3: "有人篡改过配置" and "从未发生" must
+// be distinguishable on some surface a human actually reaches).
+//
+// All three return newest-first and page by opaque cursor; the second return
+// value is the cursor for the next page ("" when exhausted).
+type ConfigChangeReader interface {
+	ListConfigChanges(ctx context.Context, filter ConfigChangeFilter) ([]ConfigChange, string, error)
+	ListScanCursorChanges(ctx context.Context, filter ConfigChangeFilter) ([]ScanCursorChange, string, error)
+	ListAccountPolicyChanges(ctx context.Context, filter ConfigChangeFilter) ([]AccountPolicyChange, string, error)
+}

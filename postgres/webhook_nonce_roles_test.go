@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -116,4 +117,85 @@ func TestWebhookNonce_SurvivesRevokedPrunePrivilege(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx,
 		`SELECT count(*) FROM webhook_nonces WHERE nonce = 'stays-expired'`).Scan(&remaining))
 	assert.Equal(t, 1, remaining, "without the privilege the cache stops shrinking -- this is the documented cost, not a second bug")
+}
+
+// TestWebhookNonce_PruneDegradationLeavesATrace pins D-m4 (2026-09-02 deep
+// audit): the tolerated branch is tolerated, not silent.
+//
+// TryRecordNonce swallows insufficient_privilege from its prune on purpose,
+// and its doc comment has always been honest about the cost ("a cache that
+// stops shrinking"). What it could not say is that the cost is paid
+// invisibly: a database missing migration 002's grant behaves identically to
+// one that has it in every observable respect -- same responses, same latency,
+// no log line, no metric -- until the replay cache fills the disk. That is the
+// shape working-agreements §3 calls out: a degraded mode has to leave a trace.
+//
+// The assertion is deliberately two-sided. Tolerating the error is existing,
+// correct behaviour (before migration 002 the fused version took down every
+// inbound webhook), so the pin has to require the call to still SUCCEED as
+// well as require the warning -- otherwise the obvious "fix" is to start
+// failing again, which is the bug this branch exists to prevent.
+func TestWebhookNonce_PruneDegradationLeavesATrace(t *testing.T) {
+	ctx := context.Background()
+	pool := postgrestest.SetupDB(t)
+
+	const appPassword = "webhook-nonce-prune-warn-not-a-real-secret" //nolint:gosec // test-only credential
+	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	require.NoError(t, err)
+
+	// Reproduce a database that never got migration 002's grant. Cluster-wide
+	// role, per-database grant -- so this is scoped to this test's database
+	// and does not leak into a concurrently running package.
+	_, err = pool.Exec(ctx, "REVOKE DELETE ON public.webhook_nonces FROM ledger_app")
+	require.NoError(t, err)
+
+	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", appPassword))
+	require.NoError(t, err)
+	t.Cleanup(appPool.Close)
+	require.NoError(t, appPool.Ping(ctx))
+
+	captured := &capturingLogger{}
+	store := postgres.NewWebhookSubscriberStore(appPool).SetLogger(captured)
+
+	fresh, err := store.TryRecordNonce(ctx, "nonce-prune-degraded-1")
+	require.NoError(t, err, "a webhook must not start failing because the cache cannot be pruned")
+	assert.True(t, fresh)
+
+	require.Len(t, captured.warnings, 1, "the degradation must produce exactly one warning")
+	assert.Contains(t, captured.warnings[0], "replay cache",
+		"the message has to say what stopped working, not just that something failed")
+	assert.Contains(t, captured.warnings[0], "002",
+		"and it has to name the fix -- an operator reading this has no other pointer to it")
+
+	// Once, not once per request: the condition is a missing GRANT, so it is
+	// either always true or never true, and a line per inbound webhook would
+	// bury the signal in its own noise.
+	for i := 0; i < 5; i++ {
+		_, err := store.TryRecordNonce(ctx, fmt.Sprintf("nonce-prune-degraded-%d", i+2))
+		require.NoError(t, err)
+	}
+	assert.Len(t, captured.warnings, 1, "a permanently degraded prune must not warn per request")
+
+	// And a healthy store says nothing at all, or the warning means nothing.
+	quiet := &capturingLogger{}
+	healthy := postgres.NewWebhookSubscriberStore(pool).SetLogger(quiet)
+	_, err = healthy.TryRecordNonce(ctx, "nonce-prune-healthy-1")
+	require.NoError(t, err)
+	assert.Empty(t, quiet.warnings, "a database with the grant must produce no warning")
+}
+
+// capturingLogger is a core.Logger that records what it was told, so a test
+// can assert on an observability claim rather than on the absence of an error.
+type capturingLogger struct {
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (l *capturingLogger) Debug(string, ...any) {}
+func (l *capturingLogger) Info(string, ...any)  {}
+func (l *capturingLogger) Error(string, ...any) {}
+func (l *capturingLogger) Warn(msg string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warnings = append(l.warnings, fmt.Sprint(append([]any{msg, " "}, args...)...))
 }

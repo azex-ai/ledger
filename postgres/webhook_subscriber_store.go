@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/postgres/sqlcgen"
 	"github.com/azex-ai/ledger/service/delivery"
 )
@@ -17,6 +20,12 @@ var _ delivery.SubscriberLister = (*WebhookSubscriberStore)(nil)
 // WebhookSubscriberStore lists active webhook subscribers for event delivery.
 type WebhookSubscriberStore struct {
 	q *sqlcgen.Queries
+
+	// logger is nil until SetLogger is called; nil falls back to
+	// slog.Default(), matching EventStore's convention. pruneWarnOnce keeps a
+	// permanently-degraded prune from writing a line per inbound webhook.
+	logger        core.Logger
+	pruneWarnOnce sync.Once
 }
 
 // NewWebhookSubscriberStore creates a new WebhookSubscriberStore.
@@ -24,6 +33,23 @@ func NewWebhookSubscriberStore(pool *pgxpool.Pool) *WebhookSubscriberStore {
 	return &WebhookSubscriberStore{
 		q: sqlcgen.New(pool),
 	}
+}
+
+// SetLogger routes this store's own diagnostic warnings (currently just the
+// nonce-prune degradation below) to the consumer's logger instead of
+// slog.Default(). Returns the receiver so it can be chained onto the
+// constructor.
+func (s *WebhookSubscriberStore) SetLogger(logger core.Logger) *WebhookSubscriberStore {
+	s.logger = logger
+	return s
+}
+
+func (s *WebhookSubscriberStore) warn(msg string, args ...any) {
+	if s.logger != nil {
+		s.logger.Warn(msg, args...)
+		return
+	}
+	slog.Warn(msg, args...)
 }
 
 func (s *WebhookSubscriberStore) ListActiveSubscribers(ctx context.Context) ([]delivery.WebhookSubscriber, error) {
@@ -82,8 +108,25 @@ func (s *WebhookSubscriberStore) RecordDeliveryStatus(ctx context.Context, subsc
 // reason — deadlock, disk, a corrupted index — still fails the call, because
 // those are not conditions this code knows how to survive.
 func (s *WebhookSubscriberStore) TryRecordNonce(ctx context.Context, nonce string) (bool, error) {
-	if err := s.q.DeleteExpiredWebhookNonces(ctx); err != nil && !isInsufficientPrivilege(err) {
-		return false, fmt.Errorf("postgres: prune webhook nonces: %w", err)
+	if err := s.q.DeleteExpiredWebhookNonces(ctx); err != nil {
+		if !isInsufficientPrivilege(err) {
+			return false, fmt.Errorf("postgres: prune webhook nonces: %w", err)
+		}
+		// Tolerated, but not silent. The doc comment above has always been
+		// honest about the cost of this branch; what it had no way to say was
+		// that the cost is paid invisibly -- a deployment missing migration
+		// 002's grant behaves, in every observable way, exactly like one that
+		// has it, right up until the replay cache fills the disk
+		// (working-agreements §3: a degraded mode has to leave a trace).
+		//
+		// sync.Once because the condition is a missing GRANT: it is either
+		// always true or never true, so a line per inbound webhook would be
+		// noise rather than signal.
+		s.pruneWarnOnce.Do(func() {
+			s.warn("postgres: webhook nonce prune refused for lack of privilege; the inbound replay cache will grow without bound. "+
+				"Apply migration 002 (GRANT DELETE ON webhook_nonces TO ledger_app) or grant the serving role DELETE on that table",
+				"error", err)
+		})
 	}
 	rows, err := s.q.TryRecordWebhookNonce(ctx, nonce)
 	if err != nil {

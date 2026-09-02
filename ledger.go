@@ -70,6 +70,7 @@ type Service struct {
 	snapshotExtraStore   *postgres.SnapshotExtraStore
 	balanceTrendsStore   *postgres.BalanceTrendsStore
 	auditStore           *postgres.AuditStore
+	configHistoryStore   *postgres.ConfigHistoryStore
 	pendingStore         *postgres.PendingStore
 	platformBalanceStore *postgres.PlatformBalanceStore
 	reconcileAdapter     *postgres.ReconcileAdapter
@@ -235,6 +236,7 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.snapshotExtraStore = postgres.NewSnapshotExtraStore(pool)
 	s.balanceTrendsStore = postgres.NewBalanceTrendsStore(pool, s.ledgerStore)
 	s.auditStore = postgres.NewAuditStore(pool)
+	s.configHistoryStore = postgres.NewConfigHistoryStore(pool)
 	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 	if len(s.custodialClassCodes) > 0 {
@@ -610,6 +612,43 @@ func (s *Service) BalanceTrends() core.BalanceTrendReader { return s.balanceTren
 // Audit returns the read-only audit query interface.
 func (s *Service) Audit() core.AuditQuerier { return s.auditStore }
 
+// AssertRuntimeRole reports whether this Service's connection authenticates as
+// the database role the schema's ACLs are written against (`ledger_app`).
+//
+// Call it once from the composition root, at startup, and decide there what a
+// mismatch means. It is not called automatically: migrations, development and
+// the runbook's recovery procedures all connect as something else on purpose,
+// and there is no default this library could pick that is right for all of
+// them. What it can do is stop the prerequisite from being a sentence in a
+// README that nothing checks.
+//
+// What is at stake is not access control -- a wrong role usually has MORE
+// access, not less. It is that several invariants are enforced by GRANTs
+// naming this one role: I-42 (journal_entries.id comes from the sequence
+// alone, which is what keeps the balance equation's checkpoint+delta scan
+// monotonic) is a column-level INSERT grant; the append-only guards, the
+// webhook_subscribers write narrowing and the function EXECUTE whitelist are
+// the same shape. On a connection as ledger_owner they are not violated -- they
+// are absent, silently, and everything keeps working until it does not.
+//
+// Returns a core.ErrInvalidInput-wrapped error naming both roles on mismatch.
+func (s *Service) AssertRuntimeRole(ctx context.Context) error {
+	return postgres.CheckRuntimeRole(ctx, s.DBTX(), postgres.AppRole)
+}
+
+// ConfigHistory returns the read side of the forensic trail: who changed the
+// rules that decide where money goes, and when.
+//
+// Exposed because migration 006 built that trail and nothing read it -- no
+// query, no store method, no command, only tests. A consumer whose only route
+// to the evidence is to go schema-diving during an incident has, in practice,
+// no route to it: "somebody tampered with the config" and "nothing ever
+// happened" stayed indistinguishable on every surface anyone reaches.
+//
+// Read alongside Audit(): that answers what the ledger recorded, this answers
+// what the ledger was told to record it as.
+func (s *Service) ConfigHistory() core.ConfigChangeReader { return s.configHistoryStore }
+
 // AccountPolicies manages per-account freeze/close + balance-floor overrides.
 func (s *Service) AccountPolicies() core.AccountPolicyStore { return s.accountPolicyStore }
 
@@ -707,6 +746,7 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		snapshotExtraStore:   s.snapshotExtraStore.WithDB(tx),
 		balanceTrendsStore:   s.balanceTrendsStore.WithDB(tx, ls),
 		auditStore:           s.auditStore.WithDB(tx),
+		configHistoryStore:   s.configHistoryStore.WithDB(tx),
 		pendingStore:         s.pendingStore.WithDB(tx, ls, cs),
 		platformBalanceStore: s.platformBalanceStore.WithDB(tx),
 		reconcileAdapter:     s.reconcileAdapter.WithDB(tx),

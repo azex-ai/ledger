@@ -714,6 +714,8 @@ Surface below, this one is **not** included in `InstallDefaultPresets` or
 |--------|-----------|-------------|
 | `svc.BalanceTrends()` | `core.BalanceTrendReader` | Daily balance trends with inflow/outflow |
 | `svc.Audit()` | `core.AuditQuerier` | Journal lists, booking trace, reversal chain |
+| `svc.ConfigHistory()` | `core.ConfigChangeReader` | Forensic trail: who changed the config/lifecycle tables, the reconciliation scan cursors, or an account policy — and when |
+| `svc.AssertRuntimeRole(ctx)` | `error` | Startup check: this connection authenticates as `ledger_app`, the role every ACL-enforced invariant is written against |
 | `svc.PlatformBalanceReader()` | `core.PlatformBalanceReader` | Per-classification platform-wide balances |
 | `svc.SolvencyChecker()` | `core.SolvencyChecker` | Custodial vs user liability check |
 | `svc.PeriodCloser()` | `core.PeriodCloser` | Manages the accounting period close line |
