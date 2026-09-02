@@ -14,7 +14,6 @@ package server
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/bizcode"
 	"github.com/azex-ai/ledger/pkg/httpx"
+	"github.com/azex-ai/ledger/pkg/slogadapter"
 )
 
 // HolderConfig configures the holder wallet surface.
@@ -34,6 +34,9 @@ type HolderConfig struct {
 	// (default 15m). TokenMaxTTL caps requested TTLs (default 1h).
 	TokenDefaultTTL time.Duration
 	TokenMaxTTL     time.Duration
+	// Logger receives this surface's audit line when a holder token is
+	// minted. Defaults to slogadapter.New(nil); never nil, never silent.
+	Logger core.Logger
 	// MintKeys enables POST /holder-tokens on the standalone HolderHandler,
 	// authenticated by these API keys at write scope. Leave empty when the
 	// embedding host mints in-process via MintHolderToken — an
@@ -53,6 +56,9 @@ func (c HolderConfig) withDefaults() HolderConfig {
 	}
 	if c.now == nil {
 		c.now = time.Now
+	}
+	if c.Logger == nil {
+		c.Logger = slogadapter.New(nil)
 	}
 	return c
 }
@@ -176,7 +182,7 @@ func (hs *holderSurface) handleMintHolderToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if req.Holder == 0 {
-		httpx.Error(w, httpx.ErrBadRequest("holder is required"))
+		httpx.Error(w, httpx.ErrField("holder", "is required"))
 		return
 	}
 	ttl := hs.cfg.TokenDefaultTTL
@@ -193,9 +199,14 @@ func (hs *holderSurface) handleMintHolderToken(w http.ResponseWriter, r *http.Re
 		httpx.Error(w, err)
 		return
 	}
-	// Audit trail: which key minted for which holder.
+	// Audit trail: which key minted, and for how long. Deliberately NOT the
+	// holder id (I-N15): middleware_logger.go drops query strings precisely
+	// because they may carry holder ids, and this line was putting one in
+	// the log by hand two files away. The API key's name is what makes a
+	// mint attributable; the subject does not need to be in the log to do
+	// that.
 	if id, ok := identityFrom(r.Context()); ok {
-		slog.Info("holder token minted", "key", id.Name, "holder", req.Holder, "ttl", ttl.String())
+		hs.cfg.Logger.Info("holder token minted", "key", id.Name, "ttl", ttl.String())
 	}
 	httpx.OK(w, mintHolderTokenResponse{
 		Token:     token,

@@ -68,7 +68,7 @@ func (s *Server) handleSetAccountPolicy(w http.ResponseWriter, r *http.Request) 
 	if req.MinBalance != "" {
 		minBalance, err = parseWireAmount(req.MinBalance, "min_balance")
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("min_balance is not a valid decimal"))
+			httpx.Error(w, err)
 			return
 		}
 	}

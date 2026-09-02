@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -157,9 +158,9 @@ func (s *Server) handlePostJournal(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]core.EntryInput, len(req.Entries))
 	for i, e := range req.Entries {
-		amount, err := parseWireAmount(e.Amount, "entries[].amount")
+		amount, err := parseWireAmount(e.Amount, fmt.Sprintf("entries[%d].amount", i))
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("entry "+e.Amount+" is not a valid decimal"))
+			httpx.Error(w, err)
 			return
 		}
 		entries[i] = core.EntryInput{
@@ -325,9 +326,9 @@ func (s *Server) handlePostTemplate(w http.ResponseWriter, r *http.Request) {
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
 	for k, v := range req.Amounts {
-		d, err := parseWireAmount(v, "amounts")
+		d, err := parseWireAmount(v, "amounts."+k)
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
+			httpx.Error(w, err)
 			return
 		}
 		amounts[k] = d
@@ -361,17 +362,17 @@ func (s *Server) handlePostDepositTolerance(w http.ResponseWriter, r *http.Reque
 
 	expectedAmount, err := parseWireAmount(req.ExpectedAmount, "expected_amount")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("expected_amount is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 	actualAmount, err := parseWireAmount(req.ActualAmount, "actual_amount")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 	toleranceAmount, err := parseWireAmount(req.Tolerance, "tolerance")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("tolerance is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 

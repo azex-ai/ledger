@@ -3,9 +3,13 @@ package httpx
 import (
 	stdjson "encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +119,104 @@ func TestResolveError_UnauthorizedJournal_Wrapped(t *testing.T) {
 	assert.Equal(t, 14010, ae.Code)
 }
 
+// coreSentinels binds every sentinel core/errors.go declares to its value.
+// The BINDING has to be written out (Go has no runtime symbol lookup), but
+// the LIST does not: TestCoreSentinels_AreAllBound below parses
+// core/errors.go with go/ast and fails if this map has drifted from it, in
+// either direction. That is the part E-M9 needed -- the previous version of
+// the agreement pin held a hand-copied slice which had never been updated
+// for core.ErrUnknownAuthKey, so the one error whose two classifications
+// disagreed was precisely the one the pin could not see.
+var coreSentinels = map[string]error{
+	"ErrNotFound":            core.ErrNotFound,
+	"ErrInvalidInput":        core.ErrInvalidInput,
+	"ErrInsufficientBalance": core.ErrInsufficientBalance,
+	"ErrDuplicateJournal":    core.ErrDuplicateJournal,
+	"ErrUnbalancedJournal":   core.ErrUnbalancedJournal,
+	"ErrInvalidTransition":   core.ErrInvalidTransition,
+	"ErrConflict":            core.ErrConflict,
+	"ErrPrecisionExceeded":   core.ErrPrecisionExceeded,
+	"ErrAccountFrozen":       core.ErrAccountFrozen,
+	"ErrAccountClosed":       core.ErrAccountClosed,
+	"ErrPeriodClosed":        core.ErrPeriodClosed,
+	"ErrAttestorUnavailable": core.ErrAttestorUnavailable,
+	"ErrUnauthorizedJournal": core.ErrUnauthorizedJournal,
+	"ErrUnknownAuthKey":      core.ErrUnknownAuthKey,
+	"ErrRollupPending":       core.ErrRollupPending,
+	"ErrTransient":           core.ErrTransient,
+}
+
+// declaredCoreSentinels parses core/errors.go and returns every top-level
+// Err* var it declares.
+func declaredCoreSentinels(t *testing.T) map[string]bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "../../core/errors.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err, "parse core/errors.go")
+
+	out := map[string]bool{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, name := range vs.Names {
+				if strings.HasPrefix(name.Name, "Err") && name.IsExported() {
+					out[name.Name] = true
+				}
+			}
+		}
+	}
+	require.NotEmpty(t, out, "no Err* sentinels found in core/errors.go -- the parse is broken, not the package")
+	return out
+}
+
+// TestCoreSentinels_AreAllBound makes the two tests below complete by
+// construction: a sentinel added to core/errors.go and forgotten here goes
+// red, instead of quietly never being classified.
+func TestCoreSentinels_AreAllBound(t *testing.T) {
+	declared := declaredCoreSentinels(t)
+
+	var unbound, stale []string
+	for name := range declared {
+		if _, ok := coreSentinels[name]; !ok {
+			unbound = append(unbound, name)
+		}
+	}
+	for name := range coreSentinels {
+		if !declared[name] {
+			stale = append(stale, name)
+		}
+	}
+	sort.Strings(unbound)
+	sort.Strings(stale)
+	require.Empty(t, unbound, "core/errors.go declares sentinel(s) this package never classifies -- add them to coreSentinels (and to resolveError)")
+	require.Empty(t, stale, "coreSentinels names sentinel(s) core/errors.go no longer declares -- delete them")
+}
+
+// TestResolveError_MapsEverySentinelExplicitly is E-M9's whole-set rule:
+// every core sentinel must have an explicit branch in resolveError. Falling
+// through to 19999 is not a mapping -- it is an unclassified internal error,
+// whose band bizcode.Retryable calls retryable, which is the opposite of
+// what core.IsRetryable says for every domain sentinel.
+func TestResolveError_MapsEverySentinelExplicitly(t *testing.T) {
+	declaredCoreSentinels(t) // fail early if the parse broke
+
+	for name, err := range coreSentinels {
+		t.Run(name, func(t *testing.T) {
+			ae := resolveError(err)
+			require.NotNil(t, ae)
+			assert.NotEqual(t, 19999, ae.Code,
+				"core.%s falls through resolveError to the unclassified-internal default; give it an explicit case", name)
+		})
+	}
+}
+
 // TestResolveError_AgreesWithCoreIsRetryable is the structural pin required
 // by contracts §W1-C: library-mode consumers (core.IsRetryable) and HTTP-mode
 // consumers (bizcode.Retryable, applied to whatever code resolveError picks)
@@ -124,37 +226,31 @@ func TestResolveError_UnauthorizedJournal_Wrapped(t *testing.T) {
 // (default values duplicated across layers) -- this test makes future
 // disagreement a compile-time-adjacent (test-time) failure instead of a
 // silent drift.
+//
+// The sentinel set is derived (see coreSentinels / TestCoreSentinels_AreAllBound).
+// Each sentinel is checked bare and wrapped, since every real caller wraps.
 func TestResolveError_AgreesWithCoreIsRetryable(t *testing.T) {
-	cases := []error{
-		core.ErrNotFound,
-		core.ErrInvalidInput,
-		core.ErrInsufficientBalance,
-		core.ErrDuplicateJournal,
-		core.ErrUnbalancedJournal,
-		core.ErrInvalidTransition,
-		core.ErrConflict,
-		core.ErrPrecisionExceeded,
-		core.ErrAccountFrozen,
-		core.ErrAccountClosed,
-		core.ErrPeriodClosed,
-		core.ErrUnauthorizedJournal,
-		core.ErrRollupPending,
-		core.ErrAttestorUnavailable,
-		core.ErrTransient,
-		fmt.Errorf("unclassified dependency hiccup"),
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		ae := resolveError(err)
+		require.NotNil(t, ae)
+		wantRetryable := core.IsRetryable(err)
+		gotRetryable := bizcode.Retryable(ae.Code)
+		assert.Equal(t, wantRetryable, gotRetryable,
+			"core.IsRetryable(%v)=%v but bizcode.Retryable(resolveError(%v).Code=%d)=%v -- library and HTTP modes disagree on the same error",
+			err, wantRetryable, err, ae.Code, gotRetryable)
 	}
 
-	for _, err := range cases {
-		t.Run(err.Error(), func(t *testing.T) {
-			ae := resolveError(err)
-			require.NotNil(t, ae)
-			wantRetryable := core.IsRetryable(err)
-			gotRetryable := bizcode.Retryable(ae.Code)
-			assert.Equal(t, wantRetryable, gotRetryable,
-				"core.IsRetryable(%v)=%v but bizcode.Retryable(resolveError(%v).Code=%d)=%v -- library and HTTP modes disagree on the same error",
-				err, wantRetryable, err, ae.Code, gotRetryable)
+	for name, err := range coreSentinels {
+		t.Run(name, func(t *testing.T) { check(t, err) })
+		t.Run(name+"/wrapped", func(t *testing.T) {
+			check(t, fmt.Errorf("postgres: some operation: %w", err))
 		})
 	}
+
+	t.Run("unclassified", func(t *testing.T) {
+		check(t, fmt.Errorf("unclassified dependency hiccup"))
+	})
 }
 
 // --- OK / Created response format ---

@@ -71,6 +71,17 @@ func configFieldDocs(t *testing.T, files []*ast.File) map[string]string {
 		}
 	}
 	require.NotEmpty(t, out, "no exported Config fields found -- the AST walk is broken, not the config")
+
+	// Fail closed on a comment-less parse: without parser.ParseComments
+	// every doc string is empty and both checks below pass vacuously (which
+	// is exactly what happened the first time this file was written).
+	var documented int
+	for _, doc := range out {
+		if strings.TrimSpace(doc) != "" {
+			documented++
+		}
+	}
+	require.NotZero(t, documented, "every Config field's doc comment came back empty -- the AST was parsed without parser.ParseComments, so these checks would pass vacuously")
 	return out
 }
 

@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -28,12 +27,19 @@ func authLogFrom(ctx context.Context) (*authLogHolder, bool) {
 	return h, ok
 }
 
-// requestLoggerMiddleware logs each request via slog at info level.
+// requestLoggerMiddleware logs each request through the injected
+// Config.Logger at info level (I-N15: it used to call the package-level
+// slog, so a consumer had no way to route or format the HTTP layer's logs
+// even though every other layer of this library takes a core.Logger).
+//
 // Query strings are intentionally dropped — they may contain holder IDs,
 // idempotency keys, or other sensitive identifiers we don't want in logs.
-// Status, duration, request ID, method, path, remote IP, and the
-// authenticated API key's name+scope (never the secret) are included.
-func requestLoggerMiddleware(next http.Handler) http.Handler {
+// Included: status, duration, request ID, method, path, remote IP, and the
+// authenticated API key's name + scope (never the secret). The api_key
+// fields are deliberate: attributing a write to a caller is the point of an
+// audit log. A holder ID is NOT deliberate anywhere in this package's logs —
+// that is the identifier the query-string rule above exists to keep out.
+func (s *Server) requestLoggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		holder := &authLogHolder{}
@@ -53,6 +59,6 @@ func requestLoggerMiddleware(next http.Handler) http.Handler {
 		if holder.name != "" {
 			attrs = append(attrs, "api_key", holder.name, "api_key_scope", holder.scope)
 		}
-		slog.Info("http request", attrs...)
+		s.logger.Info("http request", attrs...)
 	})
 }

@@ -10,6 +10,46 @@ type AppError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Err     error  `json:"-"`
+	// Fields carries per-field, already-sanitized validation messages for
+	// the response envelope's message.fields (api-contract.md §1). Keys are
+	// request-body field names in snake_case; values are text a user may
+	// read.
+	//
+	// It is populated ONLY by an explicit WithField / WithFields call at a
+	// handler boundary -- never derived from Err. Err holds whatever the
+	// storage layer, the driver or an upstream said, and that text is for
+	// the log, not the wire (user-facing-surfaces.md). Nothing in this
+	// package ever copies Err.Error() in here.
+	Fields map[string]string `json:"-"`
+}
+
+// WithField returns a copy of e carrying one field-level message. Chainable:
+//
+//	httpx.ErrBadRequest("check the highlighted fields").
+//		WithField("amount", "minimum deposit is 10 USDT")
+//
+// The text must be written for a user: it crosses the wire verbatim.
+func (e *AppError) WithField(field, message string) *AppError {
+	return e.WithFields(map[string]string{field: message})
+}
+
+// WithFields returns a copy of e carrying several field-level messages.
+// Copies rather than mutating, because the package-level sentinels
+// (InvalidInput, NotFound, ...) are shared values -- mutating one would
+// leak one request's field messages into every later response that uses the
+// same sentinel.
+func (e *AppError) WithFields(fields map[string]string) *AppError {
+	if e == nil {
+		return nil
+	}
+	merged := make(map[string]string, len(e.Fields)+len(fields))
+	for k, v := range e.Fields {
+		merged[k] = v
+	}
+	for k, v := range fields {
+		merged[k] = v
+	}
+	return &AppError{Code: e.Code, Message: e.Message, Err: e.Err, Fields: merged}
 }
 
 func (e *AppError) Error() string {
@@ -165,6 +205,14 @@ var displayMessages = map[int]string{
 	14008: "This account is closed",
 	14009: "This accounting period is closed",
 	14010: "This transaction failed a security check and could not be completed. Please contact support",
+	// 14011 (core.ErrUnknownAuthKey) deliberately reads the same as 14010 to
+	// the end user: the difference between "we verified it and it is wrong"
+	// and "we no longer hold the key that signed it" is an operator-side
+	// distinction (it drives a different runbook entry), and spelling it out
+	// on the wire would tell a caller something about this deployment's key
+	// inventory. user-facing-surfaces.md: what happened, what to do next --
+	// never the mechanism.
+	14011: "This transaction failed a security check and could not be completed. Please contact support",
 	18103: "This request is temporarily unavailable, please try again shortly",
 	18104: "This request could not be completed right now, please try again shortly",
 	18105: "A temporary error occurred, please try again",

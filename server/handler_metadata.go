@@ -191,7 +191,7 @@ func (s *Server) handleCreateClassification(w http.ResponseWriter, r *http.Reque
 	}
 	ns := core.NormalSide(req.NormalSide)
 	if !ns.IsValid() {
-		httpx.Error(w, httpx.ErrBadRequest("normal_side must be debit or credit"))
+		httpx.Error(w, httpx.ErrField("normal_side", "must be either debit or credit"))
 		return
 	}
 
@@ -358,9 +358,9 @@ func (s *Server) handlePreviewTemplate(w http.ResponseWriter, r *http.Request) {
 
 	amounts := make(map[string]decimal.Decimal, len(req.Amounts))
 	for k, v := range req.Amounts {
-		d, err := parseWireAmount(v, "amounts")
+		d, err := parseWireAmount(v, "amounts."+k)
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("amount "+v+" is not a valid decimal"))
+			httpx.Error(w, err)
 			return
 		}
 		amounts[k] = d
@@ -419,11 +419,11 @@ func (s *Server) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Exponent == nil {
-		httpx.Error(w, httpx.ErrBadRequest("exponent required (0-18; e.g. JPY=0, USD=2, wei=18)"))
+		httpx.Error(w, httpx.ErrField("exponent", "is required: the number of decimal places this currency allows (JPY=0, USD=2, wei=18)"))
 		return
 	}
 	if *req.Exponent < 0 || *req.Exponent > 18 {
-		httpx.Error(w, httpx.ErrBadRequest("exponent must be between 0 and 18"))
+		httpx.Error(w, httpx.ErrField("exponent", "must be between 0 and 18"))
 		return
 	}
 

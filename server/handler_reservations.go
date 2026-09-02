@@ -93,7 +93,7 @@ func (s *Server) handleCreateReservation(w http.ResponseWriter, r *http.Request)
 
 	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 
@@ -131,12 +131,12 @@ func (s *Server) handleSettleReservation(w http.ResponseWriter, r *http.Request)
 
 	amount, err := parseWireAmount(req.ActualAmount, "actual_amount")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("actual_amount is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 
 	if req.IdempotencyKey == "" {
-		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		httpx.Error(w, httpx.ErrField("idempotency_key", "is required"))
 		return
 	}
 	if err := s.reserver.Settle(r.Context(), core.SettleInput{ReservationUID: uid, Amount: amount, IdempotencyKey: req.IdempotencyKey}); err != nil {
@@ -166,7 +166,7 @@ func (s *Server) handleSettlePartialReservation(w http.ResponseWriter, r *http.R
 	}
 
 	if req.IdempotencyKey == "" {
-		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		httpx.Error(w, httpx.ErrField("idempotency_key", "is required"))
 		return
 	}
 	if err := s.reserver.SettlePartial(r.Context(), core.SettlePartialInput{ReservationUID: uid, Amount: amount, IdempotencyKey: req.IdempotencyKey}); err != nil {
@@ -189,7 +189,7 @@ func (s *Server) handleFinalizeReservationSettlement(w http.ResponseWriter, r *h
 		return
 	}
 	if req.IdempotencyKey == "" {
-		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		httpx.Error(w, httpx.ErrField("idempotency_key", "is required"))
 		return
 	}
 
@@ -213,7 +213,7 @@ func (s *Server) handleReleaseReservation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if req.IdempotencyKey == "" {
-		httpx.Error(w, httpx.ErrBadRequest("idempotency_key is required"))
+		httpx.Error(w, httpx.ErrField("idempotency_key", "is required"))
 		return
 	}
 

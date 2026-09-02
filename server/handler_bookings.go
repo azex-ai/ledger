@@ -139,7 +139,7 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 
 	amount, err := parseWireAmount(req.Amount, "amount")
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
+		httpx.Error(w, err)
 		return
 	}
 
@@ -147,7 +147,7 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresAt != "" {
 		expiresAt, err = time.Parse(time.RFC3339, req.ExpiresAt)
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("expires_at must be RFC3339 format"))
+			httpx.Error(w, httpx.ErrField("expires_at", "must be an RFC3339 timestamp, e.g. 2026-09-02T12:00:00Z"))
 			return
 		}
 	}
@@ -188,7 +188,7 @@ func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
 	if req.Amount != "" {
 		amount, err = parseWireAmount(req.Amount, "amount")
 		if err != nil {
-			httpx.Error(w, httpx.ErrBadRequest("amount is not a valid decimal"))
+			httpx.Error(w, err)
 			return
 		}
 	}

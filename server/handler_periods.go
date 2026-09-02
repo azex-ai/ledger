@@ -45,7 +45,7 @@ func (s *Server) handleClosePeriod(w http.ResponseWriter, r *http.Request) {
 
 	closeBefore, err := time.Parse(time.RFC3339, req.CloseBefore)
 	if err != nil {
-		httpx.Error(w, httpx.ErrBadRequest("close_before must be RFC3339"))
+		httpx.Error(w, httpx.ErrField("close_before", "must be an RFC3339 timestamp"))
 		return
 	}
 

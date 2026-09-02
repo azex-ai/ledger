@@ -166,12 +166,31 @@ func Created[T any](w http.ResponseWriter, data T) {
 }
 
 // Error resolves an error to a bizcode and writes the error response.
+//
+// The log level follows the resolved HTTP status (I-N15): a 4xx is the
+// caller's problem and logs at Info, so a scanner throwing bad uids at the
+// API cannot bury real 5xx behind a wall of Error lines; a 503 (starting up,
+// feature off, transient dependency) logs at Warn; anything else 5xx is the
+// server's own failure and logs at Error.
+//
+// message.fields is populated only from AppError.Fields -- text a handler
+// wrote for a user (see bizcode.AppError.WithField). err's own text stays in
+// the log line and never crosses the wire.
 func Error(w http.ResponseWriter, err error) {
 	ae := resolveError(err)
-	slog.Error("api error", "code", ae.Code, "message", ae.Message, "err", err)
-	writeJSON(w, ae.HTTPStatus(), ErrorBody{
+	status := ae.HTTPStatus()
+	attrs := []any{"code", ae.Code, "message", ae.Message, "status", status, "err", err}
+	switch {
+	case status >= 500 && status != http.StatusServiceUnavailable:
+		slog.Error("api error", attrs...)
+	case status == http.StatusServiceUnavailable:
+		slog.Warn("api unavailable", attrs...)
+	default:
+		slog.Info("api rejected request", attrs...)
+	}
+	writeJSON(w, status, ErrorBody{
 		Code:    ae.Code,
-		Message: ErrorMessage{Text: bizcode.DisplayMessage(ae.Code)},
+		Message: ErrorMessage{Text: bizcode.DisplayMessage(ae.Code), Fields: ae.Fields},
 	})
 }
 
@@ -188,10 +207,25 @@ func Decode[T any](r *http.Request) (T, error) {
 // --- Shortcut constructors ---
 
 func ErrBadRequest(msg string) *bizcode.AppError { return bizcode.New(10001, msg) }
-func ErrForbidden(msg string) *bizcode.AppError  { return bizcode.New(10150, msg) }
-func ErrNotFound(msg string) *bizcode.AppError   { return bizcode.New(10201, msg) }
-func ErrConflict(msg string) *bizcode.AppError   { return bizcode.New(10901, msg) }
-func ErrInternal(msg string) *bizcode.AppError   { return bizcode.New(19999, msg) }
+
+// ErrField is ErrBadRequest for a validation failure attributable to one
+// named request field. It carries the message twice: once as the AppError's
+// own text (the log line, and the developer-facing string), and once in
+// message.fields[field] on the wire, which is what api-contract.md §1
+// reserves for field-level validation errors and what a form can map onto
+// the offending input (J-8: the envelope had the field, nothing ever wrote
+// it).
+//
+// field must be the request body's own snake_case field name, and msg must
+// be written for a user to read -- it crosses the wire verbatim. Never pass
+// a driver/storage error string.
+func ErrField(field, msg string) *bizcode.AppError {
+	return bizcode.New(10001, field+": "+msg).WithField(field, msg)
+}
+func ErrForbidden(msg string) *bizcode.AppError { return bizcode.New(10150, msg) }
+func ErrNotFound(msg string) *bizcode.AppError  { return bizcode.New(10201, msg) }
+func ErrConflict(msg string) *bizcode.AppError  { return bizcode.New(10901, msg) }
+func ErrInternal(msg string) *bizcode.AppError  { return bizcode.New(19999, msg) }
 
 // resolveError maps an error to an AppError.
 func resolveError(err error) *bizcode.AppError {
@@ -223,6 +257,22 @@ func resolveError(err error) *bizcode.AppError {
 		return bizcode.Wrap(14009, "accounting period is closed", err)
 	case errors.Is(err, core.ErrUnauthorizedJournal):
 		return bizcode.Wrap(14010, "unauthorized journal", err)
+	// E-M9: ErrUnknownAuthKey had no mapping at all, so it fell through to
+	// 19999, whose band Retryable calls retryable -- while core.IsRetryable
+	// says false. Library-mode and HTTP-mode consumers reached opposite
+	// verdicts on the same error, and the pin that exists to stop exactly
+	// that was a hand-copied list of sentinels that had never been updated
+	// to include it (now derived from core/errors.go instead).
+	//
+	// Ordered after ErrUnauthorizedJournal deliberately: VerifyJournalAuth
+	// propagates an unknown key wrapped INSIDE ErrUnauthorizedJournal (Go
+	// multi-%w, so both are errors.Is-able), and for a journal that failed
+	// verification the caller-visible answer stays 14010 -- "failed a
+	// security check" -- rather than becoming a narrower code that hints at
+	// this deployment's key inventory. 14011 is for an ErrUnknownAuthKey
+	// that arrives on its own, e.g. straight from an AuthVerifier.
+	case errors.Is(err, core.ErrUnknownAuthKey):
+		return bizcode.Wrap(14011, "unknown authorization key", err)
 	case errors.Is(err, core.ErrInvalidInput):
 		return bizcode.Wrap(10001, "invalid input", err)
 	case errors.Is(err, core.ErrConflict):

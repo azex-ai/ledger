@@ -126,7 +126,11 @@ func parsePackageFiles(t *testing.T) (*token.FileSet, []*ast.File) {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
+		// ParseComments matters: config_coverage_test.go reads Config field
+		// doc comments through this helper, and without it every field's Doc
+		// is nil -- which would make that gate pass vacuously rather than
+		// fail loudly (it did, until this flag was added).
+		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.ParseComments|parser.SkipObjectResolution)
 		require.NoError(t, err, "parse %s", name)
 		files = append(files, f)
 	}

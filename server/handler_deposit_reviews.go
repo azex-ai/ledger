@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -58,10 +57,10 @@ type rejectDepositReviewRequest struct {
 // production; "unknown" + a warning log is a defensive fallback only (e.g.
 // auth disabled in dev), never expected to fire when API keys are
 // configured.
-func reviewActorFrom(ctx context.Context) string {
+func (s *Server) reviewActorFrom(ctx context.Context) string {
 	id, ok := identityFrom(ctx)
 	if !ok {
-		slog.Warn("server: deposit review: no authenticated identity on scoped route, recording actor as unknown")
+		s.logger.Warn("server: deposit review: no authenticated identity on scoped route, recording actor as unknown")
 		return "unknown"
 	}
 	return id.Name
@@ -108,7 +107,7 @@ func (s *Server) handleApproveDepositReview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	actor := reviewActorFrom(r.Context())
+	actor := s.reviewActorFrom(r.Context())
 	booking, err := s.depositReviewer.ApproveReview(r.Context(), uid, actor)
 	if err != nil {
 		httpx.Error(w, err)
@@ -139,11 +138,11 @@ func (s *Server) handleRejectDepositReview(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if req.Reason == "" {
-		httpx.Error(w, httpx.ErrBadRequest("reason is required"))
+		httpx.Error(w, httpx.ErrField("reason", "is required"))
 		return
 	}
 
-	actor := reviewActorFrom(r.Context())
+	actor := s.reviewActorFrom(r.Context())
 	booking, err := s.depositReviewer.RejectReview(r.Context(), uid, actor, req.Reason)
 	if err != nil {
 		httpx.Error(w, err)

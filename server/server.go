@@ -16,6 +16,7 @@ import (
 
 	"github.com/azex-ai/ledger/channel"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/presets"
 )
 
@@ -117,6 +118,10 @@ type Server struct {
 	// when false (the default), handlePostJournal refuses a handwritten journal
 	// that touches an is_system classification.
 	allowSystemClassificationPost bool
+
+	// logger is Config.Logger, defaulted. See that field's doc comment for
+	// what does and does not go through it.
+	logger core.Logger
 }
 
 // SetMetricsHandler installs an http.Handler that ServeHTTP will dispatch to
@@ -225,6 +230,18 @@ type Config struct {
 	// The library's own deposit/transfer/fx/capital flows go through templates,
 	// not this endpoint, so the default does not constrain them.
 	AllowSystemClassificationPost bool
+	// Logger receives this package's HTTP-layer logs: the access log line
+	// per request, and the two audit lines the holder-token and
+	// deposit-review paths emit. Not read by LoadConfig -- there is no
+	// environment variable that can produce a logger; the composition root
+	// passes one. Defaults to slogadapter.New(nil) (slog.Default()), so the
+	// HTTP layer is never silent by default (I-N15).
+	//
+	// It deliberately does NOT capture the four dangerous-configuration
+	// warnings newServer emits below: those go to the package-level slog on
+	// purpose, so no consumer can silence "auth is disabled" by injecting a
+	// quiet logger (I-M11).
+	Logger core.Logger
 }
 
 // Validate rejects configurations that would expose a production server or
@@ -493,6 +510,12 @@ func newServer(cfg *Config, deps Deps) *Server {
 		allowGenericTemplatePost[code] = true
 		delete(protectedTemplateCodes, code)
 	}
+	// A nil Config.Logger means "use slog.Default()", never "log nothing":
+	// the HTTP layer's access log is how an operator sees traffic at all.
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slogadapter.New(nil)
+	}
 	s := &Server{
 		journals:                 deps.Journals,
 		balances:                 deps.Balances,
@@ -523,6 +546,7 @@ func newServer(cfg *Config, deps Deps) *Server {
 		allowGenericTemplatePost: allowGenericTemplatePost,
 
 		allowSystemClassificationPost: cfg.AllowSystemClassificationPost,
+		logger:                        logger,
 	}
 	if cfg.DevCreditEnabled {
 		slog.Warn("server: developer credit endpoint is ENABLED — POST /api/v1/dev/credits mints holder balance with no custodied asset behind it")
@@ -552,7 +576,7 @@ func newServer(cfg *Config, deps Deps) *Server {
 		r.Use(trustedProxyRealIP(cfg.TrustedProxyCIDRs))
 	}
 	r.Use(middleware.Recoverer)
-	r.Use(requestLoggerMiddleware)
+	r.Use(s.requestLoggerMiddleware)
 	r.Use(corsMiddleware(cfg))
 	r.Use(bodyLimitMiddleware(cfg.MaxBodyBytes))
 	r.Use(rateLimitMiddleware(s.rateLimiter))
