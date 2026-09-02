@@ -56,7 +56,7 @@ const periodCloseBarrierBudget = 10 * time.Second
 const periodCloseBarrierInterval = 100 * time.Millisecond
 
 // acquirePeriodReadBarrier takes the SHARED half of the period-close barrier
-// (I-61) in q's transaction. Every journal write path calls this immediately
+// (I-59) in q's transaction. Every journal write path calls this immediately
 // before reading the active close line; it is held until that transaction
 // ends, so ClosePeriod cannot make a new line active underneath a writer
 // that has already decided its effective_at is allowed.
@@ -79,7 +79,7 @@ func acquirePeriodReadBarrier(ctx context.Context, q *sqlcgen.Queries) error {
 // GetActivePeriodClose).
 //
 // The INSERT happens under the EXCLUSIVE half of the period-close barrier
-// (I-61), which is what makes I-15 a statement about concurrent execution
+// (I-59), which is what makes I-15 a statement about concurrent execution
 // rather than about single-threaded test order: the line cannot become
 // active while a journal write that already read the previous line is still
 // in flight. Waiting is bounded (periodCloseBarrierBudget); on exhaustion

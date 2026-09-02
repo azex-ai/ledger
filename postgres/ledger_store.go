@@ -1094,7 +1094,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		reversalOfID = orig.ID
 	}
 
-	// Period close (I-15, I-61): reject postings whose effective date falls
+	// Period close (I-15, I-59): reject postings whose effective date falls
 	// before the active close line. GetActivePeriodClose returns
 	// pgx.ErrNoRows when the period has never been closed — nothing to
 	// enforce in that case.

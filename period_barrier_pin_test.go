@@ -1,6 +1,6 @@
 package ledger_test
 
-// Pins for I-61 (the period-close barrier), driven from the real consumption
+// Pins for I-59 (the period-close barrier), driven from the real consumption
 // entry point: ledger.New(pool) + Service.RunInTx, the composition a library
 // consumer actually writes. The pre-fix bug was invisible to every existing
 // I-15 pin because all six of them are single-threaded ("close, then post,
@@ -52,7 +52,7 @@ func (d barrierDims) journal(key string, effectiveAt time.Time) core.JournalInpu
 	}
 }
 
-// TestClosePeriod_WaitsForInFlightBackdatedJournal is the I-61 concurrency
+// TestClosePeriod_WaitsForInFlightBackdatedJournal is the I-59 concurrency
 // pin. A consumer's RunInTx posts a backdated journal and then keeps its
 // transaction open (exactly what RunInTx exists for — composing the caller's
 // own writes); an operator closes the period covering that date at the same
@@ -118,7 +118,7 @@ func TestClosePeriod_WaitsForInFlightBackdatedJournal(t *testing.T) {
 	require.NoError(t, res.err, "close period must not fail once the writer commits")
 	require.False(t, committedAt.IsZero())
 	assert.True(t, res.at.After(committedAt),
-		"ClosePeriod returned at %s, before the in-flight backdated journal committed at %s: the close line became active while a writer that had already passed the gate was still in flight (I-61)",
+		"ClosePeriod returned at %s, before the in-flight backdated journal committed at %s: the close line became active while a writer that had already passed the gate was still in flight (I-59)",
 		res.at.Format(time.RFC3339Nano), committedAt.Format(time.RFC3339Nano))
 }
 
@@ -144,7 +144,7 @@ func TestClosePeriod_RejectsAfterBarrier(t *testing.T) {
 }
 
 // TestReconcile_PeriodCloseViolations_ReportsForgedBackdatedJournal pins the
-// independent observable half of I-61: a barrier that nothing can falsify is
+// independent observable half of I-59: a barrier that nothing can falsify is
 // an assertion, not a control. The suite runs through the real facade entry
 // (svc.FullReconciler), and the violating row is forged with a raw INSERT --
 // which is exactly the class this check exists to catch (a journal that

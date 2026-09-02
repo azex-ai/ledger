@@ -18,7 +18,7 @@ ORDER BY created_at DESC, id DESC
 LIMIT $1;
 
 -- name: AcquirePeriodReadBarrier :exec
--- The read half of the period-close barrier (I-61). Every journal write path
+-- The read half of the period-close barrier (I-59). Every journal write path
 -- takes this SHARED advisory lock in its own transaction immediately before
 -- reading the active close line, and holds it until COMMIT/ROLLBACK.
 --
@@ -43,7 +43,7 @@ LIMIT $1;
 SELECT pg_advisory_xact_lock_shared(hashtextextended('period:close', 0));
 
 -- name: TryAcquirePeriodCloseBarrier :one
--- The write half of the period-close barrier (I-61). ClosePeriod takes this
+-- The write half of the period-close barrier (I-59). ClosePeriod takes this
 -- EXCLUSIVE advisory lock before its INSERT, so the new line cannot become
 -- active while any journal write that already read the previous line is
 -- still in flight: it waits for every in-flight writer to COMMIT or ROLLBACK.
@@ -72,7 +72,7 @@ SELECT pg_advisory_xact_lock_shared(hashtextextended('period:close', 0));
 SELECT pg_try_advisory_xact_lock(hashtextextended('period:close', 0));
 
 -- name: PeriodCloseViolations :many
--- The observable that can falsify the barrier above (I-61): journals whose
+-- The observable that can falsify the barrier above (I-59): journals whose
 -- effective_at precedes the active close line AND that were written after
 -- that line was committed. Drives the period_close_violations reconciliation
 -- check.

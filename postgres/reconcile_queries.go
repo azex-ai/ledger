@@ -420,7 +420,7 @@ func (a *ReconcileAdapter) DuplicateIdempotencyKeys(ctx context.Context) ([]serv
 
 // PeriodCloseViolations returns journals that sit on the closed side of the
 // active period-close line AND were written after that line was committed
-// (the period_close_violations check, I-61). See the query's own comment in
+// (the period_close_violations check, I-59). See the query's own comment in
 // sql/queries/periods.sql for the resolution limit of the created_at
 // comparison.
 func (a *ReconcileAdapter) PeriodCloseViolations(ctx context.Context, pageLimit int) ([]service.PeriodCloseViolation, error) {

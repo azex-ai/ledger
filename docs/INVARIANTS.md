@@ -734,7 +734,7 @@ every write path (direct `PostJournal`, `ExecuteTemplate`,
 this method) and rejects with `core.ErrPeriodClosed` when
 `effective_at < close_before` — **and, since 2026-09-02, does so under the
 shared half of the period-close advisory barrier, with `ClosePeriod` taking
-the exclusive half.** See I-61 for that mechanism and for the
+the exclusive half.** See I-59 for that mechanism and for the
 `period_close_violations` reconciliation check that can falsify it.
 
 > Enforcement gap closed 2026-09-02 (`concurrency.md` B-M5). Reading the line
@@ -753,7 +753,7 @@ the exclusive half.** See I-61 for that mechanism and for the
 first and then asserts a later posting is refused. That is the whole reason
 B-M5 went unnoticed for as long as it did: the hole was purely a matter of
 two transactions' relative timing, which no sequential test can express. The
-concurrency pins live on I-61):
+concurrency pins live on I-59):
 - `postgres.TestPeriodClosesTableExists` (schema pin)
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
   enforce before the first close
@@ -5573,7 +5573,7 @@ unforgeable. Read together, that asymmetry is itself the signal: a
   tables. The first also asserts the absence described above: the same edit
   leaves no `account_policy_changes` row.
 
-## I-61: A period close serializes against in-flight journal writes, and a journal that lands behind an active close line is observable
+## I-59: A period close serializes against in-flight journal writes, and a journal that lands behind an active close line is observable
 
 (2026-09-02 second-round audit: `concurrency.md` B-M5. Contract
 `docs/plans/2026-09-02-remediation-contracts.md` Wave 2 D-lock.)

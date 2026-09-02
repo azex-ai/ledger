@@ -173,7 +173,7 @@ type SnapshotDriftRow struct {
 
 // PeriodCloseViolation is a journal that sits on the closed side of the
 // active period-close line AND was written after that line was committed
-// (I-15, I-61). Identified by uid only -- reconciliation findings never
+// (I-15, I-59). Identified by uid only -- reconciliation findings never
 // carry internal ids (I-18).
 //
 // This is the observable that can falsify the period-close barrier. Its
@@ -270,7 +270,7 @@ type ReconcileQuerier interface {
 	// entries-based recompute as of that date, up to pageLimit rows
 	// (M4/I-23).
 	LatestSnapshotDrift(ctx context.Context, pageLimit int) ([]SnapshotDriftRow, error)
-	// period_close_violations (I-61) — journals on the closed side of the
+	// period_close_violations (I-59) — journals on the closed side of the
 	// active close line that were written after that line was committed.
 	// Independent of the advisory barrier that is supposed to make this
 	// impossible: a barrier still needs an observable that can falsify it.
@@ -560,7 +560,7 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 		s.logger.Info("reconcile: unauthorized_journals skipped: no AuthVerifier configured (ledger.WithAttestor was never called)")
 	}
 
-	// --- period_close_violations: journals written behind an already-active close line (I-61) ---
+	// --- period_close_violations: journals written behind an already-active close line (I-59) ---
 	checks = append(checks, s.runCheckPeriodCloseViolations(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
@@ -1807,7 +1807,7 @@ func (s *ReconciliationService) ReconcileAccount(ctx context.Context, holder int
 }
 
 // runCheckPeriodCloseViolations is the period_close_violations check
-// (docs/INVARIANTS.md I-15, I-61): it counts journals whose effective_at
+// (docs/INVARIANTS.md I-15, I-59): it counts journals whose effective_at
 // falls on the closed side of the active close line AND that were written
 // after that line was committed.
 //
