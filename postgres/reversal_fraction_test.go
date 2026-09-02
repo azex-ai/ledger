@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	ledger "github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
@@ -363,4 +364,209 @@ func TestReverseJournalFraction_RepeatedDimensionFractionalSteps(t *testing.T) {
 	// A third half now genuinely overshoots and must still be rejected.
 	_, err = store.ReverseJournalFraction(ctx, j.UID, 1, 2, "over", postgrestest.UniqueKey("rev-frac-h3"))
 	require.ErrorIs(t, err, core.ErrConflict, "reversing beyond the original must stay rejected")
+}
+
+// --- A-C2 (2026-09-02 deep audit): the ReversalOfUID input gate ------------
+//
+// `ReverseJournal*` derive their entries themselves and are guarded on both
+// ends (the referenced journal may not itself be a reversal; the cumulative
+// per-dimension amount may not exceed the original). `PostJournal` accepts
+// the same `reversal_of` link from a caller and, before this gate existed,
+// checked only that the uid resolved to a row. Everything downstream --
+// `cumulativeReversedByDimension` above all -- reads every journal carrying
+// `reversal_of = J` as "a reversal of J worth this much", so an unvalidated
+// link is enough to make the ledger believe J has already been reversed by
+// an amount that never left any account.
+//
+// These three tests drive the facade entry a library consumer actually uses
+// (`ledger.New(pool).JournalWriter()`), because that -- not the HTTP surface,
+// which never accepted the field -- is where the field is reachable.
+
+// TestPostJournal_ReversalOfUID_RejectsNonReversingEntries is the audit's
+// minimal repro, asserted at the balance rather than at any internal shape.
+// A perfectly legal, per-currency-balanced, NET-ZERO journal tagged
+// `reversal_of = J` moves no money at all, yet its four legs register as 50
+// already reversed on two of J's dimensions (the credit legs invert back to
+// the debit key and vice versa). `ReverseJournalFraction(J, 1, 1)` -- "reverse
+// everything remaining" -- then reverses 100 - 50 = 50, returns nil, and
+// leaves 50 on the books while telling the caller the journal is fully
+// reversed. Every reconciliation check stays green throughout, because the
+// books really do balance; what is broken is the reversal chain, not the
+// double entry.
+func TestPostJournal_ReversalOfUID_RejectsNonReversingEntries(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	writer := svc.JournalWriter()
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "ACT", "Audit C2 Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(4501)
+	d := decimal.RequireFromString
+
+	balance := func() decimal.Decimal {
+		t.Helper()
+		b, err := svc.BalanceReader().GetBalance(ctx, holder, curID, wallet)
+		require.NoError(t, err)
+		return b
+	}
+
+	j, err := writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-base"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("100")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("100")},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, balance().Equal(d("100")), "fixture must start at 100, got %s", balance())
+
+	// Net zero on every dimension, balanced per currency, and every leg is a
+	// dimension J really touches -- only the DIRECTIONS make it not a
+	// reversal. Two of the four legs (the ones matching J's own direction)
+	// have no counterpart in J once inverted, which is what makes this a
+	// non-subset rather than a small over-reversal.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-forged"),
+		ReversalOfUID:  j.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeCredit, Amount: d("50")},
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("50")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeDebit, Amount: d("50")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("50")},
+		},
+	})
+	require.Error(t, err, "a net-zero journal is not a reversal of anything; tagging it reversal_of must be refused at the input gate")
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// The gate must reject WITHOUT side effects, and the reversal chain must
+	// still be intact afterwards: reversing everything remaining has to bring
+	// the holder to exactly zero.
+	require.True(t, balance().Equal(d("100")), "a rejected post must leave the balance untouched, got %s", balance())
+
+	_, err = writer.ReverseJournalFraction(ctx, j.UID, 1, 1, "close out", postgrestest.UniqueKey("ac2-rev-all"))
+	require.NoError(t, err)
+	require.True(t, balance().IsZero(),
+		"after reversing everything remaining the balance must be 0, got %s -- a non-zero balance means a journal that moved no money was counted as reversal history", balance())
+}
+
+// TestPostJournal_ReversalOfUID_RejectsReversalOfAReversal pins the guard
+// `ReverseJournal` (ledger_store.go) and `ReverseJournalFraction`
+// (reversal_fraction_store.go) have always had and `PostJournal` did not:
+// a reversal is a leaf of the chain. Without it, `reversal_of` chains can be
+// arbitrarily long and `cumulativeReversedByDimension` -- which only ever
+// looks one level down -- silently stops describing reality.
+func TestPostJournal_ReversalOfUID_RejectsReversalOfAReversal(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	writer := svc.JournalWriter()
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "ACR", "Audit C2 Chain Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(4502)
+	d := decimal.RequireFromString
+
+	j, err := writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-chain-base"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("100")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("100")},
+		},
+	})
+	require.NoError(t, err)
+
+	rev, err := writer.ReverseJournal(ctx, j.UID, "mistake")
+	require.NoError(t, err)
+
+	// Re-reversing the reversal by hand: the legs are a perfectly shaped
+	// inversion of `rev`, so only the "the target is itself a reversal" rule
+	// can catch it.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-chain-rerev"),
+		ReversalOfUID:  rev.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("100")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("100")},
+		},
+	})
+	require.Error(t, err, "a reversal may not itself be reversed; PostJournal must refuse the same link ReverseJournal refuses")
+	require.ErrorIs(t, err, core.ErrConflict)
+}
+
+// TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining pins the ceiling
+// half of the gate: a correctly shaped hand-written reversal is still bounded
+// by what is left to reverse, per dimension, exactly as
+// `ReverseJournalFraction`'s own overshoot check is. Without it the two APIs
+// disagree on the same journal -- the fraction API refuses to over-reverse
+// while `PostJournal` posts the identical entries.
+func TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+	writer := svc.JournalWriter()
+	ctx := context.Background()
+
+	curID := postgrestest.SeedCurrencyWithExponent(t, pool, "ACC", "Audit C2 Ceiling Unit", 2)
+	jtID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(4503)
+	d := decimal.RequireFromString
+
+	j, err := writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-ceil-base"),
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: d("100")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: d("100")},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = writer.ReverseJournalFraction(ctx, j.UID, 1, 2, "half", postgrestest.UniqueKey("ac2-ceil-half"))
+	require.NoError(t, err)
+
+	// 60 > the 50 that is left. Shape is right, amount is not.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-ceil-over"),
+		ReversalOfUID:  j.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeCredit, Amount: d("60")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeDebit, Amount: d("60")},
+		},
+	})
+	require.Error(t, err, "cumulative reversed must not exceed the original, whichever API posts the reversal")
+	require.ErrorIs(t, err, core.ErrConflict)
+
+	// The remaining 50 through the same hand-written path is legal and must
+	// still be accepted -- the gate is a bound, not a ban.
+	_, err = writer.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: jtID,
+		IdempotencyKey: postgrestest.UniqueKey("ac2-ceil-rest"),
+		ReversalOfUID:  j.UID,
+		Entries: []core.EntryInput{
+			{AccountHolder: holder, CurrencyUID: curID, ClassificationUID: wallet, EntryType: core.EntryTypeCredit, Amount: d("50")},
+			{AccountHolder: -holder, CurrencyUID: curID, ClassificationUID: custodial, EntryType: core.EntryTypeDebit, Amount: d("50")},
+		},
+	})
+	require.NoError(t, err, "a correctly shaped reversal within the remaining amount must still post")
+
+	bal, err := svc.BalanceReader().GetBalance(ctx, holder, curID, wallet)
+	require.NoError(t, err)
+	require.True(t, bal.IsZero(), "half by API + half by hand must leave nothing, got %s", bal)
 }

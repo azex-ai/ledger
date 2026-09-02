@@ -1,17 +1,27 @@
 package postgres_test
 
-// Pin tests for concurrency.md's advisory-lock-namespace Major and
-// ExecuteTemplateBatch's cross-journal lock-order Major (D-lock, board §2).
-// These drive the real unexported locking primitives (acquireBalanceLocks,
-// acquireIdempotencyLock, sortedUniquePairs -- reached via export_test.go's
-// test-only shim, since internal/postgrestest itself imports postgres and a
-// package-postgres internal test file importing postgrestest back would be
-// an import cycle) against two genuine concurrent Postgres transactions, so
-// a real SQLSTATE 40P01 is what these tests observe -- not a hand-built
-// pgconn.PgError. Falsifying any of these fixes (reverting journals.sql's
-// namespace separation, or reverting ExecuteTemplateBatch's batch-wide
-// pre-lock) reproduces the deadlock these tests assert is now impossible;
-// deleting the normalizeStoreError wiring in
+// Pin tests for the advisory-lock ordering invariants (I-11 / I-39), against
+// two genuine concurrent Postgres transactions -- so a real SQLSTATE 40P01 is
+// what these tests observe, never a hand-built pgconn.PgError.
+//
+// Two shapes live here, and the difference matters (concurrency.md
+// 2026-09-02, "gate-shape"):
+//
+//   - MECHANISM tests drive the unexported primitives directly
+//     (acquireBalanceLocks / acquireIdempotencyLock / sortedUniquePairs,
+//     reached via export_test.go's shim -- internal/postgrestest imports
+//     postgres, so an internal test file importing it back would be an import
+//     cycle). They prove a lock namespace or a lock order behaves as claimed.
+//     They do NOT pin any caller, and must not be cited as one: the batch
+//     lock-order pin used to be written this way, re-implemented the fix
+//     inside the test, and stayed green with the fix deleted.
+//   - CALLER tests drive the real exported entry point
+//     (ExecuteTemplateBatch, in both pool and tx mode; PostJournal with an
+//     event link) and use a probe transaction only to create the deadlock
+//     opportunity. Deleting the fix inside the store turns these red. Each
+//     one names its falsification step in its doc comment.
+//
+// Deleting the normalizeStoreError wiring in
 // acquireBalanceLocks/acquireIdempotencyLock (bus #24) turns
 // TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient red on its
 // core.ErrTransient assertion even though the deadlock itself would still
@@ -20,25 +30,31 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 
+	ledger "github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 )
 
-// TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient constructs a
-// genuine Postgres advisory-lock ABBA deadlock between two real transactions
-// by calling acquireBalanceLocks out of global order -- exactly the shape a
-// caller that does NOT pre-sort a whole batch's pairs (the pre-fix
-// ExecuteTemplateBatch behavior; see
-// TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock
-// below for the fixed comparison) would produce. Asserts the losing side's
-// error is classified as core.ErrTransient by normalizeStoreError (bus #24),
-// not merely retryable-by-default.
+// TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient is a MECHANISM test
+// (see this file's header): it constructs a genuine Postgres advisory-lock
+// ABBA deadlock between two real transactions by calling acquireBalanceLocks
+// out of global order -- the shape any caller that does not take a whole
+// transaction's pairs in one canonical order would produce -- and asserts the
+// losing side's error is classified as core.ErrTransient by
+// normalizeStoreError (bus #24), not merely retryable-by-default. It pins the
+// classification, not any caller's lock order; the callers are pinned by the
+// ExecuteTemplateBatch and PostJournal tests below.
 func TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
@@ -152,73 +168,154 @@ func TestAcquireIdempotencyLock_NeverCollidesWithBalanceLock(t *testing.T) {
 	require.NoError(t, errs[1], "idempotency lock namespace must never block a balance lock")
 }
 
-// TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock pins
-// the fix for ExecuteTemplateBatch's cross-journal lock-order Major:
-// pre-union every journal's balance pairs across the whole batch, sort ONCE,
-// and acquire before posting any journal (see ExecuteTemplateBatch's doc
-// comment in ledger_store.go). Drives the exact primitives that call site
-// now uses (sortedUniquePairs + acquireBalanceLocks) with two real
-// transactions modeling "two batches whose journals list the same two
-// holders in opposite order" -- ordinary calling behavior for e.g. two
-// batch settlements, not an adversarial input.
-//
-// Falsification: replacing the body of each goroutine below with the
-// PRE-FIX per-journal pattern -- acquireBalanceLocks(ctx, q,
-// []BalancePair{p}) called once per pair in the batch's given order,
-// instead of once for the pre-sorted union -- reproduces a real deadlock
-// here (this is exactly what
-// TestAcquireBalanceLocks_RealDeadlock_WrapsErrTransient above already pins
-// for the same two pairs in that same per-journal shape).
-func TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock(t *testing.T) {
-	pool := postgrestest.SetupDB(t)
+// seedBatchDeadlockFixture installs the default template presets (for
+// `deposit_confirm`: DR main_wallet on the user holder, CR custodial on the
+// system counterpart, so one request locks both `h` and `-h`) and returns the
+// pieces the two ExecuteTemplateBatch lock-order tests below need.
+func seedBatchDeadlockFixture(t *testing.T, currencyCode string) (pool *pgxpool.Pool, curUID string, currencyID int64) {
+	t.Helper()
+	pool = postgrestest.SetupDB(t)
 	ctx := context.Background()
 
-	holderA := postgres.NewBalancePair(703, 1)
-	holderB := postgres.NewBalancePair(704, 1)
+	classStore := postgres.NewClassificationStore(pool)
+	tmplStore := postgres.NewTemplateStore(pool)
+	require.NoError(t, presets.InstallDefaultTemplatePresets(ctx, classStore, classStore, tmplStore))
 
-	// Batch A's journals are given in order [holderA, holderB]; batch B's in
-	// the opposite order [holderB, holderA] -- concurrency.md's exact shape
-	// (two batches whose journals touch the same two holders in reverse
-	// order). Both batches touch the SAME pairs, so even with the fix they
-	// genuinely contend and one must wait for the other -- the fix's
-	// guarantee is that this is plain serialization (no cycle), not an
-	// ABBA. Each side opens and commits its own transaction inside the
-	// goroutine (not held open across the whole test) so a real, brief
-	// wait resolves normally instead of blocking on a lock the test itself
-	// would otherwise hold until an outer defer -- pg_advisory_xact_lock
-	// only releases at COMMIT/ROLLBACK, and there is no deadlock cycle here
-	// for Postgres's detector to break automatically the way the ABBA test
-	// above relies on.
-	runBatch := func(batch []postgres.BalancePair) error {
-		tx, err := pool.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		q := postgres.NewQueriesForTest(tx)
-		// sortedUniquePairs(batchA) == sortedUniquePairs(batchB): the fix's
-		// whole point is that the caller's input order stops mattering.
-		if err := postgres.AcquireBalanceLocksForTest(ctx, q, postgres.SortedUniquePairsForTest(batch)); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
+	curUID = postgrestest.SeedCurrency(t, pool, currencyCode, "Batch Lock Order Unit")
+	currencyID = postgrestest.InternalID(t, pool, "currencies", curUID)
+	return pool, curUID, currencyID
+}
+
+// batchRequests renders one `deposit_confirm` request per holder, in the
+// order given -- the caller-controlled sequence whose effect on lock order is
+// exactly what is under test.
+func batchRequests(curUID string, keyPrefix string, holders ...int64) []core.TemplateExecutionRequest {
+	reqs := make([]core.TemplateExecutionRequest, 0, len(holders))
+	for _, h := range holders {
+		reqs = append(reqs, core.TemplateExecutionRequest{
+			TemplateCode: "deposit_confirm",
+			Params: core.TemplateParams{
+				HolderID:       h,
+				CurrencyUID:    curUID,
+				IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("%s-%d", keyPrefix, h)),
+				Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(10)},
+				Source:         "lock-order-test",
+			},
+		})
 	}
+	return reqs
+}
+
+// runBatchLockOrderProbe is the shared body of the two tests below. It builds
+// a deterministic deadlock opportunity around a REAL ExecuteTemplateBatch
+// call (pool mode or tx mode, supplied by the caller as execBatch) instead of
+// re-implementing the fix in the test:
+//
+//	probe tx P : holds bal(-h2)                      [taken first, uncontested]
+//	batch      : ExecuteTemplateBatch([h1, h2])
+//	probe tx P : then asks for bal(h1)
+//
+// Pre-fix, the batch takes each journal's locks as it posts it, in the
+// caller's order: bal(-h1), bal(h1) for the first request, then it blocks on
+// bal(-h2) for the second -- while HOLDING bal(h1). P then asks for bal(h1)
+// and the cycle closes: SQLSTATE 40P01 for whichever side Postgres picks.
+// Post-fix, the batch pre-acquires the union sorted once -- bal(-h2) is the
+// smallest key, so the batch blocks on its FIRST acquisition holding no
+// balance lock at all, P's bal(h1) is uncontested, and no cycle can form.
+//
+// The sleep is what makes this deterministic rather than a race: it gives the
+// batch time to reach its blocking acquisition before P asks for its second
+// lock. It cannot produce a false PASS -- if the batch were still ahead of
+// where the comment says it is, P would simply take an uncontested lock,
+// which is the same observation the assertion makes.
+func runBatchLockOrderProbe(t *testing.T, pool *pgxpool.Pool, currencyID, h1, h2 int64, execBatch func() error) {
+	t.Helper()
+	ctx := context.Background()
+
+	probeTx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = probeTx.Rollback(ctx) }()
+	probeQ := postgres.NewQueriesForTest(probeTx)
+
+	require.NoError(t, postgres.AcquireBalanceLocksForTest(ctx, probeQ,
+		[]postgres.BalancePair{postgres.NewBalancePair(core.SystemAccountHolder(h2), currencyID)}),
+		"probe must take the system counterpart of the batch's SECOND request uncontested")
 
 	var wg sync.WaitGroup
-	errs := make([]error, 2)
-	wg.Add(2)
+	var batchErr error
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errs[0] = runBatch([]postgres.BalancePair{holderA, holderB})
+		batchErr = execBatch()
 	}()
-	go func() {
-		defer wg.Done()
-		errs[1] = runBatch([]postgres.BalancePair{holderB, holderA})
-	}()
+
+	time.Sleep(1500 * time.Millisecond)
+
+	probeErr := postgres.AcquireBalanceLocksForTest(ctx, probeQ,
+		[]postgres.BalancePair{postgres.NewBalancePair(h1, currencyID)})
+
+	// Release the probe's locks so the batch can finish either way; the
+	// assertions below are about what already happened, not about the
+	// batch's ability to complete afterwards.
+	_ = probeTx.Rollback(ctx)
 	wg.Wait()
 
-	require.NoError(t, errs[0], "global batch lock order must eliminate cross-journal ABBA regardless of scheduling")
-	require.NoError(t, errs[1], "global batch lock order must eliminate cross-journal ABBA regardless of scheduling")
+	require.NoError(t, probeErr,
+		"the probe asked for a lock the batch must not be holding while it waits; a 40P01 here means ExecuteTemplateBatch took its balance locks in the caller's request order instead of one canonical global order")
+	require.NoError(t, batchErr,
+		"ExecuteTemplateBatch must serialize behind the probe, not deadlock with it")
+}
+
+// TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock pins
+// the pool-mode half of ExecuteTemplateBatch's cross-journal lock-order fix:
+// pre-union every journal's balance pairs across the whole batch, sort ONCE,
+// and acquire before posting any journal (preacquireBatchLocks in
+// ledger_store.go).
+//
+// This test previously asserted the same property against the PRIMITIVES
+// (sortedUniquePairs + acquireBalanceLocks called by the test itself) and
+// never mentioned ExecuteTemplateBatch in its body -- it re-implemented the
+// fix and would have stayed green with the fix deleted (concurrency.md
+// 2026-09-02, "gate-shape"). It now drives the real call.
+//
+// Falsification (re-run before trusting this test): delete the
+// preacquireBatchLocks call from ExecuteTemplateBatch's pool branch. The
+// probe then loses a real 40P01.
+func TestExecuteTemplateBatch_GlobalLockOrder_PreventsCrossJournalDeadlock(t *testing.T) {
+	pool, curUID, currencyID := seedBatchDeadlockFixture(t, "BLO")
+	ctx := context.Background()
+	store := postgres.NewLedgerStore(pool)
+
+	const h1, h2 = int64(705), int64(706)
+	runBatchLockOrderProbe(t, pool, currencyID, h1, h2, func() error {
+		_, err := store.ExecuteTemplateBatch(ctx, batchRequests(curUID, "blo-pool", h1, h2))
+		return err
+	})
+}
+
+// TestExecuteTemplateBatch_TxMode_GlobalLockOrder_PreventsCrossJournalDeadlock
+// pins the same property for the tx-mode branch a consumer reaches through
+// ledger.Service.RunInTx -- the branch the original fix never touched
+// (concurrency.md 2026-09-02 Major: "the batch-level global lock order was
+// only added to the pool path"). Driven through the facade, not through a
+// hand-bound store, because RunInTx + TemplateBatchExecutor() is the entry a
+// consumer actually has.
+//
+// Falsification: delete the preacquireBatchLocks call from
+// executeTemplateBatchWithQueries.
+func TestExecuteTemplateBatch_TxMode_GlobalLockOrder_PreventsCrossJournalDeadlock(t *testing.T) {
+	pool, curUID, currencyID := seedBatchDeadlockFixture(t, "BLOTX")
+	ctx := context.Background()
+	svc, err := ledger.New(pool)
+	require.NoError(t, err)
+
+	const h1, h2 = int64(707), int64(708)
+	runBatchLockOrderProbe(t, pool, currencyID, h1, h2, func() error {
+		return svc.RunInTx(ctx, func(tx *ledger.Service) error {
+			_, err := tx.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, batchRequests(curUID, "blo-tx", h1, h2))
+			return err
+		})
+	})
 }
 
 // TestAcquireBalanceLocks_HashCollisionCrossBatchDeadlock_Fixed pins M-6 of
@@ -321,4 +418,108 @@ func TestAcquireBalanceLocks_HashCollisionCrossBatchDeadlock_Fixed(t *testing.T)
 
 	require.NoError(t, errs[0], "hash-collision cross-batch ABBA must be impossible once AcquireBalanceLock uses the full 64-bit hashtextextended range")
 	require.NoError(t, errs[1], "hash-collision cross-batch ABBA must be impossible once AcquireBalanceLock uses the full 64-bit hashtextextended range")
+}
+
+// TestPostJournal_EventLink_LocksBookingBeforeBalances pins B-m6: the two
+// paths that touch a booking row and a balance lock in the same transaction
+// used to take them in OPPOSITE orders.
+//
+//	Transition -> PostJournal (the Event-Journal atomicity recipe in
+//	CLAUDE.md, and what service/onchain.go's deposit confirmation does):
+//	    booking row lock -> balance advisory locks
+//	PostJournal with a caller-supplied event_uid (a wire field on
+//	POST /journals, typically a repair job attaching a journal to an
+//	event some earlier transaction created):
+//	    balance advisory locks -> booking row lock  (via LinkBookingJournal)
+//
+// Two ordinary calls, one cycle. The probe transaction below stands in for
+// the Transition side, holding the booking row lock; post-fix, PostJournal
+// takes that row FOR UPDATE while resolving event_uid -- before any balance
+// lock -- so it blocks there holding nothing and the probe's later bal(H) is
+// uncontested.
+//
+// Falsification: move the GetBookingForUpdate call in postJournalWithQueries
+// back after acquireBalanceLocks (or drop it and let LinkBookingJournal take
+// the row lock implicitly, as it did). The probe then loses a real 40P01.
+func TestPostJournal_EventLink_LocksBookingBeforeBalances(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	classStore := postgres.NewClassificationStore(pool)
+	bookingStore := postgres.NewBookingStore(pool)
+	store := postgres.NewLedgerStore(pool)
+
+	cls, err := classStore.CreateClassification(ctx, core.ClassificationInput{
+		Code:       "booking_lock_order",
+		Name:       "Booking Lock Order",
+		NormalSide: core.NormalSideCredit,
+		IsSystem:   true,
+		Lifecycle: &core.Lifecycle{
+			Initial:     "pending",
+			Terminal:    []core.Status{"confirmed"},
+			Transitions: map[core.Status][]core.Status{"pending": {"confirmed"}},
+		},
+	})
+	require.NoError(t, err)
+
+	curUID := postgrestest.SeedCurrency(t, pool, "BLKORD", "Booking Lock Order Unit")
+	currencyID := postgrestest.InternalID(t, pool, "currencies", curUID)
+	jtUID := postgrestest.SeedJournalType(t, pool, "transfer", "Transfer")
+	wallet := postgrestest.SeedClassification(t, pool, "main_wallet", "Main Wallet", "debit", false)
+	custodial := postgrestest.SeedClassification(t, pool, "custodial", "Custodial", "credit", true)
+
+	const holder = int64(911)
+
+	booking, err := bookingStore.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: cls.Code,
+		AccountHolder:      holder,
+		CurrencyUID:        curUID,
+		Amount:             decimal.NewFromInt(100),
+		IdempotencyKey:     postgrestest.UniqueKey("blkord-booking"),
+		ChannelName:        "test",
+	})
+	require.NoError(t, err)
+
+	evt, err := bookingStore.Transition(ctx, core.TransitionInput{
+		BookingUID:     booking.UID,
+		ToStatus:       "confirmed",
+		IdempotencyKey: postgrestest.UniqueKey("blkord-transition"),
+	})
+	require.NoError(t, err)
+
+	// Probe = the Transition side: booking row lock first.
+	probeTx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = probeTx.Rollback(ctx) }()
+	_, err = probeTx.Exec(ctx, "SELECT id FROM bookings WHERE uid = $1::uuid FOR UPDATE", booking.UID)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	var postErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, postErr = store.PostJournal(ctx, core.JournalInput{
+			JournalTypeUID: jtUID,
+			IdempotencyKey: postgrestest.UniqueKey("blkord-post"),
+			EventUID:       evt.UID,
+			Entries: []core.EntryInput{
+				{AccountHolder: holder, CurrencyUID: curUID, ClassificationUID: wallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(100)},
+				{AccountHolder: -holder, CurrencyUID: curUID, ClassificationUID: custodial, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(100)},
+			},
+		})
+	}()
+
+	time.Sleep(1500 * time.Millisecond)
+
+	probeQ := postgres.NewQueriesForTest(probeTx)
+	probeErr := postgres.AcquireBalanceLocksForTest(ctx, probeQ,
+		[]postgres.BalancePair{postgres.NewBalancePair(holder, currencyID)})
+
+	_ = probeTx.Rollback(ctx)
+	wg.Wait()
+
+	require.NoError(t, probeErr,
+		"a 40P01 here means PostJournal held the balance locks while waiting for the booking row -- the reverse of the Transition path's order")
+	require.NoError(t, postErr, "PostJournal must serialize behind the booking row lock, not deadlock with it")
 }

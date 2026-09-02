@@ -545,3 +545,112 @@ func scaleByFraction(total decimal.Decimal, num, den int64, exponent int32) deci
 	raw := total.Mul(decimal.NewFromInt(num)).DivRound(decimal.NewFromInt(den), exponent+reversalScaleGuardDigits)
 	return core.Round(raw, exponent, core.RoundHalfUp)
 }
+
+// flipEntryType returns the opposite side of a double entry. A reversal entry
+// is the original entry with its side flipped, so this is also how a reversal
+// entry is mapped back onto the dimension of the original it reverses.
+func flipEntryType(t core.EntryType) core.EntryType {
+	if t == core.EntryTypeCredit {
+		return core.EntryTypeDebit
+	}
+	return core.EntryTypeCredit
+}
+
+// validateReversalOfInput is the input gate on the caller-supplied
+// core.JournalInput.ReversalOfUID (I-51). ReverseJournal and
+// ReverseJournalFraction DERIVE a reversal's entries from the original and
+// guard both ends of the chain; PostJournal accepts the same link from a
+// caller and, until this gate existed, checked only that the uid resolved to
+// a row. That was enough to break the chain's integrity without breaking
+// double entry: everything downstream -- cumulativeReversedByDimension above
+// all -- reads every journal carrying reversal_of = J as "a reversal of J
+// worth this much", so a journal that moves no money at all can register as
+// reversal history and make "reverse everything remaining" reverse less than
+// everything, with a nil error and every reconciliation check green
+// (financial-correctness.md A-Critical-2, the 2026-08-26 C8 defect reaching
+// the same code through an unguarded input instead of a bad derivation).
+//
+// The three rules mirror what the reversal APIs already enforce, so the two
+// ways to post a reversal cannot disagree about the same journal:
+//
+//  1. the referenced journal must not itself be a reversal (ErrConflict --
+//     same verdict as ledger_store.go's ReverseJournal and
+//     reverseJournalFractionWithQueries);
+//  2. every entry must invert an entry the original actually has, on the same
+//     (holder, currency, classification) dimension (ErrInvalidInput) -- this
+//     is what a "reversal" means, and it is the rule the net-zero repro
+//     violates;
+//  3. per dimension, already-reversed + this journal's amount must not exceed
+//     the original's (ErrConflict -- the same ceiling, aggregated at the same
+//     grain, as reversalEntriesFor's overshoot check).
+//
+// original must have been read FOR UPDATE by the caller: rules 2 and 3 read
+// the original's entries and its reversal history, and both have to stay put
+// until this journal commits.
+func validateReversalOfInput(ctx context.Context, q *sqlcgen.Queries, original sqlcgen.Journal, resolved []resolvedEntry) error {
+	originalUID := pgToUID(original.Uid)
+	if original.ReversalOf.Valid {
+		return fmt.Errorf(
+			"postgres: post journal: reversal_of %q is itself a reversal; reverse the original journal instead: %w",
+			originalUID, core.ErrConflict,
+		)
+	}
+
+	originalEntries, err := q.ListJournalEntries(ctx, original.ID)
+	if err != nil {
+		return fmt.Errorf("postgres: post journal: reversal_of: list original entries: %w", err)
+	}
+	if len(originalEntries) == 0 {
+		return fmt.Errorf(
+			"postgres: post journal: reversal_of %q has no entries; there is nothing to reverse: %w",
+			originalUID, core.ErrInvalidInput,
+		)
+	}
+
+	originalByDim := make(map[entryDimKey]decimal.Decimal, len(originalEntries))
+	for _, e := range originalEntries {
+		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: core.EntryType(e.EntryType)}
+		originalByDim[key] = originalByDim[key].Add(mustNumericToDecimal(e.Amount))
+	}
+
+	alreadyReversed, err := cumulativeReversedByDimension(ctx, q, original.ID)
+	if err != nil {
+		return fmt.Errorf("postgres: post journal: reversal_of: %w", err)
+	}
+
+	// Aggregate this journal's entries onto the ORIGINAL's dimension grain
+	// (each entry's side flipped back), keeping first-appearance order so the
+	// error a caller gets names the first offending leg deterministically.
+	newByDim := make(map[entryDimKey]decimal.Decimal, len(resolved))
+	order := make([]entryDimKey, 0, len(resolved))
+	for _, e := range resolved {
+		key := entryDimKey{
+			holder:           e.AccountHolder,
+			currencyID:       e.currencyID,
+			classificationID: e.classificationID,
+			entryType:        flipEntryType(e.EntryType),
+		}
+		if _, seen := newByDim[key]; !seen {
+			order = append(order, key)
+		}
+		newByDim[key] = newByDim[key].Add(e.Amount)
+	}
+
+	for _, key := range order {
+		originalAmount, ok := originalByDim[key]
+		if !ok {
+			return fmt.Errorf(
+				"postgres: post journal: reversal_of %q: entry (holder %d, currency %d, classification %d, %s) does not reverse any entry of the referenced journal: %w",
+				originalUID, key.holder, key.currencyID, key.classificationID, flipEntryType(key.entryType), core.ErrInvalidInput,
+			)
+		}
+		if alreadyReversed[key].Add(newByDim[key]).GreaterThan(originalAmount) {
+			return fmt.Errorf(
+				"postgres: post journal: reversal_of %q: dimension (holder %d, currency %d, classification %d, %s): cumulative reversed %s + this journal's %s would exceed original amount %s: %w",
+				originalUID, key.holder, key.currencyID, key.classificationID, key.entryType,
+				alreadyReversed[key], newByDim[key], originalAmount, core.ErrConflict,
+			)
+		}
+	}
+	return nil
+}

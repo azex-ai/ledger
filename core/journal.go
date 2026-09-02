@@ -80,6 +80,17 @@ type JournalInput struct {
 	Source         string            `json:"source"`
 	// ReversalOfUID marks this journal as the reversal of another; empty for
 	// original journals.
+	//
+	// Prefer JournalWriter.ReverseJournal / ReverseJournalFraction, which
+	// derive the entries for you. Setting this field by hand is supported,
+	// but it is a claim the store verifies rather than a label it records
+	// (docs/INVARIANTS.md I-51): the referenced journal must not itself be a
+	// reversal, and these entries must invert entries it actually has, per
+	// dimension, within what is left to reverse. Everything that reads
+	// reversal history -- "reverse everything remaining" above all -- treats
+	// every journal carrying this link as reversal history worth its amount,
+	// so an unchecked label would make a later full reversal reverse less
+	// than everything and report success.
 	ReversalOfUID string `json:"reversal_of_uid,omitempty"`
 	// EventUID links this journal to the event that caused it (I-10); empty
 	// when the posting is not event-driven.
