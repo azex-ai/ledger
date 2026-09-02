@@ -5,6 +5,8 @@
 > 每条带 id / `file:line` / 修法 / pin 要求）。完整论证与最小复现在同目录各 territory 报告原文与
 > `lead-verification.md` —— **不要只看 TODO 的一行标题就动手**。
 >
+> **Status（2026-09-03）：Wave 1 / Wave 2 全部合入 main；Wave 3 收口中（对抗式复审 ×2、INVARIANTS 引用收紧、归档）。** 复审结论出来后本文件转 CLOSED。
+>
 > Aaron 2026-09-02 拍板：**全量修复**（6 Critical + 全部 Major + 全部 Minor）。
 > 沿用无外部消费方期的 no-compat 约定（lead 已核：两条产品线 go.mod 零引用），允许破坏性变更，
 > 但每一条破坏性变更都要进 `TODO.md` §破坏性变更清单，写清消费方需要做什么。
