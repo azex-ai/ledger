@@ -28,10 +28,34 @@ package postgres_test
 //  2. Go -- no non-test file may branch on core.NormalSide* outside
 //     core.Sign, unless classified below.
 //  3. The "what money can the holder see" predicate has exactly one spelling
-//     across every query that asks it. That is not a sign question, but it is
-//     the same failure mode -- four copies of one predicate, one of them
-//     updated (2026-08-26's M-4) and three not, which is how withdrawal fees
-//     vanished from user statements (audit A-M3).
+//     across every query that asks it, AND every holder-facing query that
+//     reads journal_entries actually applies it. That is not a sign
+//     question, but it is the same failure mode -- four copies of one
+//     predicate, one of them updated (2026-08-26's M-4) and three not, which
+//     is how withdrawal fees vanished from user statements (audit A-M3).
+//
+// Three findings from the W3 adversarial review of this gate shaped the
+// implementation below, all three reproduced by mutation:
+//
+//   - M-2: the SQL check matched entry_type + amount + case on ONE line, so
+//     writing the same CASE across four lines -- the natural SQL layout --
+//     made it invisible. The gate's own error message said "do not skip this
+//     by making the line unmatchable"; a line break did exactly that. It now
+//     works on whole `-- name:` blocks with whitespace flattened.
+//   - M-3: the predicate check pinned the spelling of the copies that
+//     already existed, not the presence of the predicate where it belongs.
+//     Adding a new holder aggregate that simply forgot it -- A-M3's original
+//     shape -- passed. There is now a coverage half.
+//   - M-4: the Go check only recognized the named constants, so
+//     `if string(side) == "debit"` was a complete second implementation the
+//     regexp could not see, and the file-level exemptions pre-approved
+//     anything later written into those three files. Literal comparisons now
+//     count, and each exemption pins how many matches its file may contain.
+//   - m-5: neither half scanned postgres/sqlcgen/, where the generated copy
+//     of every query lives. The SQL half now reads it too (the generated
+//     consts carry the same `-- name:` header), so reintroducing a bare CASE
+//     there -- which only `sqlc diff` would otherwise catch, and only
+//     indirectly -- is red here as well.
 
 import (
 	"fmt"
@@ -79,57 +103,172 @@ var sqlSignExemptions = map[string]struct {
 }
 
 var (
-	sqlQueryNameRE        = regexp.MustCompile(`^--\s*name:\s*(\S+)`)
+	// Unanchored on purpose: in postgres/sqlcgen the same header sits inside
+	// a Go const declaration (`const q = `+"`"+`-- name: X :many`+"`"+`), so
+	// requiring column 0 would have filed every generated query under
+	// "(preamble)" (m-5).
+	sqlQueryNameRE        = regexp.MustCompile(`--\s*name:\s*(\S+)`)
 	signAuthoritySQLFuncs = []string{"ledger_signed_amount", "ledger_signed_delta"}
 
 	// A normal_side constant only reimplements the sign convention when it is
 	// BRANCHED ON. Declaring a classification's polarity
 	// (`NormalSide: core.NormalSideCredit`) is the input to the convention,
 	// not a copy of it, and presets/ is nothing but such declarations.
+	//
+	// The last two alternatives are M-4: `core.NormalSide` is a string type,
+	// so `if string(side) == "debit"` is a complete second implementation of
+	// the convention that the constant-name patterns above cannot see. The
+	// reviewer wrote exactly that (a mutSignedAmount in rollup_adapter.go)
+	// and the gate stayed green. Comparing against the bare literal is now
+	// itself the offence -- use core.NormalSideDebit / core.EntryTypeDebit,
+	// whichever the value is, and let core.Sign do the branching.
 	normalSideBranchRE = regexp.MustCompile(
 		`(==|!=)\s*core\.NormalSide(Debit|Credit)` +
 			`|core\.NormalSide(Debit|Credit)\s*(==|!=)` +
 			`|\bcase\s+core\.NormalSide(Debit|Credit)` +
-			`|\bswitch\s+[^\n]*\bnormalSide\b`)
+			`|\bswitch\s+[^\n]*\bnormalSide\b` +
+			`|(==|!=)\s*"(debit|credit)"` +
+			`|"(debit|credit)"\s*(==|!=)` +
+			`|\bcase\s+"(debit|credit)"`)
 )
 
-func TestSignAuthorityGate_SQLHasNoUnclassifiedEntryTypeArithmetic(t *testing.T) {
-	files, err := filepath.Glob(filepath.Join("sql", "queries", "*.sql"))
+// sqlBlock is one `-- name: X` query (or a file's preamble), with comments
+// stripped, lowercased, and all whitespace flattened to single spaces -- so a
+// CASE expression reads the same whether its author wrote it on one line or
+// on five (M-2).
+type sqlBlock struct {
+	file  string // basename, e.g. "reconcile.sql" or "reconcile.sql.go"
+	query string
+	text  string // normalized
+	line  int    // 1-based line where the block starts, for the error message
+}
+
+func (b sqlBlock) key() string { return b.file + ":" + b.query }
+
+// signAuthoritySQLPaths are every file that carries query text: the sources
+// and postgres/sqlcgen's generated copies of them (m-5). The generated consts
+// begin with the same `-- name: X :many` header, so one parser reads both.
+func signAuthoritySQLPaths(t *testing.T) []string {
+	t.Helper()
+	queries, err := filepath.Glob(filepath.Join("sql", "queries", "*.sql"))
 	require.NoError(t, err)
-	require.NotEmpty(t, files, "the gate must actually find the queries it claims to scan")
+	require.NotEmpty(t, queries, "the gate must actually find the queries it claims to scan")
+	generated, err := filepath.Glob(filepath.Join("sqlcgen", "*.sql.go"))
+	require.NoError(t, err)
+	require.NotEmpty(t, generated, "the gate must actually find the generated copies it claims to scan")
+	return append(queries, generated...)
+}
 
-	found := map[string]int{}
+// commentStrippedSQLLine removes a trailing `-- ...` comment. In a generated
+// .go file the `-- name:` header itself is a comment, so the caller must read
+// the query name BEFORE calling this.
+func commentStrippedSQLLine(line string) string {
+	if i := strings.Index(line, "--"); i >= 0 {
+		return line[:i]
+	}
+	return line
+}
 
-	for _, path := range files {
+func parseSQLBlocks(t *testing.T, paths []string) []sqlBlock {
+	t.Helper()
+	var out []sqlBlock
+	for _, path := range paths {
 		body, err := os.ReadFile(path)
 		require.NoError(t, err)
-
 		base := filepath.Base(path)
-		query := "(preamble)"
+
+		cur := sqlBlock{file: base, query: "(preamble)", line: 1}
+		var sb strings.Builder
+		flush := func() {
+			cur.text = strings.Join(strings.Fields(strings.ToLower(sb.String())), " ")
+			out = append(out, cur)
+			sb.Reset()
+		}
 		for i, line := range strings.Split(string(body), "\n") {
 			if m := sqlQueryNameRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
-				query = m[1]
+				flush()
+				cur = sqlBlock{file: base, query: m[1], line: i + 1}
 				continue
 			}
-			if !isBareEntryTypeArithmetic(line) {
-				continue
-			}
-			key := base + ":" + query
-			found[key]++
-			if _, ok := sqlSignExemptions[key]; !ok {
-				t.Errorf(
-					"%s:%d (query %s) derives an amount from entry_type without going through %s:\n\t%s\n\n"+
-						"Either use ledger_signed_amount(c.normal_side, je.entry_type, je.amount), or -- if this really is a\n"+
-						"normal_side-independent debit-minus-credit check -- add %q to sqlSignExemptions with a reason.\n"+
-						"Do not skip this by making the line unmatchable: the last query that tested entry_type directly\n"+
-						"reported deposits as withdrawals to every consumer of /holders/{h}/trends.",
-					path, i+1, query, strings.Join(signAuthoritySQLFuncs, " / "), strings.TrimSpace(line), key,
-				)
+			sb.WriteString(commentStrippedSQLLine(line))
+			sb.WriteByte(' ')
+		}
+		flush()
+	}
+	return out
+}
+
+// caseSpanRE matches one flattened `case ... end` expression, non-greedily so
+// sibling CASEs in the same block are separate matches.
+var caseSpanRE = regexp.MustCompile(`case\b.*?\bend\b`)
+
+// bareEntryTypeSpans returns the `case ... end` expressions in a normalized
+// block that turn entry_type into an amount without going through the sign
+// authority.
+func bareEntryTypeSpans(text string) []string {
+	var out []string
+	for _, span := range caseSpanRE.FindAllString(text, -1) {
+		if !strings.Contains(span, "entry_type") || !strings.Contains(span, "amount") {
+			continue
+		}
+		authoritative := false
+		for _, fn := range signAuthoritySQLFuncs {
+			if strings.Contains(span, fn) {
+				authoritative = true
 			}
 		}
+		if !authoritative {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+// expandedSQLSignExemptions mirrors every exemption onto the generated copy
+// of the same query (`reconcile.sql:Q` also covers `reconcile.sql.go:Q`), so
+// scanning sqlcgen does not mean maintaining the classification twice.
+func expandedSQLSignExemptions() map[string]struct {
+	count  int
+	reason string
+} {
+	out := map[string]struct {
+		count  int
+		reason string
+	}{}
+	for key, exempt := range sqlSignExemptions {
+		out[key] = exempt
+		file, query, _ := strings.Cut(key, ":")
+		out[file+".go:"+query] = exempt
+	}
+	return out
+}
+
+func TestSignAuthorityGate_SQLHasNoUnclassifiedEntryTypeArithmetic(t *testing.T) {
+	exemptions := expandedSQLSignExemptions()
+	found := map[string]int{}
+
+	for _, block := range parseSQLBlocks(t, signAuthoritySQLPaths(t)) {
+		spans := bareEntryTypeSpans(block.text)
+		if len(spans) == 0 {
+			continue
+		}
+		found[block.key()] += len(spans)
+		if _, ok := exemptions[block.key()]; ok {
+			continue
+		}
+		t.Errorf(
+			"%s (query %s, near line %d) derives an amount from entry_type without going through %s:\n\t%s\n\n"+
+				"Either use ledger_signed_amount(c.normal_side, je.entry_type, je.amount), or -- if this really is a\n"+
+				"normal_side-independent debit-minus-credit check -- add %q to sqlSignExemptions with a reason.\n"+
+				"Reformatting will not help: the check runs on the whole query with whitespace flattened, so a CASE\n"+
+				"split across lines reads exactly the same as a CASE on one. The last query that tested entry_type\n"+
+				"directly reported deposits as withdrawals to every consumer of /holders/{h}/trends.",
+			block.file, block.query, block.line, strings.Join(signAuthoritySQLFuncs, " / "),
+			strings.Join(spans, "\n\t"), block.file+":"+block.query,
+		)
 	}
 
-	for key, exempt := range sqlSignExemptions {
+	for key, exempt := range exemptions {
 		got := found[key]
 		if got == 0 {
 			t.Errorf("stale exemption %q (%s): no matching expression exists any more -- delete the entry", key, exempt.reason)
@@ -141,39 +280,26 @@ func TestSignAuthorityGate_SQLHasNoUnclassifiedEntryTypeArithmetic(t *testing.T)
 	}
 }
 
-// isBareEntryTypeArithmetic reports whether a SQL line turns entry_type into a
-// signed or filtered amount by hand. It deliberately does not try to parse
-// SQL: the point is to be noisy about anything shaped like the bug and force
-// a human classification, not to be exact.
-func isBareEntryTypeArithmetic(line string) bool {
-	low := strings.ToLower(line)
-	if i := strings.Index(low, "--"); i >= 0 {
-		low = low[:i]
-	}
-	if !strings.Contains(low, "entry_type") || !strings.Contains(low, "amount") {
-		return false
-	}
-	if !strings.Contains(low, "case") {
-		return false
-	}
-	for _, fn := range signAuthoritySQLFuncs {
-		if strings.Contains(low, fn) {
-			return false
-		}
-	}
-	return true
-}
-
-// goSignExemptions maps "<file>:<line content fragment>" to why a non-test Go
-// file may compare against core.NormalSide* outside core.Sign.
-var goSignExemptions = map[string]string{
-	"core/types.go":        "the declaration of the constants themselves, plus NormalSide.IsValid",
-	"service/rollup.go":    "asks whether a NEGATIVE balance is anomalous for this account, which is a different question from what sign an entry carries; the balance it tests was already produced by core.Delta",
-	"service/reconcile.go": "buckets an already-signed net (from core.Delta, which rejects invalid input two lines earlier) into debit-normal and credit-normal groups for reporting",
+// goSignExemptions maps a non-test Go file to why it may compare against
+// core.NormalSide* (or the bare "debit"/"credit" literals) outside core.Sign,
+// and to HOW MANY such comparisons it is allowed to contain.
+//
+// The count is M-4's other half: the exemption used to be whole-file, which
+// pre-approved every branch anyone wrote into those files afterwards. A file
+// that grows one is now red until someone looks at the new one on its own
+// merits -- the same contract sqlSignExemptions has carried for the SQL side.
+var goSignExemptions = map[string]struct {
+	count  int
+	reason string
+}{
+	"core/types.go":        {0, "the declaration of the constants themselves, plus NormalSide.IsValid -- declarations are the convention's INPUT, and none of them matches a branch pattern today, so the allowance is zero: a comparison appearing here would be a new implementation"},
+	"service/rollup.go":    {1, "asks whether a NEGATIVE balance is anomalous for this account, which is a different question from what sign an entry carries; the balance it tests was already produced by core.Delta"},
+	"service/reconcile.go": {1, "buckets an already-signed net (from core.Delta, which rejects invalid input two lines earlier) into debit-normal and credit-normal groups for reporting"},
 }
 
 func TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch(t *testing.T) {
 	var offenders []string
+	perFile := map[string]int{}
 
 	err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -205,6 +331,7 @@ func TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch(t *testing.T) {
 			if !normalSideBranchRE.MatchString(code) {
 				continue
 			}
+			perFile[rel]++
 			if _, ok := goSignExemptions[rel]; ok {
 				continue
 			}
@@ -216,19 +343,25 @@ func TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch(t *testing.T) {
 
 	sort.Strings(offenders)
 	assert.Emptyf(t, offenders,
-		"these non-test files branch on a normal_side constant outside core.Sign:\n\t%s\n\n"+
+		"these non-test files branch on a normal_side constant -- or on the bare \"debit\"/\"credit\" literal, which is the\n"+
+			"same convention spelled around the type -- outside core.Sign:\n\t%s\n\n"+
 			"Use core.Sign / core.SignedAmount / core.Delta. If the branch genuinely asks a different question\n"+
 			"(\"is a negative balance anomalous here?\", \"which reporting bucket does this net belong in?\"),\n"+
-			"add the file to goSignExemptions with that reason.",
+			"add the file to goSignExemptions with that reason AND the number of comparisons it may contain.",
 		strings.Join(offenders, "\n\t"))
 
 	// A stale exemption is as bad as a missing one: it silently pre-approves
-	// whatever gets written into that file next.
-	for rel := range goSignExemptions {
+	// whatever gets written into that file next. The count is what keeps the
+	// approval scoped to the branches somebody actually reviewed (M-4).
+	for rel, exempt := range goSignExemptions {
 		body, err := os.ReadFile(filepath.Join("..", rel))
 		require.NoErrorf(t, err, "exempted file %s does not exist", rel)
 		assert.Containsf(t, string(body), "NormalSide",
 			"stale exemption: %s no longer mentions NormalSide", rel)
+		assert.Equalf(t, exempt.count, perFile[rel],
+			"%s is exempted for %d normal_side comparison(s) (%s) but now has %d -- "+
+				"review the new one on its own merits instead of inheriting the file's exemption",
+			rel, exempt.count, exempt.reason, perFile[rel])
 	}
 }
 
@@ -292,4 +425,75 @@ func TestSignAuthorityGate_HolderVisibleMoneyPredicateHasOneSpelling(t *testing.
 	assert.Equal(t, want, got,
 		"the set of queries asking \"what money can the holder see / what does the platform owe\" changed; "+
 			"a new one must use the canonical predicate and be counted here, and a removed one must be dropped from the map")
+}
+
+// holderVisiblePredicateFiles are the query files whose journal_entries
+// aggregates answer "what money can the holder see / what does the platform
+// owe". Every such query must apply the canonical predicate or be exempted
+// below with a reason.
+var holderVisiblePredicateFiles = map[string]bool{
+	"holder.sql":            true,
+	"platform_balances.sql": true,
+}
+
+// holderVisiblePredicateExemptions maps "<file>:<query>" to why an aggregate
+// over journal_entries in a holder-facing file legitimately does NOT filter
+// on balance_role.
+var holderVisiblePredicateExemptions = map[string]string{
+	"platform_balances.sql:GetPlatformBalancesByHolder":   "a per-(classification, holder_side) breakdown for operators: it reports EVERY classification separately, including memo and untagged ones, and never sums them into a holder-visible or liability figure. Filtering here would hide rows the operator view exists to show",
+	"platform_balances.sql:GetSystemSideCustodialBalance": "system side only (account_holder < 0) and scoped by classification CODE to the custodial set: it measures the assets the platform holds, not what any holder can see. balance_role tags the user-side liability split and has no bearing on it",
+}
+
+// TestSignAuthorityGate_HolderVisibleQueriesApplyThePredicate is M-3, the
+// coverage half of the test above.
+//
+// That one pins the SPELLING of the copies that exist -- which is what
+// A-M3's fix needed, four copies with one updated. It cannot see the next
+// occurrence of the same mistake: a NEW aggregate that forgets the predicate
+// entirely. The reviewer added a holder-keyed SUM over journal_entries with
+// no balance_role filter at all and every gate stayed green, which is
+// A-M3 in its original form (a holder aggregate that silently includes memo
+// legs, so a fee both moves the balance and cancels itself out of the
+// statement).
+//
+// So: any query in a holder-facing file that reads journal_entries must
+// either apply the canonical predicate or be classified here. A new one
+// defaults to red -- the same fail-closed contract as
+// postgres/grant_coverage_test.go's table classification.
+func TestSignAuthorityGate_HolderVisibleQueriesApplyThePredicate(t *testing.T) {
+	const canonicalLower = "balance_role not in ('', 'memo')"
+
+	sources, err := filepath.Glob(filepath.Join("sql", "queries", "*.sql"))
+	require.NoError(t, err)
+	require.NotEmpty(t, sources)
+
+	checked := 0
+	seen := map[string]bool{}
+	for _, block := range parseSQLBlocks(t, sources) {
+		if !holderVisiblePredicateFiles[block.file] || block.query == "(preamble)" {
+			continue
+		}
+		if !strings.Contains(block.text, "journal_entries") {
+			continue
+		}
+		checked++
+		seen[block.key()] = true
+		if strings.Contains(block.text, canonicalLower) {
+			continue
+		}
+		if _, ok := holderVisiblePredicateExemptions[block.key()]; ok {
+			continue
+		}
+		t.Errorf("%s (query %s, near line %d) aggregates journal_entries in a holder-facing file without %q.\n\n"+
+			"Every query that answers \"what money can the holder see\" or \"what does the platform owe\" must apply that predicate: "+
+			"without it, memo legs join the aggregate, and a fee whose memo and locked legs net to zero disappears from the statement "+
+			"while still moving the balance (audit A-M3). If this query genuinely reports across all balance roles, add %q to "+
+			"holderVisiblePredicateExemptions with the reason.",
+			block.file, block.query, block.line, canonicalLower, block.key())
+	}
+
+	require.Positive(t, checked, "no holder-facing journal_entries query was found -- the gate scanned nothing")
+	for key := range holderVisiblePredicateExemptions {
+		assert.Truef(t, seen[key], "stale exemption %q: no such query reads journal_entries any more -- delete the entry", key)
+	}
 }

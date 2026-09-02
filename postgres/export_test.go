@@ -11,8 +11,10 @@ package postgres
 
 import (
 	"context"
+
+	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/postgres/sqlcgen"
 )
-import "github.com/azex-ai/ledger/postgres/sqlcgen"
 
 // BalancePair is balancePair, exported for tests only.
 type BalancePair = balancePair
@@ -62,3 +64,53 @@ var WithLedgerOwnerForTest = withLedgerOwner
 
 // RevokeLedgerOwnerForTest is revokeLedgerOwner, exported for tests only.
 var RevokeLedgerOwnerForTest = revokeLedgerOwner
+
+// --- P6 (W3 adversarial review of the gates): the two mechanisms behind the
+// idempotent-replay label, each reachable on its own ---
+//
+// TestPostJournal_IdempotentReplayNeverInsertsUnsignedRow asserted the
+// OUTCOME of a replay (no new row, stored status still `signed`, Authorize
+// reports `signed`). The reviewer deleted `replay: true` from attestJournal
+// and then neutered postJournalWithQueries' fail-closed refusal, and the pin
+// -- and the whole postgres package -- stayed green: every one of those
+// outcomes already held BEFORE the m-6 fix, because the locked recheck
+// short-circuits first. The pin was bound to a property of one caller, which
+// is the exact thing m-6 was about.
+//
+// These two shims expose the mechanisms themselves, since both are
+// unexported and postgrestest cannot be imported from inside package
+// postgres (see this file's header note on the import cycle).
+
+// AttestJournalReplayVerdictForTest runs attestJournal and reports whether it
+// flagged the input as an already-posted replay, and with what status.
+func (s *LedgerStore) AttestJournalReplayVerdictForTest(ctx context.Context, input core.JournalInput) (replay bool, status core.AuthStatus, err error) {
+	auth, err := s.attestJournal(ctx, input, resolveEffectiveAt(input.EffectiveAt))
+	if err != nil {
+		return false, "", err
+	}
+	return auth.replay, auth.status, nil
+}
+
+// PostJournalWithReplayFlaggedAuthForTest drives postJournalWithQueries with
+// a replay-flagged journalAuth for an input whose idempotency key has NOT
+// been posted -- the state that can only arise if a future caller flags a
+// replay without the locked recheck finding the journal. The insert path
+// must refuse it rather than write an unsigned row under a key that is
+// supposed to resolve to a signed one. Rolls back either way, so the caller
+// can assert on the row count.
+func (s *LedgerStore) PostJournalWithReplayFlaggedAuthForTest(ctx context.Context, input core.JournalInput, status core.AuthStatus) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = s.postJournalWithQueries(ctx, s.q.WithTx(tx), input, resolveEffectiveAt(input.EffectiveAt),
+		journalAuth{replay: true, status: status})
+	if err != nil {
+		return err
+	}
+	// The refusal is the contract; if the insert went through, commit it so
+	// the caller's row-count assertion sees what a real caller would have
+	// written.
+	return tx.Commit(ctx)
+}
