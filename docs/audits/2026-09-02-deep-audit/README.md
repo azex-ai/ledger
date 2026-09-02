@@ -25,6 +25,19 @@ Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contra
 
 Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径、`EventUID` 输入门、`EnableOnchain` 从不传 pool 使单飞锁全死、`advanceSweep` dispatch 分支绕过 GasCeiling。
 
+**Wave 2（Major / Minor 主体）已合入六条，剩 D-contract、D-ops：**
+
+| 任务 | 合入 | lead 证伪 | 要点 |
+|---|---|---|---|
+| D-surface | ✅ | README 代码块改错方法名 → 可运行 gate 红 | README 代码块对真库实跑；CHANGELOG 补回 Wave 1 全部破坏性变更；examples 全部 exit 0 |
+| D-tests | ✅（首版退回一次） | 删光 I-6 pin bullet 只留标题：首版绿（只查标题）→ 终版红 | 每条 invariant 必有可解析 pin；schema 精度 / NOT NULL 门禁；e2e 进 CI；发版流水线复用同一 verify |
+| D-tamper | ✅ | 空锚守卫置 false → NOT_RUN pin 红 | `VerifyLedger` 采最新 + 未覆盖 entry 永不 VERIFIED；锚回退 TAMPERED（I-55）；r2 one-object-per-seq（I-56）；多 key verifier；NaN 拒收；零签名不报绿 |
+| D-web | ✅ | 忽略 `isError` → ErrorState pin 红 | 三处假空态修正；幂等 key 按 payload；recharts 走 formatAmount；query-consumption 门禁 |
+| D-threat | ✅ | `revokeLedgerOwner` 吞错 → 两条失败路径 pin 红 | ownership 机械 gate（I-57）；审计 trigger 从目录派生（I-58）；审计表只经 trigger 写；非 superuser bootstrap 可装到底（007 有意修改，契约 §8）；`Migrate` 逐 migration 提权窗口（**W3 对抗式复审**） |
+| D-lock | ✅ | 关账共享锁换 `true` → 屏障 pin 红 | 关账屏障 + `period_close_violations` 对账（I-59）；迁移锁有界；tx 内 dimCache 视图；`Deactivate*` 真生效 |
+| D-contract | 进行中 | | |
+| D-ops | 进行中 | | |
+
 **待 Aaron 确认的语义口径**（契约 §7，已按推荐落地，可回退）：equity 改 debit-normal；`checkout_settlement` 语义（custodial 装欠用户净额、平台自赚进 fees）；托管资产口径改注入式 `CustodialClassCodes`；`Worker.Run` 对 NopLogger fail-closed。
 
 ## 0. 一句话结论
