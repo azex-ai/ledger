@@ -138,9 +138,16 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	// journal (Render only checks debit==credit per currency, not which
 	// classification received it), so only a per-classification balance
 	// check like this one would catch a wrong-classification-code bug.
+	//
+	// Inverted pin (2026-09-02 audit A-C1): this line used to demand -1000
+	// and even explained itself with "(credit-normal debited)" -- a faithful
+	// description of the template that was reversed. Injecting platform
+	// capital must RAISE the custody position; it is the only action in the
+	// catalogue that can improve the solvency margin, and it was driving it
+	// down by twice the injected amount.
 	custodialBalCapital, err := ledgerStore.GetBalance(ctx, -sysHolder, curC, custodial.UID)
 	require.NoError(t, err)
-	assert.True(t, custodialBalCapital.Equal(decimal.NewFromInt(-1000)), "custodial after injection (credit-normal debited), want -1000 got %s", custodialBalCapital)
+	assert.True(t, custodialBalCapital.Equal(decimal.NewFromInt(1000)), "custodial after injection, want 1000 got %s", custodialBalCapital)
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "capital_withdraw", core.TemplateParams{
 		HolderID:       sysHolder,
@@ -167,9 +174,16 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// "must move" was all this asserted, so it stayed green while the leg
+	// moved custody the wrong way (audit A-M2). A merchant settlement brings
+	// money IN: custody rises by gross.
 	custodialAfterGross, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
 	require.NoError(t, err)
-	assert.False(t, custodialAfterGross.IsZero(), "custodial must move when checkout_settlement_gross posts against the real store")
+	assert.True(t, custodialAfterGross.Equal(decimal.NewFromInt(200)), "custodial after checkout_settlement_gross, want 200 got %s", custodialAfterGross)
+
+	merchantAfterGross, err := ledgerStore.GetBalance(ctx, merchant, curC, mainWallet.UID)
+	require.NoError(t, err)
+	assert.True(t, merchantAfterGross.Equal(decimal.NewFromInt(200)), "the settled merchant must be credited, want 200 got %s", merchantAfterGross)
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "checkout_settlement_net", core.TemplateParams{
 		HolderID:       merchant,
@@ -187,6 +201,14 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	feesBal, err := ledgerStore.GetBalance(ctx, -merchant, curC, fees.UID)
 	require.NoError(t, err)
 	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount leg, want 5 got %s", feesBal)
+
+	custodialAfterNet, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
+	require.NoError(t, err)
+	assert.True(t, custodialAfterNet.Equal(decimal.NewFromInt(295)), "custody holds net (200+95); the 5 of fee is the platform's own money in `fees`, want 295 got %s", custodialAfterNet)
+
+	merchantAfterNet, err := ledgerStore.GetBalance(ctx, merchant, curC, mainWallet.UID)
+	require.NoError(t, err)
+	assert.True(t, merchantAfterNet.Equal(decimal.NewFromInt(295)), "merchant receives net, want 295 got %s", merchantAfterNet)
 }
 
 func TestInstallDefaultTemplatePresets(t *testing.T) {

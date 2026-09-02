@@ -48,7 +48,14 @@ func TestFeeBundle_Template_Balance(t *testing.T) {
 
 	tmpl, err := ts.GetTemplate(ctx, "fee_charge")
 	require.NoError(t, err)
-	require.Len(t, tmpl.Lines, 2)
+	// Four legs, not two (2026-09-02 audit A-M4). `fees` is credit-normal, so
+	// platform revenue accumulates on CR -- which is what
+	// checkout_settlement_net already did. This template debited it, so two
+	// 30-unit fees collected through the two paths summed to zero. Crediting
+	// fees needs a second debit, and the pair that supplies it is the same
+	// one withdraw_fee uses: the payer's memo cost tracker and the custody
+	// pool the earned fee leaves.
+	require.Len(t, tmpl.Lines, 4)
 
 	amount := decimal.NewFromFloat(2.50)
 	params := core.TemplateParams{
@@ -60,23 +67,23 @@ func TestFeeBundle_Template_Balance(t *testing.T) {
 
 	journal, err := tmpl.Render(params)
 	require.NoError(t, err)
-	assertBalanced(t, journal.Entries)
 
 	// The holder leg credits, because main_wallet is declared NormalSideDebit
-	// and a fee is money leaving the holder. This assertion used to require a
+	// and a fee is money leaving the holder. That assertion used to require a
 	// debit, which is what let the inverted template ship: the test did not
 	// miss the bug, it certified it.
 	//
-	// assertBalanced above cannot catch this and never could -- both lines
-	// draw on the same amount key, so total debits equal total credits
-	// whichever side each classification lands on. The direction is only
-	// observable in the balance the entries produce, which is pinned against
-	// real Postgres by TestPresetDirection_MovesMoneyTheRightWay in the root
-	// package.
-	assert.Equal(t, core.EntryTypeCredit, journal.Entries[0].EntryType, "the holder pays the fee, so the holder leg credits")
-	assert.Equal(t, int64(42), journal.Entries[0].AccountHolder) // user
-	assert.Equal(t, core.EntryTypeDebit, journal.Entries[1].EntryType)
-	assert.Equal(t, int64(-42), journal.Entries[1].AccountHolder) // system
+	// assertBalanced alone cannot catch this and never could -- the legs draw
+	// on the same amount key, so total debits equal total credits whichever
+	// side each classification lands on. assertJournalEffect states the
+	// EFFECT instead, which is the thing a reader can check against the
+	// product meaning of "charge a fee".
+	assertJournalEffect(t, cs, params.HolderID, journal.Entries, map[string]string{
+		"main_wallet/user": amount.Neg().String(), // the holder pays
+		"fee_expense/user": amount.String(),       // ... and it is visible as their cost
+		"custodial/system": amount.Neg().String(), // the fee leaves the custody pool
+		"fees/system":      amount.String(),       // ... and lands in platform revenue
+	})
 }
 
 func TestFeeBundle_Idempotent(t *testing.T) {

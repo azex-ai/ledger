@@ -75,13 +75,25 @@ var depositOnlyClassifications = []ClassificationPreset{
 	{Code: "pending", Name: "Pending", NormalSide: core.NormalSideCredit, BalanceRole: core.BalanceRolePending},
 }
 
+// feeExpenseClassification is the holder-side memo tracker every fee-bearing
+// template books the payer's cost against. It is shared by the withdrawal,
+// fee and settlement bundles, so it is declared once here rather than
+// repeated per bundle -- three copies would be three chances to drift.
+//
+// BalanceRoleMemo (M-4 fix): a real per-user cost account, not a liability --
+// explicitly declared as such rather than leaving balance_role blank (see
+// docs/INVARIANTS.md I-37's addendum for why "no role" alone can no longer
+// mean that). Being memo also keeps it out of the holder's own statement
+// aggregate, which is what stops a fee's two holder-side legs netting to
+// zero and hiding the charge from the user (holder.sql's balance_role
+// predicate, audit A-M3).
+var feeExpenseClassification = ClassificationPreset{
+	Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleMemo,
+}
+
 var withdrawalOnlyClassifications = []ClassificationPreset{
 	{Code: "locked", Name: "Locked", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleLocked},
-	// BalanceRoleMemo (M-4 fix): a real per-user cost account, not a
-	// liability -- explicitly declared as such rather than leaving
-	// balance_role blank (see docs/INVARIANTS.md I-37's addendum for why "no
-	// role" alone can no longer mean that).
-	{Code: "fee_expense", Name: "Fee Expense", NormalSide: core.NormalSideDebit, BalanceRole: core.BalanceRoleMemo},
+	feeExpenseClassification,
 	{Code: "fee_revenue", Name: "Fee Revenue", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
 

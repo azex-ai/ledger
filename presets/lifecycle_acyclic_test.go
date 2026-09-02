@@ -88,3 +88,77 @@ func TestSweepLifecycle_IsCyclic_WhichIsWhyItsKeysCarryMore(t *testing.T) {
 			"sweepReviveKey/sweepSentKey/sweepFailedKey carry a tx hash or channel ref because "+
 			"of it. If the cycle is gone, revisit whether those keys still need the extra component.")
 }
+
+// allPresetLifecycles is every lifecycle this package ships. The gate above
+// named two of them by hand and WithdrawalLifecycle was in neither -- it has
+// never been through hasCycle at all, despite carrying a retry edge
+// (failed -> reserved) and a status the expiration sweep keys on
+// (2026-09-02 audit F-m10). Enumerating them in one place is what stops the
+// next lifecycle from being added outside the gate's field of view.
+func allPresetLifecycles() map[string]*core.Lifecycle {
+	return map[string]*core.Lifecycle{
+		"DepositLifecycle":    DepositLifecycle,
+		"WithdrawalLifecycle": WithdrawalLifecycle,
+		"SweepLifecycle":      SweepLifecycle,
+	}
+}
+
+// TestPresetLifecycles_ExpiredIsTerminal_BecauseTheSweepKeysOnBookingAlone is
+// the counterpart to the deposit gate, for a different call site with a
+// different key shape.
+//
+// service/expiration.go keys its transition "expire-booking-" + booking uid,
+// with no status and nothing else. Its own comment explains the assumption
+// exactly: a booking only turns up in ListExpiredBookings while its current
+// status still has an outgoing "expired" edge, so once the transition lands
+// the booking drops out of the query for good -- "unless some future custom
+// classification defines a lifecycle where expired is itself non-terminal and
+// re-reachable".
+//
+// That is a precise, checkable condition sitting in a comment. If "expired"
+// ever gains an outgoing edge, a booking can reach it twice and the second,
+// legitimate expiry is swallowed as a replay of the first: no error, no log,
+// the booking simply never expires again. Same silent-failure shape as the
+// deposit key (working-agreements.md §3).
+//
+// WithdrawalLifecycle is cyclic AND has an expired status, which is precisely
+// the combination that makes the distinction matter: the cycle is confined to
+// failed -> reserved -> processing -> failed, and "expired" sits outside it
+// as a terminal leaf. Cyclic is fine here. Re-reachable "expired" is not.
+func TestPresetLifecycles_ExpiredIsTerminal_BecauseTheSweepKeysOnBookingAlone(t *testing.T) {
+	for name, lc := range allPresetLifecycles() {
+		t.Run(name, func(t *testing.T) {
+			outgoing, present := lc.Transitions["expired"]
+			if !present {
+				return // no expiry path at all; the sweep never touches it
+			}
+			assert.Emptyf(t, outgoing,
+				"%s lets a booking leave \"expired\" (to %v), so it can arrive there twice -- but "+
+					"service/expiration.go keys that transition on the booking uid alone, so the second "+
+					"expiry is swallowed as a replay of the first and the booking silently never expires. "+
+					"Either keep \"expired\" terminal, or give the sweep a key that distinguishes the passes.",
+				name, outgoing)
+
+			for from, tos := range lc.Transitions {
+				for _, to := range tos {
+					if to != "expired" {
+						continue
+					}
+					assert.NotEqualf(t, core.Status("expired"), from,
+						"%s has a self-edge into \"expired\"", name)
+				}
+			}
+		})
+	}
+}
+
+// TestWithdrawalLifecycle_IsCyclic_SoItsKeysMustCarryMore records the fact the
+// gate above depends on, so that a future change flattening the retry path
+// shows up as a deliberate decision rather than as silence.
+func TestWithdrawalLifecycle_IsCyclic_SoItsKeysMustCarryMore(t *testing.T) {
+	cyclic, at := hasCycle(WithdrawalLifecycle)
+	assert.Truef(t, cyclic,
+		"WithdrawalLifecycle is expected to revisit statuses via its failed -> reserved retry edge; "+
+			"any caller deriving an idempotency key as (booking, to_status) for this lifecycle would "+
+			"collide. If the cycle is gone, revisit that. (cycle at %q)", at)
+}

@@ -39,9 +39,14 @@ var transferJournalTypes = []JournalTypePreset{
 //
 // Direction follows the polarity main_wallet is declared with
 // (NormalSideDebit, templates.go): DR increases the holder's balance, CR
-// decreases it. deposit_confirm debits it because a deposit adds money;
-// checkout_settlement credits it because the holder is paying. A transfer is
-// the same rule applied twice, in opposite directions.
+// decreases it. deposit_confirm debits it because a deposit adds money. A
+// transfer is the same rule applied twice, in opposite directions: the
+// sender's leg credits, the receiver's leg debits.
+//
+// (This paragraph used to cite checkout_settlement as the "holder is paying"
+// example. That was one of the three contradictory readings of that template
+// the 2026-09-02 audit found -- its holder is a merchant RECEIVING a payment,
+// so it debits main_wallet like a deposit does. See presets/settlement.go.)
 //
 // Template: transfer_out — sender side:
 //

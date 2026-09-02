@@ -65,13 +65,22 @@ func TestSettlementBundle_GrossTemplate_Balance(t *testing.T) {
 
 	journal, err := tmpl.Render(params)
 	require.NoError(t, err)
-	assertBalanced(t, journal.Entries)
 
-	// DR custodial (system) CR main_wallet (user/merchant)
-	assert.Equal(t, core.EntryTypeDebit, journal.Entries[0].EntryType)
-	assert.Equal(t, int64(-10), journal.Entries[0].AccountHolder) // system
-	assert.Equal(t, core.EntryTypeCredit, journal.Entries[1].EntryType)
-	assert.Equal(t, int64(10), journal.Entries[1].AccountHolder) // merchant
+	// Inverted pin (2026-09-02 audit A-M2). It used to assert
+	//
+	//	assert.Equal(t, core.EntryTypeCredit, journal.Entries[1].EntryType) // merchant
+	//
+	// with a `// merchant` comment naming the very leg that was taking money
+	// OFF the merchant: the journal type declares HolderTxKindDeposit and the
+	// wire showed direction=out on a 97-unit "Payment". A merchant being
+	// settled RECEIVES; main_wallet is debit-normal; therefore the merchant
+	// leg debits.
+	assertJournalEffect(t, cs, params.HolderID, journal.Entries, map[string]string{
+		"main_wallet/user": gross.String(),
+		"custodial/system": gross.String(),
+	})
+	assert.Equal(t, int64(-10), journal.Entries[1].AccountHolder) // system counterpart
+	assert.Equal(t, int64(10), journal.Entries[0].AccountHolder)  // merchant
 }
 
 func TestSettlementBundle_NetTemplate_Balance(t *testing.T) {
@@ -101,19 +110,28 @@ func TestSettlementBundle_NetTemplate_Balance(t *testing.T) {
 
 	tmpl, err := ts.GetTemplate(ctx, "checkout_settlement_net")
 	require.NoError(t, err)
-	require.Len(t, tmpl.Lines, 3)
+	// Four legs, not three: crediting revenue to credit-normal `fees` needs a
+	// matching debit, and no three-leg arrangement of these classifications
+	// can raise the merchant, the custody pool and the revenue account at
+	// once (presets/settlement.go explains the arithmetic).
+	require.Len(t, tmpl.Lines, 4)
 
 	journal, err := tmpl.Render(params)
 	require.NoError(t, err)
-	assertBalanced(t, journal.Entries)
 
-	// DR custodial(system, gross) | CR main_wallet(merchant, net) + CR fees(system, fee)
-	assert.Equal(t, core.EntryTypeDebit, journal.Entries[0].EntryType)
-	assert.True(t, journal.Entries[0].Amount.Equal(gross))
-	assert.Equal(t, core.EntryTypeCredit, journal.Entries[1].EntryType)
-	assert.True(t, journal.Entries[1].Amount.Equal(net))
-	assert.Equal(t, core.EntryTypeCredit, journal.Entries[2].EntryType)
-	assert.True(t, journal.Entries[2].Amount.Equal(fee))
+	// Inverted pin (2026-09-02 audit A-M2): the old assertions demanded
+	// DR custodial(gross) + CR main_wallet(net), which drained the custody
+	// pool by gross while only reducing the liability by net -- a fresh
+	// -fee of phantom insolvency on every single settlement.
+	assertJournalEffect(t, cs, params.HolderID, journal.Entries, map[string]string{
+		"main_wallet/user": net.String(),
+		"fee_expense/user": fee.String(),
+		"custodial/system": net.String(),
+		"fees/system":      fee.String(),
+	})
+	// gross is not a leg; it is net + fee, and the ledger's balance rule is
+	// what enforces the relationship now.
+	require.True(t, gross.Equal(net.Add(fee)))
 }
 
 func TestSettlementBundle_Idempotent(t *testing.T) {

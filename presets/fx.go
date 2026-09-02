@@ -28,9 +28,21 @@ import (
 //
 // Why two templates instead of one four-entry template? The current template
 // renderer applies a single currency_id to every line; FX is by definition
-// cross-currency. Keeping each leg single-currency lets per-currency balance
-// validation (DB trigger + Go validator) catch any rate-quote bug — neither
-// leg can be unbalanced and silently pass.
+// cross-currency, so one template cannot express both sides.
+//
+// ⚠️ WHAT THE LEDGER DOES NOT CHECK. Each leg is single-currency and balances
+// within itself for ANY amount, so per-currency balance validation (DB
+// trigger + Go validator) says nothing whatsoever about the rate: quote CCY-B
+// at 100x the correct figure and both legs still pass every check. The ledger
+// does not know fx_sell and fx_buy are related, does not verify
+// qtyB == round(qtyA * rate), and — as the ATOMICITY paragraph above says —
+// does not guarantee both legs land. Rate correctness and cross-leg
+// atomicity are entirely the caller's responsibility; the ledger records what
+// it was told. (An earlier version of this comment claimed the balance
+// validation would "catch any rate-quote bug". It cannot, and
+// postgres.TestFX_LedgerDoesNotCheckTheRate now pins that both legs of a
+// 100x-wrong quote are accepted, so the absence of that check is an explicit
+// contract rather than an assumption someone can read back into the code.)
 //
 // Net effect on system books after both legs settle:
 //
@@ -46,6 +58,14 @@ import (
 // Reconciling settlement balances against external custody figures is the
 // caller's responsibility — the ledger only records what was promised, not
 // where the inventory physically lives.
+//
+// SolvencyCheck DOES count settlement as part of the custodial position (it
+// is in PlatformBalanceStore's default custodial class-code set), which is
+// what keeps a healthy cross-currency position from reporting permanent
+// insolvency on the bought currency: settlement(CCY-B) = +qtyB is exactly the
+// asset backing the qtyB now owed to the holder. Before 2026-09-02 the scope
+// was the hardcoded literal 'custodial' and every FX deployment read
+// solvent=false on every currency it bought, forever (audit A-M6).
 
 // HolderTxKindOther: a cross-currency conversion is neither money arriving
 // from outside the platform (deposit), leaving it (withdrawal), moving
