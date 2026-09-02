@@ -2546,18 +2546,6 @@ every consumer of a Merkle root implicitly relies on).
   supplying the fallback.
 
 **Pinned by**:
-- `core.TestMerkleRoot_GoldenVectors` (`core/merkle_test.go`) -- n=0..8
-  leaves, cross-checked against an independently written Python
-  transcription of RFC 6962's MTH algorithm, AND against
-  `core.TestMerkleTree_RFC6962TestLogRoots` -- a third, independent
-  implementation (Team Lead, from the spec's recursive definition) over
-  the canonical eight-entry Certificate Transparency test log, closing
-  the "no internet access to cross-check official vectors" limitation
-  this implementation disclosed rather than papered over.
-- `core.TestMerkleTree_NoDuplicationOfOddLeaf` -- the CVE-2012-2459 pin:
-  a 3-leaf tree's root is confirmed to differ from the naive
-  duplicate-last-leaf construction's root, both by direct byte
-  comparison and against an independently computed golden value.
 - `core.TestMerkleTree_InclusionProofRoundTrip_AllSizesAndIndices` -- every
   `(n, index)` pair for `n` = 1..32 round-trips through
   `GenerateInclusionProof` + `VerifyInclusion`. Falsification evidence:
@@ -2585,6 +2573,24 @@ every consumer of a Merkle root implicitly relies on).
   `insertAttestationWithoutLeafHashes`): a supplied reference still
   narrows `TAMPERED` to the exact entry id; no reference and no
   self-contained data means no entry list, never a fabricated one.
+
+**Related tests** (golden-vector and CVE-2012-2459 pins for the low-level
+RFC 6962 construction -- genuine white-box tests, but they exercise it
+through `buildMerkleTreeFromPayloads`/`merkleLeafHash`/`merkleNodeHash`,
+all unexported, so nothing in their own function bodies names a symbol
+this doc can hold them to):
+- `core.TestMerkleRoot_GoldenVectors` (`core/merkle_test.go`) -- n=0..8
+  leaves, cross-checked against an independently written Python
+  transcription of RFC 6962's MTH algorithm, AND against
+  `core.TestMerkleTree_RFC6962TestLogRoots` -- a third, independent
+  implementation (Team Lead, from the spec's recursive definition) over
+  the canonical eight-entry Certificate Transparency test log, closing
+  the "no internet access to cross-check official vectors" limitation
+  this implementation disclosed rather than papered over.
+- `core.TestMerkleTree_NoDuplicationOfOddLeaf` -- the CVE-2012-2459 pin:
+  a 3-leaf tree's root is confirmed to differ from the naive
+  duplicate-last-leaf construction's root, both by direct byte
+  comparison and against an independently computed golden value.
 
 ---
 
@@ -2666,8 +2672,8 @@ needing that composition would have to close the gap itself the way
   makes the digest comparison meaningful (byte-identical inputs whenever
   reversal history has not changed in between).
 - `postgres.LedgerStore.ReverseJournal` / `reverseJournalWithQueries`
-  (`postgres/ledger_store.go`) and `ReverseJournalFraction` /
-  `reverseJournalFractionWithQueries` (`postgres/reversal_fraction_store.go`)
+  (`postgres/ledger_store.go`) and `postgres.LedgerStore.ReverseJournalFraction`
+  / `reverseJournalFractionWithQueries` (`postgres/reversal_fraction_store.go`)
   -- the pre-authorize-before-`Begin` sequencing and the post-time digest
   comparison / fallback-status selection.
 - `postgres.LedgerStore.ExecuteTemplateBatch`
@@ -2750,15 +2756,17 @@ never overstate what is safe to pay out.
 reference implementation: individually verifies every contributing
 journal via `core.VerifyJournalAuth`, then trusts
 `CheckpointIntegrityStore.RecomputeBalance`'s entries-only sum once all
-pass; refuses outright on a transaction-bound clone);
+pass; refuses outright on a transaction-bound clone), signed journals
+produced via `postgres.LedgerStore.WithAuth`;
 `postgres.ReserverStore.requireVerifiedAvailableBalance` (the
-opt-in `Reserve` gate, run strictly before any transaction is opened —
-same placement rule as `Authorize`, since an `AuthVerifier` is permitted
-to be a remote call); `service.FullReconciliationService`'s
+opt-in `postgres.ReserverStore.Reserve` gate, run strictly before any
+transaction is opened — same placement rule as `Authorize`, since an
+`AuthVerifier` is permitted to be a remote call); `service.FullReconciliationService`'s
 `unauthorized_journals` check (fleet-wide, samples the NEWEST page of
 journals that claim a signature and confirms it still verifies; skips
 journals that were never signed at all — that is a coverage gap, not tamper
-evidence).
+evidence), reachable only through
+`service.FullReconciliationService.RunFullReconciliation`.
 
 Two corrections to that check from the 2026-09-02 audit:
 
