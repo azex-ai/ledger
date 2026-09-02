@@ -302,9 +302,17 @@ func TestWorker_StartupLogNamesTheAnchorType(t *testing.T) {
 // is logged rather than absorbed. "No anchor_publish_total time series
 // exists" and "publishing is fine" look identical on a dashboard.
 func TestNewAttestationService_WarnsWhenMetricsCannotCarryAnchorSignals(t *testing.T) {
+	if _, ok := core.NewEngine().Metrics().(AttestationMetrics); ok {
+		// core.Metrics now carries the three methods, so EVERY core.Metrics
+		// value satisfies AttestationMetrics and the fallback branch is
+		// unreachable by construction. Skipped rather than deleted or
+		// silently passing: see the FOLLOW-UP note on AttestationMetrics --
+		// the branch and this test should be removed together, deliberately,
+		// not left to rot green.
+		t.Skip("core.Metrics satisfies AttestationMetrics -- the degradation branch is unreachable; see AttestationMetrics's FOLLOW-UP note")
+	}
+
 	logger := &recordingLevelLogger{}
-	// core.NewEngine's default metrics is core's Nop implementation, which
-	// does not carry the three methods.
 	_ = NewAttestationService(unreachableAttestationStore{}, stubAttestor{}, nil, stubAnchor{}, core.NewEngine(core.WithLogger(logger)))
 
 	assert.NotNil(t, findWarnContaining(logger.warns, "does not implement service.AttestationMetrics"),

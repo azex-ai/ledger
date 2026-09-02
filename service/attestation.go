@@ -90,6 +90,15 @@ type AttestationStore interface {
 // interface -- NewAttestationService checks whether the configured
 // implementation does, and says so when it does not.
 //
+// FOLLOW-UP once core.Metrics carries all three methods (D-ops's half of
+// this seam, agreed 2026-09-02): the capability check in
+// NewAttestationService becomes unreachable by construction -- every
+// core.Metrics value would satisfy this port -- and should be replaced by a
+// plain `metrics: engine.Metrics()` assignment, deleting both the warning
+// and its test. The check exists so that this half can be merged and
+// verified on its own; a branch that only compiles once someone else's
+// branch lands is not independently reviewable.
+//
 // See docs/RUNBOOK.md for the alert thresholds these three feed.
 type AttestationMetrics interface {
 	// AttestationBatchResult reports whether one RunAttestBatch pass
