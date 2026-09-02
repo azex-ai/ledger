@@ -396,6 +396,17 @@ because PostgreSQL needs a real `NULL` to skip referential-integrity enforcement
   caused it (migration `045` converted the `014` sentinel column to this
   shape and added the FK it never had; see I-25).
 
+Two further classes, both pinned by `postgres.TestSchema_NullableColumnsExactlyMatchI7Exceptions`
+(D-tests, 2026-09-02 audit -- the gate that made this list exhaustive rather than aspirational):
+
+- **Claim-lease columns**, where `NULL` is the state "not currently claimed /
+  not yet processed / no error yet" and a sentinel would be a lie:
+  `rollup_queue.claimed_until`, `rollup_queue.processed_at`,
+  `registration_rescans.claimed_until`, `registration_rescans.last_error`.
+- **Legacy dead tables** `deposits` and `withdrawals` (superseded by bookings;
+  zero callers, ACL withdrawn by D-threat, DROP scheduled for the next
+  release) are exempt as whole tables until they are dropped.
+
 **Why**: NOT NULL eliminates a category of "missing vs zero" ambiguities.
 Where it would conflict with FK enforcement, `NULL` is documented and the Go
 field is `*int64` (in Go structs that expose the column directly — the
@@ -5765,3 +5776,62 @@ maintains by hand.
   declared, neither wired — each needs a new aggregate query beyond this
   wave's merge budget, tracked in `TODO.md`'s breaking-change list), and
   fails if either gets a call site without being removed from the map first.
+
+## I-62: A deposit whose token is no longer configured is reviewed, never auto-credited
+
+Auto-credit is gated by `core.TokenConfig.AutoCreditCeiling`, and that gate is
+only decidable while the token is still present in the chain's `CreditTokens`.
+A booking that is in flight when its token is removed from configuration
+(delisted, renamed, mis-edited) cannot be judged against a ceiling that no
+longer exists, so it goes to the review queue with no journal posted. The
+zero-value `core.TokenConfig` that a map lookup hands back for an unknown token
+is never treated as "no ceiling configured, credit freely".
+
+**Why**: The audit (G-M6, 2026-09-02) found the recheck path reading
+`cfg.CreditTokens[token]` into a zero `TokenConfig` whose `reviewGate` then
+passed everything -- a configuration edit silently turned the ceiling off for
+every in-flight deposit of that token. Fail-closed is the only defensible
+default when the rule that would decide is missing.
+
+**Enforced by**: `service.Onchain.Run` (startup validation, built by
+`service.NewOnchain`) refuses to start when any configured token lacks a ceiling (`core.TokenConfig.AutoCreditCeilingConfigured`,
+`core.UnboundedAutoCredit` being the explicit opt-out); the recheck path
+routes a booking whose token is absent from the live `core.ChainSet` to
+review.
+
+**Pinned by**:
+- `service.TestOnchain_Recheck_UnconfiguredTokenRoutesToReview` -- ingest at
+  ceiling 300, remove the token, recheck: the booking is in review and carries
+  no journal (before the fix it confirmed and credited the full amount).
+- `service.TestOnchain_Run_RejectsUnconfiguredAutoCreditCeiling` -- the
+  startup half: a token with no ceiling and no explicit
+  `core.UnboundedAutoCredit` is a configuration error, not a default.
+
+## I-63: A deep-reorg anomaly is recorded durably, not only alerted while the recheck window lasts
+
+When a confirmed deposit's transaction is no longer included after a deep
+reorg, the anomaly is written to a persistent record before any alert is
+raised, and that record survives the `reorgRecheckWindow` after which the
+periodic recheck stops looking at the booking. An operator who arrives after
+the window still finds the anomaly; a deployment that runs without a
+`core.ReorgRecorder` cannot start at all.
+
+**Why**: The audit (G-M8, 2026-09-02) found the manual reorg policy alerting
+through a log line for `reorgRecheckWindow` blocks and then falling silent,
+leaving nothing in the system that says the anomaly ever happened. A
+tamper-evident ledger that forgets its own reorg evidence after 500 blocks has
+a hole exactly where forensics needs it most.
+
+**Enforced by**: `service.NewOnchain` requires a `core.ReorgRecorder` whenever
+a chain reader is configured; the recheck path records
+`core.ReorgKindDeepReorg` anomalies through it before alerting;
+`service.WithReorgRecheckWindow` only bounds how long the booking is
+re-examined, never how long the record is kept.
+
+**Pinned by**:
+- `service.TestOnchain_ReorgRecheck_AnomalyOutlivesTheRecheckWindow` -- the
+  anomaly exists after the first recheck and is still there, still reported,
+  after `latest` moves past the window.
+- `service.TestOnchain_Run_RefusesChainReaderWithoutReorgRecorder` -- the
+  wiring half: a chain reader with no recorder is `core.ErrInvalidInput` at
+  startup.
