@@ -25,7 +25,7 @@ Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contra
 
 Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径、`EventUID` 输入门、`EnableOnchain` 从不传 pool 使单飞锁全死、`advanceSweep` dispatch 分支绕过 GasCeiling。
 
-**Wave 2（Major / Minor 主体）已合入六条，剩 D-contract、D-ops：**
+**Wave 2（Major / Minor 主体）已合入七条，剩 D-contract：**
 
 | 任务 | 合入 | lead 证伪 | 要点 |
 |---|---|---|---|
@@ -36,7 +36,7 @@ Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径�
 | D-threat | ✅ | `revokeLedgerOwner` 吞错 → 两条失败路径 pin 红 | ownership 机械 gate（I-57）；审计 trigger 从目录派生（I-58）；审计表只经 trigger 写；非 superuser bootstrap 可装到底（007 有意修改，契约 §8）；`Migrate` 逐 migration 提权窗口（**W3 对抗式复审**） |
 | D-lock | ✅ | 关账共享锁换 `true` → 屏障 pin 红 | 关账屏障 + `period_close_violations` 对账（I-59）；迁移锁有界；tx 内 dimCache 视图；`Deactivate*` 真生效 |
 | D-contract | 进行中 | | |
-| D-ops | 进行中 | | |
+| D-ops | ✅ | worker `recover()` 分支置 false → panic pin 红 | postgres 层接 `core.Metrics`（32→41 方法，4 个签名改 uid）；job 家族指标；panic 兜底（I-60）；metrics 调用点完整性门禁（I-61）；RUNBOOK/DR/CAPACITY 逐条核到代码；`ledger-cli` 不再自称只读、加 `config-history` |
 
 **待 Aaron 确认的语义口径**（契约 §7，已按推荐落地，可回退）：equity 改 debit-normal；`checkout_settlement` 语义（custodial 装欠用户净额、平台自赚进 fees）；托管资产口径改注入式 `CustodialClassCodes`；`Worker.Run` 对 NopLogger fail-closed。
 
