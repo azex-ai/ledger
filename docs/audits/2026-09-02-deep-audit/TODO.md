@@ -1790,3 +1790,16 @@
 | I-N12 / I-M9 (D-ops) | `service/delivery.CallbackDeliverer.Deliver` 现在 recover 一个 panic 的 handler 并转成该 handler 的普通 error（此前会直接 panic 出去），`LocalDispatcher.ProcessBatch` 的 `MarkDelivered`/`MarkRetry` 改走 detached 5s ctx（`cleanupContext`，与 d-lock 的 B-m2 修复同形，二者预先对齐避免合并冲突） | 无需改动：panic 恢复只影响「进程是否被消费方的 handler bug 打死」，不改变 `Subscribe` 的 at-least-once 契约；detached ctx 只影响 shutdown 竞态窗口内的记账准确性 |
 | I-M1 (D-ops, follow-up 未做) | `core.Metrics.PendingEvents` / `ReservedAmount` 两个新方法目前无生产调用点（声明存在，`observability/emission_coverage_test.go` 的 `crossBranchExclusions` 显式登记原因）：前者需要新的 `CountPendingEvents` 查询，后者需要新的按币种聚合的 reserved-amount 查询，均超出本任务「`postgres/*.go` 仅新增 metrics/normalizeStoreError 行」的合并预算 | 后续任务领取；两个方法目前恒不发射，不构成告警面 |
 | lead（D-ops 合入后） | `postgres` 包 -race 单跑 211s，`make test` 并行下 302s 撞 5m 超时报假红；已把 Makefile / go-verify.yml 超时放宽到 15m。后续：postgres 测试的容器复用 / 并行度 / 拆包，让套件回到 2 分钟内 | W3 后续 |
+
+## W3 对抗式复审（money-path）的发现与处置
+
+| 级别 | 条目 | 处置 |
+|---|---|---|
+| Critical | 闸内 hold 项读 `reservations` 可变列，`ledger_app` 一条 UPDATE 让闸授权两倍（I-49 同形兄弟） | w3-holds 修（契约 §7.12） |
+| Major ×2 | `enforce_min_balance` / `SolvencyCheck` 仍读 checkpoint+delta | SolvencyCheck → w3-fixes 改 entries-only；min_balance → Aaron（§7.14） |
+| Major | `event_uid` 冒领可永久锁死 booking 结算、无解除路径 | Aaron（§7.14） |
+| Major | 未覆盖伪造 journal 自称 `unsigned_tx_mode` 只报 DRIFT | w3-fixes |
+| Major | `Migrate` 提权窗口角色级，迁移期应用连接池 owner-equivalent | Aaron（§7.14） |
+| Major | 默认装机全关而 `StartupReport().Warnings` 为空 | w3-fixes |
+| Major | `unauthorized_journals` 一页有一条签名即跳过其余未签名并报绿 | w3-fixes |
+| Minor ×6 | custodial scope 只防全错 / 无资产类约束 / `''→available` 升级 / `anchor_observations` 可伪造 / CHANGELOG 016 极性 / I-53 行为变更未登记 | w3-fixes |

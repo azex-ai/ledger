@@ -140,3 +140,6 @@
 - **migrate.go 安装机制变更**（先跑 001 → `GRANT ledger_owner TO runner` → `Up()` → defer `REVOKE`）：接受落地，标为 §2 结构决策，**W3 对抗式复审**必审项。
 - **`POST /journals/{uid}/reverse` 幂等键**：服务端从 journal uid 派生，客户端不得提供（w1-templates 落地、d-web 修 client、d-contract 收 openapi）。H-M3b 取消。
 - **F-m2 pin 门禁的 advisory 名单**：允许「先立机制、逐步收紧」，但 advisory 集合必须是显式、只缩不扩的白名单常量；32 条 Enforced-by 引用风格重写记为 W3 条目。
+| 7.12 闸内 hold 项的可信来源（W3 对抗式复审 C-1） | `SumActiveReservations` 读 `reservations.status/settled_amount`，守卫放行 `active→settling/settled/released` 与 `settled_amount` 增大，`ledger_app` 一条 UPDATE 让 hold 归零，闸对同一笔余额授权两次 | 闸开启时 hold = Σ 非过期预留的 `reserved_amount`（不可改列）− Σ append-only receipt/leg 表里的已结算/已释放额；不读可变列。伪造 INSERT 只会让 hold 变大（安全方向） | W3（w3-holds） |
+| 7.13 复审 M-2 / M-4 / M-6 / M-7 / m-1…m-6 | 见 `w3-review/money-path.md` | SolvencyCheck 改 entries-only；未覆盖 entry 不看 `auth_status` 自称；`StartupReport` 对每项关着的保护出 Warning；`unauthorized_journals` 的 Complete = 全部已核；custodial scope 逐 code 校验；`''→available` 升级禁止；`anchor_observations` 写入收口 | W3（w3-fixes） |
+| 7.14 复审 M-1 / M-3 / M-5（待 Aaron） | `enforce_min_balance` 读 checkpoint（透支闸可被 INSERT 破）；`event_uid` 冒领后 booking 永久锁死无解除路径；`Migrate` 提权窗口是角色级，迁移期间应用连接池 owner-equivalent | 本波不动代码。推荐：M-1 明文声明信任边界 + 依赖 reconcile check #2 检测（热路径 entries-only 重算代价高）或引入签名 checkpoint；M-3 owner-only 解除路径；M-5 文档要求迁移凭证 ≠ 应用凭证，且迁移窗口内应用不得在线 | Aaron |
