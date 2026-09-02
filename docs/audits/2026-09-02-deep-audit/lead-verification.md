@@ -121,3 +121,9 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | W1-ledgerstore | `63fb592` + `46386e7` | 见上两行 | merge commit（无冲突） | I-51（含 EventUID rule 4） |
 | W1-onchain | `0d31368` `0b13dc1` `0774ef3`（rebase 后；lead 调整了 I-52/I-53 在 INVARIANTS 中的位置到 I-51 之后） | hold-cursor 守卫单点置 false → `TestOnchain_Watch_HoldsCursorWhenIngestFails` 红；service -race 绿；make test 17 包绿；chains/evm 含 `-tags e2e` 绿 | ff 至 `0774ef3` | 关 G-C1 G-C2 及 G 全部；I-20 重写；I-52 I-53。G-C2 按 receipt 内零基位置落地（契约 §7.9 措辞已订正）。跨面接触：`grant_coverage_test.go` 新表分类、I-41 Pinned by 三行、`ledger.go` 两行接线（接受） |
 | W1-facade | `d2aaf3a` `34d6b57`（两次 rebase 后） | 单点 mutation 两 pin 红（lead）；worker 合并后重跑 4 条关键反转全红；-race 17 包绿含 gapless | ff 至 `34d6b57` | I-54；`WithCustodialClassCodes`；Wave 1 收口 |
+
+# Wave 2 复核
+
+| 任务 | 分支 commit | lead 证伪 | 合入 | 备注 |
+|---|---|---|---|---|
+| D-tests（第一版） | `d2940b7` | 删掉 I-6 的**一条** pin bullet → 绿（预期，仍有其余 pin）；删光 I-6 **全部** bullet 只留 `**Pinned by**` 标题 → **仍绿**：新 gate 只查标题存在（`invariants_pins_test.go:290`），是「守形状不守语义」形态在 gate 自身上重现。已退回加强 | 待 | F-m2 advisory 32 条要求改成显式只缩不扩白名单；I-7 Exceptions 扩写 → W3-lead |
