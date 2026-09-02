@@ -173,6 +173,17 @@ func run() error {
 	// RunInTx: a crash between them would otherwise free the hold and spend
 	// nobody's credits, while the ledger reports success because from its
 	// side nothing failed (the same failure examples/billing used to teach).
+	//
+	// ExecuteTemplate called directly inside RunInTx (below) always posts
+	// auth_status=unsigned_tx_mode -- there is no point inside an already
+	// open transaction where calling out to an Attestor would not itself be
+	// the "external call inside a DB transaction" financial.md forbids. If
+	// this service were constructed WithAttestor and something downstream
+	// uses RequireVerifiedBalance on this dimension, that gate would refuse
+	// to pay it out. The fix is svc.AuthorizeTemplate BEFORE RunInTx opens,
+	// then tx.JournalWriter().PostAuthorized(...) inside it instead of
+	// ExecuteTemplate -- see examples/tamper-evident's appendix for a
+	// runnable, asserted demonstration of both paths side by side.
 	if err := ensureSpendTemplate(ctx, svc); err != nil {
 		return err
 	}
@@ -235,7 +246,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
-	const exponent = int32(18)
+	const exponent = int32(6)
 	for _, c := range list {
 		if c.Code != code {
 			continue
@@ -257,6 +268,8 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 func ensureBonusTemplate(ctx context.Context, svc *ledger.Service) error {
 	if _, err := svc.Templates().GetTemplate(ctx, "credits_topup"); err == nil {
 		return nil // already registered
+	} else if !errors.Is(err, core.ErrNotFound) {
+		return fmt.Errorf("get template credits_topup: %w", err)
 	}
 	jt, err := ensureJournalType(ctx, svc, "credits_topup", "Credits Top-up with Bonus")
 	if err != nil {
@@ -286,6 +299,8 @@ func ensureBonusTemplate(ctx context.Context, svc *ledger.Service) error {
 func ensureSpendTemplate(ctx context.Context, svc *ledger.Service) error {
 	if _, err := svc.Templates().GetTemplate(ctx, "credits_spend"); err == nil {
 		return nil
+	} else if !errors.Is(err, core.ErrNotFound) {
+		return fmt.Errorf("get template credits_spend: %w", err)
 	}
 	jt, err := ensureJournalType(ctx, svc, "credits_spend", "Credits Spend")
 	if err != nil {

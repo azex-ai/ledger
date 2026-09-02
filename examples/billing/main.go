@@ -191,7 +191,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
-	const exponent = int32(18)
+	const exponent = int32(6)
 	for _, c := range list {
 		if c.Code != code {
 			continue

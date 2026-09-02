@@ -80,11 +80,11 @@ func run() error {
 	// schema setup is not a ledger write and does not belong on the facade.
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS demo_orders (
-			id          BIGSERIAL PRIMARY KEY,
-			holder_id   BIGINT NOT NULL,
-			currency_id BIGINT NOT NULL,
-			amount      NUMERIC(30,18) NOT NULL,
-			created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+			id           BIGSERIAL PRIMARY KEY,
+			holder_id    BIGINT NOT NULL,
+			currency_uid TEXT NOT NULL,
+			amount       NUMERIC(30,18) NOT NULL,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`); err != nil {
 		return fmt.Errorf("create demo_orders: %w", err)
 	}
@@ -128,8 +128,8 @@ func run() error {
 		// commit independently of the surrounding transaction. Use DBTX inside
 		// RunInTx; reserve Pool for code that runs outside the callback.)
 		if _, err := tx.DBTX().Exec(ctx,
-			`INSERT INTO demo_orders (holder_id, currency_id, amount) VALUES ($1, $2, $3)`,
-			3001, 1, "100.00",
+			`INSERT INTO demo_orders (holder_id, currency_uid, amount) VALUES ($1, $2, $3)`,
+			3001, currencyUID, "100.00",
 		); err != nil {
 			return fmt.Errorf("insert demo_orders: %w", err)
 		}
@@ -193,7 +193,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
-	const exponent = int32(18)
+	const exponent = int32(6)
 	for _, c := range list {
 		if c.Code != code {
 			continue

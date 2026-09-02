@@ -9,7 +9,9 @@
 // Demonstrates:
 //   - ledger.New(pool)                — single facade construction
 //   - svc.InstallDefaultPresets       — deposit/withdrawal bundles ready to use
-//   - server.NewWithConfig(...)       — the full ledger HTTP API as an http.Handler
+//   - server.NewFromDeps(cfg, deps)   — the full ledger HTTP API as an http.Handler,
+//     returning an error instead of panicking on an invalid config, and naming
+//     each dependency by field instead of by position (see server.Deps)
 //   - r.Handle("/api/v1/*", ...)      — mounting that handler inside a host chi router
 //   - svc.Worker(...)                 — background rollup/expiry/snapshot loops, PLUS
 //     the one job svc.Worker does not wire on its own: worker.SetEventDeliverer
@@ -180,7 +182,10 @@ func run() error {
 		json.NewEncoder(w).Encode(map[string]string{"token": token})
 	})
 
-	ledgerAPI := newLedgerAPI(svc)
+	ledgerAPI, err := newLedgerAPI(svc)
+	if err != nil {
+		return fmt.Errorf("assemble ledger API: %w", err)
+	}
 	rlStop := make(chan struct{})
 	ledgerAPI.StartRateLimiterGC(rlStop) // reaps idle per-IP rate-limit buckets
 	defer close(rlStop)
@@ -217,7 +222,7 @@ func run() error {
 
 // newLedgerAPI wires the ledger's HTTP server entirely from svc.* accessors --
 // no direct postgres/service dependency.
-func newLedgerAPI(svc *ledger.Service) *server.Server {
+func newLedgerAPI(svc *ledger.Service) (*server.Server, error) {
 	// Dev config: wildcard CORS, no API keys (auth disabled). For production
 	// use server.LoadConfig() and set API_KEYS + CORS_ALLOWED_ORIGIN.
 	cfg := &server.Config{Env: "dev", CORSAllowOrigin: "*", MaxBodyBytes: 256 * 1024}
@@ -226,34 +231,42 @@ func newLedgerAPI(svc *ledger.Service) *server.Server {
 	// postgres/service dependency (MJ-5, 2026-08-29 review). The snapshot and
 	// system-rollup services the server used to take are Worker concerns, not
 	// HTTP ones, and are wired into the Worker separately.
-	srv := server.NewWithConfig(cfg,
-		svc.JournalWriter(),
-		svc.BalanceReader(),
-		svc.Reserver(),
-		svc.Booker(),
-		svc.BookingReader(),
-		svc.EventReader(),
-		svc.Classifications(),
-		svc.JournalTypes(),
-		svc.Templates(),
-		svc.Currencies(),
-		svc.Channels(),
-		svc.Reconciler(),
-		svc.Queries(),
-		svc.Audit(),
-		svc.PlatformBalanceReader(),
-		svc.SolvencyChecker(),
-		svc.BalanceTrends(),
-		svc.FullReconciler(service.FullReconciliationConfig{}),
-		svc.AccountPolicies(),
-		svc.PeriodCloser(),
-		svc.TrialBalanceReader(),
-	)
+	//
+	// NewFromDeps over NewWithConfig: naming each dependency by struct field
+	// instead of position removes the "two swapped same-shaped interface
+	// arguments compile clean and fail at runtime" trap NewWithConfig has,
+	// and it returns an error instead of panicking on an invalid Config.
+	srv, err := server.NewFromDeps(cfg, server.Deps{
+		Journals:         svc.JournalWriter(),
+		Balances:         svc.BalanceReader(),
+		Reserver:         svc.Reserver(),
+		Booker:           svc.Booker(),
+		BookingReader:    svc.BookingReader(),
+		EventReader:      svc.EventReader(),
+		Classifications:  svc.Classifications(),
+		JournalTypes:     svc.JournalTypes(),
+		Templates:        svc.Templates(),
+		Currencies:       svc.Currencies(),
+		Channels:         svc.Channels(),
+		Reconciler:       svc.Reconciler(),
+		Queries:          svc.Queries(),
+		Audit:            svc.Audit(),
+		PlatformBalances: svc.PlatformBalanceReader(),
+		Solvency:         svc.SolvencyChecker(),
+		BalanceTrends:    svc.BalanceTrends(),
+		FullReconciler:   svc.FullReconciler(service.FullReconciliationConfig{}),
+		AccountPolicies:  svc.AccountPolicies(),
+		PeriodCloser:     svc.PeriodCloser(),
+		TrialBalance:     svc.TrialBalanceReader(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("server.NewFromDeps: %w", err)
+	}
 	srv.SetReady(true)
 	if err := srv.SetHolderSurface(server.HolderConfig{TokenSecret: walletTokenSecret}, svc.HolderReader()); err != nil {
-		panic(err) // static demo secret; cannot fail
+		return nil, fmt.Errorf("set holder surface: %w", err) // static demo secret; should not fail, but no more panics in a "complete assembly" example
 	}
-	return srv
+	return srv, nil
 }
 
 // walletTokenSecret signs the demo's holder tokens (32+ bytes). Use an env

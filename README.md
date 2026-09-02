@@ -24,7 +24,7 @@ Core engine capabilities:
 - **Entry templates** -- reusable debit/credit recipes; `ExecuteTemplate` for single posts, `ExecuteTemplateBatch` for atomic multi-step plans
 - **Checkpoint + delta balances** -- materialised checkpoints plus incremental rollup; balance reads run inside `REPEATABLE READ` for snapshot consistency
 - **Reserve / Settle / Release** -- per-(holder, currency) advisory-lock serialisation with in-lock balance check (TOCTOU-safe)
-- **Pending two-phase deposits** -- `AddPending` → `ConfirmPending` / `CancelPending` for in-flight deposit tracking
+- **Pending two-phase deposits** -- `AddPending` → `ConfirmPending` / `CancelPending` for in-flight deposit tracking (install separately: `presets.InstallPendingBundle`, not part of `InstallDefaultPresets`/`InstallExtendedPresets`)
 - **Channel adapters** -- pluggable inbound webhook handlers (HMAC-verified) for external systems such as on-chain deposit indexers
 - **Webhook delivery** -- outbound event delivery with per-attempt exponential backoff and dead-letter handling
 - **In-process event subscription** -- `Worker.Subscribe` for library-mode event callbacks without a webhook server
@@ -41,31 +41,42 @@ Core engine capabilities:
 
 ## Local Development with go.work
 
-To consume the local copy of `azex-ai/ledger` from a sibling Go module without
-publishing or `replace` directives, drop a workspace file at the parent
-directory:
+To consume the local copy of `azex-ai/ledger` from a sibling Go module, drop a
+workspace file at the parent directory that supersedes the one this repo
+ships (which only sees its own five modules — root, `chains/evm`,
+`anchors/r2`, `anchors/r2/internal/miniotest`, `internal/postgrestest`):
 
 ```bash
 cd /path/to/parent          # e.g. /Users/aaron/azex
 cat > go.work <<'EOF'
-go 1.26.1
+go 1.26.6
 
 use (
     ./ledger
+    ./ledger/chains/evm
+    ./ledger/anchors/r2
+    ./ledger/anchors/r2/internal/miniotest
     ./ledger/internal/postgrestest
     ./your-consumer-module
 )
 EOF
-
-# The ledger repo ships its own go.work that only sees the inner modules;
-# the outer file supersedes it, so remove the inner one to avoid confusion.
-rm ledger/go.work
 ```
 
-In your consumer's `go.mod`, ensure `go 1.26.1` (or add `toolchain go1.26.1`).
-The workspace file is git-ignored by convention, so this only affects local
-builds. For published consumers, switch to `go get github.com/azex-ai/ledger@<tag>`
-and delete the workspace.
+`go` in the outer `go.work` must match the `go` directive in
+[`ledger/go.mod`](go.mod) (currently `1.26.6`) — an older toolchain version
+here fails immediately with `requires go >= 1.26.6`. There is no need to
+remove `ledger/go.work` — both `go.work` and `go.work.sum` are tracked in
+this repo (not git-ignored), and an outer workspace file always supersedes an
+inner one, so the two coexist without conflict.
+
+A plain `replace github.com/azex-ai/ledger => ../ledger` in your consumer's
+`go.mod` does **not** work as a substitute for the workspace file above: the
+root module's own `internal/postgrestest` requirement uses a relative
+`replace`, which is not transitive to your module, so `go mod tidy` fails
+with `invalid version: unknown revision 000000000000`. This only affects
+local development against an unpublished checkout — `go get
+github.com/azex-ai/ledger@<tag>` in a fresh module works normally and needs
+no workspace file at all.
 
 ## Quick Start -- As a Library
 
@@ -88,6 +99,9 @@ chart-of-accounts and just need the engine.
 
 ```go
 import (
+    "fmt"
+    "log"
+
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/shopspring/decimal"
     "github.com/azex-ai/ledger"
@@ -114,8 +128,12 @@ j, err := svc.JournalWriter().PostJournal(ctx, core.JournalInput{
     },
     Source: "api",
 })
+if err != nil {
+    log.Fatal(err)
+}
 
 bal, _ := svc.BalanceReader().GetBalance(ctx, 42, currencyUID, walletUID)
+fmt.Println("uid:", j.UID, "balance:", bal)
 ```
 
 ### Tier 2 — With Built-in Presets (recommended)
@@ -129,16 +147,30 @@ svc, _ := ledger.New(pool)
 svc.InstallExtendedPresets(ctx)              // 8 bundles, see "Built-in Presets" below
 
 // Post a deposit confirmation by template — no entry-list assembly needed.
-_, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
     HolderID:       42,
     CurrencyUID:    currencyUID,
     Amounts:        map[string]decimal.Decimal{"amount": decimal.NewFromInt(100)},
     IdempotencyKey: ledger.NewIdempotencyKey("deposit-confirm"),
     Source:         "api",
-})
+}); err != nil {
+    log.Fatal(err)
+}
 
 // Or model a long-lived flow with a Booking and lifecycle transitions.
-booking, _ := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
+// InstallExtendedPresets installs accounting templates, not lifecycles — the
+// "deposit" classification it references ships label-only, so attach a
+// lifecycle before creating bookings against it. SetLifecycleIfEmpty is
+// idempotent and never clobbers a lifecycle an operator has customised.
+depositClass, err := svc.Classifications().GetByCode(ctx, "deposit")
+if err != nil {
+    log.Fatal(err)
+}
+if err := svc.Classifications().SetLifecycleIfEmpty(ctx, depositClass.UID, presets.DepositLifecycle); err != nil {
+    log.Fatal(err)
+}
+
+booking, err := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
     ClassificationCode: "deposit",
     AccountHolder:      42,
     CurrencyUID:        currencyUID,
@@ -146,12 +178,17 @@ booking, _ := svc.Booker().CreateBooking(ctx, core.CreateBookingInput{
     IdempotencyKey:     ledger.NewIdempotencyKey("deposit"),
     ChannelName:        "evm",
 })
-svc.Booker().Transition(ctx, core.TransitionInput{
+if err != nil {
+    log.Fatal(err)
+}
+if _, err := svc.Booker().Transition(ctx, core.TransitionInput{
     BookingUID:     booking.UID,
     ToStatus:       "confirming",
     Source:         "api",
     IdempotencyKey: ledger.NewIdempotencyKey("deposit-confirming"), // REQUIRED — I-3, see docs/INVARIANTS.md
-})
+}); err != nil {
+    log.Fatal(err)
+}
 ```
 
 Background worker (rollup, expiry, reconcile, snapshots, partition
@@ -185,13 +222,26 @@ This repository ships **no server binary**. It is a library: the domain, the
 Postgres adapter, the background worker, and an optional HTTP layer you mount
 in your own binary. There is nothing here to deploy.
 
-`server.NewWithConfig` returns the full ledger API as an `http.Handler`, so a
+`server.NewFromDeps` returns the full ledger API as an `http.Handler`, so a
 consumer that wants the HTTP surface wires it alongside their own routes:
 
 ```go
-srv := server.NewWithConfig(cfg, /* ... the stores and services you assembled ... */)
+srv, err := server.NewFromDeps(cfg, server.Deps{
+    Journals: svc.JournalWriter(), Balances: svc.BalanceReader(), /* ... the rest of the stores and services you assembled ... */
+})
+if err != nil {
+    return err // invalid cfg -- you decide how to fail, not the library
+}
 http.ListenAndServe(":8080", srv.Handler())
 ```
+
+Prefer `NewFromDeps` over the older `server.New` / `server.NewWithConfig`:
+those take twenty-one same-shaped `core` interfaces as positional
+parameters, so two swapped arguments of matching interface shape compile
+clean and fail at runtime — `Deps` names each dependency by field instead.
+`NewFromDeps` also returns an error on an invalid `Config` rather than
+panicking. See [`examples/fullstack`](examples/fullstack/) for the complete
+field list.
 
 A complete, runnable assembly -- chi router, API-key auth, the worker, and a
 Next.js frontend against it -- is in [`examples/fullstack`](examples/fullstack/).
@@ -240,10 +290,27 @@ banking flow.
 | Primitive | What it is | Where it lives |
 |-----------|-----------|----------------|
 | **Currency** | Unit of value (USD, USDT, EUR, …). Has a precision. | `core.Currency` / `currencies` table |
-| **Classification** | Account type — "main_wallet", "pending", "fees", "equity", … Has `NormalSide` (debit-normal vs credit-normal) and an optional `Lifecycle` state machine. Positive holder = user-side, negative = system counterpart. | `core.Classification` / `classifications` table |
+| **Classification** | Account type — "main_wallet", "pending", "fees", "equity", … Has `NormalSide` (debit-normal vs credit-normal), a `BalanceRole` (see below), and an optional `Lifecycle` state machine. Positive holder = user-side, negative = system counterpart. | `core.Classification` / `classifications` table |
 | **Journal Type** | Categorises journals by intent — "deposit_confirm", "fee", "transfer". Required metadata before any post; think of it as the journal-entry kind in a chart of accounts. | `core.JournalType` / `journal_types` table |
 | **Entry Template** | Reusable recipe for a balanced journal: a list of `(classification, debit/credit, holder_role, amount_key)` lines. Render with `TemplateParams` to produce a `JournalInput`. | `core.EntryTemplate` / `entry_templates` table |
 | **Booking + Lifecycle** | Long-lived process record (e.g. a deposit attempt) tied to a Classification. Each `Transition` writes an Event and may post a Journal. | `core.Booking`, `core.Lifecycle` / `bookings` + `events` |
+
+**`BalanceRole`** — every non-system Classification (`IsSystem: false`) must
+declare one explicitly (`core.ClassificationInput.Validate` rejects `""`);
+`is_system` classifications leave it unset. It decides what a holder's
+balance breakdown, and `Reserve`, do with the money in that bucket:
+
+| Value | Meaning |
+|-------|---------|
+| `core.BalanceRoleAvailable` | Immediately spendable. The **only** bucket `Reserve` draws from. |
+| `core.BalanceRolePending` | Inbound funds awaiting confirmation — counted in the holder's total, not spendable yet. |
+| `core.BalanceRoleLocked` | Journal-locked funds (e.g. a withdrawal in flight) — counted, not spendable. |
+| `core.BalanceRoleMemo` | Deliberately excluded from the holder's spendable-money view and not a liability the platform owes back (e.g. `fee_expense`: money already paid, tracked per-holder for reporting only). |
+
+Picking `memo` when you meant `available` makes that money invisible to
+`Reserve` forever; picking `available` for a reporting-only account makes it
+withdrawable. See [`docs/INVARIANTS.md`](docs/INVARIANTS.md) I-25 / I-37 for
+the full contract.
 
 When a journal is posted:
 
@@ -282,6 +349,16 @@ Two convenience installers:
 ```go
 svc.InstallDefaultPresets(ctx)    // Deposit + Withdrawal only
 svc.InstallExtendedPresets(ctx)   // All 8 bundles
+```
+
+Neither installer includes the pending two-phase deposit bundle or the
+developer-mode credit bundle — both are opt-in on purpose (the former adds a
+whole extra deposit path, the latter mints balance against no custodied
+asset) and are installed separately:
+
+```go
+presets.InstallPendingBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates())
+svc.InstallDevCreditPreset(ctx) // ENV=dev + DEV_CREDIT_ENABLED=true only
 ```
 
 Or install one bundle at a time:
@@ -420,6 +497,13 @@ svc.Classifications().CreateClassification(ctx, core.ClassificationInput{
     Code:       "kyc_review",
     Name:       "KYC Review",
     NormalSide: core.NormalSideDebit,
+    IsSystem:   false,
+    // kyc_review is a process-tracking classification, not a money bucket —
+    // it never carries a spendable balance, so it is the BalanceRoleMemo
+    // case: "deliberately excluded", not "nobody tagged this yet". Every
+    // non-system classification must declare BalanceRole explicitly (see
+    // "Core Concepts" above) — CreateClassification rejects "" here.
+    BalanceRole: core.BalanceRoleMemo,
     Lifecycle: &core.Lifecycle{
         Initial:  "submitted",
         Terminal: []core.Status{"approved", "rejected"},
@@ -556,7 +640,16 @@ more. Cardinality is bounded by design: `journalTypeCode` and `classCode` are
 stable enums, currency IDs are small integers.
 
 For OpenTelemetry, DataDog, or any other backend, write a thin adapter
-against `core.Metrics`. The interface is intentionally narrow (~20 methods).
+against `core.Metrics`. The interface is intentionally wide (32 methods, one
+per emitted signal, not grouped into a handful of generic Counter/Gauge/
+Histogram calls) so each call site names what it means — embed
+`core.NoopMetrics` and override only the handful of methods you care about
+rather than writing every method body by hand:
+
+```go
+type myMetrics struct{ core.NoopMetrics }
+func (m *myMetrics) JournalPosted(code string) { /* ... */ }
+```
 
 ### Distributed tracing
 
@@ -596,6 +689,11 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.AccountPolicies()` | `core.AccountPolicyStore` | Per-account freeze/close + balance-floor overrides |
 
 ### Deposit / pending
+
+Requires `presets.InstallPendingBundle(ctx, ...)` — unlike most of the API
+Surface below, this one is **not** included in `InstallDefaultPresets` or
+`InstallExtendedPresets`; install it explicitly before using either accessor
+(the calls below fail with `core.ErrNotFound` until you do).
 
 | Method | Interface | Description |
 |--------|-----------|-------------|
@@ -662,6 +760,48 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.Ping(ctx)` | DB connectivity check (`SELECT 1`) |
 | `ledger.Migrate(databaseURL)` | Run pending schema migrations |
 | `ledger.NewIdempotencyKey(scope)` | Generate `scope:<16-byte-hex>` key via `crypto/rand` |
+| `ledger.RetryIdempotent(ctx, scope, attempts, fn)` | Retry `fn` with the same idempotency key on every attempt — see "Retrying a failed write" below |
+
+### Retrying a failed write
+
+`core.IsRetryable(err)` reports whether resubmitting is safe — but only if
+the retry reuses the **same** idempotency key. A fresh key on retry does not
+replay the original write, it posts a second, independent one
+(`api-contract.md` §9); a first attempt that times out after the journal
+landed, retried with a new key, is a silent double entry. This holds
+identically in library mode and HTTP mode, and is true whether or not you use
+the helper below — the key must outlive the loop either way.
+
+```go
+key := ledger.NewIdempotencyKey("deposit")
+for attempt := 0; attempt < 3; attempt++ {
+    _, err = svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+        IdempotencyKey: key, // the SAME key every attempt
+        // ...
+    })
+    if err == nil || !core.IsRetryable(err) {
+        break
+    }
+}
+```
+
+`ledger.RetryIdempotent` does exactly that and makes the "regenerate the key
+on retry" mistake unexpressible:
+
+```go
+err := ledger.RetryIdempotent(ctx, "deposit", 3, func(ctx context.Context, key string) error {
+    _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+        IdempotencyKey: key,
+        // ...
+    })
+    return err
+})
+```
+
+It stops immediately on any non-retryable error — a rejected input or an
+insufficient balance does not become correct by being sent again — and backs
+off starting at 50ms, doubling, capped at 2s. Nothing in this library calls
+it; it exists for callers who don't already have their own retry machinery.
 
 ## Architecture
 
@@ -696,7 +836,7 @@ ledger/
     audit_store.go       AuditQuerier
     balance_trends_store.go  BalanceTrendReader
     platform_balance_store.go  PlatformBalanceReader + SolvencyChecker
-    reconcile_adapter.go ReconcileQuerier (full reconciliation suite queries)
+    reconcile_queries.go  ReconcileQuerier (full reconciliation suite queries)
     snapshot_extra_store.go  SparseSnapshotter + LiveBalanceMerger
 
   presets/             Out-of-the-box classification configs
@@ -730,8 +870,6 @@ ledger/
   web/                 Next.js 16 management dashboard (shadcn/ui, viem-based BigInt utils)
 
   cmd/ledger-cli/      Read-only investigation CLI (balance, journals, trace, reconcile, solvency)
-
-  deploy/helm/ledger/  Kubernetes Helm chart (deployment + service + ingress + secrets)
 
   ledger.go            Top-level Service facade
   idempotency.go       NewIdempotencyKey helper
@@ -775,11 +913,11 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 
 ## Documentation
 
-- [**INVARIANTS.md**](docs/INVARIANTS.md) -- The 34 invariants the ledger guarantees (per-currency balance, append-only, idempotency, TOCTOU-safe reserve, money conservation, partition coverage, tamper-evident signing and attestation, …) with `Why / Enforced by / Pinned by` for each.
+- [**INVARIANTS.md**](docs/INVARIANTS.md) -- Every invariant the ledger guarantees (per-currency balance, append-only, idempotency, TOCTOU-safe reserve, money conservation, partition coverage, tamper-evident signing and attestation, …) with `Why / Enforced by / Pinned by` for each. The count grows as invariants are added — read the doc for the current list rather than a number here, which would just go stale again.
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
 - [**DR.md**](docs/DR.md) -- Backup & disaster recovery: PITR strategy, RPO/RTO targets, restore procedure, and invariant-based backup verification (quarterly drill).
 - [**CAPACITY.md**](docs/CAPACITY.md) -- Benchmark baseline, sizing guide (pool/replicas/DB), suggested SLOs, and scaling signals.
-- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (56 paths, 59 schemas).
+- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (59 paths, 97 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
 - [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (FX two-leg), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
@@ -799,6 +937,27 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
   [Anchoring in production](#anchoring-in-production) for what to swap it for.
 - [**tx-compose**](examples/tx-compose/) -- Transactional composition: ledger journal + caller's own DB write in one PostgreSQL transaction; rollback on error.
 
+## Tamper-evident signing (optional)
+
+`ledger.WithAttestor(attestor core.Attestor, authVerifier core.AuthVerifier)`
+is the single entry point for the whole per-journal signing / batch
+attestation / verified-balance chain below — without it every journal is
+posted `auth_status=unsigned_no_attestor` and none of this section applies.
+`authdev.NewLocalAttestor` is the dev/test implementation (ed25519 key held
+in memory); a production `core.Attestor` needs the signing key to live
+outside the failure domain `DATABASE_URL` lives in — see
+`examples/tamper-evident` for a complete, runnable walkthrough (forges a row,
+shows the gate refusing to pay it out).
+
+`ledger.WithSilentWorker()` opts a `Worker` out of `Run`'s refusal to start
+when its logger is `core.NopLogger` — see [Observability](#observability)
+above; most consumers should inject a real logger instead.
+
+`ledger.WithCustodialClassCodes(codes ...string)` overrides which
+classification codes `SolvencyChecker` treats as custodial assets (default:
+`custodial`, `settlement`) — set it if your deployment's custodial
+classification isn't named `custodial`.
+
 ## Anchoring in production
 
 `core.Anchor` is the outermost link of the tamper-evidence chain: it publishes
@@ -812,7 +971,7 @@ the attacker can also rewrite makes the rest decorative.
 | Package | Use |
 |---|---|
 | `anchordev` | Local file. **Dev and tests only** -- same machine, same user as the database it is supposed to be independent of. |
-| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. |
+| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. **Not yet independently `go get`-able** (`docs/RUNBOOK.md`'s "Consuming the submodule today"): consume it from a local checkout via the parent-directory `go.work` above, not `go get github.com/azex-ai/ledger/anchors/r2@<tag>` -- that does not yet resolve. |
 
 **Writing your own.** Object storage with a compliance-mode retention lock, a
 public chain, an RFC 3161 timestamp authority and an append-only database in a
@@ -859,20 +1018,29 @@ The current release series is **v0.x**. No API stability guarantees are made bet
 
 ## Configuration
 
-The service entry point reads:
+`server.LoadConfig()` reads (used by `server.New`; `server.NewFromDeps` and
+`server.NewWithConfig` take an explicit `*server.Config` instead and read
+nothing from the environment):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DATABASE_URL` | PostgreSQL connection string (`postgres://` or `postgresql://`) | (required) |
-| `HTTP_PORT` | HTTP server listen port | `8080` |
 | `ENV` | Deployment environment; anything other than `dev` enables production guards | `production` |
 | `CORS_ALLOWED_ORIGIN` | Allowed CORS origin. Required in non-dev `ENV` -- the service refuses to boot without it. | (required outside dev) |
-| `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
+| `HOLDER_TOKEN_SECRET` | HMAC signing key for holder-scoped wallet tokens (`/api/v1/holder/*`), at least 32 bytes | (holder surface disabled when empty) |
 | `MAX_BODY_BYTES` | Maximum inbound request body size in bytes | `262144` (256 KB) |
-| `EVM_WEBHOOK_SECRET` | HMAC-SHA256 signing key for the EVM block-scanner webhook adapter | (channel disabled when empty) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP collector endpoint; setting it enables trace export (standard `OTEL_EXPORTER_OTLP_*` vars apply) | (tracing disabled) |
-| `MIGRATE_MODE` | Migration behavior at startup: `auto` (run, then serve), `only` (run and exit — for pre-deploy migration jobs), `off` (skip; another process owns migrations) | `auto` in `dev`; `off` otherwise |
+| `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated CIDR ranges of your trusted edge proxies (e.g. `10.0.0.0/8,172.16.0.0/12`). When set, the client IP is derived from `X-Forwarded-For` (walked right-to-left, skipping trusted hops) / `X-Real-IP` / `True-Client-IP` for rate limiting and logs — but **only** for requests whose socket peer is inside these ranges, so a direct caller cannot spoof its IP. Every candidate is IP-validated. Invalid value = startup error. | (empty; socket peer) |
+| `DEV_CREDIT_ENABLED` | Enables `POST /api/v1/dev/credits` (mints holder balance against no custodied asset). Requires `ENV=dev`; boot fails otherwise. | `false` |
+| `PROTECTED_TEMPLATE_CODES` | Comma-separated extra template codes to protect beyond the structural rule (any template with a leg on an `is_system` classification) and the built-in list — see "write scope and system classifications" below | (built-in list only) |
+| `ALLOW_GENERIC_TEMPLATE_POST` | Comma-separated template codes exempted from the protected-template gate (`POST /journals/template` normally refuses these) | (none exempted) |
+
+`DATABASE_URL` / `HTTP_PORT` / migration-on-boot behavior are read by your
+own composition root, not by this library — see
+[`examples/fullstack`](examples/fullstack/). OpenTelemetry export is
+likewise your own setup: install an OTLP exporter and set the global tracer
+provider before calling `ledger.New` (see [Observability](#observability)
+below); the standard `OTEL_EXPORTER_OTLP_*` env vars apply to whatever
+exporter you install, not to code in this repo.
 
 Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot cadences, withdrawal review threshold) live in `service.WorkerConfig` and the option functions on `ledger.New`; `examples/fullstack` shows them being set.
 

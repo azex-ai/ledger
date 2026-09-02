@@ -8,6 +8,8 @@
 //   - ledger.New(pool) + svc.Worker(cfg)
 //   - worker.Subscribe(func(ctx, evt) error { ... })
 //   - Triggering a booking transition and observing the handler fires
+//   - At-least-once delivery: a handler that errors on its first attempt IS
+//     invoked again for the SAME event, so handlers must dedupe by event UID
 //   - Graceful shutdown with worker drain via context cancellation
 //
 // Run:
@@ -22,6 +24,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -101,17 +104,34 @@ func run() error {
 
 	// -----------------------------------------------------------------------
 	// Subscribe to events. The handler receives every emitted core.Event.
-	// If the handler returns an error the event is still marked delivered —
-	// a buggy handler should not block the queue.
+	//
+	// Delivery is AT-LEAST-ONCE, the same guarantee webhook delivery makes
+	// (service/worker.go's Subscribe godoc, delivery.WebhookDeliverer): if
+	// the handler returns an error, the event is scheduled for retry rather
+	// than marked delivered — so a handler that errors after doing partial
+	// work WILL be invoked again for the SAME event. Handlers must therefore
+	// be idempotent per event UID; do not write one that assumes "returned
+	// an error" means "had no effect". handle (below) guards on evt.UID for
+	// exactly this reason.
 	// -----------------------------------------------------------------------
 	received := make(chan core.Event, 10)
-	if err := worker.Subscribe(func(_ context.Context, evt core.Event) error {
+	var mu sync.Mutex
+	processed := make(map[string]bool) // idempotency guard: event UID -> already applied
+	handle := func(_ context.Context, evt core.Event) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if processed[evt.UID] {
+			fmt.Printf("[event] id=%s redelivered -- ignored (already processed; handlers must dedupe by UID)\n", evt.UID)
+			return nil
+		}
+		processed[evt.UID] = true
 		fmt.Printf("[event] id=%s class=%s %s -> %s actor=%d source=%q\n",
 			evt.UID, evt.ClassificationCode, evt.FromStatus, evt.ToStatus,
 			evt.ActorID, evt.Source)
 		received <- evt
 		return nil
-	}); err != nil {
+	}
+	if err := worker.Subscribe(handle); err != nil {
 		return fmt.Errorf("worker.Subscribe: %w", err)
 	}
 
@@ -162,6 +182,20 @@ func run() error {
 	select {
 	case evt := <-received:
 		fmt.Printf("handler received event uid=%s to_status=%s\n", evt.UID, evt.ToStatus)
+
+		// Prove the at-least-once contract instead of just asserting it: a
+		// crash after partial handler work, a claim-lease expiry, or a prior
+		// transient error can all cause the SAME event to reach this handler
+		// again (the real path retries with exponential backoff starting at
+		// 1 minute -- service/delivery/webhook.go's retryIntervals -- too
+		// long to wait out here). Call the same handler directly with the
+		// same event to simulate that redelivery and show the dedupe-by-UID
+		// guard in `handle` is what makes it safe.
+		if err := handle(ctx, evt); err != nil {
+			cancelWorker()
+			<-workerDone
+			return fmt.Errorf("simulated redelivery: %w", err)
+		}
 	case <-time.After(3 * time.Second):
 		// Failing here rather than printing and carrying on: the whole point
 		// of this example is that the handler receives the event, so an exit
@@ -186,7 +220,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
-	const exponent = int32(18)
+	const exponent = int32(6)
 	for _, c := range list {
 		if c.Code != code {
 			continue

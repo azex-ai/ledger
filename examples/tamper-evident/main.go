@@ -16,6 +16,11 @@
 //   - svc.VerifiedBalanceReader()                 — balance that ignores unsigned journals
 //   - ReserveInput.RequireVerifiedBalance         — the gate money passes through
 //   - svc.VerifyLedger(ctx, anchor, cfg)          — the five-step audit
+//   - svc.Authorize + tx.JournalWriter().PostAuthorized() inside RunInTx — the
+//     ONLY way to keep a journal signed when it must be composed atomically
+//     with other writes, contrasted with PostJournal/ExecuteTemplate called
+//     directly inside RunInTx, which always produces auth_status=unsigned_tx_mode
+//     (see the appendix at the end of run())
 //
 // Both dev implementations used here are shipped for exactly this purpose and
 // nothing more:
@@ -278,6 +283,95 @@ func run() error {
 	}
 	fmt.Printf("11. gated reserve          still REFUSED\n")
 
+	// ---------------------------------------------------------------------
+	// Appendix — Authorize + PostAuthorized inside RunInTx, and its unsigned
+	// contrast. Uses a second currency so it neither reads nor perturbs the
+	// wallet/USDT dimension the forgery narrative above depends on; both
+	// halves live in one dimension (userID, usdcUID, wallet) so the second
+	// journal's effect on VerifiedBalance is visible.
+	//
+	// This is the pattern service/onchain.go's postDepositConfirmedJournal
+	// uses for real money movement composed with a Booker.Transition: call
+	// Authorize/AuthorizeTemplate BEFORE RunInTx opens (an Attestor may be
+	// remote — calling it from inside an open DB transaction is the
+	// "external call inside a transaction" financial.md forbids), then post
+	// the result with PostAuthorized *inside* the callback.
+	// ---------------------------------------------------------------------
+	if err := runInTxAuthorizationDemo(ctx, svc, jt.UID, wallet.UID, custody.UID); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// runInTxAuthorizationDemo shows the two ways a journal composed inside
+// RunInTx ends up with an auth_status, and what each does to
+// VerifiedBalance for the dimension it touches.
+func runInTxAuthorizationDemo(ctx context.Context, svc *ledger.Service, jtUID, walletUID, custodyUID string) error {
+	usdcUID, err := ensureCurrency(ctx, svc, "USDC", "USD Coin")
+	if err != nil {
+		return err
+	}
+	signedAmount := decimal.RequireFromString("10.00")
+	unsignedAmount := decimal.RequireFromString("5.00")
+
+	// A. Authorize the journal BEFORE opening the transaction -- the only
+	//    point at which calling the (possibly remote) Attestor is safe.
+	authorized, err := svc.Authorize(ctx, journalInput(
+		jtUID, usdcUID, walletUID, custodyUID, signedAmount,
+		ledger.NewIdempotencyKey("tamper-evident-authorized-in-tx"),
+	))
+	if err != nil {
+		return fmt.Errorf("appendix: authorize: %w", err)
+	}
+	var signedJournal *core.Journal
+	if err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		// PostAuthorized never calls the Attestor -- it is the write path
+		// that is safe to call from inside an open transaction.
+		signedJournal, err = tx.JournalWriter().PostAuthorized(ctx, authorized)
+		return err
+	}); err != nil {
+		return fmt.Errorf("appendix: post authorized journal: %w", err)
+	}
+	if signedJournal.AuthStatus != core.AuthStatusSigned {
+		return fmt.Errorf("appendix: expected auth_status=%s, got %s", core.AuthStatusSigned, signedJournal.AuthStatus)
+	}
+	verified, err := svc.VerifiedBalanceReader().VerifiedBalance(ctx, userID, usdcUID, walletUID)
+	if err != nil {
+		return fmt.Errorf("appendix: Authorize+PostAuthorized should have kept this dimension verifiable: %w", err)
+	}
+	fmt.Printf("12. Authorize+PostAuthorized in RunInTx  auth_status=%s  VerifiedBalance=%s\n", signedJournal.AuthStatus, verified)
+
+	// B. The contrast: PostJournal (and ExecuteTemplate/ExecuteTemplateBatch,
+	//    which reduce to the same write path) called *directly* inside
+	//    RunInTx. There is no point inside an already-open transaction where
+	//    calling out to the Attestor would not itself be the "external call
+	//    inside a DB transaction" financial.md forbids -- so this journal is
+	//    posted, correctly, as unsigned_tx_mode. It moves real money; it is
+	//    simply not verifiable.
+	var unsignedJournal *core.Journal
+	if err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		unsignedJournal, err = tx.JournalWriter().PostJournal(ctx, journalInput(
+			jtUID, usdcUID, walletUID, custodyUID, unsignedAmount,
+			ledger.NewIdempotencyKey("tamper-evident-unsigned-in-tx"),
+		))
+		return err
+	}); err != nil {
+		return fmt.Errorf("appendix: post journal in tx: %w", err)
+	}
+	if unsignedJournal.AuthStatus != core.AuthStatusUnsignedTxMode {
+		return fmt.Errorf("appendix: expected auth_status=%s, got %s", core.AuthStatusUnsignedTxMode, unsignedJournal.AuthStatus)
+	}
+	plain, err := svc.BalanceReader().GetBalance(ctx, userID, usdcUID, walletUID)
+	if err != nil {
+		return fmt.Errorf("appendix: get balance: %w", err)
+	}
+	_, verifyErr := svc.VerifiedBalanceReader().VerifiedBalance(ctx, userID, usdcUID, walletUID)
+	if !errors.Is(verifyErr, core.ErrUnauthorizedJournal) {
+		return fmt.Errorf("appendix: expected the unsigned_tx_mode journal to make this dimension UNDEFINED, got: %v", verifyErr)
+	}
+	fmt.Printf("13. PostJournal in RunInTx (no Authorize) auth_status=%s  GetBalance=%s  VerifiedBalance=UNDEFINED (this legitimate journal is unsigned)\n",
+		unsignedJournal.AuthStatus, plain)
 	return nil
 }
 
@@ -407,7 +501,7 @@ func ensureCurrency(ctx context.Context, svc *ledger.Service, code, name string)
 	if err != nil {
 		return "", fmt.Errorf("list currencies: %w", err)
 	}
-	const exponent = int32(18)
+	const exponent = int32(6)
 	for _, c := range list {
 		if c.Code != code {
 			continue
