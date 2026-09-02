@@ -67,10 +67,10 @@ func TestWorker_Subscribe_HandlerReceivesEvent(t *testing.T) {
 	worker := newMinimalWorker(engine)
 	worker.SetLocalPoller(poller)
 	var receivedUID atomic.Value
-	worker.Subscribe(func(_ context.Context, e core.Event) error {
+	require.NoError(t, worker.Subscribe(func(_ context.Context, e core.Event) error {
 		receivedUID.Store(e.UID)
 		return nil
-	})
+	}))
 
 	// Give event_callback one tick — use a very short interval.
 	worker.config.EventDeliveryInterval = 5 * time.Millisecond
@@ -105,13 +105,13 @@ func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 
 	worker := newMinimalWorker(engine)
 	worker.SetLocalPoller(poller)
-	worker.Subscribe(func(_ context.Context, e core.Event) error {
+	require.NoError(t, worker.Subscribe(func(_ context.Context, e core.Event) error {
 		processedCount.Add(1)
 		if e.UID == "evt-1" {
 			return assert.AnError // handler fails for event 1
 		}
 		return nil
-	})
+	}))
 	worker.config.EventDeliveryInterval = 5 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
@@ -186,7 +186,12 @@ func newMinimalWorker(engine *core.Engine) *Worker {
 		EventDeliveryBatchSize: 10,
 	}
 
-	return NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, config, engine)
+	w := NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, config, engine)
+	// AllowSilent: this test builds a Worker with core.NewEngine's default
+	// (no-op) logger and asserts on behaviour rather than log lines, so the
+	// silence is deliberate -- Worker.Run otherwise refuses to start under it.
+	w.AllowSilent()
+	return w
 }
 
 // TestWorker_PollerWithoutSubscribe_DoesNotDrainQueue pins the reason
@@ -239,10 +244,10 @@ func TestWorker_SubscribeAfterPoller_UsesTheStoredPoller(t *testing.T) {
 	worker := newMinimalWorker(engine)
 	worker.SetLocalPoller(poller) // poller first...
 	var got atomic.Value
-	worker.Subscribe(func(_ context.Context, e core.Event) error { // ...dispatcher second
+	require.NoError(t, worker.Subscribe(func(_ context.Context, e core.Event) error { // ...dispatcher second
 		got.Store(e.UID)
 		return nil
-	})
+	}))
 	worker.config.EventDeliveryInterval = 5 * time.Millisecond
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

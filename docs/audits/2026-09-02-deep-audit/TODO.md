@@ -1682,7 +1682,7 @@
 
 | 条目 | 变更 | 消费方需要做什么 |
 |---|---|---|
-| （空） | | |
+| （本波的行都追加在下方「Lead 追加」表尾） | W1-templates 起形成的事实约定：破坏性变更行与 lead 追加项同表。此处保留标题，避免两处清单分叉 | W3-lead 收口时并表 |
 
 ## Lead 追加（整改期间发现，归属见括号）
 
@@ -1725,3 +1725,11 @@
 | w1-onchain | G-M6（token 零值 fail-closed）与 G-M8（深 reorg 异常持久化）各需一条 invariant，I-52/I-53 已用完 | W3-lead（Wave 2 号段之后追加，暂定 I-62 I-63） |
 | w1-onchain 兄弟扫描 | `EnableOnchain` 从不传 pool → `NewLockedJob(nil)` 静默不加锁，onchain 单飞锁对全部 facade 消费方是死的（F-M1 同形）；已在 `ledger.go` 补 `service.WithPool(s.pool)` 并带 pin | 已修（W1-onchain） |
 | w1-onchain 兄弟扫描 | `advanceSweep` 的 dispatch 分支（revive 出口，复用 failed booking 的 nonce）同样绕过 GasCeiling | 已修（W1-onchain） |
+| E-M5 / B-M6 (W1-facade) | `(*ledger.Service).Worker(cfg)` 的签名由 `*service.Worker` 改为 `(*service.Worker, error)` | `worker := svc.Worker(cfg)` → `worker, err := svc.Worker(cfg)` 并处理 err。返回 error 的唯一情形是在 `RunInTx` 回调里调用它（此前会静默造出一个半绑事务的 worker） |
+| E-M1 (W1-facade) | `(*service.Worker).Subscribe(handler)` 的签名由无返回值改为返回 `error` | `worker.Subscribe(h)` → `if err := worker.Subscribe(h); err != nil { ... }`。返回 error 的唯一情形是在 `Run` 之后订阅（此前只打一条 Error 日志，而默认 logger 会吞掉它） |
+| E-M1 / I-M11 (W1-facade) | **运行期行为变更**：`(*service.Worker).Run` 在 logger 为 `core.NopLogger`（`ledger.New` 的默认值）时**返回 error 且不启动任何 job** | 二选一：① 传 `ledger.WithLogger(...)`（推荐）；② 显式接受静默 —— `ledger.WithSilentWorker()`（facade）或 `(*service.Worker).AllowSilent()`（手搓 Worker）。**这条会让「按 README Quick Start 接线且没注入 logger」的既有部署在启动时报错**，是刻意的：此前那种部署零输出、事件永远 pending |
+| I-M11 (W1-facade) | `(*ledger.Service).Worker` 现在自动 `SetFullReconciler(svc.FullReconciler(service.FullReconciliationConfig{}))` | 已经手动调 `SetFullReconciler` 的消费方无需改动（后调的覆盖自动接线）；想要非默认 `FullReconciliationConfig` 的仍在 `Worker()` 返回后自行覆盖。**副作用：此前默认不跑的 15 项对账 check 现在默认每 `FullReconcileInterval` 跑一次**，会产生新的 DB 读负载与新的告警面 |
+| E-M3 (W1-facade) | `(*ledger.Service).RegisterChannel` 在 `RunInTx` clone 上返回 error（此前返回 nil 后静默丢弃） | 把 `RegisterChannel` 移到顶层 Service 上调用，且必须在 `svc.Channels()` 被求值之前 |
+| E-m14 (W1-facade) | `(*ledger.Service).Ping` 改走 `DBTX()`：在 `RunInTx` clone 上探的是该事务而非连接池 | 只影响把 clone 误留到回调之外的代码 —— 那种 clone 现在 `Ping` 会报错（与它的每一次读写一致），此前报健康 |
+| I-R1 / B-m1 (W1-facade) | `ledger.New` 与 `(*Service).Worker` 现在都调用 `EventStore.SetLogger`：claim-lost 的三条 Warn 从 `slog.Default()` 改走注入的 `core.Logger` | 依赖这三行落在 `slog.Default()` 的日志采集配置需要跟着改 |
+| E-M4 (W1-facade) | `RunInTx` clone 上的 `Onchain()` 由恒 nil 改为返回顶层 Service 的实例 | 无需改动（此前写 `tx.Onchain().X()` 会 nil panic）。`EnableOnchain` 仍在 clone 上被拒 |

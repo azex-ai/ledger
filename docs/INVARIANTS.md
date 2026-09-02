@@ -4689,3 +4689,111 @@ healthy baseline is `Confirmations`, not 0.
 
 ---
 
+
+## I-54: A job that is not running, a degraded mode that is in force, and a clone that has escaped its transaction are all observable without a logger
+
+(2026-09-02 second-round audit: `consumer-surface.md` E-M1/E-M3/E-M4/E-M5,
+`operability.md` I-11, `tamper-evident.md` R-3, `test-credibility.md` F-M1/F-M2,
+`concurrency.md` B-M6/B-m1. Contract
+`docs/plans/2026-09-02-remediation-contracts.md` §7.4, Wave 1 W1-facade.)
+
+**Rule** (five properties, one task):
+
+1. `service.Worker.Run` returns an error, having started nothing, when its
+   logger is `core.NopLogger` — the default `ledger.New` installs — unless
+   the consumer opted into silence with `ledger.WithSilentWorker()` /
+   `Worker.AllowSilent()`. Every signal a worker produces (which optional
+   jobs are on, whether the attestation chain has an external anchor, each
+   job's per-tick failure) travels over `core.Logger` and nowhere else, so a
+   worker booted under the silent default is indistinguishable from one that
+   never booted.
+2. What that startup log says is also available as data:
+   `Worker.StartupReport()` returns the same facts (including
+   `AttestationAnchor` and `LeaderElection`) plus a `Warnings` list, readable
+   before `Run` and with no logger involved. A degraded-but-permitted mode —
+   attestation with a nil anchor, no advisory-lock pool — is never reported
+   only by a log line.
+3. Violating a documented ordering constraint returns an error rather than
+   logging one: `Worker.Subscribe` after `Run` is refused, because the
+   `event_callback` loop's existence was decided at startup and the handler
+   would never be invoked.
+4. `(*ledger.Service).Worker` wires every job the library can wire on the
+   consumer's behalf — partition management, the advisory-lock pool, the
+   local event poller, the full reconciliation suite, and (when
+   `WithAttestor` was used) batch attestation — and both `EventStore`
+   instances it and `ledger.New` build route their claim-lost warnings
+   through the injected `core.Logger`. `service.WorkerConfig`'s defaults are
+   filled field-driven, not by a hand-written list, so a new field cannot
+   silently leave its job disabled.
+5. Every exported `*Service` method that reaches past a `RunInTx` clone —
+   reads `s.pool`, or writes a `Service` field the clone discards — either
+   branches on `s.tx` or declares its clone behaviour with a `clone-safe:`
+   note in its doc comment. This replaces I-40 property 4's enumeration of
+   three methods with a universal claim, checked mechanically against
+   `ledger.go`'s AST. `Worker` and `RegisterChannel` are refused on a clone;
+   `Pool` and `Ping` are declared (`Ping` now probes through `DBTX()`, so a
+   clone retained past its callback reports unhealthy rather than
+   contradicting its own data plane); `Onchain()` is readable on the clone
+   and returns the top-level instance.
+
+**Why**: the previous round's remedy for "`svc.Worker` silently disables
+three jobs" was a startup log line — delivered over a channel that is off by
+default, so the fix was as invisible as the bug
+(`working-agreements.md` §3:未运行 ≠ 通过；降级必须落痕). The same shape
+recurred three times independently in one round: `EventStore.SetLogger` was
+added to route warnings to the consumer's logger and then never called from
+the composition root; `SetFullReconciler` was never auto-wired even though
+`DefaultWorkerConfig` has always advertised a `FullReconcileInterval`, so
+fifteen reconciliation checks — `unauthorized_journals` among them — were off
+for every library consumer; and I-40's clone list, being an enumeration,
+never grew to include the fourth, fifth and sixth methods with the identical
+defect. Property 5 exists because enumerated lists in this repository have
+failed twice before by omission (README's API table, the sentinel-mapping
+table) and were fixed both times by deriving them mechanically.
+
+**Enforced by**: `service.Worker.Run`'s `core.IsNopLogger` refusal and
+`Worker.StartupReport` (`service/worker.go`); `core.IsNopLogger`
+(`core/logger.go`); `Worker.Subscribe`'s `running` check returning an error
+under the mutex that now guards `localDeliverer`; `(*Service).Worker`'s
+`s.tx` guard, its `SetFullReconciler` / `SetPartitionService` / `SetPool` /
+`SetLocalPoller` / `SetLogger` wiring, and `ledger.New`'s
+`eventStore.SetLogger`; `mergeWorkerConfig`'s field-driven fill;
+`RegisterChannel`'s `s.tx` guard; `withTx` carrying `onchain`; `Ping` routing
+through `DBTX()` (all `ledger.go`).
+
+**Pinned by** (root package, cited bare per this doc's convention — see I-13):
+- `TestServiceWorker_RefusesToRunUnderTheDefaultSilentLogger` — README's
+  Quick Start wiring verbatim (`ledger.New(pool)` → `svc.Worker(...)` →
+  `Run`) must return an error naming both `ledger.WithLogger` and
+  `WithSilentWorker`; `TestServiceWorker_StartsAndReportsWhenALoggerIsInjected`
+  is its control and additionally asserts the startup report's content.
+- `TestServiceWorker_StartupReportIsReadableWithoutALogger` — a
+  `WithAttestor` Service's Worker reports `Attestation=true`,
+  `AttestationAnchor=false` and the anchorless warning as data.
+- `TestServiceWorker_WiresTheAdvisoryLockPool` /
+  `TestServiceWorker_ExtendsThePartitionHorizon` /
+  `TestServiceWorker_WiresTheFullReconciler` — the three `Worker()` wiring
+  lines that had no pin; the last asserts the suite's own per-check metric,
+  not a wiring flag. Deleting any one line turns exactly one of them red.
+- `TestServiceWorker_SubscribeAfterRunIsAnError`.
+- `TestService_EventStoreClaimLostWarningsReachTheInjectedLogger` /
+  `TestServiceWorker_EventPollerClaimLostWarningsReachTheInjectedLogger` —
+  both `EventStore` instances, the second end to end through a blocked
+  handler whose lease is stolen mid-flight.
+- `TestService_WithAttestor_WiresTheWithdrawalGateVerifier` /
+  `TestService_WithAttestor_GateRejectsAnUnverifiableJournal` — the
+  `ledger.WithAttestor` → withdrawal-gate verifier wiring, reached only
+  through `ledger.New` (`postgres.NewVerifiedBalanceStore` is never named);
+  also listed under I-32 / I-33.
+- `TestMergeWorkerConfig_FillsEveryField` /
+  `TestMergeWorkerConfig_KeepsCallerValues` (internal test) — every
+  `WorkerConfig` field ends non-zero and equal to its default, and explicit
+  caller values survive.
+- `TestCloneEscapeSurfaceIsDeclaredOrGuarded` — the AST gate for property 5,
+  with `TestCloneEscapeScanner_CatchesAnUnguardedUndeclaredMethod` proving
+  the scanner is falsifiable rather than vacuous (I-48's lesson).
+- `TestService_RegisterChannel_RefusedOnTxBoundClone` /
+  `TestService_Worker_RefusedOnTxBoundClone` /
+  `TestService_Onchain_VisibleOnTxBoundClone` /
+  `TestService_Ping_FollowsTheCloneTransaction` — each establishes a control
+  on the top-level Service first, so the assertion isolates the guard.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 
 	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/service"
@@ -56,7 +58,10 @@ func run() error {
 	}
 	defer pool.Close()
 
-	svc, err := ledger.New(pool)
+	// WithLogger is not optional for anything that runs a Worker: without it
+	// the Service installs core.NopLogger, every worker signal goes nowhere,
+	// and Worker.Run refuses to start rather than run invisibly.
+	svc, err := ledger.New(pool, ledger.WithLogger(slogadapter.New(slog.Default())))
 	if err != nil {
 		return fmt.Errorf("ledger.New: %w", err)
 	}
@@ -89,7 +94,10 @@ func run() error {
 	// -----------------------------------------------------------------------
 	cfg := service.DefaultWorkerConfig()
 	cfg.EventDeliveryInterval = 100 * time.Millisecond // fast poll for demo
-	worker := svc.Worker(cfg)
+	worker, err := svc.Worker(cfg)
+	if err != nil {
+		return fmt.Errorf("svc.Worker: %w", err)
+	}
 
 	// -----------------------------------------------------------------------
 	// Subscribe to events. The handler receives every emitted core.Event.
@@ -97,13 +105,15 @@ func run() error {
 	// a buggy handler should not block the queue.
 	// -----------------------------------------------------------------------
 	received := make(chan core.Event, 10)
-	worker.Subscribe(func(_ context.Context, evt core.Event) error {
+	if err := worker.Subscribe(func(_ context.Context, evt core.Event) error {
 		fmt.Printf("[event] id=%s class=%s %s -> %s actor=%d source=%q\n",
 			evt.UID, evt.ClassificationCode, evt.FromStatus, evt.ToStatus,
 			evt.ActorID, evt.Source)
 		received <- evt
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("worker.Subscribe: %w", err)
+	}
 
 	// -----------------------------------------------------------------------
 	// Run the worker in the background. Cancel ctx to trigger graceful drain.

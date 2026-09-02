@@ -66,6 +66,10 @@ func buildTestWorker(pool *pgxpool.Pool, finder *countingExpiredReservationFinde
 	}
 
 	worker := service.NewWorker(rollupSvc, expirationSvc, reconcileSvc, snapshotSvc, systemRollupSvc, config, engine)
+	// AllowSilent: this test builds a Worker with core.NewEngine's default
+	// (no-op) logger and asserts on behaviour rather than log lines, so the
+	// silence is deliberate -- Worker.Run otherwise refuses to start under it.
+	worker.AllowSilent()
 	worker.SetPool(pool)
 	return worker
 }

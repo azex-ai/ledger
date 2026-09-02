@@ -34,19 +34,23 @@ func TestServiceWorker_SubscribeWorksWithoutManualWiring(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	svc, err := ledger.New(pool)
+	// WithSilentWorker: this test asserts on delivered events, not on log
+	// lines, so the no-op logger is a deliberate choice here rather than the
+	// unnoticed default Worker.Run now refuses to start under.
+	svc, err := ledger.New(pool, ledger.WithSilentWorker())
 	require.NoError(t, err)
 
 	cfg := service.DefaultWorkerConfig()
 	cfg.EventDeliveryInterval = 50 * time.Millisecond
-	worker := svc.Worker(cfg)
+	worker, err := svc.Worker(cfg)
+	require.NoError(t, err)
 
 	received := make(chan core.Event, 4)
 	// The only call a consumer makes. No SetLocalPoller.
-	worker.Subscribe(func(_ context.Context, evt core.Event) error {
+	require.NoError(t, worker.Subscribe(func(_ context.Context, evt core.Event) error {
 		received <- evt
 		return nil
-	})
+	}))
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan error, 1)

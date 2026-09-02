@@ -76,6 +76,55 @@ func TestNewIdempotencyKey_SpecialCharactersInScope(t *testing.T) {
 	}
 }
 
+// TestRetryIdempotent_ReusesOneKeyAcrossAttempts pins the property the helper
+// exists for. The library shipped both halves of the retry contract --
+// core.IsRetryable to classify, NewIdempotencyKey to generate -- and every
+// example generated the key inline at the call site, so composing them the
+// obvious way produced a loop that retried with a FRESH key: a first attempt
+// that timed out after the journal landed became a second, independent
+// journal (api-contract.md §9). RetryIdempotent makes that unexpressible by
+// owning the key.
+func TestRetryIdempotent_ReusesOneKeyAcrossAttempts(t *testing.T) {
+	var keys []string
+	err := ledger.RetryIdempotent(context.Background(), "deposit", 3, func(_ context.Context, key string) error {
+		keys = append(keys, key)
+		if len(keys) < 3 {
+			return fmt.Errorf("transient: %w", core.ErrTransient)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Len(t, keys, 3, "a retryable error must be retried")
+	require.Equal(t, keys[0], keys[1])
+	require.Equal(t, keys[0], keys[2], "every attempt must carry the SAME key -- a fresh one duplicates the write")
+	require.True(t, strings.HasPrefix(keys[0], "deposit:"))
+}
+
+// TestRetryIdempotent_StopsOnAPermanentError: a rejected input or an
+// insufficient balance does not become correct by being sent again.
+func TestRetryIdempotent_StopsOnAPermanentError(t *testing.T) {
+	calls := 0
+	err := ledger.RetryIdempotent(context.Background(), "withdraw", 5, func(context.Context, string) error {
+		calls++
+		return fmt.Errorf("nope: %w", core.ErrInvalidInput)
+	})
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+	require.Equal(t, 1, calls, "a non-retryable failure must not be retried")
+}
+
+// TestRetryIdempotent_GivesUpAfterAttempts keeps the last error reachable so
+// the caller can still classify it.
+func TestRetryIdempotent_GivesUpAfterAttempts(t *testing.T) {
+	calls := 0
+	err := ledger.RetryIdempotent(context.Background(), "deposit", 2, func(context.Context, string) error {
+		calls++
+		return fmt.Errorf("still down: %w", core.ErrTransient)
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, core.ErrTransient)
+	require.Equal(t, 2, calls)
+}
+
 // ---------------------------------------------------------------------------
 // Ping — unit test (no real DB; only checks nil-pool fast-fail path)
 // ---------------------------------------------------------------------------
@@ -218,7 +267,9 @@ func TestServiceWorker_AttestsAutomaticallyWhenAttestorConfigured(t *testing.T) 
 	attestor, verifier, err := authdev.NewLocalAttestor(priv.Seed(), "worker-attest-test-key")
 	require.NoError(t, err)
 
-	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier))
+	// WithSilentWorker: this test asserts on the ledger_attestations table,
+	// not on log lines (see ledger.WithSilentWorker).
+	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier), ledger.WithSilentWorker())
 	require.NoError(t, err)
 
 	// Minimal fixture: one currency, one classification, one journal type --
@@ -257,7 +308,8 @@ func TestServiceWorker_AttestsAutomaticallyWhenAttestorConfigured(t *testing.T) 
 	cfg.AttestInterval = 50 * time.Millisecond
 	cfg.AttestBatchSize = 100
 	// The only call a consumer makes -- no worker.SetAttestor.
-	worker := svc.Worker(cfg)
+	worker, err := svc.Worker(cfg)
+	require.NoError(t, err)
 
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan error, 1)
@@ -306,7 +358,7 @@ func TestService_Worker_ConcurrentCallsDoNotRaceOnEventStore(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			cfg := service.DefaultWorkerConfig()
 			cfg.EventClaimLease = time.Duration(i+1) * time.Second
-			_ = svc.Worker(cfg)
+			_, _ = svc.Worker(cfg)
 		}(i)
 	}
 	for i := 0; i < n; i++ {

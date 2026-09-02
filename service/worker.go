@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -84,6 +86,12 @@ type Worker struct {
 	snapshot       *SnapshotService
 	systemRollup   *SystemRollupService
 	eventDeliverer EventBatchProcessor // nil = skip webhook delivery (library mode)
+	// mu guards localDeliverer, which Subscribe writes and Run reads. running
+	// being atomic never protected the field it exists to talk about: the
+	// documented "Subscribe before Run" ordering makes a violation a genuine
+	// data race under -race, not merely a subscription that quietly does
+	// nothing (consumer-surface handoff to concurrency, 2026-09-02).
+	mu             sync.Mutex
 	localDeliverer *delivery.LocalDispatcher
 	// localPoller is held separately from localDeliverer so that wiring a
 	// poller does not by itself start the callback loop. The loop must exist
@@ -97,6 +105,9 @@ type Worker struct {
 	pool          *pgxpool.Pool       // nil = no advisory locks (single-replica mode)
 	config        WorkerConfig
 	logger        core.Logger
+	// allowSilent opts out of Run's refusal to start under core.NopLogger --
+	// see AllowSilent.
+	allowSilent bool
 	// running is set by Run and never cleared: Run reads localDeliverer once
 	// at startup to decide whether the event_callback loop exists at all, so
 	// a first Subscribe after Run registers a handler nothing will ever
@@ -167,10 +178,25 @@ func (w *Worker) SetAttestor(a *AttestationService) {
 }
 
 // SetPool attaches a *pgxpool.Pool used for pg_try_advisory_lock-based leader
-// election on the reconcile and system_rollup jobs.  When nil (the default),
-// those jobs run on every pod — safe for single-replica deployments.
+// election on every LockedJob this Worker runs: expiration, reconcile,
+// system_rollup, full_reconcile, partition and attestation (six, not the two
+// this comment used to name). When nil (the default), NewLockedJob leaves its
+// locker nil and all six run on every pod — safe for single-replica
+// deployments, silently fail-open for everything else, which is why
+// StartupReport surfaces it as LeaderElection.
 func (w *Worker) SetPool(pool *pgxpool.Pool) {
 	w.pool = pool
+}
+
+// AllowSilent opts this Worker out of Run's refusal to start when its logger
+// is core.NopLogger (the library default). Only call it when the absence of
+// every worker log line is a deliberate choice — a test that asserts on
+// something other than logs, or a deployment that reads the StartupReport
+// programmatically instead.
+//
+// ledger.WithSilentWorker is the facade-level way to reach this.
+func (w *Worker) AllowSilent() {
+	w.allowSilent = true
 }
 
 // Subscribe registers an in-process handler that receives every emitted event.
@@ -188,21 +214,26 @@ func (w *Worker) SetPool(pool *pgxpool.Pool) {
 // using the poller already set by SetLocalPoller. ledger.Service.Worker sets
 // one, so a library consumer does not have to.
 //
-// ORDERING: the first Subscribe must happen BEFORE Run. Run reads
-// localDeliverer once at startup to decide whether the event_callback loop
-// exists at all — a first Subscribe after Run registers a handler that
-// nothing will ever invoke, with no error anywhere: events simply stay
-// pending. Subscribe logs an Error when it detects this, but cannot return
-// one (the signature predates the check); treat that log line as a wiring
-// bug, not a warning.
-func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) {
+// ORDERING: the first Subscribe must happen BEFORE Run, and Subscribe
+// returns an error when it does not. Run reads localDeliverer once at startup
+// to decide whether the event_callback loop exists at all — a first Subscribe
+// after Run registers a handler that nothing will ever invoke, and events
+// simply stay pending. This used to be an Error log line only; under the
+// library's default core.NopLogger that line went nowhere, so the wiring bug
+// it was meant to report was invisible (working-agreements.md §3: a
+// diagnostic delivered over a channel that is off by default is not a
+// diagnostic). The handler is not registered when this returns an error.
+func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.localDeliverer == nil {
 		if w.running.Load() {
-			w.logger.Error("worker: Subscribe called after Run: the event_callback loop was not started and this handler will never be invoked — subscribe before starting the worker")
+			return fmt.Errorf("service: worker: Subscribe called after Run: the event_callback loop was never started, so this handler would never be invoked and events would stay pending forever -- subscribe before starting the worker: %w", core.ErrInvalidInput)
 		}
 		w.localDeliverer = delivery.NewLocalDispatcher(w.localPoller, w.logger)
 	}
 	w.localDeliverer.OnEvent(handler)
+	return nil
 }
 
 // SetLocalPoller wires the EventPoller that backs the in-process event
@@ -212,14 +243,90 @@ func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) {
 // the queue webhook delivery reads from. The dispatcher is created by
 // Subscribe, which is the point at which a handler exists to receive events.
 func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.localPoller = poller
 	if w.localDeliverer != nil {
 		w.localDeliverer.SetPoller(poller)
 	}
 }
 
+// StartupReport is the machine-readable form of what Run logs at startup:
+// which optional jobs this Worker will actually run, and which
+// deliberately-permitted degraded modes it is in. Callers can read it before
+// (or instead of) Run, so "is this job on?" and "is the attestation chain
+// externally witnessed?" are answerable without a logger — the log line alone
+// used to be the only answer, and under the library's default core.NopLogger
+// there was no answer at all (working-agreements.md §3).
+type StartupReport struct {
+	FullReconcile              bool `json:"full_reconcile"`
+	EventDeliveryWebhook       bool `json:"event_delivery_webhook"`
+	EventDeliveryLocalCallback bool `json:"event_delivery_local_callback"`
+	Attestation                bool `json:"attestation"`
+	// AttestationAnchor is false when the batch attestation job runs without
+	// an external anchor: the chain still advances and every batch is still
+	// signed, but VerifyLedger cannot detect a wholesale history rewrite.
+	// Attestation && !AttestationAnchor is the shape ledger.Service.Worker
+	// auto-wires by default.
+	AttestationAnchor bool `json:"attestation_anchor"`
+	Partition         bool `json:"partition"`
+	// LeaderElection reports whether a *pgxpool.Pool was attached (SetPool),
+	// which is what makes every LockedJob single-runner across replicas.
+	// False means all six locked jobs run on every replica each tick.
+	LeaderElection bool `json:"leader_election"`
+	// Warnings lists degraded-but-permitted states in the same words Run
+	// logs them. Empty means nothing to report.
+	Warnings []string `json:"warnings"`
+}
+
+// StartupReport describes what Run will do with this Worker's current wiring.
+// Safe to call before Run; Run calls it itself and logs the result.
+func (w *Worker) StartupReport() StartupReport {
+	w.mu.Lock()
+	localDeliverer := w.localDeliverer
+	w.mu.Unlock()
+
+	r := StartupReport{
+		FullReconcile:              w.fullReconcile != nil,
+		EventDeliveryWebhook:       w.eventDeliverer != nil,
+		EventDeliveryLocalCallback: localDeliverer != nil,
+		Attestation:                w.attestation != nil,
+		AttestationAnchor:          w.attestation != nil && w.attestation.anchor != nil,
+		Partition:                  w.partition != nil,
+		LeaderElection:             w.pool != nil,
+	}
+	if r.Attestation && !r.AttestationAnchor {
+		r.Warnings = append(r.Warnings, anchorlessAttestationWarning)
+	}
+	if !r.LeaderElection {
+		r.Warnings = append(r.Warnings, noLeaderElectionWarning)
+	}
+	return r
+}
+
+const anchorlessAttestationWarning = "worker: batch attestation is running with no anchor configured -- " +
+	"the batch chain will advance and every batch will be signed, but VerifyLedger " +
+	"cannot detect a wholesale history rewrite until an anchor is wired in via " +
+	"Worker.SetAttestor (see service/attestation.go's anchor field comment)"
+
+const noLeaderElectionWarning = "worker: no connection pool attached (Worker.SetPool was never called) -- " +
+	"every advisory-locked job (expiration, reconcile, system_rollup, full_reconcile, " +
+	"partition, attestation) will run on every replica each tick, which is safe only " +
+	"for a single-replica deployment"
+
 // Run starts all background jobs and blocks until ctx is cancelled.
 // Returns nil when all goroutines exit cleanly after context cancellation.
+//
+// Returns an error WITHOUT starting anything when this Worker's logger is
+// core.NopLogger (what ledger.New installs unless the consumer passes
+// ledger.WithLogger) and AllowSilent was not called. Everything below --
+// the startup report, the anchorless-attestation warning, every job's
+// per-tick failure -- reaches the operator over that logger and nowhere
+// else, so booting under the silent default produces a worker that is
+// indistinguishable, from outside, from one that never started. Refusing at
+// startup is the fail-closed reading of working-agreements.md §3; opt out
+// with ledger.WithSilentWorker / Worker.AllowSilent when silence is a
+// deliberate choice.
 //
 // Four jobs -- full reconciliation suite, webhook event delivery, local
 // event-callback delivery, and P6 batch attestation -- only start when the
@@ -249,21 +356,28 @@ func (w *Worker) SetLocalPoller(poller delivery.EventPoller) {
 // (service/attest_verify.go: nil anchor -> VerifyStatusNotRun) -- this only
 // changes what the operator sees before anything goes wrong.
 func (w *Worker) Run(ctx context.Context) error {
+	report := w.StartupReport()
+	if core.IsNopLogger(w.logger) && !w.allowSilent {
+		return fmt.Errorf("service: worker: refusing to start with the default silent logger: "+
+			"the startup report (%+v), the anchorless-attestation warning and every job's "+
+			"per-tick failure are only ever reported through core.Logger, so this worker would "+
+			"run with no way to tell it apart from one that never started -- pass "+
+			"ledger.WithLogger(...) at ledger.New, or opt into silence explicitly with "+
+			"ledger.WithSilentWorker() / Worker.AllowSilent(): %w", report, core.ErrInvalidInput)
+	}
+
 	w.running.Store(true)
-	attestationAnchored := w.attestation != nil && w.attestation.anchor != nil
 	w.logger.Info("worker: starting",
-		"full_reconcile", w.fullReconcile != nil,
-		"event_delivery_webhook", w.eventDeliverer != nil,
-		"event_delivery_local_callback", w.localDeliverer != nil,
-		"attestation", w.attestation != nil,
-		"attestation_anchor", attestationAnchored,
-		"partition", w.partition != nil,
+		"full_reconcile", report.FullReconcile,
+		"event_delivery_webhook", report.EventDeliveryWebhook,
+		"event_delivery_local_callback", report.EventDeliveryLocalCallback,
+		"attestation", report.Attestation,
+		"attestation_anchor", report.AttestationAnchor,
+		"partition", report.Partition,
+		"leader_election", report.LeaderElection,
 	)
-	if w.attestation != nil && !attestationAnchored {
-		w.logger.Warn("worker: batch attestation is running with no anchor configured -- " +
-			"the batch chain will advance and every batch will be signed, but VerifyLedger " +
-			"cannot detect a wholesale history rewrite until an anchor is wired in via " +
-			"Worker.SetAttestor (see service/attestation.go's anchor field comment)")
+	for _, warning := range report.Warnings {
+		w.logger.Warn(warning)
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
@@ -396,10 +510,16 @@ func (w *Worker) Run(ctx context.Context) error {
 		})
 	}
 
-	if w.localDeliverer != nil {
+	if report.EventDeliveryLocalCallback {
+		// Read once, under the same lock Subscribe writes through, and close
+		// over the value: the loop must not race with a (now rejected, but
+		// still possible from a Worker built by hand) later Subscribe.
+		w.mu.Lock()
+		localDeliverer := w.localDeliverer
+		w.mu.Unlock()
 		g.Go(func() error {
 			return w.runLoop(ctx, "event_callback", w.config.EventDeliveryInterval, func(ctx context.Context) {
-				if _, err := w.localDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
+				if _, err := localDeliverer.ProcessBatch(ctx, w.config.EventDeliveryBatchSize); err != nil {
 					w.logger.Error("worker: event callback delivery failed", "error", err)
 				}
 			})

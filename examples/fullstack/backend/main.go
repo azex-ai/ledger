@@ -12,11 +12,11 @@
 //   - server.NewWithConfig(...)       — the full ledger HTTP API as an http.Handler
 //   - r.Handle("/api/v1/*", ...)      — mounting that handler inside a host chi router
 //   - svc.Worker(...)                 — background rollup/expiry/snapshot loops, PLUS
-//     the two jobs svc.Worker does not wire on its own: worker.SetEventDeliverer
-//     (webhook delivery) and worker.SetFullReconciler (the full reconciliation
-//     suite). Both are silent to skip — events sit in the events table
-//     forever with no error, no log line, nothing — so a "complete assembly"
-//     example wires them explicitly instead of teaching the gap.
+//     the one job svc.Worker does not wire on its own: worker.SetEventDeliverer
+//     (webhook delivery — it needs a subscriber store the library cannot pick
+//     for you). Skipping it is silent — events sit in the events table forever
+//     with no error, no log line, nothing — so a "complete assembly" example
+//     wires it explicitly instead of teaching the gap.
 //
 // Run:
 //
@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,6 +46,7 @@ import (
 
 	"github.com/azex-ai/ledger"
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/postgres"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
@@ -84,7 +86,11 @@ func run() error {
 	}
 	defer pool.Close()
 
-	svc, err := ledger.New(pool)
+	// WithLogger is not optional for anything that runs a Worker: without it
+	// the Service installs core.NopLogger, every worker signal (the startup
+	// report naming which optional jobs are on, each job's per-tick failure)
+	// goes nowhere, and Worker.Run refuses to start rather than run invisibly.
+	svc, err := ledger.New(pool, ledger.WithLogger(slogadapter.New(slog.Default())))
 	if err != nil {
 		return fmt.Errorf("ledger.New: %w", err)
 	}
@@ -105,13 +111,17 @@ func run() error {
 	// Zero-value config takes safe defaults. The worker gets its own context
 	// (not rootCtx) so a shutdown signal drains HTTP first; workerCancel
 	// fires only after the server has stopped taking traffic.
-	worker := svc.Worker(service.WorkerConfig{})
+	worker, err := svc.Worker(service.WorkerConfig{})
+	if err != nil {
+		return fmt.Errorf("svc.Worker: %w", err)
+	}
 
-	// svc.Worker alone does NOT wire event delivery or the full reconciliation
-	// suite -- both are opt-in Set* calls on *service.Worker, and skipping them
-	// is silent: events sit in the events table forever, unretried, unlogged,
-	// with no error anywhere. This is the one wiring gap in this repo that six
-	// independent audit passes each found on their own (see
+	// svc.Worker wires the full reconciliation suite itself now, but NOT
+	// webhook event delivery -- that one stays an opt-in Set* call on
+	// *service.Worker because it needs a subscriber store the library cannot
+	// choose for you, and skipping it is silent: events sit in the events
+	// table forever, unretried, unlogged, with no error anywhere. This is the
+	// wiring gap six independent audit passes each found on their own (see
 	// docs/audits/2026-08-25-financial-engineering/consumer-surface.md). A
 	// "complete assembly" example has to close it or it teaches the same gap
 	// it exists to prevent.
@@ -120,7 +130,6 @@ func run() error {
 		postgres.NewWebhookSubscriberStore(pool), // implements delivery.SubscriberLister
 		core.NopLogger(), nil,                    // metrics nil defaults to a no-op inside NewWebhookDeliverer; logger does not, so it can't be nil
 	))
-	worker.SetFullReconciler(svc.FullReconciler(service.FullReconciliationConfig{}))
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()

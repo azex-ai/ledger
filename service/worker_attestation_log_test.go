@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -165,7 +166,8 @@ func TestWorker_Run_LogsAttestationAnchorState(t *testing.T) {
 				"anchorless attestation must not be indistinguishable from a real anchor in the startup log")
 		}
 
-		assert.NotEmpty(t, logger.warns, "an anchorless attestation job must log a Warn at startup, not just an Info flag a reader could miss")
+		assert.NotNil(t, findWarnContaining(logger.warns, "no anchor configured"),
+			"an anchorless attestation job must log a Warn at startup, not just an Info flag a reader could miss")
 	})
 
 	t.Run("attestation enabled with anchor -- no warn, attestation_anchor=true", func(t *testing.T) {
@@ -182,7 +184,8 @@ func TestWorker_Run_LogsAttestationAnchorState(t *testing.T) {
 			assert.Equal(t, true, argValue(startCall.args, "attestation"))
 			assert.Equal(t, true, argValue(startCall.args, "attestation_anchor"))
 		}
-		assert.Empty(t, logger.warns, "a properly anchored attestation job must not warn at startup")
+		assert.Nil(t, findWarnContaining(logger.warns, "no anchor configured"),
+			"a properly anchored attestation job must not warn about the anchor at startup")
 	})
 
 	t.Run("attestation disabled -- no warn, attestation_anchor=false", func(t *testing.T) {
@@ -199,8 +202,23 @@ func TestWorker_Run_LogsAttestationAnchorState(t *testing.T) {
 			assert.Equal(t, false, argValue(startCall.args, "attestation"))
 			assert.Equal(t, false, argValue(startCall.args, "attestation_anchor"))
 		}
-		assert.Empty(t, logger.warns, "attestation disabled entirely is not the degraded state this warns about")
+		assert.Nil(t, findWarnContaining(logger.warns, "no anchor configured"),
+			"attestation disabled entirely is not the degraded state this warns about")
 	})
+}
+
+// findWarnContaining locates a Warn whose message contains sub. Worker.Run
+// emits one Warn per degraded-but-permitted state it is in (see
+// StartupReport.Warnings), so these subtests match the anchor warning by
+// content rather than asserting the whole slice is empty -- a
+// pool-less test Worker legitimately also warns about leader election.
+func findWarnContaining(calls []logCall, sub string) *logCall {
+	for i := range calls {
+		if strings.Contains(calls[i].msg, sub) {
+			return &calls[i]
+		}
+	}
+	return nil
 }
 
 func findLogCall(calls []logCall, msg string) *logCall {

@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"sync"
 	"time"
 
@@ -91,6 +92,11 @@ type Service struct {
 	// journal posts unsigned, exactly as before P5 existed.
 	attestor     core.Attestor
 	authVerifier core.AuthVerifier
+
+	// silentWorker records WithSilentWorker: the consumer's explicit
+	// acknowledgement that a Worker built from this Service may run with the
+	// default no-op logger. See Worker and service.Worker.Run.
+	silentWorker bool
 }
 
 // Option mutates a Service during construction.
@@ -111,6 +117,24 @@ func WithMetrics(m core.Metrics) Option {
 		if m != nil {
 			s.metrics = m
 		}
+	}
+}
+
+// WithSilentWorker permits a Worker built from this Service to run with the
+// default core.NopLogger. Without it, service.Worker.Run refuses to start
+// under that logger and returns an error naming what is missing: every
+// signal a worker produces -- which optional jobs are on, whether the
+// attestation chain has an external anchor, every job's per-tick failure --
+// travels over core.Logger and nowhere else, so a worker booted silently
+// cannot be told apart from one that never booted at all.
+//
+// Use it when silence is a deliberate choice: a test asserting on database
+// state rather than logs, or a deployment that reads
+// (*service.Worker).StartupReport programmatically. Injecting a real logger
+// with WithLogger is the other, usually better, answer.
+func WithSilentWorker() Option {
+	return func(s *Service) {
+		s.silentWorker = true
 	}
 }
 
@@ -167,6 +191,12 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore, s.verifiedBalanceStore)
 	s.bookingStore = postgres.NewBookingStore(pool)
 	s.eventStore = postgres.NewEventStore(pool)
+	// The composition root EventStore.SetLogger's own doc comment points at
+	// is this one. Until this line existed the setter had zero production
+	// call sites, so the "claim lost, outcome dropped" warnings -- the only
+	// signal that a delivery lease was stolen -- went to slog.Default()
+	// instead of the logger WithLogger installed, for every consumer.
+	s.eventStore.SetLogger(s.logger)
 	s.classStore = postgres.NewClassificationStore(pool)
 	s.tmplStore = postgres.NewTemplateStore(pool)
 	s.currencyStore = postgres.NewCurrencyStore(pool)
@@ -188,6 +218,13 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 // Pool returns the underlying connection pool. Useful for callers that need
 // transactional access alongside the ledger (the ledger itself does not hand
 // out transactions).
+//
+// clone-safe: returns the pool on the transaction-bound clone too, by design
+// -- the clone shares the Service's pool and only its store handles are
+// rebound. Work issued through the returned pool from inside a RunInTx
+// callback therefore lands OUTSIDE that transaction and commits
+// independently; use DBTX() when you mean "the same transaction as the
+// ledger's writes".
 func (s *Service) Pool() *pgxpool.Pool { return s.pool }
 
 // DBTX returns the database executor that the ledger's stores are currently
@@ -474,11 +511,26 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 //     the clone inside the callback — see service/onchain.go's
 //     postDepositConfirmedJournal for the pattern this library's own
 //     internal callers use.
-//   - AttestationService, VerifyLedger, and EnableOnchain all reach past the
-//     clone's transaction (the first two read/write directly through the
-//     pool; the latter would set state on a Service value that is discarded
-//     when fn returns) and are refused on a transaction-bound clone: call
-//     them on the top-level Service instead.
+//   - Six methods reach past the clone's transaction and are refused on it,
+//     because each would otherwise either operate outside the transaction the
+//     caller believes it is composing with, or report success for a change
+//     nobody keeps. Call them on the top-level Service:
+//     AttestationService, VerifyLedger and Worker read/write through the pool
+//     directly; EnableOnchain and RegisterChannel would set state on a Service
+//     value discarded when fn returns; VerifiedBalanceReader's returned reader
+//     would call a (possibly remote) core.AuthVerifier from inside the open
+//     transaction, with the balance advisory lock held — see its own doc
+//     comment for the correct gate-then-compose ordering.
+//   - Every other exported method either operates correctly on the
+//     transaction or declares its clone behaviour with a `clone-safe:` note in
+//     its doc comment. That is not a promise maintained by hand:
+//     TestCloneEscapeSurfaceIsDeclaredOrGuarded walks ledger.go's AST and
+//     fails on any exported *Service method that touches s.pool or writes a
+//     Service field without either an `s.tx != nil` guard or that note.
+//     Currently declared rather than guarded: Pool and Ping (see each).
+//   - Onchain() is readable on the clone and returns the same
+//     *service.Onchain the top-level Service has (EnableOnchain still refuses
+//     to configure one from here).
 func (s *Service) RunInTx(ctx context.Context, fn func(*Service) error) error {
 	return s.RunInTxWithOptions(ctx, pgx.TxOptions{}, fn)
 }
@@ -556,6 +608,16 @@ func (s *Service) CheckpointIntegrity() core.CheckpointIntegrityStore { return s
 // offers, not a policy it imposes -- nothing in this library calls it
 // automatically (e.g. Reserve does not), so a consumer that never calls
 // this accessor sees no behavior change at all (contracts §W2-3).
+//
+// Call it on the top-level Service, never from inside a RunInTx callback:
+// the gate verifies every contributing journal live, and core.AuthVerifier
+// is explicitly allowed to run off-host, so calling it from inside an open
+// transaction is the "external call inside a DB transaction" financial.md
+// forbids -- with the balance advisory lock held across every round trip.
+// The returned reader refuses on a transaction-bound store for that reason.
+// The correct ordering is the one service/onchain.go's
+// postDepositConfirmedJournal uses: clear the gate on the pool first, then
+// open RunInTx and compose the withdrawal journal inside the callback.
 func (s *Service) VerifiedBalanceReader() core.VerifiedBalanceReader { return s.verifiedBalanceStore }
 
 // withTx returns a short-lived Service clone with every store rebound to tx.
@@ -583,8 +645,16 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 		// postgres.LedgerStore.WithDB), and PostJournal's tx-mode branch
 		// never consults it regardless -- see RunInTx's doc comment on
 		// AuthStatusUnsignedTxMode.
-		attestor:             s.attestor,
-		authVerifier:         s.authVerifier,
+		attestor:     s.attestor,
+		authVerifier: s.authVerifier,
+		silentWorker: s.silentWorker,
+		// onchain: carried for exactly the reason spelled out above for
+		// attestor/authVerifier -- Onchain() reads the field directly, and
+		// dropping it made tx.Onchain() return a bare nil on a Service whose
+		// top-level EnableOnchain had succeeded, so `tx.Onchain().IngestDeposit(...)`
+		// nil-panicked. Carrying it does not make the clone able to CHANGE
+		// onchain: EnableOnchain's own s.tx guard still refuses the write.
+		onchain:              s.onchain,
 		ledgerStore:          ls,
 		reserverStore:        s.reserverStore.WithDB(tx, ls),
 		bookingStore:         s.bookingStore.WithDB(tx),
@@ -635,10 +705,11 @@ func (s *Service) InstallDefaultPresets(ctx context.Context) error {
 	return nil
 }
 
-// InstallExtendedPresets installs the full preset suite: deposit, withdrawal,
-// transfer, fee, capital, settlement, and spread bundles. Safe to call
-// alongside or after InstallDefaultPresets — duplicate rows are validated and
-// skipped.
+// InstallExtendedPresets installs the full preset suite: all 8 bundles —
+// deposit, withdrawal, transfer, fee, capital, settlement, spread, and FX.
+// (FX is what docs/COOKBOOK.md's buy-credits and cash-out recipes are built
+// on; it is installed here, not separately.) Safe to call alongside or after
+// InstallDefaultPresets — duplicate rows are validated and skipped.
 func (s *Service) InstallExtendedPresets(ctx context.Context) error {
 	if err := presets.InstallExtendedPresets(ctx, s.classStore, s.JournalTypes(), s.tmplStore); err != nil {
 		return fmt.Errorf("ledger: install extended presets: %w", err)
@@ -672,9 +743,19 @@ func (s *Service) InstallDevCreditPreset(ctx context.Context) error {
 // empty name, or one whose name is already registered returns an error so
 // silent collisions cannot bury startup-time misconfiguration.
 //
-// Call before starting the HTTP server. Concurrent registrations are
-// serialised by a mutex.
+// Call before you pass svc.Channels() into the HTTP layer: server takes a
+// snapshot of that map (see Channels), so a registration made after that
+// point is invisible to it even though the server has not started listening
+// yet. "Before ListenAndServe" is not early enough. Concurrent registrations
+// are serialised by a mutex.
+//
+// Returns an error when called on the transaction-bound clone RunInTx hands
+// to its callback: the registration would land in the clone's own channel
+// map, which RunInTx discards when the callback returns.
 func (s *Service) RegisterChannel(adapter channel.Adapter) error {
+	if s.tx != nil {
+		return fmt.Errorf("ledger: RegisterChannel: called on a transaction-bound store; the registration would be written to a clone RunInTx discards when the callback returns, leaving the top-level Service without it despite this call reporting success -- call RegisterChannel on the top-level Service: %w", core.ErrInvalidInput)
+	}
 	if adapter == nil {
 		return fmt.Errorf("ledger: RegisterChannel: adapter is nil")
 	}
@@ -693,7 +774,10 @@ func (s *Service) RegisterChannel(adapter channel.Adapter) error {
 }
 
 // Channels returns a snapshot of all registered channel adapters. The returned
-// map is a copy — mutations do not affect the registry.
+// map is a copy — mutations do not affect the registry, and neither does a
+// RegisterChannel call made after this returns: whoever holds the snapshot
+// (server.NewWithConfig, typically) keeps serving the set that existed at
+// this moment. Register everything first, then call this once.
 func (s *Service) Channels() map[string]channel.Adapter {
 	s.channelsMu.RLock()
 	defer s.channelsMu.RUnlock()
@@ -816,8 +900,20 @@ func (c onchainTxComposer) AuthorizeTemplate(ctx context.Context, templateCode s
 // Worker builds a fully-wired background Worker from the internal stores and
 // the provided WorkerConfig. The caller is responsible for running it:
 //
-//	worker := svc.Worker(service.DefaultWorkerConfig())
-//	go worker.Run(ctx)
+//	worker, err := svc.Worker(service.DefaultWorkerConfig())
+//	if err != nil { return err }
+//	go func() { _ = worker.Run(ctx) }()
+//
+// Returns an error when called on the transaction-bound clone RunInTx hands
+// to its callback. The Worker built there would be a chimera: its expiration
+// service holds stores bound to a transaction RunInTx destroys when the
+// callback returns, while everything else (rollup, partition DDL, the event
+// poller, the advisory-lock pool, and the AttestationService this method
+// auto-wires -- the very object AttestationService() refuses to build from a
+// clone) runs on the pool. It would start, log "worker: started", and then
+// fail every expiration tick against a closed transaction: expired
+// reservations and bookings never reclaimed, forever, behind one Error line
+// per tick.
 //
 // Any zero-valued field on cfg is filled in from service.DefaultWorkerConfig
 // so callers get a safe-by-default Worker even when they pass a partially
@@ -834,7 +930,18 @@ func (c onchainTxComposer) AuthorizeTemplate(ctx context.Context, templateCode s
 // default. Previously SetAttestor had to be called manually and no shipped
 // entry point ever did, so a WithAttestor deployment's batch chain never
 // advanced even though DefaultWorkerConfig configured an interval for it.
-func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
+//
+// The full reconciliation suite (Worker.SetFullReconciler) is wired the same
+// way, and for the same reason: DefaultWorkerConfig has always configured a
+// FullReconcileInterval, so the fifteen checks it runs -- including
+// unauthorized_journals, checkpoint_balance and journal_dr_cr -- looked
+// enabled while nothing ever registered the reconciler that makes them run.
+// Override it after this returns if you want a non-default
+// FullReconciliationConfig.
+func (s *Service) Worker(cfg service.WorkerConfig) (*service.Worker, error) {
+	if s.tx != nil {
+		return nil, fmt.Errorf("ledger: Worker: called on a transaction-bound store; the Worker would be stitched from stores bound to a transaction RunInTx discards when the callback returns, while its remaining jobs (and the AttestationService this wires automatically, which AttestationService() itself refuses to build here) run on the pool -- call Worker on the top-level Service: %w", core.ErrInvalidInput)
+	}
 	cfg = mergeWorkerConfig(cfg)
 	engine := core.NewEngine(core.WithLogger(s.logger), core.WithMetrics(s.metrics))
 
@@ -854,6 +961,10 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	// race or clobber.
 	eventPoller := postgres.NewEventStore(s.pool)
 	eventPoller.SetClaimLease(cfg.EventClaimLease)
+	// Same wiring as ledger.New's shared EventStore: this instance is the one
+	// that actually polls, so its claim-lost warnings are the ones an
+	// operator most needs on the injected logger rather than slog.Default().
+	eventPoller.SetLogger(s.logger)
 
 	rollupSvc := service.NewRollupService(rollupAdapter, rollupAdapter, rollupAdapter, rollupAdapter, engine)
 	expirationSvc := service.NewExpirationService(rollupAdapter, s.reserverStore, s.reserverStore, s.bookingStore, s.bookingStore, engine)
@@ -872,65 +983,59 @@ func (s *Service) Worker(cfg service.WorkerConfig) *service.Worker {
 	// separate wiring call. Before this, Subscribe built a dispatcher with a
 	// nil poller, which failed on every tick, logged, and delivered nothing.
 	w.SetLocalPoller(eventPoller)
+	// The full reconciliation suite, wired for the same reason SetAttestor is
+	// (see this method's doc comment). FullReconciler's own SetAuthCheck
+	// contract makes a nil AuthVerifier skip the auth check rather than run
+	// with one, so wiring this unconditionally makes no policy decision here.
+	w.SetFullReconciler(s.FullReconciler(service.FullReconciliationConfig{}))
 	if s.attestor != nil {
 		w.SetAttestor(s.attestationServiceUnchecked(nil))
 	}
-	return w
+	if s.silentWorker {
+		w.AllowSilent()
+	}
+	return w, nil
 }
 
-// mergeWorkerConfig fills zero-valued fields of cfg with their counterparts
+// mergeWorkerConfig fills non-positive fields of cfg with their counterparts
 // from service.DefaultWorkerConfig, so service.WorkerConfig{} (or any partial
 // config) produces a Worker with safe intervals — service/worker.go's
-// time.NewTicker would otherwise panic on a zero Duration.
+// time.NewTicker would otherwise panic on a zero Duration, and a zero batch
+// size means a job that runs and processes nothing.
+//
+// Field-driven rather than a hand-written list of if statements, one per
+// field. The list version shipped without AttestInterval/AttestBatchSize for
+// a full release: the P6 attestation job's interval stayed zero, runLoop
+// skipped it, and nothing anywhere connected "I added two config fields" to
+// "I must add two more if statements". Reflection makes adding a field
+// sufficient; TestMergeWorkerConfig_FillsEveryField pins that no field is
+// left at its zero value, so a field of a kind this function cannot fill
+// fails loudly instead of silently disabling a job.
 func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
-	d := service.DefaultWorkerConfig()
-	if cfg.RollupInterval <= 0 {
-		cfg.RollupInterval = d.RollupInterval
-	}
-	if cfg.RollupBatchSize <= 0 {
-		cfg.RollupBatchSize = d.RollupBatchSize
-	}
-	if cfg.RollupClaimLease <= 0 {
-		cfg.RollupClaimLease = d.RollupClaimLease
-	}
-	if cfg.ExpirationInterval <= 0 {
-		cfg.ExpirationInterval = d.ExpirationInterval
-	}
-	if cfg.ExpirationBatchSize <= 0 {
-		cfg.ExpirationBatchSize = d.ExpirationBatchSize
-	}
-	if cfg.ReconcileInterval <= 0 {
-		cfg.ReconcileInterval = d.ReconcileInterval
-	}
-	if cfg.SnapshotInterval <= 0 {
-		cfg.SnapshotInterval = d.SnapshotInterval
-	}
-	if cfg.SystemRollupInterval <= 0 {
-		cfg.SystemRollupInterval = d.SystemRollupInterval
-	}
-	if cfg.EventDeliveryInterval <= 0 {
-		cfg.EventDeliveryInterval = d.EventDeliveryInterval
-	}
-	if cfg.EventDeliveryBatchSize <= 0 {
-		cfg.EventDeliveryBatchSize = d.EventDeliveryBatchSize
-	}
-	if cfg.EventClaimLease <= 0 {
-		cfg.EventClaimLease = d.EventClaimLease
-	}
-	if cfg.FullReconcileInterval <= 0 {
-		cfg.FullReconcileInterval = d.FullReconcileInterval
-	}
-	if cfg.PartitionInterval <= 0 {
-		cfg.PartitionInterval = d.PartitionInterval
-	}
-	if cfg.PartitionMonthsAhead <= 0 {
-		cfg.PartitionMonthsAhead = d.PartitionMonthsAhead
-	}
-	if cfg.AttestInterval <= 0 {
-		cfg.AttestInterval = d.AttestInterval
-	}
-	if cfg.AttestBatchSize <= 0 {
-		cfg.AttestBatchSize = d.AttestBatchSize
+	defaults := reflect.ValueOf(service.DefaultWorkerConfig())
+	out := reflect.ValueOf(&cfg).Elem()
+
+	for i := 0; i < out.NumField(); i++ {
+		field := out.Field(i)
+		if !field.CanSet() {
+			continue
+		}
+		switch field.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			// time.Duration is an int64 kind, so this covers every interval,
+			// batch size and lease the config currently holds.
+			if field.Int() <= 0 {
+				field.Set(defaults.Field(i))
+			}
+		default:
+			// Deliberately not a silent skip: a new field of an unhandled
+			// kind must not fall through to "left at its zero value", which
+			// is how the AttestInterval gap disabled a job for a release.
+			// The pin test asserts every field ends up non-zero and equal to
+			// the default, so this branch is reachable only between adding a
+			// field and teaching this switch about it.
+			continue
+		}
 	}
 	return cfg
 }
@@ -939,16 +1044,17 @@ func mergeWorkerConfig(cfg service.WorkerConfig) service.WorkerConfig {
 // Health check
 // ---------------------------------------------------------------------------
 
-// Ping verifies the database connection by acquiring a connection from the pool
-// and executing SELECT 1. Returns a wrapped error on failure.
+// Ping verifies the database executor this Service's stores are bound to by
+// executing SELECT 1 through it. Returns a wrapped error on failure.
+//
+// clone-safe: it probes through DBTX(), so on the clone RunInTx hands to its
+// callback it probes that transaction rather than the pool. That is
+// deliberate -- a clone accidentally retained past the callback answers
+// "tx is closed" here, matching what every one of its data-plane reads and
+// writes will answer, instead of reporting a healthy connection while the
+// store it belongs to is dead.
 func (s *Service) Ping(ctx context.Context) error {
-	conn, err := s.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("ledger: ping: acquire connection: %w", err)
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
+	if _, err := s.DBTX().Exec(ctx, "SELECT 1"); err != nil {
 		return fmt.Errorf("ledger: ping: %w", err)
 	}
 	return nil
