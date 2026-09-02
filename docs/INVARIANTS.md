@@ -5343,12 +5343,13 @@ dead-letter row means it is recorded rather than lost. Everything else,
 including an unclassified error, holds the cursor.
 
 **Enforced by**:
-- `service.Onchain.scanChainOnce` (`service/onchain.go`) — collects blocking
-  failures and returns without calling `SetCursor`; classifies via
-  `permanentIngestFailure` (`core.IsRetryable`); records deterministic
-  rejections through `DeadLetterRecorder`. `Metrics.ChainCursorLag` is
-  reported against the block actually scanned, so a held cursor shows up as
-  a growing lag.
+- `service.Onchain.scanChainOnce` (`service/onchain.go`), reached through
+  `service.Onchain.RunWatchOnce` (single tick) and `service.Onchain.Run`
+  (the long-running loop) — collects blocking failures and returns without
+  calling `SetCursor`; classifies via `permanentIngestFailure`
+  (`core.IsRetryable`); records deterministic rejections through
+  `DeadLetterRecorder`. `Metrics.ChainCursorLag` is reported against the
+  block actually scanned, so a held cursor shows up as a growing lag.
 - `service.Onchain.escalateWatcherStall` — after
   `WithWatcherStallAlertAfter` consecutive failed ticks on one chain, every
   still-blocking sighting is dead-lettered and a wedged-watcher error is
@@ -5356,7 +5357,8 @@ including an unclassified error, holds the cursor.
 - `service.Onchain.processRegistrationRescan` — same classification, same
   fail-closed advance semantics for the historical rescan path.
 - `postgres.SetChainCursor` (`postgres/sql/queries/chain_cursors.sql`) —
-  `WHERE chain_cursors.last_scanned_block < EXCLUDED.last_scanned_block`.
+  `WHERE chain_cursors.last_scanned_block < EXCLUDED.last_scanned_block`,
+  wrapped by `postgres.ChainCursorStore.SetCursor`.
 - `service.newWatchLockedJob` — the per-chain watch loop runs under
   `advisoryLockKey("job:onchain_watch:<chainID>")`, so concurrent replicas
   cannot undo a deliberately held cursor.
@@ -5469,9 +5471,9 @@ table) and were fixed both times by deriving them mechanically.
 under the mutex that now guards `localDeliverer`; `(*Service).Worker`'s
 `s.tx` guard, its `SetFullReconciler` / `SetPartitionService` / `SetPool` /
 `SetLocalPoller` / `SetLogger` wiring, and `ledger.New`'s
-`eventStore.SetLogger`; `mergeWorkerConfig`'s field-driven fill;
-`RegisterChannel`'s `s.tx` guard; `withTx` carrying `onchain`; `Ping` routing
-through `DBTX()` (all `ledger.go`).
+`eventStore.SetLogger`; `mergeWorkerConfig`'s field-driven fill over
+`service.DefaultWorkerConfig`; `RegisterChannel`'s `s.tx` guard; `withTx`
+carrying `onchain`; `Ping` routing through `DBTX()` (all `ledger.go`).
 
 **Pinned by** (root package, cited bare per this doc's convention — see I-13):
 - `TestServiceWorker_RefusesToRunUnderTheDefaultSilentLogger` — README's
@@ -5501,14 +5503,18 @@ through `DBTX()` (all `ledger.go`).
   `TestMergeWorkerConfig_KeepsCallerValues` (internal test) — every
   `WorkerConfig` field ends non-zero and equal to its default, and explicit
   caller values survive.
-- `TestCloneEscapeSurfaceIsDeclaredOrGuarded` — the AST gate for property 5,
-  with `TestCloneEscapeScanner_CatchesAnUnguardedUndeclaredMethod` proving
-  the scanner is falsifiable rather than vacuous (I-48's lesson).
 - `TestService_RegisterChannel_RefusedOnTxBoundClone` /
   `TestService_Worker_RefusedOnTxBoundClone` /
   `TestService_Onchain_VisibleOnTxBoundClone` /
   `TestService_Ping_FollowsTheCloneTransaction` — each establishes a control
   on the top-level Service first, so the assertion isolates the guard.
+
+**Related tests** (the property-5 AST scanner, `scanCloneEscapes`, is
+defined in the test file itself, not a production symbol, so nothing in
+either pin's own function body names a symbol this doc can hold it to):
+- `TestCloneEscapeSurfaceIsDeclaredOrGuarded` — the AST gate for property 5.
+- `TestCloneEscapeScanner_CatchesAnUnguardedUndeclaredMethod` — proves the
+  scanner is falsifiable rather than vacuous (I-48's lesson).
 
 ## I-55: What the anchor said before is remembered, so an erased or rolled-back anchor is not read as a benign backlog
 

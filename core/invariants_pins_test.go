@@ -643,10 +643,7 @@ func pkgDirMatches(dir, pkg string) bool {
 // here. If a section not already in this list starts failing after a
 // legitimate doc edit, fix the citation or the pin -- do not add the
 // section here to make it go away.
-var citationStyleGapInvariants = map[string]bool{
-	"I-49": true, "I-52": true,
-	"I-53": true, "I-54": true,
-}
+var citationStyleGapInvariants = map[string]bool{}
 
 func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	raw, err := os.ReadFile("../docs/INVARIANTS.md")
