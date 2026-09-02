@@ -26,15 +26,24 @@ type LocalDispatcher struct {
 	poller   EventPoller
 	callback *CallbackDeliverer
 	logger   core.Logger
+	metrics  core.Metrics
 }
 
 // NewLocalDispatcher creates a LocalDispatcher backed by the given poller.
 // Register handlers via the embedded CallbackDeliverer (exposed as Callback).
-func NewLocalDispatcher(poller EventPoller, logger core.Logger) *LocalDispatcher {
+// metrics defaults to core.NopMetrics() when nil, matching NewWebhookDeliverer
+// (I-N12: library-mode delivery had zero metrics coverage even though
+// CAPACITY.md's event-delivery SLO is written against EventDelivered/
+// EventDeliveryFailed/EventDead regardless of which deliverer emits them).
+func NewLocalDispatcher(poller EventPoller, logger core.Logger, metrics core.Metrics) *LocalDispatcher {
+	if metrics == nil {
+		metrics = core.NopMetrics()
+	}
 	return &LocalDispatcher{
 		poller:   poller,
 		callback: NewCallbackDeliverer(),
 		logger:   logger,
+		metrics:  metrics,
 	}
 }
 
@@ -71,6 +80,13 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 				"attempts", evt.Attempts,
 				"error", invokeErr,
 			)
+			// Mirror WebhookDeliverer.deliverEvent: the store decides dead vs
+			// retry from the same threshold, EventDead is reported here purely
+			// as an observability echo of that decision (I-N12).
+			d.metrics.EventDeliveryFailed()
+			if evt.MaxAttempts > 0 && evt.Attempts+1 >= evt.MaxAttempts {
+				d.metrics.EventDead()
+			}
 			// Detached ctx: the handler already ran, so its outcome must be
 			// recorded even if the parent was cancelled mid-batch. See
 			// cleanupContext.
@@ -93,7 +109,9 @@ func (d *LocalDispatcher) ProcessBatch(ctx context.Context, batchSize int) (int,
 				"event_id", evt.InternalID,
 				"error", markErr,
 			)
+			continue
 		}
+		d.metrics.EventDelivered()
 	}
 
 	return len(events), nil

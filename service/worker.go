@@ -234,7 +234,7 @@ func (w *Worker) Subscribe(handler func(context.Context, core.Event) error) erro
 		if w.running.Load() {
 			return fmt.Errorf("service: worker: Subscribe called after Run: the event_callback loop was never started, so this handler would never be invoked and events would stay pending forever -- subscribe before starting the worker: %w", core.ErrInvalidInput)
 		}
-		w.localDeliverer = delivery.NewLocalDispatcher(w.localPoller, w.logger)
+		w.localDeliverer = delivery.NewLocalDispatcher(w.localPoller, w.logger, w.metrics)
 	}
 	w.localDeliverer.OnEvent(handler)
 	return nil

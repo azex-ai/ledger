@@ -35,8 +35,9 @@ document: [`DR.md`](./DR.md).
 
 ## 1. Reconciliation failed
 
-**Alert source**: `ReconcileCompleted{success="false"}` Prometheus counter or the
-`POST /api/v1/reconcile` endpoint returning `balanced: false`.
+**Alert source**: `ledger_reconciliations_completed_total{success="false"}`
+Prometheus counter or the `POST /api/v1/reconcile` endpoint returning
+`balanced: false`.
 
 **Severity**: P1. The ledger is reporting an internal accounting violation.
 

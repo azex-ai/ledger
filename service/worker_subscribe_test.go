@@ -131,7 +131,7 @@ func TestWorker_Subscribe_HandlerErrorDoesNotBlockQueue(t *testing.T) {
 // TestLocalDispatcher_ProcessBatch_NilPollerError verifies that ProcessBatch
 // returns an error when no poller has been configured.
 func TestLocalDispatcher_ProcessBatch_NilPollerError(t *testing.T) {
-	d := delivery.NewLocalDispatcher(nil, core.NewEngine().Logger())
+	d := delivery.NewLocalDispatcher(nil, core.NewEngine().Logger(), core.NewEngine().Metrics())
 	_, err := d.ProcessBatch(context.Background(), 10)
 	require.Error(t, err, "expected error when poller is nil")
 }

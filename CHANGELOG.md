@@ -233,6 +233,29 @@ written because it was true when `[0.6.0]` shipped.
   lifecycle** (F-m10): the one startup check that reads the database. A
   deployment using the shipped `presets.DepositLifecycle` (acyclic by
   construction) is unaffected.
+- **`core.Metrics` currency-labelled methods take `currencyUID string`, not
+  `currencyID int64`** (H-M9): `.BalanceDrift(`, `.NegativeBalanceDetected(`,
+  `.ReconcileGap(`, and `.ReservedAmount(` all changed signature — an
+  internal `currencies.id` has no meaning outside this database and is not
+  stable across a restore-from-backup, so every other currency-labelled
+  metric on this interface already used the uid; these four were the last
+  holdouts. A hand-written `core.Metrics` implementation (not embedding
+  `NoopMetrics`) will not compile until it updates these four methods.
+- **`core.Metrics` grew from 32 to 41 methods** (I-M1, I-M8/C-M9, I-M10,
+  B-m10): the entire `postgres/` write layer was previously not wired to
+  `core.Metrics` at all (12 of the 32 existing methods had zero production
+  call sites), and three background-job families and the tamper-evidence
+  chain had none. New methods: `JobTickCompleted` / `JobTickFailed` /
+  `JobTickSkippedLocked` / `JobPanicked` (worker + `LockedJob` + `Onchain`
+  job ticks), `StuckRollups` (rollup items that exhausted their retry
+  budget — see the new `ledger-cli rollup reset-claim`), `PendingEvents`
+  (declared; not yet emitted — see `crossBranchExclusions` in
+  `observability/emission_coverage_test.go`), `AttestationBatchResult` /
+  `AnchorPublishResult` / `AnchorLagSeqs` (P5/P6 tamper-evidence chain).
+  A hand-written `core.Metrics` implementation must add all nine (embedding
+  `NoopMetrics` is unaffected). `LedgerStore` / `ReserverStore` /
+  `BookingStore` each gained a `WithMetrics(core.Metrics)` chain method,
+  defaulting to `core.NopMetrics()`; `ledger.New` wires them automatically.
 
 ### Go module — Fixed
 

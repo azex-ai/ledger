@@ -655,9 +655,9 @@ alert on a stalled job with it). Cardinality is bounded by design:
 integers.
 
 For OpenTelemetry, DataDog, or any other backend, write a thin adapter
-against `core.Metrics` (see its own doc comment in
-[`core/metrics.go`](core/metrics.go) for the full method count and the
-embed-`core.NoopMetrics`-and-override-a-few pattern).
+against `core.Metrics` (41 methods, one per emitted signal -- see its own
+doc comment in [`core/metrics.go`](core/metrics.go) for the full list and
+the embed-`core.NoopMetrics`-and-override-a-few pattern).
 
 ### Distributed tracing
 

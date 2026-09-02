@@ -33,25 +33,20 @@ import (
 // remove the entry once that branch lands its wiring, so this test starts
 // enforcing it like every other method.
 var crossBranchExclusions = map[string]string{
-	// C-M9/I-M8 (d-tamper's task, service/attestation.go): method added
-	// here per contract §2 ("core.Metrics 新方法 D-ops 独占追加权"), call
-	// site is d-tamper's per the task split in
-	// docs/plans/2026-09-02-remediation-contracts.md §4.
-	"AttestationBatchResult": "d-tamper: service/attestation.go RunAttestBatch",
-	"AnchorPublishResult":    "d-tamper: service/attestation.go catchUpAnchor",
-	"AnchorLagSeqs":          "d-tamper: service/attestation.go RunAttestBatch/catchUpAnchor",
-	// I-N12 (event delivery queue depth): the two dispatchers that would
-	// call this are service/delivery/local.go (D-lock's exclusive file)
-	// and service/delivery/webhook.go (D-contract's exclusive file) -- see
-	// contract §4 file ownership. Neither is reachable from this branch.
-	"PendingEvents": "D-lock/D-contract: service/delivery/{local,webhook}.go",
-	// I-N12 (ReservedAmount fleet gauge): no existing query aggregates
+	// I-M1 (fleet-wide reserved-amount gauge): no existing query aggregates
 	// reserved amount per-currency across all holders (only per-holder,
 	// via SumActiveReservations) -- adding one is a new postgres/*.go query
 	// beyond this task's "metrics/normalizeStoreError lines only" merge
 	// constraint (contract §4's D-ops row). Left for a follow-up task with
 	// its own migration/query budget.
 	"ReservedAmount": "follow-up: needs a new per-currency reserved-amount query",
+	// I-N12 (event delivery queue depth gauge): no existing query counts
+	// pending/retry events -- same "new postgres/*.go query is out of this
+	// task's merge budget" constraint as ReservedAmount above. The edge-
+	// triggered counters this same finding asked for (EventDelivered/
+	// EventDeliveryFailed/EventDead on LocalDispatcher) are wired; only the
+	// backlog-depth gauge is deferred.
+	"PendingEvents": "follow-up: needs a new CountPendingEvents query",
 }
 
 func TestEveryMetricsMethodHasAProductionCallSite(t *testing.T) {
