@@ -114,3 +114,5 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 |---|---|---|---|---|
 | W1-gate | `f48ae31` + `c7a8a7d` | 拆回基线两条 pin 红；复核发现闸开启路径把 availableBase 挪到锁外（stale-high 超卖），退回补 `min(V, E)`，mutation 实跑红 | `a9993fe` | 关 C-C1 / B-M2(store) / C-m7 / A-N6；新 I-49 |
 | W1-templates | `a4f1364` + `71d2d55` | 拆回基线：RefusesTheAuditedMintingCodes / UnknownTemplateCode / DepositTolerance 两条 pin 全红；server 包 -race 绿 | 见 merge commit | 关 D-C1 / D-m9 / H-M3(Go 侧) / §7.11 deposit-tolerance；`server_test.go` 既有形状测试显式 opt-in（登记） |
+| W1-ledgerstore | `63fb592`（+ EventUID 补修进行中） | 拆回基线三文件：7 条 pin 全红（含两个真 40P01）；postgres -race 绿 | 待合（等 I-50） | 兄弟扫描挖出 `EventUID` 同形，并入 I-51 |
+| W1-facade | `4eaa335` | 整文件回退无法编译（新 API 被测试引用），改单点 mutation：`Worker()` 的 `s.tx` 守卫置 false → `RefusedOnTxBoundClone` + `SubscribeAfterRunIsAnError` 红；恢复后根包 + service -race 绿 | 待合（排 I-54，最后） | 一次 `go test . -run Worker` 出现过一次未定位的 FAIL，重跑全 PASS，合并时再跑全量核 flake |
