@@ -1130,10 +1130,12 @@ runtime validation.
   — it is never given a `JournalTypeStore` or `TemplateStore` handle, so no
   code path exists by which installing the sweep classification could also
   install a journal type or template for it, and no journal template ever
-  references classification code `sweep`.
-- `service.Onchain`'s sweep orchestration (`service/onchain.go`) never calls
-  `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep booking's
-  transitions — only `Booker.Transition`.
+  references classification code `sweep`. `presets.InstallCryptoDepositBundle`
+  is the umbrella installer that calls `InstallSweepClassification` alongside
+  the deposit bundle's own journal-type/template install.
+- `service.Onchain.RunSweepOnce`'s sweep orchestration (`service/onchain.go`)
+  never calls `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep
+  booking's transitions — only `Booker.Transition`.
 
 **Pinned by**:
 - `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
@@ -1200,8 +1202,13 @@ instead of creating a duplicate.
 - `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
   comment states the single admissible definition (receipt-relative
   position). Both ingestion paths must derive it that way: the chains/evm
-  watcher and an external scanner feeding the `channel/onchain` webhook
-  bridge.
+  watcher (`evm.Reader.FetchDeposits`) and the `channel/onchain` webhook
+  bridge (`onchain.EVMAdapter.ParseSighting`), feeding
+  `service.Onchain.IngestDeposit`, the single orchestration both paths
+  funnel through to derive the idempotency key and create the booking.
+  `postgres.BookingStore.CreateBooking`'s existing same-key/same-payload
+  idempotency (I-3) is what resolves repeated observations of the same
+  transfer to the same booking.
 - `evm.Reader.FetchDeposits` (`chains/evm/reader.go`) — for every
   transaction that credited a registered address in the scanned window it
   reads the transaction receipt (`eth_getTransactionReceipt`) and maps each
@@ -1243,13 +1250,6 @@ instead of creating a duplicate.
   that key must resolve to the same booking, not `ErrConflict`; test-credibility.md
   flagged this as PLAUSIBLE-but-unverified since only `block_number` had a
   dedicated test -- verified real, now covered)
-- `postgres.TestBookingMetadataMatches_ObservationVariantKeys_TableDriven`
-  (F-P20, 2026-09-02 audit: the two pins above cover the keys someone
-  remembered to write a test for; this one is derived FROM
-  `bookingMetadataObservationVariantKeys` itself, at the pure-function
-  `bookingMetadataMatches` layer, so a sixth key added to that list without
-  test data is automatically exercised, both directions -- ignored on its
-  own, still conflicts on any other field)
 - `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
   re-observing the same sighting is a pure no-op; a second Transfer log in
   the same tx with a different `txlog_seq` does not collide)
@@ -1271,6 +1271,19 @@ instead of creating a duplicate.
   the surviving transfers — the same defect's second face)
 - `evm.TestReader_FetchDeposits_UnreadableReceiptFailsClosed` (no sighting may
   be produced from a transaction whose receipt could not be read)
+
+**Related tests** (exercises `bookingMetadataMatches` and
+`bookingMetadataObservationVariantKeys` directly — both unexported, so
+nothing in its own function body names a symbol this doc can hold it to,
+even though it is a genuine white-box pin for the same-package
+`postgres.idempotency_match.go` machinery):
+- `postgres.TestBookingMetadataMatches_ObservationVariantKeys_TableDriven`
+  (F-P20, 2026-09-02 audit: the two pins above cover the keys someone
+  remembered to write a test for; this one is derived FROM
+  `bookingMetadataObservationVariantKeys` itself, at the pure-function
+  `bookingMetadataMatches` layer, so a sixth key added to that list without
+  test data is automatically exercised, both directions -- ignored on its
+  own, still conflicts on any other field)
 
 ## I-21: Review holds a deposit with zero ledger effect
 
@@ -1302,12 +1315,15 @@ be sitting in the user's balance by the time a human looks at the queue.
   only from `confirming`, and its own only outgoing edges are `confirmed`
   and `failed`; no other status can reach `review`, and `review` cannot
   reach anything but a human-driven `ApproveReview`/`RejectReview` call.
-- `service.Onchain.routeToReview` (`service/onchain.go`) calls only
-  `Booker.Transition` -- it never touches `TxComposer`/`JournalWriter`.
+- `service.Onchain.routeToReview` (`service/onchain.go`), called from
+  `service.Onchain.IngestDeposit` when the ceiling or reconcile gate fires,
+  calls only `Booker.Transition` -- it never touches
+  `TxComposer`/`JournalWriter`.
 - `service.Onchain.postDepositConfirmedJournal` is the ONLY function in the
   onchain subsystem that posts a `deposit_confirm` journal; both
-  `advanceConfirmation`'s normal path and `ApproveReview` call through it,
-  so there is exactly one code path that can ever credit a deposit.
+  `advanceConfirmation`'s normal path and `service.Onchain.ApproveReview`
+  call through it, so there is exactly one code path that can ever credit a
+  deposit.
 - `service.Onchain.RejectReview` calls only `Booker.Transition` to `failed`,
   mirroring `routeToReview` -- never `TxComposer`.
 
@@ -1564,7 +1580,8 @@ effect of running reconcile.
 
 **Enforced by**:
 - `postgres.CheckpointIntegrityStore` (`postgres/checkpoint_integrity_store.go`) —
-  `RecomputeBalance`/`RebuildCheckpoint`, backed by
+  `postgres.CheckpointIntegrityStore.RecomputeBalance` /
+  `postgres.CheckpointIntegrityStore.RebuildCheckpoint`, backed by
   `RecomputeCheckpointFromEntries` and `RebuildBalanceCheckpoint`
   (`postgres/sql/queries/integrity_checkpoint.sql`,
   `postgres/sql/queries/checkpoints.sql`).
@@ -1580,7 +1597,10 @@ effect of running reconcile.
   later, cleaner segment of the same lap (C4b).
 - `service.FullReconciliationService.runCheckSystemRollupIntegrity` /
   `runCheckSnapshotIntegrity` (system_rollups / balance_snapshots vs.
-  entries).
+  entries), both reachable only through the public entry point,
+  `service.FullReconciliationService.RunFullReconciliation`, which runs
+  every reconcile check (including `runCheck2GlobalBalance` above) and
+  assembles their results into one report.
 
 **Pinned by**:
 - `postgres.TestCheckpointIntegrity_RecomputeBalance_IgnoresCheckpointTampering`
@@ -1598,21 +1618,29 @@ effect of running reconcile.
   injected poison amount)
 - `postgres.TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly` (`UPDATE`
   and `DELETE` against `checkpoint_rebuilds` are both rejected)
-- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
-  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
-  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`,
-  `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
+- `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
   3-pair fleet scanned 1 pair per run across 4 calls resumes correctly, and
   the run that completes the lap still reports `Passed=false` for a drift
   found two runs earlier)
-- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
-  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`,
-  `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
+- `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
   (DB-backed: poisons a checkpoint, refreshes `system_rollups` from it, and
   requires the check to catch the drift against entries)
+- `service.TestFullReconciliation_DetectsSnapshotDrift`
+
+**Related tests** (same-package `service` unit tests against a mock querier,
+calling `runCheck2GlobalBalance` / `runCheckSystemRollupIntegrity` /
+`runCheckSnapshotIntegrity` directly — all three unexported, so nothing in
+their own function bodies names a symbol this doc can hold them to, even
+though they are genuine white-box pins for that mechanism; the DB-backed
+`TestFullReconciliation_*` pins above cover the same checks through the
+exported `RunFullReconciliation` entry point):
+- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
+  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
+  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`
+- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
+  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`
 - `service.TestCheckSnapshotIntegrity_DetectsDrift`,
-  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`,
-  `service.TestFullReconciliation_DetectsSnapshotDrift`
+  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`
 
 ---
 
@@ -2029,9 +2057,15 @@ as before P5 existed. Signing cannot add atomicity to a link it does not
 cover.
 
 **Enforced by**:
-- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
-  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
-  three columns inside the transaction that also writes the journal row.
+- `postgres.LedgerStore.attestJournal` / `postgres.LedgerStore.PostJournal`
+  (`postgres/ledger_store.go`) -- resolves `EffectiveAt` once, signs before
+  `pool.Begin`, writes the three columns inside the transaction that also
+  writes the journal row.
+- `core.VerifyJournalAuth` (`core/auth.go`) recomputes the digest from the
+  journal's own fields and rejects (wrapping `core.ErrUnauthorizedJournal`)
+  any journal whose stored digest is empty, does not match the
+  recomputation, or whose signature/key_id the configured
+  `core.AuthVerifier` does not accept.
 - `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
   the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
   big-endian two's complement, domain-separated SHA-256) both `Sign` and
@@ -2048,7 +2082,9 @@ cover.
   (and must not) touch that function itself.
 - `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
   key_id at construction time, in the caller's own composition root,
-  never silently inside the ledger.
+  never silently inside the ledger. `authdev.NewLocalVerifier` /
+  `NewLocalVerifierSet` are the verify-only counterpart (a process holding
+  only the public key).
 - `postgres.LedgerStore.Authorize` / `PostAuthorized`
   (`postgres/ledger_store.go`, design doc §7.5) -- `Authorize` runs
   `attestJournal` before any transaction and refuses to run at all on a
@@ -2084,7 +2120,8 @@ cover.
   (`core/auth_test.go`) -- pin the exact byte layout against independently
   computed values; any diff is a breaking encoding change.
 - `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
-  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
+  `core.TestVerifyJournalAuth_RejectsMismatchedDigest` /
+  `core.TestVerifyJournalAuth_RejectsEmptySignature` -- each isolates one
   of `VerifyJournalAuth`'s three guard clauses; removing any one of them
   was verified, by hand, to make its corresponding test fail (the
   mismatch-check removal reaches a nil `AuthVerifier` and panics; the
@@ -2107,8 +2144,7 @@ cover.
   `TestPostJournal_TxMode_NeverSignsEvenWithAttestor` (the contrasting
   negative: the *old* tx-mode entry point is deliberately unchanged and
   still labeled `unsigned_tx_mode`),
-  `TestPostJournal_PoolMode_AuthStatusMatchesAttestorConfiguration`,
-  `TestAuthStatus_NewColumnRejectsUnknownValue`.
+  `TestPostJournal_PoolMode_AuthStatusMatchesAttestorConfiguration`.
 - `service.TestOnchain_DepositConfirm_SignsViaRunInTx`
   (`service/onchain_signing_test.go`) -- drives a real deposit through
   `IngestDeposit` to `confirmed` with an Attestor configured and asserts
@@ -2120,6 +2156,13 @@ cover.
   (reverting `postDepositConfirmedJournal` to its pre-§7.5
   `ExecuteTemplate`-based form reproduces `auth_status = unsigned_tx_mode`
   and an empty signature).
+
+**Related tests** (schema shape, not application behavior -- a raw SQL
+`INSERT` naming `auth_status` directly, so nothing in its body names a Go
+symbol this doc can hold it to):
+- `postgres.TestAuthStatus_NewColumnRejectsUnknownValue` -- the
+  `auth_status` CHECK constraint (migration 051) rejects a value outside
+  `signed`/`unsigned_no_attestor`/`unsigned_tx_mode`.
 
 ## I-27: The attestation chain is complete -- gapless, linked, signed, and every entry covered exactly once
 
@@ -2198,11 +2241,6 @@ NULL`), not an id-range assumption, so the late entry is simply
   -- the exact §8.2 scenario: two entries commit out of id order; the
   late one is covered on the next run, exactly once, without disturbing
   the earlier one's coverage.
-- `TestNaiveIDRangeWatermark_WouldMissTheLateEntry` -- falsification
-  evidence: the REJECTED alternative (a monotonic `id > watermark`
-  design, no side table) is run against the identical interleaving and
-  shown to structurally exclude the late entry forever, demonstrating
-  why the side-table design is load-bearing, not decorative.
 - `TestAttestationService_EmptyBatchStillProducesAnAttestation` --
   design doc §8.1's "空批照样出一条": a tick that finds nothing still
   produces a row, so "the job ran and found nothing" is never confused
@@ -2228,6 +2266,15 @@ NULL`), not an id-range assumption, so the late entry is simply
   forged journal's entries inserted after full coverage are `TAMPERED`;
   entries legitimately posted after the last batch are `DRIFT` with a
   count, never `VERIFIED`.
+
+**Related tests** (deliberately does NOT exercise this invariant's real
+mechanism -- it runs the REJECTED alternative design instead, so nothing in
+its body names a symbol this doc can hold it to):
+- `TestNaiveIDRangeWatermark_WouldMissTheLateEntry` -- falsification
+  evidence: the REJECTED alternative (a monotonic `id > watermark`
+  design, no side table) is run against the identical interleaving and
+  shown to structurally exclude the late entry forever, demonstrating
+  why the side-table design is load-bearing, not decorative.
 
 ## I-28: The latest external anchor head matches the DB's attestation chain
 
@@ -2294,11 +2341,16 @@ does not also touch the anchor is caught by comparing the two.
   survives a process restart (the anchor itself is external and
   durable).
 - `anchordev.LocalFileAnchor` -- the dev-only local-file `core.Anchor`
-  implementation `Publish`/`Head` calls exercise directly. **Not a
-  production adapter** -- see its package doc comment; the real carrier
-  (an object-lock bucket in a separate cloud account, at minimum) is a
-  genuinely unresolved deployment choice this library does not ship
-  (integrity contracts §7).
+  implementation `anchordev.LocalFileAnchor.Publish`/`Head` calls exercise
+  directly. **Not a production adapter** -- see its package doc comment;
+  the real carrier (an object-lock bucket in a separate cloud account, at
+  minimum) is a genuinely unresolved deployment choice this library does
+  not ship (integrity contracts §7).
+- `service.Worker.StartupReport` names the configured anchor's concrete
+  type (`AttestationAnchorType`) and warns when it is the dev-only file
+  anchor, so a composition root cannot silently wire a non-production
+  carrier -- see `anchordev.NewLocalFileAnchorForDevelopment`'s name for
+  the compile-time half of the same guard.
 
 **Pinned by**:
 - `service.TestAttestationService_PublishesToAnchor` -- the happy path:
