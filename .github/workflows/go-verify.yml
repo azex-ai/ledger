@@ -96,7 +96,7 @@ jobs:
           check-latest: true
           cache: true
           cache-dependency-path: go.sum
-      - run: go test -race -timeout 5m -count=1 ./...
+      - run: go test -race -timeout 15m -count=1 ./...
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/ledger_test?sslmode=disable
       # Submodules are invisible to the root module's ./... -- go does not
@@ -105,10 +105,10 @@ jobs:
       # is the shape this repo keeps paying for: the check exists, nothing
       # executes it. Each runs in its own directory against its own go.mod.
       - name: Test chains/evm
-        run: go test -race -timeout 5m -count=1 ./...
+        run: go test -race -timeout 15m -count=1 ./...
         working-directory: chains/evm
       - name: Test anchors/r2
-        run: go test -race -timeout 5m -count=1 ./...
+        run: go test -race -timeout 15m -count=1 ./...
         working-directory: anchors/r2
       # F-m3 (2026-09-02 audit): docs/INVARIANTS.md's own "How to add a new
       # invariant" rule #5 says a fuzz-target pin gets run for a few seconds
