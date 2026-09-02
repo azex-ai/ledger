@@ -80,6 +80,12 @@ func NewVerifiedBalanceStore(pool *pgxpool.Pool, verifier core.AuthVerifier) *Ve
 }
 
 // WithDB returns a clone of the store bound to an existing transaction.
+//
+// The clone exists so a transaction-scoped ledger.Service can still hand out
+// a core.VerifiedBalanceReader, not so the gate can run inside a transaction:
+// VerifiedBalance fails closed in tx mode (see its doc comment). The verifier
+// is carried over only so the pool-mode store this was cloned from stays the
+// single source of that wiring.
 func (s *VerifiedBalanceStore) WithDB(db DBTX) *VerifiedBalanceStore {
 	return &VerifiedBalanceStore{
 		dims:      s.dims,
@@ -94,7 +100,22 @@ func (s *VerifiedBalanceStore) WithDB(db DBTX) *VerifiedBalanceStore {
 // VerifiedBalance implements core.VerifiedBalanceReader. See that
 // interface's doc comment for the full contract (UNDEFINED semantics,
 // vacuous zero-journal case, mechanism-not-policy scope).
+//
+// Pool mode only. A core.AuthVerifier is explicitly permitted to run off-host
+// ("that independence is the whole point", core.AuthVerifier's doc comment)
+// and financial.md forbids an external call from inside an open transaction,
+// so a transaction-bound clone fails closed here rather than dialing out with
+// the caller's transaction — and its advisory locks — held open for the round
+// trip. ReserverStore.Reserve's RequireVerifiedBalance gate and
+// LedgerStore.Authorize already guard the same external call at their own
+// entry points; this is the third door into it (concurrency.md Major: the
+// previous fix landed on the entry point that was reported, not on every
+// entry point reaching the call).
 func (s *VerifiedBalanceStore) VerifiedBalance(ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error) {
+	if s.pool == nil {
+		return decimal.Zero, fmt.Errorf("postgres: verified balance: called on a transaction-bound store; the gate may call a remote AuthVerifier and financial.md forbids that inside an open transaction -- call VerifiedBalance on the top-level Service BEFORE RunInTx opens, then compose the withdrawal journal inside the callback: %w", core.ErrInvalidInput)
+	}
+
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
 		return decimal.Zero, err

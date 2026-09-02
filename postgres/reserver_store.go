@@ -120,16 +120,25 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// silently call out on. Fail closed instead of doing so anyway, mirroring
 	// LedgerStore.Authorize's identical guard (concurrency.md Major: this gate
 	// previously copied Authorize's placement comment but not its guard).
+	//
+	// The gate does not only authorize; it also decides the amount. What it
+	// computes is the entries-only recompute of every available-role
+	// classification, and that figure -- not checkpoint + delta -- is what
+	// caps the reservation below, together with an under-lock recompute of
+	// the same sum (I-49).
+	var verifiedAvailableBase *decimal.Decimal
 	if input.RequireVerifiedBalance {
 		if s.pool == nil {
 			err := fmt.Errorf("postgres: reserve: called on a transaction-bound store with RequireVerifiedBalance=true; the verified-balance gate may call a remote AuthVerifier and financial.md forbids that inside an open transaction -- call Reserve with RequireVerifiedBalance set BEFORE opening a RunInTx, not from inside its callback: %w", core.ErrInvalidInput)
 			ledgerotel.RecordError(span, err)
 			return nil, err
 		}
-		if err := s.requireVerifiedAvailableBalance(ctx, input.AccountHolder, input.CurrencyUID, cur.ID); err != nil {
+		verified, err := s.requireVerifiedAvailableBalance(ctx, input.AccountHolder, input.CurrencyUID, cur.ID)
+		if err != nil {
 			ledgerotel.RecordError(span, err)
 			return nil, err
 		}
+		verifiedAvailableBase = &verified
 	}
 
 	// Check idempotency first (outside tx / on the current db handle).
@@ -144,7 +153,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID)
+		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID, verifiedAvailableBase)
 		ledgerotel.RecordError(span, err)
 		return res, err
 	}
@@ -158,7 +167,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	res, err := s.reserveWithQueries(ctx, qtx, input, cur.ID)
+	res, err := s.reserveWithQueries(ctx, qtx, input, cur.ID, verifiedAvailableBase)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
@@ -173,44 +182,129 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 }
 
 // requireVerifiedAvailableBalance is Reserve's ReserveInput.RequireVerifiedBalance
-// gate (contracts §W2-2): available balance is the sum of every
-// balance_role='available' classification the holder has touched in this
-// currency (the same basis reserveWithQueries' availableBase computes, via
-// sumBalancesByRoleWithQueries) -- so this refuses the reservation unless
-// EVERY one of those classifications individually passes
-// VerifiedBalanceReader's authorization check. A single unauthorized
-// classification is enough to refuse the whole reservation: this is a
-// binary gate ("is the money behind this account's available balance
-// trustworthy"), not a partial-amount computation -- ReserveInput.Amount
-// never enters into it.
+// gate (contracts §W2-2, docs/INVARIANTS.md I-32 + I-49). It does two things,
+// and the second one is the reason it returns a number:
 //
-// core.ListComputedBalancesForHolders-style role classification is
-// re-derived here (not read from the dims cache) for the same reason
-// sumBalancesByRoleWithQueries does: SetBalanceRole can retag a
+//   - Authorization: every balance_role='available' classification the holder
+//     has touched in this currency must individually pass
+//     VerifiedBalanceReader's check. A single unauthorized classification
+//     refuses the whole reservation -- fail-closed, never "sum the ones that
+//     passed" (I-32's Why section: excluding an unauthorized reversal would
+//     report MORE money, not less).
+//
+//   - Amount: the per-classification figures VerifiedBalance returns are
+//     entries-only recomputes (CheckpointIntegrityStore.RecomputeBalance),
+//     and their sum is what the caller gets back. Reserve uses it in place of
+//     the checkpoint+delta roleSums, so a tampered balance_checkpoints row
+//     cannot inflate what a gated reservation may lock. This used to be
+//     discarded; the design's §0 decision table ("checkpoint is an untrusted
+//     cache; the withdrawal path recomputes in full and does not read it")
+//     was therefore not implemented on the one primitive that pays out.
+//
+// The list of classifications comes from ListComputedBalancesForHolders, whose
+// `populated` CTE enumerates DISTINCT journal_entries rows -- entries, not
+// checkpoints. A checkpoint row for a dimension with no entries cannot
+// conjure a classification into this loop, and only row.BalanceRole (a config
+// column, guarded by the config-table triggers) is read off it. The `balance`
+// column it also returns is deliberately unused here.
+//
+// Role is re-derived per call (not read from the dims cache) for the same
+// reason sumBalancesByRoleWithQueries does it: SetBalanceRole can retag a
 // classification after creation, and the dims cache only holds immutable
 // fields.
-func (s *ReserverStore) requireVerifiedAvailableBalance(ctx context.Context, holder int64, currencyUID string, currencyID int64) error {
+//
+// Placement: this runs OUTSIDE the transaction, because an AuthVerifier may
+// be a remote call. The figure it returns is therefore authorized but not
+// current -- a journal committed between here and the advisory lock can leave
+// it stale-HIGH (a spend lowers the true balance), which on its own would
+// re-open the very over-sell race I-4's lock exists to close. It is not used
+// on its own: reserveWithQueries re-derives the same sum from entries under
+// the lock, in pure SQL, and takes the minimum of the two. See that
+// function's comment for why each figure covers the other's blind spot.
+// Verifying under the lock instead is not an option -- it would put the
+// verifier call inside the transaction, which financial.md forbids.
+func (s *ReserverStore) requireVerifiedAvailableBalance(ctx context.Context, holder int64, currencyUID string, currencyID int64) (decimal.Decimal, error) {
 	rows, err := s.q.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
 		CurrencyID: currencyID,
 		HolderIds:  []int64{holder},
 	})
 	if err != nil {
-		return fmt.Errorf("postgres: reserve: verified balance: list classifications: %w", err)
+		return decimal.Zero, fmt.Errorf("postgres: reserve: verified balance: list classifications: %w", err)
 	}
 
+	total := decimal.Zero
 	for _, row := range rows {
 		if core.BalanceRole(row.BalanceRole) != core.BalanceRoleAvailable {
 			continue
 		}
 		classUID := pgToUID(row.ClassificationUid)
-		if _, err := s.verifiedBalance.VerifiedBalance(ctx, holder, currencyUID, classUID); err != nil {
-			return fmt.Errorf("postgres: reserve: verified balance check failed for classification %s: %w", classUID, err)
+		verified, err := s.verifiedBalance.VerifiedBalance(ctx, holder, currencyUID, classUID)
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: reserve: verified balance check failed for classification %s: %w", classUID, err)
 		}
+		total = total.Add(verified)
 	}
-	return nil
+	return total, nil
 }
 
-func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64) (*core.Reservation, error) {
+// sumAvailableFromEntriesWithQueries is the under-lock, transaction-local half
+// of I-49's available base: the same per-classification entries-only sum
+// CheckpointIntegrityStore.RecomputeBalance runs
+// (RecomputeCheckpointFromEntries — balance_checkpoints appears nowhere in its
+// FROM/JOIN), totalled over every balance_role='available' classification the
+// holder has entries in.
+//
+// Pure SQL on the caller's transaction, deliberately: this runs while the
+// (holder, currency) advisory lock is held, so it must not make an external
+// call. It is therefore current but unauthenticated — an unsigned forgery
+// counts here — which is exactly why reserveWithQueries takes the minimum of
+// this and the gate's authorized figure rather than either alone.
+//
+// One query per available classification rather than a single aggregate: a
+// holder has a handful of available-role classifications (usually one), the
+// generated query already exists and is the same trusted basis I-23 names,
+// and reusing it keeps "entries-only recompute" implemented in exactly one
+// place. The `balance` column ListComputedBalancesForHolders also returns is
+// checkpoint + delta and is ignored here; only the entries-derived
+// enumeration and the config-side balance_role are read from it.
+func (s *ReserverStore) sumAvailableFromEntriesWithQueries(ctx context.Context, qtx *sqlcgen.Queries, holder, currencyID int64) (decimal.Decimal, error) {
+	rows, err := qtx.ListComputedBalancesForHolders(ctx, sqlcgen.ListComputedBalancesForHoldersParams{
+		CurrencyID: currencyID,
+		HolderIds:  []int64{holder},
+	})
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: list classifications: %w", err)
+	}
+
+	total := decimal.Zero
+	for _, row := range rows {
+		if core.BalanceRole(row.BalanceRole) != core.BalanceRoleAvailable {
+			continue
+		}
+		recomputed, err := qtx.RecomputeCheckpointFromEntries(ctx, sqlcgen.RecomputeCheckpointFromEntriesParams{
+			AccountHolder:    holder,
+			CurrencyID:       currencyID,
+			ClassificationID: row.ClassificationID,
+		})
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: classification %d: %w", row.ClassificationID, err)
+		}
+		balance, err := numericToDecimal(recomputed.Balance)
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("postgres: reserve: recompute available from entries: convert classification %d: %w", row.ClassificationID, err)
+		}
+		total = total.Add(balance)
+	}
+	return total, nil
+}
+
+// reserveWithQueries writes the reservation. verifiedAvailableBase is non-nil
+// exactly when ReserveInput.RequireVerifiedBalance was set: it carries the
+// entries-only available total requireVerifiedAvailableBalance computed
+// outside the transaction, and is combined with an under-lock recompute to
+// form the available base below. Nil restores the ungated behavior byte for
+// byte.
+func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64, verifiedAvailableBase *decimal.Decimal) (*core.Reservation, error) {
 	if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
@@ -271,11 +365,52 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// funds (role=locked), and role-less classifications (fee_expense etc.)
 	// are not reservable. This is the same figure GetBalanceBreakdown reports
 	// as Available (before subtracting holds).
-	roleSums, err := s.ledger.sumBalancesByRoleWithQueries(ctx, qtx, input.AccountHolder, currencyID)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: sum balances by role: %w", err)
+	//
+	// Under the RequireVerifiedBalance gate the base is instead min(V, E) of
+	// two entries-only figures (I-49), neither of which reads
+	// balance_checkpoints — the one balance-bearing table an attacker holding
+	// the app's DB credential can UPDATE (it has no append-only trigger; the
+	// rollup worker must be able to write it):
+	//
+	//   V = verifiedAvailableBase, computed by the gate BEFORE the
+	//       transaction opened, because it needs a possibly-remote
+	//       AuthVerifier and financial.md forbids external calls inside a
+	//       transaction. Authorized, but as of a moment now past.
+	//   E = sumAvailableFromEntriesWithQueries, recomputed HERE, under the
+	//       (holder, currency) advisory lock, in pure SQL with no external
+	//       call. Current, but it cannot tell a genuine journal from a forged
+	//       one.
+	//
+	// Each covers the other's blind spot, and taking the minimum is what
+	// makes the pair safe in both directions:
+	//
+	//   - A journal committed in the gate's window that SPENDS money leaves
+	//     V stale-high. E sees it, E < V, the reservation is sized off E. This
+	//     is I-4's over-sell hazard, and it is why V alone is not enough: the
+	//     pre-fix ungated read was inside this lock, so moving the base
+	//     outside it without this recheck would have traded a tampering hole
+	//     for a TOCTOU hole.
+	//   - A forged, unsigned journal committed in that same window CREDITS
+	//     money. E sees it too — E has no authorization check — but E > V, so
+	//     V wins and the forgery buys nothing. This is why E alone is not
+	//     enough either.
+	//
+	// Holds are subtracted from either base identically: reservations are not
+	// part of what a checkpoint or an unsigned journal can misstate.
+	var availableBase decimal.Decimal
+	if verifiedAvailableBase != nil {
+		entriesBase, err := s.sumAvailableFromEntriesWithQueries(ctx, qtx, input.AccountHolder, currencyID)
+		if err != nil {
+			return nil, err
+		}
+		availableBase = decimal.Min(*verifiedAvailableBase, entriesBase)
+	} else {
+		roleSums, err := s.ledger.sumBalancesByRoleWithQueries(ctx, qtx, input.AccountHolder, currencyID)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reserve: sum balances by role: %w", err)
+		}
+		availableBase = roleSums[core.BalanceRoleAvailable]
 	}
-	availableBase := roleSums[core.BalanceRoleAvailable]
 
 	activeReserved, err := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 		AccountHolder: input.AccountHolder,

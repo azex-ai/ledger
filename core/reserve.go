@@ -58,12 +58,24 @@ type ReserveInput struct {
 	Amount         decimal.Decimal `json:"amount"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	ExpiresIn      time.Duration   `json:"expires_in"`
-	// RequireVerifiedBalance, when true, makes Reserve additionally refuse
-	// (wrapping ErrUnauthorizedJournal) unless every balance_role=available
-	// classification this holder has touched in CurrencyUID passes
-	// VerifiedBalanceReader's authorization check (contracts
-	// §W2-1/§W2-2/§W2-3) -- on top of, not instead of, the normal
-	// available-balance-covers-Amount check this method always runs.
+	// RequireVerifiedBalance, when true, changes Reserve in two ways
+	// (contracts §W2-1/§W2-2/§W2-3, docs/INVARIANTS.md I-32 and I-49):
+	//
+	//   - It refuses (wrapping ErrUnauthorizedJournal) unless every
+	//     balance_role=available classification this holder has touched in
+	//     CurrencyUID passes VerifiedBalanceReader's authorization check.
+	//
+	//   - It sizes the reservation off entries-only recomputes rather than off
+	//     balance_checkpoints. So this is also a stricter AMOUNT check: an
+	//     inflated checkpoint row cannot raise what a gated Reserve will lock,
+	//     even when every journal is genuinely signed. Insufficiency under the
+	//     recomputed base is ErrInsufficientBalance, not
+	//     ErrUnauthorizedJournal.
+	//
+	// Because the gate may call a (possibly remote) AuthVerifier, it runs
+	// before any transaction is opened -- setting this field on a Reserve
+	// issued from inside a RunInTx callback is refused with ErrInvalidInput
+	// rather than silently downgraded.
 	//
 	// Off by default: this library does not pick a threshold or a default
 	// policy for when the extra check is warranted -- that decision, and
