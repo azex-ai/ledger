@@ -203,19 +203,40 @@ LIMIT 1;
 -- finding): the two-key form was ALSO disjoint from every single-key
 -- pg_advisory_lock/pg_try_advisory_lock caller elsewhere in the codebase
 -- (service.advisoryLockKey, an FNV-64a hash of a small fixed set of job
--- names, used by LockedJob and SnapshotService) via the same lock-tag
--- classid mechanism -- this single-key form shares that 64-bit space with
--- them. A job-name hash landing on the same value as a live
--- (holder,currency) or idempotency key is not attacker-influenceable (job
--- names are fixed constants, not caller input) and every one of those
--- other callers uses the non-blocking pg_try_advisory_lock, so the only
--- possible effect is one skipped/delayed lock-wait, never a deadlock
--- (pg_try_advisory_lock cannot participate in a wait-for cycle) and never
--- an incorrect result. Judged negligible; flagged here rather than silently
+-- names, used by LockedJob and SnapshotService; postgres/migrate.go's
+-- clusterMigrationLockKey) via the same lock-tag classid mechanism -- this
+-- single-key form shares that 64-bit space with them. A job-name hash
+-- landing on the same value as a live (holder,currency) or idempotency key
+-- is not attacker-influenceable (job names are fixed constants, not caller
+-- input), so the worst case is one skipped or delayed lock-wait, never an
+-- incorrect result. Judged negligible; flagged here rather than silently
 -- assumed away, and left unmitigated because closing it would mean
 -- reserving a bit-pattern across both journals.sql and
 -- service/locked_job.go / service/snapshot.go, outside this fix's file
 -- scope.
+--
+-- Why a collision cannot deadlock (corrected 2026-09-02, concurrency.md
+-- B-m3): the reason is NOT "every one of those other callers uses the
+-- non-blocking pg_try_advisory_lock", which is how this note used to read.
+-- The load-bearing property is that PostgreSQL scopes advisory locks to the
+-- DATABASE of the connection holding them -- the same property I-47's entire
+-- design rests on. postgres/migrate.go's acquireClusterLock deliberately
+-- connects to the CLUSTER's `postgres` maintenance database, so its key and
+-- the bal: / idem: / job: keys taken on the application database are not in
+-- the same lock space at all, whatever their 64-bit values.
+--
+-- The try-variant claim happens to be true again as of 2026-09-02 (B-m4
+-- changed acquireClusterLock from a blocking session-level
+-- pg_advisory_lock to a polled pg_try_advisory_lock, and
+-- postgres.TestNoBlockingSessionAdvisoryLocks now keeps it that way), but it
+-- was false when it was written, and it is the weaker argument: it holds
+-- only for as long as nobody adds a blocking session lock. Database scoping
+-- holds regardless.
+--
+-- Boundary, so the next reader knows where the argument stops: if someone
+-- installs the ledger schema INTO the cluster's `postgres` maintenance
+-- database (nothing prevents it), the migration key and these keys do share
+-- one 64-bit space, and this reasoning has to be redone.
 SELECT pg_advisory_xact_lock(hashtextextended('bal:' || sqlc.arg(key)::text, 0));
 
 -- name: AcquireIdempotencyLock :exec

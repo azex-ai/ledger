@@ -5,6 +5,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/golang-migrate/migrate/v4/source"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/azex-ai/ledger/core"
 )
 
 // clusterMigrationLockKey is the pg_advisory_lock key acquireClusterLock
@@ -23,6 +26,67 @@ import (
 // documented so a collision is a deliberate choice, not an accident. See
 // acquireClusterLock and docs/INVARIANTS.md I-47 for why this exists.
 const clusterMigrationLockKey = 2573143714
+
+// clusterLockBudget is the default total time acquireClusterLock spends
+// waiting for the cluster migration lock before giving up. Five minutes is
+// long enough for another node's full migration run and short enough that a
+// leaked lock surfaces as a failed deploy rather than a process that never
+// finishes booting.
+const clusterLockBudget = 5 * time.Minute
+
+// clusterLockPollInterval is how often acquireClusterLock retries, and
+// therefore how often it logs that it is still waiting.
+const clusterLockPollInterval = 2 * time.Second
+
+// migrateConfig holds the knobs MigrateContext exposes. Zero value means
+// "the documented defaults"; nothing here reads the environment.
+type migrateConfig struct {
+	logger     core.Logger
+	lockBudget time.Duration
+}
+
+// MigrateOption configures MigrateContext.
+type MigrateOption func(*migrateConfig)
+
+// WithMigrateLogger routes Migrate's own diagnostics (currently: waiting for
+// the cluster migration lock) through the consumer's core.Logger. Without it
+// they go to slog.Default(), the same fallback EventStore.warn uses -- never
+// nowhere. A startup path that can block on a cluster-wide lock must say so:
+// the failure this replaces was a Migrate() that hung silently and forever
+// (concurrency.md 2026-09-02 B-m4).
+func WithMigrateLogger(l core.Logger) MigrateOption {
+	return func(c *migrateConfig) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
+
+// WithMigrateLockBudget overrides how long Migrate waits for the cluster
+// migration lock before returning an error. Non-positive values are ignored.
+func WithMigrateLockBudget(d time.Duration) MigrateOption {
+	return func(c *migrateConfig) {
+		if d > 0 {
+			c.lockBudget = d
+		}
+	}
+}
+
+func newMigrateConfig(opts []MigrateOption) migrateConfig {
+	cfg := migrateConfig{lockBudget: clusterLockBudget}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+func (c migrateConfig) info(msg string, args ...any) {
+	if c.logger != nil {
+		c.logger.Info(msg, args...)
+		return
+	}
+	slog.Info(msg, args...)
+}
 
 //go:embed sql/migrations/*.sql
 var migrations embed.FS
@@ -78,14 +142,24 @@ func NewMigrationSource() (source.Driver, error) {
 // the schema is then up to date AND the migration credential is left holding
 // them, which is reported rather than logged because nothing else in the
 // deployment can notice it. The message says which.
-func Migrate(databaseURL string) error {
+func Migrate(databaseURL string, opts ...MigrateOption) error {
+	return MigrateContext(context.Background(), databaseURL, opts...)
+}
+
+// MigrateContext is Migrate with a caller-supplied context, so a boot
+// sequence that is being torn down can stop waiting for the cluster
+// migration lock instead of hanging until the lock is released. Migrate
+// forwards context.Background() (expand step per deployment.md: the existing
+// signature is unchanged, the ctx-aware sibling is additive).
+func MigrateContext(ctx context.Context, databaseURL string, opts ...MigrateOption) error {
+	cfg := newMigrateConfig(opts)
 	databaseURL = toMigrateURL(databaseURL)
 
 	if err := waitForDatabase(databaseURL, 10*time.Second); err != nil {
 		return fmt.Errorf("postgres: migrate: wait for database: %w", err)
 	}
 
-	unlock, err := acquireClusterLock(databaseURL)
+	unlock, err := acquireClusterLock(ctx, databaseURL, cfg)
 	if err != nil {
 		return fmt.Errorf("postgres: migrate: acquire cluster lock: %w", err)
 	}
@@ -375,26 +449,70 @@ func toMigrateURL(databaseURL string) string {
 // connection that holds it, which Postgres does automatically for
 // session-level advisory locks — no explicit pg_advisory_unlock call is
 // needed on the success path or any error path.
-func acquireClusterLock(databaseURL string) (unlock func(), err error) {
+//
+// Non-blocking, polled, bounded, and logged (concurrency.md 2026-09-02
+// B-m4). This used to be a bare blocking pg_advisory_lock on
+// context.Background(): when the holder's process was SIGKILLed and its TCP
+// connection went half-open, Postgres would not reclaim the session until
+// tcp_keepalives_idle, and in the meantime EVERY Migrate() call against the
+// cluster — including other projects sharing a local dev server, which is
+// exactly what I-47 is designed to serialize — blocked here forever with no
+// log line, no timeout and no way to cancel. Failing loudly after a budget
+// is strictly better than a boot that never returns, and the per-attempt
+// Info line names what is being waited on.
+//
+// Using the try_ variant rather than a lock_timeout also keeps the claim
+// AcquireBalanceLock's residual-risk note in queries/journals.sql makes
+// about the single-key advisory space true: there is no blocking
+// session-level advisory lock anywhere in this repository, so nothing here
+// can participate in a wait-for cycle. Pinned by
+// TestNoBlockingSessionAdvisoryLocks.
+func acquireClusterLock(ctx context.Context, databaseURL string, cfg migrateConfig) (unlock func(), err error) {
 	lockURL, err := maintenanceDatabaseURL(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("derive maintenance database url: %w", err)
 	}
 
-	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, lockURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect to maintenance database: %w", err)
 	}
+	release := func() { _ = conn.Close(context.WithoutCancel(ctx)) }
 
-	// Blocks indefinitely until acquired -- that is the point: every other
-	// Migrate() call against this cluster waits here rather than racing.
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(clusterMigrationLockKey)); err != nil {
-		_ = conn.Close(ctx)
-		return nil, fmt.Errorf("pg_advisory_lock: %w", err)
+	deadline := time.Now().Add(cfg.lockBudget)
+	for attempt := 1; ; attempt++ {
+		var got bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", int64(clusterMigrationLockKey)).Scan(&got); err != nil {
+			release()
+			return nil, fmt.Errorf("pg_try_advisory_lock: %w", err)
+		}
+		if got {
+			if attempt > 1 {
+				cfg.info("postgres: migrate: acquired cluster migration lock", "attempts", attempt, "key", clusterMigrationLockKey)
+			}
+			return release, nil
+		}
+		if time.Now().After(deadline) {
+			release()
+			return nil, fmt.Errorf(
+				"cluster migration lock (advisory key %d on the cluster's postgres database) still held after %s and %d attempts: "+
+					"another Migrate is running against this cluster, or a previous Migrate's connection has not been reclaimed "+
+					"(check pg_locks where locktype='advisory' and objid=%d on the postgres database)",
+				clusterMigrationLockKey, cfg.lockBudget, attempt, clusterMigrationLockKey,
+			)
+		}
+		cfg.info("postgres: migrate: waiting for cluster migration lock",
+			"attempt", attempt,
+			"key", clusterMigrationLockKey,
+			"budget", cfg.lockBudget.String(),
+		)
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, fmt.Errorf("waiting for cluster migration lock: %w", ctx.Err())
+		case <-time.After(clusterLockPollInterval):
+		}
 	}
-
-	return func() { _ = conn.Close(ctx) }, nil
 }
 
 // maintenanceDatabaseURL rewrites databaseURL to point at the cluster's

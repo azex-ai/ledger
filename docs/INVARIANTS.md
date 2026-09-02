@@ -4538,11 +4538,26 @@ one).
 (Board #52; CI's `test` job failed 17 tests at once, all tracing to
 `internal/postgrestest/postgrestest.go:128`'s `Migrate` call.)
 
-**Rule**: `postgres.Migrate` takes a session-level `pg_advisory_lock` on the
+**Rule**: `postgres.Migrate` takes a session-level advisory lock on the
 cluster's `postgres` maintenance database, before opening golang-migrate's
 own connection to the target database, and holds it for the entire `Up()`
 run. `acquireClusterLock` (`postgres/migrate.go`) is the sole place this
 happens; no SQL migration file changes.
+
+Since 2026-09-02 (`concurrency.md` B-m4) the acquisition is a polled
+`pg_try_advisory_lock` with a bounded budget
+(`WithMigrateLockBudget`, default five minutes), a per-attempt `Info` line
+naming the key, and a context (`MigrateContext`). It was a bare blocking
+`pg_advisory_lock` on `context.Background()`: when the holder's process was
+SIGKILLed and its connection went half-open, every `Migrate` on the cluster
+— which is precisely the population this invariant exists to serialize —
+blocked forever with no log, no timeout and no way to cancel. Bounded
+failure beats an unbounded silent wait. As a side effect there is now no
+blocking session-level advisory lock anywhere in the repository, which
+`postgres.TestNoBlockingSessionAdvisoryLocks` keeps true and which the
+residual-risk note on `AcquireBalanceLock`
+(`postgres/sql/queries/journals.sql`) leans on as its *secondary* argument —
+its primary argument is the per-database scoping described below.
 
 **Why**: `001_baseline` and
 `007_role_hardening_and_partition_security_definer` between them issue 8
@@ -4598,7 +4613,18 @@ that runs its migration job from more than one pod at once.
 `postgres.maintenanceDatabaseURL` (`postgres/migrate.go`), called from
 `postgres.Migrate` before `migrate.NewWithSourceInstance`.
 
-**Pinned by**: `postgres.TestMigrate_ConcurrentAcrossDatabases` — installs
+**Pinned by**:
+- `postgres.TestMigrate_ClusterLockHeldElsewhere_FailsWithinBudget` — a
+  foreign session holds the key; `Migrate` must fail with an error naming
+  the key inside its budget instead of hanging, and must log that it is
+  waiting.
+- `postgres.TestMigrate_ClusterLockReleased_Succeeds` — the bounded wait is
+  still a wait: `Migrate` succeeds once the holder lets go.
+- `postgres.TestMigrateContext_CancelledWhileWaiting` — a torn-down boot
+  sequence stops waiting.
+- `postgres.TestNoBlockingSessionAdvisoryLocks` — no blocking session-level
+  advisory lock may reappear anywhere in the repository.
+- `postgres.TestMigrate_ConcurrentAcrossDatabases` — installs
 into 8 freshly created databases on one cluster concurrently (after a
 sequential warm-up `Migrate()` call so every racer hits `007`'s
 unconditional `ALTER ROLE` rather than racing `001`'s
