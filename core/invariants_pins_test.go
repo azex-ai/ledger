@@ -567,11 +567,19 @@ func pkgDirMatches(dir, pkg string) bool {
 // document" working-agreements §5 warns against building. So: enforced
 // (t.Error, blocking) on every section NOT in this list, which is every
 // section this task actually touched or spot-checked clean; advisory
-// (t.Log, visible but non-blocking) elsewhere, so nothing is hidden. Shrink
-// this list as each invariant's Enforced by prose gets its missing symbols
-// backtick-quoted -- that is a documentation fix, not a test fix, and it
-// makes the corresponding entry here start failing loudly if the pin really
-// is hollow.
+// (t.Log, visible but non-blocking) elsewhere, so nothing is hidden.
+//
+// GOVERNANCE (team-lead ruling, 2026-09-02 merge review): this list is a
+// hardcoded, explicit constant on purpose -- never compute it, never
+// auto-derive it from the current failure set, never widen it to silence a
+// NEW failure. It may only SHRINK: an entry comes out once its invariant's
+// Enforced by prose gets its missing symbols backtick-quoted (a
+// documentation fix, not a test fix), at which point this check starts
+// holding its pins to the real mechanism. Rewriting the citation style for
+// these 32 invariants is tracked as a Wave 3 item, not silently absorbed
+// here. If a section not already in this list starts failing after a
+// legitimate doc edit, fix the citation or the pin -- do not add the
+// section here to make it go away.
 var citationStyleGapInvariants = map[string]bool{
 	"I-1": true, "I-4": true, "I-5": true, "I-11": true, "I-14": true,
 	"I-15": true, "I-16": true, "I-19": true, "I-20": true, "I-21": true,
