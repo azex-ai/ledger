@@ -51,11 +51,17 @@ is meaningless — debits and credits in different currencies are not comparable
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
 - `core.FuzzJournalValidate` (Go fuzz target)
+
+**Related tests** (exercise this invariant's DB-trigger mechanism, but not
+cited above as a pin: the mechanism is a Postgres trigger with no Go symbol
+to reference, and the test reaches it only through this file's local
+`postBalancedJournal`/`withBalanceTriggerDisabled` helpers, so nothing in its
+own function body names an app-layer symbol this doc can hold it to):
 - `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates to
   schema v41 (pre-044), proves a direct SQL insert that unbalances an
   existing journal by currency succeeds with nothing to stop it, then
   migrates up through 044 and proves the identical attack on a fresh journal
-  now fails at commit.
+  now fails at commit. See I-24, where this is the primary pin.
 
 ## I-2: Append-only journals; corrections via reversal only
 
@@ -264,7 +270,8 @@ holder over-committed.
 **Enforced by**:
 - Advisory lock in `postgres.ReserverStore.Reserve` (acquired before balance read).
 - `SELECT ... FOR UPDATE` on the reservation row in `Settle` / `Release`.
-- Reservation FSM transition table in `core/reserve.go` rejects illegal moves.
+- Reservation FSM transition table, `core.ReservationStatus.CanTransitionTo`
+  (`core/reserve.go`), rejects illegal moves.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (10
@@ -294,6 +301,8 @@ isolation give us a balance that's consistent and current.
 **Enforced by**:
 - `postgres.LedgerStore.GetBalance` (transaction-wrapped).
 - `postgres.PlatformBalanceStore.GetPlatformBalances` (LATERAL JOIN with delta).
+- `postgres.QueryStore.GetSystemRollups` (the same checkpoint + delta shape,
+  for system-side rollups rather than a single holder dimension).
 - Rollup worker advances checkpoints lazily.
 
 **Load-bearing prerequisite**: every `journal_entries` write goes through the
@@ -305,7 +314,7 @@ lets the rollup use `MAX(id)` as a safe checkpoint watermark and lets
 path that inserts entries without `acquireBalanceLocks` silently reopens
 this visibility race — do not add one. This was, until 2026-08-26, a prose-only
 warning with no machine gate (docs/audits/2026-08-25-financial-engineering/financial-correctness.md);
-`postgres.TestInsertJournalEntry_SingleChokePoint` now makes it one — it
+`TestInsertJournalEntry_SingleChokePoint` (postgres package) now makes it one — it
 parses this package's AST and fails if `InsertJournalEntry` ever gets a second
 call site, or if its one call site stops calling `acquireBalanceLocks`.
 
@@ -352,7 +361,7 @@ delta for a holder with 9,600 entries**, and exactly 10x that for 10x the
 history. The query is now a loose index scan for the dimension set plus a
 LATERAL for the delta (the shape `platform_balances.sql` already used); the
 same fixture touches **102 rows, independent of history**.
-`postgres.TestBalanceRead_CostDoesNotGrowWithHistory` holds it there.
+`TestBalanceRead_CostDoesNotGrowWithHistory` (postgres package) holds it there.
 
 Still open, deliberately: `journal_entries` is `PARTITION BY RANGE (created_at)`
 and no balance read carries a `created_at` predicate, so **every read visits
@@ -369,8 +378,6 @@ justify taking it now.
 - `postgres.TestLedgerStore_GetBalance_MultipleJournals`
 - `postgres.TestPlatformBalance_RealtimeReflectsUnrolledJournal`
 - `postgres.TestQueryStore_GetSystemRollups_RealtimeReflectsUnrolledJournal`
-- `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing prerequisite,
-  now a machine gate)
 - `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` (I-42's
   pin — the same forged-id attack, now asserted refused under a real
   `ledger_app` credential)
@@ -379,6 +386,14 @@ justify taking it now.
   for a dimension with no checkpoint row and one whose watermark was reset to
   zero. This is the invariant's own equation, checked against the read path
   rather than against the read path's previous output.
+
+**Related tests** (hold the "Load-bearing prerequisite" and "Cost" paragraphs
+above, but not cited as pins: both work by parsing this repo's own source —
+one this package's AST, the other the SQL `EXPLAIN` plan — rather than by
+calling `GetBalance` / `GetPlatformBalances` / `GetSystemRollups`, so neither
+test's own function body names a symbol this doc can hold it to):
+- `postgres.TestInsertJournalEntry_SingleChokePoint` (load-bearing
+  prerequisite, now a machine gate)
 - `postgres.TestBalanceRead_CostDoesNotGrowWithHistory` — the cost half above,
   in both directions: rows read must not scale with history, and the partition
   count visited is asserted to still be *all* of them, so if pruning ever
@@ -597,7 +612,10 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert),
 `postgres.LedgerStore.sumBalancesByRoleWithQueries` (shared basis),
-`classifications.balance_role` CHECK constraint (migration `032`).
+`classifications.balance_role` CHECK constraint (migration `032`), tagged
+onto each classification by `presets.InstallDefaultTemplatePresets` (and any
+direct `CreateClassification` / `SetBalanceRole` call) — the basis the two
+bullets above sum over.
 
 **Pinned by**:
 - `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (see I-4:
@@ -721,19 +739,19 @@ still be numerically wrong in storage; only reads through
 **Enforced by**:
 - `core.JournalInput.Validate` rejects `effective_at` beyond the future
   tolerance.
-- `postgres.LedgerStore.postJournalWithQueries` defaults a zero `effective_at`
-  to `now()` and writes the same resolved value to the journal row and every
-  entry row in the same transaction.
-- Reversal journals (`ReverseJournal`) never copy the original journal's
-  `effective_at` — they always default to "now" (open period), which is the
-  standard close-then-correct pattern (see I-15).
+- `postgres.LedgerStore.PostJournal` (internally `postJournalWithQueries`)
+  defaults a zero `effective_at` to `now()` and writes the same resolved
+  value to the journal row and every entry row in the same transaction.
+- Reversal journals (`postgres.LedgerStore.ReverseJournal`) never copy the
+  original journal's `effective_at` — they always default to "now" (open
+  period), which is the standard close-then-correct pattern (see I-15).
 - `postgres.RollupAdapter.GetSnapshotBalances`'s staleness check and live
-  recompute (see above).
+  recompute (see above), and `postgres.RollupAdapter.ListBalancesAt`, the
+  as-of read this staleness check falls back to.
 
 **Pinned by**:
 - `core.TestJournalInput_Validate_EffectiveAt_Zero_OK`,
   `..._Past_OK`, `..._WithinTolerance_OK`, `..._FarFuture_Rejected`
-- `postgres.TestEffectiveAtColumnsExist` (schema pin)
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_DefaultsToNow`
 - `postgres.TestLedgerStore_PostJournal_EffectiveAt_Backdated` (also pins
   entry/journal `effective_at` equality)
@@ -744,6 +762,13 @@ still be numerically wrong in storage; only reads through
 - `postgres.TestRollupAdapter_GetSnapshotBalances_BackdatedEntryInvalidatesCache`
   (the Major #2 fix: a snapshot written before a backdated entry lands must
   read back the corrected total, not the stale cached one)
+
+**Related tests** (schema shape, not application behavior — queries
+`information_schema`/`pg_indexes` directly, so nothing in its body names a
+Go symbol this doc can hold it to):
+- `postgres.TestEffectiveAtColumnsExist` — `journals.effective_at` and
+  `journal_entries.effective_at` are `NOT NULL`, and
+  `idx_entries_currency_effective` exists.
 
 ## I-15: The accounting period close line is a hard write barrier
 
@@ -776,13 +801,18 @@ current (open) date, never by rewriting history — consistent with I-2
 
 **Enforced by**: `postgres.LedgerStore.postJournalWithQueries` reads the
 active close line (`GetActivePeriodClose`) inside the same transaction as
-every write path (direct `PostJournal`, `ExecuteTemplate`,
-`ExecuteTemplateBatch`, and `ReverseJournal`, since they all funnel through
-this method) and rejects with `core.ErrPeriodClosed` when
+every write path (direct `postgres.LedgerStore.PostJournal`,
+`ExecuteTemplate`, `ExecuteTemplateBatch`, and
+`postgres.LedgerStore.ReverseJournal`, since they all funnel through this
+method) and rejects with `core.ErrPeriodClosed` when
 `effective_at < close_before` — **and, since 2026-09-02, does so under the
-shared half of the period-close advisory barrier, with `ClosePeriod` taking
-the exclusive half.** See I-59 for that mechanism and for the
-`period_close_violations` reconciliation check that can falsify it.
+shared half of the period-close advisory barrier, with
+`postgres.PeriodCloseStore.ClosePeriod` taking the exclusive half.** See I-59
+for that mechanism and for the `period_close_violations` reconciliation
+check that can falsify it. `postgres.PeriodCloseStore.ActiveCloseLine` is the
+same read exposed to callers outside a write path (e.g. the API). A close
+request with no `close_before` never reaches any of this:
+`core.ClosePeriodInput.Validate` rejects it first.
 
 > Enforcement gap closed 2026-09-02 (`concurrency.md` B-M5). Reading the line
 > "inside the same transaction as every write path" was the whole of the
@@ -801,7 +831,6 @@ first and then asserts a later posting is refused. That is the whole reason
 B-M5 went unnoticed for as long as it did: the hole was purely a matter of
 two transactions' relative timing, which no sequential test can express. The
 concurrency pins live on I-59):
-- `postgres.TestPeriodClosesTableExists` (schema pin)
 - `postgres.TestPeriodCloseStore_ActiveCloseLine_NeverClosed` — nothing to
   enforce before the first close
 - `postgres.TestLedgerStore_PostJournal_PeriodClosed_Rejected` — a posting whose
@@ -813,6 +842,12 @@ concurrency pins live on I-59):
 - `postgres.TestPeriodClosesGuard_NoUpdateNoDelete` — the close log itself is
   append-only (migration 045, attack path A5)
 - `core.TestClosePeriodInput_Validate_RequiresCloseBefore`
+
+**Related tests** (schema shape, not application behavior — queries
+`information_schema` directly, so nothing in its body names a Go symbol this
+doc can hold it to):
+- `postgres.TestPeriodClosesTableExists` — `period_closes`' columns are
+  `NOT NULL`.
 
 > Corrected 2026-08-21: this section previously cited two
 > PartitionBoundary tests (names deliberately unquoted here so the pin checker
@@ -842,23 +877,25 @@ reconciliation time (or in an external settlement mismatch).
   default to 18 (the loosest setting) so no historical data is invalidated.
 - `postgres.validateEntriesPrecision` (`postgres/precision.go`), called from
   `LedgerStore.postJournalWithQueries` — the single choke point behind
-  `PostJournal`, `ExecuteTemplate`, `ExecuteTemplateBatch`, and
-  `ReverseJournal`. `PendingStore.AddPending/ConfirmPending/CancelPending`
-  inherit the check for free because they all post through
-  `LedgerStore.PostJournal` rather than writing entries directly.
+  `postgres.LedgerStore.PostJournal`, `ExecuteTemplate`,
+  `ExecuteTemplateBatch`, and `postgres.LedgerStore.ReverseJournal`.
+  `PendingStore.AddPending/ConfirmPending/CancelPending` inherit the check
+  for free because they all post through `postgres.LedgerStore.PostJournal`
+  rather than writing entries directly.
 - `postgres.validateSingleAmountPrecision` / `checkAmountPrecision`, called
   from every amount-bearing write path that does **not** flow through
-  `PostJournal`: `ReserverStore.Reserve`, `ReserverStore.Settle`,
-  `ReserverStore.SettlePartial`, `BookingStore.CreateBooking`, and
-  `BookingStore.Transition` (non-zero settled amounts).
+  `PostJournal`: `postgres.ReserverStore.Reserve`,
+  `postgres.ReserverStore.Settle`, `postgres.ReserverStore.SettlePartial`,
+  `postgres.BookingStore.CreateBooking`, and `postgres.BookingStore.Transition`
+  (non-zero settled amounts).
 - The check is `amount.Equal(amount.Truncate(exponent))` — over-precise
   amounts are rejected with `core.ErrPrecisionExceeded` (bizcode 14006),
   **never** silently rounded or truncated. Rounding is the caller's explicit
   decision (`core.Round` / `core.ConvertAt` in `core/money.go`), not something
   the ledger does on the caller's behalf.
 - `core.CurrencyInput.Validate` rejects `Exponent` outside `[0, 18]` before a
-  currency is even created; the DB `CHECK` is defense-in-depth for the same
-  bound.
+  currency is even created (called from `postgres.CurrencyStore.CreateCurrency`);
+  the DB `CHECK` is defense-in-depth for the same bound.
 
 **Not enforced by**: `core.Allocate` (`core/money.go`) — it requires its
 `total` argument to already be exact at the target exponent (returns
@@ -880,6 +917,14 @@ database.
 - `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
 - `core.TestCurrencyInput_Validate`
 - `core.TestRound_HalfUp` / `TestRound_HalfEven` / `TestRound_Down` / `TestRound_Up`
+- `core.TestConvertAt_MatchesHandCalculation`
+
+**Related tests** (as the "**Not enforced by**" paragraph above says,
+`core.Allocate` requires and guarantees exactness at a given exponent, but
+does so as a pure function with no currency lookup — it is not part of the
+store-level check that actually gates what reaches the database, so these
+don't reference `ErrPrecisionExceeded`/`Round`/`ConvertAt`/`Validate` and
+aren't pins for this invariant):
 - `core.TestAllocate_SumEqualsTotal_KnownCases` and friends
   (`TestAllocate_RejectsNegativeWeight`, `TestAllocate_RejectsAllZeroWeights`,
   `TestAllocate_RejectsEmptyWeights`, `TestAllocate_RejectsOverPrecisionTotal`,
@@ -888,7 +933,6 @@ database.
 - `core.TestAllocateInvariant_SumAlwaysEqualsTotal` (500 random trials)
 - `core.FuzzAllocate` (Go fuzz target — sum(shares) == total for any valid
   total/weights/exponent)
-- `core.TestConvertAt_MatchesHandCalculation`
 
 ---
 
@@ -1086,10 +1130,12 @@ runtime validation.
   — it is never given a `JournalTypeStore` or `TemplateStore` handle, so no
   code path exists by which installing the sweep classification could also
   install a journal type or template for it, and no journal template ever
-  references classification code `sweep`.
-- `service.Onchain`'s sweep orchestration (`service/onchain.go`) never calls
-  `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep booking's
-  transitions — only `Booker.Transition`.
+  references classification code `sweep`. `presets.InstallCryptoDepositBundle`
+  is the umbrella installer that calls `InstallSweepClassification` alongside
+  the deposit bundle's own journal-type/template install.
+- `service.Onchain.RunSweepOnce`'s sweep orchestration (`service/onchain.go`)
+  never calls `JournalWriter.PostJournal`/`ExecuteTemplate` for a sweep
+  booking's transitions — only `Booker.Transition`.
 
 **Pinned by**:
 - `postgres.TestSweepBooking_NeverPostsJournal` (drives a sweep booking
@@ -1156,8 +1202,13 @@ instead of creating a duplicate.
 - `core.DepositSighting.TxLogSeq` (`core/onchain.go`) — the field's doc
   comment states the single admissible definition (receipt-relative
   position). Both ingestion paths must derive it that way: the chains/evm
-  watcher and an external scanner feeding the `channel/onchain` webhook
-  bridge.
+  watcher (`evm.Reader.FetchDeposits`) and the `channel/onchain` webhook
+  bridge (`onchain.EVMAdapter.ParseSighting`), feeding
+  `service.Onchain.IngestDeposit`, the single orchestration both paths
+  funnel through to derive the idempotency key and create the booking.
+  `postgres.BookingStore.CreateBooking`'s existing same-key/same-payload
+  idempotency (I-3) is what resolves repeated observations of the same
+  transfer to the same booking.
 - `evm.Reader.FetchDeposits` (`chains/evm/reader.go`) — for every
   transaction that credited a registered address in the scanned window it
   reads the transaction receipt (`eth_getTransactionReceipt`) and maps each
@@ -1199,13 +1250,6 @@ instead of creating a duplicate.
   that key must resolve to the same booking, not `ErrConflict`; test-credibility.md
   flagged this as PLAUSIBLE-but-unverified since only `block_number` had a
   dedicated test -- verified real, now covered)
-- `postgres.TestBookingMetadataMatches_ObservationVariantKeys_TableDriven`
-  (F-P20, 2026-09-02 audit: the two pins above cover the keys someone
-  remembered to write a test for; this one is derived FROM
-  `bookingMetadataObservationVariantKeys` itself, at the pure-function
-  `bookingMetadataMatches` layer, so a sixth key added to that list without
-  test data is automatically exercised, both directions -- ignored on its
-  own, still conflicts on any other field)
 - `service.TestOnchain_IngestDeposit_FullLifecycle` (end-to-end:
   re-observing the same sighting is a pure no-op; a second Transfer log in
   the same tx with a different `txlog_seq` does not collide)
@@ -1227,6 +1271,19 @@ instead of creating a duplicate.
   the surviving transfers — the same defect's second face)
 - `evm.TestReader_FetchDeposits_UnreadableReceiptFailsClosed` (no sighting may
   be produced from a transaction whose receipt could not be read)
+
+**Related tests** (exercises `bookingMetadataMatches` and
+`bookingMetadataObservationVariantKeys` directly — both unexported, so
+nothing in its own function body names a symbol this doc can hold it to,
+even though it is a genuine white-box pin for the same-package
+`postgres.idempotency_match.go` machinery):
+- `postgres.TestBookingMetadataMatches_ObservationVariantKeys_TableDriven`
+  (F-P20, 2026-09-02 audit: the two pins above cover the keys someone
+  remembered to write a test for; this one is derived FROM
+  `bookingMetadataObservationVariantKeys` itself, at the pure-function
+  `bookingMetadataMatches` layer, so a sixth key added to that list without
+  test data is automatically exercised, both directions -- ignored on its
+  own, still conflicts on any other field)
 
 ## I-21: Review holds a deposit with zero ledger effect
 
@@ -1258,12 +1315,15 @@ be sitting in the user's balance by the time a human looks at the queue.
   only from `confirming`, and its own only outgoing edges are `confirmed`
   and `failed`; no other status can reach `review`, and `review` cannot
   reach anything but a human-driven `ApproveReview`/`RejectReview` call.
-- `service.Onchain.routeToReview` (`service/onchain.go`) calls only
-  `Booker.Transition` -- it never touches `TxComposer`/`JournalWriter`.
+- `service.Onchain.routeToReview` (`service/onchain.go`), called from
+  `service.Onchain.IngestDeposit` when the ceiling or reconcile gate fires,
+  calls only `Booker.Transition` -- it never touches
+  `TxComposer`/`JournalWriter`.
 - `service.Onchain.postDepositConfirmedJournal` is the ONLY function in the
   onchain subsystem that posts a `deposit_confirm` journal; both
-  `advanceConfirmation`'s normal path and `ApproveReview` call through it,
-  so there is exactly one code path that can ever credit a deposit.
+  `advanceConfirmation`'s normal path and `service.Onchain.ApproveReview`
+  call through it, so there is exactly one code path that can ever credit a
+  deposit.
 - `service.Onchain.RejectReview` calls only `Booker.Transition` to `failed`,
   mirroring `routeToReview` -- never `TxComposer`.
 
@@ -1520,7 +1580,8 @@ effect of running reconcile.
 
 **Enforced by**:
 - `postgres.CheckpointIntegrityStore` (`postgres/checkpoint_integrity_store.go`) —
-  `RecomputeBalance`/`RebuildCheckpoint`, backed by
+  `postgres.CheckpointIntegrityStore.RecomputeBalance` /
+  `postgres.CheckpointIntegrityStore.RebuildCheckpoint`, backed by
   `RecomputeCheckpointFromEntries` and `RebuildBalanceCheckpoint`
   (`postgres/sql/queries/integrity_checkpoint.sql`,
   `postgres/sql/queries/checkpoints.sql`).
@@ -1536,7 +1597,10 @@ effect of running reconcile.
   later, cleaner segment of the same lap (C4b).
 - `service.FullReconciliationService.runCheckSystemRollupIntegrity` /
   `runCheckSnapshotIntegrity` (system_rollups / balance_snapshots vs.
-  entries).
+  entries), both reachable only through the public entry point,
+  `service.FullReconciliationService.RunFullReconciliation`, which runs
+  every reconcile check (including `runCheck2GlobalBalance` above) and
+  assembles their results into one report.
 
 **Pinned by**:
 - `postgres.TestCheckpointIntegrity_RecomputeBalance_IgnoresCheckpointTampering`
@@ -1554,21 +1618,29 @@ effect of running reconcile.
   injected poison amount)
 - `postgres.TestCheckpointIntegrity_CheckpointRebuilds_IsAppendOnly` (`UPDATE`
   and `DELETE` against `checkpoint_rebuilds` are both rejected)
-- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
-  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
-  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`,
-  `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
+- `service.TestFullReconciliation_Check2ResumesAcrossRuns` (DB-backed: a
   3-pair fleet scanned 1 pair per run across 4 calls resumes correctly, and
   the run that completes the lap still reports `Passed=false` for a drift
   found two runs earlier)
-- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
-  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`,
-  `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
+- `service.TestFullReconciliation_DetectsSystemRollupDriftFromPoisonedCheckpoint`
   (DB-backed: poisons a checkpoint, refreshes `system_rollups` from it, and
   requires the check to catch the drift against entries)
+- `service.TestFullReconciliation_DetectsSnapshotDrift`
+
+**Related tests** (same-package `service` unit tests against a mock querier,
+calling `runCheck2GlobalBalance` / `runCheckSystemRollupIntegrity` /
+`runCheckSnapshotIntegrity` directly — all three unexported, so nothing in
+their own function bodies names a symbol this doc can hold them to, even
+though they are genuine white-box pins for that mechanism; the DB-backed
+`TestFullReconciliation_*` pins above cover the same checks through the
+exported `RunFullReconciliation` entry point):
+- `service.TestCheck2GlobalBalance_ResumesFromPersistedCursor`,
+  `service.TestCheck2GlobalBalance_LapDirtyPersistsAcrossRuns`,
+  `service.TestCheck2GlobalBalance_PartialRunPersistsLapDirty`
+- `service.TestCheckSystemRollupIntegrity_DetectsDrift`,
+  `service.TestCheckSystemRollupIntegrity_FabricatedRowWithNoEntries`
 - `service.TestCheckSnapshotIntegrity_DetectsDrift`,
-  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`,
-  `service.TestFullReconciliation_DetectsSnapshotDrift`
+  `service.TestCheckSnapshotIntegrity_PageLimitReportsIncomplete`
 
 ---
 
@@ -1985,9 +2057,15 @@ as before P5 existed. Signing cannot add atomicity to a link it does not
 cover.
 
 **Enforced by**:
-- `postgres.LedgerStore.attestJournal` / `PostJournal` (`postgres/ledger_store.go`)
-  -- resolves `EffectiveAt` once, signs before `pool.Begin`, writes the
-  three columns inside the transaction that also writes the journal row.
+- `postgres.LedgerStore.attestJournal` / `postgres.LedgerStore.PostJournal`
+  (`postgres/ledger_store.go`) -- resolves `EffectiveAt` once, signs before
+  `pool.Begin`, writes the three columns inside the transaction that also
+  writes the journal row.
+- `core.VerifyJournalAuth` (`core/auth.go`) recomputes the digest from the
+  journal's own fields and rejects (wrapping `core.ErrUnauthorizedJournal`)
+  any journal whose stored digest is empty, does not match the
+  recomputation, or whose signature/key_id the configured
+  `core.AuthVerifier` does not accept.
 - `core.CanonicalJournalDigest` / `core.EncodeAmount` (`core/auth.go`) --
   the deterministic uid-space encoding (18-decimal fixed-point, 16-byte
   big-endian two's complement, domain-separated SHA-256) both `Sign` and
@@ -2004,7 +2082,9 @@ cover.
   (and must not) touch that function itself.
 - `authdev.NewLocalAttestor` -- refuses a wrong-length seed or empty
   key_id at construction time, in the caller's own composition root,
-  never silently inside the ledger.
+  never silently inside the ledger. `authdev.NewLocalVerifier` /
+  `NewLocalVerifierSet` are the verify-only counterpart (a process holding
+  only the public key).
 - `postgres.LedgerStore.Authorize` / `PostAuthorized`
   (`postgres/ledger_store.go`, design doc §7.5) -- `Authorize` runs
   `attestJournal` before any transaction and refuses to run at all on a
@@ -2040,7 +2120,8 @@ cover.
   (`core/auth_test.go`) -- pin the exact byte layout against independently
   computed values; any diff is a breaking encoding change.
 - `core.TestVerifyJournalAuth_RejectsEmptyStoredDigest` /
-  `RejectsMismatchedDigest` / `RejectsEmptySignature` -- each isolates one
+  `core.TestVerifyJournalAuth_RejectsMismatchedDigest` /
+  `core.TestVerifyJournalAuth_RejectsEmptySignature` -- each isolates one
   of `VerifyJournalAuth`'s three guard clauses; removing any one of them
   was verified, by hand, to make its corresponding test fail (the
   mismatch-check removal reaches a nil `AuthVerifier` and panics; the
@@ -2063,8 +2144,7 @@ cover.
   `TestPostJournal_TxMode_NeverSignsEvenWithAttestor` (the contrasting
   negative: the *old* tx-mode entry point is deliberately unchanged and
   still labeled `unsigned_tx_mode`),
-  `TestPostJournal_PoolMode_AuthStatusMatchesAttestorConfiguration`,
-  `TestAuthStatus_NewColumnRejectsUnknownValue`.
+  `TestPostJournal_PoolMode_AuthStatusMatchesAttestorConfiguration`.
 - `service.TestOnchain_DepositConfirm_SignsViaRunInTx`
   (`service/onchain_signing_test.go`) -- drives a real deposit through
   `IngestDeposit` to `confirmed` with an Attestor configured and asserts
@@ -2076,6 +2156,13 @@ cover.
   (reverting `postDepositConfirmedJournal` to its pre-§7.5
   `ExecuteTemplate`-based form reproduces `auth_status = unsigned_tx_mode`
   and an empty signature).
+
+**Related tests** (schema shape, not application behavior -- a raw SQL
+`INSERT` naming `auth_status` directly, so nothing in its body names a Go
+symbol this doc can hold it to):
+- `postgres.TestAuthStatus_NewColumnRejectsUnknownValue` -- the
+  `auth_status` CHECK constraint (migration 051) rejects a value outside
+  `signed`/`unsigned_no_attestor`/`unsigned_tx_mode`.
 
 ## I-27: The attestation chain is complete -- gapless, linked, signed, and every entry covered exactly once
 
@@ -2154,11 +2241,6 @@ NULL`), not an id-range assumption, so the late entry is simply
   -- the exact §8.2 scenario: two entries commit out of id order; the
   late one is covered on the next run, exactly once, without disturbing
   the earlier one's coverage.
-- `TestNaiveIDRangeWatermark_WouldMissTheLateEntry` -- falsification
-  evidence: the REJECTED alternative (a monotonic `id > watermark`
-  design, no side table) is run against the identical interleaving and
-  shown to structurally exclude the late entry forever, demonstrating
-  why the side-table design is load-bearing, not decorative.
 - `TestAttestationService_EmptyBatchStillProducesAnAttestation` --
   design doc §8.1's "空批照样出一条": a tick that finds nothing still
   produces a row, so "the job ran and found nothing" is never confused
@@ -2184,6 +2266,15 @@ NULL`), not an id-range assumption, so the late entry is simply
   forged journal's entries inserted after full coverage are `TAMPERED`;
   entries legitimately posted after the last batch are `DRIFT` with a
   count, never `VERIFIED`.
+
+**Related tests** (deliberately does NOT exercise this invariant's real
+mechanism -- it runs the REJECTED alternative design instead, so nothing in
+its body names a symbol this doc can hold it to):
+- `TestNaiveIDRangeWatermark_WouldMissTheLateEntry` -- falsification
+  evidence: the REJECTED alternative (a monotonic `id > watermark`
+  design, no side table) is run against the identical interleaving and
+  shown to structurally exclude the late entry forever, demonstrating
+  why the side-table design is load-bearing, not decorative.
 
 ## I-28: The latest external anchor head matches the DB's attestation chain
 
@@ -2250,11 +2341,16 @@ does not also touch the anchor is caught by comparing the two.
   survives a process restart (the anchor itself is external and
   durable).
 - `anchordev.LocalFileAnchor` -- the dev-only local-file `core.Anchor`
-  implementation `Publish`/`Head` calls exercise directly. **Not a
-  production adapter** -- see its package doc comment; the real carrier
-  (an object-lock bucket in a separate cloud account, at minimum) is a
-  genuinely unresolved deployment choice this library does not ship
-  (integrity contracts §7).
+  implementation `anchordev.LocalFileAnchor.Publish`/`Head` calls exercise
+  directly. **Not a production adapter** -- see its package doc comment;
+  the real carrier (an object-lock bucket in a separate cloud account, at
+  minimum) is a genuinely unresolved deployment choice this library does
+  not ship (integrity contracts §7).
+- `service.Worker.StartupReport` names the configured anchor's concrete
+  type (`AttestationAnchorType`) and warns when it is the dev-only file
+  anchor, so a composition root cannot silently wire a non-production
+  carrier -- see `anchordev.NewLocalFileAnchorForDevelopment`'s name for
+  the compile-time half of the same guard.
 
 **Pinned by**:
 - `service.TestAttestationService_PublishesToAnchor` -- the happy path:
@@ -2450,18 +2546,6 @@ every consumer of a Merkle root implicitly relies on).
   supplying the fallback.
 
 **Pinned by**:
-- `core.TestMerkleRoot_GoldenVectors` (`core/merkle_test.go`) -- n=0..8
-  leaves, cross-checked against an independently written Python
-  transcription of RFC 6962's MTH algorithm, AND against
-  `core.TestMerkleTree_RFC6962TestLogRoots` -- a third, independent
-  implementation (Team Lead, from the spec's recursive definition) over
-  the canonical eight-entry Certificate Transparency test log, closing
-  the "no internet access to cross-check official vectors" limitation
-  this implementation disclosed rather than papered over.
-- `core.TestMerkleTree_NoDuplicationOfOddLeaf` -- the CVE-2012-2459 pin:
-  a 3-leaf tree's root is confirmed to differ from the naive
-  duplicate-last-leaf construction's root, both by direct byte
-  comparison and against an independently computed golden value.
 - `core.TestMerkleTree_InclusionProofRoundTrip_AllSizesAndIndices` -- every
   `(n, index)` pair for `n` = 1..32 round-trips through
   `GenerateInclusionProof` + `VerifyInclusion`. Falsification evidence:
@@ -2489,6 +2573,24 @@ every consumer of a Merkle root implicitly relies on).
   `insertAttestationWithoutLeafHashes`): a supplied reference still
   narrows `TAMPERED` to the exact entry id; no reference and no
   self-contained data means no entry list, never a fabricated one.
+
+**Related tests** (golden-vector and CVE-2012-2459 pins for the low-level
+RFC 6962 construction -- genuine white-box tests, but they exercise it
+through `buildMerkleTreeFromPayloads`/`merkleLeafHash`/`merkleNodeHash`,
+all unexported, so nothing in their own function bodies names a symbol
+this doc can hold them to):
+- `core.TestMerkleRoot_GoldenVectors` (`core/merkle_test.go`) -- n=0..8
+  leaves, cross-checked against an independently written Python
+  transcription of RFC 6962's MTH algorithm, AND against
+  `core.TestMerkleTree_RFC6962TestLogRoots` -- a third, independent
+  implementation (Team Lead, from the spec's recursive definition) over
+  the canonical eight-entry Certificate Transparency test log, closing
+  the "no internet access to cross-check official vectors" limitation
+  this implementation disclosed rather than papered over.
+- `core.TestMerkleTree_NoDuplicationOfOddLeaf` -- the CVE-2012-2459 pin:
+  a 3-leaf tree's root is confirmed to differ from the naive
+  duplicate-last-leaf construction's root, both by direct byte
+  comparison and against an independently computed golden value.
 
 ---
 
@@ -2570,8 +2672,8 @@ needing that composition would have to close the gap itself the way
   makes the digest comparison meaningful (byte-identical inputs whenever
   reversal history has not changed in between).
 - `postgres.LedgerStore.ReverseJournal` / `reverseJournalWithQueries`
-  (`postgres/ledger_store.go`) and `ReverseJournalFraction` /
-  `reverseJournalFractionWithQueries` (`postgres/reversal_fraction_store.go`)
+  (`postgres/ledger_store.go`) and `postgres.LedgerStore.ReverseJournalFraction`
+  / `reverseJournalFractionWithQueries` (`postgres/reversal_fraction_store.go`)
   -- the pre-authorize-before-`Begin` sequencing and the post-time digest
   comparison / fallback-status selection.
 - `postgres.LedgerStore.ExecuteTemplateBatch`
@@ -2654,15 +2756,17 @@ never overstate what is safe to pay out.
 reference implementation: individually verifies every contributing
 journal via `core.VerifyJournalAuth`, then trusts
 `CheckpointIntegrityStore.RecomputeBalance`'s entries-only sum once all
-pass; refuses outright on a transaction-bound clone);
+pass; refuses outright on a transaction-bound clone), signed journals
+produced via `postgres.LedgerStore.WithAuth`;
 `postgres.ReserverStore.requireVerifiedAvailableBalance` (the
-opt-in `Reserve` gate, run strictly before any transaction is opened —
-same placement rule as `Authorize`, since an `AuthVerifier` is permitted
-to be a remote call); `service.FullReconciliationService`'s
+opt-in `postgres.ReserverStore.Reserve` gate, run strictly before any
+transaction is opened — same placement rule as `Authorize`, since an
+`AuthVerifier` is permitted to be a remote call); `service.FullReconciliationService`'s
 `unauthorized_journals` check (fleet-wide, samples the NEWEST page of
 journals that claim a signature and confirms it still verifies; skips
 journals that were never signed at all — that is a coverage gap, not tamper
-evidence).
+evidence), reachable only through
+`service.FullReconciliationService.RunFullReconciliation`.
 
 Two corrections to that check from the 2026-09-02 audit:
 
@@ -2905,7 +3009,8 @@ mode `~/.claude/rules/working-agreements.md` §3 names.
 split out of the `ScopeWrite` group; `parseScopeAndCapabilities` (API_KEYS
 `+`-joined capability parsing). `service.Onchain.reviewGate`'s
 `recordReconcileFailure`/`clearReconcileFailure` and the
-`reviewReasonReconcileUnavailable` branch; `core.TokenConfig.ReconcileFailureLimit`;
+`reviewReasonReconcileUnavailable` branch, reached through
+`service.Onchain.IngestDeposit`; `core.TokenConfig.ReconcileFailureLimit`;
 `service.Onchain.validateReconcileFailureLimits` /
 `ValidateReconcileFailureLimits`, called from `Run()` and
 `ledger.Service.EnableOnchain` (same two call sites as I-26's
@@ -3403,11 +3508,15 @@ function both `handlePostTemplate` and `handlePostDepositTolerance` call,
 combining `rejectSystemClassificationTemplate` (which shares
 `systemClassificationUIDs` with the handwritten path's
 `rejectSystemClassificationEntries`) with
-`presets.ProtectedTemplateCodes()` (`presets/protected_templates.go`) merged
+`presets.ProtectedTemplateCodes` (`presets/protected_templates.go`,
+including `presets.DepositConfirmTemplateCode`/`DepositConfirmPendingTemplateCode`
+and `presets.DevCreditTemplateCode`) merged
 with `server.Config.ProtectedTemplateCodes` and reduced by
 `Config.AllowGenericTemplatePost` into `server.Server.protectedTemplateCodes`
 (`server/server.go`), both checked in `handlePostTemplate`
-(`server/handler_journals.go`); `server/openapi_contract_test.go`'s
+(`server/handler_journals.go`) against the `core.Journal` /
+`core.TemplateParams` shape `core.JournalWriter.ExecuteTemplate` takes and
+returns; `server/openapi_contract_test.go`'s
 `TestOpenAPIContract_RequestBodiesMatchGoStructs` /
 `TestOpenAPIContract_ResponseEnvelopesMatchGoStructs` /
 `TestOpenAPIContract_ListEnvelopeItemsMatchGoStructs` /
@@ -3417,6 +3526,11 @@ with `server.Config.ProtectedTemplateCodes` and reduced by
 unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publish.yml`'s
 `verify` job now also runs `codegen:check` before publishing (previously only
 `ledger-react.yml` did, and only on PRs touching `web/**` or `docs/openapi.yaml`).
+Also cross-cited from I-34/I-21, whose own mechanism this section's Pinned
+by list dual-pins (F-P34): `server.Capability` / `server.CapabilityDepositReview`
+(`server/middleware_auth.go`), constructed from `server.APIKey` /
+`server.ScopeWrite` / `server.ScopeAdmin`; `service.Onchain.IngestDeposit`
+and `service.Onchain.Run`.
 
 **Pinned by**:
 - `server.TestDepositReview_SelfMintSelfApprove_MI2` — the end-to-end mi2
@@ -3460,20 +3574,15 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   control for the above: installed templates whose legs are all holder-side
   (`lock_funds`, `unlock_funds`) still execute, so the rule is not a blanket
   deny of the endpoint.
-- `server.TestPostTemplate_RefusesTheAuditedMintingCodes` — the three codes
-  the 2026-09-02 audit's own httptest reproduction posted successfully,
-  named as literals: `dev_credit`, `capital_injection`, `fee_charge`.
-- `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` /
-  `TestPostTemplate_UnknownTemplateCodeNeverReachesExecuteTemplate` — the two
-  layers are independent and the order is load-bearing: a protected code is
-  refused even when the template table answers `ErrNotFound` for everything,
-  and an unknown code fails closed at the guard rather than reaching
-  `ExecuteTemplate`.
+- `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` — a
+  protected code is refused even when the template table answers
+  `ErrNotFound` for everything (the order is load-bearing: the name-list
+  layer runs first).
 - `server.TestPostTemplate_DefaultProtectsDepositCodes` — M-2's own pin:
   an unconfigured `Config.ProtectedTemplateCodes` still refuses every code in
   the library's hardcoded set; verified red before that revision (all four
   posted 201, not 403). Written as literals rather than ranged over
-  `presets.ProtectedTemplateCodes()` (D-m9): a table driven by the
+  `presets.ProtectedTemplateCodes` (D-m9): a table driven by the
   implementation's own return value cannot fail because a dangerous code is
   absent from that return value.
 - `server.TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes` — the
@@ -3481,16 +3590,11 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   and outside `Config.ProtectedTemplateCodes` is not refused by it.
 - `server.TestPostTemplate_AllowGenericTemplatePostIsTheOnlyWayPastTheSystemLegRule`
   — the structural rule's single opt-out, per-code and explicit.
-- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` /
-  `TestPostDepositTolerance_RequiresAdminScope` — §7.11's own pins: all five
-  outcomes that would execute a step are refused under default config
-  (verified red 2026-09-02: all five posted 201 with `ExecuteTemplate`
-  reached), and a `write`-scope key is refused by the route's scope even with
-  the step codes opted in (verified red before the route moved).
-- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` /
-  `TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` — the
-  controls: the gate refuses executions, not the endpoint, and the same
-  single escape hatch opts a deployment back in.
+- `server.TestPostDepositTolerance_RequiresAdminScope` — a `write`-scope key
+  is refused by the route's scope even with the step codes opted in
+  (verified red before the route moved).
+- `server.TestPostDepositTolerance_AllowGenericTemplatePostOptsItBackIn` —
+  the control: the same single escape hatch opts a deployment back in.
 - `server.TestReverseJournal_RejectsClientSuppliedIdempotencyKey` /
   `TestReverseJournal_RejectsIdempotencyKeyHeader` /
   `TestReverseJournal_WithoutIdempotencyKeyPostsTheReversal` — H-M3's Go
@@ -3503,6 +3607,23 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   hatch opts a specific default-protected code back in without opening the
   others, answering whether defaulting protection on could brick a
   deployment with a reviewed reason to post one of these codes generically.
+
+**Related tests** (exercise real mechanism -- the httptest harness, the
+openapi.yaml-vs-registry cross-check -- entirely through local test-package
+helpers or unexported package-level vars/funcs, so nothing in their own
+function bodies names a symbol this doc can hold them to):
+- `server.TestPostTemplate_RefusesTheAuditedMintingCodes` — the three codes
+  the 2026-09-02 audit's own httptest reproduction posted successfully,
+  named as literals: `dev_credit`, `capital_injection`, `fee_charge`.
+- `server.TestPostTemplate_UnknownTemplateCodeNeverReachesExecuteTemplate` —
+  an unknown code fails closed at the guard rather than reaching
+  `ExecuteTemplate`.
+- `server.TestPostDepositTolerance_RefusesProtectedTemplatesByDefault` —
+  all five outcomes that would execute a step are refused under default
+  config (verified red 2026-09-02: all five posted 201 with
+  `ExecuteTemplate` reached).
+- `server.TestPostDepositTolerance_PlanWithNoStepsIsUnaffected` — the gate
+  refuses executions, not the endpoint.
 - `server.TestOpenAPIContract_EveryRequestBodySchemaIsRegistered` /
   `TestOpenAPIContract_EveryResponseEnvelopeSchemaIsRegistered` — M-8's own
   pins: verified red by construction (delete any single entry from
@@ -3512,6 +3633,7 @@ unconditionally by `ci.yml`'s `test` job; `.github/workflows/ledger-react-publis
   `JournalWithEntriesEnvelope`, `ReconcileEnvelope`, and
   `ReconcileReportEnvelope` to make these two tests pass is what surfaced
   the three real drifts the revision note above describes.
+
 ## I-39: Advisory-lock coordination is structurally safe, not conventionally safe
 
 (`docs/audits/2026-08-25-financial-engineering/concurrency.md`, board #30/#24,
@@ -3664,19 +3786,28 @@ to fix.
 - `postgres/sql/queries/journals.sql`'s `AcquireBalanceLock`
   (`hashtextextended('bal:' || key, 0)`) and `AcquireIdempotencyLock`
   (`hashtextextended('idem:' || key, 0)`), both single-key
-  `pg_advisory_xact_lock(bigint)`.
+  `pg_advisory_xact_lock(bigint)` -- exercised directly through the
+  test-only seams `postgres.AcquireBalanceLocksForTest` /
+  `postgres.AcquireIdempotencyLockForTest` (`postgres.NewQueriesForTest` /
+  `postgres.NewBalancePair` / `postgres.SortedUniquePairsForTest` build
+  their inputs), since both are otherwise unexported.
 - `postgres/ledger_store.go`'s `sortedUniquePairs` (shared dedupe+sort,
-  extracted from `balancePairsFromEntries`) and `ExecuteTemplateBatch`'s
-  pool-mode pre-lock step, before its per-journal posting loop.
-- `postgres/reserver_store.go`'s `s.pool == nil` guard inside `Reserve`'s
-  `RequireVerifiedBalance` branch.
+  extracted from `balancePairsFromEntries`) and
+  `postgres.LedgerStore.ExecuteTemplateBatch`'s pool-mode pre-lock step,
+  before its per-journal posting loop.
+- `postgres/reserver_store.go`'s `s.pool == nil` guard inside
+  `postgres.ReserverStore.Reserve`'s `RequireVerifiedBalance` branch.
 - `service/worker.go`'s `expirationJob := service.NewLockedJob("expiration",
   ...)`, mirroring `reconcileJob` / `sysRollupJob` / `fullReconcileJob` /
-  `partitionJob` / `attestJob`.
+  `partitionJob` / `attestJob`, run through `service.Worker.Run` (the
+  lock key itself exposed to tests via `service.AdvisoryLockKeyForTest`).
 - `postgres/sql/queries/integrity_checkpoint.sql`'s
-  `CountPendingRollupForDimension`, `AND failed_attempts < 10`.
-- `postgres/registration_rescan_store.go`'s `AdvanceRegistrationRescan` /
-  `RetryRegistrationRescan`, both `WHERE uid = $1::uuid AND attempts = $N`;
+  `CountPendingRollupForDimension`, `AND failed_attempts < 10`, gating
+  `postgres.CheckpointIntegrityStore.RebuildCheckpoint`.
+- `postgres/registration_rescan_store.go`'s
+  `postgres.RegistrationRescanStore.AdvanceRegistrationRescan` /
+  `postgres.RegistrationRescanStore.RetryRegistrationRescan`, both
+  `WHERE uid = $1::uuid AND attempts = $N`;
   `core.RegistrationRescanStore`'s interface doc comment
   (`core/onchain.go`); the 3 call sites in `service/onchain.go` that thread
   `job.Attempts` through as `expectedAttempts`.
@@ -3906,14 +4037,16 @@ stalling that chain's fund collection with no self-healing path
 **Enforced by**: `service.FullReconciliationService.RunFullReconciliation`
 (check suite composition, `service/reconcile.go`); `runCheck2GlobalBalance`'s
 `resumedLap` tracking and the `scanned == 0 && resumedLap` branch (same
-file); `service.RollupService.processItem`'s `BalanceDrift` call (`service/rollup.go`);
+file); `service.RollupService.processItem`'s `BalanceDrift` call
+(`service/rollup.go`), reached through `service.RollupService.ProcessBatch`;
 `chains/evm.multicallResultsToBalances` / `chains/evm.decodeERC20BalanceOf`
 (`chains/evm/scanner.go`) excluding an unreadable address from `balances`
 (see the m-10 correction below for the per-address, not per-batch, grain
 this operates at) instead of defaulting it to zero;
 `chains/evm.Sweeper.priorFeeFloor` / `chains/evm.Sweeper.GasPrice`
 / `chains/evm.feeCapBasis` (`chains/evm/sweeper.go`); `core.Sweeper.BatchSweep`'s
-`priorTxHash` parameter (`core/interfaces.go`).
+`priorTxHash` parameter (`core/interfaces.go`), reached from
+`service.Onchain.RunSweepOnce`.
 
 **Pinned by**:
 - `service.TestFullReconciliation_AllPass` / `TestFullReconciliation_FullCoverageCanBeTrue` —
@@ -3921,20 +4054,13 @@ this operates at) instead of defaulting it to zero;
   `true` when everything is wired and nothing is capped or skipped (the DB-backed
   half is `service.TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid`'s
   added `FullCoverage` assertion).
-- `service.TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete` /
-  `TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete` — the
-  resumed-vs-fresh boundary, both directions; `service.TestFullReconciliation_Check2ResumesAcrossRuns`'s
-  fourth run is the DB-backed pin for the same boundary.
+- `service.TestFullReconciliation_Check2ResumesAcrossRuns`'s fourth run is
+  the DB-backed pin for the resumed-vs-fresh boundary.
 - `service.TestRollupService_DriftDetection` (asserts the reported value is
   the positive magnitude 85, not the raw balance -85) /
   `TestRollupService_DriftDetection_ClearsOnceHealthy`.
-- `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` /
-  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`;
-  `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
+- `service.TestOnchain_Sweep_UnreadableAddressDoesNotBlockReadableAddresses`
   (correction below).
-- `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
-  `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
-  `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
 - `service.TestOnchain_Sweep_GasBumpCarriesPriorTxHash` /
   `TestOnchain_Sweep_GasBumpFallsBackToChannelRefAfterRestart` — point 5's
   SERVICE half, which had no pin at all until the 2026-09-02 remediation
@@ -3946,9 +4072,7 @@ this operates at) instead of defaulting it to zero;
   The second test covers the restart case specifically: with the in-memory
   tracking gone, the bump must fall back to the booking's persisted
   `ChannelRef`, which is the durable hash point 5 is about.
-- `chains/evm.TestSweeper_ReplacementGasPrice_QuotesTheEscalatedBidInGwei` /
-  `TestSweeper_ReplacementGasPrice_FallsBackToMarketOnFirstDispatch` and
-  `service.TestOnchain_Sweep_GasBumpRespectsGasCeiling` — point 5's final
+- `service.TestOnchain_Sweep_GasBumpRespectsGasCeiling` — point 5's final
   clause ("`GasCeiling` bounds what will really be paid") held only for a
   FIRST dispatch. A replacement bids `max(market basis, prior fee x 1.125)`,
   which the market basis does not bound, so on the retry path — the only
@@ -3963,6 +4087,24 @@ this operates at) instead of defaulting it to zero;
   ladder's floor while the only gate that ran (`sweepTick`'s) had compared
   the market price, before the nonce was even known. Both dispatch and bump
   now gate on the bid for their own nonce.
+
+**Related tests** (same-package white-box tests calling an unexported entry
+point directly -- `runCheck2GlobalBalance`, `multicallResultsToBalances` /
+`decodeERC20BalanceOf`, `Sweeper.quoteFee` / `recordFee` /
+`replacementGasPriceFrom` / package-level `gasPriceFrom` -- so nothing in
+their own function bodies names a symbol this doc can hold them to; the
+DB-backed / service-level pins above cover the same properties through an
+exported entry point):
+- `service.TestCheck2GlobalBalance_ResumedCursorZeroPairsIsIncomplete` /
+  `TestCheck2GlobalBalance_FreshCursorZeroPairsStillComplete` — the
+  resumed-vs-fresh boundary, both directions.
+- `chains/evm.TestMulticallResultsToBalances_FailsClosedPerAddress` /
+  `TestDecodeERC20BalanceOf_FailsClosedOnMalformedReturn`.
+- `chains/evm.TestSweeper_QuoteFee_PrefersChainTruthOverMemory` /
+  `TestSweeper_QuoteFee_FallsBackToMemoryWhenPriorHashUnknown` /
+  `TestSweeper_QuoteFee_NoPriorMeansNoBump`.
+- `chains/evm.TestSweeper_ReplacementGasPrice_QuotesTheEscalatedBidInGwei` /
+  `TestSweeper_ReplacementGasPrice_FallsBackToMarketOnFirstDispatch`.
 
 > **Correction (m-10 fix on point 4, `.local/independent-review-2026-08-26.md`,
 > third-pass independent review).** Point 4 as originally written and its
@@ -4152,10 +4294,11 @@ DEFINER) never receive a per-partition grant at all -- the only way
 `ledger_app` reaches them is tuple-routing through the parent's own name,
 which Postgres checks against the parent's ACL (the one this migration
 restricts), not the partition the row physically lands in --
-`postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` (I-35) already
-pins that routing behavior. `postgres/sql/queries/journals.sql`'s
+`TestLedgerAppInsertsIntoPartitionCreatedAfterGrant` (postgres package,
+I-35) already pins that routing behavior. `postgres/sql/queries/journals.sql`'s
 `InsertJournalEntry` is the sole production write path into this table and
-never lists `id` in its column list, so it is unaffected.
+never lists `id` in its column list, so it is unaffected. That write path
+is reached through `postgres.LedgerStore.PostJournal`.
 
 **Pinned by**:
 - `postgres.TestJournalEntries_DuplicateIDAcrossPartitions_Rejected` --
@@ -4163,13 +4306,19 @@ never lists `id` in its column list, so it is unaffected.
   real `ledger_app` credential (`newAppPool`) and asserted refused
   (`SQLSTATE 42501`) rather than silently splitting the ledger's two views
   of the same balance.
-- `postgres.TestRoleAttributes` -- static ACL shape: `journal_entries` keeps
-  table-level `SELECT` for `ledger_app`, no table-level `INSERT`, a
-  column-level `INSERT` on `journal_id` (representative of the
-  non-`id` column set), and no column-level `INSERT` on `id`.
 - `postgres.TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants/journal_entries` --
   the same shape, enumerated structurally alongside every other table's grant
   policy rather than hardcoded to this one table.
+
+**Related tests** (static ACL shape checked via `pg_roles` /
+`information_schema` and local unexported helpers
+(`assertGrants`/`assertColumnPrivilegeExists`/`assertColumnPrivilegeAbsent`),
+so nothing in its own function body names a Go symbol this doc can hold it
+to):
+- `postgres.TestRoleAttributes` -- `journal_entries` keeps table-level
+  `SELECT` for `ledger_app`, no table-level `INSERT`, a column-level
+  `INSERT` on `journal_id` (representative of the non-`id` column set), and
+  no column-level `INSERT` on `id`.
 
 > **Correction (M-5 fix, `.local/independent-review-2026-08-26.md`,
 > docs/plans/2026-08-26-audit-remediation-contracts.md follow-on
@@ -4284,7 +4433,9 @@ function is never inlined by the planner — see the migration's comment and
 `CASE` (statistically indistinguishable) and ~3.0ms/op for an otherwise
 identical `STRICT` variant (~2.1x slower) — the `STRICT` measurement was
 taken with a throwaway benchmark during this task and is not preserved in
-the repository.
+the repository. `postgres.VerifiedBalanceStore.VerifiedBalance` (I-32) is
+one of the entries-only recompute paths that ultimately routes its sign
+arithmetic through this convergence.
 
 **Pinned by**:
 - `core.TestSign_RejectsUnknownNormalSideAndEntryType` / `TestSign_Table` —
@@ -4304,6 +4455,14 @@ the repository.
   `TestLedgerSignedDelta_AgreesWithCoreDelta` — the SQL functions match
   `core.SignedAmount` / `core.Delta` bit-for-bit across all four valid
   combinations.
+- `postgres.TestVerifiedBalance_ZeroContributingJournalsIsDefinedZero` — the
+  vacuous-truth case for the entries-only recompute path this convergence
+  ultimately backs.
+
+**Related tests** (call `ledger_signed_amount`/`ledger_signed_delta`
+directly via raw SQL, or INSERT directly to probe a CHECK constraint, so
+nothing in their own function bodies names a Go symbol this doc can hold
+them to):
 - `postgres.TestLedgerSignedAmount_RejectsUnknownNormalSide` /
   `TestLedgerSignedDelta_RejectsUnknownNormalSide` — the SQL-side reject,
   asserted against the exact Postgres error code
@@ -4392,13 +4551,15 @@ rejected prior shapes (a journal-type code or a uid string).
 `IsValid()` — the DB layer cannot accept a value the Go layer would refuse,
 or vice versa. `postgres/sql/queries/holder.sql`'s
 `ListHolderTransactionRows` is the sole place the `COALESCE(NULLIF(...),
-'other')` read-time fallback is applied. `presets.JournalTypePreset.HolderKind`
+'other')` read-time fallback is applied, read through
+`postgres.LedgerStore.ListHolderTransactions`. `presets.JournalTypePreset.HolderKind`
 (`presets/templates.go` and every other `presets/*.go` bundle file) —
 every preset journal type this package installs declares one explicitly;
 `presets.ensureJournalTypePreset`'s expand-safe upgrade (mirroring
-`ensureClassificationPreset`'s `balance_role` upgrade) retags a
-pre-migration-012 row in place on re-install and rejects a conflicting
-pre-existing non-empty value rather than silently overwriting it.
+`ensureClassificationPreset`'s `balance_role` upgrade), reached through
+`presets.InstallDefaultTemplatePresets`, retags a pre-migration-012 row in
+place on re-install and rejects a conflicting pre-existing non-empty value
+rather than silently overwriting it.
 
 **Pinned by**:
 - `core.TestHolderTxKind_IsValid` — the closed vocabulary, including the two
@@ -4563,6 +4724,8 @@ never-signed-at-all case this same function already handles per I-32);
 constructor that makes "register the retired key" a thing an operator can
 actually do, plus `LocalVerifier.KeyIDs` for a startup log or health
 endpoint answering "which generations can this process verify?".
+`runCheckUnauthorizedJournals` is reached only through
+`service.FullReconciliationService.RunFullReconciliation` (I-32).
 
 **Pinned by**:
 - `authdev.TestNewLocalAttestor_RejectsUnknownKeyID` — an unrecognized
@@ -4623,9 +4786,13 @@ this bug's exact shape: `time.Now()`-based tests passed on the author's
 Mac and only failed in Linux CI.
 
 **Enforced by**: `core.canonicalTimestamp` (`core/auth.go`), called from
-`core.CanonicalJournalDigest` and `core.encodeAttestedEntry`
-(`core/attestation.go`) before every `.Format(time.RFC3339Nano)` call that
-feeds a signed digest. No new domain separator accompanies this fix --
+`core.CanonicalJournalDigest`, `core.CanonicalBatchDigest`, and
+`core.encodeAttestedEntry` (`core/attestation.go`) before every
+`.Format(time.RFC3339Nano)` call that feeds a signed digest.
+`core.VerifyJournalAuth` (I-26) is what a caller-facing digest mismatch
+ultimately surfaces through, fed by `postgres.AttestationStore.JournalAuthMaterial`
+reading the value back from a real `TIMESTAMPTZ` column via
+`postgres.LedgerStore.PostJournal`. No new domain separator accompanies this fix --
 `canonicalTimestamp`'s doc comment lays out why: the floor is a no-op for
 any `effective_at` that was already microsecond-aligned (every instant that
 round-tripped a `TIMESTAMPTZ` column, and every instant macOS's `time.Now()`
@@ -5176,12 +5343,13 @@ dead-letter row means it is recorded rather than lost. Everything else,
 including an unclassified error, holds the cursor.
 
 **Enforced by**:
-- `service.Onchain.scanChainOnce` (`service/onchain.go`) — collects blocking
-  failures and returns without calling `SetCursor`; classifies via
-  `permanentIngestFailure` (`core.IsRetryable`); records deterministic
-  rejections through `DeadLetterRecorder`. `Metrics.ChainCursorLag` is
-  reported against the block actually scanned, so a held cursor shows up as
-  a growing lag.
+- `service.Onchain.scanChainOnce` (`service/onchain.go`), reached through
+  `service.Onchain.RunWatchOnce` (single tick) and `service.Onchain.Run`
+  (the long-running loop) — collects blocking failures and returns without
+  calling `SetCursor`; classifies via `permanentIngestFailure`
+  (`core.IsRetryable`); records deterministic rejections through
+  `DeadLetterRecorder`. `Metrics.ChainCursorLag` is reported against the
+  block actually scanned, so a held cursor shows up as a growing lag.
 - `service.Onchain.escalateWatcherStall` — after
   `WithWatcherStallAlertAfter` consecutive failed ticks on one chain, every
   still-blocking sighting is dead-lettered and a wedged-watcher error is
@@ -5189,7 +5357,8 @@ including an unclassified error, holds the cursor.
 - `service.Onchain.processRegistrationRescan` — same classification, same
   fail-closed advance semantics for the historical rescan path.
 - `postgres.SetChainCursor` (`postgres/sql/queries/chain_cursors.sql`) —
-  `WHERE chain_cursors.last_scanned_block < EXCLUDED.last_scanned_block`.
+  `WHERE chain_cursors.last_scanned_block < EXCLUDED.last_scanned_block`,
+  wrapped by `postgres.ChainCursorStore.SetCursor`.
 - `service.newWatchLockedJob` — the per-chain watch loop runs under
   `advisoryLockKey("job:onchain_watch:<chainID>")`, so concurrent replicas
   cannot undo a deliberately held cursor.
@@ -5302,9 +5471,9 @@ table) and were fixed both times by deriving them mechanically.
 under the mutex that now guards `localDeliverer`; `(*Service).Worker`'s
 `s.tx` guard, its `SetFullReconciler` / `SetPartitionService` / `SetPool` /
 `SetLocalPoller` / `SetLogger` wiring, and `ledger.New`'s
-`eventStore.SetLogger`; `mergeWorkerConfig`'s field-driven fill;
-`RegisterChannel`'s `s.tx` guard; `withTx` carrying `onchain`; `Ping` routing
-through `DBTX()` (all `ledger.go`).
+`eventStore.SetLogger`; `mergeWorkerConfig`'s field-driven fill over
+`service.DefaultWorkerConfig`; `RegisterChannel`'s `s.tx` guard; `withTx`
+carrying `onchain`; `Ping` routing through `DBTX()` (all `ledger.go`).
 
 **Pinned by** (root package, cited bare per this doc's convention — see I-13):
 - `TestServiceWorker_RefusesToRunUnderTheDefaultSilentLogger` — README's
@@ -5334,14 +5503,18 @@ through `DBTX()` (all `ledger.go`).
   `TestMergeWorkerConfig_KeepsCallerValues` (internal test) — every
   `WorkerConfig` field ends non-zero and equal to its default, and explicit
   caller values survive.
-- `TestCloneEscapeSurfaceIsDeclaredOrGuarded` — the AST gate for property 5,
-  with `TestCloneEscapeScanner_CatchesAnUnguardedUndeclaredMethod` proving
-  the scanner is falsifiable rather than vacuous (I-48's lesson).
 - `TestService_RegisterChannel_RefusedOnTxBoundClone` /
   `TestService_Worker_RefusedOnTxBoundClone` /
   `TestService_Onchain_VisibleOnTxBoundClone` /
   `TestService_Ping_FollowsTheCloneTransaction` — each establishes a control
   on the top-level Service first, so the assertion isolates the guard.
+
+**Related tests** (the property-5 AST scanner, `scanCloneEscapes`, is
+defined in the test file itself, not a production symbol, so nothing in
+either pin's own function body names a symbol this doc can hold it to):
+- `TestCloneEscapeSurfaceIsDeclaredOrGuarded` — the AST gate for property 5.
+- `TestCloneEscapeScanner_CatchesAnUnguardedUndeclaredMethod` — proves the
+  scanner is falsifiable rather than vacuous (I-48's lesson).
 
 ## I-55: What the anchor said before is remembered, so an erased or rolled-back anchor is not read as a benign backlog
 
