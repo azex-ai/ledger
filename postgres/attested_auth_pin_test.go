@@ -22,18 +22,22 @@ import (
 	"github.com/azex-ai/ledger/service"
 )
 
-// TestVerifiedBalance_TrustsCachedAuthorizedVerdictEvenIfLiveRecheckWouldFail
-// is T4's headline pin: it proves the fast path genuinely bypasses a live
-// core.VerifyJournalAuth call for an already-attested journal, not just
-// that it happens to return the same answer. After RunAttestBatch caches
-// core.JournalAuthVerdictAuthorized for a genuinely-signed journal, this
+// TestVerifiedBalance_CachedAuthorizedVerdictDoesNotSkipTheLiveCheck is the
+// pin for I-33's one-directional trust rule: a cached
+// core.JournalAuthVerdictAuthorized is NOT a substitute for verification.
+//
+// After RunAttestBatch caches Authorized for a genuinely-signed journal, this
 // test corrupts that journal's stored signature directly via SQL (an
 // owner-role bypass of the no-arbitrary-update trigger -- this wave's
-// standing threat model) so that a LIVE re-verification would now fail
-// (confirmed directly below, as a sanity check that is itself the
-// pre-T4/pre-fix behavior this pin falsifies -- working-agreements §3).
-// VerifiedBalance must still succeed with the correct balance, proving it
-// trusted the cached, pre-corruption verdict instead of re-deriving it.
+// standing threat model) so that a LIVE re-verification would now fail. The
+// sanity check below confirms it really would, so the final assertion tests
+// the gate and not the fixture (working-agreements §3). VerifiedBalance must
+// then REFUSE (core.ErrUnauthorizedJournal): the cached verdict answers "was
+// this journal authorized when it was attested", and a withdrawal gate needs
+// "is it authorized now".
+//
+// T4 originally asserted the opposite here -- the design was wrong, not the
+// test. The body carries the full account at the assertion itself.
 func TestVerifiedBalance_CachedAuthorizedVerdictDoesNotSkipTheLiveCheck(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()

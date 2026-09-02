@@ -160,6 +160,14 @@ type Reserver interface {
 	// input.IdempotencyKey is REQUIRED (I-3): see SettleInput's doc comment
 	// for why the reservation's own state machine cannot serve as a replay
 	// signal for a terminal transition.
+	//
+	// THIS METHOD POSTS NO ACCOUNTING. Settling only removes the hold; the
+	// settled amount does not leave the balance until the caller posts the
+	// charge journal, and it must do so inside the same RunInTx. A caller
+	// that settles without posting sees the whole reservation -- settled
+	// portion included -- reappear as spendable in GetBalanceBreakdown, with
+	// nothing anywhere recording that a settlement happened. See
+	// examples/billing for the composed shape.
 	Settle(ctx context.Context, input SettleInput) error
 	// Release cancels an active reservation, freeing its entire reserved
 	// amount without any accounting effect. It is a no-op on the ledger
@@ -184,6 +192,13 @@ type Reserver interface {
 	// SettlePartial call is not a valid "settle everything" shortcut; use
 	// Settle for that. input.IdempotencyKey is REQUIRED (I-3); see
 	// FinalizeSettlementInput's doc comment.
+	//
+	// THIS METHOD POSTS NO ACCOUNTING either, and the gap is wider here
+	// because the settled amount accumulated across several SettlePartial
+	// calls: finalizing releases the remaining hold, so every partially
+	// settled amount whose journal was never posted returns to available at
+	// once. Post the charge journals in the same RunInTx as the SettlePartial
+	// calls that authorize them.
 	FinalizeSettlement(ctx context.Context, input FinalizeSettlementInput) error
 	// HeldAmount returns the holder's outstanding holds in the given currency:
 	// full reserved_amount for active reservations plus the unsettled
@@ -700,6 +715,13 @@ type AuthVerifier interface {
 // A dimension with zero contributing journals returns (decimal.Zero, nil):
 // "every journal that touched this account is authorized" is vacuously
 // true when no journal ever touched it.
+//
+// Call this OUTSIDE any transaction the caller has open. An implementation
+// consults an AuthVerifier, which is explicitly permitted to run off-host,
+// and financial.md forbids an external call from inside an open transaction
+// (postgres.VerifiedBalanceStore refuses outright when bound to one). The
+// withdrawal shape is therefore: read the verified balance on the pool,
+// decide, then open the transaction and post the journal inside it.
 //
 // This is a mechanism, not a policy: the library does not decide whether
 // any given call site (Reserve, a withdrawal handler, ...) should call

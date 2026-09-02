@@ -2163,7 +2163,16 @@ this library calls `VerifiedBalance` automatically. `core.Reserver`'s
 `ReserveInput.RequireVerifiedBalance` is an opt-in gate a caller sets per
 call — off by default, no threshold, no consumer-side choice made on the
 library's behalf (`docs/plans/2026-08-21-integrity-hardening-contracts.md`
-§W2-3).
+§W2-3). When that gate is set, the amount it authorizes is the recomputed
+one, not `balance_checkpoints` + delta — that is I-49, and it is a
+separate rule because it was originally, and wrongly, disclaimed here.
+
+`VerifiedBalance` must be called outside any open transaction: an
+`AuthVerifier` may run off-host and `financial.md` forbids external calls
+inside a transaction, so `postgres.VerifiedBalanceStore` fails closed
+(`core.ErrInvalidInput`) when bound to one — the same guard
+`LedgerStore.Authorize` and the `Reserve` gate carry at their own entry
+points.
 
 **Why**: The naive alternative — exclude unauthorized journals and sum the
 rest — is wrong and dangerous. A journal's net contribution to a dimension
@@ -2179,7 +2188,8 @@ never overstate what is safe to pay out.
 reference implementation: individually verifies every contributing
 journal via `core.VerifyJournalAuth`, then trusts
 `CheckpointIntegrityStore.RecomputeBalance`'s entries-only sum once all
-pass); `postgres.ReserverStore.requireVerifiedAvailableBalance` (the
+pass; refuses outright on a transaction-bound clone);
+`postgres.ReserverStore.requireVerifiedAvailableBalance` (the
 opt-in `Reserve` gate, run strictly before any transaction is opened —
 same placement rule as `Authorize`, since an `AuthVerifier` is permitted
 to be a remote call); `service.FullReconciliationService`'s
@@ -2212,8 +2222,11 @@ itself skipped, `Complete=false`, when no `core.AuthVerifier` is wired via
   (a baseline `Reserve` call in the same test, `RequireVerifiedBalance`
   unset) would approve it.
 - `postgres.TestReserve_RequireVerifiedBalance_AllowsWhenEverythingSigned` —
-  the gate does not reject a perfectly ordinary, fully signed account; it
-  is an authorization check, not a stricter amount check.
+  the gate does not reject a perfectly ordinary, fully signed account.
+- `postgres.TestVerifiedBalance_TxBoundStoreFailsClosed` — a
+  transaction-bound clone refuses with `core.ErrInvalidInput` and the
+  counting `AuthVerifier` records zero calls, so the guard is proven to
+  fire *before* the external call, not after it.
 - `service.TestFullReconciliation_UnauthorizedJournals_SkippedWithoutSetAuthCheck` /
   `TestFullReconciliation_UnauthorizedJournals_PassesWhenAllSignedJournalsAreValid` /
   `TestFullReconciliation_UnauthorizedJournals_FlagsForgedSignature` /
@@ -4097,6 +4110,80 @@ named `t.Run` subtests.
   lenient, not evidence it is — see the two "deliberately left
   unenforced" items above, which is where that leniency actually is, and
   is documented as intentional rather than an oversight).
+
+## I-49: Under the verified-balance gate, what `Reserve` may lock is computed from entries alone — `balance_checkpoints` cannot raise it
+
+**Rule**: When `core.ReserveInput.RequireVerifiedBalance` is set, the
+available base `Reserve` sizes the reservation against is
+Σ `VerifiedBalance(holder, currency, cls)` over every
+`balance_role='available'` classification the holder has entries in, minus
+that holder's active reservation holds. Each term is an entries-only
+recompute (I-32 → `CheckpointIntegrityStore.RecomputeBalance`); no term
+reads `balance_checkpoints`. Insufficiency against that base is
+`core.ErrInsufficientBalance` — distinct from the authorization refusal
+(`core.ErrUnauthorizedJournal`) I-32 defines. With the flag unset, `Reserve`
+is unchanged: checkpoint + delta, exactly as before.
+
+The set of classifications summed comes from `journal_entries`
+(`ListComputedBalancesForHolders`' `populated` CTE is a `DISTINCT` over
+entries), so the enumeration is entries-derived too. Only the
+classification's `balance_role` is read from config; the `balance` column
+that query also returns is deliberately ignored on this path.
+
+**Why**: `balance_checkpoints` is the one balance-bearing table that must
+stay `UPDATE`-able — the rollup worker's whole job is writing it — so it
+carries no `ledger_block_mutation` trigger, and the standing threat model's
+first row (an attacker holding the application's DB credential) can raise a
+row in it with one statement. Design doc
+`2026-08-21-tamper-evident-ledger-design.md` §0 accordingly classifies the
+checkpoint as an **untrusted cache** and requires the withdrawal path to
+recompute in full.
+
+The gate did not do that. It verified signatures — correctly, and every
+journal in the attack is genuinely signed, so the check passes — and then
+threw the recomputed number away; `reserveWithQueries` sized the
+reservation off checkpoint + delta. One `UPDATE balance_checkpoints`
+therefore bought an arbitrarily large reservation, and then an arbitrarily
+large settlement, with the tamper-evidence machinery reporting nothing
+wrong, because nothing it watches *was* wrong. The asynchronous
+`checkpoint_balance` reconcile check finds the drift on its next run; the
+money is gone by then.
+
+I-32's earlier wording made this a feature rather than a bug ("it is an
+authorization check, not a stricter amount check", stated in its `Pinned by`
+section), which is why no pin was red: the rule itself had legalized the
+gap. This invariant is the corrected rule — see
+`docs/audits/2026-09-02-deep-audit/tamper-evident.md` C-1 and
+`lead-verification.md` C-Critical-1 for the reproduction.
+
+**Placement note (why the value is trustworthy despite being read outside
+the lock)**: the gate runs before the transaction opens, because an
+`AuthVerifier` may be a remote call and `financial.md` forbids external
+calls inside a transaction; `reserveWithQueries` then re-reads holds under
+the `(holder, currency)` advisory lock. An entry committed in that window
+makes the recomputed base stale — but only ever stale-*low* relative to
+the truth at lock time, since entries are append-only (I-1) and a
+concurrent reserve is serialized by the same lock. The gated path can
+therefore refuse a reservation it could have allowed; it can never allow
+one it should have refused. Re-reading under the lock would move the
+verifier call inside the transaction and is not an option.
+
+**Enforced by**: `postgres.ReserverStore.requireVerifiedAvailableBalance`
+(returns the sum) and `postgres.ReserverStore.reserveWithQueries` (uses it
+as `availableBase` whenever the gate ran, in place of
+`sumBalancesByRoleWithQueries`).
+
+**Pinned by**:
+- `postgres.TestReserve_RequireVerifiedBalance_RejectsInflatedCheckpoint` —
+  every journal genuinely signed, `balance_checkpoints` inflated by
+  1,000,000 via direct SQL: a gated `Reserve` for 500,000 must fail with
+  `core.ErrInsufficientBalance`. Two controls make the pin load-bearing:
+  a gated reservation for an amount the real balance covers still succeeds
+  (the gate is not refusing everything), and the same 500,000 *without* the
+  flag succeeds (the tampering is genuinely in effect, and is exactly what
+  the pre-fix gated path paid out).
+
+---
 
 ## How to add a new invariant
 
