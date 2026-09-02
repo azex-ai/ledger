@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // pinReference matches a package-qualified test name as INVARIANTS.md cites it,
@@ -638,12 +641,74 @@ func pkgDirMatches(dir, pkg string) bool {
 // NEW failure. It may only SHRINK: an entry comes out once its invariant's
 // Enforced by prose gets its missing symbols backtick-quoted (a
 // documentation fix, not a test fix), at which point this check starts
-// holding its pins to the real mechanism. Rewriting the citation style for
-// these 32 invariants is tracked as a Wave 3 item, not silently absorbed
-// here. If a section not already in this list starts failing after a
-// legitimate doc edit, fix the citation or the pin -- do not add the
-// section here to make it go away.
+// holding its pins to the real mechanism. If a section not already in this
+// list starts failing after a legitimate doc edit, fix the citation or the
+// pin -- do not add the section here to make it go away.
+//
+// C-2 (W3 adversarial review of the gates): that governance was PROSE. The
+// reviewer added "I-59" and "I-8" -- two of the ten invariants that were
+// blocking at the time -- and the core package stayed green, because
+// nothing asserted the list's contents. W3-citations then emptied it by
+// fixing the citations themselves, so the machine-enforced form of "may
+// only shrink" is now simply "must stay empty", which
+// TestCitationStyleGapListStaysClosed below asserts. Adding an entry is red.
 var citationStyleGapInvariants = map[string]bool{}
+
+// TestCitationStyleGapListStaysClosed is the lock on the list above.
+func TestCitationStyleGapListStaysClosed(t *testing.T) {
+	var entries []string
+	for section := range citationStyleGapInvariants {
+		entries = append(entries, section)
+	}
+	sort.Strings(entries)
+	assert.Emptyf(t, entries,
+		"citationStyleGapInvariants is not empty: %v.\n\n"+
+			"This list downgrades a pin-vs-mechanism mismatch from a failure to a log line, and it was emptied when every "+
+			"invariant's Enforced by was made to name its exported mechanism (W3-citations). It may only shrink, which at zero "+
+			"means it may not grow: an entry here silently un-gates one of the pins this file exists to hold. If a section's "+
+			"citation is genuinely unresolvable, register it in unresolvableEnforcedCitations instead -- that list is checked, "+
+			"reported, and equally closed to silent growth", entries)
+}
+
+// unresolvableEnforcedCitations registers the invariants whose **Enforced
+// by** block names no Go symbol this repository declares, with the reason.
+// Their pins cannot be held to a mechanism by this check -- there is no
+// symbol to hold them to -- so the section is skipped.
+//
+// C-2, second half: that skip used to be a bare `continue`. Nineteen
+// sections took it, including (before this pass) I-49 and I-53, two of the
+// Wave 1 money-path invariants -- and the output said nothing at all, so
+// from the outside a skipped section and a checked one looked identical
+// (working-agreements §3: not run is not passed). The register makes the set
+// explicit and closed: a NEW unresolvable section is red until someone
+// either fixes the citation (the I-49 / I-53 fix in this same commit: name
+// the exported entry point the mechanism is reached through) or writes down
+// why it cannot be fixed.
+//
+// The recurring honest reason: the mechanism is a DDL object -- a trigger, a
+// constraint, a GRANT, a partition -- and the invariant is enforced by
+// Postgres, not by a Go function a test can name.
+var unresolvableEnforcedCitations = map[string]string{
+	"I-2":  "the mechanism is the journals.reversal_of FK plus SELECT ... FOR UPDATE; the two Go methods it names are cited bare, without a package qualifier",
+	"I-3":  "UNIQUE constraints on five tables' idempotency_key columns",
+	"I-6":  "column types (NUMERIC(30,18)) and a Go field type (decimal.Decimal), not functions",
+	"I-7":  "three migrations' NOT NULL work",
+	"I-9":  "a four-line helper cited by file and line rather than by symbol",
+	"I-12": "derived: 'I-1 + I-2 together', with no mechanism of its own",
+	"I-13": "partition DDL across three migrations",
+	"I-18": "a migration's uid columns plus per-store conversion helpers cited by file",
+	"I-22": "role GRANTs in 001_baseline",
+	"I-24": "the check_journal_currency_balance() deferred constraint trigger",
+	"I-25": "the per-table mutation guard trigger functions",
+	"I-35": "two SECURITY DEFINER partition functions",
+	"I-36": "a column-level GRANT/REVOKE pair on webhook_subscribers",
+	"I-40": "cited as expressions inside methods ('the s.attestor != nil branch'), not as symbols",
+	"I-50": "the mechanism IS a gate test file (postgres/sign_authority_gate_test.go) and its classification tables",
+	"I-51": "unexported validators cited with their file paths; the exported entry points are the four reversal APIs, named in prose",
+	"I-57": "ledger_resweep_ownership(), a SQL function",
+	"I-58": "migration 020's catalogue-derived DO loop and its SECURITY DEFINER writers",
+	"I-61": "the mechanism IS a gate test file (observability/emission_coverage_test.go)",
+}
 
 func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	raw, err := os.ReadFile("../docs/INVARIANTS.md")
@@ -655,17 +720,28 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	testBodies := buildTestFuncBodyIndex(t)
 
 	var failures, advisories []string
+	checked, skipped := 0, map[string]bool{}
 	for _, sec := range splitInvariantSections(string(raw)) {
 		enforced := blockBetween(sec.body, "**Enforced by**")
 		leaves := enforcedLeafNames(enforced, symbolIdx)
 		if len(leaves) == 0 {
-			continue // nothing in this section's Enforced by resolves to a repo symbol -- skip, see doc comment
+			// Nothing in this section's Enforced by resolves to a repo
+			// symbol. Registered, not silent (C-2).
+			skipped[sec.number] = true
+			if _, known := unresolvableEnforcedCitations[sec.number]; !known {
+				t.Errorf("%s's **Enforced by** names no Go symbol this repository declares, so none of its pins can be held to a mechanism -- "+
+					"and this check would otherwise skip it in silence.\n\n"+
+					"Fix the citation (name the EXPORTED entry point the mechanism is reached through -- that is what I-49 and I-53 needed), "+
+					"or register %q in unresolvableEnforcedCitations with the reason it cannot be named.", sec.number, sec.number)
+			}
+			continue
 		}
 
 		pinned := blockBetween(sec.body, "**Pinned by**")
 		if pinned == "" {
 			continue // F-m2's other test already flags a missing Pinned by section
 		}
+		checked++
 
 		bucket := &failures
 		if citationStyleGapInvariants[sec.number] {
@@ -690,6 +766,25 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	for _, f := range failures {
 		t.Error(f)
 	}
+
+	// A registered section that starts resolving must leave the register, or
+	// the register becomes a permanent carve-out nobody rereads.
+	var stale []string
+	for section, reason := range unresolvableEnforcedCitations {
+		if !skipped[section] {
+			stale = append(stale, section+" ("+reason+")")
+		}
+	}
+	sort.Strings(stale)
+	assert.Empty(t, stale,
+		"section(s) registered as having unresolvable Enforced-by citations now resolve to a repo symbol -- delete their unresolvableEnforcedCitations entries so this check starts holding their pins: %v", stale)
+
+	// Fail-closed sanity: if the section splitter or the symbol index ever
+	// regresses, every section lands in the skip path and this check silently
+	// verifies nothing.
+	require.Greater(t, checked, len(unresolvableEnforcedCitations),
+		"only %d invariant section(s) were actually checked against their Enforced-by symbols, against %d registered as unresolvable -- "+
+			"a check that inspects almost nothing reads as a pass", checked, len(unresolvableEnforcedCitations))
 }
 
 // checkPinTouchesLeaves looks up every declared body for a (pkg, fn) pin

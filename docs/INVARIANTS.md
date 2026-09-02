@@ -5721,8 +5721,10 @@ depends on seeing "pending → confirmed" for on-chain deposits either lowers
 `Confirmations` or drives ingestion from the webhook path.
 
 **Enforced by**:
-- `service.Onchain.scanChainOnce` / `processRegistrationRescan` via
-  `confirmationDepth(cfg)` (`service/onchain.go`).
+- `service.Onchain.RunWatchOnce` -- the exported entry point the watcher
+  loop and every pin drive the scan through. Inside it, `scanChainOnce` /
+  `processRegistrationRescan` bound the window via `confirmationDepth(cfg)`
+  (`service/onchain.go`).
 
 **Pinned by**:
 - `service.TestOnchain_Watch_NeverScansPastConfirmationDepth`
