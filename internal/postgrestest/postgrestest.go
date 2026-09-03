@@ -69,10 +69,22 @@ func baseConnection(t testing.TB) string {
 		// container after the test binary exits.
 		sharedServer.connStr, sharedServer.err = container.ConnectionString(ctx, "sslmode=disable")
 	})
-	if sharedServer.err != nil && strings.Contains(sharedServer.err.Error(), "Cannot connect to the Docker daemon") {
-		t.Skip("Docker daemon not running, skipping integration test")
-	}
-	require.NoError(t, sharedServer.err)
+	// F-9 (2026-09-03 independent review): this used to t.Skip when the
+	// Docker daemon was unreachable, which made `make test` on a machine
+	// with Docker stopped print `ok` for the postgres package while running
+	// none of its 100+ integration tests. Not-run read as pass -- the exact
+	// shape working-agreements.md §3 forbids, and the same shape the
+	// -count=1 comment in the Makefile already governs for cached passes.
+	//
+	// There are two legitimate ways to say "I do not have a database": run
+	// with -short (handled above), or point DATABASE_URL at one. Neither is
+	// silent. Anything else is an environment failure, and an environment
+	// failure must fail the run.
+	require.NoErrorf(t, sharedServer.err,
+		"could not start the PostgreSQL test container, so the integration tests below cannot run.\n\n"+
+			"This is a failure, not a skip: a suite that did not execute is not a suite that passed. Either start Docker, "+
+			"or say so explicitly -- `make test-short` (skips every integration test) or DATABASE_URL=... (runs them against "+
+			"a server you provide).")
 	return sharedServer.connStr
 }
 
