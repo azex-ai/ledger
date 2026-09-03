@@ -47,6 +47,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -566,4 +568,98 @@ func consumerReachableModule(module string) bool {
 		}
 	}
 	return true
+}
+
+// TestReleaseSubmoduleJobsRunTheSameChecksAsGoVerify closes R-3
+// (2026-09-04 recheck).
+//
+// TestGoVerifyRunsRealCommandsForEveryModule reads go-verify.yml and only
+// go-verify.yml. TestReleaseWorkflowUsesSameVerifyAsGoVerify compares the
+// two workflows' ROOT verify job. Neither looks at go-release.yml's
+// hand-written submodule jobs, which exist because go-verify.yml is
+// root-module-shaped and cannot be called for them.
+//
+// So the submodule side had quietly diverged: F-8 added govulncheck to
+// go-verify.yml's three scan steps, and an `anchors/r2/v*` tag went on
+// publishing the module -- aws-sdk-go-v2, the largest third-party surface
+// in this repository -- with no vulnerability scan, and nothing said so.
+// That is F-M6's failure mode a second time, one level down: the two
+// callers stopped diverging and the two SUBMODULE paths had not.
+//
+// The required set is derived from what go-verify.yml actually runs for
+// that module, so adding a check there makes this fail until the release
+// path has it too. It cannot be satisfied by adding a step that merely
+// carries the right working-directory: the `run` has to invoke the command.
+func TestReleaseSubmoduleJobsRunTheSameChecksAsGoVerify(t *testing.T) {
+	verify := loadWorkflow(t, goVerifyPath)
+	release := loadWorkflow(t, "../.github/workflows/go-release.yml")
+
+	// What go-verify.yml runs, per module directory.
+	inVerify := map[string]map[string]bool{}
+	for _, job := range verify.Jobs {
+		for _, step := range job.Steps {
+			dir := step.dir()
+			if inVerify[dir] == nil {
+				inVerify[dir] = map[string]bool{}
+			}
+			if strings.Contains(step.Uses, "golangci-lint-action") {
+				inVerify[dir]["golangci-lint"] = true
+			}
+			for _, cmd := range []string{"go vet", "go build", "go test", "govulncheck"} {
+				if step.Run != "" && runInvokes(step.Run, cmd) {
+					inVerify[dir][cmd] = true
+				}
+			}
+		}
+	}
+
+	checked := 0
+	for _, module := range workspaceModules(t) {
+		if !consumerReachableModule(module) || module == "." {
+			continue // the root goes through the reusable workflow itself
+		}
+		want := inVerify[module]
+		require.NotEmptyf(t, want, "go-verify.yml runs nothing for %q -- the other gate would have caught that; "+
+			"this one cannot derive a required set from it", module)
+
+		// The release job for this module: the one whose steps run there.
+		got := map[string]bool{}
+		jobName := ""
+		for name, job := range release.Jobs {
+			for _, step := range job.Steps {
+				if step.dir() != module {
+					continue
+				}
+				jobName = name
+				if strings.Contains(step.Uses, "golangci-lint-action") {
+					got["golangci-lint"] = true
+				}
+				for _, cmd := range []string{"go vet", "go build", "go test", "govulncheck"} {
+					if step.Run != "" && runInvokes(step.Run, cmd) {
+						got[cmd] = true
+					}
+				}
+			}
+		}
+		require.NotEmptyf(t, jobName, "go-release.yml has no job with steps in %q -- has the module's release path been removed?", module)
+		checked++
+
+		var missing []string
+		for cmd := range want {
+			if !got[cmd] {
+				missing = append(missing, cmd)
+			}
+		}
+		sort.Strings(missing)
+		assert.Emptyf(t, missing,
+			"go-release.yml's %q job does not run %v for %q, and go-verify.yml does.\n\n"+
+				"These jobs are hand-written because go-verify.yml is root-module-shaped, which is exactly why they "+
+				"drift: govulncheck was added to go-verify.yml and not here, so publishing this module ran no "+
+				"vulnerability scan and no gate noticed (R-3). Add the step with `working-directory: %s`",
+			jobName, missing, module, module)
+	}
+
+	require.GreaterOrEqualf(t, checked, 2,
+		"only %d submodule release job(s) were compared; this repo publishes two (anchors/r2, chains/evm), and a "+
+			"check that inspects fewer reads as a pass", checked)
 }

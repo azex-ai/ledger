@@ -65,6 +65,18 @@ jobs:
         working-directory: anchors/r2
       - run: go test -race -timeout 5m -count=1 ./...
         working-directory: anchors/r2
+      # R-3 (2026-09-04 recheck): go-verify.yml's vulncheck job scans this
+      # module, but go-verify.yml is root-module-shaped and these two jobs
+      # are hand-written rather than callers of it -- so an
+      # `anchors/r2/v*` tag published the module (aws-sdk-go-v2, the
+      # largest third-party surface here) with no vulnerability scan at all,
+      # and no gate said so. F-M6 in reverse: the two callers had stopped
+      # diverging, and the SUBMODULE side had not.
+      - name: govulncheck (anchors/r2)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+        working-directory: anchors/r2
 
   release-anchors-r2:
     needs: verify-anchors-r2
@@ -102,6 +114,13 @@ jobs:
       - run: go build -tags e2e ./...
         working-directory: chains/evm
       - run: go test -race -timeout 5m -count=1 ./...
+        working-directory: chains/evm
+      # See the anchors/r2 job's note (R-3). go-ethereum is this module's
+      # third-party surface.
+      - name: govulncheck (chains/evm)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
         working-directory: chains/evm
       - uses: foundry-rs/foundry-toolchain@v1
       - run: go test -tags e2e -race -timeout 5m -count=1 -run TestE2E ./...
