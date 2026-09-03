@@ -127,6 +127,19 @@
 -- created function is EXECUTE-able by PUBLIC by default, so the sweep is not
 -- inherited -- postgres/function_acl_test.go is the gate that says so, and it
 -- went red on the first run of this migration.
+--
+-- Every function also carries `SET search_path = public, pg_temp`, that exact
+-- value. Not decoration and not style: an unpinned search_path searches
+-- pg_temp FIRST for relation names, and ledger_app holds the default
+-- TEMPORARY privilege, so `CREATE TEMP TABLE journal_entries` shadows the
+-- real one for any guard that reads it (install-roles C1). Naming pg_temp
+-- explicitly at the END is what puts it after public. pg_catalog is left off
+-- deliberately -- Postgres searches it first regardless when it is not
+-- listed, so pg_has_role/current_setting/octet_length resolve either way, and
+-- migration 030's catalogue gate requires this exact string of every trigger
+-- and SECURITY DEFINER function rather than a set of near-equivalents nobody
+-- can compare mechanically. Every body below also schema-qualifies the
+-- relations it reads, which is belt to that brace.
 
 ------------------------------------------------------------
 -- 1. The forensic trail learns about INSERT.
@@ -275,7 +288,7 @@ END $$;
 -- top of 029 sees the guard.
 CREATE FUNCTION ledger_template_line_repair_is_authorized() RETURNS boolean
 LANGUAGE sql STABLE
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
     SELECT COALESCE(current_setting('ledger.repair_template_lines', true), 'off') = 'on'
        AND pg_has_role(current_user, 'ledger_owner', 'USAGE');
@@ -286,7 +299,7 @@ REVOKE ALL ON FUNCTION ledger_template_line_repair_is_authorized() FROM PUBLIC;
 
 CREATE FUNCTION ledger_entry_template_lines_insert_guard() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     same_tx BOOLEAN;
@@ -350,7 +363,7 @@ CREATE TRIGGER entry_template_lines_insert_guard
 -- label-only classification as a convenient dimension.
 CREATE FUNCTION ledger_bookings_insert_guard() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     initial_status TEXT;
@@ -394,7 +407,7 @@ CREATE TRIGGER bookings_insert_guard
 -- so a born-settled row is a hold that never existed.
 CREATE FUNCTION ledger_reservations_insert_guard() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NEW.status <> 'active' THEN
@@ -470,7 +483,7 @@ CREATE TRIGGER reservations_insert_guard
 -- attack case; reported separately rather than edited here.
 CREATE FUNCTION ledger_chain_cursor_rewind_is_authorized() RETURNS boolean
 LANGUAGE sql STABLE
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
     SELECT COALESCE(current_setting('ledger.rewind_chain_cursor', true), 'off') = 'on'
        AND pg_has_role(current_user, 'ledger_owner', 'USAGE');
@@ -481,7 +494,7 @@ REVOKE ALL ON FUNCTION ledger_chain_cursor_rewind_is_authorized() FROM PUBLIC;
 
 CREATE FUNCTION ledger_chain_cursors_guard() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     mutable CONSTANT text[] := ARRAY['last_scanned_block', 'updated_at'];
@@ -652,7 +665,7 @@ REVOKE ALL ON FUNCTION ledger_rewind_chain_cursor(bigint, bigint, text) FROM PUB
 -- still exercises.
 CREATE FUNCTION ledger_attestations_insert_guard() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
     head_seq  BIGINT;
@@ -723,7 +736,7 @@ CREATE TRIGGER ledger_attestations_insert_guard
 -- thing it repairs.
 CREATE FUNCTION ledger_attestation_discard_is_authorized() RETURNS boolean
 LANGUAGE sql STABLE
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
     SELECT COALESCE(current_setting('ledger.discard_attestations', true), 'off') = 'on'
        AND pg_has_role(current_user, 'ledger_owner', 'USAGE');
@@ -734,7 +747,7 @@ REVOKE ALL ON FUNCTION ledger_attestation_discard_is_authorized() FROM PUBLIC;
 
 CREATE FUNCTION ledger_attestation_chain_block_delete() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF ledger_attestation_discard_is_authorized() THEN
