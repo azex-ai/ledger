@@ -5986,8 +5986,8 @@ than one an operator has to cut out of an append-only table. `observed_seq
 `core.Anchor.Head`'s contract now includes: once `Head` has returned seq
 N, no later call may return a seq lower than N. "The highest seq ever
 published" is the contract; "the value of the last write" is not.
-`anchortest` checks both halves -- `HeadNeverRegressesOnAnOlderPublish`
-through the interface, and `HeadNeverRegressesAfterAnOutOfBandOlderWrite`
+`anchortest` checks both halves -- "HeadNeverRegressesOnAnOlderPublish"
+through the interface, and "HeadNeverRegressesAfterAnOutOfBandOlderWrite"
 using the implementation's own client via `anchortest.WithOutOfBandWrite`,
 because the attack does not go through `Publish`.
 
@@ -6024,12 +6024,12 @@ both documented in that package and in `docs/RUNBOOK.md`:
 **Enforced by**:
 - `core.Anchor.Head`'s doc comment (the contract text itself).
 - `anchortest.Check` / `anchortest.RunConformance` run the
-  `HeadNeverRegressesOnAnOlderPublish` and
-  `HeadNeverRegressesAfterAnOutOfBandOlderWrite` phases; the latter is
+  "HeadNeverRegressesOnAnOlderPublish" and
+  "HeadNeverRegressesAfterAnOutOfBandOlderWrite" phases; the latter is
   SKIPPED (and reported as skipped, never as passed, via
   `anchortest.Skipped`) when the caller supplies no out-of-band writer.
 - `anchors/r2.New` (with `anchors/r2.Config`) builds the `Anchor` whose
-  one-object-per-seq layout and `ListObjectsV2`-based `Head` make a
+  one-object-per-seq layout and `s3.ListObjectsV2`-based `Head` make a
   regression impossible to publish; `Head` also fails closed on a foreign
   object under its prefix rather than skipping it.
 - `anchordev.LocalFileAnchor`'s existing refusal of any seq that is not

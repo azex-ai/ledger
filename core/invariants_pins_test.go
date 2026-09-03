@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -379,19 +378,11 @@ func TestInvariantsDocEveryInvariantHasPinnedBy(t *testing.T) {
 type declaredSymbolIndex struct {
 	bare   map[string]bool
 	method map[string]bool // "Type.Method"
-	// mentioned is every identifier, selector and string literal the repo's
-	// Go source contains. A citation can name something this repo USES
-	// rather than declares -- an SDK call (`ListObjectsV2`), or a named
-	// conformance phase that exists as a string constant
-	// (`HeadNeverRegressesOnAnOlderPublish`) -- and "does this repository
-	// have it" must be true of those too, while staying false for a name
-	// nobody has written anywhere.
-	mentioned map[string]bool
 }
 
 func buildDeclaredSymbolIndex(t *testing.T) declaredSymbolIndex {
 	t.Helper()
-	idx := declaredSymbolIndex{bare: map[string]bool{}, method: map[string]bool{}, mentioned: map[string]bool{}}
+	idx := declaredSymbolIndex{bare: map[string]bool{}, method: map[string]bool{}}
 	fset := token.NewFileSet()
 
 	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
@@ -416,21 +407,6 @@ func buildDeclaredSymbolIndex(t *testing.T) declaredSymbolIndex {
 			// rather than failing the whole index.
 			return nil
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch e := n.(type) {
-			case *ast.Ident:
-				idx.mentioned[e.Name] = true
-			case *ast.SelectorExpr:
-				idx.mentioned[e.Sel.Name] = true
-			case *ast.BasicLit:
-				if e.Kind == token.STRING {
-					if unquoted, uerr := strconv.Unquote(e.Value); uerr == nil {
-						idx.mentioned[unquoted] = true
-					}
-				}
-			}
-			return true
-		})
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
@@ -671,10 +647,10 @@ var (
 	// common as qualified ones, and until round 2's second pass they were
 	// checked by nothing: renaming `ReverseJournal` to `ZzReverseJournal`
 	// left every gate green.
-	// An all-caps token is a SQL keyword (`UNIQUE`, `MAX`, `NULL`), not a Go
-	// symbol; the caller excludes those separately, since the shape alone
-	// cannot tell them apart.
-	goSymbolShaped = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*(\.[A-Za-z0-9]+)*$`)
+	// The second character must be lowercase: that is what separates a Go
+	// name (`ReverseJournal`, `PendingStore.AddPending`) from a SQL keyword
+	// (`UNIQUE`, `MAX`, `NULL`), which the shape alone cannot.
+	goSymbolShaped = regexp.MustCompile(`^[A-Z][a-z][A-Za-z0-9]*(\.[A-Za-z0-9]+)*$`)
 	// dbObjectShaped matches a snake_case name specific enough to look for:
 	// a trigger, a SQL function, a column, a constraint. Short or
 	// underscore-free tokens (`uid`, `status`) are prose as often as they
@@ -725,7 +701,7 @@ func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesBy
 			// differently because they live in different indexes.
 			name := strings.SplitN(token, "(", 2)[0]
 			switch {
-			case goSymbolShaped.MatchString(name) && strings.ToUpper(name) != name:
+			case goSymbolShaped.MatchString(name) && !testFuncNamePattern.MatchString(strings.Split(name, ".")[0]):
 				leaf := name
 				if parts := strings.Split(name, "."); len(parts) > 1 {
 					leaf = parts[len(parts)-1]
@@ -734,7 +710,7 @@ func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesBy
 						continue
 					}
 				}
-				if idx.bare[leaf] || idx.mentioned[leaf] {
+				if idx.bare[leaf] {
 					out.resolved++
 				} else {
 					out.broken = append(out.broken, token)
