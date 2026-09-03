@@ -31,6 +31,86 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `core.Metrics` gains four onchain-operability methods
+
+**Landed (Wave 5, W5-onchain-ops; audit
+`docs/audits/2026-09-03-independent-review/onchain-ops.md` C-2 / M-3 / M-8).**
+
+    core.Metrics.DepositIngestDeadLettered(chainID int64, reason string)
+    core.Metrics.DeadLetterBacklog(count int64, oldestAge time.Duration)
+    core.Metrics.SweepOrphanedBroadcast(chainID int64)
+    core.Metrics.ChainCursorAdvanceAge(chainID int64, age time.Duration)
+
+**What a consumer must do.** Embedding `core.NoopMetrics` (the pattern
+`core.Metrics`' doc comment recommends): nothing, the four no-op methods come
+with it. Implementing the interface by hand: add the four methods, or switch
+to embedding. `observability.PrometheusMetrics` already implements them and
+registers `ledger_deposit_ingest_dead_lettered_total`,
+`ledger_dead_letters_unbooked`, `ledger_dead_letter_oldest_age_seconds`,
+`ledger_sweep_orphaned_broadcast_total` and
+`ledger_chain_cursor_advance_age_seconds`.
+
+**Why they exist.** The first two make a dead-lettered deposit — a real
+on-chain transfer this ledger decided never to book — visible at all; before
+them its only trace was a row nothing read plus a log line that lands in
+`core.NopLogger()` by default. The third counts the one condition that blocks
+a chain's outbound collection indefinitely. The fourth is the watcher
+liveness signal `chain_cursor_lag_blocks` cannot be, because that gauge
+freezes rather than climbs when the RPC endpoint is down. All four have
+triage entries in `docs/RUNBOOK.md` §14 / §18.
+
+### `service.DeadLetterRecorder` gains a read half, and `postgres.IngestDeadLetterStore.ListDeadLetters` is paginated
+
+**Landed (Wave 5, W5-onchain-ops; audit C-2).**
+
+    service.DeadLetterRecorder + GetDeadLetter(ctx, uid) (core.IngestDeadLetter, error)
+                               + ListDeadLetters(ctx, cursor string, limit int32) ([]core.IngestDeadLetter, string, error)
+                               + CountUnbookedDeadLetters(ctx) (int64, time.Time, error)
+
+    postgres.IngestDeadLetterStore.ListDeadLetters(ctx, limit int32) ([]core.IngestDeadLetter, error)
+    -> postgres.IngestDeadLetterStore.ListDeadLetters(ctx, cursor string, limit int32) ([]core.IngestDeadLetter, string, error)
+
+**What a consumer must do.** Passing `postgres.NewIngestDeadLetterStore(pool)`
+(what `ledger.EnableOnchain` does): nothing but update call sites of
+`ListDeadLetters`, which now takes a cursor and returns a next-cursor
+(`""` = first page / exhausted). Implementing `DeadLetterRecorder` by hand:
+implement the three new methods — they are what makes the queue readable,
+countable and replayable.
+
+`core.IngestDeadLetter` also gains two fields, `Booked bool` (recomputed per
+read: whether the deposit was credited in the end) and
+`Sighting core.DepositSighting` (the recorded payload, which is what a replay
+re-drives). Additive; only a consumer constructing the struct by hand with
+positional fields is affected.
+
+### `service.Onchain.RunPendingRecheckOnce` / `RunReorgRecheckOnce` return an error
+
+**Landed (Wave 5, W5-onchain-ops; audit M-9).**
+
+    (*service.Onchain).RunPendingRecheckOnce(ctx)  ->  ... error
+    (*service.Onchain).RunReorgRecheckOnce(ctx)    ->  ... error
+
+**What a consumer must do.** Handle (or explicitly discard) the returned
+error. Both used to return nothing, which made an ops-triggered recheck that
+failed indistinguishable from one that found nothing to do — and, since the
+library's default logger is `core.NopLogger()`, usually completely silent.
+`RunWatchOnce` and `RunSweepOnce` already returned errors; this makes the
+four consistent.
+
+### `core.TokenConfig.Validate` refuses `Decimals > 18` (was 36)
+
+**Landed (Wave 5, W5-onchain-ops; audit M-2).**
+
+**What a consumer must do.** Nothing, unless a `TokenConfig` really is
+configured above 18 — in which case that configuration was never usable: a
+ledger currency's `Exponent` caps at 18 (`core.CurrencyInput.Validate`), so
+every deposit of such a token carrying a fraction was refused with
+`ErrPrecisionExceeded`, dead-lettered, and scanned past. `Onchain.Run` also
+now refuses to start when a token's `Decimals` exceeds the exponent of the
+currency it books into (`service.Onchain.ValidateTokenPrecision`, additive);
+a push-only consumer that never calls `Run()` should call that method at
+startup.
+
 ### `postgres.NewPendingStore` takes a `core.VerifiedBalanceReader`, and `ConfirmPending` refuses to run inside `RunInTx` when it is set
 
 **Landed (Wave 4, contract §7.20; invariant I-64).**

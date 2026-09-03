@@ -7,9 +7,14 @@
 //     a suspect or restored database must run it against a CLONE, never the
 //     database being examined, exactly as any other write tool would
 //     (docs/DR.md).
-//   - `rollup reset-claim` is the one operator write action this tool
-//     exposes on purpose (B-m10): there is no other way to un-stick a
+//   - `rollup reset-claim` is one of the two operator write actions this
+//     tool exposes on purpose (B-m10): there is no other way to un-stick a
 //     rollup_queue item that exhausted its retry budget.
+//   - `reorgs resolve` is the other (M-6): a deposit chain anomaly is closed
+//     out only by an operator's explicit resolution, and until this command
+//     existed the only way to do it was hand-written UPDATE -- so the
+//     library's own recheck loop re-alerted on every tick forever after
+//     on-call had already dealt with it, an alarm nailed to ON.
 //
 // Every other command only reads.
 //
@@ -22,6 +27,8 @@
 //   - List recent journals or events (`ledger-cli journals --limit 20`).
 //   - Pull a balance snapshot for one account (`ledger-cli balance --holder 42 --currency <uid>`).
 //   - Un-stick a rollup queue item (`ledger-cli rollup reset-claim --id <id>`).
+//   - Triage deposits the ledger refused to book (`ledger-cli dead-letters list`).
+//   - Work the deposit chain-anomaly queue (`ledger-cli reorgs list` / `reorgs resolve`).
 //
 // Build:
 //
@@ -39,6 +46,10 @@
 //	ledger-cli currencies
 //	ledger-cli classifications
 //	ledger-cli rollup reset-claim --id <id>
+//	ledger-cli dead-letters list --limit 20
+//	ledger-cli dead-letters show --uid <uid>
+//	ledger-cli reorgs list
+//	ledger-cli reorgs resolve --booking-uid <uid> --kind deep_reorg --note "reversed per RUNBOOK 12"
 package main
 
 import (
@@ -46,6 +57,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -78,7 +90,7 @@ func main() {
 // path. See TestReconcileFullFlagUsage_DoesNotHardcodeACheckCount.
 const reconcileFullFlagUsage = "run the full reconcile check suite (see the report's checks[] array for exactly which checks ran); default is just the global accounting equation"
 
-const usage = `ledger-cli — ledger investigation tool (read-only except reconcile --full's resume cursor and rollup reset-claim; see package doc)
+const usage = `ledger-cli — ledger investigation tool (read-only except reconcile --full's resume cursor, rollup reset-claim and reorgs resolve; see package doc)
 
 usage:
   ledger-cli <command> [flags]
@@ -97,6 +109,8 @@ commands:
   currencies      list currencies
   classifications list classifications
   rollup          rollup queue admin (reset-claim)
+  dead-letters    deposits the ledger refused to book, and never scanned again (list, show)
+  reorgs          deposit chain anomalies awaiting an operator's close-out (list, resolve)
   config-history  forensic trail: who changed account policies / config tables / reconcile scan cursors, and when
 
 env:
@@ -239,6 +253,10 @@ func run(args []string) error {
 		return cmdClassifications(ctx, svc, rest)
 	case "rollup":
 		return cmdRollup(ctx, pool, rest)
+	case "dead-letters":
+		return cmdDeadLetters(ctx, pool, rest)
+	case "reorgs":
+		return cmdReorgs(ctx, pool, rest)
 	case "config-history":
 		return cmdConfigHistory(ctx, svc, rest)
 	default:
@@ -489,6 +507,146 @@ func cmdRollup(ctx context.Context, pool *pgxpool.Pool, args []string) error {
 		return jsonOut(map[string]any{"reset": true, "id": *id})
 	default:
 		return fmt.Errorf("unknown rollup subcommand %q (want: reset-claim)", args[0])
+	}
+}
+
+// cmdDeadLetters is the read side of the deposit-ingest dead-letter queue
+// (docs/RUNBOOK.md §18). A dead letter is a transfer that is ON CHAIN, to a
+// registered address, in a whitelisted token, that the ingestion path
+// refused and the forward scan then moved past: no booking exists, so no
+// recheck loop revisits it, and the cursor is past its block, so no scan
+// sees it again. Until this command existed the table had no reader at all
+// -- `ListDeadLetters`' own doc comment said "for on-call triage (RUNBOOK)"
+// while nothing called it and the runbook had no such section (C-2).
+//
+// Read-only on purpose, and this is the one place in this tool where a
+// missing verb is a deliberate design decision rather than an omission:
+// REPLAYING a dead letter calls IngestDeposit, which needs the chain set --
+// a token's currency code and its auto-credit ceilings live in the
+// consumer's Go composition root, not in the database. This binary holds
+// only DATABASE_URL, so it could only offer a replay by asking the operator
+// to re-type the mint bounds, which puts the money fence on the wrong side
+// of the keyboard. The replay is therefore served by the process that
+// already holds the configuration: POST
+// /api/v1/deposits/dead-letters/{uid}/replay, or
+// service.Onchain.ReplayDeadLetter in library mode.
+//
+// Takes *pgxpool.Pool directly rather than *ledger.Service for the same
+// reason cmdRollup does: this is an ops store, not part of the facade's
+// financial surface.
+func cmdDeadLetters(ctx context.Context, pool *pgxpool.Pool, args []string) error {
+	const usage = `usage:
+  ledger-cli dead-letters list [--limit N] [--cursor C] [--unbooked-only]
+  ledger-cli dead-letters show --uid <uid>
+
+to replay one after fixing its cause (needs the chain config, so not this tool):
+  POST /api/v1/deposits/dead-letters/{uid}/replay   (capability: deposit_review)
+  or service.Onchain.ReplayDeadLetter(ctx, uid)     (library mode)`
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	store := postgres.NewIngestDeadLetterStore(pool)
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("dead-letters list", flag.ExitOnError)
+		limit := fs.Int("limit", 20, "max rows to return")
+		cursor := fs.String("cursor", "", "opaque page cursor from a previous run; empty = newest page")
+		unbookedOnly := fs.Bool("unbooked-only", false, "only rows whose deposit still has no booking -- the ones that still need action")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		letters, nextCursor, err := store.ListDeadLetters(ctx, *cursor, int32(*limit))
+		if err != nil {
+			return err
+		}
+		if *unbookedOnly {
+			kept := make([]core.IngestDeadLetter, 0, len(letters))
+			for _, dl := range letters {
+				if !dl.Booked {
+					kept = append(kept, dl)
+				}
+			}
+			letters = kept
+		}
+		return jsonOut(map[string]any{"list": letters, "next_cursor": nextCursor})
+	case "show":
+		fs := flag.NewFlagSet("dead-letters show", flag.ExitOnError)
+		uid := fs.String("uid", "", "dead letter uid (from `dead-letters list`)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *uid == "" {
+			return errors.New("--uid is required")
+		}
+		dl, err := store.GetDeadLetter(ctx, *uid)
+		if err != nil {
+			return err
+		}
+		return jsonOut(dl)
+	default:
+		return fmt.Errorf("unknown dead-letters subcommand %q\n\n%s", args[0], usage)
+	}
+}
+
+// cmdReorgs is the operator surface over deposit chain anomalies
+// (core.DepositReorg, docs/RUNBOOK.md §12): a confirmed deposit whose
+// transaction left the canonical chain, and a deposit this watcher failed as
+// a shallow reorg whose transaction came back.
+//
+// `resolve` is the second write action in this tool (see the package doc).
+// It exists because the anomaly queue is deliberately NOT self-clearing:
+// after on-call reverses a deep-reorged credit the transaction is still off
+// chain, so the recheck loop still finds the anomaly true and re-alerts on
+// every tick -- forever. postgres.DepositReorgStore.ResolveReorg was the
+// only way off that queue and had zero callers anywhere, no endpoint and no
+// command, which left "hand-written UPDATE" as the documented-nowhere
+// procedure (M-6).
+func cmdReorgs(ctx context.Context, pool *pgxpool.Pool, args []string) error {
+	const usage = `usage:
+  ledger-cli reorgs list [--limit N]
+  ledger-cli reorgs resolve --booking-uid <uid> --kind <deep_reorg|shallow_reorg_failed> --note "<what you did>"`
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	store := postgres.NewDepositReorgStore(pool)
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("reorgs list", flag.ExitOnError)
+		limit := fs.Int("limit", 50, "max rows to return")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		list, err := store.ListOpenReorgs(ctx, int32(*limit))
+		if err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"list": list})
+	case "resolve":
+		fs := flag.NewFlagSet("reorgs resolve", flag.ExitOnError)
+		bookingUID := fs.String("booking-uid", "", "the anomaly's booking uid (from `reorgs list`)")
+		kind := fs.String("kind", "", "deep_reorg | shallow_reorg_failed")
+		note := fs.String("note", "", "what was done about it -- recorded on the row, required")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *bookingUID == "" || *kind == "" {
+			return errors.New("--booking-uid and --kind are required")
+		}
+		if *note == "" {
+			// The note is the only record of WHY an alert stopped firing.
+			// Closing an anomaly with no explanation is how "we looked at
+			// it" becomes indistinguishable from "somebody silenced it".
+			return errors.New("--note is required: it is the only record of what was done about this anomaly")
+		}
+		if *kind != core.ReorgKindDeepReorg && *kind != core.ReorgKindShallowReorgFailed {
+			return fmt.Errorf("--kind must be %q or %q", core.ReorgKindDeepReorg, core.ReorgKindShallowReorgFailed)
+		}
+		if err := store.ResolveReorg(ctx, *kind, *bookingUID, *note); err != nil {
+			return err
+		}
+		return jsonOut(map[string]any{"resolved": true, "booking_uid": *bookingUID, "kind": *kind, "resolution": *note})
+	default:
+		return fmt.Errorf("unknown reorgs subcommand %q\n\n%s", args[0], usage)
 	}
 }
 

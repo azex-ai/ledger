@@ -7017,3 +7017,107 @@ taken when no attestor/verifier is configured. Migration
   verify something unsigned, the answer to the caller is unchanged (the
   funds stay held), and the Warn line is therefore the only evidence the
   event happened. It must reach the logger passed to `ledger.WithLogger`.
+
+## I-69: An irreversible on-chain decision requires corroboration — several observations, and evidence read from the chain rather than from our own row
+
+**Rule**: three decisions in the deposit path are irreversible in practice —
+they either move a holder's balance or foreclose ever moving it — and none of
+them may be taken on a single observation, nor on the ledger's own record of
+what the chain said:
+
+1. **Refusing a deposit that has not reached its threshold** (shallow reorg →
+   terminal `failed`; the booking's idempotency key then absorbs every future
+   sighting of that transfer, so the refusal cannot be undone by re-observing
+   it). Requires `WithShallowReorgMisses` consecutive observations that the
+   transaction is not on chain. Default 3.
+2. **Reversing a confirmed deposit under `ReorgPolicyAutoReverse`** (a
+   reversal journal debits the holder, with no human in the loop). Requires
+   `WithDeepReorgMisses` consecutive observations. Default 3. Reporting is
+   NOT delayed by this: the `deposit_reorgs` row is opened and
+   `ledger_deposit_reorg_detected_total` fires on the first observation
+   (I-63); the threshold gates only the automatic debit.
+3. **Crediting a deposit** (`confirming` → `confirmed` plus its
+   `deposit_confirm` journal) from the recheck loop. Before crediting, the
+   chain is re-read for the block the booking names and must produce a log
+   carrying that booking's tx hash, log position, token, amount, and a
+   recipient registered to that booking's holder. A booking the chain does
+   not corroborate is parked in `review` (reason `onchain_unverified`) after
+   `WithConfirmationEvidenceMisses` consecutive contradictions — never
+   credited, at any count. A booking still in `pending` is advanced one step
+   to `confirming` first, since `review` is only reachable from there: it has
+   met its confirmation threshold on paper, which is all `confirming` claims,
+   and what it has failed to do is convince the chain. An appended booking
+   arrives in exactly that shape — migration 029's INSERT guard constrains a
+   directly-inserted row to its lifecycle's initial status — so this is the
+   ordinary case here, not an edge.
+
+A failure to ASK (an RPC or database error) is never an answer in either
+direction: the booking stays where it is and the tick reports a failure. All
+three thresholds default to the same value, deliberately — the decisions
+differ in what they do, not in how much one answer from one endpoint is
+worth.
+
+**Why**: two audits found the same shape from opposite ends. The first
+(2026-09-03 onchain-ops M-1) found the asymmetry: the shallow path already
+required three observations and its own doc comment argued why —
+`TxIncluded` answers false for any node that has not caught up, and
+`chains/evm` dials exactly one RPC endpoint per chain with no failover —
+while the deep path, whose consequence is an automatic debit, acted on one.
+
+The second (2026-09-03 money-out C-2) found the deeper version: the recheck
+loop was not asking the chain at all on the path that credits. It derived
+`confirmations = latest − metadata.block_number + 1` from the booking's own
+row and, once that cleared the threshold, credited `bookings.amount`,
+consulting the chain only on the other branch. So a single `INSERT` that the
+application role is allowed to make — `status='confirming'`,
+`block_number=1`, a transaction hash that does not exist — was signed out by
+the honest job into a real, signed credit. Every control was working and none
+of them was looking at this: I-21's trust boundary is about the SIGHTING's
+provenance, I-25's immutable columns are UPDATE semantics, I-3's idempotency
+says a key is unique rather than real, and P5 faithfully signed the amount
+the row claimed. Re-reading the primary source is what closes it, and it has
+to be the primary source: a fence that only existed when a consumer had
+opted into a second RPC provider (`OnchainDeps.DepositConfirmer`, which is
+optional and off by default) would have left the factory default exactly as
+the audit measured it.
+
+The re-read compares the log's amount, token and recipient, not merely the
+transaction's existence, because an attacker can reference a transaction that
+does exist. Where a `DepositConfirmer` IS configured, the reconciliation gate
+still runs afterwards and remains the stronger check.
+
+**Enforced by**: the pre-credit re-read (`corroborateBeforeConfirm`) inside
+the pending/confirming recheck pass, reached through
+`service.Onchain.RunPendingRecheckOnce`; the auto-reverse corroboration gate
+inside the deep-reorg pass, reached through
+`service.Onchain.RunReorgRecheckOnce`; and the three thresholds
+`service.WithShallowReorgMisses`, `service.WithDeepReorgMisses` and
+`service.WithConfirmationEvidenceMisses`, all defaulting to the same
+`defaultOnchainMisses`.
+An uncorroborated booking leaves a durable trace by the same mechanism a
+ceiling breach does — the `review` transition, its event, and
+`ledger_deposit_review_required_total{reason="onchain_unverified"}` — so the
+refusal is a queue an operator works (docs/RUNBOOK.md §13), not a log line.
+
+**Pinned by**:
+- `service.TestOnchain_Recheck_ForgedBookingIsNotCredited` — the audit's own
+  attack: one `INSERT` naming a transaction that does not exist, then the
+  honest recheck loop. The booking must reach `review`, never `confirmed`,
+  and no journal may exist at any point.
+- `service.TestOnchain_Recheck_CorroborationRejectsATamperedAmount` —
+  referencing a REAL transaction does not buy the amount of one's choosing:
+  the log says 10, the booking claims 10000, and the booking is parked. This
+  is the case a bare inclusion check cannot see.
+- `service.TestOnchain_Recheck_CorroborationFailureIsNotAVerdict` — an
+  `eth_getLogs` outage must neither credit a real deposit nor park it; the
+  booking stays put and the tick reports the failure. When the chain can
+  answer again, the same deposit confirms normally.
+- `service.TestOnchain_AutoReverse_WaitsForConsecutiveObservations` — two
+  observations debit nobody while the anomaly row and the counter fire on the
+  first; a corroborating observation resets the streak; the third consecutive
+  one posts the reversal, and a fourth does not post a second.
+- `service.TestOnchain_AutoReverse_MissThresholdIsConfigurable` — the bar is
+  the consumer's to set, including back down to 1.
+- `service.TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses` and
+  `service.TestOnchain_Recheck_TxIncludedErrorIsNotEvidence` — the first of
+  the three decisions, and the rule that an erroring check has said nothing.

@@ -1201,6 +1201,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/deposits/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List dead-lettered deposit sightings (transfers the ledger refused to book).
+         * @description A dead letter is a transfer that IS on chain, to a registered address, in a whitelisted token, that the ingestion path refused -- an idempotency-key payload conflict, an unregistered currency, an amount the currency's exponent cannot represent -- after which the forward scan moved past it. No booking exists, so nothing else in the system will revisit it: this queue and POST /deposits/dead-letters/{uid}/replay are the only way back. Newest first, keyset paginated. `booked` is recomputed per read (a row whose deposit was credited in the end needs no action), so the queue clears itself. See docs/RUNBOOK.md section 18. Answers FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    cursor?: string;
+                    limit?: number;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Dead-letter queue page. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["DeadLetterListEnvelope"];
+                    };
+                };
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/deposits/dead-letters/{uid}/replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Re-drive one dead-lettered sighting through the real ingestion path.
+         * @description For after the cause is fixed (a currency registered, an exponent corrected, a token added back to the allowlist). Runs the identical IngestDeposit path a watcher sighting would, review gate included, so it is idempotent -- a sighting already booked resolves to the same booking and posts nothing new -- and it can end in the same deposit_confirm journal an approval posts. Hence the deposit_review capability rather than write scope: the key that can forge a sighting must not also be able to push one back in. 400 when this ledger has nothing to book for that sighting (address not registered, or token not in the chain's allowlist) rather than reporting a no-op as success.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    uid: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The booking the replayed sighting resolved to. */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["BookingEnvelope"];
+                    };
+                };
+                400: components["responses"]["DomainError"];
+                404: components["responses"]["DomainError"];
+                /** @description Crypto-deposit add-on not enabled on this server. */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/deposits/{uid}/review/approve": {
         parameters: {
             query?: never;
@@ -3492,6 +3591,35 @@ export interface components {
         DepositReviewListEnvelope: components["schemas"]["Envelope"] & {
             data?: {
                 list: components["schemas"]["Booking"][];
+                /** @description Null when exhausted. */
+                next_cursor: string | null;
+            };
+        };
+        DeadLetter: {
+            /** Format: uuid */
+            uid: string;
+            /** Format: int64 */
+            chain_id: number;
+            tx_hash: string;
+            /** @description The Transfer log's zero-based position among ALL logs in the transaction's receipt -- the same definition the booking idempotency key uses. */
+            txlog_seq: number;
+            /** @description deposit-{chain_id}-{tx_hash}-{txlog_seq} -- the key the booking would have had. */
+            idempotency_key: string;
+            /** @description The rejection's error text as recorded. The BOUNDED classification an alert labels on is the `reason` label of ledger_deposit_ingest_dead_lettered_total, not this field. */
+            reason: string;
+            /** @description Whether a booking exists for this idempotency key now -- i.e. whether the deposit was credited after all (replayed, or the cause self-healed). Recomputed per read; true means no action is needed. */
+            booked: boolean;
+            /** @description The ERC-20 contract address that emitted the Transfer log. */
+            token: string;
+            /** @description The registered deposit address credited. */
+            to: string;
+            /** @description Decimal string. What would have been credited. */
+            amount: string;
+            created_at: components["schemas"]["Timestamp"];
+        };
+        DeadLetterListEnvelope: components["schemas"]["Envelope"] & {
+            data?: {
+                list: components["schemas"]["DeadLetter"][];
                 /** @description Null when exhausted. */
                 next_cursor: string | null;
             };

@@ -162,10 +162,18 @@ func (s DepositSighting) Validate() error {
 	return nil
 }
 
-// IngestDeadLetter is a deposit sighting that IngestDeposit could not
-// idempotently reconcile (CreateBooking returned ErrConflict -- design doc
-// §6, a normalization bug signal, not a transient error). Read-only ops
-// model for on-call triage; written by postgres.IngestDeadLetterStore.
+// IngestDeadLetter is a deposit sighting the ingestion path refused to book
+// and the forward scan then moved past: a CreateBooking ErrConflict (design
+// doc §6, a normalization bug signal, not a transient error), an unregistered
+// currency, an amount the currency's exponent cannot represent, or a watcher
+// wedged on this sighting for several consecutive ticks. Read-only ops model
+// for on-call triage (docs/RUNBOOK.md §18); written by
+// postgres.IngestDeadLetterStore.
+//
+// The row is the ONLY durable trace such a sighting leaves: no booking was
+// created, so no recheck loop revisits it, and the cursor is past it, so no
+// forward scan sees it again. That is why Sighting is carried here -- a
+// replay needs nothing else (service.Onchain.ReplayDeadLetter).
 type IngestDeadLetter struct {
 	UID            string    `json:"uid"`
 	ChainID        int64     `json:"chain_id"`
@@ -174,6 +182,17 @@ type IngestDeadLetter struct {
 	IdempotencyKey string    `json:"idempotency_key"`
 	Reason         string    `json:"reason"`
 	CreatedAt      time.Time `json:"created_at"`
+	// Booked reports whether a booking now exists for this sighting's
+	// idempotency key -- i.e. whether the deposit was eventually credited
+	// after all, by a replay or because the cause self-healed (a frozen
+	// account unfrozen, a closed period reopened). It is what makes the
+	// dead-letter table a queue that clears itself rather than an alarm
+	// nailed to ON: the row is never rewritten, the answer is recomputed
+	// from bookings on every read.
+	Booked bool `json:"booked"`
+	// Sighting is the deposit sighting as recorded at rejection time, as
+	// stored in the row's payload column.
+	Sighting DepositSighting `json:"sighting"`
 }
 
 // Deposit chain-anomaly kinds recorded on DepositReorg.Kind. Both describe a
@@ -334,10 +353,23 @@ type TokenConfig struct {
 	ReconcileFailureLimit int32 `json:"reconcile_failure_limit"`
 }
 
-// maxTokenDecimals bounds TokenConfig.Decimals. No real token exceeds 18;
-// 36 leaves generous headroom while still rejecting a typo that would
-// normalize a raw amount into oblivion (or, negated, inflate it).
-const maxTokenDecimals = 36
+// maxTokenDecimals bounds TokenConfig.Decimals. 18 is not headroom, it is
+// the ceiling imposed by the other end of the pipe: normalizeAmount produces
+// an amount with Decimals decimal places, that amount is booked against a
+// ledger currency, and CurrencyInput.Validate caps a currency's Exponent at
+// 18. A token configured above 18 therefore has NO currency that can
+// represent its non-integer amounts, so every such deposit is refused by
+// postgres' precision check and dead-lettered -- a real, confirmed transfer
+// silently written off, with the configuration that guaranteed it having
+// passed validation (M-2,
+// docs/audits/2026-09-03-independent-review/onchain-ops.md).
+//
+// This used to be 36 ("generous headroom"), which is how the two limits came
+// to disagree. The per-token cross-check against the currency's ACTUAL
+// exponent -- which may be lower still -- is
+// service.Onchain.ValidateTokenPrecision; this constant is what a consumer
+// who never calls Run() still gets, since it needs no database.
+const maxTokenDecimals = 18
 
 // Validate rejects a TokenConfig whose Decimals cannot describe any real
 // token. A negative value is the dangerous one: normalizeAmount computes
@@ -349,7 +381,7 @@ func (c TokenConfig) Validate() error {
 		return fmt.Errorf("core: token config: decimals must not be negative (a negative value multiplies every credited amount by 10^%d): %w", -c.Decimals, ErrInvalidInput)
 	}
 	if c.Decimals > maxTokenDecimals {
-		return fmt.Errorf("core: token config: decimals=%d exceeds the %d maximum: %w", c.Decimals, maxTokenDecimals, ErrInvalidInput)
+		return fmt.Errorf("core: token config: decimals=%d exceeds the %d maximum -- a ledger currency's exponent caps at %d, so no currency could represent this token's non-integer amounts and every such deposit would be dead-lettered: %w", c.Decimals, maxTokenDecimals, maxTokenDecimals, ErrInvalidInput)
 	}
 	return nil
 }

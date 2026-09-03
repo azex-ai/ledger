@@ -71,7 +71,7 @@ func (h *onchainHarness) cursorBlock(t *testing.T, chainID int64) int64 {
 
 func (h *onchainHarness) deadLetterCount(t *testing.T) int {
 	t.Helper()
-	rows, err := h.deadLetters.ListDeadLetters(context.Background(), 100)
+	rows, _, err := h.deadLetters.ListDeadLetters(context.Background(), "", 100)
 	require.NoError(t, err)
 	return len(rows)
 }
@@ -180,7 +180,7 @@ func TestOnchain_Watch_DeadLettersPermanentRejectionAndAdvances(t *testing.T) {
 		"a permanently unbookable sighting must not wedge the chain once it is durably recorded")
 	assert.Equal(t, int64(700), h.cursorBlock(t, chainID))
 
-	rows, err := h.deadLetters.ListDeadLetters(ctx, 10)
+	rows, _, err := h.deadLetters.ListDeadLetters(ctx, "", 10)
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "skipping is only allowed because the sighting is recorded")
 	assert.Equal(t, "deposit-1-0xdeterministic-0", rows[0].IdempotencyKey)
@@ -250,6 +250,17 @@ func TestOnchain_Recheck_UnconfiguredTokenRoutesToReview(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, core.Status("confirming"), booking.Status)
 
+	// The deposit is real and the chain says so -- this pin is about the
+	// CONFIG vanishing, not about the evidence. Since money-out C-2 the
+	// recheck loop re-reads the log before crediting, so the fixture has to
+	// provide one or the booking would be parked for the other reason.
+	h.reader.setIncluded(chainID, "0xdelisted", true)
+	h.reader.setSightings(chainID, core.DepositSighting{
+		ChainID: chainID, TxHash: "0xdelisted", TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("10000"),
+		Confirmations: 0, BlockNumber: 100,
+	})
+
 	// The token is delisted: a new Onchain over the same database, with the
 	// token gone from CreditTokens (which is what a config rollback or a
 	// contract migration looks like), drives the existing booking.
@@ -263,7 +274,7 @@ func TestOnchain_Recheck_UnconfiguredTokenRoutesToReview(t *testing.T) {
 	}}
 	h2 := h.rewire(t, delisted)
 	h.reader.setLatestBlock(chainID, 200) // far past the 6-confirmation threshold
-	h2.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h2.RunPendingRecheckOnce(ctx))
 
 	after, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)
@@ -311,7 +322,7 @@ func TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses(t *testing.T) {
 	h.reader.setIncluded(chainID, txHash, false)
 
 	for i := 1; i <= 2; i++ {
-		h.svc.RunPendingRecheckOnce(ctx)
+		require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 		current, err := h.bookings.GetBooking(ctx, booking.UID)
 		require.NoError(t, err)
 		require.Equal(t, core.Status("confirming"), current.Status,
@@ -321,10 +332,10 @@ func TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses(t *testing.T) {
 	// One corroborating observation resets the streak: the count is
 	// CONSECUTIVE misses, not misses ever.
 	h.reader.setIncluded(chainID, txHash, true)
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 	h.reader.setIncluded(chainID, txHash, false)
 	for i := 1; i <= 2; i++ {
-		h.svc.RunPendingRecheckOnce(ctx)
+		require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 		current, err := h.bookings.GetBooking(ctx, booking.UID)
 		require.NoError(t, err)
 		require.Equal(t, core.Status("confirming"), current.Status,
@@ -333,7 +344,7 @@ func TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses(t *testing.T) {
 
 	// Third consecutive miss: now the booking fails -- and the automatic,
 	// irreversible refusal leaves an anomaly row a human has to close out.
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 	failed, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)
 	require.Equal(t, core.Status("failed"), failed.Status)
@@ -348,7 +359,7 @@ func TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses(t *testing.T) {
 	// And if the transaction turns out to be on chain after all, that is
 	// reported loudly and repeatedly -- nothing else can credit the holder.
 	h.reader.setIncluded(chainID, txHash, true)
-	h.svc.RunReorgRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
 	assert.True(t, h.logger(t).contains("failed_tx_returned"),
 		"a wrongly-failed deposit whose tx returned must be escalated, not silently left failed")
 }
@@ -388,7 +399,7 @@ func TestOnchain_ReorgRecheck_AnomalyOutlivesTheRecheckWindow(t *testing.T) {
 	// The transaction leaves the canonical chain while the booking is still
 	// inside the recheck window.
 	h.reader.setIncluded(chainID, txHash, false)
-	h.svc.RunReorgRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
 
 	open, err := h.reorgs.ListOpenReorgs(ctx, 10)
 	require.NoError(t, err)
@@ -404,7 +415,7 @@ func TestOnchain_ReorgRecheck_AnomalyOutlivesTheRecheckWindow(t *testing.T) {
 	// anomaly is still re-observed and still reported.
 	h.reader.setLatestBlock(chainID, 5000)
 	time.Sleep(5 * time.Millisecond) // so last_seen_at can be observed to move
-	h.svc.RunReorgRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
 
 	stillOpen, err := h.reorgs.ListOpenReorgs(ctx, 10)
 	require.NoError(t, err)
@@ -419,7 +430,7 @@ func TestOnchain_ReorgRecheck_AnomalyOutlivesTheRecheckWindow(t *testing.T) {
 	assert.Empty(t, afterResolve)
 
 	// A recheck after resolution must not silently reopen it.
-	h.svc.RunReorgRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
 	afterRecheck, err := h.reorgs.ListOpenReorgs(ctx, 10)
 	require.NoError(t, err)
 	assert.Empty(t, afterRecheck, "reopening a closed-out anomaly is an operator decision, not a tick's")
@@ -499,6 +510,14 @@ func TestOnchain_Sweep_DoesNotRebroadcastAfterALostTxHash(t *testing.T) {
 	assert.Len(t, h.sweeper.batchSweeps, 1, "exactly one broadcast total: the orphaned one")
 	assert.True(t, h.logger(t).contains("orphaned_broadcast"),
 		"the stall must name itself so RUNBOOK §15 recovery can start")
+	// M-3: this is the one condition in the file that blocks a (chain,
+	// token)'s collection INDEFINITELY -- every later tick finds the same
+	// booking and returns the same conflict -- and it had no counter, only a
+	// log line into a logger that is NopLogger() by default. It is now on
+	// RUNBOOK §14's page-on-any-nonzero table, next to a §15 subsection that
+	// actually describes the recovery the error message promises.
+	assert.Equal(t, []int64{chainID}, h.metrics.orphanedBroadcastCalls(),
+		"the only permanent block on an outbound channel must be countable, not just logged")
 }
 
 // --- G-M4 / G-m6: the gas-bump timer must actually reset ------------------
@@ -765,7 +784,10 @@ func TestOnchain_Recheck_TxIncludedErrorIsNotEvidence(t *testing.T) {
 	h.reader.setIncludedErr(chainID, txHash, errors.New("rpc: 503 upstream unavailable"))
 
 	for i := 0; i < 5; i++ {
-		h.svc.RunPendingRecheckOnce(ctx)
+		// The tick itself now REPORTS the RPC failure (M-9: these loops used
+		// to swallow every error into a logger that is NopLogger() by
+		// default). What must not happen is the booking moving.
+		require.Error(t, h.svc.RunPendingRecheckOnce(ctx))
 	}
 
 	current, err := h.bookings.GetBooking(ctx, booking.UID)
@@ -781,11 +803,11 @@ func TestOnchain_Recheck_TxIncludedErrorIsNotEvidence(t *testing.T) {
 	// threshold applies -- proving the errors were skipped, not counted.
 	h.reader.setIncludedErr(chainID, txHash, nil)
 	h.reader.setIncluded(chainID, txHash, false)
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 	afterFirstRealMiss, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)
 	require.Equal(t, core.Status("confirming"), afterFirstRealMiss.Status, "miss 1 of 2")
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 	afterSecondRealMiss, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)
 	assert.Equal(t, core.Status("failed"), afterSecondRealMiss.Status)

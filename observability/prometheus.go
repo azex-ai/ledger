@@ -82,6 +82,10 @@ type PrometheusMetrics struct {
 	reconcileGap       *prometheus.GaugeVec
 	reservedAmount     *prometheus.GaugeVec
 	chainCursorLag     *prometheus.GaugeVec
+	// chainCursorAdvanceAge is the liveness half of chainCursorLag, which
+	// freezes rather than grows under the most common watcher stalls -- see
+	// core.Metrics.ChainCursorAdvanceAge (M-8).
+	chainCursorAdvanceAge *prometheus.GaugeVec
 
 	// negativeBalanceDetected is a monotonic counterpart to the balanceDrift
 	// Gauge above (M-3 fix, I-41 point 3): the Gauge's label omits holder to
@@ -93,11 +97,18 @@ type PrometheusMetrics struct {
 	negativeBalanceDetected *prometheus.CounterVec
 
 	// Onchain counters
-	depositReorgDetected     *prometheus.CounterVec
-	sweepUnattributed        *prometheus.CounterVec
-	sweepAddressUnreadable   *prometheus.CounterVec
-	registrationRescanFailed *prometheus.CounterVec
-	depositReviewRequired    *prometheus.CounterVec
+	depositReorgDetected      *prometheus.CounterVec
+	sweepUnattributed         *prometheus.CounterVec
+	sweepAddressUnreadable    *prometheus.CounterVec
+	registrationRescanFailed  *prometheus.CounterVec
+	depositReviewRequired     *prometheus.CounterVec
+	depositIngestDeadLettered *prometheus.CounterVec
+	sweepOrphanedBroadcast    *prometheus.CounterVec
+
+	// Dead-letter backlog: the two readings DeadLetterBacklog samples
+	// together (depth, and the age of the oldest still-unbooked row).
+	deadLettersUnbooked     prometheus.Gauge
+	deadLetterOldestAgeSecs prometheus.Gauge
 
 	// Background jobs (I-M10)
 	jobTickCompleted     *prometheus.CounterVec
@@ -264,6 +275,11 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "chain_cursor_lag_blocks",
 			Help:      "Blocks behind the chain tip the deposit watcher's cursor currently is, labelled by chain.",
 		}, []string{"chain_id"}),
+		chainCursorAdvanceAge: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "chain_cursor_advance_age_seconds",
+			Help:      "Seconds since this process last observed the deposit watcher's cursor move, labelled by chain. Unlike chain_cursor_lag_blocks this is reported on failed ticks too, so it grows when the RPC or the database is down -- alert on max_over_time here, and on the minimum across replicas (see docs/RUNBOOK.md).",
+		}, []string{"chain_id"}),
 		depositReorgDetected: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
 			Name:      "deposit_reorg_detected_total",
@@ -289,6 +305,27 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 			Name:      "deposit_review_required_total",
 			Help:      "Total deposits routed to human review instead of auto-crediting, labelled by chain and reason.",
 		}, []string{"chain_id", "reason"}),
+
+		depositIngestDeadLettered: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "deposit_ingest_dead_lettered_total",
+			Help:      "Total on-chain deposit sightings written to the dead-letter store and skipped by the forward scan -- a real transfer this ledger decided never to book, labelled by chain and a bounded rejection reason. Page on any nonzero rate (see docs/RUNBOOK.md).",
+		}, []string{"chain_id", "reason"}),
+		sweepOrphanedBroadcast: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: ns,
+			Name:      "sweep_orphaned_broadcast_total",
+			Help:      "Total times a sweep booking was found pending at a nonce the signer has already spent (its broadcast's tx hash was lost). Blocks that (chain, token)'s collection until a human intervenes -- see docs/RUNBOOK.md.",
+		}, []string{"chain_id"}),
+		deadLettersUnbooked: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "dead_letters_unbooked",
+			Help:      "Dead-lettered deposit sightings that still have no booking. Self-clearing: a row whose deposit was later booked (replayed, or self-healed) leaves this gauge on its own.",
+		}),
+		deadLetterOldestAgeSecs: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Name:      "dead_letter_oldest_age_seconds",
+			Help:      "Age of the oldest still-unbooked dead-lettered deposit sighting, in seconds. 0 when the queue is empty.",
+		}),
 
 		jobTickCompleted: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: ns,
@@ -348,9 +385,12 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 		m.journalLatency, m.rollupLatency, m.snapshotLatency, m.journalEntryCount,
 		m.pendingRollups, m.activeReservations, m.checkpointAge,
 		m.balanceDrift, m.negativeBalanceDetected, m.reconcileGap, m.reservedAmount,
-		m.chainCursorLag, m.depositReorgDetected, m.sweepUnattributed,
+		m.chainCursorLag, m.chainCursorAdvanceAge,
+		m.depositReorgDetected, m.sweepUnattributed,
 		m.sweepAddressUnreadable,
 		m.registrationRescanFailed, m.depositReviewRequired,
+		m.depositIngestDeadLettered, m.sweepOrphanedBroadcast,
+		m.deadLettersUnbooked, m.deadLetterOldestAgeSecs,
 		m.jobTickCompleted, m.jobTickFailed, m.jobTickSkippedLocked, m.jobPanicked,
 		m.stuckRollups, m.pendingEvents,
 		m.attestationBatchResult, m.anchorPublishResult, m.anchorLagSeqs,
@@ -492,6 +532,12 @@ func (m *PrometheusMetrics) ChainCursorLag(chainID int64, lagBlocks int64) {
 	m.chainCursorLag.WithLabelValues(int64Label(chainID)).Set(float64(lagBlocks))
 }
 
+// ChainCursorAdvanceAge records how long it has been since the watcher's
+// cursor last moved on this chain.
+func (m *PrometheusMetrics) ChainCursorAdvanceAge(chainID int64, age time.Duration) {
+	m.chainCursorAdvanceAge.WithLabelValues(int64Label(chainID)).Set(age.Seconds())
+}
+
 // DepositReorgDetected increments the deep-reorg detection counter.
 func (m *PrometheusMetrics) DepositReorgDetected(chainID int64) {
 	m.depositReorgDetected.WithLabelValues(int64Label(chainID)).Inc()
@@ -516,6 +562,26 @@ func (m *PrometheusMetrics) RegistrationRescanFailed(chainID int64) {
 // DepositReviewRequired increments the review-required counter.
 func (m *PrometheusMetrics) DepositReviewRequired(chainID int64, reason string) {
 	m.depositReviewRequired.WithLabelValues(int64Label(chainID), safeLabel(reason)).Inc()
+}
+
+// DepositIngestDeadLettered increments the dead-lettered-sighting counter.
+func (m *PrometheusMetrics) DepositIngestDeadLettered(chainID int64, reason string) {
+	m.depositIngestDeadLettered.WithLabelValues(int64Label(chainID), safeLabel(reason)).Inc()
+}
+
+// SweepOrphanedBroadcast increments the orphaned-broadcast counter.
+func (m *PrometheusMetrics) SweepOrphanedBroadcast(chainID int64) {
+	m.sweepOrphanedBroadcast.WithLabelValues(int64Label(chainID)).Inc()
+}
+
+// DeadLetterBacklog records the dead-letter queue's depth and the age of its
+// oldest still-unbooked row. Both readings come from one sampling call
+// because neither is interpretable without the other: a depth of 3 that is
+// seconds old is an operator's inbox, the same depth a week old is a
+// forgotten one.
+func (m *PrometheusMetrics) DeadLetterBacklog(count int64, oldestAge time.Duration) {
+	m.deadLettersUnbooked.Set(float64(count))
+	m.deadLetterOldestAgeSecs.Set(oldestAge.Seconds())
 }
 
 // --- Background jobs (I-M10) ---

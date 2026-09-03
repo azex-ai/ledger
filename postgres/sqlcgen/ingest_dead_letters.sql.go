@@ -7,9 +7,79 @@ package sqlcgen
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const countUnbookedIngestDeadLetters = `-- name: CountUnbookedIngestDeadLetters :one
+SELECT count(*)::BIGINT AS unbooked,
+       COALESCE(min(dl.created_at), 'epoch'::timestamptz)::TIMESTAMPTZ AS oldest_created_at
+FROM ingest_dead_letters dl
+WHERE NOT EXISTS (
+    SELECT 1 FROM bookings b WHERE b.idempotency_key = dl.idempotency_key
+)
+`
+
+type CountUnbookedIngestDeadLettersRow struct {
+	Unbooked        int64     `json:"unbooked"`
+	OldestCreatedAt time.Time `json:"oldest_created_at"`
+}
+
+// The backlog gauge's sample (core.Metrics.DeadLetterBacklog): how many dead
+// letters still have no booking, and when the oldest of those was recorded.
+// COALESCE keeps the empty-queue answer a timestamp rather than a NULL the
+// adapter would have to special-case -- 'epoch' is this schema's no-NULL
+// convention for "absent", and the caller reports a zero age for it.
+func (q *Queries) CountUnbookedIngestDeadLetters(ctx context.Context) (CountUnbookedIngestDeadLettersRow, error) {
+	row := q.db.QueryRow(ctx, countUnbookedIngestDeadLetters)
+	var i CountUnbookedIngestDeadLettersRow
+	err := row.Scan(&i.Unbooked, &i.OldestCreatedAt)
+	return i, err
+}
+
+const getIngestDeadLetter = `-- name: GetIngestDeadLetter :one
+SELECT dl.id, dl.uid, dl.chain_id, dl.tx_hash, dl.txlog_seq, dl.idempotency_key, dl.reason, dl.payload, dl.created_at,
+       (b.id IS NOT NULL)::BOOLEAN AS booked
+FROM ingest_dead_letters dl
+LEFT JOIN bookings b ON b.idempotency_key = dl.idempotency_key
+WHERE dl.uid = $1
+`
+
+type GetIngestDeadLetterRow struct {
+	ID             int64       `json:"id"`
+	Uid            pgtype.UUID `json:"uid"`
+	ChainID        int64       `json:"chain_id"`
+	TxHash         string      `json:"tx_hash"`
+	TxlogSeq       int32       `json:"txlog_seq"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	Reason         string      `json:"reason"`
+	Payload        []byte      `json:"payload"`
+	CreatedAt      time.Time   `json:"created_at"`
+	Booked         bool        `json:"booked"`
+}
+
+// One dead letter, by uid, including the payload -- the serialized
+// core.DepositSighting a replay re-drives through IngestDeposit. Everything
+// a replay needs was already on the row before the replay path existed;
+// nothing read this column at all.
+func (q *Queries) GetIngestDeadLetter(ctx context.Context, uid pgtype.UUID) (GetIngestDeadLetterRow, error) {
+	row := q.db.QueryRow(ctx, getIngestDeadLetter, uid)
+	var i GetIngestDeadLetterRow
+	err := row.Scan(
+		&i.ID,
+		&i.Uid,
+		&i.ChainID,
+		&i.TxHash,
+		&i.TxlogSeq,
+		&i.IdempotencyKey,
+		&i.Reason,
+		&i.Payload,
+		&i.CreatedAt,
+		&i.Booked,
+	)
+	return i, err
+}
 
 const insertIngestDeadLetter = `-- name: InsertIngestDeadLetter :one
 INSERT INTO ingest_dead_letters (uid, chain_id, tx_hash, txlog_seq, idempotency_key, reason, payload)
@@ -58,21 +128,56 @@ func (q *Queries) InsertIngestDeadLetter(ctx context.Context, arg InsertIngestDe
 }
 
 const listIngestDeadLetters = `-- name: ListIngestDeadLetters :many
-SELECT id, uid, chain_id, tx_hash, txlog_seq, idempotency_key, reason, payload, created_at FROM ingest_dead_letters ORDER BY id DESC LIMIT $1
+SELECT dl.id, dl.uid, dl.chain_id, dl.tx_hash, dl.txlog_seq, dl.idempotency_key, dl.reason, dl.payload, dl.created_at,
+       (b.id IS NOT NULL)::BOOLEAN AS booked
+FROM ingest_dead_letters dl
+LEFT JOIN bookings b ON b.idempotency_key = dl.idempotency_key
+WHERE ($1::bigint = 0 OR dl.id < $1::bigint)
+ORDER BY dl.id DESC
+LIMIT $2::int
 `
 
-// Newest first, for on-call triage (RUNBOOK). Unbounded scope is not
-// expected -- ErrConflict should be rare; limit guards against a runaway
-// normalization bug flooding an operator's terminal.
-func (q *Queries) ListIngestDeadLetters(ctx context.Context, limit int32) ([]IngestDeadLetter, error) {
-	rows, err := q.db.Query(ctx, listIngestDeadLetters, limit)
+type ListIngestDeadLettersParams struct {
+	CursorID  int64 `json:"cursor_id"`
+	PageLimit int32 `json:"page_limit"`
+}
+
+type ListIngestDeadLettersRow struct {
+	ID             int64       `json:"id"`
+	Uid            pgtype.UUID `json:"uid"`
+	ChainID        int64       `json:"chain_id"`
+	TxHash         string      `json:"tx_hash"`
+	TxlogSeq       int32       `json:"txlog_seq"`
+	IdempotencyKey string      `json:"idempotency_key"`
+	Reason         string      `json:"reason"`
+	Payload        []byte      `json:"payload"`
+	CreatedAt      time.Time   `json:"created_at"`
+	Booked         bool        `json:"booked"`
+}
+
+// Keyset pagination, NEWEST FIRST, for on-call triage (RUNBOOK §18) --
+// same shape and same reasoning as ListJournalsCursor: cursor_id = 0 means
+// "first page", the caller encodes the last (oldest) row's id as the opaque
+// next_cursor, and the next page is strictly older. A runaway normalization
+// bug can produce many of these, so the queue has to be walkable rather
+// than truncated at a "recent N" that hides the rest.
+//
+// `booked` answers the only question that decides whether a row still needs
+// an operator: a dead letter whose deposit was booked afterwards -- replayed
+// by hand, or self-healed because the cause was a frozen account or a closed
+// period that has since reopened -- is history, not a queue item. The join is
+// on the shared deposit-{chain}-{tx}-{seq} idempotency key, which is by
+// construction the same string on both rows (bookings has a UNIQUE index on
+// it, so this is an index lookup, not a scan).
+func (q *Queries) ListIngestDeadLetters(ctx context.Context, arg ListIngestDeadLettersParams) ([]ListIngestDeadLettersRow, error) {
+	rows, err := q.db.Query(ctx, listIngestDeadLetters, arg.CursorID, arg.PageLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []IngestDeadLetter{}
+	items := []ListIngestDeadLettersRow{}
 	for rows.Next() {
-		var i IngestDeadLetter
+		var i ListIngestDeadLettersRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Uid,
@@ -83,6 +188,7 @@ func (q *Queries) ListIngestDeadLetters(ctx context.Context, limit int32) ([]Ing
 			&i.Reason,
 			&i.Payload,
 			&i.CreatedAt,
+			&i.Booked,
 		); err != nil {
 			return nil, err
 		}

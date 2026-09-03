@@ -655,7 +655,7 @@ alert on a stalled job with it). Cardinality is bounded by design:
 integers.
 
 For OpenTelemetry, DataDog, or any other backend, write a thin adapter
-against `core.Metrics` (41 methods, one per emitted signal -- see its own
+against `core.Metrics` (45 methods, one per emitted signal -- see its own
 doc comment in [`core/metrics.go`](core/metrics.go) for the full list and
 the embed-`core.NoopMetrics`-and-override-a-few pattern).
 
@@ -944,7 +944,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
 - [**DR.md**](docs/DR.md) -- Backup & disaster recovery: PITR strategy, RPO/RTO targets, restore procedure, and invariant-based backup verification (quarterly drill).
 - [**CAPACITY.md**](docs/CAPACITY.md) -- Benchmark baseline, sizing guide (pool/replicas/DB), suggested SLOs, and scaling signals.
-- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (59 paths, 100 schemas).
+- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 102 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
 - [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (FX two-leg), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.

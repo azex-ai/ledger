@@ -88,7 +88,10 @@ func TestHandleReorg_EmitsDepositReorgDetected(t *testing.T) {
 	// anomaly row itself is pinned by the reorg store's own tests.
 	o := &Onchain{deps: OnchainDeps{Logger: core.NopLogger(), Metrics: metrics}}
 
-	o.handleReorg(context.Background(), &core.Booking{UID: "bk-reorg", ChannelRef: "0xdead"}, 8453)
+	// misses=1: the FIRST observation. Reporting is unconditional -- only
+	// auto_reverse's debit waits for corroboration (M-1) -- so one
+	// observation must already produce the counter.
+	o.handleReorg(context.Background(), &core.Booking{UID: "bk-reorg", ChannelRef: "0xdead"}, 8453, 1)
 
 	reorgs, _, _ := metrics.snapshot()
 	assert.Equal(t, []int64{8453}, reorgs,
@@ -215,7 +218,9 @@ func TestRunRegistrationRescansOnce_EmitsRegistrationRescanFailed(t *testing.T) 
 		registrationRescanTimeout: time.Second,
 	}
 
-	o.runRegistrationRescansOnce(context.Background())
+	// The claim itself succeeds and one job fails, so the tick reports that
+	// failure -- which is the point of M-9's counted ticks.
+	require.Error(t, o.runRegistrationRescansOnce(context.Background()))
 
 	_, _, failures := metrics.snapshot()
 	assert.Equal(t, []int64{137}, failures,
@@ -290,13 +295,44 @@ func TestScanChainOnce_EmitsChainCursorLag(t *testing.T) {
 	assert.Equal(t, int64(7), lags[0].chainID)
 	assert.Equal(t, 1000-cursors.set[0], lags[0].lagBlocks,
 		"the lag is measured against the chain head, not against the safe tip: a cursor that stops advancing must show a GROWING number")
+
+	// M-8: the lag above can only be computed once LatestBlock has answered,
+	// so it is not a liveness signal. Every tick also reports how long the
+	// cursor has gone without moving, which is.
+	ages := metrics.snapshotAges()
+	require.Len(t, ages, 1, "every watcher tick must also report ChainCursorAdvanceAge")
+	assert.Equal(t, int64(7), ages[0].chainID)
 }
 
-// lagMetricsRecorder records ChainCursorLag.
+// lagMetricsRecorder records the watcher's two cursor gauges.
+//
+// Embeds core.NoopMetrics (the value, not the core.Metrics interface): an
+// embedded nil interface panics on the first method this recorder does not
+// override, which is how adding ChainCursorAdvanceAge turned this pin into
+// a segfault rather than a failure. The embedding pattern core.Metrics'
+// own doc comment recommends does not have that failure mode.
 type lagMetricsRecorder struct {
-	core.Metrics
+	core.NoopMetrics
 	mu   sync.Mutex
 	lags []lagCall
+	ages []ageCall
+}
+
+type ageCall struct {
+	chainID int64
+	age     time.Duration
+}
+
+func (m *lagMetricsRecorder) ChainCursorAdvanceAge(chainID int64, age time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ages = append(m.ages, ageCall{chainID, age})
+}
+
+func (m *lagMetricsRecorder) snapshotAges() []ageCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]ageCall(nil), m.ages...)
 }
 
 type lagCall struct {
