@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // readme_docs_consistency_test.go machine-checks the "数量" and "路径"
@@ -367,4 +370,71 @@ func mustReadFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestREADMEMetricNamesExistInThePrometheusAdapter is P-2 (2026-09-03
+// independent review).
+//
+// The two README gates above compare NUMBERS -- the method count, the
+// endpoint counts. A rename, a one-in-one-out swap, or a metric whose
+// meaning changed entirely all leave the number alone. The names README.md
+// prints as the ones to build a dashboard on had no gate at all, and those
+// are the part a reader copies.
+//
+// One direction only, deliberately: every ledger_* name in the README must
+// be one the adapter registers. The reverse would demand the README list
+// all forty-one, which is exactly what it says to read core/metrics.go for.
+func TestREADMEMetricNamesExistInThePrometheusAdapter(t *testing.T) {
+	registered := prometheusMetricNames(t)
+	require.GreaterOrEqualf(t, len(registered), 30,
+		"only %d metric name(s) were parsed out of observability/prometheus.go, which registers around forty -- "+
+			"a scan that finds almost none reads as a pass", len(registered))
+
+	readme := mustReadFile(t, "README.md")
+	cited := regexp.MustCompile("`(ledger_[a-z0-9_]+)`").FindAllStringSubmatch(readme, -1)
+
+	checked := 0
+	for _, m := range cited {
+		name := m[1]
+		// The database roles share this prefix and are not metrics.
+		if name == "ledger_app" || name == "ledger_ro" || name == "ledger_owner" {
+			continue
+		}
+		checked++
+		assert.Truef(t, registered[name],
+			"README.md tells a reader to alert on %q, and observability/prometheus.go registers no such metric.\n\n"+
+				"A dashboard built from the README would show an empty panel. The count gates next door compare "+
+				"NUMBERS, which a rename or a one-in-one-out swap leaves untouched -- the names are the part a "+
+				"reader actually copies (P-2). Registered: %v", name, sortedSetKeys(registered))
+	}
+	require.Positive(t, checked, "no ledger_* metric name was found in README.md -- the citation regexp stopped matching")
+}
+
+// prometheusMetricNames returns the fully qualified names the Prometheus
+// adapter registers: its Namespace joined to each collector's Name.
+func prometheusMetricNames(t *testing.T) map[string]bool {
+	t.Helper()
+	src := mustReadFile(t, "observability/prometheus.go")
+
+	// The adapter writes `Namespace: ns` against a package constant, so
+	// the namespace comes from that declaration rather than from the
+	// literal at each call site.
+	decl := regexp.MustCompile(`ns\s*=\s*"([a-z0-9_]+)"`).FindStringSubmatch(src)
+	require.NotNil(t, decl, "observability/prometheus.go declares no metric namespace constant")
+	namespace := decl[1]
+
+	out := map[string]bool{}
+	for _, m := range regexp.MustCompile(`Name:\s*"([a-z0-9_]+)"`).FindAllStringSubmatch(src, -1) {
+		out[namespace+"_"+m[1]] = true
+	}
+	return out
+}
+
+func sortedSetKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
