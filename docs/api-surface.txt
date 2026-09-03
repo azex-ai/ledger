@@ -505,6 +505,7 @@ core.ErrDuplicateJournal = var
 core.ErrInsufficientBalance = var
 core.ErrInvalidInput = var
 core.ErrInvalidTransition = var
+core.ErrNoLifecycle = var
 core.ErrNotFound = var
 core.ErrPeriodClosed = var
 core.ErrPrecisionExceeded = var

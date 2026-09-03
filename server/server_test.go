@@ -1549,18 +1549,21 @@ func TestCreateBooking_NotFound(t *testing.T) {
 }
 
 // TestCreateBooking_NoLifecycle is F-M1's pin (2026-09-03 consumer audit):
-// postgres.BookingStore returns a plain, unwrapped error (no core.ErrXxx
-// sentinel) when the target classification has no lifecycle attached --
-// exactly what the out-of-the-box `deposit` classification looks like until
-// an operator calls SetLifecycleIfEmpty (README "Tier 2"). Before this pin,
-// that fell through resolveError's default case to 500/19999 "An unexpected
-// error occurred", and docs/api.md's error table marks 500 Retryable, so a
-// conformant client would retry a request that could never succeed.
+// postgres.BookingStore wraps core.ErrNoLifecycle when the target
+// classification has no lifecycle attached -- exactly what the
+// out-of-the-box `deposit` classification looks like until an operator
+// calls SetLifecycleIfEmpty (README "Tier 2"). Before core.ErrNoLifecycle
+// existed, the store returned a plain, unwrapped error, this handler could
+// only detect it by matching the message text, and any change to that
+// wording would have silently regressed the HTTP layer back to
+// resolveError's default case -- 500/19999 "An unexpected error occurred"
+// -- with docs/api.md's error table marking 500 Retryable, so a conformant
+// client would retry a request that could never succeed.
 func TestCreateBooking_NoLifecycle(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.booker = &mockBooker{
 			createFn: func(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
-				return nil, fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
+				return nil, fmt.Errorf("postgres: create booking: classification %q has no lifecycle: %w", input.ClassificationCode, core.ErrNoLifecycle)
 			},
 		}
 	})

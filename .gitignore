@@ -5,6 +5,14 @@
 examples/fullstack/backend/backend
 .team
 
+# readme_runnable_test.go's compile/run gates write these at the module
+# root (os.MkdirTemp(".", ...)) so `go run`/`go build` resolve
+# github.com/azex-ai/ledger and go.work normally; each test removes its own
+# on success, but a killed process (SIGKILL, a CI timeout) leaves one
+# behind.
+readmecheck-*/
+readmecompile-*/
+
 # Scratch space for measurement reports and local tool state (bench output,
 # gh device id). Never committed -- some of it is credential-adjacent.
 .local/

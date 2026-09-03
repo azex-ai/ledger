@@ -1,9 +1,9 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -166,24 +166,20 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 
 	op, err := s.booker.CreateBooking(r.Context(), input)
 	if err != nil {
-		if isMissingLifecycleErr(err) {
+		if errors.Is(err, core.ErrNoLifecycle) {
 			// F-M1 (2026-09-03 consumer audit): this is a caller-fixable
 			// configuration problem -- the out-of-the-box `deposit`
 			// classification ships label-only (README "Tier 2 -- With
 			// Built-in Presets": InstallExtendedPresets installs accounting
 			// templates, not lifecycles), and CreateBooking has no way to
 			// create a booking against a classification with no lifecycle
-			// attached -- not "internal error". postgres.BookingStore
-			// returns this as a plain, unwrapped error (no core.ErrXxx
-			// sentinel to switch on), so it fell through resolveError's
-			// default case to 500/19999 with a text that gave the caller
-			// nothing to act on; api.md's error table marks 500 as
-			// Retryable, so a conformant client retried a request that
-			// could never succeed. Detected by message match rather than
-			// errors.Is because postgres/booking_store.go (where the
-			// sentinel would need to live) is outside this task's file
-			// scope -- see the same string in
-			// postgres/booking_store.go's "has no lifecycle" error.
+			// attached -- not "internal error". Before core.ErrNoLifecycle
+			// existed, postgres.BookingStore returned a plain, unwrapped
+			// error here, and this handler could only detect it by matching
+			// the message text, which fell through resolveError's default
+			// case to 500/19999 the moment that wording changed; api.md's
+			// error table marks 500 as Retryable, so a conformant client
+			// retried a request that could never succeed.
 			//
 			// httpx.ErrField, not ErrBadRequest: a plain AppError's Message
 			// is server-log-only (httpx.Error renders message.text on the
@@ -202,13 +198,6 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.Created(w, bookingToResponse(op))
-}
-
-// isMissingLifecycleErr reports whether err is postgres.BookingStore's
-// "classification has no lifecycle" error -- see the comment where this is
-// called.
-func isMissingLifecycleErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "has no lifecycle")
 }
 
 func (s *Server) handleTransition(w http.ResponseWriter, r *http.Request) {
