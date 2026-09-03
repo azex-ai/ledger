@@ -7,7 +7,20 @@
 > 是唯一随处置状态维护的两份。上一轮（2026-08-25）的方法与结论见
 > `docs/audits/2026-08-25-financial-engineering/README.md`，本轮**不重报**它已关闭的条目。
 
-## 处置状态（2026-09-02 更新）
+## 处置状态（2026-09-03 收口）
+
+**全量整改完成，main 全绿**（`make vet` / `make lint` 0 / `make test` 18 包 / `chains/evm` / `anchors/r2` / web 225 用例 / `codegen:check`）。
+
+| 阶段 | 产出 |
+|---|---|
+| Wave 1 | 6 Critical 全部修复合入；兄弟扫描额外修 4 条同形 |
+| Wave 2 | 8 个文件独占任务全部合入（207 条独立条目：修复 / 记为不修附结论 / 转后续） |
+| W3 复审 | money-path 3 攻破（1 Critical）+ gates 23 处盲区（3 Critical）→ 全部修复合入；M-5 经实跑升 Critical 并做了机制层 |
+| 新增契约 | I-49 … I-63；migration 016 … 027；`core.Metrics` 32→41；`docs/BREAKING.md`；openapi `x-required-scope` |
+| 留给 Aaron | `enforce_min_balance` / `ConfirmPending` 读 checkpoint（热路径信任边界）；hold 项方案 (A) 签名 receipt；契约 §7 十六条 lead 替拍的语义口径逐条确认 |
+
+后续单列项（TODO 文末「Lead 追加」表标 W3 后续）：B-m12 sweep 锁复核、postgres 测试套件 211s、reconcile check 读 `config_table_changes`、pin 门禁追一层本地 helper 后升回 28 条 pin、min_balance 信任边界。
+
 
 Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contracts.md`，任务清单 `TODO.md`，lead 逐条证伪记录在 `lead-verification.md`。
 
@@ -54,6 +67,8 @@ Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径�
 ## 0. 一句话结论
 
 > **上一轮的修复全部真的落地了——每一条都停在了它自己那一层。**
+>
+> 整改之后的复审又证明了一次：**这一轮的修复也停在了自己那一层。** I-49 修了 `min(V,E)`，被减掉的 hold 项仍读可写表；「兄弟扫描」被写成「读了 checkpoint」而不是「算式里有项来自攻击者可写的表」。所以本轮的最终方法结论不是「扫兄弟」，而是**按「谁能写这张表」列出每个金额算式的每一项**——这条已写进契约 §0 的下一版。
 
 十份报告的「上轮修复复核」段结论一致：8 条 Critical 与三波整改的每一项都接到了真实路径，
 新加的门禁种回漂移都会红（F 实测六个、C 实测五个）。这一轮没有一条发现是「修复没落地」。

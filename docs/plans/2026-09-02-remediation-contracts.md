@@ -5,7 +5,7 @@
 > 每条带 id / `file:line` / 修法 / pin 要求）。完整论证与最小复现在同目录各 territory 报告原文与
 > `lead-verification.md` —— **不要只看 TODO 的一行标题就动手**。
 >
-> **Status（2026-09-03）：Wave 1 / Wave 2 全部合入 main；Wave 3 收口中（对抗式复审 ×2、INVARIANTS 引用收紧、归档）。** 复审结论出来后本文件转 CLOSED。
+> **Status（2026-09-03）：CLOSED（代码面）。** Wave 1 / 2 / 3 全部合入 main；两轮对抗式复审的发现全部修复。**§7.14 列出的语义口径与信任边界决定待 Aaron 确认**，确认后本文件转历史记录。
 >
 > Aaron 2026-09-02 拍板：**全量修复**（6 Critical + 全部 Major + 全部 Minor）。
 > 沿用无外部消费方期的 no-compat 约定（lead 已核：两条产品线 go.mod 零引用），允许破坏性变更，
