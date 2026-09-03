@@ -1815,3 +1815,4 @@
 | 19 处 | 其余门禁盲区（见 `w3-review/gates.md` 逐条表） | w3-gates-fixes，同一 mutation 修后必红 |
 | w3-citations | 28 条真实 pin 因门禁 AST 只看被引用函数自身函数体（不追本地 helper / raw SQL 探测）被降为「Related tests」；门禁追一层本地 helper 后再升回 Pinned by | W3 后续 |
 | w3-holds 兄弟扫描（核实后） | `account_policies` 的 `enforce_min_balance=false` UPDATE：**DB 审计有**（migration 020 派生 trigger 写 `config_table_changes`，changed_by=ledger_app，全行 diff），应用层轨迹 `account_policy_changes` 无——这是 `config_history.sql` 的设计意图（两份对读即可认出无操作人的变更）。残留：没有任何 reconcile check 读 `config_table_changes`，发现依赖有人跑 `ledger-cli config-history` | W3 后续：加一条 reconcile check「config_table_changes 里存在无对应应用层轨迹的变更」告警 |
+| w3-gates-fixes 残留 | pin 引用门禁：Enforced by 引用不存在的符号仍被静默丢弃；已登记（unresolvable）节零解析仍绿 | W3（w3-gates-fixes 第二轮，worktree w3-gates-fixes-2） |
