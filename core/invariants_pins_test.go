@@ -786,7 +786,7 @@ func selfGatedSection(enforced, body string, testBodies map[string][]testFuncBod
 	}
 
 	pinned := blockBetween(body, "**Pinned by**")
-	pins := 0
+	pins, inGateFile := 0, 0
 	for _, m := range append(pinReference.FindAllStringSubmatch(pinned, -1), bareReference.FindAllStringSubmatch(pinned, -1)...) {
 		name := m[len(m)-1]
 		bodies, ok := testBodies[name]
@@ -794,19 +794,24 @@ func selfGatedSection(enforced, body string, testBodies map[string][]testFuncBod
 			continue
 		}
 		pins++
-		inGateFile := false
 		for _, b := range bodies {
 			for _, gate := range gateFiles {
 				if b.file == gate {
-					inGateFile = true
+					inGateFile++
 				}
 			}
 		}
-		if !inGateFile {
-			return false
-		}
 	}
-	return pins > 0
+	// At least one pin has to BE the gate -- that is what makes the section
+	// self-enforcing rather than merely gate-adjacent.
+	//
+	// It used to be all of them, which had this backwards (F-5,
+	// 2026-09-03): a self-gated section could never cite an ordinary
+	// behaviour pin alongside its gate without losing its self-gated
+	// status. I-61 is exactly that case -- the emission-coverage gate plus
+	// the test that actually drives a rollup tick and asserts the gauge --
+	// and extra evidence must not cost a section its classification.
+	return pins > 0 && inGateFile > 0
 }
 
 // enforcedGateFiles returns the `_test.go` files an Enforced by block names

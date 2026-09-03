@@ -6575,9 +6575,13 @@ set is the interface's actual shape; the check tracks it automatically as
 methods are added, rather than needing its own list edited in lockstep.
 
 **Enforced by**: `observability/emission_coverage_test.go` — reflects the
-metrics interface's live method set (not a hand-copied name list), walks
-`service/` and `postgres/` non-test source as text for `.MethodName(`, and
-checks the result against the `crossBranchExclusions` map, whose own doc
+metrics interface's live method set (not a hand-copied name list), parses
+`service/` and `postgres/` non-test source with `go/ast` for a call on a
+metrics-shaped receiver, **skipping statically unreachable branches** (M-10
+made this AST-based rather than a text scan that counted comments; F-5,
+2026-09-03, made it skip `if … && false`, which had let the stuck-rollup
+signal be switched off with the whole suite green), and checks the result
+against the `crossBranchExclusions` map, whose own doc
 comment states the governance rule: entries are removed once their call site
 lands, never added to silence a newly-introduced gap. Mirrors I-50's
 inversion — the exclusion map is this gate's *output*, not a list someone
@@ -6593,6 +6597,17 @@ maintains by hand.
   declared, neither wired — each needs a new aggregate query beyond this
   wave's merge budget, tracked in `TODO.md`'s breaking-change list), and
   fails if either gets a call site without being removed from the map first.
+- `observability.TestEveryMetricsMethodHasABehaviourPin` — the census half.
+  Strengthened 2026-09-03 (F-5) on both sides: the coverage gate no longer
+  counts a call site inside a statically false branch (`err == nil && false`
+  switched the stuck-rollup signal off entirely with the whole suite green),
+  and the census no longer counts a name that appears only as a mock's empty
+  method declaration, which every implementation of a wide interface has to
+  write for every method.
+- `service.TestRollup_ReportsStuckAndPendingSeparately` — the behaviour pin
+  the census was reporting as present and was not (F-5): the stuck and
+  pending gauges are asserted separately, because pending drains as the
+  queue is worked and stuck does not.
 
 ## I-62: A deposit whose token is no longer configured is reviewed, never auto-credited
 
