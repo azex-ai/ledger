@@ -739,3 +739,32 @@ func TestRollup_ReportsStuckAndPendingSeparately(t *testing.T) {
 		"pending and stuck are separate gauges on purpose: pending drains as the queue is worked and stuck does not, "+
 			"so reporting one for the other makes a permanently stuck item look like transient backlog")
 }
+
+// TestRollup_ReportsQueueDepthOnAnEmptyTick pins the case the gauges exist
+// for (team-lead ruling, 2026-09-03).
+//
+// ProcessBatch used to return early when DequeueRollupBatch handed back
+// nothing, before either gauge was emitted. StuckRollups counts items that
+// have exhausted their retries -- which is exactly what DequeueRollupBatch
+// does NOT hand back -- so a queue that is entirely stuck dequeues nothing,
+// and both gauges went unwritten at the moment they were the signal. A
+// gauge that stops being written goes stale rather than to zero, so the
+// dashboard keeps showing the last healthy value.
+func TestRollup_ReportsQueueDepthOnAnEmptyTick(t *testing.T) {
+	queue := &mockRollupQueuer{stuck: 4} // nothing dequeueable, four wedged
+	metrics := &recordingMetrics{}
+	svc := NewRollupService(queue, newMockCheckpointRW(), &mockEntrySummer{}, &mockClassificationLister{},
+		core.NewEngine(core.WithMetrics(metrics)))
+
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Zero(t, processed, "the fixture must dequeue nothing -- that is the case under test")
+
+	require.Equal(t, []int64{4}, metrics.stuckRollups,
+		"a tick that dequeued nothing must still report the stuck count. Four items wedged and zero dequeueable is "+
+			"precisely the state this gauge exists to alarm on, and it is the state in which the early return used to "+
+			"skip it")
+	require.Equal(t, []int64{0}, metrics.pendingRollups,
+		"pending must be reported as the zero it is, not left unwritten -- an un-emitted gauge goes stale on the "+
+			"dashboard rather than dropping to zero")
+}
