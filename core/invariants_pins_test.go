@@ -1159,81 +1159,183 @@ func TestCitationStyleGapListStaysClosed(t *testing.T) {
 // section to cite nothing real -- TestInvariantsEnforcedCitationsResolve
 // applies to registered sections exactly as it does to any other.
 type dbOnlyMechanism struct {
-	migration string   // repo-relative path of the migration that declares it
-	objects   []string // names that must appear in that file
+	migration string     // repo-relative path of the migration that declares it
+	objects   []dbObject // the declarations that must be in that file
 	reason    string
 }
+
+// dbObject is one registered declaration, as a kind and a name rather than
+// as a string to search for.
+//
+// F-3 (2026-09-03 independent review): the check used to be
+// strings.Contains over the whole migration file. One entry read
+// "idempotency_key TEXT UNIQUE NOT NULL", of which the baseline has five
+// copies -- deleting four of them still matched, and the reviewer measured
+// that it took deleting the last one to turn anything red. A whole-file
+// substring cannot tell a declaration from a comment, from a DROP, or from
+// four other tables' copies of the same phrase.
+//
+// Naming the kind makes the check parse for a declaration instead. It also
+// makes the register say something a reader can check: "trigger" and
+// "function" and "unique column" are claims with shapes, where a bare
+// string is a claim about text.
+type dbObject struct {
+	kind string // one of the kinds objectIsDeclared knows
+	name string // the object's name; "table.column" for the column kinds
+	// detail qualifies some kinds: the type for columnType, the object a
+	// privilege is revoked on for privilege.
+	detail string
+}
+
+// Kinds objectIsDeclared understands. An unknown kind fails rather than
+// passing vacuously -- a register entry nobody can verify is the thing this
+// whole file exists to prevent.
+const (
+	kindTable            = "table"
+	kindPartitionedTable = "partitioned_table"
+	kindPartition        = "partition"
+	kindFunction         = "function"
+	kindTrigger          = "trigger"
+	kindIndex            = "index"
+	kindConstraint       = "constraint"
+	kindColumn           = "column"
+	kindUniqueColumn     = "unique_column"
+	kindNullableColumn   = "nullable_column"
+	kindColumnType       = "column_type"
+	kindRole             = "role"
+	kindPrivilege        = "privilege"
+)
 
 var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
 	"I-3": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"uq_bookings_idempotency", "uq_ingest_dead_letters_idempotency_key", "idempotency_key TEXT UNIQUE NOT NULL"},
-		reason:    "UNIQUE constraints on every mutation table's idempotency_key",
+		objects: []dbObject{
+			{kind: kindUniqueColumn, name: "journals.idempotency_key"},
+			{kind: kindUniqueColumn, name: "reservations.idempotency_key"},
+			{kind: kindConstraint, name: "uq_bookings_idempotency"},
+			{kind: kindIndex, name: "uq_ingest_dead_letters_idempotency_key"},
+		},
+		reason: "UNIQUE constraints on every mutation table's idempotency_key",
 	},
 	"I-6": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"NUMERIC(30,18)"},
-		reason:    "the column type itself; the Go half is a type choice (decimal.Decimal), not a function",
+		objects: []dbObject{
+			{kind: kindColumnType, name: "journal_entries.amount", detail: "NUMERIC(30,18)"},
+			{kind: kindColumnType, name: "journals.total_debit", detail: "NUMERIC(30,18)"},
+		},
+		reason: "the column type itself; the Go half is a type choice (decimal.Decimal), not a function",
 	},
 	"I-7": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"reversal_of", "NOT NULL"},
-		reason:    "NOT NULL defaults and the four nullable FK exceptions, declared in the schema",
+		objects: []dbObject{
+			{kind: kindNullableColumn, name: "journals.reversal_of"},
+			{kind: kindNullableColumn, name: "bookings.journal_id"},
+		},
+		reason: "NOT NULL defaults and the four nullable FK exceptions, declared in the schema",
 	},
 	"I-12": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"check_journal_currency_balance"},
-		reason:    "conservation is I-1 + I-2; its DB-side enforcement is the deferred balance trigger, which holds even for writes that never went through this library",
+		objects: []dbObject{
+			{kind: kindFunction, name: "check_journal_currency_balance"},
+			{kind: kindTrigger, name: "trg_check_journal_currency_balance"},
+		},
+		reason: "conservation is I-1 + I-2; its DB-side enforcement is the deferred balance trigger, which holds even for writes that never went through this library",
 	},
 	"I-13": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"PARTITION BY RANGE", "journal_entries_default"},
-		reason:    "partition declaration plus the catch-all partition",
+		objects: []dbObject{
+			{kind: kindPartitionedTable, name: "journal_entries"},
+			{kind: kindPartition, name: "journal_entries_default"},
+		},
+		reason: "partition declaration plus the catch-all partition",
 	},
 	"I-18": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"uq_journals_uid", "uq_bookings_uid", "uq_currencies_uid"},
-		reason:    "external identity is the uid column and its unique index; the adapter-side conversion (uidToPG/pgToUID) is unexported by design, since nothing outside the store may hold an internal id",
+		objects: []dbObject{
+			{kind: kindIndex, name: "uq_journals_uid"},
+			{kind: kindIndex, name: "uq_bookings_uid"},
+			{kind: kindIndex, name: "uq_currencies_uid"},
+		},
+		reason: "external identity is the uid column and its unique index; the adapter-side conversion (uidToPG/pgToUID) is unexported by design, since nothing outside the store may hold an internal id",
 	},
 	"I-22": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"ledger_app", "REVOKE ALL ON SCHEMA"},
-		reason:    "role creation and the GRANT set that withholds DDL from ledger_app",
+		objects: []dbObject{
+			{kind: kindRole, name: "ledger_app"},
+			{kind: kindPrivilege, name: "PUBLIC", detail: "SCHEMA public"},
+		},
+		reason: "role creation and the GRANT set that withholds DDL from ledger_app",
 	},
 	"I-24": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"check_journal_currency_balance", "DEFERRABLE INITIALLY DEFERRED"},
-		reason:    "the deferred constraint trigger that balances every journal inside the DB",
+		objects: []dbObject{
+			{kind: kindFunction, name: "check_journal_currency_balance"},
+			{kind: kindTrigger, name: "trg_check_journal_currency_balance"},
+		},
+		reason: "the deferred constraint trigger that balances every journal inside the DB",
 	},
 	"I-25": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"ledger_classifications_guard", "ledger_reservations_guard"},
-		reason:    "per-table guard trigger functions on the balance-computation config tables",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_classifications_guard"},
+			{kind: kindFunction, name: "ledger_reservations_guard"},
+			{kind: kindFunction, name: "ledger_block_mutation"},
+		},
+		reason: "per-table guard trigger functions on the balance-computation config tables",
 	},
 	"I-35": {
 		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
-		objects:   []string{"ledger_create_monthly_partition", "ledger_rebalance_default_partition", "SECURITY DEFINER"},
-		reason:    "partition maintenance runs as the definer, so the serving credential needs no DDL",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_create_monthly_partition", detail: "SECURITY DEFINER"},
+			{kind: kindFunction, name: "ledger_rebalance_default_partition", detail: "SECURITY DEFINER"},
+		},
+		reason: "partition maintenance runs as the definer, so the serving credential needs no DDL",
 	},
 	"I-36": {
 		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
-		objects:   []string{"webhook_subscribers", "REVOKE SELECT"},
-		reason:    "a column-level GRANT that withholds the webhook secret from ledger_ro",
+		objects: []dbObject{
+			{kind: kindPrivilege, name: "ledger_ro", detail: "public.webhook_subscribers"},
+		},
+		reason: "a column-level GRANT that withholds the webhook secret from ledger_ro",
 	},
 	"I-57": {
 		migration: "postgres/sql/migrations/019_ownership_resweep.up.sql",
-		objects:   []string{"ledger_resweep_ownership"},
-		reason:    "the ownership sweep is a SQL function migrations call at their end",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_resweep_ownership"},
+		},
+		reason: "the ownership sweep is a SQL function migrations call at their end",
 	},
 	"I-58": {
 		migration: "postgres/sql/migrations/020_audit_trail_integrity_and_coverage.up.sql",
-		objects:   []string{"ledger_log_config_table_change"},
-		reason:    "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_log_config_table_change", detail: "SECURITY DEFINER"},
+		},
+		reason: "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
 	},
 }
 
-// TestDbOnlyMechanismsExistWhereRegistered checks the register's own claims:
-// the migration is there, and it declares the objects the entry names.
+// dbOnlyRegisterSize is the register's size when F-3 locked it. The sister
+// list (citationStyleGapInvariants) has been at zero and locked since C-2;
+// this one had nothing asserting its contents at all, and the reviewer
+// showed that two lines of doc edit plus one entry here un-gates any
+// invariant's pins entirely, with core still green.
+//
+// The rule is "may only shrink", and a constant is how that is said to a
+// machine: removing an entry means editing this number down, adding one
+// means editing it up in a diff a reviewer reads. The register exists for
+// mechanisms with no Go face, which is a property of the schema, not of
+// anybody's schedule -- it should be shrinking as citations improve.
+const dbOnlyRegisterSize = 13
+
+// checkedSectionFloor is how many invariant sections
+// TestInvariantsPinsReferenceEnforcedSymbols actually holds to their
+// mechanism. See the require at the end of that test for why it is a
+// number rather than a comparison against the register's size.
+const checkedSectionFloor = 50
+
+// TestDbOnlyMechanismsExistWhereRegistered checks the register's own
+// claims: the migration is there, and it DECLARES the objects the entry
+// names -- parsed as declarations, not searched for as text (F-3).
 //
 // Without this, the register is a list of assertions nobody verifies -- the
 // same shape as an Enforced by citation pointing at a symbol that does not
@@ -1247,13 +1349,173 @@ func TestDbOnlyMechanismsExistWhereRegistered(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join("..", entry.migration))
 		require.NoErrorf(t, err, "%s registers %s as the migration declaring its mechanism, but that file does not exist", section, entry.migration)
 
-		text := strings.ToLower(string(body))
+		sql := string(body)
 		for _, object := range entry.objects {
-			assert.Containsf(t, text, strings.ToLower(object),
-				"%s registers %q as declared in %s, and it is not there. A db-only mechanism nobody can find is not a mechanism -- "+
-					"if the object was renamed or squashed into another migration, update the entry", section, object, entry.migration)
+			ok, known := objectIsDeclared(sql, object)
+			require.Truef(t, known,
+				"%s registers %q with kind %q, which no rule in objectIsDeclared understands. An entry nobody can "+
+					"verify is worse than no entry: it reads as coverage", section, object.name, object.kind)
+			assert.Truef(t, ok,
+				"%s registers %s %q as declared in %s, and no such declaration is there.\n\n"+
+					"This is parsed, not searched: a mention in a comment, in a DROP, or in another table's copy of "+
+					"the same phrase does not count. The check used to be strings.Contains over the whole file, and "+
+					"one entry -- \"idempotency_key TEXT UNIQUE NOT NULL\", of which the baseline has five copies -- "+
+					"still matched with four of the five deleted (F-3). If the object was renamed or moved to another "+
+					"migration, update the entry",
+				section, object.kind, object.name, entry.migration)
 		}
 	}
+}
+
+// TestDbOnlyMechanismRegisterOnlyShrinks is the lock F-3 found missing.
+//
+// citationStyleGapInvariants has had TestCitationStyleGapListStaysClosed on
+// it since C-2, and that test's own message claims this register is
+// "equally closed to silent growth". It was not: nothing asserted its size
+// or its contents, and the reviewer added one entry -- plus two lines of
+// doc edit -- to detach an invariant from its pins entirely, with the core
+// package still green.
+func TestDbOnlyMechanismRegisterOnlyShrinks(t *testing.T) {
+	assert.Lenf(t, unresolvableEnforcedCitations, dbOnlyRegisterSize,
+		"the db-only mechanism register has %d entries, and dbOnlyRegisterSize says %d.\n\n"+
+			"Registering a section here stops TestInvariantsPinsReferenceEnforcedSymbols from holding ANY of its pins "+
+			"to its mechanism, so the list may only shrink -- and shrinking means editing this constant down in the "+
+			"same commit, which is the point: the change becomes a line a reviewer reads instead of a silence. If a "+
+			"new section genuinely has no Go face, say so here and in the commit message; if it has one, name the "+
+			"exported entry point in **Enforced by** instead, which is what I-2, I-9, I-18, I-40, I-50, I-51 and I-61 "+
+			"all did to leave this list. Registered: %v",
+		len(unresolvableEnforcedCitations), dbOnlyRegisterSize, sortedKeys(unresolvableEnforcedCitations))
+}
+
+// objectIsDeclared reports whether sql declares object, and whether the
+// object's kind is one this function knows how to look for. An unknown kind
+// returns known=false so it fails loudly rather than passing vacuously.
+func objectIsDeclared(sql string, object dbObject) (found, known bool) {
+	name := regexp.QuoteMeta(object.name)
+	switch object.kind {
+	case kindTable:
+		return reFind(sql, `(?im)^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?`+name+`\s*\(`), true
+	case kindPartitionedTable:
+		return declaresPartitionedTable(sql, object.name), true
+	case kindPartition:
+		return reFind(sql, `(?is)CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?`+name+`\s+PARTITION\s+OF\b`), true
+	case kindFunction:
+		return declaresFunction(sql, object.name, object.detail), true
+	case kindTrigger:
+		return reFind(sql, `(?is)CREATE\s+(CONSTRAINT\s+)?TRIGGER\s+`+name+`\b`), true
+	case kindIndex:
+		return reFind(sql, `(?is)CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?(IF\s+NOT\s+EXISTS\s+)?`+name+`\b`), true
+	case kindConstraint:
+		return reFind(sql, `(?is)CONSTRAINT\s+`+name+`\b`), true
+	case kindColumn, kindUniqueColumn, kindNullableColumn, kindColumnType:
+		decl, ok := columnDeclaration(sql, object.name)
+		if !ok {
+			return false, true
+		}
+		switch object.kind {
+		case kindUniqueColumn:
+			return regexp.MustCompile(`(?i)\bUNIQUE\b`).MatchString(decl), true
+		case kindNullableColumn:
+			return !regexp.MustCompile(`(?i)\bNOT\s+NULL\b`).MatchString(decl), true
+		case kindColumnType:
+			return strings.Contains(strings.ReplaceAll(strings.ToUpper(decl), " ", ""),
+				strings.ReplaceAll(strings.ToUpper(object.detail), " ", "")), true
+		}
+		return true, true
+	case kindRole:
+		return reFind(sql, `(?is)CREATE\s+ROLE\s+`+name+`\b`), true
+	case kindPrivilege:
+		return revokesFrom(sql, object.name, object.detail), true
+	}
+	return false, false
+}
+
+func reFind(sql, pattern string) bool {
+	return regexp.MustCompile(pattern).MatchString(sql)
+}
+
+// declaresFunction finds CREATE [OR REPLACE] FUNCTION name(...) and, when
+// detail is set (e.g. "SECURITY DEFINER"), requires it inside that
+// function's own body rather than anywhere in the file.
+func declaresFunction(sql, name, detail string) bool {
+	head := regexp.MustCompile(`(?is)CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+` + regexp.QuoteMeta(name) + `\s*\(`)
+	loc := head.FindStringIndex(sql)
+	if loc == nil {
+		return false
+	}
+	if detail == "" {
+		return true
+	}
+	body := sql[loc[1]:]
+	// The body ends at the dollar-quoted terminator that closes it; taking
+	// everything up to the next CREATE is close enough and never reaches
+	// into a neighbouring declaration.
+	if next := regexp.MustCompile(`(?is)\n\s*CREATE\s`).FindStringIndex(body); next != nil {
+		body = body[:next[0]]
+	}
+	return strings.Contains(strings.ToUpper(body), strings.ToUpper(detail))
+}
+
+// declaresPartitionedTable requires "PARTITION BY" to be part of THIS
+// table's CREATE statement, not merely present somewhere in the file.
+func declaresPartitionedTable(sql, table string) bool {
+	block, ok := createTableBlock(sql, table)
+	if !ok {
+		return false
+	}
+	return regexp.MustCompile(`(?is)PARTITION\s+BY\b`).MatchString(block)
+}
+
+// createTableBlock returns the text of one CREATE TABLE statement, from the
+// table name to the semicolon that ends it.
+func createTableBlock(sql, table string) (string, bool) {
+	head := regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?` + regexp.QuoteMeta(table) + `\s*[(\s]`)
+	loc := head.FindStringIndex(sql)
+	if loc == nil {
+		return "", false
+	}
+	rest := sql[loc[0]:]
+	if end := strings.Index(rest, ";"); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest, true
+}
+
+// columnDeclaration returns the one line declaring "table.column" inside
+// that table's CREATE TABLE statement. Scoping to the statement is what
+// makes this a declaration check: five tables declare idempotency_key, and
+// a file-wide search cannot tell which one it found.
+func columnDeclaration(sql, qualified string) (string, bool) {
+	table, column, ok := strings.Cut(qualified, ".")
+	if !ok {
+		return "", false
+	}
+	block, ok := createTableBlock(sql, table)
+	if !ok {
+		return "", false
+	}
+	line := regexp.MustCompile(`(?im)^\s*` + regexp.QuoteMeta(column) + `\s+[A-Za-z].*$`)
+	m := line.FindString(block)
+	if m == "" {
+		return "", false
+	}
+	return m, true
+}
+
+// revokesFrom requires one REVOKE statement that names both the grantee and
+// the object -- statement-scoped, so a REVOKE on some other table plus a
+// mention of the role elsewhere does not add up to coverage.
+func revokesFrom(sql, grantee, object string) bool {
+	for _, stmt := range strings.Split(sql, ";") {
+		up := strings.ToUpper(stmt)
+		if !strings.Contains(up, "REVOKE") {
+			continue
+		}
+		if strings.Contains(up, strings.ToUpper(object)) && strings.Contains(up, strings.ToUpper(grantee)) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]dbOnlyMechanism) []string {
@@ -1355,9 +1617,19 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	// Fail-closed sanity: if the section splitter or the symbol index ever
 	// regresses, every section lands in the skip path and this check silently
 	// verifies nothing.
-	require.Greater(t, checked, len(unresolvableEnforcedCitations),
-		"only %d invariant section(s) were actually checked against their Enforced-by symbols, against %d registered as unresolvable -- "+
-			"a check that inspects almost nothing reads as a pass", checked, len(unresolvableEnforcedCitations))
+	//
+	// F-3 (2026-09-03 independent review): this bound used to be `checked >
+	// len(unresolvableEnforcedCitations)`, which with thirteen registered
+	// sections meant the register had to reach thirty-two before the sanity
+	// check noticed anything -- far enough away to be no bound at all. The
+	// floor is now stated against the document: 52 sections are checked today,
+	// so the floor is 50. Adding invariants raises the real
+	// number and never trips it; a splitter or index regression drops it off
+	// a cliff and does.
+	require.GreaterOrEqualf(t, checked, checkedSectionFloor,
+		"only %d invariant section(s) were actually checked against their Enforced-by symbols, against a floor of %d "+
+			"(%d registered as unresolvable) -- a check that inspects almost nothing reads as a pass",
+		checked, checkedSectionFloor, len(unresolvableEnforcedCitations))
 }
 
 // checkPinTouchesLeaves looks up every declared body for a (pkg, fn) pin
