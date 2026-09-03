@@ -2116,7 +2116,10 @@ three now fails the test loudly instead of defaulting to full access.
     F-2: it writes as `ledger_app`, which has no UPDATE grant on these
     tables, so what it measures is least privilege, not append-onlyness)
   - `postgres.TestAppendOnlyGuards_EveryTriggerRefusesItsMutation` -- every
-    trigger running `ledger_block_mutation()`, derived from `pg_trigger` and
+    trigger running one of the append-only guard functions
+    (`ledger_block_mutation()` and, since migration 029,
+    `ledger_attestation_chain_block_delete()` on the two attestation
+    tables), derived from `pg_trigger` and
     provoked as the table OWNER, so the statement reaches the trigger. Added
     2026-09-03 (F-2): rewriting that function to `RETURN NEW` disabled all
     twenty-five append-only guards and turned exactly three tests red

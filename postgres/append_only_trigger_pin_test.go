@@ -67,7 +67,28 @@ type blockedMutation struct {
 // refusal plus one owner-only door (ledger_discard_attestations_from). Those
 // two are pinned by TestPoisonedAttestationTailHasAWayBack instead, which is
 // why lowering this number is the honest edit rather than a loss.
-const appendOnlyGuardFloor = 23
+const appendOnlyGuardFloor = 25
+
+// appendOnlyGuardFunctions are the trigger functions that make a table
+// append-only. Derived from, rather than assumed to be, one name.
+//
+// R-2 (2026-09-04 recheck): migration 029 moved the two attestation tables
+// off ledger_block_mutation onto ledger_attestation_chain_block_delete,
+// which refuses a DELETE exactly as before unless the owner has opened the
+// audited discard door. The census matched one function name, so the two
+// moved triggers silently left it -- appendOnlyGuardFloor went 25 -> 23 --
+// and entry_attestations_no_delete ended up with no pin at all. Deleting it
+// from 029 left the whole suite green, which matters because that trigger
+// is what stops the per-entry coverage rows behind I-27 ("every entry
+// covered exactly once") and I-29 from being removed without trace.
+//
+// A guard replaced by an equivalent guard must stay counted. Naming the set
+// is how: a third function joining it is one line here, and a table quietly
+// losing its guard still shrinks the floor.
+var appendOnlyGuardFunctions = []string{
+	"ledger_block_mutation",
+	"ledger_attestation_chain_block_delete",
+}
 
 func readBlockedMutations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []blockedMutation {
 	t.Helper()
@@ -87,8 +108,8 @@ func readBlockedMutations(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		WHERE NOT tg.tgisinternal
 		  AND tg.tgparentid = 0
 		  AND n.nspname = 'public'
-		  AND p.proname = 'ledger_block_mutation'
-		ORDER BY c.relname, tg.tgname`)
+		  AND p.proname = ANY ($1::text[])
+		ORDER BY c.relname, tg.tgname`, appendOnlyGuardFunctions)
 	require.NoError(t, err)
 	defer rows.Close()
 

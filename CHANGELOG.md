@@ -33,6 +33,20 @@ the **anchors/r2** entry near the bottom of this section. `[0.6.0]`'s "known
 open items" note above is now partially closed by this; that note is left as
 written because it was true when `[0.6.0]` shipped.
 
+### Fixed
+
+- **`entry_attestations_no_delete` had no pin, and the append-only census
+  had stopped counting it** (Wave 5 recheck R-2). Migration 029 moved both
+  attestation tables from `ledger_block_mutation()` onto
+  `ledger_attestation_chain_block_delete()`, which refuses a DELETE exactly
+  as before unless the owner has opened the audited discard door. The census
+  matched a single function name, so the two moved triggers left it
+  unnoticed and deleting `entry_attestations`' guard left the whole suite
+  green -- that trigger is what stops the per-entry coverage rows behind
+  I-27 and I-29 being removed without trace. The census now derives from a
+  named SET of guard functions, so a guard replaced by an equivalent guard
+  stays counted.
+
 ### Go module — Breaking
 
 - **`core.Round` and `core.ConvertAt` return `(decimal.Decimal, error)`, and
