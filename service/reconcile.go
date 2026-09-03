@@ -915,11 +915,7 @@ pageLoop:
 		setErr := s.querier.SetScanCursor(persistCtx, checkpointBalanceCheckName, afterHolder, afterCurrency, lapDirty, lapScanned)
 		cancelPersist()
 		if setErr != nil {
-			result.Passed = false
-			result.Findings = append(result.Findings, core.Finding{
-				Description: "checkpoint scan cursor persist failed",
-				Detail:      setErr.Error(),
-			})
+			noteCursorWriteFailure(&result, "checkpoint scan cursor persist failed", setErr)
 		}
 	} else if scanned == 0 && resumedLap {
 		// The lap "completed" on its very first page fetch of this run, but
@@ -954,11 +950,7 @@ pageLoop:
 			Detail:      "cannot distinguish a lap that legitimately finished exactly at the persisted resume point from a cursor advanced by something other than this scan (see docs/RUNBOOK.md); not counted as full coverage",
 		})
 		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
-			result.Passed = false
-			result.Findings = append(result.Findings, core.Finding{
-				Description: "checkpoint scan cursor reset failed",
-				Detail:      setErr.Error(),
-			})
+			noteCursorWriteFailure(&result, "checkpoint scan cursor reset failed", setErr)
 		}
 	} else if resumedLap {
 		// The page loop reached the natural end of the data ("no more rows
@@ -1000,22 +992,14 @@ pageLoop:
 			// re-walks from the true beginning, and lapScanned resets to 0
 			// so it does not inherit a count this run could not verify.
 			if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
-				result.Passed = false
-				result.Findings = append(result.Findings, core.Finding{
-					Description: "checkpoint scan cursor reset failed",
-					Detail:      setErr.Error(),
-				})
+				noteCursorWriteFailure(&result, "checkpoint scan cursor reset failed", setErr)
 			}
 		} else {
 			result.Findings = append(result.Findings, core.Finding{
 				Description: fmt.Sprintf("checkpoint scan complete: %d account/currency pairs verified this run", scanned),
 			})
 			if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
-				result.Passed = false
-				result.Findings = append(result.Findings, core.Finding{
-					Description: "checkpoint scan cursor reset failed",
-					Detail:      setErr.Error(),
-				})
+				noteCursorWriteFailure(&result, "checkpoint scan cursor reset failed", setErr)
 			}
 		}
 	} else {
@@ -1026,15 +1010,46 @@ pageLoop:
 		// lapScanned counter so the next run starts a fresh lap instead of
 		// replaying this resume point (or a stale dirty flag/count) forever.
 		if setErr := s.querier.SetScanCursor(ctx, checkpointBalanceCheckName, cursorStartHolder, cursorStartCurrency, false, 0); setErr != nil {
-			result.Passed = false
-			result.Findings = append(result.Findings, core.Finding{
-				Description: "checkpoint scan cursor reset failed",
-				Detail:      setErr.Error(),
-			})
+			noteCursorWriteFailure(&result, "checkpoint scan cursor reset failed", setErr)
 		}
 	}
 
 	return result
+}
+
+// noteCursorWriteFailure records that the checkpoint scan could not write its
+// resume cursor, as an INCOMPLETENESS rather than as a failed check.
+//
+// m4 of the 2026-09-03 independent review: running `reconcile --full` on the
+// read-only credential produced
+//
+//	{"name":"checkpoint_balance","passed":false,"complete":true,
+//	 "findings":[... "checkpoint scan cursor reset failed",
+//	             "permission denied for table reconcile_scan_cursors"]}
+//
+// -- and `full_coverage: true` alongside it. Two things are wrong with that.
+// `passed:false` says the ledger disagreed with itself, which it did not; and
+// `complete:true` says the fleet was fully covered, which the run cannot
+// know once its own bookkeeping write failed. Read together they push an
+// operator towards giving the investigation tool a write credential, which is
+// the opposite of what the credential split is for.
+//
+// The cursor write is bookkeeping for the NEXT run. Its failure says nothing
+// about the balances this run examined, and everything about whether coverage
+// can be claimed -- so Passed is left alone and Complete goes false, which
+// also drags FullCoverage false where it belongs. Not run is neither passed
+// nor failed (working-agreements §3).
+//
+// Deliberately not conditioned on SQLSTATE 42501: `service` is the
+// orchestration layer and does not import pgconn, and the treatment is right
+// for any cursor-write failure -- a disk error loses the resume position just
+// as thoroughly as a permission error does.
+func noteCursorWriteFailure(result *core.CheckResult, description string, err error) {
+	result.Complete = false
+	result.Findings = append(result.Findings, core.Finding{
+		Description: description,
+		Detail:      err.Error() + " -- the balances examined by this run are unaffected, but its coverage cannot be claimed and the next run resumes from a stale position",
+	})
 }
 
 // runCheck3OrphanEntries checks for entries whose journal_id is not in journals.
