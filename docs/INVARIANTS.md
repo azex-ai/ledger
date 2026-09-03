@@ -2062,7 +2062,14 @@ three now fails the test loudly instead of defaulting to full access.
   runs the attack statement as `ledger_app` and requires it to fail):
   - `TestAccountPoliciesGuard`
   - `TestBookingsAndEventsGuards`
-  - `TestIdempotencyReceiptTablesAreAppendOnly`
+  - `TestIdempotencyReceiptTablesRefuseTheAppCredential` (renamed 2026-09-03,
+    F-2: it writes as `ledger_app`, which has no UPDATE grant on these
+    tables, so what it measures is least privilege, not append-onlyness)
+  - `postgres.TestAppendOnlyGuards_EveryTriggerRefusesItsMutation` -- every
+    trigger running `ledger_block_mutation()`, derived from `pg_trigger` and
+    provoked as the table OWNER, so the statement reaches the trigger. Added
+    2026-09-03 (F-2): rewriting that function to `RETURN NEW` disabled all
+    twenty-five append-only guards and turned exactly three tests red
 - `postgres.TestAccountPolicyEnforcementKnobChangeIsAudited` — the one case
   in this list where the attack SUCCEEDS by construction (the guard has to
   permit the three enforcement columns; see above). It runs the unfreeze +
