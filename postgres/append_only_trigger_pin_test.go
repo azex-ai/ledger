@@ -61,7 +61,13 @@ type blockedMutation struct {
 // ledger_block_mutation() guarded when this gate was written. It is a
 // floor, not a snapshot: adding a guard is ordinary work and needs no edit
 // here, but losing one has to be a deliberate edit to this number.
-const appendOnlyGuardFloor = 25
+// 25 when the gate was written against main c854c6e; 23 since migration 029,
+// which replaced the two blanket DELETE guards on ledger_attestations and
+// entry_attestations with ledger_attestation_chain_block_delete() -- the same
+// refusal plus one owner-only door (ledger_discard_attestations_from). Those
+// two are pinned by TestPoisonedAttestationTailHasAWayBack instead, which is
+// why lowering this number is the honest edit rather than a loss.
+const appendOnlyGuardFloor = 23
 
 func readBlockedMutations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []blockedMutation {
 	t.Helper()
