@@ -3,6 +3,7 @@ package core_test
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -172,6 +173,14 @@ func (v stubVerifier) Verify(_ context.Context, digest, signature []byte, keyID 
 
 var assertVerifyMismatch = errStub("stubVerifier: mismatch")
 
+// unknownKeyVerifier is an AuthVerifier that holds no keys at all -- the
+// shape of a process whose key set has not caught up with a rotation.
+type unknownKeyVerifier struct{}
+
+func (unknownKeyVerifier) Verify(_ context.Context, _, _ []byte, keyID string) error {
+	return fmt.Errorf("stub: key %q: %w", keyID, core.ErrUnknownAuthKey)
+}
+
 type errStub string
 
 func (e errStub) Error() string { return string(e) }
@@ -189,25 +198,55 @@ func TestVerifyReservationDischargeAuth(t *testing.T) {
 	require.NoError(t, core.VerifyReservationDischargeAuth(ctx, good, in, digest, []byte("sig"), "k1"),
 		"the happy path must verify, or every pin below passes for the wrong reason")
 
+	// P-6 (2026-09-03 independent review): each case asserts WHICH check
+	// refused it, not merely that something did.
+	//
+	// Six require.Error calls cannot tell the difference between six
+	// working checks and one working check that happens to run first. I-45
+	// makes this concrete on the neighbouring surface: it requires "I do
+	// not hold this key" to stay distinguishable from "this signature is
+	// invalid", because the operational response differs -- one is a key
+	// rotation that has not reached this process, the other is forgery. A
+	// discharge claim's six ways of being unauthorized collapse into one
+	// verdict here unless the pins hold them apart.
 	t.Run("nil verifier", func(t *testing.T) {
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, nil, in, digest, []byte("sig"), "k1"))
+		err := core.VerifyReservationDischargeAuth(ctx, nil, in, digest, []byte("sig"), "k1")
+		require.ErrorContains(t, err, "no auth verifier configured",
+			"a ledger with no verifier configured must say so: it is an operator misconfiguration, not a bad claim")
 	})
 	t.Run("no stored digest", func(t *testing.T) {
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, good, in, nil, []byte("sig"), "k1"))
+		err := core.VerifyReservationDischargeAuth(ctx, good, in, nil, []byte("sig"), "k1")
+		require.ErrorContains(t, err, "has no stored digest",
+			"an unsigned claim and a wrongly signed one are different problems")
 	})
 	t.Run("stored digest does not match the row", func(t *testing.T) {
 		tampered := in
 		tampered.Amount = decimal.RequireFromString("999")
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, good, tampered, digest, []byte("sig"), "k1"),
-			"a row whose amount was edited must not verify against the digest that was signed")
+		err := core.VerifyReservationDischargeAuth(ctx, good, tampered, digest, []byte("sig"), "k1")
+		require.ErrorContains(t, err, "does not match recomputed digest",
+			"a row whose amount was edited must not verify against the digest that was signed, AND must say that is why")
 	})
 	t.Run("no signature", func(t *testing.T) {
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, good, in, digest, nil, "k1"))
+		err := core.VerifyReservationDischargeAuth(ctx, good, in, digest, nil, "k1")
+		require.ErrorContains(t, err, "has no signature")
 	})
 	t.Run("no key id", func(t *testing.T) {
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, good, in, digest, []byte("sig"), ""))
+		err := core.VerifyReservationDischargeAuth(ctx, good, in, digest, []byte("sig"), "")
+		require.ErrorContains(t, err, "has no signature",
+			"a claim naming no key is unsigned as far as this check is concerned")
 	})
 	t.Run("verifier rejects", func(t *testing.T) {
-		require.Error(t, core.VerifyReservationDischargeAuth(ctx, good, in, digest, []byte("other"), "k1"))
+		err := core.VerifyReservationDischargeAuth(ctx, good, in, digest, []byte("other"), "k1")
+		require.ErrorContains(t, err, "signature invalid")
+		require.ErrorIs(t, err, assertVerifyMismatch,
+			"the verifier's own error must survive to the caller. Collapsing it into a fresh error here is what makes "+
+				"a key this process has not learned yet indistinguishable from a forgery (I-45)")
+	})
+	t.Run("verifier does not know the key", func(t *testing.T) {
+		err := core.VerifyReservationDischargeAuth(ctx, unknownKeyVerifier{}, in, digest, []byte("sig"), "k-rotated")
+		require.ErrorIs(t, err, core.ErrUnknownAuthKey,
+			"I-45 on the discharge surface: \"I do not hold this key\" must reach the caller as itself. It is a key "+
+				"rotation this process has not caught up with -- an operational event -- and it must not read as a "+
+				"forged discharge claim, which is an incident")
 	})
 }

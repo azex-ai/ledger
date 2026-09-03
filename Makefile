@@ -11,7 +11,20 @@ build:
 # does not cross module boundaries (go.work notwithstanding) -- see
 # test-submodules for chains/evm and anchors/r2, which this target does not
 # touch, same as CI's separate steps for them.
+# The docker probe is F-9 (2026-09-03 independent review): the postgres
+# package's integration tests used to SKIP when the daemon was down, so
+# this target printed `ok` for a package whose 100+ tests had not run.
+# postgrestest now fails instead of skipping, and this probe turns that
+# from a wall of failures deep in the run into one line before it starts.
+# DATABASE_URL is the documented way to run against a server you provide;
+# make test-short is the documented way to run without one at all.
 test:
+	@if [ -z "$$DATABASE_URL" ] && ! docker info >/dev/null 2>&1; then \
+		echo "make test: the Docker daemon is not reachable, and the integration tests need PostgreSQL."; \
+		echo "  Start Docker, or set DATABASE_URL=postgres://... to use a server you provide,"; \
+		echo "  or run 'make test-short' to skip every integration test (and know that you did)."; \
+		exit 1; \
+	fi
 	go test -race -timeout 15m -count=1 ./...
 
 test-short:

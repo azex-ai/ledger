@@ -786,7 +786,7 @@ func selfGatedSection(enforced, body string, testBodies map[string][]testFuncBod
 	}
 
 	pinned := blockBetween(body, "**Pinned by**")
-	pins := 0
+	pins, inGateFile := 0, 0
 	for _, m := range append(pinReference.FindAllStringSubmatch(pinned, -1), bareReference.FindAllStringSubmatch(pinned, -1)...) {
 		name := m[len(m)-1]
 		bodies, ok := testBodies[name]
@@ -794,19 +794,24 @@ func selfGatedSection(enforced, body string, testBodies map[string][]testFuncBod
 			continue
 		}
 		pins++
-		inGateFile := false
 		for _, b := range bodies {
 			for _, gate := range gateFiles {
 				if b.file == gate {
-					inGateFile = true
+					inGateFile++
 				}
 			}
 		}
-		if !inGateFile {
-			return false
-		}
 	}
-	return pins > 0
+	// At least one pin has to BE the gate -- that is what makes the section
+	// self-enforcing rather than merely gate-adjacent.
+	//
+	// It used to be all of them, which had this backwards (F-5,
+	// 2026-09-03): a self-gated section could never cite an ordinary
+	// behaviour pin alongside its gate without losing its self-gated
+	// status. I-61 is exactly that case -- the emission-coverage gate plus
+	// the test that actually drives a rollup tick and asserts the gauge --
+	// and extra evidence must not cost a section its classification.
+	return pins > 0 && inGateFile > 0
 }
 
 // enforcedGateFiles returns the `_test.go` files an Enforced by block names
@@ -836,10 +841,32 @@ func enforcedDBObjects(enforced string) []string {
 	var out []string
 	for _, m := range backtickToken.FindAllStringSubmatch(enforced, -1) {
 		token := strings.TrimSpace(m[1])
+		// The doc cites a column with its whole declaration inside one
+		// backtick span (`currencies.exponent SMALLINT NOT NULL DEFAULT 18
+		// CHECK (0..18)`); the name is the first word of it.
+		if i := strings.IndexAny(token, " \t\n"); i > 0 {
+			token = token[:i]
+		}
 		// `ledger_unlink_event_journal(uuid)` -- the doc cites SQL functions
 		// with their argument list; the name is what a query string carries.
 		if i := strings.Index(token, "("); i > 0 {
 			token = token[:i]
+		}
+		// `classifications.balance_role` names a column. Take the column,
+		// not the table: a pin whose SQL merely mentions `classifications`
+		// has not shown it touches the constraint on that one column, and
+		// admitting the table name here would let almost any query in the
+		// package stand in for almost any claim. F-1, 2026-09-03: without
+		// this, a doc that cites its mechanism as table.column got no DB
+		// object out of the citation at all, so a direct-SQL pin held to
+		// exactly that column read as touching nothing.
+		if i := strings.LastIndex(token, "."); i >= 0 {
+			token = token[i+1:]
+			if len(token) < 5 || !regexp.MustCompile(`^[a-z][a-z0-9_]*$`).MatchString(token) {
+				continue
+			}
+			out = append(out, token)
+			continue
 		}
 		if len(token) < 6 || !strings.Contains(token, "_") {
 			continue
@@ -1137,103 +1164,206 @@ func TestCitationStyleGapListStaysClosed(t *testing.T) {
 // section to cite nothing real -- TestInvariantsEnforcedCitationsResolve
 // applies to registered sections exactly as it does to any other.
 type dbOnlyMechanism struct {
-	migration string   // repo-relative path of the migration that declares it
-	objects   []string // names that must appear in that file
+	migration string     // repo-relative path of the migration that declares it
+	objects   []dbObject // the declarations that must be in that file
 	reason    string
 }
+
+// dbObject is one registered declaration, as a kind and a name rather than
+// as a string to search for.
+//
+// F-3 (2026-09-03 independent review): the check used to be
+// strings.Contains over the whole migration file. One entry read
+// "idempotency_key TEXT UNIQUE NOT NULL", of which the baseline has five
+// copies -- deleting four of them still matched, and the reviewer measured
+// that it took deleting the last one to turn anything red. A whole-file
+// substring cannot tell a declaration from a comment, from a DROP, or from
+// four other tables' copies of the same phrase.
+//
+// Naming the kind makes the check parse for a declaration instead. It also
+// makes the register say something a reader can check: "trigger" and
+// "function" and "unique column" are claims with shapes, where a bare
+// string is a claim about text.
+type dbObject struct {
+	kind string // one of the kinds objectIsDeclared knows
+	name string // the object's name; "table.column" for the column kinds
+	// detail qualifies some kinds: the type for columnType, the object a
+	// privilege is revoked on for privilege.
+	detail string
+}
+
+// Kinds objectIsDeclared understands. An unknown kind fails rather than
+// passing vacuously -- a register entry nobody can verify is the thing this
+// whole file exists to prevent.
+const (
+	kindTable            = "table"
+	kindPartitionedTable = "partitioned_table"
+	kindPartition        = "partition"
+	kindFunction         = "function"
+	kindTrigger          = "trigger"
+	kindIndex            = "index"
+	kindConstraint       = "constraint"
+	kindColumn           = "column"
+	kindUniqueColumn     = "unique_column"
+	kindNullableColumn   = "nullable_column"
+	kindColumnType       = "column_type"
+	kindRole             = "role"
+	kindPrivilege        = "privilege"
+)
 
 var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
 	"I-3": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"uq_bookings_idempotency", "uq_ingest_dead_letters_idempotency_key", "idempotency_key TEXT UNIQUE NOT NULL"},
-		reason:    "UNIQUE constraints on every mutation table's idempotency_key",
+		objects: []dbObject{
+			{kind: kindUniqueColumn, name: "journals.idempotency_key"},
+			{kind: kindUniqueColumn, name: "reservations.idempotency_key"},
+			{kind: kindConstraint, name: "uq_bookings_idempotency"},
+			{kind: kindIndex, name: "uq_ingest_dead_letters_idempotency_key"},
+		},
+		reason: "UNIQUE constraints on every mutation table's idempotency_key",
 	},
 	"I-6": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"NUMERIC(30,18)"},
-		reason:    "the column type itself; the Go half is a type choice (decimal.Decimal), not a function",
+		objects: []dbObject{
+			{kind: kindColumnType, name: "journal_entries.amount", detail: "NUMERIC(30,18)"},
+			{kind: kindColumnType, name: "journals.total_debit", detail: "NUMERIC(30,18)"},
+		},
+		reason: "the column type itself; the Go half is a type choice (decimal.Decimal), not a function",
 	},
 	"I-7": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"reversal_of", "NOT NULL"},
-		reason:    "NOT NULL defaults and the four nullable FK exceptions, declared in the schema",
+		objects: []dbObject{
+			{kind: kindNullableColumn, name: "journals.reversal_of"},
+			{kind: kindNullableColumn, name: "bookings.journal_id"},
+		},
+		reason: "NOT NULL defaults and the four nullable FK exceptions, declared in the schema",
 	},
 	"I-12": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"check_journal_currency_balance"},
-		reason:    "conservation is I-1 + I-2; its DB-side enforcement is the deferred balance trigger, which holds even for writes that never went through this library",
+		objects: []dbObject{
+			{kind: kindFunction, name: "check_journal_currency_balance"},
+			{kind: kindTrigger, name: "trg_check_journal_currency_balance"},
+		},
+		reason: "conservation is I-1 + I-2; its DB-side enforcement is the deferred balance trigger, which holds even for writes that never went through this library",
 	},
 	"I-13": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"PARTITION BY RANGE", "journal_entries_default"},
-		reason:    "partition declaration plus the catch-all partition",
+		objects: []dbObject{
+			{kind: kindPartitionedTable, name: "journal_entries"},
+			{kind: kindPartition, name: "journal_entries_default"},
+		},
+		reason: "partition declaration plus the catch-all partition",
 	},
 	"I-18": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"uq_journals_uid", "uq_bookings_uid", "uq_currencies_uid"},
-		reason:    "external identity is the uid column and its unique index; the adapter-side conversion (uidToPG/pgToUID) is unexported by design, since nothing outside the store may hold an internal id",
+		objects: []dbObject{
+			{kind: kindIndex, name: "uq_journals_uid"},
+			{kind: kindIndex, name: "uq_bookings_uid"},
+			{kind: kindIndex, name: "uq_currencies_uid"},
+		},
+		reason: "external identity is the uid column and its unique index; the adapter-side conversion (uidToPG/pgToUID) is unexported by design, since nothing outside the store may hold an internal id",
 	},
 	"I-22": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"ledger_app", "REVOKE ALL ON SCHEMA"},
-		reason:    "role creation and the GRANT set that withholds DDL from ledger_app",
+		objects: []dbObject{
+			{kind: kindRole, name: "ledger_app"},
+			{kind: kindPrivilege, name: "PUBLIC", detail: "SCHEMA public"},
+		},
+		reason: "role creation and the GRANT set that withholds DDL from ledger_app",
 	},
 	"I-24": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"check_journal_currency_balance", "DEFERRABLE INITIALLY DEFERRED"},
-		reason:    "the deferred constraint trigger that balances every journal inside the DB",
+		objects: []dbObject{
+			{kind: kindFunction, name: "check_journal_currency_balance"},
+			{kind: kindTrigger, name: "trg_check_journal_currency_balance"},
+		},
+		reason: "the deferred constraint trigger that balances every journal inside the DB",
 	},
 	"I-25": {
 		migration: "postgres/sql/migrations/001_baseline.up.sql",
-		objects:   []string{"ledger_classifications_guard", "ledger_reservations_guard"},
-		reason:    "per-table guard trigger functions on the balance-computation config tables",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_classifications_guard"},
+			{kind: kindFunction, name: "ledger_reservations_guard"},
+			{kind: kindFunction, name: "ledger_block_mutation"},
+		},
+		reason: "per-table guard trigger functions on the balance-computation config tables",
 	},
 	"I-35": {
 		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
-		objects:   []string{"ledger_create_monthly_partition", "ledger_rebalance_default_partition", "SECURITY DEFINER"},
-		reason:    "partition maintenance runs as the definer, so the serving credential needs no DDL",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_create_monthly_partition", detail: "SECURITY DEFINER"},
+			{kind: kindFunction, name: "ledger_rebalance_default_partition", detail: "SECURITY DEFINER"},
+		},
+		reason: "partition maintenance runs as the definer, so the serving credential needs no DDL",
 	},
 	"I-36": {
 		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
-		objects:   []string{"webhook_subscribers", "REVOKE SELECT"},
-		reason:    "a column-level GRANT that withholds the webhook secret from ledger_ro",
+		objects: []dbObject{
+			{kind: kindPrivilege, name: "ledger_ro", detail: "public.webhook_subscribers"},
+		},
+		reason: "a column-level GRANT that withholds the webhook secret from ledger_ro",
 	},
 	"I-57": {
 		migration: "postgres/sql/migrations/019_ownership_resweep.up.sql",
-		objects:   []string{"ledger_resweep_ownership"},
-		reason:    "the ownership sweep is a SQL function migrations call at their end",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_resweep_ownership"},
+		},
+		reason: "the ownership sweep is a SQL function migrations call at their end",
 	},
 	"I-58": {
 		migration: "postgres/sql/migrations/020_audit_trail_integrity_and_coverage.up.sql",
-		objects:   []string{"ledger_log_config_table_change"},
-		reason:    "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_log_config_table_change", detail: "SECURITY DEFINER"},
+		},
+		reason: "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
 	},
 	"I-66": {
 		migration: "postgres/sql/migrations/029_insert_path_guards.up.sql",
-		objects: []string{
-			"ledger_entry_template_lines_insert_guard",
-			"ledger_bookings_insert_guard",
-			"ledger_reservations_insert_guard",
-			"ledger_attestations_insert_guard",
-			"ledger_discard_attestations_from",
-			"_audit_insert",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_entry_template_lines_insert_guard"},
+			{kind: kindFunction, name: "ledger_bookings_insert_guard"},
+			{kind: kindFunction, name: "ledger_reservations_insert_guard"},
+			{kind: kindFunction, name: "ledger_attestations_insert_guard"},
+			{kind: kindFunction, name: "ledger_discard_attestations_from", detail: "SECURITY DEFINER"},
+			{kind: kindTrigger, name: "entry_template_lines_insert_guard"},
+			{kind: kindTrigger, name: "bookings_insert_guard"},
+			{kind: kindTrigger, name: "chain_cursors_audit_insert"},
 		},
-		reason: "the INSERT-path guards and the AFTER INSERT half of the forensic trail are triggers, and deliberately so: the whole point is that they hold for a statement that never went through this library, so there is no Go entry point to name",
+		reason: "the INSERT-path guards and the AFTER INSERT half of the forensic trail are triggers, and deliberately so: the whole point is that they hold for a statement that never went through this library, so there is no Go entry point to name. The catalogue-derived `_audit_insert` triggers are created by a DO loop and cannot be named as declarations; chain_cursors_audit_insert is the one declared literally",
 	},
 	"I-68": {
 		migration: "postgres/sql/migrations/030_guard_function_search_path.up.sql",
-		objects: []string{
-			"SET search_path = public, pg_temp",
-			"ledger_assert_journal_balanced",
-			"trg_check_journal_balance_on_journal",
-			"REVOKE TEMPORARY ON DATABASE",
+		objects: []dbObject{
+			{kind: kindFunction, name: "ledger_assert_journal_balanced", detail: "SET search_path = public, pg_temp"},
+			{kind: kindTrigger, name: "trg_check_journal_balance_on_journal"},
+			{kind: kindPrivilege, name: "PUBLIC", detail: "TEMPORARY ON DATABASE"},
 		},
-		reason: "three DB-only facts with no Go face at all: a proconfig entry on every function, two constraint triggers, and a database-level ACL. The Go side never names any of them -- the application posts a journal and the database decides",
+		reason: "three DB-only facts with no Go face at all: a proconfig entry on every function, two constraint triggers, and a database-level ACL. The Go side of I-68 is the catalogue gate in postgres/guard_function_search_path_test.go, which is a pin, not an entry point",
 	},
 }
 
-// TestDbOnlyMechanismsExistWhereRegistered checks the register's own claims:
-// the migration is there, and it declares the objects the entry names.
+// dbOnlyRegisterSize is the register's size when F-3 locked it. The sister
+// list (citationStyleGapInvariants) has been at zero and locked since C-2;
+// this one had nothing asserting its contents at all, and the reviewer
+// showed that two lines of doc edit plus one entry here un-gates any
+// invariant's pins entirely, with core still green.
+//
+// The rule is "may only shrink", and a constant is how that is said to a
+// machine: removing an entry means editing this number down, adding one
+// means editing it up in a diff a reviewer reads. The register exists for
+// mechanisms with no Go face, which is a property of the schema, not of
+// anybody's schedule -- it should be shrinking as citations improve.
+const dbOnlyRegisterSize = 15
+
+// checkedSectionFloor is how many invariant sections
+// TestInvariantsPinsReferenceEnforcedSymbols actually holds to their
+// mechanism. See the require at the end of that test for why it is a
+// number rather than a comparison against the register's size.
+const checkedSectionFloor = 50
+
+// TestDbOnlyMechanismsExistWhereRegistered checks the register's own
+// claims: the migration is there, and it DECLARES the objects the entry
+// names -- parsed as declarations, not searched for as text (F-3).
 //
 // Without this, the register is a list of assertions nobody verifies -- the
 // same shape as an Enforced by citation pointing at a symbol that does not
@@ -1247,13 +1377,173 @@ func TestDbOnlyMechanismsExistWhereRegistered(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join("..", entry.migration))
 		require.NoErrorf(t, err, "%s registers %s as the migration declaring its mechanism, but that file does not exist", section, entry.migration)
 
-		text := strings.ToLower(string(body))
+		sql := string(body)
 		for _, object := range entry.objects {
-			assert.Containsf(t, text, strings.ToLower(object),
-				"%s registers %q as declared in %s, and it is not there. A db-only mechanism nobody can find is not a mechanism -- "+
-					"if the object was renamed or squashed into another migration, update the entry", section, object, entry.migration)
+			ok, known := objectIsDeclared(sql, object)
+			require.Truef(t, known,
+				"%s registers %q with kind %q, which no rule in objectIsDeclared understands. An entry nobody can "+
+					"verify is worse than no entry: it reads as coverage", section, object.name, object.kind)
+			assert.Truef(t, ok,
+				"%s registers %s %q as declared in %s, and no such declaration is there.\n\n"+
+					"This is parsed, not searched: a mention in a comment, in a DROP, or in another table's copy of "+
+					"the same phrase does not count. The check used to be strings.Contains over the whole file, and "+
+					"one entry -- \"idempotency_key TEXT UNIQUE NOT NULL\", of which the baseline has five copies -- "+
+					"still matched with four of the five deleted (F-3). If the object was renamed or moved to another "+
+					"migration, update the entry",
+				section, object.kind, object.name, entry.migration)
 		}
 	}
+}
+
+// TestDbOnlyMechanismRegisterOnlyShrinks is the lock F-3 found missing.
+//
+// citationStyleGapInvariants has had TestCitationStyleGapListStaysClosed on
+// it since C-2, and that test's own message claims this register is
+// "equally closed to silent growth". It was not: nothing asserted its size
+// or its contents, and the reviewer added one entry -- plus two lines of
+// doc edit -- to detach an invariant from its pins entirely, with the core
+// package still green.
+func TestDbOnlyMechanismRegisterOnlyShrinks(t *testing.T) {
+	assert.Lenf(t, unresolvableEnforcedCitations, dbOnlyRegisterSize,
+		"the db-only mechanism register has %d entries, and dbOnlyRegisterSize says %d.\n\n"+
+			"Registering a section here stops TestInvariantsPinsReferenceEnforcedSymbols from holding ANY of its pins "+
+			"to its mechanism, so the list may only shrink -- and shrinking means editing this constant down in the "+
+			"same commit, which is the point: the change becomes a line a reviewer reads instead of a silence. If a "+
+			"new section genuinely has no Go face, say so here and in the commit message; if it has one, name the "+
+			"exported entry point in **Enforced by** instead, which is what I-2, I-9, I-18, I-40, I-50, I-51 and I-61 "+
+			"all did to leave this list. Registered: %v",
+		len(unresolvableEnforcedCitations), dbOnlyRegisterSize, sortedKeys(unresolvableEnforcedCitations))
+}
+
+// objectIsDeclared reports whether sql declares object, and whether the
+// object's kind is one this function knows how to look for. An unknown kind
+// returns known=false so it fails loudly rather than passing vacuously.
+func objectIsDeclared(sql string, object dbObject) (found, known bool) {
+	name := regexp.QuoteMeta(object.name)
+	switch object.kind {
+	case kindTable:
+		return reFind(sql, `(?im)^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?`+name+`\s*\(`), true
+	case kindPartitionedTable:
+		return declaresPartitionedTable(sql, object.name), true
+	case kindPartition:
+		return reFind(sql, `(?is)CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?`+name+`\s+PARTITION\s+OF\b`), true
+	case kindFunction:
+		return declaresFunction(sql, object.name, object.detail), true
+	case kindTrigger:
+		return reFind(sql, `(?is)CREATE\s+(CONSTRAINT\s+)?TRIGGER\s+`+name+`\b`), true
+	case kindIndex:
+		return reFind(sql, `(?is)CREATE\s+(UNIQUE\s+)?INDEX\s+(CONCURRENTLY\s+)?(IF\s+NOT\s+EXISTS\s+)?`+name+`\b`), true
+	case kindConstraint:
+		return reFind(sql, `(?is)CONSTRAINT\s+`+name+`\b`), true
+	case kindColumn, kindUniqueColumn, kindNullableColumn, kindColumnType:
+		decl, ok := columnDeclaration(sql, object.name)
+		if !ok {
+			return false, true
+		}
+		switch object.kind {
+		case kindUniqueColumn:
+			return regexp.MustCompile(`(?i)\bUNIQUE\b`).MatchString(decl), true
+		case kindNullableColumn:
+			return !regexp.MustCompile(`(?i)\bNOT\s+NULL\b`).MatchString(decl), true
+		case kindColumnType:
+			return strings.Contains(strings.ReplaceAll(strings.ToUpper(decl), " ", ""),
+				strings.ReplaceAll(strings.ToUpper(object.detail), " ", "")), true
+		}
+		return true, true
+	case kindRole:
+		return reFind(sql, `(?is)CREATE\s+ROLE\s+`+name+`\b`), true
+	case kindPrivilege:
+		return revokesFrom(sql, object.name, object.detail), true
+	}
+	return false, false
+}
+
+func reFind(sql, pattern string) bool {
+	return regexp.MustCompile(pattern).MatchString(sql)
+}
+
+// declaresFunction finds CREATE [OR REPLACE] FUNCTION name(...) and, when
+// detail is set (e.g. "SECURITY DEFINER"), requires it inside that
+// function's own body rather than anywhere in the file.
+func declaresFunction(sql, name, detail string) bool {
+	head := regexp.MustCompile(`(?is)CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+` + regexp.QuoteMeta(name) + `\s*\(`)
+	loc := head.FindStringIndex(sql)
+	if loc == nil {
+		return false
+	}
+	if detail == "" {
+		return true
+	}
+	body := sql[loc[1]:]
+	// The body ends at the dollar-quoted terminator that closes it; taking
+	// everything up to the next CREATE is close enough and never reaches
+	// into a neighbouring declaration.
+	if next := regexp.MustCompile(`(?is)\n\s*CREATE\s`).FindStringIndex(body); next != nil {
+		body = body[:next[0]]
+	}
+	return strings.Contains(strings.ToUpper(body), strings.ToUpper(detail))
+}
+
+// declaresPartitionedTable requires "PARTITION BY" to be part of THIS
+// table's CREATE statement, not merely present somewhere in the file.
+func declaresPartitionedTable(sql, table string) bool {
+	block, ok := createTableBlock(sql, table)
+	if !ok {
+		return false
+	}
+	return regexp.MustCompile(`(?is)PARTITION\s+BY\b`).MatchString(block)
+}
+
+// createTableBlock returns the text of one CREATE TABLE statement, from the
+// table name to the semicolon that ends it.
+func createTableBlock(sql, table string) (string, bool) {
+	head := regexp.MustCompile(`(?im)^\s*CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?` + regexp.QuoteMeta(table) + `\s*[(\s]`)
+	loc := head.FindStringIndex(sql)
+	if loc == nil {
+		return "", false
+	}
+	rest := sql[loc[0]:]
+	if end := strings.Index(rest, ";"); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest, true
+}
+
+// columnDeclaration returns the one line declaring "table.column" inside
+// that table's CREATE TABLE statement. Scoping to the statement is what
+// makes this a declaration check: five tables declare idempotency_key, and
+// a file-wide search cannot tell which one it found.
+func columnDeclaration(sql, qualified string) (string, bool) {
+	table, column, ok := strings.Cut(qualified, ".")
+	if !ok {
+		return "", false
+	}
+	block, ok := createTableBlock(sql, table)
+	if !ok {
+		return "", false
+	}
+	line := regexp.MustCompile(`(?im)^\s*` + regexp.QuoteMeta(column) + `\s+[A-Za-z].*$`)
+	m := line.FindString(block)
+	if m == "" {
+		return "", false
+	}
+	return m, true
+}
+
+// revokesFrom requires one REVOKE statement that names both the grantee and
+// the object -- statement-scoped, so a REVOKE on some other table plus a
+// mention of the role elsewhere does not add up to coverage.
+func revokesFrom(sql, grantee, object string) bool {
+	for _, stmt := range strings.Split(sql, ";") {
+		up := strings.ToUpper(stmt)
+		if !strings.Contains(up, "REVOKE") {
+			continue
+		}
+		if strings.Contains(up, strings.ToUpper(object)) && strings.Contains(up, strings.ToUpper(grantee)) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]dbOnlyMechanism) []string {
@@ -1355,9 +1645,19 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	// Fail-closed sanity: if the section splitter or the symbol index ever
 	// regresses, every section lands in the skip path and this check silently
 	// verifies nothing.
-	require.Greater(t, checked, len(unresolvableEnforcedCitations),
-		"only %d invariant section(s) were actually checked against their Enforced-by symbols, against %d registered as unresolvable -- "+
-			"a check that inspects almost nothing reads as a pass", checked, len(unresolvableEnforcedCitations))
+	//
+	// F-3 (2026-09-03 independent review): this bound used to be `checked >
+	// len(unresolvableEnforcedCitations)`, which with thirteen registered
+	// sections meant the register had to reach thirty-two before the sanity
+	// check noticed anything -- far enough away to be no bound at all. The
+	// floor is now stated against the document: 52 sections are checked today,
+	// so the floor is 50. Adding invariants raises the real
+	// number and never trips it; a splitter or index regression drops it off
+	// a cliff and does.
+	require.GreaterOrEqualf(t, checked, checkedSectionFloor,
+		"only %d invariant section(s) were actually checked against their Enforced-by symbols, against a floor of %d "+
+			"(%d registered as unresolvable) -- a check that inspects almost nothing reads as a pass",
+		checked, checkedSectionFloor, len(unresolvableEnforcedCitations))
 }
 
 // checkPinTouchesLeaves looks up every declared body for a (pkg, fn) pin
@@ -1409,4 +1709,128 @@ func checkPinTouchesLeaves(t *testing.T, sectionNum, pkg, fn string, leaves map[
 	sort.Strings(leafList)
 	*failures = append(*failures, sectionNum+"'s pin "+fn+" never references any of its Enforced by symbols ("+
 		strings.Join(leafList, ", ")+") -- it may not actually exercise this invariant's mechanism")
+}
+
+// --- F-1: a DB-side claim needs a pin that talks to the DB directly ---
+
+// dbMechanismClaim matches an **Enforced by** bullet that names Postgres
+// itself as the enforcer: a constraint, an index, a trigger, a grant, a
+// partition. These are the claims a pin written against the Go API cannot
+// substantiate, because the Go API's own guards stand in front of them.
+//
+// F-1 (2026-09-03 independent review) is the general form of that: dropping
+// `UNIQUE` from journals.idempotency_key left all fifteen of I-3's pins
+// green, because every one of them called PostJournal, where an advisory
+// lock and a pre-read settle a duplicate before Postgres ever sees it. The
+// constraint exists for the writers that do not hold that lock -- a second
+// replica, a leaked ledger_app credential, a replayed WAL -- and only a pin
+// that writes the way those writers write can tell whether it is still
+// there.
+var dbMechanismClaim = regexp.MustCompile(`(?i)\b(unique (constraint|index)|check constraint|foreign key|not null|` +
+	`trigger|grant|revoke|deferrable|partition|column-level)\b`)
+
+// directSQLStatement matches a raw SQL statement among a pin's string
+// literals -- the signature of a test that reaches the database without
+// going through this library's write path.
+//
+// Catalogue reads (`FROM pg_index`, `information_schema`) count: asking
+// Postgres what it built is a direct interrogation of the mechanism, and it
+// is the only way to see an index left INVALID by a failed concurrent
+// build, which no INSERT can distinguish from a missing one.
+var directSQLStatement = regexp.MustCompile(`(?is)(insert\s+into|update\s+[a-z_"]|delete\s+from|alter\s+table|` +
+	`\bgrant\s+|\brevoke\s+|create\s+(table|index|trigger|temp)|from\s+(pg_|information_schema)|` +
+	`has_table_privilege|has_column_privilege|set\s+role)`)
+
+// dbClaimsWithoutDirectPin registers sections whose Enforced by names a
+// Postgres-side mechanism but whose pins legitimately do not issue SQL.
+//
+// This list is closed the way unresolvableEnforcedCitations is closed
+// (TestDbOnlyMechanismRegisterOnlyShrinks): the count is snapshotted, so an
+// entry cannot be added without editing a number a reviewer sees. That is
+// the shape C-2 established and F-3 found missing on the sister list.
+// It is empty, and W5 emptied it: the five sections that failed when this
+// gate was written (I-1, I-6, I-11, I-12, I-16) each turned out to be
+// fixable at the mechanism rather than at the register -- three by adding a
+// direct-SQL pin that did not exist, two by citing one that did but was
+// filed under a neighbouring invariant. Empty is therefore the honest
+// starting state, and "may only shrink" at zero means "may not grow".
+var dbClaimsWithoutDirectPin = map[string]string{}
+
+func TestDatabaseSideClaimsHaveADirectSQLPin(t *testing.T) {
+	raw, err := os.ReadFile("../docs/INVARIANTS.md")
+	require.NoError(t, err, "read INVARIANTS.md")
+
+	testBodies := buildTestFuncBodyIndex(t)
+
+	checked := 0
+	var claimed []string
+	for _, sec := range splitInvariantSections(string(raw)) {
+		enforced := blockBetween(sec.body, "**Enforced by**")
+		if !dbMechanismClaim.MatchString(enforced) {
+			continue
+		}
+		claimed = append(claimed, sec.number)
+		pinned := blockBetween(sec.body, "**Pinned by**")
+		if pinned == "" {
+			continue // a missing Pinned by is another test's failure
+		}
+
+		names := map[string]bool{}
+		for _, m := range pinReference.FindAllStringSubmatch(pinned, -1) {
+			names[m[2]] = true
+		}
+		for _, m := range bareReference.FindAllStringSubmatch(pinned, -1) {
+			names[m[1]] = true
+		}
+
+		direct := ""
+		for name := range names {
+			for _, body := range testBodies[name] {
+				if directSQLStatement.MatchString(body.usedStrings) {
+					direct = name
+					break
+				}
+			}
+			if direct != "" {
+				break
+			}
+		}
+		if _, exempt := dbClaimsWithoutDirectPin[sec.number]; exempt {
+			assert.Emptyf(t, direct,
+				"%s is registered in dbClaimsWithoutDirectPin, but its pin %s does issue direct SQL. "+
+					"The register is for sections that cannot have one; delete the entry", sec.number, direct)
+			continue
+		}
+		checked++
+		assert.NotEmptyf(t, direct,
+			"%s's **Enforced by** claims a Postgres-side mechanism (constraint / index / trigger / grant / partition), "+
+				"but not one of its pins issues SQL of its own -- every one of them goes through this library's write "+
+				"path.\n\nThat is the F-1 shape: the Go path holds an advisory lock and pre-reads, so it returns the right "+
+				"answer whether or not the database constraint is still there. Dropping UNIQUE from "+
+				"journals.idempotency_key left all fifteen of I-3's pins green. Add a pin that writes the way an "+
+				"unlocked writer writes -- a direct INSERT asserting 23505 (see "+
+				"postgres.TestJournalIdempotencyKey_RejectsDirectSQLDuplicate), a catalogue read, or a permission probe "+
+				"-- or register %s in dbClaimsWithoutDirectPin with the reason it cannot have one.\n\nPins seen: %v",
+			sec.number, sec.number, sortedNames(names))
+	}
+
+	sort.Strings(claimed)
+	require.GreaterOrEqualf(t, len(claimed), 20,
+		"only %d invariant section(s) were read as claiming a Postgres-side mechanism (%v). The doc has around twenty; "+
+			"a matcher that finds almost none inspects nothing and reads as a pass", len(claimed), claimed)
+	require.Greaterf(t, checked, len(dbClaimsWithoutDirectPin),
+		"%d section(s) actually checked against %d registered exemptions -- the register has swallowed the check", checked, len(dbClaimsWithoutDirectPin))
+	assert.Emptyf(t, dbClaimsWithoutDirectPin,
+		"dbClaimsWithoutDirectPin is not empty: %v.\n\nIt was emptied when this gate was written, by fixing the five "+
+			"sections that failed rather than registering them, so at zero \"may only shrink\" means \"may not grow\". "+
+			"An entry here un-gates one DB-side claim; F-3 is what happens to a register nobody locks", dbClaimsWithoutDirectPin)
+}
+
+func sortedNames(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

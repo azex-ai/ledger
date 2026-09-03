@@ -81,6 +81,9 @@ type AccountPolicyInput struct {
 }
 
 func (i AccountPolicyInput) Validate() error {
+	if err := ValidateAmountMagnitude("account policy", "min_balance", i.MinBalance); err != nil {
+		return err
+	}
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("core: account policy: account_holder must not be zero: %w", ErrInvalidInput)
 	}

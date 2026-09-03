@@ -634,8 +634,8 @@ func TestBookingsAndEventsGuards(t *testing.T) {
 	})
 }
 
-// TestIdempotencyReceiptTablesAreAppendOnly pins migration 006's fix for
-// board #14 item #25: account_policy_changes and the three idempotency
+// TestIdempotencyReceiptTablesRefuseTheAppCredential pins migration 006's
+// fix for board #14 item #25: account_policy_changes and the three idempotency
 // receipt tables (reservation_settlement_legs, reservation_operation_receipts,
 // booking_transition_receipts) had no legitimate UPDATE anywhere in
 // postgres/sql/queries/, yet ledger_app held UPDATE on all four because none
@@ -644,7 +644,18 @@ func TestBookingsAndEventsGuards(t *testing.T) {
 // FinalizeSettlement/Transition call for that idempotency key -- the
 // operation reports success without re-applying, while the reservation it
 // was supposed to close stays active and its funds stay locked.
-func TestIdempotencyReceiptTablesAreAppendOnly(t *testing.T) {
+//
+// Renamed 2026-09-03 (F-2). It used to be called
+// ...TablesAreAppendOnly, which is not what it measures: every statement
+// below runs as ledger_app, which holds no UPDATE or DELETE grant on these
+// tables, so each one is refused by the ACL and never reaches a trigger.
+// That is a real and worthwhile property -- least privilege, I-22 -- but it
+// is not append-onlyness, and while this test carried that name the twelve
+// mutation guards migration 006 attached to these tables had no pin at all.
+// The append-only half now lives in
+// TestAppendOnlyGuards_EveryTriggerRefusesItsMutation, which writes as the
+// owner precisely so that a GRANT cannot stand in for a trigger.
+func TestIdempotencyReceiptTablesRefuseTheAppCredential(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 	appPool := newAppPool(t, pool, "roles-test-app-receipts-not-a-real-secret") //nolint:gosec

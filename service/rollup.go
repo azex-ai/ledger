@@ -94,6 +94,18 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	}
 
 	if len(items) == 0 {
+		// The queue-depth gauges are reported even when there is nothing to
+		// dequeue, and that is the case they exist for (2026-09-03 W5).
+		// StuckRollups counts items that have exhausted their retries, which
+		// DequeueRollupBatch does not hand back -- so a queue that is
+		// ENTIRELY stuck dequeues nothing, and returning here left both
+		// gauges un-emitted at exactly the moment they were the signal. A
+		// gauge that stops being written goes stale rather than going to
+		// zero, so a dashboard shows the last healthy value forever.
+		// Same shape as the RollupItemFailed note further down: the one
+		// branch most worth an alert was the one branch that produced no
+		// metric.
+		s.reportQueueDepth(ctx)
 		return 0, nil
 	}
 
@@ -160,19 +172,27 @@ func (s *RollupService) ProcessBatch(ctx context.Context, batchSize int) (int, e
 	s.metrics.RollupProcessed(processed)
 	s.metrics.RollupLatency(time.Since(start))
 
-	// Report pending count
-	pending, err := s.queue.CountPendingRollups(ctx)
-	if err == nil {
+	s.reportQueueDepth(ctx)
+
+	return processed, nil
+}
+
+// reportQueueDepth emits the two queue-depth gauges. Called on every tick,
+// including one that dequeued nothing.
+//
+// A read failure leaves the gauge unwritten rather than reporting zero: a
+// query that did not answer is not a queue that is empty, and reporting it
+// as empty is the shape working-agreements.md §3 forbids.
+func (s *RollupService) reportQueueDepth(ctx context.Context) {
+	if pending, err := s.queue.CountPendingRollups(ctx); err == nil {
 		s.metrics.PendingRollups(pending)
 	}
-	// Report stuck count (B-m10) -- distinct gauge from PendingRollups above:
-	// pending clears as the queue drains, stuck never will without an
-	// operator resetting the item (see cmd/ledger-cli's rollup reset-claim).
+	// Stuck is a distinct gauge from pending (B-m10): pending clears as the
+	// queue drains, stuck never will without an operator resetting the item
+	// (see cmd/ledger-cli's rollup reset-claim).
 	if stuck, err := s.queue.CountStuckRollups(ctx); err == nil {
 		s.metrics.StuckRollups(stuck)
 	}
-
-	return processed, nil
 }
 
 func (s *RollupService) processItem(

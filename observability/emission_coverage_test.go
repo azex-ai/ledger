@@ -101,18 +101,17 @@ func productionMetricsCalls(t *testing.T) map[string][]string {
 			if parseErr != nil {
 				return parseErr
 			}
-			ast.Inspect(file, func(n ast.Node) bool {
+			rel, _ := filepath.Rel(root, path)
+			walkLive(file, func(n ast.Node) {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
-					return true
+					return
 				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok || !isMetricsReceiver(sel.X) {
-					return true
+					return
 				}
-				rel, _ := filepath.Rel(root, path)
 				out[sel.Sel.Name] = append(out[sel.Sel.Name], rel+":"+strconv.Itoa(fset.Position(call.Pos()).Line))
-				return true
 			})
 			return nil
 		})
@@ -121,6 +120,101 @@ func productionMetricsCalls(t *testing.T) map[string][]string {
 		}
 	}
 	return out
+}
+
+// walkLive is ast.Inspect minus the statically unreachable parts.
+//
+// F-5 (2026-09-03 independent review): the AST rewrite in M-10 fixed
+// "a comment is not a call site", but a call site is not an emission
+// either. The reviewer changed
+//
+//	if stuck, err := s.queue.CountStuckRollups(ctx); err == nil {
+//
+// to `err == nil && false`, which turns the signal off completely, and
+// `go test ./...` -- postgres included -- stayed green. The call expression
+// was still there for the AST to find.
+//
+// Full reachability is a dataflow problem and not what this gate is for.
+// Constant-false is the part that matters: it is how a signal gets switched
+// off during debugging and left that way, and it is the one shape that
+// makes an emission unreachable while leaving it perfectly visible to a
+// reader and to a syntax-level scan.
+func walkLive(n ast.Node, visit func(ast.Node)) {
+	switch v := n.(type) {
+	case nil:
+		return
+	case *ast.IfStmt:
+		if v.Init != nil {
+			walkLive(v.Init, visit)
+		}
+		walkLive(v.Cond, visit)
+		if !staticallyFalse(v.Cond) {
+			walkLive(v.Body, visit)
+		}
+		if v.Else != nil && !staticallyTrue(v.Cond) {
+			walkLive(v.Else, visit)
+		}
+		return
+	case *ast.ForStmt:
+		if v.Cond != nil && staticallyFalse(v.Cond) {
+			walkLive(v.Cond, visit)
+			return
+		}
+	}
+	visit(n)
+	ast.Inspect(n, func(child ast.Node) bool {
+		if child == nil || child == n {
+			return child == n
+		}
+		switch child.(type) {
+		case *ast.IfStmt, *ast.ForStmt:
+			walkLive(child, visit)
+			return false
+		}
+		visit(child)
+		return true
+	})
+}
+
+// staticallyFalse reports whether an expression is false without knowing
+// anything about the program: the literal `false`, an && with a false
+// operand, an || with both false, a !true.
+func staticallyFalse(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.ParenExpr:
+		return staticallyFalse(v.X)
+	case *ast.Ident:
+		return v.Name == "false"
+	case *ast.UnaryExpr:
+		return v.Op == token.NOT && staticallyTrue(v.X)
+	case *ast.BinaryExpr:
+		switch v.Op {
+		case token.LAND:
+			return staticallyFalse(v.X) || staticallyFalse(v.Y)
+		case token.LOR:
+			return staticallyFalse(v.X) && staticallyFalse(v.Y)
+		}
+	}
+	return false
+}
+
+func staticallyTrue(e ast.Expr) bool {
+	switch v := e.(type) {
+	case *ast.ParenExpr:
+		return staticallyTrue(v.X)
+	case *ast.Ident:
+		return v.Name == "true"
+	case *ast.UnaryExpr:
+		return v.Op == token.NOT && staticallyFalse(v.X)
+	case *ast.BinaryExpr:
+		switch v.Op {
+		case token.LAND:
+			return staticallyTrue(v.X) && staticallyTrue(v.Y)
+		case token.LOR:
+			return staticallyTrue(v.X) || staticallyTrue(v.Y)
+		}
+	}
+	return false
 }
 
 // isMetricsReceiver reports whether an expression is the metrics handle:
@@ -266,13 +360,37 @@ func metricsNamesInTests(t *testing.T) map[string]bool {
 			return parseErr
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
+			// Only x.Name -- a selector. F-5 (2026-09-03 independent
+			// review): this used to count *ast.FuncDecl names and every
+			// bare *ast.Ident too, so a test that declares an empty method
+			// purely to satisfy the interface --
+			//
+			//	func (m *recordingMetrics) StuckRollups(int64) {}
+			//
+			// -- was enough to make StuckRollups count as "named by a
+			// test". Every mock of core.Metrics declares all of them, so
+			// under that rule the census could never report anything.
+			// Measured: the StuckRollups emission was switched off entirely
+			// and the whole suite, postgres included, stayed green.
+			//
+			// A selector means a test reaches for the thing by that name,
+			// and a recorder method with a body means a test is capturing
+			// the call. An empty method body means neither. That is still
+			// weaker than proving the emission -- this is a census, and it
+			// says so -- but it is no longer satisfied by boilerplate that
+			// every mock has to write for every method.
 			switch v := n.(type) {
 			case *ast.SelectorExpr:
 				out[v.Sel.Name] = true
 			case *ast.FuncDecl:
-				out[v.Name.Name] = true
-			case *ast.Ident:
-				out[v.Name] = true
+				// A method declaration counts only if it DOES something.
+				// Every mock of core.Metrics declares all of them; the
+				// ones that record (`m.completed++`, `r.calls = append(...)`)
+				// are what a behaviour assertion reads, and the ones with
+				// an empty body exist solely to satisfy the interface.
+				if v.Recv != nil && v.Body != nil && len(v.Body.List) > 0 {
+					out[v.Name.Name] = true
+				}
 			}
 			return true
 		})

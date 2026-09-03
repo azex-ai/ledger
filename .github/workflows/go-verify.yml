@@ -171,6 +171,19 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
+      # F-8 (2026-09-03 independent review): go does not cross module
+      # boundaries, workspace or not, so the root invocation above scanned
+      # neither anchors/r2 (aws-sdk-go-v2) nor chains/evm (go-ethereum) --
+      # the two modules with the largest third-party surface in the repo.
+      # The gate built to catch exactly this shape of drift
+      # (TestGoVerifyRunsRealCommandsForEveryModule) had no vulncheck cell,
+      # so the omission was invisible. It has one now.
+      - name: govulncheck (chains/evm)
+        run: govulncheck ./...
+        working-directory: chains/evm
+      - name: govulncheck (anchors/r2)
+        run: govulncheck ./...
+        working-directory: anchors/r2
 
   sqlc-diff:
     runs-on: ubuntu-latest

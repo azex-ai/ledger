@@ -661,6 +661,8 @@ type recordingMetrics struct {
 	rollupProcessed              int
 	rollupItemFailed             int
 	negativeBalanceDetectedCalls int // count of NegativeBalanceDetected calls
+	stuckRollups                 []int64 // every value passed to StuckRollups, in call order
+	pendingRollups               []int64 // ditto for PendingRollups
 }
 
 func (m *recordingMetrics) JournalPosted(string)                   {}
@@ -675,8 +677,8 @@ func (m *recordingMetrics) BookingTransitioned(string, string)     {}
 func (m *recordingMetrics) JournalLatency(time.Duration)           {}
 func (m *recordingMetrics) SnapshotLatency(time.Duration)          {}
 func (m *recordingMetrics) JournalEntryCount(string, int)          {}
-func (m *recordingMetrics) PendingRollups(int64)                   {}
-func (m *recordingMetrics) StuckRollups(int64)                     {}
+func (m *recordingMetrics) PendingRollups(n int64)                 { m.pendingRollups = append(m.pendingRollups, n) }
+func (m *recordingMetrics) StuckRollups(n int64)                   { m.stuckRollups = append(m.stuckRollups, n) }
 func (m *recordingMetrics) ActiveReservations(int64)               {}
 func (m *recordingMetrics) CheckpointAge(string, time.Duration)    {}
 func (m *recordingMetrics) ReconcileGap(string, decimal.Decimal)   {}
@@ -690,4 +692,79 @@ func (m *recordingMetrics) BalanceDrift(_ string, _ string, delta decimal.Decima
 }
 func (m *recordingMetrics) NegativeBalanceDetected(string, string) {
 	m.negativeBalanceDetectedCalls++
+}
+
+// TestRollup_ReportsStuckAndPendingSeparately is F-5's pin (2026-09-03
+// independent review).
+//
+// StuckRollups had no behaviour pin at all. The reviewer switched its
+// emission off -- `if stuck, err := s.queue.CountStuckRollups(ctx); err ==
+// nil && false` -- and `go test ./...`, postgres included, stayed green.
+// The two gates that exist for this both said yes: the coverage gate found
+// the call expression (an unreachable one, but AST does not evaluate), and
+// the census gate found the name on recordingMetrics' own empty method
+// declaration, which every mock of a wide interface has to write.
+//
+// The two gauges are asserted separately because that separation is the
+// signal's whole reason for existing (B-m10): pending drains as the queue
+// is worked, stuck does not and never will until an operator resets the
+// item (cmd/ledger-cli's `rollup reset-claim`). An alert on pending alone
+// goes quiet while the stuck items sit there.
+func TestRollup_ReportsStuckAndPendingSeparately(t *testing.T) {
+	queue := &mockRollupQueuer{
+		items:   []RollupQueueItem{{ID: 1, AccountHolder: 900, CurrencyID: 1, ClassificationID: 30}},
+		pending: 7,
+		stuck:   3,
+	}
+	cpRW := newMockCheckpointRW()
+	entries := &mockEntrySummer{
+		debitByClass:  map[int64]decimal.Decimal{30: decimal.NewFromInt(10)},
+		creditByClass: map[int64]decimal.Decimal{},
+		maxEntryID:    5,
+		maxEntryAt:    time.Now(),
+	}
+	cls := &mockClassificationLister{classifications: []ClassificationDim{
+		{ID: 30, UID: "cls-30", Code: "asset", NormalSide: core.NormalSideDebit},
+	}}
+	metrics := &recordingMetrics{}
+
+	svc := NewRollupService(queue, cpRW, entries, cls, core.NewEngine(core.WithMetrics(metrics)))
+	_, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{3}, metrics.stuckRollups,
+		"the stuck-item gauge must be emitted once per tick with the queue's count. Without this assertion the emission "+
+			"can be switched off and every gate stays green (F-5)")
+	require.Equal(t, []int64{7}, metrics.pendingRollups,
+		"pending and stuck are separate gauges on purpose: pending drains as the queue is worked and stuck does not, "+
+			"so reporting one for the other makes a permanently stuck item look like transient backlog")
+}
+
+// TestRollup_ReportsQueueDepthOnAnEmptyTick pins the case the gauges exist
+// for (team-lead ruling, 2026-09-03).
+//
+// ProcessBatch used to return early when DequeueRollupBatch handed back
+// nothing, before either gauge was emitted. StuckRollups counts items that
+// have exhausted their retries -- which is exactly what DequeueRollupBatch
+// does NOT hand back -- so a queue that is entirely stuck dequeues nothing,
+// and both gauges went unwritten at the moment they were the signal. A
+// gauge that stops being written goes stale rather than to zero, so the
+// dashboard keeps showing the last healthy value.
+func TestRollup_ReportsQueueDepthOnAnEmptyTick(t *testing.T) {
+	queue := &mockRollupQueuer{stuck: 4} // nothing dequeueable, four wedged
+	metrics := &recordingMetrics{}
+	svc := NewRollupService(queue, newMockCheckpointRW(), &mockEntrySummer{}, &mockClassificationLister{},
+		core.NewEngine(core.WithMetrics(metrics)))
+
+	processed, err := svc.ProcessBatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Zero(t, processed, "the fixture must dequeue nothing -- that is the case under test")
+
+	require.Equal(t, []int64{4}, metrics.stuckRollups,
+		"a tick that dequeued nothing must still report the stuck count. Four items wedged and zero dequeueable is "+
+			"precisely the state this gauge exists to alarm on, and it is the state in which the early return used to "+
+			"skip it")
+	require.Equal(t, []int64{0}, metrics.pendingRollups,
+		"pending must be reported as the zero it is, not left unwritten -- an un-emitted gauge goes stale on the "+
+			"dashboard rather than dropping to zero")
 }

@@ -371,3 +371,180 @@ $ git -C /Users/aaron/projects/_worktrees/ledger/r3-gates-pins status --porcelai
 
 主仓 `/Users/aaron/projects/ledger` 本轮唯一写入的文件是本报告：
 `docs/audits/2026-09-03-independent-review/gates-pins.md`。
+
+---
+
+# W5 处置（`w5-gates`，2026-09-03/04 SGT）
+
+> 分支 `w5-gates`，基线 = main `02041d7`。本节由整改 worker 追加，是**本报告唯一被改动的部分**。
+> 纪律：**每一条都先按复审员写的 mutation 跑一次红，改完再跑一次绿**。凡是我判「不成立」的，下面写明判据，不是省略。
+
+## 1. F-1…F-9 逐条处置
+
+| # | 处置 | 复现的 mutation | 改后 |
+|---|---|---|---|
+| **F-1** | 已修 | `journals.idempotency_key` 去 `UNIQUE` → 全套零失败 | 两个直击 pin + 一条通用门禁，见下 |
+| **F-2** | 已修 | `ledger_block_mutation()` 改 `RETURN NEW` → 只红 3 个 | 同一 mutation 现在红 **25** 个 |
+| **F-3** | 已修 | 加一条豁免项 + 两行文档改动 → `core` 全绿 | 尺寸锁 + 声明解析，两半都红 |
+| **F-4** | 已修 | Go map 查表 / SQL `FILTER`+布尔转 int → 三个门禁全绿 | 两种写法都红 |
+| **F-5** | 已修 | `StuckRollups` 发射包进 `&& false` → 全套（含 postgres）全绿 | 覆盖门禁与 census 都红，并补了真 pin |
+| **F-6** | 已修 | 8 个 `aria-label` 清空 + 重建 → 225/225 全绿 | 同一 mutation 现在红 |
+| **F-7** | 已修 | `EventRef int64` 加进 `core.JournalInput` → core/server/service 全绿 | 立刻红 |
+| **F-8** | 已修 | （非 mutation，读配置）两个 submodule 无 govulncheck | 补扫描 + 矩阵加 vulncheck 位；删掉步骤则红 |
+| **F-9** | 已修 | （环境）Docker 停机时 `make test` 报 `ok` | 改 fail-closed，两半各有 pin |
+
+### F-1 的推广：「约束声明 × 直击 pin」表
+
+`core.TestDatabaseSideClaimsHaveADirectSQLPin`：读 `docs/INVARIANTS.md` 每一条 **Enforced by**，凡声称 Postgres 侧机制（constraint / index / trigger / grant / partition）的，要求该 section 的 pin 里**至少有一条自己发 SQL**（写入、目录读取或权限探测都算；走本库写路径的不算）。
+
+22 条声称 DB 机制，其中 **5 条没有直击 pin**。全部在机制侧修掉，豁免表 ship 时为空且锁死：
+
+| I | 声称的机制 | 原状 | 处置 |
+|---|---|---|---|
+| I-1 | `check_journal_currency_balance()` 触发器 + `chk_journal_balance` CHECK | 4 个 pin 全走 `Validate`，DB 层背书无 pin | 引用已存在的 `TestJournalBalanceTrigger_RejectsDirectSQLImbalance`（此前只挂在 I-24 名下）+ 新增 `TestJournalTotalsCheck_RejectsDirectSQLImbalance` |
+| I-3 | 五张表的 `idempotency_key UNIQUE` | 15 个 pin 全走 advisory lock | 新增 `TestJournalIdempotencyKey_RejectsDirectSQLDuplicate`（双插入断言 23505）+ `TestEveryIdempotencyKeyColumnHasATotalUniqueIndex`（目录派生） |
+| I-11 | `classifications.balance_role` CHECK | pin 全走 `CreateClassification`（Go 侧先校验） | 新增 `TestBalanceRoleCheck_RejectsDirectSQLUnknownRole` |
+| I-12 | 同 I-1 的延迟触发器 | 4 个 pin 对触发器失效无感（复审员标「分不清」） | 引用同一个触发器 pin —— **这就是那一行的答案** |
+| I-16 | `currencies.exponent CHECK (0..18)` | pin 全走 `CreateCurrency` | 新增 `TestCurrencyExponentCheck_RejectsDirectSQLOutOfRange` |
+
+顺带发现两条**失效的迁移引用**：I-11 引 migration `032`、I-16 引 `027_currency_exponent.up.sql`，baseline 压平后两者都不存在（027 现在是 `unlink_event_journal`）。已改为真正声明该约束的文件。
+
+三个新 CHECK pin 一律用 **INSERT** 而非 UPDATE —— 写这些 pin 时发现配置表上有 `ledger_*_guard` 触发器，UPDATE 会先被它拒（"may only change is_active"），断言就会因为错误的原因通过。
+
+### F-3 的两点重判
+
+1. **对象校验改解析声明**（已做）：`objects` 从 `[]string` 改成 `[]dbObject{kind, name, detail}`，按 kind 找声明形状（`CREATE TRIGGER <name>` / `CREATE [OR REPLACE] FUNCTION <name>` / `CREATE [UNIQUE] INDEX <name>` / `CONSTRAINT <name>` / `CREATE ROLE <name>` / 列级 unique·nullable·类型（**限定在该表的 `CREATE TABLE` 语句内**）/ 分区表 / 分区 / 语句内的 REVOKE）。未知 kind **直接失败**，不静默通过。删掉 `journals` 那一处 UNIQUE 立即红 —— 旧的全文件 substring 要删到 5 处全没才红。
+2. **「登记项对应约束若已有直击 pin 则必须出表」—— 判定不成立**，已跟 team-lead 确认。`unresolvableEnforcedCitations` 的判据是「Enforced by 里没有任何可解析的导出 Go 符号」，和「有没有直击 SQL 的 pin」是两个正交维度：按那条规则 I-3 现在有了直击 pin 就得出表，但它的 Enforced by 仍然只有约束名，出表会让 `TestInvariantsPinsReferenceEnforcedSymbols` 立刻红。改为等效的两条：**尺寸快照锁**（`dbOnlyRegisterSize = 13`，只许改小）+ 让 `TestDatabaseSideClaimsHaveADirectSQLPin` **同样适用于已登记 section**（登记不豁免直击 pin 要求）。
+3. 顺带修掉报告点名的松下界：`require.Greater(checked, len(register))` 在 13 条登记下要等名单涨到 32 才会响。改成对文档的真实 floor（今天 52 条被检查，floor 取 50）。
+
+### F-5 的两点收紧（以及一条附带的行为 bug）
+
+- **覆盖门禁**加静态可达性：常量 false 的 `if`、常量 true 的 `else`、永不执行的 `for`，其中的 call site 不算。完全可达性是数据流问题、不是这个门禁的职责；常量 false 是「调试时把信号关掉忘了打开」的形状，也是唯一一种「发射不可达但对读者和语法扫描完全正常」的写法。
+- **census** 从「名字作为任意 identifier 出现过」收紧为「作为 selector 出现，或作为**函数体非空**的方法声明出现」。空方法体是每个宽接口 mock 都必须为每个方法写的样板；按旧规则这个 census 永远报不出东西。收紧后跑全接口，**恰好只报出 `StuckRollups`** —— 正是复审员实测的那一个。这是判据校准得当的证据。
+- 补 `service.TestRollup_ReportsStuckAndPendingSeparately`。
+- **写这条 pin 时发现一个真实行为 bug**：`ProcessBatch` 在 `len(items) == 0` 时提前 return，**在两个 gauge 发射之前**。而 `StuckRollups` 数的正是「耗尽重试、不会被 dequeue」的条目 —— 队列**全部**卡死时恰好一条都 dequeue 不到，两个 gauge 一次都不发；gauge 停写不等于归零，仪表盘会一直显示最后一个健康值。已按 team-lead 授权修（gauge 先发再 return），并加 pin。
+
+### F-9 的边界
+
+`postgrestest` 现在在容器起不来时 `t.Fatal`，只保留 `-short` 这一条调用方显式说出口的跳过；`make test` 前置 `docker info` 探测，并在 `DATABASE_URL` 已设时不触发。两半都由 `core/test_infra_gates_test.go` 钉住 —— 它是源码级断言，因为「Docker 不在」这个条件没法从一个需要 Docker 才能跑的进程里造出来。
+
+## 2. PLAUSIBLE 段逐条
+
+| # | 结论 | 处置 |
+|---|---|---|
+| **P-1** | **成立** | 已修。复审员的 mutation（`holderTokenAuth` 换成直通）此前只由三个不相干的 handler 测试兜住；新增 `server.TestHolderRoutes_RejectEveryRequestWithoutAValidToken`，对 holder 前缀下每条路由跑三次（无凭证 / 别的密钥签的 token / 有效 token），前两次必须 401 且不到达 store，第三次必须不是 401。同一 mutation 现在直接红在门禁本身。**正向 control 当场救了这个 pin 一次**：第一版把 `/api/v1` 前缀拼重了，每个请求都 404，两条否定断言全部因为完全错误的原因通过。 |
+| **P-2** | **成立** | 已修。README 印给读者去建仪表盘的 `ledger_*` 指标名此前无门禁；新增 `TestREADMEMetricNamesExistInThePrometheusAdapter`，从 adapter 的 namespace 常量 + 各 collector 的 `Name` 派生。单向：反向会要求 README 列全 41 个，而它明说了去读 `core/metrics.go`。改名 `rollups_pending` 立刻红。 |
+| **P-3** | **成立** | 已修。spec 里 25 个 `enum` 无一从 Go 常量派生。新增 `server.TestOpenAPIEnumsAreDerivedFromGoConstants`：7 个词表（EntryType / NormalSide / HolderRole / BalanceRole / AccountPolicyStatus / ReservationStatus / HolderTxKind / DepositToleranceOutcome）按 **Go 类型**而非 OpenAPI component 登记 —— 因为多数词表在 spec 里既有具名 component 又有内联副本（ReservationStatus 是 component + query 参数 + 响应字段），只派生具名那份等于放任内联副本掉队。三条规则：① 每个词表必须在 spec 里**逐字出现**；② 任何 enum 不得是某个词表的**真子集/真超集**（这正是「某一份副本停止更新」的形状；单值 enum 豁免，那是响应体里的字面量）；③ 其余每个 enum 登记不派生的理由，且名单不得比 spec 活得久。有一个 enum 是「词表减去一个值」（holder **transaction** 的 kind 永远不为 `""`，读路径把 `HolderTxKindNone` 解析成 `HolderTxKindOther`），这条也是派生的。加/减一个 `BalanceRole` 常量都红。 |
+| **P-4** | **成立，未修，记录在案** | `ledger-react.yml` 的 path filter 确实让 web 全套对纯 Go / 纯 docs 提交不跑。这是有意的（省 CI 时间且 web 产物不受 Go 改动影响）。`docs/frontend.md` 没有 `readme_docs_consistency_test.go` 那样的对应物 —— **确认是缺口**，但它属于 W5-readme 的独占域（`docs/` 文档一致性门禁），未在本分支动。 |
+| **P-5** | **成立，部分处置** | `anchortest.Check` 的**完备性**确实无法自证。本轮把它验到了能验的程度：删掉 head-regression 阶段 → `TestCheck_CatchesHeadRegression` / `TestCheck_CatchesOutOfBandHeadRegression` 红（见下 I-48）；`anchors/r2` 的 `Publish` 去掉 create-only 检查 → `TestAnchor_Conformance` + `TestAnchor_PublishIsCreateOnlyPerSeq` 红（I-56）。也就是说「Check 能抓它探的维度」是真的。复审员点名的两个**未探维度**（并发 `Publish` 同 seq、网络分区下 `Head` 返回旧值而非报错）仍未探 —— 属新增 conformance 阶段，是设计工作不是门禁工作，**留给拍板**。 |
+| **P-6** | **成立** | 已修。`TestVerifyReservationDischargeAuth` 六个否定用例是六个裸 `require.Error`，分不清「六个检查都在工作」和「只有第一个在工作」。每个用例改为断言**是哪一个检查拒的**；`verifier rejects` 追加 `require.ErrorIs` 要求 verifier 自己的错误活着传到调用方；新增第七个用例直接钉 I-45 在 discharge 面的形态（不认识的 key 必须以 `core.ErrUnknownAuthKey` 到达）。把其中两个分支坍缩成统一的 "unauthorized" → 三个 subtest 红，此前六个全过。 |
+
+## 3. 互斥 / 自相矛盾的测试
+
+复审员的结论**复核成立**，没有新增发现。具体核了它点名的两组：
+
+- `TestReserverStore_Settle_RefusesExpiredReservation` vs `TestReserverStore_FinalizeSettlement_AllowedAfterExpiry` —— 两者驱动的是**不同操作**（`Settle` / `FinalizeSettlement`），I-49 的正文写明这是有意的：过期后 `expires_at` 是唯一不可伪造的 discharge 依据。不互斥。
+- I-53 的 WATCHER 路径 vs I-20 的 webhook 路径 —— 两条 section 各自写明了路径区分。不互斥。
+
+## 4. 24 条未 mutation 的不变式 —— 逐条结果
+
+每条拆掉它 **Enforced by** 点名的那个机制，跑该 section **Pinned by 所在包**（这一点很重要，见下方方法论）。
+
+| I | 拆的机制 | 结果 |
+|---|---|---|
+| I-6 | `journal_entries.amount` `NUMERIC(30,18)` → `(20,8)` | **红**（`TestSchema_NumericColumnsAreExactly30_18`） |
+| I-7 | `journals.total_debit` 去 `NOT NULL` | **红**（`TestSchema_NullableColumnsExactlyMatchI7Exceptions`） |
+| I-10 | 不再调 `linkJournalToEventAndBooking` | **红，但由未登记的 pin 承担** → 见下 |
+| I-14 | entry 的 `EffectiveAt` 写 `time.Now()` 而非 journal 解析出的值 | **红**（`..._EffectiveAt_Backdated`） |
+| I-19 | 让 sweep 路径真的 `PostJournal` | **红** |
+| I-20 | `TxLogSeq` 改用区块级 log index | **红**（在 `chains/evm` 模块内跑） |
+| I-21 | `routeToReview` 同时 post `deposit_confirm` journal | **红**（`TestRouteToReview_EmitsDepositReviewRequired`） |
+| I-27 | `entry_attestations` 去掉 `PRIMARY KEY (entry_id)` | **红**（6+） |
+| **I-28** | `VerifyLedger` 停掉 `a.Seq == anchorSeq` 的 head 比对 | **绿 —— 空洞** → 已补 pin，见下 |
+| I-29 | `AttestationRootHashV2` 不再把 `merkle_root` 绑进签名 | **红**（含 `TestVerifyLedger_TamperedMerkleRootAlone`） |
+| I-30 | `largestPowerOfTwoLessThan` → 朴素折半 | **红**（golden vectors + 奇数叶不复制） |
+| I-31 | 冲销路径永不签名 | **红** |
+| I-34 | `requireCapability` 直通 | **红**（含 `TestDepositReview_SelfMintSelfApprove_MI2`） |
+| I-37 | 偿付负债的 role 过滤改成 `IS NOT NULL` | **红**（4+） |
+| I-38 | 注册一条 spec 未声明的路由 | **红** |
+| I-41 | `scanned == 0 && resumedLap` 判断停用 | **红**（2 个） |
+| I-44 | `HolderTxKind.IsValid()` 恒 true | **红** |
+| I-47 | `Migrate` 去掉 cluster advisory lock | **红** |
+| I-48 | `anchortest.Check` 跳过 head-regression 阶段 | **红**（2 个） |
+| I-53 | `confirmationDepth` 恒 0（扫到链头） | **红** |
+| I-54 | `Worker.Run` 不再拒绝 nop logger | **红**（根包 `TestServiceWorker_RefusesToRunUnderTheDefaultSilentLogger`） |
+| I-55 | 不再 `RecordAnchorObservation` | **红**（`TestVerifyLedger_AnchorRollbackToAnOlderSeqIsTampered`） |
+| I-56 | R2 `Publish` 允许同 seq 覆盖不同 head | **红**（`TestAnchor_Conformance` + `TestAnchor_PublishIsCreateOnlyPerSeq`） |
+| I-62 | 未配置 ceiling 不再是启动错误 | **红** |
+| I-63 | 不再调 `RecordReorg` | **红**（`TestOnchain_ReorgRecheck_AnomalyOutlivesTheRecheckWindow`） |
+
+统计：**23 红 · 1 空洞（I-28，已修）· 1 引用错位（I-10，已修）**。
+
+### I-28 —— 唯一真正空洞的一条（已修）
+
+section 的主张是「最新的外部 anchor head 与数据库的 attestation 链一致」，机制是 `VerifyLedger` 里**唯一一行**把 `seq == anchorSeq` 的 DB 行与 anchor 已发布的 head 相比。把它停掉，`go test ./...` **每个包都绿**。它列的 11 个 pin 全是这行**周围**的情况（anchor 为空、anchor 落后、anchor 回滚、anchor 领先于 DB），各由不同分支裁决，head 比对没了它们照旧过。
+
+这恰恰是锚定的全部意义：`VerifyLedger` 里其他每一个检查读的都是「拥有数据库的攻击者能改写的数据」，只有这一行是跟数据库之外的东西比。
+
+新增 `service.TestVerifyLedger_AnchorHeadDisagreeingAtTheAnchoredSeqIsTampered`：数据库保持真实且自洽，改的是**anchor 说了什么**，于是 DB 侧每个检查都过，findings 只能来自被测的这行比对。（改 DB 行会同时触发上一分支的 root_hash 自洽检查 —— 那样报出 TAMPERED 什么也证明不了，这正是这个机制看起来「有覆盖」的原因。）control 断言的是**那一条 reason 不存在**而不是整体 VERIFIED，因为 fixture 的 journal 是刻意伪造的、自带一条 unsigned-journal finding，比状态会让断言在无关 finding 上通过。
+
+### I-10 —— 机制在、pin 名单错（已修）
+
+拆掉 `linkJournalToEventAndBooking` 后，它列的三个 pin 全绿；真正红的是 `TestPostJournal_EventUID_RejectsUnrelatedJournal`、`TestTxComposition_RunInTx_BookingEventJournalLinkage`、onchain 充值全生命周期测试和 migration 027 的 unlink 测试。已把前两个写进 Pinned by（后两个经由 service 到达该机制，pin-vs-mechanism 门禁按设计无法把它们钉到这条上，正文写明了）。
+
+## 5. 六类未验证门禁面
+
+| # | 门禁面 | 结果 |
+|---|---|---|
+| 1 | **branch protection** | **仍无法从代码验证**，结论与复审员一致：本报告所有「CI 会红」只等价于「workflow 会失败」，不等价于「合不进 main」。属仓库设置，需 Aaron 在 GitHub 侧确认。 |
+| 2 | **`web/` 宿主应用（dogfood）** | **已跑**：`npm run build` exit 0（15 条路由全部产出）、`npm run lint` exit 0。`ledger-react.yml` 确实有这两步（第 65-66 行）。 |
+| 3 | **`chains/evm` e2e（`-tags e2e`，需 anvil）** | **已跑且已证伪**。本机有 foundry，`TestE2E_WatchThenSweep` 真跑 2.25s（不是 self-skip）。两次 mutation 都红：① Transfer 金额解码改成常量 1 → 红；② CREATE2 域字节 `0xff` → `0xfe` → 红（且 `core` 的 golden vector 也红）。这层是有效的。 |
+| 4 | **`anchors/r2`（需 MinIO testcontainer）** | **已跑且已证伪**。见 I-56：`Publish` 去掉 create-only 检查 → `TestAnchor_Conformance` + `TestAnchor_PublishIsCreateOnlyPerSeq` 红。 |
+| 5 | **fuzz 30s 的实效** | **已跑，并且找到了一个 Critical** → 见下节。`FuzzLifecycleValidate`（544 万次执行）与 `FuzzAllocate`（480 万次）30s 内无发现；`FuzzJournalValidate` **30s 内失败**。 |
+| 6 | **`core.Metrics` 的 behaviour-pin 普查** | **已用机器判据答完**。F-5 收紧后的 census 跑全接口，恰好只报出 `StuckRollups`。复审员留的 4 个候选（`AnchorPublishResult`、`JobTickSkippedLocked`、`SweepAddressUnreadable`、`JobTickCompleted`）在收紧后的判据下**均判为有 pin** —— 它们都由带非空函数体的 recorder 方法捕获（例如 `JobTickCompleted` 走 recorder 的 `completed` 字段，`service/worker_metrics_test.go:175` 有真断言）。复审员怀疑「筛法会误报」，成立。 |
+
+## 6. 门禁面 #5 的产物：`FuzzJournalValidate` 30 秒内找到 money-path DoS（**CRITICAL，待拍板**）
+
+**已修**（team-lead 2026-09-04 裁决 Critical 成立并授权在本分支修 —— 见本节末「处置」）。证据链（端到端实证，不是推断）：
+
+失败输入：`amount = "10E777777070"`。最小复现用 `"1E999999999"`。
+
+| 步骤 | 结果 |
+|---|---|
+| `decimal.NewFromString("1E999999999")` | **成功**，微秒级（shopspring 惰性存 coefficient=1 / exponent=999999999） |
+| `core.JournalInput.Validate()` | **通过**，微秒级（只调 `IsPositive()`） |
+| `postgres.checkAmountPrecision` | **通过**，微秒级（`amount.Equal(amount.Truncate(18))` 对该 exponent 为 true） |
+| `d.Add(d)` / `d.Equal(d)` | 微秒级 |
+| `d.String()`（上 wire / 绑 SQL 参数） | **不返回** |
+| `LedgerStore.PostJournal(...)` | **90 秒不返回**，栈停在 `math/big.karatsubaSqr` —— 真的在展开 10^999999999 的十进制数字 |
+
+**可达面（修正我上报时的说法）**：我最初报的是「任何持 write scope 的 key 发 `POST /api/v1/journals` 就能挂死进程」。修的时候回查了每一个 untrusted 金额解析点，**这句话是过度陈述**，据实更正：
+
+- `server/amount.go` 的 `parseWireAmount` 会拒绝含 `e`/`E` 的字符串（api-contract §4 的 wire 格式规则），而**全部 14 个 REST handler 的金额都走它** —— 所以 REST 面对这个形式是**偶然被挡住的**。
+- `channel/onchain/evm.go:124,156` 的 `EVMAdapter.ParseSighting` **直接对原始 body 调 `decimal.NewFromString`，不经过 `parseWireAmount`** —— 入站 webhook → `DepositSighting` → `IngestDeposit` 是**真正远程可达**的那条路径。
+- **library 模式全面暴露**，前面什么都没有（而 library 模式是本库的主消费形态）。
+
+「REST 面被挡住」不能当缓解：挡它的是一条 wire 格式规则而不是量级上界，离「不成立」只差一次放宽、或一个自己解析金额的新 handler。这也正是 I-70 把门放在 `core` 而不是 handler 的理由 —— 和 `core/limits.go` 为 Metadata/Source 写的理由同一条。
+
+`core/limits.go` 已经为 Metadata/Source 立了「防病态上界」，并在它自己的注释里写明理由是「HTTP body cap 只覆盖两种消费模式中的一种，所以要放在 core 一次性检查」。金额没有对应的上界 —— **同一个形状的缺口，同一个文件里缺的那一条**。
+
+建议修法（小而定向，判据本身常数时间）：`NUMERIC(30,18)` 本来就只能存 12 位整数位，所以 `len(coefficient.String()) + exponent > 12` 的金额根本不可存 —— 在 `Validate` 的 per-entry 循环**最前面**拒（必须在任何算术之前：不同 exponent 相加会触发 rescale，同样爆），`Reserve` / `AddPending` / `CreateBooking` / `Transition` 的金额入口同理。
+
+### 处置（team-lead 裁决后）
+
+`core.ValidateAmountMagnitude`（`core/limits.go`，与 `validateFreeformFields` 同形同文件）+ **I-70**。判据由 `NUMERIC(30,18)` 自己的宽度派生，不是拍的：整数位 > 12 或小数位 > 18 一律 `core.ErrInvalidInput`。常数时间，只读 `Exponent()` 和 coefficient 的位数 —— 检查本身绝不能变成它要防的那次展开。
+
+先做兄弟扫描（core 里 59 个 `decimal.Decimal` 字段，筛出 13 个调用方提供的入口），**不是只修 `PostJournal`**：`JournalInput`（`EntryTemplate.Render` → `ExecuteTemplate` 由此继承）、`ReserveInput`、`SettleInput`、`SettlePartialInput`、`AddPendingInput`、`ConfirmPendingInput`、`CancelPendingInput`、`CreateBookingInput`、`TransitionInput`、`AccountPolicyInput`、`DepositSighting`（webhook 那条）、`SweepPolicy`、`TokenConfig`。在 `JournalInput.Validate` 里放在 per-entry 循环**最前面**，早于 `totalsByCurrency()` —— 不同 exponent 相加会 rescale，和渲染一样会炸。
+
+pin：`core.TestEveryAmountEntryPointRejectsAPathologicalAmount`，14 个入口 × 4 个病态值，**每条带 100ms 时间上界**。时间上界才是断言本身：一个「先展开再拒绝」的检查能满足 `require.Error`，而它就是那个 DoS。接受侧的 control 当场抓到一个真 bug —— 第一版把负 coefficient 的 `-` 号数成了一位，`-999999999999`（合法的透支下限）被拒。
+
+失败输入现已作为种子入库（`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`），每次普通 `go test` 都重放，不只在 fuzz 时。修后复跑 CI 的同一个 30s 预算：528 万次执行，PASS。
+
+实测：`PostJournal` 从「90 秒不返回」变成 **58µs 返回 `ErrInvalidInput`**。
+
+⚠️ **编号偏差待你确认**：你指定 I-70，但 66–69 是兄弟分支的号段，在我这条分支上还不存在 —— 写 I-70 会让 `TestInvariantsDocIsOrderedAndGapless` 直接红（"I-70 follows I-65"），违反 Done 的全绿要求。我用了 **I-66**（本分支绿）。合并时二选一：先合我这条则 66 本来就对、兄弟们顺延；后合则按 gate 的提示改成当时空出的号。
+
+## 7. 方法论：两条必须交代的事（复审员自己交代过两条，这是新的两条）
+
+1. **mutation 必须跑「pin 所在的包」，不是「机制所在的包」。** I-54 的机制在 `service/worker.go`，我第一次只跑 `./service/` 得到「绿」；它的 pin 全在**根包**（doc 里按惯例裸引用），跑根包立刻红。这个错误会把一条有效的不变式误判成空洞 —— 上面那张表里每一行的包集合都是从该 section 的 Pinned by 里机器抽出来的。
+2. **`_ = fn` 不是调用，加一个 `var` 不是加一条模板。** I-21 我第一次写的 mutation 是 `_ = o.postDepositConfirmedJournal`（只是引用），I-19 第一次是加了个字符串常量 —— 两次都「绿」，两次都是**无效 mutation**，不是空洞 pin。改成真的调用 / 真的 post journal 之后两条都红。同理 I-28 / I-63 我第一次写的正则没匹配上真实代码（`row.Seq` vs `a.Seq`、`!= nil` vs `== nil`），也各得到一次假绿。**凡是判「空洞」的，必须先证明 mutation 真的改变了行为。** 上面表里唯一的空洞（I-28）是在 mutation 确认生效、且跑遍全部五个 module 之后才下的结论。

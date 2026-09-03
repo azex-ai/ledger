@@ -143,6 +143,19 @@ written because it was true when `[0.6.0]` shipped.
   bypassed by an application pool that sets
   `application_name = 'azex-ledger-migrate'` for itself.
 
+- **Every amount-bearing `Validate()` refuses an amount `NUMERIC(30,18)`
+  cannot store** (Wave 5, I-70). More than 12 integer digits or more than 18
+  fractional digits is now `core.ErrInvalidInput`, from all thirteen
+  caller-supplied amount inputs and therefore from `ExecuteTemplate` too.
+  The bound is the storage column's own width, so amounts that previously
+  round-tripped are unaffected; what changes is that an amount Postgres
+  would have rejected as `numeric field overflow` is now rejected earlier
+  and differently, and that an amount in scientific notation with a large
+  exponent — which used to be accepted by `Validate` and then hang the
+  process indefinitely when something rendered it — is rejected in
+  microseconds. Found by `FuzzJournalValidate` inside CI's own 30-second
+  budget; see `docs/BREAKING.md` for what to match on instead.
+
 - **`postgres.NewPendingStore` takes a fourth argument, and `ConfirmPending`
   refuses to run inside `RunInTx` when it is set** (Wave 4, contract §7.20,
   I-64). `NewPendingStore(pool, ledger, classStore)` becomes

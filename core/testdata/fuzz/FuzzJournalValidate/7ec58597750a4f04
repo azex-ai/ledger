@@ -1,0 +1,7 @@
+go test fuzz v1
+int64(-175)
+string("0")
+string("0")
+string("\xb0")
+string("100000000000000000000")
+string("10E777777070")

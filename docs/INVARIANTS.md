@@ -46,6 +46,14 @@ is meaningless — debits and credits in different currencies are not comparable
   (covers global totals as a defense-in-depth check).
 
 **Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` -- the
+  deferred trigger named above, exercised by direct SQL rather than through
+  `PostJournal`. Added to this list 2026-09-03 (F-1): the four Go-side pins
+  below all go through `Validate`, which rejects the imbalance before the
+  database is asked, so none of them can tell whether the DB-layer backstop
+  is still installed. It was cited only under I-24 until now.
+- `postgres.TestJournalTotalsCheck_RejectsDirectSQLImbalance` -- the
+  `chk_journal_balance` header CHECK, likewise by direct SQL.
 - `core.TestJournalInvariant_BalancedRandomEntries` (200 random trials)
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
@@ -544,6 +552,15 @@ also holds: an audit trail starting from the journal can always find its
 - `ledger.Service.RunInTx` provides the shared transaction boundary.
 
 **Pinned by**:
+- `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` and
+  `postgres.TestTxComposition_RunInTx_BookingEventJournalLinkage` — added
+  2026-09-03. The W5 mutation survey removed the
+  `linkJournalToEventAndBooking` call entirely and the three pins listed
+  below all stayed green; these two are what actually went red, alongside
+  the onchain deposit lifecycle test and migration 027's unlink tests
+  (neither cited here: they reach this mechanism through a service, so the
+  pin-vs-mechanism gate cannot hold them to it, and it says so). The
+  mechanism was enforced and pinned; the section named the wrong pins.
 - `postgres.TestAudit_TraceBooking` (booking → events → journals stitch --
   the `events.journal_id` direction)
 - `postgres.TestIntegration_FullLedgerFlow`
@@ -653,7 +670,10 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert),
 `postgres.LedgerStore.sumBalancesByRoleWithQueries` (shared basis),
-`classifications.balance_role` CHECK constraint (migration `032`), tagged
+`classifications.balance_role` CHECK constraint (declared in
+`postgres/sql/migrations/001_baseline.up.sql`, widened for `memo` by
+`011_balance_role_memo.up.sql`; the "migration `032`" this line used to cite
+has not existed since the baseline squash), tagged
 onto each classification by `presets.InstallDefaultTemplatePresets` (and any
 direct `CreateClassification` / `SetBalanceRole` call) — the basis the two
 bullets above sum over.
@@ -682,6 +702,11 @@ ungated one:
   holder whose only funds were an unconfirmed deposit withdraw them, with
   every one of the six pins above still green -- that is what these two are
   for.
+- *DB-side*: `postgres.TestBalanceRoleCheck_RejectsDirectSQLUnknownRole` -- the CHECK
+  named above, by direct SQL. Added 2026-09-03 (F-1): every pin above reaches
+  `balance_role` through `CreateClassification`, which validates the role in
+  Go, so none of them notices if the constraint is dropped. A role no reader
+  matches is money silently absent from the available basis.
 
 ## I-12: Money conservation across the system
 
@@ -700,6 +725,12 @@ conservation hold for writes that never went through this library's Go
 layer at all, which is the case this invariant has to survive.
 
 **Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` -- the
+  deferred trigger this section's **Enforced by** names, exercised by direct
+  SQL. Added 2026-09-03 (F-1, and the reviewer's "I-12 is indistinguishable"
+  row): gutting `check_journal_currency_balance()` left all four pins below
+  green, because each of them writes through the Go layer, which is exactly
+  the case this invariant says it has to survive without.
 - `postgres.TestMoneyConservation_Network` (N×M×K large-scale random journal
   sequence)
 - `service.TestReconciliationService_BalancedSystem`
@@ -932,7 +963,9 @@ reconciliation time (or in an external settlement mismatch).
 
 **Enforced by**:
 - `currencies.exponent SMALLINT NOT NULL DEFAULT 18 CHECK (0..18)`
-  (`postgres/sql/migrations/027_currency_exponent.up.sql`). Existing rows
+  (`postgres/sql/migrations/001_baseline.up.sql`; the
+  `027_currency_exponent.up.sql` this line used to cite has not existed since
+  the baseline squash -- 027 is now `unlink_event_journal`). Existing rows
   default to 18 (the loosest setting) so no historical data is invalidated.
 - `postgres.validateEntriesPrecision` (`postgres/precision.go`), called from
   `LedgerStore.postJournalWithQueries` — the single choke point behind
@@ -974,6 +1007,10 @@ database.
 - `postgres.TestPrecision_SettlePartial_RejectsOverPrecisionAmount`
 - `postgres.TestCurrencyStore_CreateCurrency_RejectsInvalidExponent`
 - `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
+- `postgres.TestCurrencyExponentCheck_RejectsDirectSQLOutOfRange` -- the CHECK
+  named above, by direct SQL. Added 2026-09-03 (F-1): the two pins above call
+  `CreateCurrency`, which validates the exponent in Go and returns before the
+  column is written, so neither can see the constraint disappear.
 - `core.TestCurrencyInput_Validate`
 - `core.TestRound_HalfUp` / `TestRound_HalfEven` / `TestRound_Down` / `TestRound_Up`
 - `core.TestConvertAt_MatchesHandCalculation`
@@ -1165,6 +1202,18 @@ every external reference stable across dump/restore.
   `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation` plants a
   tagged, an untagged and a non-json-tagged fixture; the untagged one is the
   case the previous scanner was structurally unable to fail on)
+- `core.TestEveryInt64OnACoreTypeIsClassified` — the TYPE-side half, added
+  2026-09-03 (F-7). Everything above derives its banned set from the
+  schema's column NAMES, so it can only catch a leak spelled the way the
+  schema spells it: adding `EventRef int64 `json:"event_ref"`` to
+  `core.JournalInput` left `core`, `server` and `service` green, and the one
+  test that noticed (`TestAPISurface_MatchesSnapshot`) is fixed by
+  regenerating the snapshot, in which `EventRef int64` reads as harmless.
+  This gate asks instead what every exported `int64` on an exported `core`
+  type IS: an identifier from a namespace the CALLER owns (account holder,
+  chain id, actor), a quantity, or -- registered one by one, with a reason
+  -- a stored row id the attestation digest has to bind. An unclassified one
+  is red, whatever it is called.
 - `core.TestNoInternalIDsInCoreInterfaceSignatures` (the interfaces half of
   this invariant: `idschema.ScanInterfaceParamsForBannedKeys` reads every
   `core` interface method's parameter NAMES, snake_cased, against the same
@@ -2069,7 +2118,14 @@ three now fails the test loudly instead of defaulting to full access.
   runs the attack statement as `ledger_app` and requires it to fail):
   - `TestAccountPoliciesGuard`
   - `TestBookingsAndEventsGuards`
-  - `TestIdempotencyReceiptTablesAreAppendOnly`
+  - `TestIdempotencyReceiptTablesRefuseTheAppCredential` (renamed 2026-09-03,
+    F-2: it writes as `ledger_app`, which has no UPDATE grant on these
+    tables, so what it measures is least privilege, not append-onlyness)
+  - `postgres.TestAppendOnlyGuards_EveryTriggerRefusesItsMutation` -- every
+    trigger running `ledger_block_mutation()`, derived from `pg_trigger` and
+    provoked as the table OWNER, so the statement reaches the trigger. Added
+    2026-09-03 (F-2): rewriting that function to `RETURN NEW` disabled all
+    twenty-five append-only guards and turned exactly three tests red
 - `postgres.TestAccountPolicyEnforcementKnobChangeIsAudited` — the one case
   in this list where the attack SUCCEEDS by construction (the guard has to
   permit the three enforcement columns; see above). It runs the unfreeze +
@@ -2571,6 +2627,18 @@ does not also touch the anchor is caught by comparing the two.
   the compile-time half of the same guard.
 
 **Pinned by**:
+- `service.TestVerifyLedger_AnchorHeadDisagreeingAtTheAnchoredSeqIsTampered`
+  — added 2026-09-03 after the W5 mutation survey found this section's
+  mechanism unpinned. `VerifyLedger`'s one comparison of the DB row at
+  `seq == anchorSeq` against the anchor's head could be disabled and
+  `go test ./...` stayed green across every package: the eleven pins listed
+  below are all about the cases AROUND it (an empty anchor, one that lags,
+  one that rolled back, one ahead of the DB), each decided by a different
+  branch. The new pin leaves the database genuine and changes what the
+  ANCHOR says, so every DB-side check still passes and the finding can only
+  come from this comparison — editing the DB row instead would also trip
+  the root_hash self-consistency check one branch above, which is how the
+  mechanism came to look covered.
 - `service.TestAttestationService_PublishesToAnchor` -- the happy path:
   after a successful `RunAttestBatch`, the anchor's `Head` reflects the
   new seq/root_hash.
@@ -6658,9 +6726,13 @@ set is the interface's actual shape; the check tracks it automatically as
 methods are added, rather than needing its own list edited in lockstep.
 
 **Enforced by**: `observability/emission_coverage_test.go` — reflects the
-metrics interface's live method set (not a hand-copied name list), walks
-`service/` and `postgres/` non-test source as text for `.MethodName(`, and
-checks the result against the `crossBranchExclusions` map, whose own doc
+metrics interface's live method set (not a hand-copied name list), parses
+`service/` and `postgres/` non-test source with `go/ast` for a call on a
+metrics-shaped receiver, **skipping statically unreachable branches** (M-10
+made this AST-based rather than a text scan that counted comments; F-5,
+2026-09-03, made it skip `if … && false`, which had let the stuck-rollup
+signal be switched off with the whole suite green), and checks the result
+against the `crossBranchExclusions` map, whose own doc
 comment states the governance rule: entries are removed once their call site
 lands, never added to silence a newly-introduced gap. Mirrors I-50's
 inversion — the exclusion map is this gate's *output*, not a list someone
@@ -6676,6 +6748,17 @@ maintains by hand.
   declared, neither wired — each needs a new aggregate query beyond this
   wave's merge budget, tracked in `TODO.md`'s breaking-change list), and
   fails if either gets a call site without being removed from the map first.
+- `observability.TestEveryMetricsMethodHasABehaviourPin` — the census half.
+  Strengthened 2026-09-03 (F-5) on both sides: the coverage gate no longer
+  counts a call site inside a statically false branch (`err == nil && false`
+  switched the stuck-rollup signal off entirely with the whole suite green),
+  and the census no longer counts a name that appears only as a mock's empty
+  method declaration, which every implementation of a wide interface has to
+  write for every method.
+- `service.TestRollup_ReportsStuckAndPendingSeparately` — the behaviour pin
+  the census was reporting as present and was not (F-5): the stuck and
+  pending gauges are asserted separately, because pending drains as the
+  queue is worked and stuck does not.
 
 ## I-62: A deposit whose token is no longer configured is reviewed, never auto-credited
 
@@ -7568,3 +7651,83 @@ refusal is a queue an operator works (docs/RUNBOOK.md §13), not a log line.
 - `service.TestOnchain_Recheck_ShallowReorgNeedsConsecutiveMisses` and
   `service.TestOnchain_Recheck_TxIncludedErrorIsNotEvidence` — the first of
   the three decisions, and the rule that an erroring check has said nothing.
+---
+
+## I-70: An amount this ledger could not store is refused before anything expands it
+
+`decimal.Decimal` is arbitrary precision; `NUMERIC(30,18)` is not. An amount
+needing more than 12 integer digits or more than 18 fractional ones cannot
+be stored, and it is refused at the `core` boundary — in both consumption
+modes, before any arithmetic, and in constant time.
+
+**The bound is not about correctness, it is about termination.**
+`shopspring/decimal` holds a value as a coefficient and an exponent and
+never expands the `10^exponent` scaling factor until something asks for the
+digits. So `1E999999999` — nineteen bytes — parses, compares, adds and
+truncates in microseconds. It is only when the value is *rendered* (to bind
+a `NUMERIC` parameter, or to put on the wire) that `String()` materializes a
+billion digits, at which point the process spends unbounded CPU in
+`math/big` and allocates without bound.
+
+That means the usual guards do not see it. `core.JournalInput.Validate`
+accepted it: `IsPositive()` is a field read. The per-currency precision check
+(I-16) accepted it: `amount.Equal(amount.Truncate(18))` is true for a value
+with no fractional digits. Measured, before this invariant existed:
+`LedgerStore.PostJournal` did not return after ninety seconds. Afterwards it
+returns in 58µs.
+
+**Where it was reachable**: library mode everywhere, with nothing in front
+of it. Over HTTP, `server.parseWireAmount` happens to refuse `e`/`E`
+(a wire-format rule, api-contract §4 — not a magnitude bound), so the REST
+handlers were incidentally covered; the inbound webhook adapter was not.
+`channel/onchain.EVMAdapter.ParseSighting` calls `decimal.NewFromString` on
+the raw body directly, so a `DepositSighting` was the one remotely reachable
+path. Relying on the wire-format rule would have been relying on an
+accident: it is one relaxation, or one new handler that parses an amount its
+own way, from being untrue.
+
+**Why the check must precede arithmetic, not just storage**: adding two
+decimals with different exponents rescales one of them, which expands it the
+same way rendering does. So it runs first in `JournalInput.Validate`'s
+per-entry loop, before `totalsByCurrency()`.
+
+**Why in `core`**: the same reasoning `core/limits.go` already states for
+`MaxSourceLen` and the metadata bounds — the HTTP body cap covers one of two
+consumption modes, so a bound that lives in a handler leaves library
+consumers unprotected. For amounts the body cap does not cover even the HTTP
+mode, because a short string can name an enormous number. This was the
+missing member of that set, in that file.
+
+**Enforced by**:
+- `core.ValidateAmountMagnitude` (`core/limits.go`) — reads
+  `Exponent()` and the coefficient's digit count and nothing else, so the
+  check itself cannot be the expansion it prevents.
+- `core.MaxAmountIntegerDigits` / `core.MaxAmountFractionalDigits` — derived
+  from `NUMERIC(30,18)` rather than chosen, so the bound and the column
+  cannot drift apart.
+- Every caller-supplied amount's `Validate()`: `core.JournalInput`
+  (which is also how `core.EntryTemplate.Render`, and therefore
+  `ExecuteTemplate`, inherits it), `core.ReserveInput`, `core.SettleInput`,
+  `core.SettlePartialInput`, `core.AddPendingInput`,
+  `core.ConfirmPendingInput`, `core.CancelPendingInput`,
+  `core.CreateBookingInput`, `core.TransitionInput`,
+  `core.AccountPolicyInput`, `core.DepositSighting`, `core.SweepPolicy`,
+  `core.TokenConfig`.
+
+**Pinned by**:
+- `core.TestEveryAmountEntryPointRejectsAPathologicalAmount` — the sibling
+  scan made executable: all fourteen entry points, each against
+  `1E999999999`, the fuzzer's own `10E777777070`, the boundary `1E13`, and a
+  negative, **with a 100ms time bound on each**. The time bound is the
+  assertion: a check that eventually rejects the amount after expanding it
+  satisfies `require.Error` and is still the denial of service.
+- `core.TestValidateAmountMagnitude_RejectsWhatNumericCannotStore` and
+  `core.TestValidateAmountMagnitude_AcceptsWhatNumericCanStore` — the bound
+  itself, in both directions. The acceptance half is not decoration: it
+  caught a real bug in the first draft, where a negative coefficient's
+  leading `-` was counted as a digit and `-999999999999` (a storable
+  overdraft limit) was refused.
+- `core.FuzzJournalValidate` — the seed corpus now carries the input that
+  found this (`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`), so
+  the case is replayed on every plain `go test`, not only during a fuzzing
+  run.

@@ -262,7 +262,34 @@ describe("skin parity (M6 gate)", () => {
   // ⚠️ These numbers are NOT comparable to the pre-M-14 baselines (55/63):
   // the counter changed, not the pages. Measured the same day, the corrected
   // count is 47 shadcn / 63 heroui.
-  const HARDENING_TOKENS = ["aria-label=", "truncate", "min-w-0"];
+  // F-6 (2026-09-03 independent review): these were substrings, and
+  // `aria-label=` is one of them. Emptying all eight of TemplatesPage's
+  // aria-labels -- `aria-label=""`, the attribute present and the
+  // accessible name gone -- left 41 test files / 225 tests green after a
+  // rebuild. There is no jsx-a11y lint in this repo either (Next 16 ships
+  // no lint and we deliberately do not add ESLint), so nothing else looks.
+  //
+  // A hardening token is now a pattern with a requirement:
+  //
+  //   - aria-label must have a non-empty value. `aria-label=""` and
+  //     `aria-label={""}` do not count, which is the whole finding.
+  //   - truncate and min-w-0 must appear on a line that also mentions
+  //     className. The reviewer's other two drifts -- moving `truncate` off
+  //     the long-address cell onto a decorative <span>, moving `min-w-0`
+  //     off the flex child onto a container where it does nothing -- keep
+  //     the count identical and lose the property; nothing short of
+  //     rendering can tell those apart, and this at least stops the class
+  //     being counted from a comment or a doc string.
+  //
+  // The residual is stated rather than hidden: this is a census, and a
+  // census counts. The step that would make it a pin is asserting the
+  // rendered accessible name (getByRole(..., { name })) per page, which is
+  // a different and larger piece of work.
+  const HARDENING_TOKENS: Array<{ label: string; re: RegExp }> = [
+    { label: "aria-label with a value", re: /aria-label\s*=\s*(?:"[^"]+"|'[^']+'|\{(?!\s*(?:""|'')\s*\})[^}]+\})/g },
+    { label: "truncate on a className", re: /^.*\bclassName\b.*\btruncate\b.*$/gm },
+    { label: "min-w-0 on a className", re: /^.*\bclassName\b.*\bmin-w-0\b.*$/gm },
+  ];
   const SHADCN_PAGE_BASELINE: Record<string, number> = {
     "BalancesPage.tsx": 4,
     "ClassificationsPage.tsx": 2,
@@ -307,7 +334,7 @@ describe("skin parity (M6 gate)", () => {
     const text = readCode(path.join(dir, file));
     let n = 0;
     for (const t of HARDENING_TOKENS) {
-      n += (text.match(new RegExp(t.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"), "g")) ?? []).length;
+      n += (text.match(t.re) ?? []).length;
     }
     return n;
   }
@@ -316,7 +343,7 @@ describe("skin parity (M6 gate)", () => {
     return tsxFilesIn(dir).reduce((total, f) => total + pageCensus(dir, f), 0);
   }
 
-  it("hardening census only ratchets up, per page (aria-label= / truncate / min-w-0)", () => {
+  it("hardening census only ratchets up, per page (aria-label with a value / truncate + min-w-0 on a className)", () => {
     for (const [dir, baseline] of [
       [SHADCN_DIR, SHADCN_PAGE_BASELINE],
       [HEROUI_DIR, HEROUI_PAGE_BASELINE],

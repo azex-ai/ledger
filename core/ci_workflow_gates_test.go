@@ -230,7 +230,7 @@ func runInvokes(run, cmd string) bool {
 func TestGoVerifyRunsRealCommandsForEveryModule(t *testing.T) {
 	verify := loadWorkflow(t, goVerifyPath)
 
-	type coverage struct{ vet, build, test, lint bool }
+	type coverage struct{ vet, build, test, lint, vulncheck bool }
 	covered := map[string]*coverage{}
 	get := func(dir string) *coverage {
 		if covered[dir] == nil {
@@ -255,6 +255,13 @@ func TestGoVerifyRunsRealCommandsForEveryModule(t *testing.T) {
 			case runInvokes(step.Run, "go test"):
 				c.test = true
 			}
+			// govulncheck is not a `go` subcommand, so it needs its own
+			// arm rather than a switch case: the install line and the scan
+			// line can live in the same `run:` block, and the switch above
+			// would have stopped at the first match.
+			if runInvokes(step.Run, "govulncheck") {
+				c.vulncheck = true
+			}
 		}
 	}
 
@@ -263,6 +270,18 @@ func TestGoVerifyRunsRealCommandsForEveryModule(t *testing.T) {
 		want := map[string]bool{"go vet": c.vet, "go build": c.build, "golangci-lint": c.lint}
 		if moduleHasTests(t, module) {
 			want["go test"] = c.test
+		}
+		// F-8 (2026-09-03 independent review): vulncheck used to be absent
+		// from this matrix, so `govulncheck ./...` running in the root and
+		// nowhere else was invisible -- anchors/r2 (aws-sdk-go-v2) and
+		// chains/evm (go-ethereum) shipped unscanned. Required only for
+		// modules a consumer can import: the two `internal/` fixture
+		// modules exist to keep testcontainers out of consumer builds
+		// (CLAUDE.md Gotchas), and scanning them would report CVEs on code
+		// no production path can reach -- the precise thing govulncheck's
+		// reachability analysis is for.
+		if consumerReachableModule(module) {
+			want["govulncheck"] = c.vulncheck
 		}
 		var missing []string
 		for cmd, ok := range want {
@@ -532,4 +551,19 @@ func TestCustomBuildTagsAppearInCIOrMakefile(t *testing.T) {
 		t.Errorf("custom build tag(s) with zero -tags reference in any .github/workflows/*.yml or Makefile: %v -- "+
 			"these files are never compiled by anything", uncovered)
 	}
+}
+
+// consumerReachableModule reports whether a workspace module can end up in
+// somebody else's build. Go's `internal/` rule makes that a structural
+// property, not a judgement call: no module outside this repository can
+// import a package under an `internal/` path segment, so the fixture
+// modules (internal/postgrestest, anchors/r2/internal/miniotest) are
+// unreachable from any consumer by construction.
+func consumerReachableModule(module string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(module), "/") {
+		if seg == "internal" {
+			return false
+		}
+	}
+	return true
 }

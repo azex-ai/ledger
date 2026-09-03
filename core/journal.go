@@ -154,6 +154,12 @@ func (j *JournalInput) Validate() error {
 		return fmt.Errorf("core: journal: effective_at %s is too far in the future: %w", j.EffectiveAt.Format(time.RFC3339), ErrInvalidInput)
 	}
 	for i, e := range j.Entries {
+		// First, and before totalsByCurrency() below does any arithmetic:
+		// adding two decimals with different exponents rescales one of
+		// them, which expands it exactly as rendering would.
+		if err := ValidateAmountMagnitude("journal", fmt.Sprintf("entry[%d].amount", i), e.Amount); err != nil {
+			return err
+		}
 		if e.AccountHolder == 0 {
 			return fmt.Errorf("core: journal: entry[%d]: account_holder must not be zero: %w", i, ErrInvalidInput)
 		}

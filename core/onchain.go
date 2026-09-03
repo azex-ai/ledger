@@ -128,6 +128,9 @@ type DepositSighting struct {
 }
 
 func (s DepositSighting) Validate() error {
+	if err := ValidateAmountMagnitude("deposit sighting", "amount", s.Amount); err != nil {
+		return err
+	}
 	if s.ChainID <= 0 {
 		return fmt.Errorf("core: deposit sighting: chain_id must be positive: %w", ErrInvalidInput)
 	}
@@ -377,6 +380,12 @@ const maxTokenDecimals = 18
 // amount by 10^6 (G-M7). Called by service.Onchain's startup validation and
 // by (*evm.ClientSet).VerifyTokenDecimals before it goes to the chain.
 func (c TokenConfig) Validate() error {
+	if err := ValidateAmountMagnitude("token config", "auto_credit_ceiling", c.AutoCreditCeiling); err != nil {
+		return err
+	}
+	if err := ValidateAmountMagnitude("token config", "reconcile_ceiling", c.ReconcileCeiling); err != nil {
+		return err
+	}
 	if c.Decimals < 0 {
 		return fmt.Errorf("core: token config: decimals must not be negative (a negative value multiplies every credited amount by 10^%d): %w", -c.Decimals, ErrInvalidInput)
 	}
@@ -509,6 +518,12 @@ type SweepPolicy struct {
 var maxPlausibleGasCeilingGwei = decimal.NewFromInt(1_000_000)
 
 func (p SweepPolicy) Validate() error {
+	if err := ValidateAmountMagnitude("sweep policy", "min_threshold", p.MinThreshold); err != nil {
+		return err
+	}
+	if err := ValidateAmountMagnitude("sweep policy", "gas_ceiling", p.GasCeiling); err != nil {
+		return err
+	}
 	if p.ChainID <= 0 {
 		return fmt.Errorf("core: sweep policy: chain_id must be positive: %w", ErrInvalidInput)
 	}

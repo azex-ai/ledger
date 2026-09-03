@@ -202,6 +202,40 @@ The check itself is additive: `RunFullReconciliation` now returns 16 checks
 without an `AuthVerifier` wired and 17 with one. A consumer asserting on the
 number of checks in a report has to move that number.
 
+### Every amount-bearing `Validate()` refuses an amount `NUMERIC(30,18)` cannot store
+
+**Landed (Wave 5, invariant I-70).** Not a signature change: a runtime one.
+Any amount needing more than 12 integer digits or more than 18 fractional
+digits is now `core.ErrInvalidInput` at the `core` boundary, from
+`JournalInput`, `ReserveInput`, `SettleInput`, `SettlePartialInput`,
+`AddPendingInput`, `ConfirmPendingInput`, `CancelPendingInput`,
+`CreateBookingInput`, `TransitionInput`, `AccountPolicyInput`,
+`DepositSighting`, `SweepPolicy` and `TokenConfig` — and therefore from
+`ExecuteTemplate`, whose amounts reach `JournalInput.Validate` through
+`EntryTemplate.Render`.
+
+**What a consumer must do.** Almost certainly nothing: the bound is the
+storage column's own width, so every amount that previously round-tripped
+still passes. Two cases change:
+
+- An amount that used to be accepted by `Validate` and then rejected by
+  Postgres (`numeric field overflow`) is now rejected earlier, by `core`,
+  with `ErrInvalidInput` instead of a driver error. Code matching on the
+  Postgres error text needs to match `core.ErrInvalidInput` instead.
+- An amount in scientific notation with a large exponent used to be
+  accepted by `Validate` and then **not return at all**. `1E999999999`
+  parses in microseconds because `shopspring/decimal` is lazy, and only
+  expands when something renders it — measured, `PostJournal` did not
+  return after ninety seconds, burning CPU in `math/big`. That is now a
+  58µs `ErrInvalidInput`. If a consumer was sending such values, they were
+  hanging, not succeeding.
+
+Found by `FuzzJournalValidate` inside the 30-second budget CI already runs.
+Reachable in library mode with nothing in front of it, and over HTTP through
+the inbound webhook adapter (`channel/onchain.EVMAdapter.ParseSighting`
+parses the raw body's amount directly; `server.parseWireAmount`, which
+refuses `e`/`E` as a wire-format rule, is not in that path).
+
 ### `postgres.NewPendingStore` takes a `core.VerifiedBalanceReader`, and `ConfirmPending` refuses to run inside `RunInTx` when it is set
 
 **Landed (Wave 4, contract §7.20; invariant I-64).**
