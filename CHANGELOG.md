@@ -69,6 +69,47 @@ written because it was true when `[0.6.0]` shipped.
   write in the schema). Size for it; the reasoning is in 029's header and
   `docs/CAPACITY.md`'s existing note for the 020 population.
 
+- **`core.Metrics` gains four onchain-operability methods** (Wave 5,
+  W5-onchain-ops; audit `onchain-ops.md` C-2 / M-3 / M-8):
+  `Metrics.DepositIngestDeadLettered(chainID, reason)`,
+  `Metrics.DeadLetterBacklog(count, oldestAge)`,
+  `Metrics.SweepOrphanedBroadcast(chainID)` and
+  `Metrics.ChainCursorAdvanceAge(chainID, age)`. Embedding
+  `core.NoopMetrics` (the documented pattern) needs no change; a hand-written
+  implementation must add the four. `observability.PrometheusMetrics`
+  implements them and registers
+  `ledger_deposit_ingest_dead_lettered_total`, `ledger_dead_letters_unbooked`,
+  `ledger_dead_letter_oldest_age_seconds`,
+  `ledger_sweep_orphaned_broadcast_total` and
+  `ledger_chain_cursor_advance_age_seconds`. The first two make a
+  dead-lettered deposit visible at all; the last is the watcher liveness
+  signal `chain_cursor_lag_blocks` cannot be, because that gauge freezes
+  rather than climbs when the RPC endpoint is down.
+
+- **`service.DeadLetterRecorder` gains a read half, and
+  `postgres.IngestDeadLetterStore.ListDeadLetters` is paginated** (Wave 5;
+  audit C-2). The port adds `GetDeadLetter`, `ListDeadLetters` and
+  `CountUnbookedDeadLetters`; `ListDeadLetters(ctx, limit)` becomes
+  `ListDeadLetters(ctx, cursor, limit) ([]core.IngestDeadLetter, string,
+  error)`. `core.IngestDeadLetter` gains `Booked` and `Sighting`. Together
+  they are what makes a dead letter readable (`ledger-cli dead-letters
+  list/show`, `GET /deposits/dead-letters`) and replayable
+  (`service.Onchain.ReplayDeadLetter`, `POST
+  /deposits/dead-letters/{uid}/replay`).
+
+- **`service.Onchain.RunPendingRecheckOnce` and `RunReorgRecheckOnce` return
+  an error** (Wave 5; audit M-9). Both returned nothing, which made an
+  ops-triggered recheck that failed indistinguishable from one that found
+  nothing to do — and silent, since the default logger is
+  `core.NopLogger()`. `RunWatchOnce`/`RunSweepOnce` already returned errors.
+
+- **`core.TokenConfig.Validate` refuses `Decimals > 18` (was 36)** (Wave 5;
+  audit M-2). A ledger currency's exponent caps at 18, so a token above that
+  had no currency able to represent its non-integer amounts: every such
+  deposit was refused, dead-lettered and scanned past. `Onchain.Run` now also
+  refuses to start when a token's decimals exceed the exponent of the
+  currency it books into (`service.Onchain.ValidateTokenPrecision`).
+
 - **`postgres.NewPendingStore` takes a fourth argument, and `ConfirmPending`
   refuses to run inside `RunInTx` when it is set** (Wave 4, contract §7.20,
   I-64). `NewPendingStore(pool, ledger, classStore)` becomes

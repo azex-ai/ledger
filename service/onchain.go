@@ -53,13 +53,30 @@ type TxComposer interface {
 	AuthorizeTemplate(ctx context.Context, templateCode string, params core.TemplateParams) (core.AuthorizedJournal, error)
 }
 
-// DeadLetterRecorder persists a deposit sighting that IngestDeposit could
-// not idempotently reconcile (design doc §6: a CreateBooking ErrConflict is
-// a normalization bug signal, not a transient error -- these must never be
-// silently dropped or endlessly retried). Implemented by
-// postgres.IngestDeadLetterStore.
+// DeadLetterRecorder persists -- and hands back -- the deposit sightings the
+// ingestion path refused to book and the forward scan then moved past
+// (design doc §6: a CreateBooking ErrConflict is a normalization bug signal,
+// not a transient error -- these must never be silently dropped or endlessly
+// retried). Implemented by postgres.IngestDeadLetterStore.
+//
+// The read half exists because writing the row was never the whole
+// requirement (C-2, docs/audits/2026-09-03-independent-review/onchain-ops.md):
+// design doc §140 asks for "alert plus a dead-letter table a human works",
+// and until this interface could be read from, the table had no metric, no
+// operator surface and no way back into the ledger for a deposit that a
+// configuration fix had since made bookable.
 type DeadLetterRecorder interface {
 	RecordDeadLetter(ctx context.Context, sighting core.DepositSighting, idempotencyKey, reason string) error
+	// ListDeadLetters returns a page of dead letters, newest first, plus the
+	// opaque cursor for the next (older) page ("" when exhausted).
+	ListDeadLetters(ctx context.Context, cursor string, limit int32) (letters []core.IngestDeadLetter, nextCursor string, err error)
+	// GetDeadLetter returns one dead letter by uid, including the sighting
+	// recorded on it -- what ReplayDeadLetter re-drives.
+	GetDeadLetter(ctx context.Context, uid string) (core.IngestDeadLetter, error)
+	// CountUnbookedDeadLetters returns how many dead letters still have no
+	// booking, and when the oldest of those was recorded (zero time when
+	// there are none) -- the sample behind core.Metrics.DeadLetterBacklog.
+	CountUnbookedDeadLetters(ctx context.Context) (count int64, oldest time.Time, err error)
 }
 
 // ReorgRecorder persists deposit chain anomalies -- a confirmed deposit
@@ -301,6 +318,58 @@ func WithShallowReorgMisses(n int32) OnchainOption {
 	}
 }
 
+// WithDeepReorgMisses sets how many CONSECUTIVE observations of "this
+// confirmed deposit's transaction is not on chain" are required before
+// ReorgPolicyAutoReverse posts the reversal that debits the holder (M-1).
+// Default: defaultDeepReorgMisses, the same 3 the shallow path uses. n<=0
+// restores the default rather than disabling the counter.
+//
+// Under the default ReorgPolicyManual this option changes nothing: detection
+// is reported and the anomaly row opened on the FIRST observation either way
+// (I-63) -- what the threshold gates is only the irreversible act.
+//
+// Why it exists: the deep-reorg path used to auto-debit on a single
+// TxIncluded=false, while the shallow path -- the same class of evidence,
+// with a LESS irreversible consequence -- already required three
+// (WithShallowReorgMisses, whose doc comment argues the case). The
+// asymmetry was backwards. TxIncluded answers false for any node that has
+// not caught up, and chains/evm dials exactly one RPC endpoint per chain
+// with no failover, so one false answer is cheap to produce and a reversal
+// journal cannot be un-posted by the same loop that posted it.
+//
+// The counter is in memory, matching recordShallowMiss: a restart resets it,
+// which can only DELAY the reversal, never bring one about earlier than the
+// threshold allows. The durable half of the fact -- that the anomaly exists
+// and when it was first seen -- is the deposit_reorgs row (I-63), which is
+// what an operator acts on.
+func WithDeepReorgMisses(n int32) OnchainOption {
+	return func(o *Onchain) {
+		if n > 0 {
+			o.deepReorgMisses = n
+		}
+	}
+}
+
+// WithConfirmationEvidenceMisses sets how many CONSECUTIVE observations of
+// "the chain does not corroborate this booking" the recheck loop requires
+// before parking it for human review instead of crediting it (money-out
+// C-2). Default: defaultOnchainMisses, the same evidence bar
+// WithDeepReorgMisses and WithShallowReorgMisses use. n<=0 restores the
+// default.
+//
+// Below the threshold the booking simply does not advance -- it stays in
+// `confirming` and is re-examined next tick. Nothing is credited on
+// uncorroborated evidence at any count; the threshold only decides when a
+// disagreement stops being treated as a lagging node and starts being an
+// operator's problem.
+func WithConfirmationEvidenceMisses(n int32) OnchainOption {
+	return func(o *Onchain) {
+		if n > 0 {
+			o.confirmEvidenceMisses = n
+		}
+	}
+}
+
 // WithWatcherStallAlertAfter sets how many CONSECUTIVE failed forward-scan
 // ticks on one chain escalate from a per-tick error to a wedged-watcher
 // alert plus a dead-letter row per blocking sighting (G-C1). Default: 3.
@@ -427,6 +496,8 @@ type Onchain struct {
 	maxSweepBumps              int
 	maxConcurrentRescans       int
 	shallowReorgMisses         int32
+	deepReorgMisses            int32
+	confirmEvidenceMisses      int32
 	watcherStallAlertAfter     int
 
 	currencies *currencyResolver
@@ -458,10 +529,35 @@ type Onchain struct {
 	// pending/confirming deposit booking -- see WithShallowReorgMisses.
 	shallowMissMu sync.Mutex
 	shallowMiss   map[string]int32
+	// deepMiss counts consecutive "tx not on chain" observations per
+	// CONFIRMED deposit booking, gating ReorgPolicyAutoReverse's reversal --
+	// see WithDeepReorgMisses. Separate from shallowMiss on purpose: the two
+	// count different observations of different bookings at different points
+	// in the lifecycle, and sharing one map would let a pre-threshold miss
+	// streak carry over into the reversal decision.
+	deepMissMu sync.Mutex
+	deepMiss   map[string]int32
+	// evidenceMiss counts consecutive "the chain does not corroborate this
+	// booking" observations per pre-confirmation deposit booking -- see
+	// WithConfirmationEvidenceMisses.
+	evidenceMissMu sync.Mutex
+	evidenceMiss   map[string]int32
 	// scanFailures counts consecutive failed forward-scan ticks per chain --
 	// see WithWatcherStallAlertAfter.
 	scanFailureMu sync.Mutex
 	scanFailures  map[int64]int
+
+	// cursorSeen records, per chain, the highest forward-scan cursor value
+	// this process has observed and when it observed it advance -- the input
+	// to core.Metrics.ChainCursorAdvanceAge (M-8).
+	//
+	// Read from GetCursor rather than written on SetCursor on purpose: with
+	// several replicas only the advisory-lock holder writes, so a follower
+	// tracking its own writes would report an ever-growing age while the
+	// fleet is perfectly healthy. Observing the value instead means any
+	// replica's read of another's progress counts as progress.
+	cursorMu   sync.Mutex
+	cursorSeen map[int64]cursorObservation
 
 	// reconcileFailures tracks, per booking uid, consecutive
 	// DepositConfirmer.ConfirmDeposit errors since the booking last entered
@@ -477,12 +573,34 @@ type Onchain struct {
 	reconcileFailures map[string]int32
 }
 
-// defaultShallowReorgMisses / defaultWatcherStallAlertAfter are the
-// consecutive-observation thresholds behind WithShallowReorgMisses and
-// WithWatcherStallAlertAfter -- see those options for why each exists.
+// cursorObservation is the highest cursor value this process has seen for a
+// chain, and the moment it first saw that value -- so "the cursor has not
+// moved for N seconds" is answerable on a tick that never gets far enough to
+// know the chain tip.
+type cursorObservation struct {
+	block int64
+	at    time.Time
+}
+
+// defaultShallowReorgMisses / defaultDeepReorgMisses /
+// defaultWatcherStallAlertAfter are the consecutive-observation thresholds
+// behind WithShallowReorgMisses, WithDeepReorgMisses and
+// WithWatcherStallAlertAfter -- see those options for why each exists. The
+// two reorg thresholds are equal deliberately: the deep path's consequence
+// (an automatic debit) is at least as irreversible as the shallow path's, so
+// it may not be reached on weaker evidence (M-1).
 const (
-	defaultShallowReorgMisses     = int32(3)
-	defaultWatcherStallAlertAfter = 3
+	// defaultOnchainMisses is the shared evidence bar: how many consecutive
+	// observations of the same thing the chain has to say before this
+	// library acts irreversibly on it. One value, three uses, deliberately
+	// (I-69) -- the three decisions differ in what they do, not in how
+	// trustworthy one answer from one RPC endpoint is.
+	defaultOnchainMisses = int32(3)
+
+	defaultShallowReorgMisses      = defaultOnchainMisses
+	defaultDeepReorgMisses         = defaultOnchainMisses
+	defaultConfirmationEvidenceMax = defaultOnchainMisses
+	defaultWatcherStallAlertAfter  = 3
 	// defaultRescanLookback is WithRescanLookback's default: how far below
 	// the safe tip every tick re-scans no matter where the cursor sits.
 	// 128 blocks is minutes on every chain this library targets and one
@@ -515,6 +633,8 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		maxSweepBumps:              5,
 		maxConcurrentRescans:       4,
 		shallowReorgMisses:         defaultShallowReorgMisses,
+		deepReorgMisses:            defaultDeepReorgMisses,
+		confirmEvidenceMisses:      defaultConfirmationEvidenceMax,
 		watcherStallAlertAfter:     defaultWatcherStallAlertAfter,
 		currencies:                 newCurrencyResolver(),
 		classes:                    newClassResolver(),
@@ -522,7 +642,10 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		sweepBump:                  make(map[string]int),
 		sweepClock:                 make(map[string]time.Time),
 		shallowMiss:                make(map[string]int32),
+		deepMiss:                   make(map[string]int32),
+		evidenceMiss:               make(map[string]int32),
 		scanFailures:               make(map[int64]int),
+		cursorSeen:                 make(map[int64]cursorObservation),
 		reconcileFailures:          make(map[string]int32),
 	}
 	for _, opt := range opts {
@@ -662,6 +785,107 @@ func (o *Onchain) validateReconcileFailureLimits() error {
 // reason documented on ValidateAutoCreditCeilings.
 func (o *Onchain) ValidateReconcileFailureLimits() error {
 	return o.validateReconcileFailureLimits()
+}
+
+// validateTokenPrecision refuses to start when a configured token's
+// Decimals exceeds the exponent of the ledger currency its deposits (or its
+// sweep batches) are booked against.
+//
+// The failure it prevents is silent and total (M-2,
+// docs/audits/2026-09-03-independent-review/onchain-ops.md): the adapter
+// normalizes a raw on-chain amount to Decimals decimal places -- correctly,
+// and VerifyTokenDecimals will even confirm the value against the contract --
+// and CreateBooking then refuses it with ErrPrecisionExceeded, which
+// core.IsRetryable classifies as permanent, which makes it a dead letter and
+// lets the cursor move past. No booking is ever created, so no recheck loop
+// can recover it. Every deposit of that token carrying a fraction below the
+// currency's exponent is written off, one row at a time, with nothing about
+// the configuration having looked wrong.
+//
+// Neither existing startup check can see it: validateAutoCreditCeilings
+// reads only the TokenConfig (it cannot know the currency's exponent), and
+// (*evm.ClientSet).VerifyTokenDecimals compares the config against the
+// CHAIN. This is the only place both halves are in scope.
+//
+// Sweep tokens are checked too, for the same reason at a different point: a
+// sweep booking carries the batch total and is created against
+// SweepTokens[token].CurrencyCode, so an under-scaled currency there fails
+// every sweepTick for that (chain, token) instead of dead-lettering.
+//
+// A currency code that resolves to no currency is NOT this check's business
+// (the resolver reports that at ingest time with a better message, and
+// dropping a whole deployment for a token nobody deposits would be worse) --
+// it is reported as a warning-shaped skip only by not being checked here.
+func (o *Onchain) validateTokenPrecision(ctx context.Context) error {
+	if o.deps.Currencies == nil {
+		return nil
+	}
+	list, err := o.deps.Currencies.ListCurrencies(ctx, false)
+	if err != nil {
+		if ctx.Err() != nil {
+			// Run is shutting down or was handed a cancelled context -- not a
+			// verdict about the configuration. Same reasoning as
+			// validateInstalledDepositLifecycle's cancellation branch.
+			return nil
+		}
+		return fmt.Errorf("list currencies: %w", err)
+	}
+	byCode := make(map[string]core.Currency, len(list))
+	for _, c := range list {
+		byCode[c.Code] = c
+	}
+	// Deterministic order, so a deployment with several misconfigured tokens
+	// reports the same one every time instead of a different one per restart.
+	chainIDs := make([]int64, 0, len(o.chains))
+	for chainID := range o.chains {
+		chainIDs = append(chainIDs, chainID)
+	}
+	sort.Slice(chainIDs, func(i, j int) bool { return chainIDs[i] < chainIDs[j] })
+	for _, chainID := range chainIDs {
+		cfg := o.chains[chainID]
+		for _, side := range []struct {
+			name   string
+			tokens map[string]core.TokenConfig
+		}{
+			{"credit_tokens", cfg.CreditTokens},
+			{"sweep_tokens", cfg.SweepTokens},
+		} {
+			tokens := make([]string, 0, len(side.tokens))
+			for token := range side.tokens {
+				tokens = append(tokens, token)
+			}
+			sort.Strings(tokens)
+			for _, token := range tokens {
+				tc := side.tokens[token]
+				currency, ok := byCode[tc.CurrencyCode]
+				if !ok {
+					continue
+				}
+				if tc.Decimals > currency.Exponent {
+					return fmt.Errorf("service: onchain: chain %d %s[%q] has decimals=%d but currency %q only has exponent=%d -- every deposit of this token carrying more than %d decimal places would be refused with ErrPrecisionExceeded, dead-lettered, and skipped by the forward scan (a real deposit written off, unrecoverable without a manual replay): raise the currency's exponent or correct the token's decimals: %w",
+						chainID, side.name, token, tc.Decimals, currency.Code, currency.Exponent, currency.Exponent, core.ErrInvalidInput)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateTokenPrecision is the exported form of the token-decimals ×
+// currency-exponent cross-check (see validateTokenPrecision). Unlike
+// ValidateAutoCreditCeilings / ValidateReconcileFailureLimits it reads the
+// database, so it takes a context and is called from Run() rather than from
+// the composition root's construction path -- the same treatment
+// validateInstalledDepositLifecycle gets, and for the same reason
+// (ledger.EnableOnchain has no context to give it).
+//
+// A push-only/webhook-only consumer that never calls Run() should call this
+// once at startup. What it does NOT need this for is the coarser half:
+// core.TokenConfig.Validate already refuses Decimals > 18 outright (no
+// currency's exponent can exceed 18), and that runs in
+// ValidateAutoCreditCeilings.
+func (o *Onchain) ValidateTokenPrecision(ctx context.Context) error {
+	return o.validateTokenPrecision(ctx)
 }
 
 // validateInstalledDepositLifecycle refuses to start when the deposit
@@ -826,13 +1050,23 @@ func (o *Onchain) EnsureDepositAddress(ctx context.Context, holder int64) (*core
 // runRegistrationRescansOnce leases a bounded batch and advances each job by
 // one RPC-sized block window. Progress is persisted only after every sighting
 // in the window has been ingested successfully.
-func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) {
+//
+// Returns the tick's outcome so runLoop can count it (M-9). Every failure
+// here is ALSO persisted (RetryRegistrationRescan) and counted
+// (RegistrationRescanFailed), so the returned error is not the only record;
+// what it adds is that the JOB reports a failed tick rather than a completed
+// one, which is what an "is this loop working" alert reads.
+func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) error {
 	jobs, err := o.deps.RegistrationRescans.ClaimRegistrationRescans(ctx, o.maxConcurrentRescans, o.registrationRescanTimeout)
 	if err != nil {
 		o.log().Error("service: onchain: claim registration rescans failed", "error", err)
-		return
+		return fmt.Errorf("claim registration rescans: %w", err)
 	}
-	var wg sync.WaitGroup
+	var (
+		wg    sync.WaitGroup
+		errMu sync.Mutex
+		errs  []error
+	)
 	for _, job := range jobs {
 		job := job
 		wg.Add(1)
@@ -854,10 +1088,14 @@ func (o *Onchain) runRegistrationRescansOnce(ctx context.Context) {
 				cleanupCancel()
 				o.log().Error("service: onchain: registration rescan failed", "chain_id", job.ChainID, "address", job.Address, "error", err)
 				o.metrics().RegistrationRescanFailed(job.ChainID)
+				errMu.Lock()
+				errs = append(errs, fmt.Errorf("rescan %s (chain %d, address %s): %w", job.UID, job.ChainID, job.Address, err))
+				errMu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (o *Onchain) processRegistrationRescan(ctx context.Context, job core.RegistrationRescan) error {
@@ -1126,6 +1364,12 @@ const (
 	// so it is parked for a human rather than rejected, but it is never
 	// auto-credited.
 	reviewReasonTokenUnconfigured = "token_unconfigured"
+	// reviewReasonOnchainUnverified is recorded when the chain does not
+	// corroborate a booking the recheck loop is about to credit
+	// (corroborateBeforeConfirm): the transaction is not on chain, or the
+	// log it names does not carry the amount / token / recipient the booking
+	// claims. money-out C-2, docs/audits/2026-09-03-independent-review/money-out.md.
+	reviewReasonOnchainUnverified = "onchain_unverified"
 	// reviewReasonShallowReorgReturned labels the metrics signal emitted
 	// when a deposit this watcher failed as a shallow reorg turns out to be
 	// on chain after all (G-M1). It is not a booking status -- nothing can
@@ -1514,13 +1758,38 @@ func parseDepositMeta(m map[string]string) (chainID int64, txHash string, txLogS
 
 // blockCache memoizes ChainReader.LatestBlock within a single recheck tick,
 // so a batch touching many bookings on the same chain issues one RPC call
-// per chain instead of one per booking.
+// per chain instead of one per booking. It also holds the registered-address
+// set the confirmation-evidence re-read needs (see corroborateBeforeConfirm),
+// for the same reason: one query per tick, not one per booking.
 type blockCache struct {
 	mu   sync.Mutex
 	vals map[int64]int64
+
+	addrsOnce sync.Once
+	addrs     []string
+	addrsErr  error
 }
 
 func newBlockCache() *blockCache { return &blockCache{vals: make(map[int64]int64)} }
+
+// registeredAddresses returns every registered deposit address, once per
+// tick. FetchDeposits filters by `to IN (...)`, so re-reading the chain for
+// ONE booking still needs the set -- which is also what makes the re-read
+// answer "is this transfer to a registered address at all".
+func (o *Onchain) registeredAddresses(ctx context.Context, c *blockCache) ([]string, error) {
+	c.addrsOnce.Do(func() {
+		rows, err := o.deps.Registry.ListAddresses(ctx)
+		if err != nil {
+			c.addrsErr = err
+			return
+		}
+		c.addrs = make([]string, len(rows))
+		for i, a := range rows {
+			c.addrs[i] = a.Address
+		}
+	})
+	return c.addrs, c.addrsErr
+}
 
 func (o *Onchain) latestBlock(ctx context.Context, c *blockCache, chainID int64) (int64, error) {
 	c.mu.Lock()
@@ -1558,11 +1827,15 @@ func (o *Onchain) RunWatchOnce(ctx context.Context, chainID int64) error {
 	return o.scanChainOnce(ctx, chainID)
 }
 
-// RunReorgRecheckOnce runs a single deep-reorg recheck pass (open anomalies
-// first, then confirmed deposits inside the recheck window) outside Run's
-// ticker loop -- mirrors RunSweepOnce / RunPendingRecheckOnce.
-func (o *Onchain) RunReorgRecheckOnce(ctx context.Context) {
-	o.recheckConfirmedDeposits(ctx)
+// RunReorgRecheckOnce runs a single deep-reorg recheck pass (the dead-letter
+// backlog sample, open anomalies, then confirmed deposits inside the recheck
+// window) outside Run's ticker loop -- mirrors RunSweepOnce /
+// RunPendingRecheckOnce.
+//
+// Returns the pass's outcome (M-9), for the same reason
+// RunPendingRecheckOnce does.
+func (o *Onchain) RunReorgRecheckOnce(ctx context.Context) error {
+	return o.recheckConfirmedDeposits(ctx)
 }
 
 // scanChainOnce advances chainID's forward scan by one window: read the
@@ -1589,6 +1862,16 @@ func (o *Onchain) RunReorgRecheckOnce(ctx context.Context) {
 func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 	cfg := o.chains[chainID]
 
+	// Reported on EVERY tick, including the ones that return early below --
+	// that is the whole point (M-8). ChainCursorLag can only be computed
+	// once LatestBlock has answered, so the four early returns here (DB
+	// down, RPC down, eth_getLogs rejected, ingest blocked) leave it frozen
+	// at its last reading, which is indistinguishable from a healthy
+	// watcher. This gauge grows through all of them, and through the nastier
+	// case where every call succeeds but the provider's head has stopped
+	// moving. Deferred so it reflects whatever the tick managed to observe.
+	defer func() { o.metrics().ChainCursorAdvanceAge(chainID, o.cursorAdvanceAge(chainID)) }()
+
 	cursor, err := o.deps.Cursors.GetCursor(ctx, chainID)
 	from := int64(0)
 	// scanned is where the cursor actually stands, kept separate from `from`
@@ -1599,7 +1882,11 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 	case err == nil:
 		from = cursor.LastScannedBlock + 1
 		scanned = cursor.LastScannedBlock
+		o.observeCursor(chainID, cursor.LastScannedBlock)
 	case errors.Is(err, core.ErrNotFound):
+		// Nothing to observe yet, but the age clock has to start somewhere:
+		// a chain whose cursor row never appears is stalled, not idle.
+		o.observeCursor(chainID, -1)
 		// Never scanned: start from genesis. New chains are expected to be
 		// configured with cursors seeded out-of-band if genesis scanning is
 		// infeasible; this library has no opinion on that.
@@ -1671,6 +1958,7 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 		if err := o.deps.Cursors.SetCursor(ctx, chainID, to); err != nil {
 			return fmt.Errorf("set cursor: %w", err)
 		}
+		o.observeCursor(chainID, to)
 		reportLag(max(scanned, to))
 		return nil
 	}
@@ -1726,6 +2014,7 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 	if err := o.deps.Cursors.SetCursor(ctx, chainID, to); err != nil {
 		return fmt.Errorf("set cursor: %w", err)
 	}
+	o.observeCursor(chainID, to)
 	o.clearScanFailures(chainID)
 	// SetCursor is monotonic, so a lookback tick that re-scanned below the
 	// cursor leaves it where it was; report the higher of the two rather
@@ -1762,16 +2051,189 @@ func permanentIngestFailure(err error) bool {
 	return !core.IsRetryable(err)
 }
 
-// recordIngestDeadLetter writes sighting to the dead-letter store, logging
-// (never swallowing) a failure to do so. A dead letter is the only durable
-// trace a skipped sighting leaves, so losing it silently would reopen the
-// exact hole G-C1 closes.
+// Dead-letter reasons. A BOUNDED classification of why a sighting was
+// refused, for core.Metrics.DeadLetterIngestDeadLettered's `reason` label --
+// deliberately NOT the error text, which is free-form (it goes on the row,
+// where cardinality does not matter). Each maps to a triage path in
+// docs/RUNBOOK.md §18.
+const (
+	// deadLetterReasonPayloadConflict: an existing booking already holds this
+	// sighting's idempotency key with a DIFFERENT payload. Design doc §6
+	// calls this what it is -- a normalization bug -- so the row is evidence
+	// of a defect on the producing side, not of a chain event.
+	deadLetterReasonPayloadConflict = "payload_conflict"
+	// deadLetterReasonCurrencyUnregistered: the token's configured
+	// CurrencyCode names no currency in this ledger. Configuration, fixable,
+	// replayable.
+	deadLetterReasonCurrencyUnregistered = "currency_unregistered"
+	// deadLetterReasonPrecisionExceeded: the amount has more decimals than
+	// the currency's exponent can represent. See validateTokenPrecision --
+	// under a validated composition root this is refused at startup, so
+	// reaching it at runtime means a currency's exponent changed under a
+	// running deployment, or Run() was never called.
+	deadLetterReasonPrecisionExceeded = "precision_exceeded"
+	// deadLetterReasonAccountUnavailable / deadLetterReasonPeriodClosed:
+	// states that pass and can therefore self-heal. The booking is created
+	// before the journal is attempted, so these normally surface on a
+	// booking the recheck loop keeps retrying rather than here; a row with
+	// this reason is usually noise, and `booked` on it will be true.
+	deadLetterReasonAccountUnavailable = "account_unavailable"
+	deadLetterReasonPeriodClosed       = "period_closed"
+	// deadLetterReasonInvalidInput: the sighting itself, or the state it
+	// asks for, is malformed. Not replayable without fixing the producer.
+	deadLetterReasonInvalidInput = "invalid_input"
+	// deadLetterReasonWatcherWedged: not a verdict about this sighting at
+	// all -- the chain's scan has been failing for watcherStallAlertAfter
+	// consecutive ticks and this is one of the sightings in the way. The
+	// cursor has NOT moved past it (escalateWatcherStall's doc comment), so
+	// it will be re-ingested by itself once the underlying failure clears.
+	deadLetterReasonWatcherWedged = "watcher_wedged"
+	// deadLetterReasonUnclassified: an error matching no known sentinel.
+	// core.IsRetryable defaults such errors to retryable, so reaching this
+	// label means something classified it as permanent by another route --
+	// worth reading the row's reason text.
+	deadLetterReasonUnclassified = "unclassified"
+)
+
+// errWatcherWedged marks the synthetic cause escalateWatcherStall attaches to
+// the sightings a wedged chain is stuck behind, so deadLetterReason can tell
+// them apart from a verdict about the sighting itself by errors.Is rather
+// than by matching on message text.
+var errWatcherWedged = errors.New("watcher wedged")
+
+// deadLetterReason classifies cause into the bounded metric label set above.
+// The order matters where an error could match twice; each case is a
+// different on-call action, which is the whole point of the label.
+func deadLetterReason(cause error) string {
+	switch {
+	case errors.Is(cause, errWatcherWedged):
+		return deadLetterReasonWatcherWedged
+	case errors.Is(cause, core.ErrConflict), errors.Is(cause, core.ErrDuplicateJournal):
+		return deadLetterReasonPayloadConflict
+	case errors.Is(cause, core.ErrPrecisionExceeded):
+		return deadLetterReasonPrecisionExceeded
+	case errors.Is(cause, core.ErrAccountFrozen), errors.Is(cause, core.ErrAccountClosed):
+		return deadLetterReasonAccountUnavailable
+	case errors.Is(cause, core.ErrPeriodClosed):
+		return deadLetterReasonPeriodClosed
+	case errors.Is(cause, core.ErrNotFound):
+		return deadLetterReasonCurrencyUnregistered
+	case errors.Is(cause, core.ErrInvalidInput), errors.Is(cause, core.ErrInvalidTransition),
+		errors.Is(cause, core.ErrUnbalancedJournal):
+		return deadLetterReasonInvalidInput
+	default:
+		return deadLetterReasonUnclassified
+	}
+}
+
+// recordIngestDeadLetter writes sighting to the dead-letter store, counts it,
+// and logs (never swallows) a failure to do so.
+//
+// The counter is the load-bearing half (C-2): a dead letter means a real,
+// on-chain, already-confirmed transfer to a registered address that this
+// ledger has decided never to book, and until this call existed its only
+// signals were the row -- which nothing read -- and an Error log line that
+// lands in core.NopLogger() unless the consumer injected a logger. The row is
+// still the only durable trace, so losing it silently would reopen the exact
+// hole G-C1 closes; the counter is what makes anyone look.
 func (o *Onchain) recordIngestDeadLetter(ctx context.Context, s core.DepositSighting, cause error) {
 	key := depositIdempotencyKey(s.ChainID, strings.ToLower(s.TxHash), s.TxLogSeq)
+	o.metrics().DepositIngestDeadLettered(s.ChainID, deadLetterReason(cause))
 	if err := o.deps.DeadLetters.RecordDeadLetter(ctx, s, key, cause.Error()); err != nil {
 		o.log().Error("service: onchain: watcher: record dead letter failed",
 			"chain_id", s.ChainID, "tx_hash", s.TxHash, "idempotency_key", key, "error", err)
 	}
+}
+
+// ListDeadLetters returns a page of dead letters, newest first (see
+// core.IngestDeadLetter). Exposed on Onchain, rather than leaving consumers
+// to reach for the store, so the HTTP layer's optional crypto-deposit
+// surface has one thing to be handed -- the same shape ListReviews /
+// ApproveReview / RejectReview already have.
+func (o *Onchain) ListDeadLetters(ctx context.Context, cursor string, limit int32) ([]core.IngestDeadLetter, string, error) {
+	if o.deps.DeadLetters == nil {
+		return nil, "", fmt.Errorf("service: onchain: list dead letters: no DeadLetterRecorder wired: %w", core.ErrInvalidInput)
+	}
+	letters, next, err := o.deps.DeadLetters.ListDeadLetters(ctx, cursor, limit)
+	if err != nil {
+		return nil, "", fmt.Errorf("service: onchain: list dead letters: %w", err)
+	}
+	return letters, next, nil
+}
+
+// ReplayDeadLetter re-drives one dead-lettered deposit sighting through the
+// real ingestion path (IngestDeposit), after an operator has fixed whatever
+// made it unbookable -- a missing currency registered, a currency's exponent
+// corrected, a token added back to CreditTokens.
+//
+// This is the recovery path the dead-letter table had no way to offer
+// (C-2). Nothing else can drive one of these sightings again: no booking was
+// ever created, so the recheck loops cannot see it; the cursor is past its
+// block, so no forward scan will; and registration rescans only cover newly
+// registered addresses. Everything a replay needs is on the row.
+//
+// Idempotent by construction, not by bookkeeping: IngestDeposit derives the
+// same deposit-{chain}-{tx}-{seq} key it always would, so replaying a dead
+// letter whose deposit has since been booked -- by an earlier replay, or
+// because the cause self-healed -- resolves to that same booking and posts
+// nothing new. The dead-letter row itself is never mutated; whether it still
+// needs attention is recomputed from bookings on every read
+// (core.IngestDeadLetter.Booked).
+//
+// Requires the full ingestion wiring, which means the consumer's composition
+// root: the chain set (a token's currency code and its ceilings live in Go
+// config, not in the database) is not reachable from a tool holding only
+// DATABASE_URL. `ledger-cli dead-letters` therefore lists and shows, and
+// calls this through the process that owns the config.
+func (o *Onchain) ReplayDeadLetter(ctx context.Context, uid string) (*core.Booking, error) {
+	if err := o.deps.validateCore(); err != nil {
+		return nil, err
+	}
+	dl, err := o.deps.DeadLetters.GetDeadLetter(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: replay dead letter %s: %w", uid, err)
+	}
+	booking, err := o.IngestDeposit(ctx, dl.Sighting)
+	if err != nil {
+		return nil, fmt.Errorf("service: onchain: replay dead letter %s (recorded reason: %s): %w", uid, dl.Reason, err)
+	}
+	if booking == nil {
+		// IngestDeposit answers (nil, nil) for a sighting this ledger has no
+		// business booking: an unregistered address, or a token no longer in
+		// CreditTokens. On the watcher path that is correctly a no-op; for a
+		// replay an operator explicitly asked for, "nothing happened" must
+		// not read as success (working-agreements §3).
+		return nil, fmt.Errorf("service: onchain: replay dead letter %s: this ledger has nothing to book for that sighting -- its address is not registered, or its token is not in chain %d's CreditTokens: %w",
+			uid, dl.Sighting.ChainID, core.ErrInvalidInput)
+	}
+	o.log().Warn("service: onchain: deposit.dead_letter_replayed",
+		"dead_letter_uid", uid, "booking_uid", booking.UID, "status", booking.Status,
+		"chain_id", dl.Sighting.ChainID, "tx_hash", dl.Sighting.TxHash, "recorded_reason", dl.Reason)
+	return booking, nil
+}
+
+// sampleDeadLetterBacklog reports the dead-letter queue's depth and the age
+// of its oldest still-unbooked row (core.Metrics.DeadLetterBacklog). Sampled
+// from the deep-reorg recheck tick because that loop already exists to ask
+// "is anything still wrong that a human has to close out", runs on a
+// human-scale interval (5 minutes by default), and is the cheapest place to
+// add one indexed anti-join.
+func (o *Onchain) sampleDeadLetterBacklog(ctx context.Context) error {
+	if o.deps.DeadLetters == nil {
+		// Run refuses to start without one (validateCore); reaching here
+		// means a direct NewOnchain caller drove this loop by hand.
+		return nil
+	}
+	count, oldest, err := o.deps.DeadLetters.CountUnbookedDeadLetters(ctx)
+	if err != nil {
+		return fmt.Errorf("sample dead letter backlog: %w", err)
+	}
+	age := time.Duration(0)
+	if !oldest.IsZero() {
+		age = time.Since(oldest)
+	}
+	o.metrics().DeadLetterBacklog(count, age)
+	return nil
 }
 
 // escalateWatcherStall turns a run of blocking scan failures into an
@@ -1794,8 +2256,44 @@ func (o *Onchain) escalateWatcherStall(ctx context.Context, chainID, from, to in
 		"chain_id", chainID, "consecutive_failed_ticks", failures,
 		"window_from", from, "window_to", to, "blocked_sightings", len(blocked))
 	for _, s := range blocked {
-		o.recordIngestDeadLetter(ctx, s, fmt.Errorf("watcher wedged on chain %d for %d consecutive ticks: ingest keeps failing for this sighting", chainID, failures))
+		o.recordIngestDeadLetter(ctx, s, fmt.Errorf("%w on chain %d for %d consecutive ticks: ingest keeps failing for this sighting", errWatcherWedged, chainID, failures))
 	}
+}
+
+// observeCursor records that chainID's forward-scan cursor is at block, and
+// restarts that chain's advance clock if this is the first time this process
+// has seen it that high. A value that is not higher than the last one seen
+// is not progress and deliberately does not reset the clock.
+func (o *Onchain) observeCursor(chainID, block int64) {
+	o.cursorMu.Lock()
+	defer o.cursorMu.Unlock()
+	if o.cursorSeen == nil {
+		// NewOnchain always makes this map; a zero-valued Onchain (tests
+		// that construct the struct directly) must not panic the watcher.
+		o.cursorSeen = make(map[int64]cursorObservation)
+	}
+	prev, seen := o.cursorSeen[chainID]
+	if !seen || block > prev.block {
+		o.cursorSeen[chainID] = cursorObservation{block: block, at: time.Now()}
+	}
+}
+
+// cursorAdvanceAge returns how long it has been since observeCursor last saw
+// chainID's cursor advance. The first call for a chain starts the clock at
+// now rather than at the zero time, so a freshly started process reports 0
+// instead of "58 years behind".
+func (o *Onchain) cursorAdvanceAge(chainID int64) time.Duration {
+	o.cursorMu.Lock()
+	defer o.cursorMu.Unlock()
+	if o.cursorSeen == nil {
+		o.cursorSeen = make(map[int64]cursorObservation)
+	}
+	obs, seen := o.cursorSeen[chainID]
+	if !seen {
+		o.cursorSeen[chainID] = cursorObservation{block: -1, at: time.Now()}
+		return 0
+	}
+	return time.Since(obs.at)
 }
 
 func (o *Onchain) clearScanFailures(chainID int64) {
@@ -1807,20 +2305,36 @@ func (o *Onchain) clearScanFailures(chainID int64) {
 // --- pending/confirming recheck + shallow reorg ---
 
 // RunPendingRecheckOnce runs a single pending/confirming recheck pass outside
-// Run's ticker loop -- mirrors RunSweepOnce, useful for an ops-triggered
-// manual recheck and for tests that need to exercise the recheck path
-// directly against a fake ChainReader without waiting on recheckInterval.
-func (o *Onchain) RunPendingRecheckOnce(ctx context.Context) {
-	o.recheckPendingDeposits(ctx)
+// Run's ticker loop -- mirrors RunSweepOnce / RunWatchOnce, useful for an
+// ops-triggered manual recheck and for tests that need to exercise the
+// recheck path directly against a fake ChainReader without waiting on
+// recheckInterval.
+//
+// Returns the pass's outcome (M-9). It used to return nothing, which made
+// an ops-triggered recheck that failed indistinguishable from one that found
+// nothing to do -- and, since the library's default logger is
+// core.NopLogger(), often completely silent.
+func (o *Onchain) RunPendingRecheckOnce(ctx context.Context) error {
+	return o.recheckPendingDeposits(ctx)
 }
 
-func (o *Onchain) recheckPendingDeposits(ctx context.Context) {
+// recheckPendingDeposits advances every pending/confirming deposit booking it
+// can, and reports whether the pass was clean.
+//
+// Every per-booking failure is aggregated rather than returned early: one
+// booking whose journal cannot post (a frozen account, a closed period) must
+// not stop the loop that credits everyone else. But it must not be invisible
+// either -- this loop is the one that actually credits pull-path deposits,
+// and before M-9 its every error went to a logger that is NopLogger() by
+// default, with no metric of any kind.
+func (o *Onchain) recheckPendingDeposits(ctx context.Context) error {
 	depositUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.DepositClassificationCode)
 	if err != nil {
 		o.log().Error("service: onchain: recheck: resolve deposit classification failed", "error", err)
-		return
+		return fmt.Errorf("recheck: resolve deposit classification: %w", err)
 	}
 	cache := newBlockCache()
+	var errs []error
 	for _, status := range []core.Status{"pending", "confirming"} {
 		cursor := ""
 		for {
@@ -1832,10 +2346,13 @@ func (o *Onchain) recheckPendingDeposits(ctx context.Context) {
 			})
 			if err != nil {
 				o.log().Error("service: onchain: recheck: list bookings failed", "status", status, "error", err)
+				errs = append(errs, fmt.Errorf("recheck: list %s bookings: %w", status, err))
 				break
 			}
 			for i := range bookings {
-				o.recheckOneDeposit(ctx, cache, &bookings[i])
+				if err := o.recheckOneDeposit(ctx, cache, &bookings[i]); err != nil {
+					errs = append(errs, err)
+				}
 			}
 			if next == "" {
 				break
@@ -1843,13 +2360,21 @@ func (o *Onchain) recheckPendingDeposits(ctx context.Context) {
 			cursor = next
 		}
 	}
+	return errors.Join(errs...)
 }
 
-func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *core.Booking) {
+// recheckOneDeposit advances one pending/confirming deposit booking. A nil
+// error means "this booking is in the state it should be in", which includes
+// the cases where there is nothing to do yet; the two Warn-and-skip branches
+// below are deliberately NOT errors -- they describe a booking that will
+// never progress no matter how often this runs, so counting them as failed
+// ticks would pin the job's failure signal to ON and drown the transient
+// failures it exists to surface.
+func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *core.Booking) error {
 	chainID, txHash, txLogSeq, blockNumber, ok := parseDepositMeta(b.Metadata)
 	if !ok {
 		o.log().Warn("service: onchain: recheck: deposit booking missing identity metadata, skipping", "booking_uid", b.UID)
-		return
+		return nil
 	}
 	cfg, ok := o.chains[chainID]
 	if !ok {
@@ -1859,12 +2384,12 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 		// booking simply stopped progressing.
 		o.log().Warn("service: onchain: recheck: deposit booking is on an unconfigured chain, it will not progress until the chain is configured again",
 			"booking_uid", b.UID, "chain_id", chainID, "status", b.Status)
-		return
+		return nil
 	}
 	latest, err := o.latestBlock(ctx, cache, chainID)
 	if err != nil {
 		o.log().Error("service: onchain: recheck: latest block failed", "chain_id", chainID, "error", err)
-		return
+		return fmt.Errorf("recheck booking %s: latest block on chain %d: %w", b.UID, chainID, err)
 	}
 	confirmations := latest - blockNumber + 1
 	if confirmations < 0 {
@@ -1875,7 +2400,7 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 		included, err := o.deps.Reader.TxIncluded(ctx, chainID, txHash)
 		if err != nil {
 			o.log().Error("service: onchain: recheck: tx included check failed", "chain_id", chainID, "tx_hash", txHash, "error", err)
-			return
+			return fmt.Errorf("recheck booking %s: tx included on chain %d: %w", b.UID, chainID, err)
 		}
 		if !included {
 			// Shallow reorg: the tx appears to have vanished before reaching
@@ -1893,7 +2418,7 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 				o.log().Warn("service: onchain: recheck: deposit tx not found on chain, waiting for corroboration",
 					"booking_uid", b.UID, "chain_id", chainID, "tx_hash", txHash,
 					"consecutive_misses", misses, "threshold", o.shallowReorgMisses)
-				return
+				return nil
 			}
 			// No journal was ever posted for this booking, so a plain failed
 			// transition is sufficient for the ledger (design doc §6) -- but
@@ -1908,7 +2433,7 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 				IdempotencyKey: depositTransitionKey(b.UID, "failed"),
 			}); err != nil {
 				o.log().Error("service: onchain: recheck: transition to failed failed", "booking_uid", b.UID, "error", err)
-				return
+				return fmt.Errorf("recheck booking %s: transition to failed: %w", b.UID, err)
 			}
 			o.clearShallowMiss(b.UID)
 			o.log().Error("service: onchain: deposit.shallow_reorg_failed",
@@ -1916,17 +2441,74 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 				"consecutive_misses", misses, "amount", b.Amount.String())
 			o.metrics().DepositReorgDetected(chainID)
 			o.recordReorgAnomaly(ctx, core.ReorgKindShallowReorgFailed, b.UID, chainID, txHash, "")
-			return
+			return nil
 		}
 		// On chain after all: the miss streak (if any) was noise.
 		o.clearShallowMiss(b.UID)
-		return
+		return nil
 	}
 	o.clearShallowMiss(b.UID)
 
+	// The booking has reached its confirmation threshold -- ON PAPER. Ask
+	// the chain before acting on that (money-out C-2): everything from here
+	// on is irreversible, and every input to the arithmetic above came from
+	// the row itself.
+	evidence, detail := o.corroborateBeforeConfirm(ctx, cache, b, chainID, txHash, txLogSeq, blockNumber)
+	switch evidence {
+	case evidenceUnavailable:
+		o.log().Error("service: onchain: recheck: cannot corroborate deposit against the chain, not crediting",
+			"booking_uid", b.UID, "chain_id", chainID, "tx_hash", txHash, "detail", detail)
+		return fmt.Errorf("recheck booking %s: corroborate before confirm: %s: %w", b.UID, detail, core.ErrTransient)
+	case evidenceContradicted:
+		misses := o.recordEvidenceMiss(b.UID)
+		if misses < o.confirmEvidenceMisses {
+			// Not credited, not condemned. One answer from one endpoint is
+			// not evidence in either direction (I-69).
+			o.log().Warn("service: onchain: recheck: the chain does not corroborate this deposit, waiting for corroboration",
+				"booking_uid", b.UID, "chain_id", chainID, "tx_hash", txHash, "detail", detail,
+				"consecutive_misses", misses, "threshold", o.confirmEvidenceMisses)
+			return nil
+		}
+		o.log().Error("service: onchain: deposit.onchain_unverified: the chain does not corroborate this deposit -- parking it for human review instead of crediting it",
+			"booking_uid", b.UID, "chain_id", chainID, "tx_hash", txHash, "txlog_seq", txLogSeq,
+			"amount", b.Amount.String(), "account_holder", b.AccountHolder,
+			"detail", detail, "consecutive_misses", misses)
+		if b.Status == "pending" {
+			// `review` is only reachable from `confirming`
+			// (presets.DepositLifecycle), and a booking can arrive here
+			// still in `pending` -- the honest way (this process crashed
+			// between CreateBooking and its first transition) or the
+			// interesting way (an appended row, which migration 029's
+			// INSERT guard constrains to the lifecycle's INITIAL status and
+			// therefore to exactly this shape). Advance it one step first:
+			// it HAS met its confirmation threshold on paper, which is all
+			// `confirming` claims; what it has failed to do is convince the
+			// chain. Same idempotency key advanceConfirmation would use, so
+			// a later honest advance is a no-op rather than a conflict.
+			if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
+				BookingUID:     b.UID,
+				ToStatus:       "confirming",
+				ChannelRef:     depositChannelRef(txHash, txLogSeq),
+				Source:         onchainSource,
+				IdempotencyKey: depositTransitionKey(b.UID, "confirming"),
+			}); err != nil {
+				return fmt.Errorf("recheck booking %s: advance uncorroborated deposit to confirming before review: %w", b.UID, err)
+			}
+			b.Status = "confirming"
+		}
+		if _, err := o.routeToReview(ctx, b, depositChannelRef(txHash, txLogSeq), reviewReasonOnchainUnverified); err != nil {
+			return fmt.Errorf("recheck booking %s: route uncorroborated deposit to review: %w", b.UID, err)
+		}
+		o.clearEvidenceMiss(b.UID)
+		return nil
+	}
+	o.clearEvidenceMiss(b.UID)
+
 	if _, err := o.advanceConfirmation(ctx, b, int32(confirmations), depositChannelRef(txHash, txLogSeq), cfg); err != nil {
 		o.log().Error("service: onchain: recheck: advance confirmation failed", "booking_uid", b.UID, "error", err)
+		return fmt.Errorf("recheck booking %s: advance confirmation: %w", b.UID, err)
 	}
+	return nil
 }
 
 // recordShallowMiss increments booking uid's consecutive "tx not on chain"
@@ -1947,6 +2529,142 @@ func (o *Onchain) clearShallowMiss(bookingUID string) {
 	o.shallowMissMu.Lock()
 	defer o.shallowMissMu.Unlock()
 	delete(o.shallowMiss, bookingUID)
+}
+
+// depositEvidence is what the chain says about a booking the recheck loop is
+// about to credit.
+type depositEvidence int
+
+const (
+	// evidenceUnavailable: the chain could not be asked (RPC error, DB
+	// error). Never a verdict -- the booking stays where it is and the tick
+	// reports a failure.
+	evidenceUnavailable depositEvidence = iota
+	// evidenceCorroborated: a log in the named block carries this booking's
+	// tx hash, log position, token, amount and a recipient registered to
+	// this booking's holder.
+	evidenceCorroborated
+	// evidenceContradicted: the chain has no such transfer, or it does not
+	// say what the booking says.
+	evidenceContradicted
+)
+
+// corroborateBeforeConfirm re-reads the chain for the booking that is about
+// to be credited and answers whether the chain agrees with it.
+//
+// This exists because a booking row is not evidence (money-out C-2,
+// docs/audits/2026-09-03-independent-review/money-out.md). The recheck loop
+// used to compute `confirmations = latest - metadata.block_number + 1` and,
+// if that cleared the threshold, credit `bookings.amount` -- consulting the
+// chain ONLY on the other branch, when the booking was still below the
+// threshold. So a single INSERT with `status='confirming'` and
+// `block_number=1`, which `ledger_app` is allowed to make and which no
+// BEFORE UPDATE guard covers, was signed out by the honest recheck job into
+// a real credit against a transaction that never existed. Every control the
+// deposit path had was doing its job and none of them was looking at this:
+// I-21's trust boundary covers the SIGHTING's provenance, I-25's immutable
+// columns are UPDATE semantics, I-3's idempotency guarantees uniqueness of a
+// key rather than that the key names a real chain event, and P5 faithfully
+// signed the amount the row claimed.
+//
+// The re-read is deliberately of the PRIMARY source, not the optional
+// second one (OnchainDeps.DepositConfirmer): a fence that only exists when a
+// consumer opted into a second RPC provider would leave the factory default
+// -- which the audit measured as vulnerable -- exactly as it was. Where a
+// DepositConfirmer IS configured, reviewGate's reconciliation still runs
+// afterwards and remains the stronger check.
+//
+// Cost: one TxIncluded plus one single-block FetchDeposits per booking, at
+// the moment it would be credited -- once per booking in practice, since it
+// leaves `confirming` on that same tick either way.
+func (o *Onchain) corroborateBeforeConfirm(ctx context.Context, cache *blockCache, b *core.Booking, chainID int64, txHash string, txLogSeq int32, blockNumber int64) (depositEvidence, string) {
+	included, err := o.deps.Reader.TxIncluded(ctx, chainID, txHash)
+	if err != nil {
+		return evidenceUnavailable, fmt.Sprintf("tx inclusion check failed: %v", err)
+	}
+	if !included {
+		return evidenceContradicted, "the transaction is not on chain"
+	}
+
+	addrs, err := o.registeredAddresses(ctx, cache)
+	if err != nil {
+		return evidenceUnavailable, fmt.Sprintf("list registered addresses failed: %v", err)
+	}
+	if len(addrs) == 0 {
+		// No registered address can have received anything, so no log could
+		// corroborate this booking -- but "the registry is empty" is a
+		// statement about our own state, not about the chain. Fail closed
+		// without calling it a contradiction.
+		return evidenceUnavailable, "no registered deposit addresses to re-read the chain against"
+	}
+	sightings, err := o.deps.Reader.FetchDeposits(ctx, chainID, blockNumber, blockNumber, addrs)
+	if err != nil {
+		return evidenceUnavailable, fmt.Sprintf("re-read of block %d failed: %v", blockNumber, err)
+	}
+
+	wantToken := strings.ToLower(b.Metadata["token"])
+	for _, s := range sightings {
+		if !strings.EqualFold(s.TxHash, txHash) || s.TxLogSeq != txLogSeq {
+			continue
+		}
+		if strings.ToLower(s.Token) != wantToken {
+			return evidenceContradicted, fmt.Sprintf("the log at %s#%d is token %s, the booking claims %s", txHash, txLogSeq, strings.ToLower(s.Token), wantToken)
+		}
+		if !s.Amount.Equal(b.Amount) {
+			return evidenceContradicted, fmt.Sprintf("the log at %s#%d moved %s, the booking claims %s", txHash, txLogSeq, s.Amount.String(), b.Amount.String())
+		}
+		addr, err := core.ChecksumAddress(s.To)
+		if err != nil {
+			return evidenceUnavailable, fmt.Sprintf("normalize recipient %q: %v", s.To, err)
+		}
+		da, err := o.deps.Registry.GetByAddress(ctx, addr)
+		if err != nil {
+			if errors.Is(err, core.ErrNotFound) {
+				return evidenceContradicted, fmt.Sprintf("the log at %s#%d paid %s, which is not a registered deposit address", txHash, txLogSeq, addr)
+			}
+			return evidenceUnavailable, fmt.Sprintf("resolve recipient %s: %v", addr, err)
+		}
+		if da.AccountHolder != b.AccountHolder {
+			return evidenceContradicted, fmt.Sprintf("the log at %s#%d paid holder %d's address, the booking credits holder %d", txHash, txLogSeq, da.AccountHolder, b.AccountHolder)
+		}
+		return evidenceCorroborated, ""
+	}
+	return evidenceContradicted, fmt.Sprintf("block %d carries no transfer %s#%d to any registered address", blockNumber, txHash, txLogSeq)
+}
+
+// recordEvidenceMiss / clearEvidenceMiss count consecutive contradictions per
+// booking -- see WithConfirmationEvidenceMisses. In memory, same rationale as
+// the other two counters: a restart can only delay the escalation to review,
+// and nothing is credited while the count is below the threshold either way.
+func (o *Onchain) recordEvidenceMiss(bookingUID string) int32 {
+	o.evidenceMissMu.Lock()
+	defer o.evidenceMissMu.Unlock()
+	o.evidenceMiss[bookingUID]++
+	return o.evidenceMiss[bookingUID]
+}
+
+func (o *Onchain) clearEvidenceMiss(bookingUID string) {
+	o.evidenceMissMu.Lock()
+	defer o.evidenceMissMu.Unlock()
+	delete(o.evidenceMiss, bookingUID)
+}
+
+// recordDeepMiss / clearDeepMiss are recordShallowMiss / clearShallowMiss
+// for the CONFIRMED side of the lifecycle -- see WithDeepReorgMisses. Kept
+// as their own pair rather than sharing the shallow map: a booking's
+// pre-threshold miss streak must not count toward the decision to reverse
+// its already-posted journal.
+func (o *Onchain) recordDeepMiss(bookingUID string) int32 {
+	o.deepMissMu.Lock()
+	defer o.deepMissMu.Unlock()
+	o.deepMiss[bookingUID]++
+	return o.deepMiss[bookingUID]
+}
+
+func (o *Onchain) clearDeepMiss(bookingUID string) {
+	o.deepMissMu.Lock()
+	defer o.deepMissMu.Unlock()
+	delete(o.deepMiss, bookingUID)
 }
 
 // recordReorgAnomaly persists (or refreshes) a chain anomaly, logging a
@@ -1971,15 +2689,25 @@ func (o *Onchain) recordReorgAnomaly(ctx context.Context, kind, bookingUID strin
 
 // --- confirmed deposit deep-reorg recheck ---
 
-func (o *Onchain) recheckConfirmedDeposits(ctx context.Context) {
+func (o *Onchain) recheckConfirmedDeposits(ctx context.Context) error {
+	var errs []error
+	// The dead-letter backlog is sampled from this tick (see
+	// sampleDeadLetterBacklog): both this and the anomaly sweep below answer
+	// "is there anything a human still has to close out".
+	if err := o.sampleDeadLetterBacklog(ctx); err != nil {
+		o.log().Error("service: onchain: reorg recheck: sample dead letter backlog failed", "error", err)
+		errs = append(errs, err)
+	}
 	// Open anomalies are revisited FIRST, and unconditionally: the recheck
 	// window below is a cost bound on FINDING new anomalies, never a licence
 	// to stop reporting one already found (G-M8).
-	o.recheckOpenAnomalies(ctx)
+	if err := o.recheckOpenAnomalies(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	depositUID, err := o.classes.resolve(ctx, o.deps.Classifications, presets.DepositClassificationCode)
 	if err != nil {
 		o.log().Error("service: onchain: reorg recheck: resolve deposit classification failed", "error", err)
-		return
+		return errors.Join(append(errs, fmt.Errorf("reorg recheck: resolve deposit classification: %w", err))...)
 	}
 	cache := newBlockCache()
 	cursor := ""
@@ -1992,13 +2720,16 @@ func (o *Onchain) recheckConfirmedDeposits(ctx context.Context) {
 		})
 		if err != nil {
 			o.log().Error("service: onchain: reorg recheck: list bookings failed", "error", err)
-			return
+			errs = append(errs, fmt.Errorf("reorg recheck: list confirmed bookings: %w", err))
+			return errors.Join(errs...)
 		}
 		for i := range bookings {
-			o.recheckOneConfirmedDeposit(ctx, cache, &bookings[i])
+			if err := o.recheckOneConfirmedDeposit(ctx, cache, &bookings[i]); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if next == "" {
-			return
+			return errors.Join(errs...)
 		}
 		cursor = next
 	}
@@ -2019,20 +2750,22 @@ func (o *Onchain) recheckConfirmedDeposits(ctx context.Context) {
 //     idempotency key absorbs every future sighting), so the only possible
 //     remedy is a human, and the only reason they can act at all is that
 //     the row exists (G-M1 / G-M8).
-func (o *Onchain) recheckOpenAnomalies(ctx context.Context) {
+func (o *Onchain) recheckOpenAnomalies(ctx context.Context) error {
 	if o.deps.ReorgRecorder == nil {
-		return
+		return nil
 	}
 	anomalies, err := o.deps.ReorgRecorder.ListOpenReorgs(ctx, 200)
 	if err != nil {
 		o.log().Error("service: onchain: reorg recheck: list open anomalies failed", "error", err)
-		return
+		return fmt.Errorf("reorg recheck: list open anomalies: %w", err)
 	}
+	var errs []error
 	for _, a := range anomalies {
 		included, err := o.deps.Reader.TxIncluded(ctx, a.ChainID, a.TxHash)
 		if err != nil {
 			o.log().Error("service: onchain: reorg recheck: tx included check failed",
 				"kind", a.Kind, "booking_uid", a.BookingUID, "chain_id", a.ChainID, "tx_hash", a.TxHash, "error", err)
+			errs = append(errs, fmt.Errorf("reorg recheck: anomaly %s: tx included on chain %d: %w", a.UID, a.ChainID, err))
 			continue
 		}
 		switch {
@@ -2052,9 +2785,13 @@ func (o *Onchain) recheckOpenAnomalies(ctx context.Context) {
 			o.recordReorgAnomaly(ctx, a.Kind, a.BookingUID, a.ChainID, a.TxHash, a.JournalUID)
 		}
 	}
+	return errors.Join(errs...)
 }
 
-func (o *Onchain) recheckOneConfirmedDeposit(ctx context.Context, cache *blockCache, b *core.Booking) {
+// recheckOneConfirmedDeposit re-observes one confirmed deposit. Same
+// error/skip split as recheckOneDeposit: a booking that can never be checked
+// (unparseable metadata) is a Warn, an observation that failed is an error.
+func (o *Onchain) recheckOneConfirmedDeposit(ctx context.Context, cache *blockCache, b *core.Booking) error {
 	chainID, txHash, _, blockNumber, ok := parseDepositMeta(b.Metadata)
 	if !ok {
 		// Same silent-skip shape as recheckOneDeposit's (which at least
@@ -2062,29 +2799,39 @@ func (o *Onchain) recheckOneConfirmedDeposit(ctx context.Context, cache *blockCa
 		// parsed is excluded from reorg detection entirely, so it must not
 		// be excluded quietly as well.
 		o.log().Warn("service: onchain: reorg recheck: confirmed deposit booking missing identity metadata, it cannot be checked for reorgs", "booking_uid", b.UID)
-		return
+		return nil
 	}
 	latest, err := o.latestBlock(ctx, cache, chainID)
 	if err != nil {
 		o.log().Error("service: onchain: reorg recheck: latest block failed", "chain_id", chainID, "error", err)
-		return
+		return fmt.Errorf("reorg recheck booking %s: latest block on chain %d: %w", b.UID, chainID, err)
 	}
 	if latest-blockNumber > o.reorgRecheckWindow {
-		return // old enough to be treated as final; bounds recheck cost
+		return nil // old enough to be treated as final; bounds recheck cost
 	}
 	included, err := o.deps.Reader.TxIncluded(ctx, chainID, txHash)
 	if err != nil {
 		o.log().Error("service: onchain: reorg recheck: tx included check failed", "chain_id", chainID, "tx_hash", txHash, "error", err)
-		return
+		return fmt.Errorf("reorg recheck booking %s: tx included on chain %d: %w", b.UID, chainID, err)
 	}
 	if included {
-		return
+		// On chain: the miss streak (if any) was noise, same as the shallow
+		// path's clearShallowMiss.
+		o.clearDeepMiss(b.UID)
+		return nil
 	}
-	o.handleReorg(ctx, b, chainID)
+	o.handleReorg(ctx, b, chainID, o.recordDeepMiss(b.UID))
+	return nil
 }
 
-func (o *Onchain) handleReorg(ctx context.Context, b *core.Booking, chainID int64) {
-	o.log().Warn("service: onchain: deep reorg detected", "booking_uid", b.UID, "channel_ref", b.ChannelRef, "chain_id", chainID, "policy", o.reorgPolicy)
+// handleReorg reports a deep reorg -- always -- and reverses the deposit's
+// journal only under ReorgPolicyAutoReverse AND only once misses (the count
+// of CONSECUTIVE observations that the transaction is not on chain) has
+// reached deepReorgMisses. See WithDeepReorgMisses for why the irreversible
+// half needs corroboration and the reporting half does not (M-1).
+func (o *Onchain) handleReorg(ctx context.Context, b *core.Booking, chainID int64, misses int32) {
+	o.log().Warn("service: onchain: deep reorg detected", "booking_uid", b.UID, "channel_ref", b.ChannelRef, "chain_id", chainID, "policy", o.reorgPolicy,
+		"consecutive_misses", misses, "auto_reverse_threshold", o.deepReorgMisses)
 	o.metrics().DepositReorgDetected(chainID)
 
 	// Persist before deciding what to do about it, and under BOTH policies
@@ -2100,6 +2847,17 @@ func (o *Onchain) handleReorg(ctx context.Context, b *core.Booking, chainID int6
 	if o.reorgPolicy != core.ReorgPolicyAutoReverse {
 		// Manual (default): alert plus the durable row above; on-call
 		// reverses via RUNBOOK §12 and closes the anomaly out.
+		return
+	}
+	if misses < o.deepReorgMisses {
+		// One observation is not evidence (WithDeepReorgMisses). The anomaly
+		// row above is already open and the counter already fired, so this
+		// is a delay in the automatic DEBIT only -- nothing about the
+		// detection is withheld, and an operator watching
+		// ledger_deposit_reorg_detected_total sees it on the first tick.
+		o.log().Warn("service: onchain: auto-reverse withheld: waiting for corroboration before debiting",
+			"booking_uid", b.UID, "chain_id", chainID, "journal_uid", b.JournalUID,
+			"consecutive_misses", misses, "threshold", o.deepReorgMisses)
 		return
 	}
 	if b.JournalUID == "" {
@@ -2119,7 +2877,9 @@ func (o *Onchain) handleReorg(ctx context.Context, b *core.Booking, chainID int6
 		o.log().Error("service: onchain: auto-reverse: reverse journal failed", "booking_uid", b.UID, "journal_uid", b.JournalUID, "error", err)
 		return
 	}
-	o.log().Warn("service: onchain: auto-reverse: reversal journal posted", "booking_uid", b.UID, "journal_uid", b.JournalUID)
+	o.clearDeepMiss(b.UID)
+	o.log().Warn("service: onchain: auto-reverse: reversal journal posted", "booking_uid", b.UID, "journal_uid", b.JournalUID,
+		"consecutive_misses", misses)
 }
 
 // --- sweep ---
@@ -2490,6 +3250,13 @@ func (o *Onchain) advanceSweep(ctx context.Context, b *core.Booking, policy core
 				return fmt.Errorf("sweep: verify nonce before rebroadcast: %w", err)
 			}
 			if pendingNonce > nonce {
+				// The one condition in this file that blocks a (chain,
+				// token)'s collection INDEFINITELY -- every later tick finds
+				// this same booking in pending and returns the same
+				// ErrConflict -- and it had no counter of its own, only a
+				// log line and an indirect job_tick_failed (M-3). RUNBOOK
+				// §15's orphaned-broadcast subsection is the recovery.
+				o.metrics().SweepOrphanedBroadcast(chainID)
 				o.log().Error("service: onchain: sweep.orphaned_broadcast: booking is pending but its nonce is already spent on chain -- a broadcast was lost before its tx hash could be persisted; refusing to rebroadcast",
 					"booking_uid", b.UID, "chain_id", chainID, "token", token,
 					"booking_nonce", nonce, "pending_nonce", pendingNonce)
@@ -2736,6 +3503,9 @@ func (o *Onchain) Run(ctx context.Context) error {
 	if err := o.validateReconcileFailureLimits(); err != nil {
 		return fmt.Errorf("service: onchain: run: %w", err)
 	}
+	if err := o.validateTokenPrecision(ctx); err != nil {
+		return fmt.Errorf("service: onchain: run: %w", err)
+	}
 	if err := o.validateInstalledDepositLifecycle(ctx); err != nil {
 		return fmt.Errorf("service: onchain: run: %w", err)
 	}
@@ -2747,20 +3517,36 @@ func (o *Onchain) Run(ctx context.Context) error {
 			return fmt.Errorf("service: onchain: run: a ChainReader is configured but no ReorgRecorder is -- the reorg detector would then report a confirmed deposit's transaction vanishing only to a log line that goes quiet once the booking ages out of the recheck window, leaving nothing for on-call to act on (G-M8); wire service.WithReorgRecorder(postgres.NewDepositReorgStore(pool)): %w", core.ErrInvalidInput)
 		}
 		g.Go(func() error {
-			return o.runLoop(ctx, "onchain_registration_rescan", o.registrationRescanInterval, o.runRegistrationRescansOnce)
+			return o.runLoop(ctx, onchainJob{
+				name:       "onchain_registration_rescan",
+				interval:   o.registrationRescanInterval,
+				tick:       o.runRegistrationRescansOnce,
+				countTicks: true,
+			})
 		})
 		for chainID := range o.chains {
 			chainID := chainID
-			job := newWatchLockedJob(chainID, o, o.pool)
+			// name is shared with the LockedJob so both metric families
+			// label this job identically (Minor-12).
 			g.Go(func() error {
-				return o.runLoop(ctx, "onchain_watch", o.watchInterval, job)
+				return o.runLoop(ctx, newWatchLockedJob(chainID, o, o.pool))
 			})
 		}
 		g.Go(func() error {
-			return o.runLoop(ctx, "onchain_recheck", o.recheckInterval, o.recheckPendingDeposits)
+			return o.runLoop(ctx, onchainJob{
+				name:       "onchain_recheck",
+				interval:   o.recheckInterval,
+				tick:       o.recheckPendingDeposits,
+				countTicks: true,
+			})
 		})
 		g.Go(func() error {
-			return o.runLoop(ctx, "onchain_reorg_recheck", o.reorgRecheckInterval, o.recheckConfirmedDeposits)
+			return o.runLoop(ctx, onchainJob{
+				name:       "onchain_reorg_recheck",
+				interval:   o.reorgRecheckInterval,
+				tick:       o.recheckConfirmedDeposits,
+				countTicks: true,
+			})
 		})
 	} else {
 		o.log().Info("service: onchain: no ChainReader configured, watcher/recheck/reorg jobs skipped (webhook-only ingestion)")
@@ -2774,12 +3560,38 @@ func (o *Onchain) Run(ctx context.Context) error {
 			}
 			job := newSweepLockedJob(policy, o, o.pool)
 			g.Go(func() error {
-				return o.runLoop(ctx, "onchain_sweep", policy.Interval, job)
+				return o.runLoop(ctx, job)
 			})
 		}
 	}
 
 	return g.Wait()
+}
+
+// onchainJob is one of the background jobs Run schedules: a name that is
+// also its metrics label, a tick interval, and the tick itself.
+//
+// countTicks exists because two of these jobs are wrapped in a LockedJob,
+// which already emits exactly one of JobTickCompleted / JobTickFailed /
+// JobTickSkippedLocked per call (see LockedJob.Run's doc comment on not
+// double-counting). For the other three -- registration_rescan, recheck and
+// reorg_recheck -- nothing did, so those three loops had NO liveness and NO
+// failure signal at all, and every error inside them went to a core.Logger
+// that is NopLogger() by default (M-9,
+// docs/audits/2026-09-03-independent-review/onchain-ops.md). One of the
+// three, recheck, is the loop that actually credits pull-path deposits.
+type onchainJob struct {
+	// name is the job's metrics label. For the LockedJob-wrapped jobs it
+	// MUST equal the LockedJob's own name, or the same job appears under two
+	// different labels across the job_tick_* and job_panicked_total
+	// families (Minor-12) -- newWatchLockedJob/newSweepLockedJob take theirs
+	// from here for exactly that reason.
+	name     string
+	interval time.Duration
+	tick     func(context.Context) error
+	// countTicks is false when the tick's own wrapper already accounts for
+	// the outcome (LockedJob).
+	countTicks bool
 }
 
 // runLoop mirrors Worker.runLoop's ticker + ctx.Done() exit convention,
@@ -2790,44 +3602,63 @@ func (o *Onchain) Run(ctx context.Context) error {
 // (e.g. a ChainReader/ChainScanner/Sweeper implementation bug) propagated
 // straight through errgroup.Wait and out of Run, taking the whole process
 // down with it.
-func (o *Onchain) runLoop(ctx context.Context, name string, interval time.Duration, fn func(context.Context)) error {
-	if interval <= 0 {
-		o.log().Warn("service: onchain: skipping job: interval is non-positive", "job", name)
+func (o *Onchain) runLoop(ctx context.Context, j onchainJob) error {
+	if j.interval <= 0 {
+		o.log().Warn("service: onchain: skipping job: interval is non-positive", "job", j.name)
 		<-ctx.Done()
 		return nil
 	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(j.interval)
 	defer ticker.Stop()
 
-	o.log().Info("service: onchain: started", "job", name, "interval", interval.String())
+	o.log().Info("service: onchain: started", "job", j.name, "interval", j.interval.String())
 	for {
 		select {
 		case <-ctx.Done():
-			o.log().Info("service: onchain: stopped", "job", name)
+			o.log().Info("service: onchain: stopped", "job", j.name)
 			return nil
 		case <-ticker.C:
-			o.safeRunTick(ctx, name, fn)
+			o.safeRunTick(ctx, j)
 		}
 	}
 }
 
-// safeRunTick executes fn, recovering any panic so a single onchain job tick
-// cannot take down the whole process. Metrics are the same shape as
-// service.Worker.safeRun's JobPanicked -- see that method's doc comment for
-// why accounting for completed/failed is left to each job closure instead of
-// centralized here.
-func (o *Onchain) safeRunTick(ctx context.Context, name string, fn func(context.Context)) {
+// safeRunTick executes one tick, recovering any panic so a single onchain job
+// tick cannot take down the whole process, and accounting for the outcome
+// unless the tick's own wrapper already does (onchainJob.countTicks).
+//
+// JobPanicked is emitted for EVERY job, counted or not: a panic inside a
+// LockedJob's fn unwinds through Run before it can account for anything, so
+// this is the only layer that sees it. A counted job's panic also counts as
+// a failed tick -- a tick that panicked did not complete, and an alert built
+// on job_tick_completed staying flat must not read a panicking loop as
+// merely quiet.
+func (o *Onchain) safeRunTick(ctx context.Context, j onchainJob) {
 	defer func() {
 		if r := recover(); r != nil {
 			o.log().Error("service: onchain: job panicked",
-				"job", name,
+				"job", j.name,
 				"panic", fmt.Sprintf("%v", r),
 				"stack", string(debug.Stack()),
 			)
-			o.deps.Metrics.JobPanicked(name)
+			o.metrics().JobPanicked(j.name)
+			if j.countTicks {
+				o.metrics().JobTickFailed(j.name)
+			}
 		}
 	}()
-	fn(ctx)
+	err := j.tick(ctx)
+	if err != nil {
+		o.log().Error("service: onchain: job tick failed", "job", j.name, "error", err)
+	}
+	if !j.countTicks {
+		return
+	}
+	if err != nil {
+		o.metrics().JobTickFailed(j.name)
+		return
+	}
+	o.metrics().JobTickCompleted(j.name)
 }
 
 // newSweepLockedJob wraps one policy's sweepTick in a per-chain advisory
@@ -2860,25 +3691,35 @@ func (o *Onchain) safeRunTick(ctx context.Context, name string, fn func(context.
 // Failing to acquire the lock skips the tick, which is the right semantics
 // for a scan: the holder is doing the work, and the cursor tells the next
 // tick where to resume.
-func newWatchLockedJob(chainID int64, o *Onchain, pool *pgxpool.Pool) func(context.Context) {
-	lj := NewLockedJob(fmt.Sprintf("onchain_watch:%d", chainID), func(ctx context.Context) error {
+func newWatchLockedJob(chainID int64, o *Onchain, pool *pgxpool.Pool) onchainJob {
+	name := fmt.Sprintf("onchain_watch:%d", chainID)
+	lj := NewLockedJob(name, func(ctx context.Context) error {
 		return o.scanChainOnce(ctx, chainID)
 	}, pool, o.deps.Logger, o.deps.Metrics)
-	return func(ctx context.Context) {
-		if err := lj.Run(ctx); err != nil {
-			o.log().Error("service: onchain: watcher tick failed", "chain_id", chainID, "error", err)
-		}
+	return onchainJob{
+		name:     name,
+		interval: o.watchInterval,
+		tick:     lj.Run,
+		// LockedJob.Run accounts for the tick itself.
+		countTicks: false,
 	}
 }
 
-func newSweepLockedJob(policy core.SweepPolicy, o *Onchain, pool *pgxpool.Pool) func(context.Context) {
-	lockName := fmt.Sprintf("sweep:%d", policy.ChainID)
-	lj := NewLockedJob(lockName, func(ctx context.Context) error {
+func newSweepLockedJob(policy core.SweepPolicy, o *Onchain, pool *pgxpool.Pool) onchainJob {
+	// The LockedJob's name is also its advisory-lock key
+	// (advisoryLockKey("job:"+name)), so it is deliberately NOT renamed to
+	// the "onchain_sweep" prefix the docs would prefer: two releases running
+	// side by side during a rolling deploy would then take DIFFERENT locks
+	// and broadcast two transactions at the same signer nonce. The label is
+	// documented as-is in docs/RUNBOOK.md §14 instead (Minor-12).
+	name := fmt.Sprintf("sweep:%d", policy.ChainID)
+	lj := NewLockedJob(name, func(ctx context.Context) error {
 		return o.sweepTick(ctx, policy)
 	}, pool, o.deps.Logger, o.deps.Metrics)
-	return func(ctx context.Context) {
-		if err := lj.Run(ctx); err != nil {
-			o.log().Error("service: onchain: sweep job failed", "chain_id", policy.ChainID, "error", err)
-		}
+	return onchainJob{
+		name:       name,
+		interval:   policy.Interval,
+		tick:       lj.Run,
+		countTicks: false,
 	}
 }

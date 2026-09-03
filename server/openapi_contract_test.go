@@ -370,6 +370,7 @@ var listEnvelopeCases = []struct {
 	{"EventListEnvelope", eventResponse{}},
 	{"EntryListEnvelope", entryResponse{}},
 	{"DepositReviewListEnvelope", bookingResponse{}},
+	{"DeadLetterListEnvelope", deadLetterResponse{}},
 	{"HolderTransactionListEnvelope", holderTransactionResponse{}},
 	{"HolderBalanceListEnvelope", holderBalanceResponse{}},
 	{"HolderHoldListEnvelope", holderHoldResponse{}},

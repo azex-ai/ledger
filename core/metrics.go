@@ -100,9 +100,35 @@ type Metrics interface {
 	// Onchain (crypto deposit + sweep, design doc §6)
 
 	// ChainCursorLag reports how many blocks behind the chain tip the
-	// deposit watcher's cursor currently is, labelled by chain. A stalled
-	// (non-decreasing) lag is the alerting signal for a stuck watcher.
+	// deposit watcher's cursor currently is, labelled by chain.
+	//
+	// ⚠️ This gauge FREEZES rather than grows under the most common watcher
+	// stalls, and is therefore NOT a liveness signal on its own: it can only
+	// be computed once the tip is known, so a failed LatestBlock (RPC down or
+	// rate-limited), a failed GetCursor/ListAddresses (database down) or a
+	// failed FetchDeposits (eth_getLogs rejected) all leave the last reading
+	// standing (M-8, docs/audits/2026-09-03-independent-review/onchain-ops.md).
+	// A provider pinned at a stale head is worse still: every tick succeeds
+	// and this gauge reports a small, healthy-looking lag forever. Alert on
+	// ChainCursorAdvanceAge and JobTickCompleted; read this one for "how far
+	// behind are we" once you know the watcher is alive.
 	ChainCursorLag(chainID int64, lagBlocks int64)
+	// ChainCursorAdvanceAge reports how long it has been since this process
+	// last observed chainID's forward-scan cursor MOVE, labelled by chain.
+	// Reported on every watcher tick, including the ticks that fail before
+	// the tip is known -- which is exactly what ChainCursorLag cannot do
+	// (see above), and why this exists.
+	//
+	// Two properties to know before alerting on it. It is a per-process
+	// reading: a replica that keeps losing the per-chain advisory lock never
+	// scans, so alert on the minimum across replicas, not on any single
+	// series. And an idle chain is not a stalled one only because the cursor
+	// still advances to the safe tip every tick -- the age therefore stays
+	// near the watch interval on a healthy chain of any block rate, and
+	// climbing without bound means either the scan is failing or the chain's
+	// head has stopped moving as far as this deployment can see. Both are
+	// on-call events; neither shows up in ChainCursorLag.
+	ChainCursorAdvanceAge(chainID int64, age time.Duration)
 	// DepositReorgDetected is emitted whenever a previously-confirmed
 	// deposit's transaction is found to have disappeared from the canonical
 	// chain (deep reorg), regardless of ReorgPolicy.
@@ -129,9 +155,49 @@ type Metrics interface {
 	// DepositReviewRequired is emitted whenever a deposit that reached its
 	// confirmation threshold is routed to human review instead of
 	// auto-crediting (design doc §9: M3 compensating controls), labelled by
-	// chain and reason ("over_ceiling" | "reconcile_mismatch" -- a bounded
-	// set, safe for Prometheus cardinality).
+	// chain and reason. The reason vocabulary is bounded (safe for Prometheus
+	// cardinality) and has five members, all listed with their triage in
+	// docs/RUNBOOK.md §14: "over_ceiling", "reconcile_mismatch",
+	// "reconcile_unavailable", "token_unconfigured", and
+	// "shallow_reorg_returned" -- the last of which is NOT a booking status,
+	// so it never appears in the /deposits/reviews queue (see §13).
 	DepositReviewRequired(chainID int64, reason string)
+	// DepositIngestDeadLettered is emitted whenever a deposit sighting is
+	// written to the dead-letter store and the forward scan is allowed to
+	// move past it -- i.e. a transfer that is on chain, to a registered
+	// address, in a whitelisted token, that this ledger has decided never to
+	// book. It is the single most payment-affecting event on the pull path,
+	// and before this counter existed its only trace was a row plus an Error
+	// log line that lands in core.NopLogger() unless the consumer injected a
+	// logger (C-2, docs/audits/2026-09-03-independent-review/onchain-ops.md).
+	//
+	// Page on any nonzero rate. reason is a bounded classification of WHY the
+	// sighting was rejected, not the error text (which is on the row):
+	// "payload_conflict", "currency_unregistered", "precision_exceeded",
+	// "account_unavailable", "period_closed", "invalid_input",
+	// "watcher_wedged", "unclassified" -- see docs/RUNBOOK.md §18 for what
+	// each one means and how to replay after fixing the cause.
+	DepositIngestDeadLettered(chainID int64, reason string)
+	// DeadLetterBacklog reports the dead letters whose deposit STILL has no
+	// booking, and the age of the oldest such row, sampled once per
+	// deep-reorg recheck tick.
+	//
+	// "Still has no booking" is what makes this a queue and not an alarm
+	// nailed to ON (the anti-pattern StuckRollups documents below): a dead
+	// letter whose deposit was booked later -- because an operator replayed
+	// it, or because the cause self-healed, as a frozen account or a closed
+	// period does -- leaves this gauge on its own, with no resolution column
+	// to maintain and no operator action required to clear a row that is no
+	// longer true.
+	DeadLetterBacklog(count int64, oldestAge time.Duration)
+	// SweepOrphanedBroadcast is emitted whenever a sweep booking is found
+	// pending at a nonce the signer has already spent -- a broadcast whose
+	// transaction hash was lost before it could be persisted. The sweep path
+	// refuses to rebroadcast (it cannot tell "landed" from "still pending"
+	// without the hash), so this counter marks the one condition that blocks
+	// a (chain, token)'s collection INDEFINITELY, every tick, until a human
+	// intervenes per docs/RUNBOOK.md §15. Page on any nonzero rate.
+	SweepOrphanedBroadcast(chainID int64)
 
 	// Background jobs (Worker.runLoop / LockedJob, I-M10)
 	//
@@ -229,12 +295,16 @@ func (NoopMetrics) NegativeBalanceDetected(string, string)       {}
 func (NoopMetrics) ReconcileGap(string, decimal.Decimal)         {}
 func (NoopMetrics) ReservedAmount(string, decimal.Decimal)       {}
 
-func (NoopMetrics) ChainCursorLag(int64, int64)         {}
-func (NoopMetrics) DepositReorgDetected(int64)          {}
-func (NoopMetrics) SweepUnattributed(int64)             {}
-func (NoopMetrics) SweepAddressUnreadable(int64, int)   {}
-func (NoopMetrics) RegistrationRescanFailed(int64)      {}
-func (NoopMetrics) DepositReviewRequired(int64, string) {}
+func (NoopMetrics) ChainCursorLag(int64, int64)                {}
+func (NoopMetrics) ChainCursorAdvanceAge(int64, time.Duration) {}
+func (NoopMetrics) DepositReorgDetected(int64)                 {}
+func (NoopMetrics) SweepUnattributed(int64)                    {}
+func (NoopMetrics) SweepAddressUnreadable(int64, int)          {}
+func (NoopMetrics) RegistrationRescanFailed(int64)             {}
+func (NoopMetrics) DepositReviewRequired(int64, string)        {}
+func (NoopMetrics) DepositIngestDeadLettered(int64, string)    {}
+func (NoopMetrics) DeadLetterBacklog(int64, time.Duration)     {}
+func (NoopMetrics) SweepOrphanedBroadcast(int64)               {}
 
 func (NoopMetrics) JobTickCompleted(string)     {}
 func (NoopMetrics) JobTickFailed(string)        {}

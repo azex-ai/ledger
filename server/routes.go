@@ -68,6 +68,14 @@ func (s *Server) setupRoutes() {
 			// (see handler_deposit_reviews.go).
 			r.Get("/deposits/reviews", s.handleListDepositReviews)
 
+			// Crypto deposit add-on (dead-letter queue: the sightings the
+			// pull path refused to book and scanned past). Read-only here;
+			// the replay that puts one back into the ledger is in the
+			// capability group below. 404s via bizcode.FeatureNotEnabled
+			// until SetDeadLetterService is called (see
+			// handler_dead_letters.go).
+			r.Get("/deposits/dead-letters", s.handleListDeadLetters)
+
 			r.Get("/audit/journals", s.handleListAuditJournals)
 			r.Get("/audit/bookings/{uid}/trace", s.handleTraceBooking)
 			r.Get("/audit/journals/{uid}/reversals", s.handleListReversals)
@@ -143,6 +151,12 @@ func (s *Server) setupRoutes() {
 			// see DepositReviewer's ApproveReview/RejectReview contracts.
 			r.Post("/deposits/{uid}/review/approve", s.handleApproveDepositReview)
 			r.Post("/deposits/{uid}/review/reject", s.handleRejectDepositReview)
+
+			// Replaying a dead letter re-runs the whole ingestion path,
+			// review gate included, and can therefore end in the same
+			// deposit_confirm journal an approval posts -- so it sits behind
+			// the same capability, for the same reason (C-2).
+			r.Post("/deposits/dead-letters/{uid}/replay", s.handleReplayDeadLetter)
 		})
 
 		// ---- Scope: admin ----

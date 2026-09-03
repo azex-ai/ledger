@@ -90,6 +90,9 @@ type fakeChainReader struct {
 	// includedErr, when set for a (chain, tx), makes TxIncluded fail rather
 	// than answer -- the case that must never be read as "not on chain".
 	includedErr map[string]error
+	// latestErr, when set for a chain, makes LatestBlock fail -- see
+	// setLatestBlockErr.
+	latestErr map[int64]error
 }
 
 type fakeFetchCall struct {
@@ -105,13 +108,37 @@ func newFakeChainReader() *fakeChainReader {
 		latest:      make(map[int64]int64),
 		sightings:   make(map[int64][]core.DepositSighting),
 		includedErr: make(map[string]error),
+		latestErr:   make(map[int64]error),
 	}
 }
 
 func (f *fakeChainReader) LatestBlock(ctx context.Context, chainID int64) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.latestErr[chainID]; err != nil {
+		return 0, err
+	}
 	return f.latest[chainID], nil // 0 (map zero value) unless setLatestBlock was called
+}
+
+// setFetchErr makes FetchDeposits fail -- the eth_getLogs outage that must
+// leave a legitimate deposit exactly where it is (neither credited nor
+// parked for review) now that the recheck loop re-reads the chain before
+// crediting.
+func (f *fakeChainReader) setFetchErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fetchErr = err
+}
+
+// setLatestBlockErr makes LatestBlock fail for chainID -- the RPC-provider
+// outage that is the single most common watcher stall, and the one
+// chain_cursor_lag_blocks structurally cannot report (M-8): the lag can only
+// be computed once the tip is known.
+func (f *fakeChainReader) setLatestBlockErr(chainID int64, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.latestErr[chainID] = err
 }
 
 // setLatestBlock drives the recheck loop's confirmations math
@@ -424,6 +451,14 @@ type recordingOnchainMetrics struct {
 	core.NoopMetrics
 	mu                     sync.Mutex
 	sweepAddressUnreadable []sweepAddressUnreadableCall
+	deadLettered           []deadLetteredCall
+	deadLetterBacklog      []deadLetterBacklogCall
+	cursorLag              []cursorGaugeCall
+	cursorAdvanceAge       []cursorAgeCall
+	orphanedBroadcasts     []int64
+	reorgsDetected         []int64
+	jobTicksCompleted      map[string]int
+	jobTicksFailed         map[string]int
 }
 
 type sweepAddressUnreadableCall struct {
@@ -431,10 +466,135 @@ type sweepAddressUnreadableCall struct {
 	count   int
 }
 
+type deadLetteredCall struct {
+	chainID int64
+	reason  string
+}
+
+type deadLetterBacklogCall struct {
+	count     int64
+	oldestAge time.Duration
+}
+
+type cursorGaugeCall struct {
+	chainID int64
+	lag     int64
+}
+
+type cursorAgeCall struct {
+	chainID int64
+	age     time.Duration
+}
+
 func (m *recordingOnchainMetrics) SweepAddressUnreadable(chainID int64, count int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sweepAddressUnreadable = append(m.sweepAddressUnreadable, sweepAddressUnreadableCall{chainID, count})
+}
+
+func (m *recordingOnchainMetrics) DepositIngestDeadLettered(chainID int64, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deadLettered = append(m.deadLettered, deadLetteredCall{chainID, reason})
+}
+
+func (m *recordingOnchainMetrics) DeadLetterBacklog(count int64, oldestAge time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deadLetterBacklog = append(m.deadLetterBacklog, deadLetterBacklogCall{count, oldestAge})
+}
+
+func (m *recordingOnchainMetrics) ChainCursorLag(chainID, lagBlocks int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cursorLag = append(m.cursorLag, cursorGaugeCall{chainID, lagBlocks})
+}
+
+func (m *recordingOnchainMetrics) ChainCursorAdvanceAge(chainID int64, age time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cursorAdvanceAge = append(m.cursorAdvanceAge, cursorAgeCall{chainID, age})
+}
+
+func (m *recordingOnchainMetrics) SweepOrphanedBroadcast(chainID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.orphanedBroadcasts = append(m.orphanedBroadcasts, chainID)
+}
+
+func (m *recordingOnchainMetrics) DepositReorgDetected(chainID int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reorgsDetected = append(m.reorgsDetected, chainID)
+}
+
+func (m *recordingOnchainMetrics) JobTickCompleted(job string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.jobTicksCompleted == nil {
+		m.jobTicksCompleted = map[string]int{}
+	}
+	m.jobTicksCompleted[job]++
+}
+
+func (m *recordingOnchainMetrics) JobTickFailed(job string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.jobTicksFailed == nil {
+		m.jobTicksFailed = map[string]int{}
+	}
+	m.jobTicksFailed[job]++
+}
+
+// snapshots taken under the lock -- the Run-driven pins read these while the
+// background jobs are still ticking.
+func (m *recordingOnchainMetrics) deadLetteredCalls() []deadLetteredCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]deadLetteredCall(nil), m.deadLettered...)
+}
+
+func (m *recordingOnchainMetrics) backlogCalls() []deadLetterBacklogCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]deadLetterBacklogCall(nil), m.deadLetterBacklog...)
+}
+
+func (m *recordingOnchainMetrics) cursorAgeCalls() []cursorAgeCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]cursorAgeCall(nil), m.cursorAdvanceAge...)
+}
+
+func (m *recordingOnchainMetrics) cursorLagCalls() []cursorGaugeCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]cursorGaugeCall(nil), m.cursorLag...)
+}
+
+func (m *recordingOnchainMetrics) reorgDetections() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.reorgsDetected)
+}
+
+func (m *recordingOnchainMetrics) orphanedBroadcastCalls() []int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int64(nil), m.orphanedBroadcasts...)
+}
+
+func (m *recordingOnchainMetrics) tickCounts() (completed, failed map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	completed, failed = map[string]int{}, map[string]int{}
+	for k, v := range m.jobTicksCompleted {
+		completed[k] = v
+	}
+	for k, v := range m.jobTicksFailed {
+		failed[k] = v
+	}
+	return completed, failed
 }
 
 // setupOnchain wires a service.Onchain against a fresh testcontainers
@@ -734,7 +894,7 @@ func TestOnchain_IngestDeposit_ConflictingPayloadIsDeadLettered(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, core.ErrConflict)
 
-	letters, err := h.deadLetters.ListDeadLetters(ctx, 100)
+	letters, _, err := h.deadLetters.ListDeadLetters(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, countByTxHash(letters, "0xtxconflict"))
 
@@ -743,7 +903,7 @@ func TestOnchain_IngestDeposit_ConflictingPayloadIsDeadLettered(t *testing.T) {
 	// (RecordDeadLetter is idempotent on idempotency_key).
 	_, err = h.svc.IngestDeposit(ctx, sightingB)
 	require.Error(t, err)
-	letters, err = h.deadLetters.ListDeadLetters(ctx, 100)
+	letters, _, err = h.deadLetters.ListDeadLetters(ctx, "", 100)
 	require.NoError(t, err)
 	assert.Equal(t, 1, countByTxHash(letters, "0xtxconflict"))
 }
@@ -812,6 +972,15 @@ func TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber(t *testing.T) {
 
 	const txHash = "0xreallatest"
 	h.reader.setIncluded(chainID, txHash, true) // tx is genuinely still on-chain throughout
+	// ...and the log itself is there to be re-read: since money-out C-2 the
+	// recheck loop corroborates the booking against the chain before
+	// crediting it, so a fixture that only asserts inclusion is no longer
+	// enough to get a deposit confirmed (that is the point of the fix).
+	h.reader.setSightings(chainID, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.RequireFromString("100"),
+		Confirmations: 0, BlockNumber: 100,
+	})
 
 	// First sighting: 0 confirmations at observation time, mined at block
 	// 100 -- IngestDeposit's own advanceConfirmation call only ever sees this
@@ -832,7 +1001,7 @@ func TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber(t *testing.T) {
 	// 102-0+1 = 103 >= 6 and wrongly confirmed the deposit on this very
 	// first recheck tick.
 	h.reader.setLatestBlock(chainID, 102)
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 
 	stillPending, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)
@@ -841,7 +1010,7 @@ func TestOnchain_RecheckPendingDeposits_HonorsRealBlockNumber(t *testing.T) {
 
 	// Chain head advances enough to cross the threshold -- 106-100+1 = 7 >= 6.
 	h.reader.setLatestBlock(chainID, 106)
-	h.svc.RunPendingRecheckOnce(ctx)
+	require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
 
 	confirmed, err := h.bookings.GetBooking(ctx, booking.UID)
 	require.NoError(t, err)

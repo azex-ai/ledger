@@ -82,6 +82,12 @@ type Server struct {
 	// answers bizcode.FeatureNotEnabled until then.
 	depositReviewer DepositReviewer
 
+	// Optional dead-letter operator surface (see SetDeadLetterService in
+	// handler_dead_letters.go). Nil until a consumer's composition root
+	// wires service.Onchain in; both /deposits/dead-letters routes answer
+	// bizcode.FeatureNotEnabled until then.
+	deadLetters DeadLetterService
+
 	// Optional Prometheus /metrics handler. Mounted outside chi's middleware
 	// chain so it bypasses auth + rate limiting (scrapers usually live on
 	// the internal network and authenticate by host/port).

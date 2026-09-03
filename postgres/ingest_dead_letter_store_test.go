@@ -31,7 +31,7 @@ func TestIngestDeadLetterStore_RecordAndList(t *testing.T) {
 
 	require.NoError(t, store.RecordDeadLetter(ctx, sighting, key, "amount mismatch"))
 
-	letters, err := store.ListDeadLetters(ctx, 10)
+	letters, _, err := store.ListDeadLetters(ctx, "", 10)
 	require.NoError(t, err)
 	require.NotEmpty(t, letters)
 	assert.Equal(t, key, letters[0].IdempotencyKey)
@@ -61,7 +61,7 @@ func TestIngestDeadLetterStore_RecordDeadLetter_IdempotentOnKey(t *testing.T) {
 	require.NoError(t, store.RecordDeadLetter(ctx, sighting, key, "amount mismatch"))
 	require.NoError(t, store.RecordDeadLetter(ctx, sighting, key, "amount mismatch"))
 
-	letters, err := store.ListDeadLetters(ctx, 1000)
+	letters, _, err := store.ListDeadLetters(ctx, "", 1000)
 	require.NoError(t, err)
 	count := 0
 	for _, l := range letters {

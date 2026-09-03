@@ -28,6 +28,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 15. [A chain's sweep collection has stopped moving](#15-a-chains-sweep-collection-has-stopped-moving)
 16. [P5 signing key rotation](#16-p5-signing-key-rotation)
 17. [A booking's event was claimed by the wrong journal](#17-a-bookings-event-was-claimed-by-the-wrong-journal)
+18. [A deposit was dead-lettered](#18-a-deposit-was-dead-lettered)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -45,16 +46,41 @@ Prometheus counter or the `POST /api/v1/reconcile` endpoint returning
 ### Confirm it's real
 
 ```bash
-# Run the full reconcile suite once more to make sure it's not a flake
+# The global accounting equation only -- shape: {balanced, gap, details}
 curl -X POST http://ledger/api/v1/reconcile | jq .
 
-# Or run the full check suite at once via the service:
-ledger-cli reconcile --full
+# The full check suite -- shape: {overall_passed, full_coverage, skipped_checks, checks[]}
+ledger-cli reconcile --full --pubkey-hex <hex> --key-id <id>
 ```
 
-A real failure includes a `details[]` array naming the dimension(s) that drift.
-Each detail has `expected`, `actual`, and `drift` — do not panic at a
-sub-cent drift; check the `drift` magnitude first.
+⚠️ **These two return DIFFERENT shapes**, and everything below about
+`checks[]` only applies to the second (`docs/api.md` documents the same split
+for `POST /reconcile` vs `POST /reconcile/full`). `POST /api/v1/reconcile`
+answers `{balanced, gap, details}` and has no `checks[]` at all.
+
+A real failure of the first includes a `details[]` array naming the
+dimension(s) that drift. Each detail has `expected`, `actual`, and `drift` —
+do not panic at a sub-cent drift; check the `drift` magnitude first.
+
+**Read `skipped_checks` before you read `overall_passed`.** A check that was
+not RUN in this deployment does not appear in `checks[]` at all -- it is
+named in `skipped_checks`, and `full_coverage` is false. So
+`overall_passed: true` with a non-empty `skipped_checks` is not a clean bill
+of health, it is a clean bill of health *for the checks that ran*:
+
+```bash
+ledger-cli reconcile --full --pubkey-hex <hex> --key-id <id> \
+  | jq -e '.overall_passed == true and .full_coverage == true and (.skipped_checks // [] | length) == 0'
+```
+
+The common cause of a non-empty `skipped_checks` is exactly the flags above:
+`unauthorized_journals` (I-32) is the ledger's only forgery detector, and it
+cannot run without a `core.AuthVerifier`, which `ledger-cli` only wires when
+given `--pubkey-hex` and `--key-id`. **A skipped check is also invisible to
+`ledger_reconcile_check_results_total`** -- the series does not exist rather
+than reporting a failure -- so a Prometheus rule written as
+`... == 0` will not fire for it. Alert with `absent(...)` too, or assert on
+`skipped_checks` from the report as above.
 
 ### Investigate
 
@@ -80,7 +106,7 @@ proof of the count):
 | `journal_dr_cr` | genuine per-journal, per-currency balance (M1/I-24) — catches two journals that are each individually unbalanced but net to zero in aggregate, which `global_dr_cr_equality` structurally cannot see |
 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
-| `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32); skipped (`Complete=false`) unless a `core.AuthVerifier` is wired via `SetAuthCheck`; never-signed journals are a coverage gap, not tamper evidence, so they're skipped rather than flagged |
+| `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32). Without a `core.AuthVerifier` (wired via `SetAuthCheck`, or `ledger-cli reconcile --full --pubkey-hex/--key-id`) this check **does not appear in `checks[]` at all** -- it is named in `skipped_checks` and `full_coverage` goes false. Never-signed journals are a coverage gap, not tamper evidence, so they are skipped rather than flagged |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -177,9 +203,11 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   dimension, identify every entry the forged journal touched, and check
   `postgres.VerifiedBalanceStore.VerifiedBalance` / the `RequireVerifiedBalance`
   `Reserve` gate (I-32) before paying anything out of that dimension. If this
-  check reports `Complete=false` instead, it means no `core.AuthVerifier` was
-  wired via `SetAuthCheck` for this run — that is a coverage gap in the
-  reconcile job's own configuration, not a finding about the ledger.
+  check is **missing from `checks[]`** (and named in `skipped_checks`), it
+  means no `core.AuthVerifier` was wired via `SetAuthCheck` for this run —
+  that is a coverage gap in the reconcile job's own configuration, not a
+  finding about the ledger, and it is not something you will find by looking
+  for a failed entry inside `checks[]`. Do not read the absence as a pass.
 
 ### `reservation discharge claim does not verify` (Warn log, I-65)
 
@@ -570,12 +598,23 @@ ledger-cli trace --booking-uid <booking-uid>
 
 Or:
 
+Or, in SQL. Every identifier this system hands you -- alerts, `ledger-cli`,
+`GET /deposits/reviews`, the dead-letter queue -- is a **uid**; the numeric
+`id` is internal and never crosses a boundary (api-contract.md §3), so these
+key on uid and do the join for you:
+
 ```sql
-SELECT * FROM bookings WHERE id = 12345;
-SELECT * FROM events  WHERE booking_id = 12345 ORDER BY occurred_at;
+SELECT * FROM bookings WHERE uid = '<booking-uid>';
+
+SELECT e.* FROM events e
+ JOIN bookings b ON b.id = e.booking_id
+ WHERE b.uid = '<booking-uid>'
+ ORDER BY e.occurred_at;
+
 SELECT j.* FROM journals j
- JOIN events e ON e.journal_id = j.id
- WHERE e.booking_id = 12345
+ JOIN events e   ON e.journal_id = j.id
+ JOIN bookings b ON b.id = e.booking_id
+ WHERE b.uid = '<booking-uid>'
  ORDER BY j.id;
 ```
 
@@ -593,21 +632,106 @@ LIMIT 50;
 
 ### Compute live balance for an account
 
+This is the hand-recompute [§1](#1-reconciliation-failed) sends you to when
+`checkpoint_balance` / `system_rollup_integrity` / `snapshot_integrity` fail
+— the case where a materialized cache disagrees with `journal_entries` and
+you need the ground truth, not another read of the cache:
+
 ```sql
 SELECT
   COALESCE(cp.balance, 0)
-  + COALESCE(SUM(CASE WHEN je.entry_type='debit'  THEN je.amount END), 0)
-  - COALESCE(SUM(CASE WHEN je.entry_type='credit' THEN je.amount END), 0) AS balance
-FROM (SELECT 0::numeric AS balance, 0::bigint AS last_entry_id) seed
+  + COALESCE((
+      SELECT SUM(CASE WHEN je.entry_type = 'debit' THEN je.amount ELSE -je.amount END)
+      FROM journal_entries je
+      WHERE je.account_holder = k.holder
+        AND je.currency_id = k.currency
+        AND je.classification_id = k.class
+        AND je.id > COALESCE(cp.last_entry_id, 0)
+    ), 0) AS balance
+FROM (SELECT 42::bigint AS holder, 1::bigint AS currency, 1::bigint AS class) k
 LEFT JOIN balance_checkpoints cp
-  ON cp.account_holder = 42 AND cp.currency_id = 1 AND cp.classification_id = 1
-LEFT JOIN journal_entries je
-  ON je.account_holder = 42 AND je.currency_id = 1 AND je.classification_id = 1
- AND je.id > COALESCE(cp.last_entry_id, 0);
+  ON cp.account_holder = k.holder
+ AND cp.currency_id = k.currency
+ AND cp.classification_id = k.class;
 ```
 
-For debit-normal classifications add `(debit-credit)`; for credit-normal,
-flip the sign at the end. Check `core.NormalSide` of the classification.
+The result is the **debit-normal** balance (`debit - credit`). For a
+credit-normal classification, negate it. Check `core.NormalSide` of the
+classification — `ledger-cli classifications` prints it.
+
+> This query used to mix `COALESCE(cp.balance, 0)` with `SUM(...)` and no
+> `GROUP BY`, so it did not run at all (`ERROR: column "cp.balance" must
+> appear in the GROUP BY clause`). It was the tool §1 named for a suspected
+> credential leak, which is the worst possible moment to find that out.
+
+### The onchain tables (deposits the ledger did not book, and why)
+
+Five tables carry the pull path's own state. Every SQL block below was run
+against a migrated database.
+
+**Dead-lettered deposits that still have no booking** — a transfer that IS on
+chain, to a registered address, that this ledger refused and then scanned
+past. See [§18](#18-a-deposit-was-dead-lettered) for what to do about one;
+`ledger-cli dead-letters list --unbooked-only` is the same question with the
+payload decoded.
+
+```sql
+SELECT dl.uid, dl.chain_id, dl.tx_hash, dl.txlog_seq, dl.reason, dl.created_at,
+       dl.payload->>'amount' AS amount, dl.payload->>'to' AS deposit_address
+FROM ingest_dead_letters dl
+WHERE NOT EXISTS (SELECT 1 FROM bookings b WHERE b.idempotency_key = dl.idempotency_key)
+ORDER BY dl.created_at
+LIMIT 50;
+```
+
+**Open deposit chain anomalies** — deep reorgs and wrongly-failed deposits
+awaiting an operator's close-out ([§12](#12-deep-reorg-on-a-confirmed-crypto-deposit)).
+`resolved_at` at the Unix epoch means OPEN (this schema has no NULLs):
+
+```sql
+SELECT r.kind, r.booking_uid, r.chain_id, r.tx_hash, r.journal_uid,
+       r.detected_at, r.last_seen_at,
+       b.status, b.amount, b.account_holder
+FROM deposit_reorgs r
+JOIN bookings b ON b.uid = r.booking_uid
+WHERE r.resolved_at <= 'epoch'
+ORDER BY r.detected_at
+LIMIT 50;
+```
+
+**Forward-scan cursors** — the single value deciding which chain blocks this
+ledger can still see. `last_scanned_block` not moving between two runs of
+this query is the same fact `ledger_chain_cursor_advance_age_seconds`
+reports, and it is what a watcher stall looks like in the database:
+
+```sql
+SELECT chain_id, last_scanned_block, updated_at, now() - updated_at AS since_write
+FROM chain_cursors ORDER BY chain_id;
+```
+
+**Registration rescans still owed** — the "deposit sent before the address
+was registered" backfill (`ledger_registration_rescan_failed_total`):
+
+```sql
+SELECT uid, chain_id, address, next_block, status, attempts, available_at, last_error
+FROM registration_rescans
+WHERE status <> 'completed'
+ORDER BY available_at
+LIMIT 50;
+```
+
+**In-flight sweeps** — see [§15](#15-a-chains-sweep-collection-has-stopped-moving);
+`pending` is included deliberately, because that is the state an orphaned
+broadcast is stuck in:
+
+```sql
+SELECT uid, metadata->>'chain_id' AS chain_id, metadata->>'token' AS token,
+       metadata->>'nonce' AS nonce, status, channel_ref, updated_at
+FROM bookings
+WHERE classification_id = (SELECT id FROM classifications WHERE code = 'sweep')
+  AND status IN ('pending', 'sent')
+ORDER BY updated_at ASC;
+```
 
 ### List all reversal chains
 
@@ -1381,9 +1505,17 @@ storage is cheaper than a hole in the audit trail.
 
 ## 12. Deep reorg on a confirmed crypto deposit
 
-**Alert source**: `deposit.reorged` event (emitted by the watcher's periodic
-recheck of recently-confirmed deposit bookings against the canonical chain —
-docs/plans/2026-07-11-crypto-deposit-sweep-design.md §6).
+**Alert source**: `ledger_deposit_reorg_detected_total{chain_id}` (emitted by
+the watcher's periodic recheck of recently-confirmed deposit bookings against
+the canonical chain — docs/plans/2026-07-11-crypto-deposit-sweep-design.md
+§6), plus the `service: onchain: deep reorg detected` log line. There is **no
+`deposit.reorged` event**: this section used to name one, and nothing in the
+library has ever emitted it.
+
+**Which booking**: `ledger-cli reorgs list`. The counter tells you a reorg
+happened; the anomaly row tells you which deposit, which journal, when it was
+first seen and whether it is still true — and it outlives the recheck window
+that stops re-examining the booking (I-63).
 
 **Severity**: P1 — a confirmed deposit's underlying transaction has
 disappeared from the chain. If unresolved, the ledger credits a user for
@@ -1398,10 +1530,19 @@ add-on) governs what happens next. **`manual` is the default.**
    second, independent RPC provider or a public block explorer for the
    chain. A single lagging/misbehaving node reporting "not found" is not a
    reorg — do not act on one source alone.
+   ```bash
+   # The queue, oldest first: kind, booking_uid, chain_id, tx_hash,
+   # journal_uid, detected_at, last_seen_at.
+   ledger-cli reorgs list
+   ```
    ```sql
-   -- Find the affected booking + its journal.
-   SELECT uid, account_holder, currency_id, amount, status, channel_ref, journal_id
-   FROM bookings WHERE uid = '<booking_uid>';
+   -- Or the same anomaly joined to the booking it names.
+   SELECT r.kind, r.tx_hash, r.detected_at, r.last_seen_at,
+          b.uid, b.account_holder, b.currency_id, b.amount, b.status, b.channel_ref
+   FROM deposit_reorgs r
+   JOIN bookings b ON b.uid = r.booking_uid
+   WHERE r.resolved_at <= 'epoch'
+   ORDER BY r.detected_at;
    ```
 2. **Confirm the transaction is genuinely gone** (not just re-mined at a
    different block height — re-orgs commonly re-include a transaction one or
@@ -1419,16 +1560,42 @@ add-on) governs what happens next. **`manual` is the default.**
 4. **If the transaction reappears** (re-mined, same effect) before you've
    posted a reversal: no action needed, this was a false alarm — file it as
    one for tuning the recheck window/confirmation threshold if it recurs.
-5. File the incident per the after-action checklist below regardless of
+5. **Close the anomaly out.** Nothing else will: the transaction is still
+   off chain after you reverse it, so the recheck loop keeps finding the
+   anomaly true and keeps re-alerting — every tick, forever — until an
+   operator says what was done about it.
+   ```bash
+   ledger-cli reorgs resolve --booking-uid <uid> --kind deep_reorg \
+     --note "reversed journal <uid>, verified absent on <explorer/second RPC>"
+   ```
+   `--note` is required: it is the only record of why an alert stopped
+   firing, and "we looked at it" must be distinguishable from "somebody
+   silenced it". A second `resolve` on the same anomaly affects zero rows
+   and reports not-found rather than overwriting the first operator's note.
+6. File the incident per the after-action checklist below regardless of
    outcome — a `manual`-policy deep reorg alert firing at all is worth
    understanding (chain instability, RPC provider issue, or a confirmation
    threshold set too low for that chain).
 
+**The other kind on that queue**: `shallow_reorg_failed` is a deposit this
+watcher itself failed (its transaction disappeared before reaching the
+confirmation threshold) whose transaction is **back on chain**. `failed` is
+terminal and the booking's idempotency key absorbs every future sighting of
+the same transfer, so the ledger cannot re-credit it — only a human can make
+the holder whole. It is the loudest case in the subsystem
+(`deposit.failed_tx_returned`) and it has the same close-out:
+`ledger-cli reorgs resolve --kind shallow_reorg_failed`.
+
 ### `auto_reverse` — already handled, verify it landed correctly
 
 If the consumer configured `ReorgPolicyAutoReverse`, the watcher posts the
-reversal journal automatically on detection — no on-call action needed to
-*initiate* the correction. On-call's job is to **verify** the automatic
+reversal journal automatically — **after** `WithDeepReorgMisses` consecutive
+observations that the transaction is not on chain (default 3, the same
+evidence bar the shallow path uses; I-69). Detection itself is not delayed:
+the anomaly row is opened and the counter fires on the FIRST observation, so
+what you see first is `auto-reverse withheld: waiting for corroboration`, and
+the reversal follows only if the chain keeps saying the same thing. No
+on-call action is needed to *initiate* the correction. On-call's job is to **verify** the automatic
 reversal was itself correct (not a false positive from a flaky RPC node):
 
 1. Check the reversal journal exists and references the right original
@@ -1443,7 +1610,9 @@ reversal was itself correct (not a false positive from a flaky RPC node):
 `auto_reverse` trades a manual verification step for automatic remediation
 speed. A false positive (a lagging node, a brief RPC provider outage, a
 too-short recheck window) auto-debits a user with no human in the loop before
-the money moves. Selecting `auto_reverse` is an explicit risk acceptance by
+the money moves — which is why it now takes `WithDeepReorgMisses` consecutive
+observations rather than one, and why a deployment that wants a higher bar
+should raise it. Selecting `auto_reverse` is an explicit risk acceptance by
 whoever configures the consumer's `ReorgPolicy` — it is not a "safer"
 default, and `manual` remains the default for exactly this reason (design
 doc §6).
@@ -1473,8 +1642,9 @@ doc §6).
 **Alert source**: `deposit.review_required` (emitted by the deposit path's M3
 compensating controls when a deposit clears its confirmation threshold but
 must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-design.md
-§9). Three possible reasons, recorded on the alert and on the booking's
-`metadata.review_reason`:
+§9). Four reasons appear on a booking's `metadata.review_reason`; a fifth
+value exists on the METRIC only and is not a booking status at all (see
+below):
 
 - `over_ceiling` — the amount exceeds the chain/token's configured
   `AutoCreditCeiling`.
@@ -1489,6 +1659,36 @@ must not yet be auto-credited — docs/plans/2026-07-11-crypto-deposit-sweep-des
   legitimate, sitting here only because your second RPC provider has been
   down. Treat it as "go check the `DepositConfirmer` backing service", then
   resolve the same way as any other review once it is confirmed genuine.
+- `token_unconfigured` (G-M6) — the booking's token is no longer in the
+  chain's `CreditTokens` by the time it reached its threshold (a config
+  rollback, a contract migration). Its ceilings are then unknowable, and
+  "unknowable" must not read as "unbounded". The deposit is real; decide
+  whether the token belongs back in the allowlist before approving.
+- `onchain_unverified` (money-out C-2) — **the chain does not corroborate
+  this booking.** Before crediting, the recheck loop re-reads the block the
+  booking names and requires a log carrying its tx hash, log position, token,
+  amount and a recipient registered to its holder; this reason means that
+  re-read failed `WithConfirmationEvidenceMisses` times in a row (default 3).
+  Treat it as a **P1 security event, not a deposit question**: the ordinary
+  causes of a real deposit failing this (a node that cannot see its own
+  recent block) clear themselves within a tick or two, so a booking that
+  reaches here either references a transaction that does not exist or claims
+  an amount/token/recipient the log does not carry. Verify the transaction
+  independently and, if there is no such transfer, treat the row as forged —
+  a booking `INSERT` is exactly the shape a leaked `ledger_app` credential
+  produces (see `docs/audits/2026-09-03-independent-review/money-out.md`
+  C-2), and approving it credits the attacker.
+
+And one metric-only value, which is **not** a booking status and will never
+appear in the review queue:
+
+- `shallow_reorg_returned` (G-M1) — a deposit this watcher automatically
+  FAILED as a shallow reorg turned out to be on chain after all. The booking
+  is terminal and its idempotency key absorbs every future sighting, so the
+  ledger cannot credit it; only a human can make the holder whole. Working it
+  through `GET /deposits/reviews` will show an empty queue — go to
+  [§12](#12-deep-reorg-on-a-confirmed-crypto-deposit)'s anomaly queue
+  (`ledger-cli reorgs list`, kind `shallow_reorg_failed`) instead.
 
 **Severity**: P2 by default — the deposit is safely parked, no ledger effect
 has happened yet (invariant I-21: a `review` booking's `journal_uid` is
@@ -1574,16 +1774,22 @@ control being wrong — investigate the primary source before touching
 | `ledger_sweep_unattributed_total{chain_id}` | A sweep batch collected a token not in that chain's `CreditTokens` allowlist -- value moved to the factory's treasury with **no corresponding user ledger balance**. | Solvency-adjacent: identify the token and amount from the sweep transaction on-chain, decide whether to add it to `CreditTokens` retroactively (crediting the affected users) or treat it as an operational recovery (capital adjustment journal, `presets/capital.go`). Do not ignore -- this is unattributed custody, not free money. |
 | `ledger_deposit_reorg_detected_total{chain_id}` | A previously-confirmed deposit's transaction has disappeared from the canonical chain (deep reorg). | Go straight to [§12](#12-deep-reorg-on-a-confirmed-crypto-deposit) -- this metric is that section's alert source. |
 | `ledger_registration_rescan_failed_total{chain_id}` | `EnsureDepositAddress`'s background historical rescan (catching deposits sent before an address was registered) failed and did not retry to completion. | The "deposit sent before registration" gap stays open for that address/chain until a retry succeeds. Check watcher logs for the specific address/chain; a persistently failing rescan on one chain usually means an RPC provider issue on that chain specifically, not a code bug. |
+| `ledger_deposit_ingest_dead_lettered_total{chain_id, reason}` | A transfer that IS on chain, to a registered address, in a whitelisted token, that this ledger decided **never to book** — after which the forward scan moved past it. No booking exists, so nothing else in the system will ever revisit it. | Go straight to [§18](#18-a-deposit-was-dead-lettered). `reason` is bounded: `payload_conflict`, `currency_unregistered`, `precision_exceeded`, `account_unavailable`, `period_closed`, `invalid_input`, `watcher_wedged`, `unclassified` — §18 has one line of triage each. |
+| `ledger_sweep_orphaned_broadcast_total{chain_id}` | A sweep booking is `pending` at a nonce the signer has already spent: a broadcast whose transaction hash was lost before it could be persisted. The sweep path refuses to rebroadcast (it cannot tell "landed" from "still pending" without the hash). | This is the **only** condition that blocks a (chain, token)'s collection indefinitely — every later tick fails identically until a human acts. [§15](#15-a-chains-sweep-collection-has-stopped-moving)'s "booking stuck in pending at a spent nonce" has the recovery. |
+| `ledger_deposit_review_required_total{chain_id, reason="onchain_unverified"}` | The chain does not corroborate a booking the recheck loop was about to credit (money-out C-2). | Treat as a security event, not a deposit question — [§13](#13-large--unreconciled-deposit-parked-in-review) explains why and what to check. Other `reason` values are ordinary review traffic; see the backlog table below. |
 
 ### Backlog / degradation gauges and counters (page on sustained growth, not a single blip)
 
 | Metric | Means | Action |
 |---|---|---|
-| `ledger_chain_cursor_lag_blocks{chain_id}` | Blocks behind the chain tip the deposit watcher's cursor currently is. | A transient bump (RPC hiccup, a slightly slow block) is normal. A monotonically climbing lag means the watcher loop (`Onchain.scanChainOnce`) is stuck or too slow for that chain's block rate -- check watcher logs for repeated errors; same shape of triage as [§3](#3-rollup-queue-is-backlogged)'s worker-liveness check, different loop. |
+| `ledger_chain_cursor_lag_blocks{chain_id}` | Blocks behind the chain tip the deposit watcher's cursor currently is. | **Not a liveness signal — see the row below before writing an alert on it.** It can only be computed once `LatestBlock` has answered, so an RPC outage, a database outage or a rejected `eth_getLogs` leaves it FROZEN at its last reading rather than climbing. When it *does* climb, the meaning is real: the watcher is seeing blocks but its cursor is being held still (usually an ingest failure it refuses to scan past, I-52), or it is too slow for that chain's block rate. |
+| `ledger_chain_cursor_advance_age_seconds{chain_id}` | Seconds since this process last observed that chain's cursor MOVE. Reported on every watcher tick, including the ticks that fail before the tip is known. | This is the cursor-liveness signal. On a healthy chain it stays near the watch interval (15s by default) whatever the block rate, because the cursor advances to the safe tip every tick. Climbing without bound = the scan is failing, or the chain's head has stopped moving as far as this deployment can see; both are on-call events and neither shows in the lag gauge. ⚠️ It is a PER-PROCESS reading: a replica that keeps losing the per-chain advisory lock never scans, so alert on the **minimum across replicas**, not on any single series. |
+| `ledger_dead_letters_unbooked` / `ledger_dead_letter_oldest_age_seconds` | The dead-letter queue's depth and the age of its oldest still-unbooked row, sampled once per deep-reorg recheck tick. | Self-clearing: a row whose deposit was booked in the end (replayed, or the cause self-healed) leaves the gauge on its own, so a non-zero depth means work that is still owed. Depth alone is not enough — a depth of 3 seconds old is an inbox, the same depth a week old is a forgotten queue. [§18](#18-a-deposit-was-dead-lettered). |
+| `ledger_job_tick_completed_total{job}` / `ledger_job_tick_failed_total{job}` / `ledger_job_tick_skipped_locked_total{job}` / `ledger_job_panicked_total{job}` | Per-tick outcome of every background job, this library's generic worker loops included. `increase(ledger_job_tick_completed_total{job="..."}[window]) == 0` is the stalled-job alert; `skipped_locked` is what distinguishes "another replica is doing the work" from "nobody is". | The onchain jobs and their exact labels: `onchain_watch:<chain_id>` (forward scan, per chain), `sweep:<chain_id>` (collection, per chain — the prefix is `sweep:` and not `onchain_sweep:` because that string is also the advisory-lock key, and renaming it would let two releases sweep the same nonce during a rolling deploy), `onchain_recheck` (drives pending/confirming deposits to confirmed — **the loop that actually credits pull-path deposits**), `onchain_reorg_recheck` (the only reorg detector; also samples the dead-letter backlog), `onchain_registration_rescan`. A panicking tick counts as both `panicked` and `failed`. |
 | `ledger_rollup_items_failed_total` | A rollup queue item's claim was released after a failed processing attempt (`RollupService.processItem` returned an error). | Check `RollupItemFailed`-adjacent logs (`"service: rollup: process item failed"`) for the specific `holder`/`currency_id`/`classification_id` and the underlying error. That dimension's checkpoint stops advancing until a retry succeeds -- balance reads stay correct via the delta path meanwhile ([§3](#3-rollup-queue-is-backlogged)'s "critical fact"), so this is urgency-by-volume, not an immediate correctness incident. |
 | `ledger_template_failed_total{template, reason}` | An `entry_templates` execution failed (`TemplateFailed`). | The triggering business operation did not get its accounting posted. Cross-reference `reason` against [§7](#7-journal-posting-failures)'s table (same reason vocabulary) and find the caller that invoked the template. |
 | `ledger_sweep_address_unreadable_total{chain_id}` | `ChainScanner.ScanBalances` could not read one or more deposit addresses' on-chain balance this sweep round. | Those addresses are excluded from that round's sweep-eligible set (not defaulted to zero) and simply retry next cycle. A single occurrence is an RPC hiccup; a sustained nonzero rate means that chain's RPC provider is degraded -- check node/provider health for that chain. |
-| `ledger_deposit_review_required_total{chain_id, reason}` | A deposit reached its confirmation threshold but was routed to human review instead of auto-crediting (M3 compensating controls, design doc §9). `reason` is `over_ceiling` or `reconcile_mismatch`. | Go straight to [§13](#13-large--unreconciled-deposit-parked-in-review) -- this metric is that section's alert source. |
+| `ledger_deposit_review_required_total{chain_id, reason}` | A deposit reached its confirmation threshold but was routed to human review instead of auto-crediting (M3 compensating controls, design doc §9). `reason` is one of `over_ceiling`, `reconcile_mismatch`, `reconcile_unavailable`, `token_unconfigured`, `onchain_unverified` — plus `shallow_reorg_returned`, which is NOT a booking status and will not appear in the review queue. | Go straight to [§13](#13-large--unreconciled-deposit-parked-in-review) -- this metric is that section's alert source, and it lists what each reason means. `onchain_unverified` is in the payment-affecting table above instead: it is a security signal, not review traffic. |
 
 ### `balance_drift_units{class, currency_uid}` -- read this together with `reconcile_gap_units`
 
@@ -1634,10 +1840,13 @@ truth.
 
 ## 15. A chain's sweep collection has stopped moving
 
-**Alert source**: no dedicated metric exists for "this specific nonce is
-stuck" (a documented gap, see [§14](#14-onchain-money-path-metrics----this-library-ships-none-of-the-alerting)) --
-this section is triggered by noticing `ledger_chain_cursor_lag_blocks` is
-fine (deposits are still being seen) but no `sweep`-classification bookings
+**Alert source**: `ledger_sweep_orphaned_broadcast_total{chain_id}` for the
+one variant that never self-heals (see "booking stuck in pending at a spent
+nonce" below), and `ledger_job_tick_failed_total{job="sweep:<chain_id>"}` for
+every other failing sweep tick. There is still no metric for "this specific
+nonce is taking a long time", so the ordinary version of this section is
+triggered by noticing the watcher is healthy (deposits are still being seen)
+but no `sweep`-classification bookings
 for a chain/token have reached `confirmed` in longer than expected, or by a
 user/support report that a chain's treasury balance has stopped growing
 despite deposits continuing to arrive at CREATE2 addresses.
@@ -1713,18 +1922,88 @@ work, not done in this pass.
   genuinely pending transaction. No manual intervention needed in the
   common case.
 - If it has exceeded `SweepPolicy`'s bump cap and transitioned to `failed`:
-  the nonce is freed for later sweeps to proceed (see
-  `service/onchain.go`'s `reviveFailedSweep`/`findFailedSweep` comments),
-  but THIS batch's funds are still sitting at their deposit addresses,
-  uncollected. Investigate why gas stayed elevated long enough to exhaust
-  the retry budget (a sustained network-wide gas spike, not a bug), and
-  either raise `SweepPolicy.GasCeiling` for that chain/token if it was set
-  too conservatively, or manually trigger a fresh sweep once gas normalizes.
+  **the nonce is not necessarily freed.** `failed` means the transaction was
+  broadcast repeatedly at that nonce and never observed included — from the
+  signer EOA's perspective that slot is still "next", and `NextNonce`
+  (`PendingNonceAt`) will keep reporting it until the stuck transaction
+  lands, the node's mempool drops it, or somebody replaces it with a
+  self-paying transaction at the same nonce. The library's own revival path
+  (`reviveFailedSweep`) re-requests a fresh nonce precisely because it cannot
+  assume otherwise. So: check the nonce sequence first (last bullet below);
+  if an earlier unconfirmed nonce is still sitting there, adjusting
+  `GasCeiling` changes nothing, because EVM nonces are strictly sequential
+  and everything after it is blocked. Once the sequence is clean, investigate
+  why gas stayed elevated long enough to exhaust the retry budget (a
+  sustained network-wide gas spike, not a bug) and either raise
+  `SweepPolicy.GasCeiling` for that chain/token if it was set too
+  conservatively, or wait for gas to normalize — the next tick revives the
+  failed booking on a fresh nonce by itself. Either way THIS batch's funds
+  are still sitting at their deposit addresses, uncollected, not lost.
 - If a chain's sweeps have stopped ENTIRELY (not just one stuck nonce): check
   for a bad nonce anywhere in the sequence first (`NextNonce` uses
   `PendingNonceAt`, so any earlier unconfirmed nonce for the signing key --
   including a manually-sent transaction outside this library -- blocks
   everything after it).
+
+### A booking is stuck in `pending` at a spent nonce (`sweep.orphaned_broadcast`)
+
+**Signal**: `ledger_sweep_orphaned_broadcast_total{chain_id}` nonzero, an
+Error log line `service: onchain: sweep.orphaned_broadcast`, and every
+subsequent tick for that (chain, token) failing with *"booking … is pending
+at nonce N but the signer's pending nonce is already M -- the earlier
+broadcast's tx hash was lost"*.
+
+**What happened**: a tick broadcast the batch successfully and then failed
+before it could persist the transaction hash (`BatchSweep` succeeded ->
+`Transition(sent)` failed). The booking is left in `pending` with an empty
+`channel_ref`, while the nonce it holds has been consumed on chain. The
+sweep path refuses to rebroadcast, because without the hash it cannot tell
+whether that first transaction landed (rebroadcasting would then get "nonce
+too low" forever) or is still pending (the replacement would go out
+underpriced). This fails closed, which is correct, and it is the only
+condition in the subsystem that blocks an outbound channel **indefinitely**:
+`findInFlightSweep` sees the booking every tick and returns the same
+conflict.
+
+**Recover it — the tx hash is findable, because the nonce is on the row**:
+
+1. Identify the booking and its nonce:
+   ```sql
+   SELECT uid, metadata->>'chain_id' AS chain_id, metadata->>'token' AS token,
+          metadata->>'nonce' AS nonce, metadata->>'addresses' AS addresses,
+          status, channel_ref, updated_at
+   FROM bookings
+   WHERE classification_id = (SELECT id FROM classifications WHERE code = 'sweep')
+     AND status = 'pending'
+   ORDER BY updated_at ASC;
+   ```
+2. Look that nonce up on a block explorer **by the signer EOA + nonce** (not
+   by hash — the hash is what was lost). Every explorer indexes an account's
+   transactions by nonce; this is the one and only way to recover the hash.
+3. **If a transaction exists at that nonce** (landed, or still in the
+   mempool), hand the booking back its hash by transitioning it to `sent`:
+   ```
+   POST /api/v1/bookings/{uid}/transition
+   { "to_status": "sent", "channel_ref": "<recovered tx hash>",
+     "source": "onchain", "idempotency_key": "sweep-recover-<uid>-<tx hash>" }
+   ```
+   From there the ordinary loop takes over with no further manual steps: the
+   next tick calls `TxIncluded` on that hash and either confirms the booking
+   (if it landed) or gas-bumps it (if it is still pending).
+4. **If the nonce was consumed by something that is not our sweep** (a
+   manually-sent transaction from the same EOA — which should not happen, the
+   signer is single-deployment by design), the batch was never broadcast.
+   Move the booking out of the way so the revival path can re-dispatch it at
+   a fresh nonce: transition it to `sent` with the *consuming* transaction's
+   hash as `channel_ref` (the lifecycle only allows `pending -> sent`), then
+   let it exhaust its bump budget to `failed`, or transition it to `failed`
+   directly with the same shape of call. The next sweep tick finds the failed
+   booking and revives it on a fresh nonce (`reviveFailedSweep`) — same
+   booking, same audit trail.
+5. Whatever the outcome, note the incident: an orphaned broadcast means a
+   broadcast succeeded while the database write after it did not, which is
+   worth understanding on its own (a connection pool exhausted mid-sweep, a
+   database failover, a process kill between the two).
 
 ---
 
@@ -1837,6 +2116,92 @@ the normal path; the real journal can now claim the event.
   rows for `events` and `bookings`. Include them in the postmortem.
 - Find the caller. A legitimate service that claims events it does not own is
   the actual defect; the unlink only clears the symptom.
+
+---
+
+## 18. A deposit was dead-lettered
+
+**Alert source**: `ledger_deposit_ingest_dead_lettered_total{chain_id, reason}`
+— page on any nonzero rate. Backlog:
+`ledger_dead_letters_unbooked` / `ledger_dead_letter_oldest_age_seconds`.
+
+**Severity**: P1. A dead letter means a transfer that **is on chain**, to an
+address this ledger issued, in a token this ledger credits, which the
+ingestion path refused — after which the forward scan moved past it. Nothing
+will revisit it on its own: no booking was created, so no recheck loop can
+see it; the cursor is past its block, so no forward scan will; registration
+rescans only cover newly registered addresses. Somebody's money arrived and
+the ledger decided not to know about it.
+
+Skipping is nevertheless the right behaviour for a deterministic rejection —
+holding the cursor for one unbookable sighting would turn it into "this chain
+ingests nothing, ever again" (I-52) — which is why the row, this section and
+the replay exist.
+
+### Confirm and triage
+
+```bash
+# The queue, newest first, with the sighting decoded (amount, token,
+# recipient) and `booked` telling you whether it has since been credited.
+ledger-cli dead-letters list --unbooked-only --limit 50
+
+# Everything recorded about one of them, including the exact payload a
+# replay would re-drive.
+ledger-cli dead-letters show --uid <dead-letter-uid>
+```
+
+`booked: true` means the deposit was credited in the end — by an earlier
+replay, or because the cause healed itself — and the row is history, not
+work. That answer is recomputed from `bookings` on every read; nothing has to
+remember to resolve anything.
+
+The metric's `reason` label is a bounded classification of *why*, and each
+one has a different fix:
+
+| `reason` | What it means | What fixes it |
+|---|---|---|
+| `currency_unregistered` | The token's configured `CurrencyCode` names no currency in this ledger. | Create the currency (`POST /api/v1/currencies`), then replay. Configuration, fully recoverable. |
+| `precision_exceeded` | The amount has more decimal places than the currency's `exponent` can represent. | Normally impossible after startup — `Onchain.Run` refuses to start when a token's `Decimals` exceeds its currency's `exponent` (I-69). Reaching it means the currency's exponent changed under a running deployment, or `Run()` was never called. Fix the exponent mismatch, then replay. |
+| `payload_conflict` | An existing booking holds this sighting's idempotency key with a **different payload**. | A normalization bug on the producing side, not a chain event (design doc §6). Compare the dead letter's payload against the existing booking (`ledger-cli trace`); do NOT replay until you know which of the two is right. |
+| `account_unavailable` / `period_closed` | The holder's account is frozen/closed, or the accounting period is closed. | Usually self-healing noise: the booking is created before the journal is attempted, so these normally surface on a booking the recheck loop keeps retrying — expect `booked: true` on the row shortly. If not, unfreeze / reopen, then replay. |
+| `watcher_wedged` | Not a verdict about this sighting at all: the chain's scan has failed for several consecutive ticks and this sighting is one of the ones in the way. **The cursor has NOT moved past it.** | Fix the underlying failure (the watcher logs name it); the sighting is re-ingested by itself. Nothing to replay. |
+| `invalid_input` / `unclassified` | The sighting is malformed, or the error matched no known sentinel. | Read the row's `reason` text — it is the raw error. `unclassified` is worth reporting: the classifier defaults unknown errors to *retryable*, so reaching this label means something else marked it permanent. |
+
+### Replay one, after fixing the cause
+
+```
+POST /api/v1/deposits/dead-letters/{uid}/replay      # capability: deposit_review
+```
+
+or, in library mode, `service.Onchain.ReplayDeadLetter(ctx, uid)`.
+
+This re-drives the recorded sighting through the **real** ingestion path —
+the same `IngestDeposit` a watcher sighting takes, review gate included — so
+it is idempotent (a sighting already booked resolves to the same booking and
+posts nothing new) and it cannot be used to credit something the ordinary
+path would have refused.
+
+> **Why this is not a `ledger-cli` command.** Re-driving a sighting needs the
+> chain set: a token's currency code and its auto-credit ceilings are Go
+> configuration in your composition root, not rows in the database. A tool
+> holding only `DATABASE_URL` could only offer a replay by asking the
+> operator to re-type the mint bounds at 3am, which puts the money fence on
+> the wrong side of the keyboard. So the CLI lists and shows, and the replay
+> is served by the process that already holds the configuration.
+
+A replay that answers `400` with *"this ledger has nothing to book for that
+sighting"* means the address is not registered or the token is not in that
+chain's `CreditTokens` — deliberately an error rather than a silent no-op,
+since you asked for something to happen.
+
+### Related queues
+
+- `ledger-cli reorgs list` — chain anomalies awaiting close-out
+  ([§12](#12-deep-reorg-on-a-confirmed-crypto-deposit)).
+- `GET /api/v1/deposits/reviews` — deposits parked for a human
+  ([§13](#13-large--unreconciled-deposit-parked-in-review)).
+- The SQL for both, plus cursors and registration rescans, is in
+  [§8](#8-common-investigation-queries).
 
 ---
 

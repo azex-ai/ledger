@@ -830,6 +830,68 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DepositReviewListEnvelope" }
         "503": { description: Crypto-deposit add-on not enabled on this server. }
+  /deposits/dead-letters:
+    get:
+      x-required-scope: read
+      tags: [Crypto Deposit]
+      summary: List dead-lettered deposit sightings (transfers the ledger refused to book).
+      description: >-
+        A dead letter is a transfer that IS on chain, to a registered
+        address, in a whitelisted token, that the ingestion path refused --
+        an idempotency-key payload conflict, an unregistered currency, an
+        amount the currency's exponent cannot represent -- after which the
+        forward scan moved past it. No booking exists, so nothing else in the
+        system will revisit it: this queue and
+        POST /deposits/dead-letters/{uid}/replay are the only way back.
+        Newest first, keyset paginated. `booked` is recomputed per read (a
+        row whose deposit was credited in the end needs no action), so the
+        queue clears itself. See docs/RUNBOOK.md section 18. Answers
+        FeatureNotEnabled (503) unless the crypto-deposit add-on is wired in.
+      parameters:
+        - in: query
+          name: cursor
+          schema: { type: string, description: "Opaque page cursor from next_cursor" }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+      responses:
+        "200":
+          description: Dead-letter queue page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeadLetterListEnvelope" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
+  /deposits/dead-letters/{uid}/replay:
+    post:
+      x-required-capability: deposit_review
+      tags: [Crypto Deposit]
+      summary: Re-drive one dead-lettered sighting through the real ingestion path.
+      description: >-
+        For after the cause is fixed (a currency registered, an exponent
+        corrected, a token added back to the allowlist). Runs the identical
+        IngestDeposit path a watcher sighting would, review gate included, so
+        it is idempotent -- a sighting already booked resolves to the same
+        booking and posts nothing new -- and it can end in the same
+        deposit_confirm journal an approval posts. Hence the deposit_review
+        capability rather than write scope: the key that can forge a sighting
+        must not also be able to push one back in. 400 when this ledger has
+        nothing to book for that sighting (address not registered, or token
+        not in the chain's allowlist) rather than reporting a no-op as
+        success.
+      parameters:
+        - in: path
+          name: uid
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The booking the replayed sighting resolved to.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "400": { $ref: "#/components/responses/DomainError" }
+        "404": { $ref: "#/components/responses/DomainError" }
+        "503": { description: Crypto-deposit add-on not enabled on this server. }
   /deposits/{uid}/review/approve:
     post:
       x-required-capability: deposit_review
@@ -2668,6 +2730,56 @@ components:
                 list:
                   type: array
                   items: { $ref: "#/components/schemas/Booking" }
+                next_cursor: { type: [string, "null"], description: "Null when exhausted." }
+
+    DeadLetter:
+      type: object
+      required: [uid, chain_id, tx_hash, txlog_seq, idempotency_key, reason, booked, token, to, amount, created_at]
+      properties:
+        uid: { type: string, format: uuid }
+        chain_id: { type: integer, format: int64 }
+        tx_hash: { type: string }
+        txlog_seq:
+          type: integer
+          description: >-
+            The Transfer log's zero-based position among ALL logs in the
+            transaction's receipt -- the same definition the booking
+            idempotency key uses.
+        idempotency_key:
+          type: string
+          description: "deposit-{chain_id}-{tx_hash}-{txlog_seq} -- the key the booking would have had."
+        reason:
+          type: string
+          description: >-
+            The rejection's error text as recorded. The BOUNDED
+            classification an alert labels on is the `reason` label of
+            ledger_deposit_ingest_dead_lettered_total, not this field.
+        booked:
+          type: boolean
+          description: >-
+            Whether a booking exists for this idempotency key now -- i.e.
+            whether the deposit was credited after all (replayed, or the
+            cause self-healed). Recomputed per read; true means no action is
+            needed.
+        token: { type: string, description: "The ERC-20 contract address that emitted the Transfer log." }
+        to: { type: string, description: "The registered deposit address credited." }
+        amount:
+          type: string
+          description: "Decimal string. What would have been credited."
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+
+    DeadLetterListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [list, next_cursor]
+              properties:
+                list:
+                  type: array
+                  items: { $ref: "#/components/schemas/DeadLetter" }
                 next_cursor: { type: [string, "null"], description: "Null when exhausted." }
 
     OutboundEvent:
