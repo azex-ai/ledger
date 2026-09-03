@@ -35,14 +35,13 @@ is meaningless — debits and credits in different currencies are not comparable
 - `check_journal_currency_balance()` deferred constraint trigger
   (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`) — the
   DB-layer backstop for direct SQL / a compromised app credential that
-  bypasses everything above. Migration 004 first shipped this as a per-row
-  trigger that re-scanned every entry of the journal on every row (O(N^2));
-  018 dropped it for exactly that reason, leaving the DB layer unenforced
-  until 044 restored it with a transaction-scoped per-journal dedup (O(N)
-  overall — see the migration file for the mechanism). **044 is not
-  retroactive**: rows written between 018 and 044 are not covered by the
-  trigger, which is why the fleet-wide "journal_dr_cr" reconcile check
-  (I-24) exists as an independent, bulk-scanning complement.
+  bypasses everything above. The mechanism is in `001_baseline.up.sql`
+  section 12 as amended by `030_guard_function_search_path.up.sql`; getting
+  its cost right took three attempts, and the history is worth keeping
+  because each attempt failed differently (see I-24 and I-68). The trigger
+  only sees writes it is present for, which is why the fleet-wide
+  "journal_dr_cr" reconcile check (I-24) exists as an independent,
+  bulk-scanning complement rather than as a backup nobody needs.
 - `chk_journal_balance` table-level CHECK on `journals.total_debit = total_credit`
   (covers global totals as a defense-in-depth check).
 
@@ -57,11 +56,10 @@ cited above as a pin: the mechanism is a Postgres trigger with no Go symbol
 to reference, and the test reaches it only through this file's local
 `postBalancedJournal`/`withBalanceTriggerDisabled` helpers, so nothing in its
 own function body names an app-layer symbol this doc can hold it to):
-- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates to
-  schema v41 (pre-044), proves a direct SQL insert that unbalances an
-  existing journal by currency succeeds with nothing to stop it, then
-  migrates up through 044 and proves the identical attack on a fresh journal
-  now fails at commit. See I-24, where this is the primary pin.
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — proves a
+  direct SQL insert that unbalances an existing journal by currency succeeds
+  with the trigger switched off, then proves the identical insert fails at
+  commit with it on. See I-24, where this is the primary pin.
 
 ## I-2: Append-only journals; corrections via reversal only
 
@@ -1782,9 +1780,8 @@ exported `RunFullReconciliation` entry point):
 Every journal's per-currency balance (I-1) is enforced by **two independent
 mechanisms that do not trust each other**: the application layer
 (`core.JournalInput.Validate` + `VerifyJournalBalanced`, both bypassable by
-direct SQL against the database) and the DB layer (a deferred constraint
-trigger on `journal_entries`, restored by migration 044 after migration 018
-dropped its predecessor). Additionally, a fleet-wide reconcile check
+direct SQL against the database) and the DB layer (deferred constraint
+triggers on `journals` and `journal_entries`). Additionally, a fleet-wide reconcile check
 ("journal_dr_cr") scans every journal individually in bulk, independent of
 the DB trigger's write-time enforcement.
 
@@ -1799,19 +1796,31 @@ debit==credit equality, which cannot see two journals that are each
 individually unbalanced but net to zero in aggregate.
 
 **Enforced by**:
+- `ledger_assert_journal_balanced(bigint)` — the aggregate itself, named once
+  so the two triggers below cannot drift apart
+  (`postgres/sql/migrations/030_guard_function_search_path.up.sql`).
+- `ledger_check_journal_balance()` deferred constraint trigger,
+  `AFTER INSERT OR UPDATE ON journals FOR EACH ROW`,
+  `DEFERRABLE INITIALLY DEFERRED`: runs the aggregate exactly once per
+  journals row the transaction wrote. `OR UPDATE` is load-bearing, not
+  symmetry — see I-68.
 - `check_journal_currency_balance()` deferred constraint trigger,
   `AFTER INSERT OR UPDATE OR DELETE ON journal_entries FOR EACH ROW`,
-  `DEFERRABLE INITIALLY DEFERRED` (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`).
-  Dedupes by `journal_id` within the transaction via a `pg_temp` table
-  (`ON COMMIT DELETE ROWS`) so the actual aggregate check runs once per
-  journal touched by the transaction, not once per row — O(N) overall, not
-  004's O(N^2).
+  `DEFERRABLE INITIALLY DEFERRED` (`001_baseline.up.sql` section 12, rewritten
+  by 030): the backstop for entries written against a journal the current
+  transaction did **not** write, which is the direct-SQL tampering shape. It
+  skips when `journals.xmin` is the current transaction's, because the
+  journals-level trigger already covers that journal. Between the two, the
+  aggregate runs once per journal rather than once per entry row — O(N)
+  overall, not migration 004's O(N^2) — with no dedup memo anywhere the
+  caller can write, which is what I-68 is about.
 - `service.FullReconciliationService.runCheck11JournalBalance`
   ("journal_dr_cr" — `service/reconcile.go`), backed by
   `IntegrityUnbalancedJournalsCount` / `IntegrityUnbalancedJournalsSample`
   (`postgres/sql/queries/integrity_balance.sql`): a bulk, fleet-wide scan
-  independent of the trigger, catching what the trigger cannot (rows
-  written before 044 existed, or any future bypass of it).
+  independent of the trigger, catching what the trigger cannot (anything
+  written while it was absent or disabled, and any future bypass of it --
+  and there were three, see I-68).
 - The pre-existing "journal_dr_cr" global-equality behavior is kept as an
   independent check, renamed `global_dr_cr_equality`
   (`service.FullReconciliationService.runCheck1JournalBalance`) — the two
@@ -1819,11 +1828,16 @@ individually unbalanced but net to zero in aggregate.
   other.
 
 **Pinned by**:
-- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — migrates
-  to schema v41, proves a direct-SQL unbalancing insert succeeds with no DB
-  guard; migrates up through 044 and proves the identical attack now fails.
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — proves a
+  direct-SQL unbalancing insert succeeds with the guard switched off, and
+  that the identical insert fails with it on.
+- `postgres.TestBalanceGuard_SurvivesPgTempRelationShadowing`,
+  `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` and
+  `postgres.TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal` — the three
+  ways this DB half was fully bypassable by `ledger_app` until migration 030.
+  See I-68.
 - `postgres.TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses` —
-  crafts two journals (pre-044, via direct SQL) that are each individually
+  crafts two journals (via direct SQL, guard off) that are each individually
   unbalanced by currency but net to zero globally; proves the global
   equality query reports "balanced" while `IntegrityUnbalancedJournalsCount`
   reports both violations.
@@ -7232,3 +7246,125 @@ cursor-ahead-of-head report.
 - `service.TestOnchain_Watch_LookbackDisabledKeepsTheOldWindow` — the knob
   is a knob: with it off the window is exactly cursor+1..safeTip, which is
   what the I-52/I-53 pins assert.
+
+---
+
+## I-68: No guard function's relation lookup is caller-redirectable, and the balance guard keeps no state the caller can write
+
+**Rule**: three statements, each independently load-bearing:
+
+1. **Every function in schema `public` pins `search_path = public, pg_temp`**
+   — pg_temp present, and last. The one exemption is
+   `ledger_signed_amount` / `ledger_signed_delta`, and it is bounded by
+   shape rather than by name alone: an exempt function must be LANGUAGE sql,
+   IMMUTABLE, not SECURITY DEFINER, backed by no trigger, and its source must
+   name no relation.
+2. **The per-journal balance guard (I-1 / I-24's DB half) keeps no dedup memo
+   in any storage the caller can write.** The aggregate runs once per journal
+   through a deferred constraint trigger on `journals`, fired by INSERT **or**
+   UPDATE; the per-entry constraint trigger runs it for entries written
+   against a journal the current transaction did not write, deciding that on
+   `journals.xmin` — a system column nobody can write.
+3. **`PUBLIC` does not hold `TEMPORARY` on the ledger database**, so
+   `ledger_app` cannot create a pg_temp relation at all.
+
+**Why**: C1 and C2 of `docs/audits/2026-09-03-independent-review/install-roles.md`.
+`ledger_app` owns nothing, holds no DDL and cannot DELETE from any table
+(I-22, re-measured statement by statement in that report's appendix B) — and
+could still commit a one-sided journal entry and mint 999,999 out of nothing,
+by two independent routes through one function:
+
+- **C1, relation shadowing.** `check_journal_currency_balance()` was SECURITY
+  INVOKER with an empty `proconfig` and an unqualified `FROM journal_entries`.
+  PostgreSQL searches pg_temp **first** for relation names whenever pg_temp is
+  not itself listed on the path — so omitting it does not exclude it, it
+  promotes it. One `CREATE TEMP TABLE journal_entries (...)` and the deferred
+  trigger aggregated over the attacker's empty shadow. Measured both ways:
+  with the temp table the unbalanced COMMIT succeeded; without it the
+  identical pair of INSERTs was refused.
+- **C2, a pre-seeded memo.** The same function deduped by journal_id in a
+  `pg_temp` table it created with `CREATE TEMP TABLE IF NOT EXISTS`. Creating
+  it first (`ON COMMIT PRESERVE ROWS`) and filling it from `generate_series`
+  — `journals_id_seq` is readable, so the ids are predictable — made the
+  aggregate never run. Independent of C1, and unfixable by any search_path
+  pin: a temp table can only ever live in pg_temp.
+
+Nine SECURITY INVOKER guard functions were unpinned. The gate that was
+supposed to cover this — migration 013's search_path test, deleted by this
+change — enumerated two SECURITY DEFINER partition functions by name, so no
+amount of running it could have found them. The finding is as much about how
+the gate was written as about the function it missed.
+
+The shape of the fix was itself measured rather than assumed. `pg_catalog,
+public` (pg_temp omitted, which is what "do not let pg_temp in" reads like)
+leaves the shadow in place: with `public.t` holding three rows and a session
+temp `t` holding none, an unqualified `FROM t` returns 0 under both "no
+proconfig" and "`pg_catalog, public`", and 3 only under "`... , pg_temp`" or a
+`public.`-qualified body. Naming pg_catalog first additionally breaks
+unqualified DDL (`permission denied to create "pg_catalog.x"`), which is
+exactly what `ledger_create_monthly_partition` does.
+
+Dropping the dedup outright was measured too, on the real schema through the
+real `PostJournal` path (median of 11, fresh database per variant, ms):
+
+| entries/journal | 2 | 6 | 20 | 100 | 500 | 2000 |
+|---|---|---|---|---|---|---|
+| pg_temp memo (pre-030) | 3.31 | 3.97 | 6.74 | 22.27 | 100.85 | 397.08 |
+| no dedup at all | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
+| journals-scoped (030) | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
+
+Free at the sizes presets post, 5.7x at 2000 — and 2000 legs is one INSERT
+loop away for the very credential this guard exists to contain, so "just drop
+the dedup" trades a bypass for a quadratic lever. The journals-scoped form
+costs nothing and holds no caller-writable state.
+
+**Enforced by**:
+- `postgres/sql/migrations/030_guard_function_search_path.up.sql` section 1 —
+  `ALTER FUNCTION ... SET search_path = public, pg_temp` on the ten unpinned
+  functions, joining the seven migrations 013 / 020 / 024 / 027 had already
+  pinned.
+- Section 2 — `ledger_assert_journal_balanced(bigint)` (the aggregate, defined
+  once), `ledger_check_journal_balance()` on `journals` `AFTER INSERT OR
+  UPDATE`, and the rewritten `check_journal_currency_balance()` whose only
+  state is `journals.xmin`. `OR UPDATE` is not symmetry: UPDATE refreshes
+  xmin, `ledger_journals_block_arbitrary_update` compares `to_jsonb(OLD)`
+  against `to_jsonb(NEW)` and therefore permits `UPDATE journals SET source =
+  source`, and an INSERT-only trigger would let a caller adopt an old
+  journal's xmin with that no-op and then append a one-sided entry that
+  nothing checks.
+- Section 3 — `REVOKE TEMPORARY ON DATABASE ... FROM PUBLIC`. From PUBLIC, not
+  from `ledger_app`: a privilege reaching a role through PUBLIC can only be
+  revoked from PUBLIC, so the role-targeted form would have been a no-op that
+  reads like a fix.
+
+**Pinned by**:
+- `postgres.TestGuardFunctionSearchPath_EveryFunctionIsPinned` — the
+  catalogue-derived replacement for 013's two-name list: every function in
+  `public` carries exactly `search_path=public, pg_temp` or is a named
+  exemption. A migration that adds a function without the pin is red on the
+  first CI run.
+- `postgres.TestGuardFunctionSearchPath_ExemptionsCannotReadRelations` — the
+  exemption cannot be widened to cover something with a relation to shadow.
+- `postgres.TestBalanceGuard_SurvivesPgTempRelationShadowing` — C1's red pin,
+  as `ledger_app`, with TEMPORARY handed back for the duration so the attack
+  is actually reachable. The guard has to hold without section 3, or section 3
+  is doing all the work and a future re-grant silently re-opens C1.
+- `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` — C2's red pin, same
+  posture, in the strongest shape available to `ledger_app`: it writes both
+  the journals row and the one-sided entry itself, so the journals-level
+  trigger and the per-entry backstop are both in scope.
+- `postgres.TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal` — the xmin
+  adoption bypass. Its first half recreates the journals trigger INSERT-only
+  and shows the attack landing, so the second half is not vacuous.
+- `postgres.TestLedgerApp_CannotCreateTemporaryRelations` — section 3, plus
+  the datacl assertion that PUBLIC no longer holds TEMPORARY.
+- `postgres.TestBalanceGuard_LegitimateJournalsStillPost` — the control: a
+  40-leg balanced journal still posts, so none of the above is achieved by
+  refusing everything.
+- `postgres.TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist` — carries
+  the one grant this added. A trigger function's own EXECUTE right is checked
+  at CREATE TRIGGER time, but a function it *calls* is checked at call time
+  against the invoker, so `ledger_app` needs EXECUTE on
+  `ledger_assert_journal_balanced` for the check to run at all. Without it
+  every application write failed closed on the wrong error — found by running
+  the pins above as `ledger_app` rather than on the superuser test connection.

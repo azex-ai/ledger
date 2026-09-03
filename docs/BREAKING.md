@@ -476,6 +476,54 @@ Rolling `028` back drops the columns and returns every gated hold to the
 conservative rule; safe in the direction that matters (it can only hold more
 money, never release more).
 
+### Migration `030`: `TEMPORARY` is revoked from `PUBLIC`, and the migration credential must be able to do it
+
+**Landed (Wave 5; invariant I-68; audit `install-roles.md` C1/C2).**
+
+Migration `030` closes the two Critical findings that let a leaked
+`ledger_app` credential commit a one-sided journal entry: it pins
+`search_path = public, pg_temp` on every function in the schema, rewrites the
+balance guard so it keeps no dedup state in `pg_temp`, and -- the part that
+can break an install -- runs
+
+    REVOKE TEMPORARY ON DATABASE <the ledger database> FROM PUBLIC;
+
+**What a consumer must do.**
+
+1. **If anything you run against this database creates temporary tables on the
+   `ledger_app` or `ledger_ro` credential, it will stop working.** Nothing in
+   this repository does after `030` (the balance guard's dedup set was the
+   only production `CREATE TEMP` and `030` deletes it), and the privilege is
+   what both C1 and C2 needed, so it goes. If you genuinely need it for one
+   role, grant it back narrowly -- `GRANT TEMPORARY ON DATABASE <db> TO
+   <role>` -- and understand that you are re-opening the vector the pins
+   `postgres.TestBalanceGuard_SurvivesPgTempRelationShadowing` and
+   `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` cover. Those two
+   deliberately run WITH the privilege granted back, so the guard is proven to
+   hold without this layer; it is depth, not the wall.
+
+2. **The migration credential must be the database owner or a superuser**, or
+   `030` stops with a named remedy instead of running. Only a database owner
+   can revoke a database privilege, and migrations `002+` run as
+   `ledger_owner`, which is not it -- `030` drops back to the session user
+   (`SET LOCAL ROLE NONE`, restored at COMMIT) to make the attempt. The
+   RUNBOOK's main path (bootstrap credential owns the database) satisfies
+   this. The one documented shape that does not is "migrate an
+   already-installed database using the `ledger_owner` credential itself"; for
+   that deployment, have a DBA run the `REVOKE` above once and re-run the
+   migration -- `030` treats already-revoked as done, so the second run
+   proceeds.
+
+   The failure is loud on purpose. Logging a warning and carrying on would
+   leave a database that reports migrated while the privilege behind two
+   Critical findings is still granted, which is exactly the "not run reads as
+   passed" shape this repo keeps finding.
+
+Rolling `030` back restores `TEMPORARY` to `PUBLIC` (best-effort, with a
+`WARNING` if the credential cannot), unpins the ten functions and restores the
+`pg_temp`-dedup balance guard -- i.e. it re-opens C1 and C2, which is what
+going back to the previous release means.
+
 ---
 
 ## 0.6.0 and earlier
