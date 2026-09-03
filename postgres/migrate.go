@@ -213,6 +213,14 @@ func NewMigrationSource() (source.Driver, error) {
 // is not subject to the check. See assertSoleSessionOnCredential; pinned by
 // TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential.
 //
+// The check binds sessions that already exist, not one that connects while the
+// run is in progress: such a session can still SET ROLE ledger_owner
+// deliberately for the rest of the run. Measured, pinned in
+// TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential, and
+// written up in docs/INVARIANTS.md I-22. What removes it is a migration
+// credential the application does not hold, which is why that is stated as a
+// requirement and not a preference.
+//
 // A returned error does not imply "nothing was applied". The one case where
 // both are true at once is a failure to take that membership back: the schema
 // is then up to date AND the migration credential is left holding it, which is

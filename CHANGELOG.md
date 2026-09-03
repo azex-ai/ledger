@@ -387,6 +387,15 @@ written because it was true when `[0.6.0]` shipped.
   `TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential`, which
   also asserts the same run succeeds once the other session is gone.
 
+  The residual is stated rather than implied away: the guard runs at the start
+  of a run, so a connection opened on the migration credential *while*
+  migrations are in flight can still `SET ROLE ledger_owner` deliberately.
+  Measured, and pinned as such — bounded by the membership being `SET`-only
+  (nothing is inherited), by its revocation when `Migrate` returns (the same
+  statement then fails with `42501`, also pinned), and by not existing at all
+  for a superuser or `ledger_owner` credential. See `docs/INVARIANTS.md` I-22's
+  "Note on the migration window".
+
   **Behaviour change worth knowing before a shared cluster surprises you**: on
   the non-superuser path, `002..N` now execute *as* `ledger_owner` and no
   longer carry the runner's own role attributes. The only statement in the set
