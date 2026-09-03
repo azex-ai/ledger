@@ -88,7 +88,8 @@ cumulative arithmetic here mean what it says.
 **Enforced by**:
 - The `journals.reversal_of` FK column (added in migration `014`).
 - `SELECT ... FOR UPDATE` on the original journal row serialises concurrent
-  reversals — BOTH `ReverseJournalFraction` and the full `ReverseJournal`
+  reversals — BOTH `postgres.LedgerStore.ReverseJournalFraction` and the full
+  `postgres.LedgerStore.ReverseJournal`
   take it inside one transaction with their history check and insert; the
   per-dimension cumulative check runs under that lock. Migration `029`
   replaced the old "at most once" unique index with this application-level
@@ -516,7 +517,9 @@ external lookup.
 what `userID` means (user-row id, workspace id, tenant id). Library does not
 encode any platform-specific ID-space transform.
 
-**Enforced by**: `core/types.go:108` (one helper, four lines).
+**Enforced by**: `core.SystemAccountHolder` (`core/types.go`) and its
+inverse test `core.IsUserAccount` (`core/system_account.go`) -- one helper
+each, four lines together.
 
 **Pinned by**:
 - `core.TestSystemAccountHolder_RoundTrip`
@@ -4064,12 +4067,16 @@ answer that is either silently wrong (mixed pool/tx views for
 `VerifyLedger`) or silently discarded (`EnableOnchain` configuring a value
 nobody keeps) instead of a clear rejection.
 
-**Enforced by**: `(*ledger.Service).Worker`'s `s.attestor != nil` branch and
+**Enforced by**: `ledger.Service.Worker`'s `s.attestor != nil` branch and
 `mergeWorkerConfig`'s `AttestInterval`/`AttestBatchSize` cases (`ledger.go`);
-`PendingStore.checkPendingBalanceAndPost`'s pool-mode `Authorize` +
-`PostAuthorized` sequencing (`postgres/pending_store.go`);
-`RunInTxWithOptions`'s `s.tx != nil` guard; `AttestationService` /
-`VerifyLedger` / `EnableOnchain`'s own `s.tx != nil` guards (`ledger.go`).
+`postgres.PendingStore.ConfirmPending` / `postgres.PendingStore.CancelPending`
+routing through `checkPendingBalanceAndPost`'s pool-mode
+`postgres.LedgerStore.Authorize` + `postgres.LedgerStore.PostAuthorized`
+sequencing (`postgres/pending_store.go`);
+`ledger.Service.RunInTx` / `ledger.Service.RunInTxWithOptions`'s
+`s.tx != nil` guard;
+`ledger.Service.AttestationService` / `ledger.Service.VerifyLedger` /
+`ledger.Service.EnableOnchain`'s own `s.tx != nil` guards (`ledger.go`).
 `withTx` also now carries `attestor`/`authVerifier` onto the clone (they
 were previously dropped, which happened to make some of the guards above
 pass for the wrong reason before this fix — see the pinned tests' own doc
@@ -5450,7 +5457,15 @@ silently pre-approves whatever is written there next.
 The list in I-43's "Enforced by" is now this gate's *output*, not its source
 of truth. That inversion is the invariant.
 
-**Enforced by**: `postgres/sign_authority_gate_test.go` — `sqlSignExemptions`
+**Enforced by**: the convention itself is `core.Sign` / `core.SignedAmount`
+in Go and `ledger_signed_amount` / `ledger_signed_delta` in SQL; every
+holder-visible read path goes through one of them --
+`postgres.LedgerStore.GetBalance`, `postgres.LedgerStore.GetBalanceBreakdown`,
+`postgres.LedgerStore.ListHolderBalances`,
+`postgres.BalanceTrendsStore.GetBalanceTrends` and
+`postgres.PlatformBalanceStore.SolvencyCheck`.
+That there is only ONE of each is enforced by
+`postgres/sign_authority_gate_test.go` — `sqlSignExemptions`
 and `goSignExemptions` are the classification tables; anything not in them
 fails. Runs under plain `go test ./...` with no path filter or build tag, so
 it cannot be skipped by a CI job that forgot it.
@@ -5602,14 +5617,19 @@ moved money, that is corrected by a reversal, not by the unlink.
 
 **Enforced by**:
 - `validateReversalOfInput` (`postgres/reversal_fraction_store.go`), called
-  from `postJournalWithQueries` (`postgres/ledger_store.go`) — the single
-  choke point every journal insert passes through, so the reversal APIs
-  re-validate their own derived entries there too.
+  from `postJournalWithQueries` behind `postgres.LedgerStore.PostJournal`
+  (`postgres/ledger_store.go`) — the single choke point every journal insert
+  passes through, so the reversal APIs re-validate their own derived entries
+  there too.
 - The `event_uid` branch of `postJournalWithQueries`, which resolves the
   event, refuses an already-linked one, and requires the booking's
   `(holder, currency)` pair among `balancePairsFromEntries(resolved)` —
   all before the first INSERT, so a refused claim leaves both `journal_id`
   columns untouched.
+- `ledger_unlink_event_journal(uuid)` (migration `027`) -- the owner-only,
+  audited way out of a link this rule made set-once, described under "Why"
+  below. It is part of the mechanism, not an exception to it: without it a
+  refused-but-taken link is stuck rather than fail-closed.
 - `GetJournalForUpdateByUID` on the referenced journal, taken while resolving
   `reversal_of` and **before** the balance advisory locks, so the entries and
   reversal history the rules above read cannot change before this journal

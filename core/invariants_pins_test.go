@@ -687,6 +687,91 @@ func TestInvariantsEnforcedCitationsResolve(t *testing.T) {
 	}
 }
 
+// selfGatedSection reports whether an invariant's mechanism is a gate test
+// file that this same section pins -- i.e. every pin it cites is declared in
+// a `_test.go` file its **Enforced by** names.
+//
+// Two invariants are of this shape by construction: I-50 ("the sign
+// convention has one implementation, and THAT FACT IS CHECKED BY MACHINE")
+// and I-61 ("core.Metrics has no method without a production call site").
+// Their mechanism is the gate, so the pin and the mechanism are the same
+// object; holding the pin to a separate exported symbol would mean inventing
+// one. Requiring the pins to be declared in the named file is what keeps
+// this from being a loophole: move the pin elsewhere, or rename the file,
+// and the section stops qualifying.
+func selfGatedSection(enforced, body string, testBodies map[string][]testFuncBody) bool {
+	gateFiles := enforcedGateFiles(enforced)
+	if len(gateFiles) == 0 {
+		return false
+	}
+
+	pinned := blockBetween(body, "**Pinned by**")
+	pins := 0
+	for _, m := range append(pinReference.FindAllStringSubmatch(pinned, -1), bareReference.FindAllStringSubmatch(pinned, -1)...) {
+		name := m[len(m)-1]
+		bodies, ok := testBodies[name]
+		if !ok {
+			continue
+		}
+		pins++
+		inGateFile := false
+		for _, b := range bodies {
+			for _, gate := range gateFiles {
+				if b.file == gate {
+					inGateFile = true
+				}
+			}
+		}
+		if !inGateFile {
+			return false
+		}
+	}
+	return pins > 0
+}
+
+// enforcedGateFiles returns the `_test.go` files an Enforced by block names
+// as the mechanism itself.
+func enforcedGateFiles(enforced string) []string {
+	var out []string
+	for _, m := range backtickToken.FindAllStringSubmatch(enforced, -1) {
+		token := strings.TrimSpace(m[1])
+		if strings.HasSuffix(token, "_test.go") {
+			out = append(out, filepath.Base(token))
+		}
+	}
+	return out
+}
+
+// enforcedDBObjects returns the DB-side mechanism names an Enforced by block
+// cites: snake_case identifiers long enough to be specific
+// (`journals_no_arbitrary_update`, `ledger_unlink_event_journal`,
+// `effective_at`). A pin that drives one of these can only name it inside a
+// query string, so this is matched against the pin's string literals rather
+// than its identifiers.
+//
+// The length and underscore requirements keep out the tokens that would
+// match almost any SQL: `uid`, `journals`, `status`. A DB mechanism whose
+// name is that generic cannot be told apart from prose, and is not counted.
+func enforcedDBObjects(enforced string) []string {
+	var out []string
+	for _, m := range backtickToken.FindAllStringSubmatch(enforced, -1) {
+		token := strings.TrimSpace(m[1])
+		// `ledger_unlink_event_journal(uuid)` -- the doc cites SQL functions
+		// with their argument list; the name is what a query string carries.
+		if i := strings.Index(token, "("); i > 0 {
+			token = token[:i]
+		}
+		if len(token) < 6 || !strings.Contains(token, "_") {
+			continue
+		}
+		if !regexp.MustCompile(`^[a-z][a-z0-9_]*$`).MatchString(token) {
+			continue
+		}
+		out = append(out, token)
+	}
+	return out
+}
+
 // enforcedLeafNames extracts, from an "Enforced by" block's text, the set of
 // trailing identifier names (e.g. "Validate" from "JournalInput.Validate",
 // or "NewReserverStore" from a bare citation) for every citation that
@@ -741,13 +826,30 @@ func enforcedLeafNames(enforcedBlock string, idx declaredSymbolIndex) map[string
 // it in a comment or string literal (go/ast walks the syntax tree, not the
 // source text).
 type testFuncBody struct {
-	pkgDir    string
+	pkgDir string
+	// file is the base name of the _test.go file declaring the function --
+	// what selfGatedSection matches an Enforced-by gate-file citation
+	// against.
+	file      string
 	usedNames map[string]bool
+	// usedStrings is the body's string literals, concatenated. A DB-side
+	// mechanism -- a trigger, a SQL function, a protected column -- can only
+	// be referenced from Go by name inside a query string, so an
+	// identifier-only view of a pin cannot see that it drives one.
+	usedStrings string
 }
 
 func buildTestFuncBodyIndex(t *testing.T) map[string][]testFuncBody {
 	t.Helper()
-	out := map[string][]testFuncBody{}
+	// Pass 1: every function declared in a _test.go file, test or helper,
+	// with what its own body touches.
+	type rawBody struct {
+		pkgDir, file string
+		used         map[string]bool
+		literals     string
+		calls        map[string]bool
+	}
+	byPkg := map[string]map[string]*rawBody{}
 	fset := token.NewFileSet()
 
 	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
@@ -778,25 +880,75 @@ func buildTestFuncBodyIndex(t *testing.T) map[string][]testFuncBody {
 			if !ok || fn.Body == nil {
 				continue
 			}
-			if !testFuncNamePattern.MatchString(fn.Name.Name) {
-				continue
+			body := &rawBody{
+				pkgDir: pkgDir, file: d.Name(),
+				used: map[string]bool{}, calls: map[string]bool{},
 			}
-			used := map[string]bool{}
+			var literals strings.Builder
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch e := n.(type) {
 				case *ast.SelectorExpr:
-					used[e.Sel.Name] = true
+					body.used[e.Sel.Name] = true
 				case *ast.Ident:
-					used[e.Name] = true
+					body.used[e.Name] = true
+				case *ast.BasicLit:
+					if e.Kind == token.STRING {
+						literals.WriteString(e.Value)
+						literals.WriteByte('\n')
+					}
+				case *ast.CallExpr:
+					if id, isIdent := e.Fun.(*ast.Ident); isIdent {
+						body.calls[id.Name] = true
+					}
 				}
 				return true
 			})
-			out[fn.Name.Name] = append(out[fn.Name.Name], testFuncBody{pkgDir: pkgDir, usedNames: used})
+			body.literals = literals.String()
+			if byPkg[pkgDir] == nil {
+				byPkg[pkgDir] = map[string]*rawBody{}
+			}
+			byPkg[pkgDir][fn.Name.Name] = body
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk repo for test function bodies: %v", err)
+	}
+
+	// Pass 2: fold in one level of same-package test helpers.
+	//
+	// Round 2: a table-driven pin drives the mechanism from a helper
+	// (postgres.TestPresetSolvency_EveryShippedTemplate's cases go through
+	// runSolvencyCase, which is where the solvency read actually happens),
+	// so a body-only view reports it as touching nothing. One level, not
+	// transitive: it covers the "test declares a table, helper runs each
+	// row" shape this repo uses without turning every pin into the union of
+	// its whole package.
+	out := map[string][]testFuncBody{}
+	for pkgDir, fns := range byPkg {
+		for name, body := range fns {
+			if !testFuncNamePattern.MatchString(name) {
+				continue
+			}
+			used := make(map[string]bool, len(body.used))
+			for k := range body.used {
+				used[k] = true
+			}
+			literals := body.literals
+			for callee := range body.calls {
+				helper, ok := fns[callee]
+				if !ok || callee == name {
+					continue
+				}
+				for k := range helper.used {
+					used[k] = true
+				}
+				literals += helper.literals
+			}
+			out[name] = append(out[name], testFuncBody{
+				pkgDir: pkgDir, file: body.file, usedNames: used, usedStrings: literals,
+			})
+		}
 	}
 	return out
 }
@@ -886,53 +1038,129 @@ func TestCitationStyleGapListStaysClosed(t *testing.T) {
 			"reported, and equally closed to silent growth", entries)
 }
 
-// unresolvableEnforcedCitations registers the invariants whose **Enforced
-// by** block names no Go symbol this repository declares, with the reason.
-// Their pins cannot be held to a mechanism by this check -- there is no
-// symbol to hold them to -- so the section is skipped.
+// dbOnlyMechanism registers an invariant whose mechanism has no Go face at
+// all: a trigger, a constraint, a GRANT, a partition -- something Postgres
+// enforces, with no function in this repository a pin could be held to.
 //
-// C-2, second half: that skip used to be a bare `continue`. Nineteen
-// sections took it, including (before this pass) I-49 and I-53, two of the
-// Wave 1 money-path invariants -- and the output said nothing at all, so
-// from the outside a skipped section and a checked one looked identical
-// (working-agreements §3: not run is not passed). The register makes the set
-// explicit and closed: a NEW unresolvable section is red until someone
-// either fixes the citation (the I-49 / I-53 fix in this same commit: name
-// the exported entry point the mechanism is reached through) or writes down
-// why it cannot be fixed.
+// C-2, second half, as refined in round 2 (team-lead): the register used to
+// carry a prose reason and nothing else, which made it a place to put any
+// section whose citations happened not to resolve. It now has to say WHERE
+// the mechanism is (a migration in this repo) and WHAT it is called there
+// (the trigger / function / constraint / column name), and the gate checks
+// the file exists and names those objects. A section that has a Go face may
+// not be registered at all -- naming the exported entry point the mechanism
+// is reached through is the fix for those (see I-2, I-9, I-18, I-40, I-50,
+// I-51, I-61, which left this register when their citations were corrected).
 //
-// The recurring honest reason: the mechanism is a DDL object -- a trigger, a
-// constraint, a GRANT, a partition -- and the invariant is enforced by
-// Postgres, not by a Go function a test can name.
+// The skip this register authorizes is narrow: the section's PINS are not
+// held to an exported symbol, because there is none. It never authorizes a
+// section to cite nothing real -- TestInvariantsEnforcedCitationsResolve
+// applies to registered sections exactly as it does to any other.
+type dbOnlyMechanism struct {
+	migration string   // repo-relative path of the migration that declares it
+	objects   []string // names that must appear in that file
+	reason    string
+}
+
+var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
+	"I-3": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"uq_bookings_idempotency", "uq_ingest_dead_letters_idempotency_key", "idempotency_key TEXT UNIQUE NOT NULL"},
+		reason:    "UNIQUE constraints on every mutation table's idempotency_key",
+	},
+	"I-6": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"NUMERIC(30,18)"},
+		reason:    "the column type itself; the Go half is a type choice (decimal.Decimal), not a function",
+	},
+	"I-7": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"reversal_of", "NOT NULL"},
+		reason:    "NOT NULL defaults and the four nullable FK exceptions, declared in the schema",
+	},
+	"I-12": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"check_journal_currency_balance"},
+		reason:    "conservation is I-1 + I-2; its DB-side enforcement is the deferred balance trigger, which holds even for writes that never went through this library",
+	},
+	"I-13": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"PARTITION BY RANGE", "journal_entries_default"},
+		reason:    "partition declaration plus the catch-all partition",
+	},
+	"I-18": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"uq_journals_uid", "uq_bookings_uid", "uq_currencies_uid"},
+		reason:    "external identity is the uid column and its unique index; the adapter-side conversion (uidToPG/pgToUID) is unexported by design, since nothing outside the store may hold an internal id",
+	},
+	"I-22": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"ledger_app", "REVOKE ALL ON SCHEMA"},
+		reason:    "role creation and the GRANT set that withholds DDL from ledger_app",
+	},
+	"I-24": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"check_journal_currency_balance", "DEFERRABLE INITIALLY DEFERRED"},
+		reason:    "the deferred constraint trigger that balances every journal inside the DB",
+	},
+	"I-25": {
+		migration: "postgres/sql/migrations/001_baseline.up.sql",
+		objects:   []string{"ledger_classifications_guard", "ledger_reservations_guard"},
+		reason:    "per-table guard trigger functions on the balance-computation config tables",
+	},
+	"I-35": {
+		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
+		objects:   []string{"ledger_create_monthly_partition", "ledger_rebalance_default_partition", "SECURITY DEFINER"},
+		reason:    "partition maintenance runs as the definer, so the serving credential needs no DDL",
+	},
+	"I-36": {
+		migration: "postgres/sql/migrations/007_role_hardening_and_partition_security_definer.up.sql",
+		objects:   []string{"webhook_subscribers", "REVOKE SELECT"},
+		reason:    "a column-level GRANT that withholds the webhook secret from ledger_ro",
+	},
+	"I-57": {
+		migration: "postgres/sql/migrations/019_ownership_resweep.up.sql",
+		objects:   []string{"ledger_resweep_ownership"},
+		reason:    "the ownership sweep is a SQL function migrations call at their end",
+	},
+	"I-58": {
+		migration: "postgres/sql/migrations/020_audit_trail_integrity_and_coverage.up.sql",
+		objects:   []string{"ledger_log_config_table_change"},
+		reason:    "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
+	},
+}
+
+// TestDbOnlyMechanismsExistWhereRegistered checks the register's own claims:
+// the migration is there, and it declares the objects the entry names.
 //
-// ⚠️ What an entry here does NOT do (round 2): it does not exempt the section
-// from TestInvariantsEnforcedCitationsResolve. A registered section must
-// still cite something that exists -- an unexported mechanism, a file -- and
-// any Go-symbol citation it makes must still resolve. The register means
-// "nothing here is an EXPORTED symbol a black-box pin can be held to", never
-// "nothing here is checkable at all". Team-lead's mutation of stripping
-// I-2's backticks was green precisely because those two meanings had been
-// collapsed into one.
-var unresolvableEnforcedCitations = map[string]string{
-	"I-2":  "the mechanism is the journals.reversal_of FK plus SELECT ... FOR UPDATE; the two Go methods it names are cited bare, without a package qualifier",
-	"I-3":  "UNIQUE constraints on five tables' idempotency_key columns",
-	"I-6":  "column types (NUMERIC(30,18)) and a Go field type (decimal.Decimal), not functions",
-	"I-7":  "three migrations' NOT NULL work",
-	"I-9":  "a four-line helper cited by file and line rather than by symbol",
-	"I-12": "derived: 'I-1 + I-2 together', with no mechanism of its own",
-	"I-13": "partition DDL across three migrations",
-	"I-18": "a migration's uid columns plus per-store conversion helpers cited by file",
-	"I-22": "role GRANTs in 001_baseline",
-	"I-24": "the check_journal_currency_balance() deferred constraint trigger",
-	"I-25": "the per-table mutation guard trigger functions",
-	"I-35": "two SECURITY DEFINER partition functions",
-	"I-36": "a column-level GRANT/REVOKE pair on webhook_subscribers",
-	"I-40": "cited as expressions inside methods ('the s.attestor != nil branch'), not as symbols",
-	"I-50": "the mechanism IS a gate test file (postgres/sign_authority_gate_test.go) and its classification tables",
-	"I-51": "unexported validators cited with their file paths; the exported entry points are the four reversal APIs, named in prose",
-	"I-57": "ledger_resweep_ownership(), a SQL function",
-	"I-58": "migration 020's catalogue-derived DO loop and its SECURITY DEFINER writers",
-	"I-61": "the mechanism IS a gate test file (observability/emission_coverage_test.go)",
+// Without this, the register is a list of assertions nobody verifies -- the
+// same shape as an Enforced by citation pointing at a symbol that does not
+// exist, which is what round 2 is about.
+func TestDbOnlyMechanismsExistWhereRegistered(t *testing.T) {
+	for _, section := range sortedKeys(unresolvableEnforcedCitations) {
+		entry := unresolvableEnforcedCitations[section]
+		require.NotEmptyf(t, entry.migration, "%s: a db-only mechanism must say which migration declares it", section)
+		require.NotEmptyf(t, entry.objects, "%s: a db-only mechanism must name the objects it declares", section)
+
+		body, err := os.ReadFile(filepath.Join("..", entry.migration))
+		require.NoErrorf(t, err, "%s registers %s as the migration declaring its mechanism, but that file does not exist", section, entry.migration)
+
+		text := strings.ToLower(string(body))
+		for _, object := range entry.objects {
+			assert.Containsf(t, text, strings.ToLower(object),
+				"%s registers %q as declared in %s, and it is not there. A db-only mechanism nobody can find is not a mechanism -- "+
+					"if the object was renamed or squashed into another migration, update the entry", section, object, entry.migration)
+		}
+	}
+}
+
+func sortedKeys(m map[string]dbOnlyMechanism) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
@@ -949,15 +1177,27 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 	for _, sec := range splitInvariantSections(string(raw)) {
 		enforced := blockBetween(sec.body, "**Enforced by**")
 		leaves := enforcedLeafNames(enforced, symbolIdx)
+		if len(leaves) == 0 && selfGatedSection(enforced, sec.body, testBodies) {
+			// A self-enforcing gate: the mechanism IS the test, and the doc
+			// names the file it lives in (I-50's sign-authority gate, I-61's
+			// emission-coverage gate). "Does the pin touch the mechanism"
+			// is satisfied by identity here, and there is nothing else to
+			// hold it to -- but this is NOT the silent skip: the pins must
+			// actually live in the file the Enforced by names.
+			checked++
+			continue
+		}
 		if len(leaves) == 0 {
 			// Nothing in this section's Enforced by resolves to a repo
 			// symbol. Registered, not silent (C-2).
 			skipped[sec.number] = true
 			if _, known := unresolvableEnforcedCitations[sec.number]; !known {
-				t.Errorf("%s's **Enforced by** names no Go symbol this repository declares, so none of its pins can be held to a mechanism -- "+
-					"and this check would otherwise skip it in silence.\n\n"+
-					"Fix the citation (name the EXPORTED entry point the mechanism is reached through -- that is what I-49 and I-53 needed), "+
-					"or register %q in unresolvableEnforcedCitations with the reason it cannot be named.", sec.number, sec.number)
+				t.Errorf("%s's **Enforced by** names no exported Go symbol this repository declares, so none of its pins can be held to a "+
+					"mechanism -- and this check would otherwise skip it in silence.\n\n"+
+					"Fix the citation (name the EXPORTED entry point the mechanism is reached through -- that is what I-49, I-53 and, in "+
+					"round 2, I-2 / I-9 / I-18 / I-40 / I-50 / I-51 / I-61 needed), or -- only if the mechanism genuinely has no Go face at "+
+					"all -- register %q in unresolvableEnforcedCitations with the migration that declares it and the object names it "+
+					"declares there, which TestDbOnlyMechanismsExistWhereRegistered then verifies.", sec.number, sec.number)
 			}
 			continue
 		}
@@ -973,12 +1213,14 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 			bucket = &advisories
 		}
 
+		gateFiles := enforcedGateFiles(enforced)
+		dbObjects := enforcedDBObjects(enforced)
 		for _, m := range pinReference.FindAllStringSubmatch(pinned, -1) {
 			pkg, fn := m[1], m[2]
-			checkPinTouchesLeaves(t, sec.number, pkg, fn, leaves, testBodies, bucket)
+			checkPinTouchesLeaves(t, sec.number, pkg, fn, leaves, gateFiles, dbObjects, testBodies, bucket)
 		}
 		for _, m := range bareReference.FindAllStringSubmatch(pinned, -1) {
-			checkPinTouchesLeaves(t, sec.number, "", m[1], leaves, testBodies, bucket)
+			checkPinTouchesLeaves(t, sec.number, "", m[1], leaves, gateFiles, dbObjects, testBodies, bucket)
 		}
 	}
 
@@ -992,17 +1234,21 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 		t.Error(f)
 	}
 
-	// A registered section that starts resolving must leave the register, or
-	// the register becomes a permanent carve-out nobody rereads.
+	// A registered section that grows a Go face must leave the register, or
+	// the register becomes a permanent carve-out nobody rereads. Round 2
+	// makes that rule explicit in both directions: the register is for
+	// mechanisms with NO Go face, so a section whose Enforced by now names an
+	// exported symbol belongs on the checked side.
 	var stale []string
-	for section, reason := range unresolvableEnforcedCitations {
+	for section, entry := range unresolvableEnforcedCitations {
 		if !skipped[section] {
-			stale = append(stale, section+" ("+reason+")")
+			stale = append(stale, section+" ("+entry.reason+")")
 		}
 	}
 	sort.Strings(stale)
 	assert.Empty(t, stale,
-		"section(s) registered as having unresolvable Enforced-by citations now resolve to a repo symbol -- delete their unresolvableEnforcedCitations entries so this check starts holding their pins: %v", stale)
+		"section(s) registered as db-only now name an exported Go symbol -- a section with a Go face may not be registered; "+
+			"delete their unresolvableEnforcedCitations entries so this check starts holding their pins: %v", stale)
 
 	// Fail-closed sanity: if the section splitter or the symbol index ever
 	// regresses, every section lands in the skip path and this check silently
@@ -1016,7 +1262,7 @@ func TestInvariantsPinsReferenceEnforcedSymbols(t *testing.T) {
 // citation and appends a failure only if at least one body was found (a pin
 // this file can't locate is silently skipped, not failed -- see the calling
 // test's doc comment) AND none of the found bodies reference any leaf name.
-func checkPinTouchesLeaves(t *testing.T, sectionNum, pkg, fn string, leaves map[string]bool, testBodies map[string][]testFuncBody, failures *[]string) {
+func checkPinTouchesLeaves(t *testing.T, sectionNum, pkg, fn string, leaves map[string]bool, gateFiles, dbObjects []string, testBodies map[string][]testFuncBody, failures *[]string) {
 	t.Helper()
 	bodies, ok := testBodies[fn]
 	if !ok {
@@ -1035,6 +1281,22 @@ func checkPinTouchesLeaves(t *testing.T, sectionNum, pkg, fn string, leaves map[
 		for leaf := range leaves {
 			if b.usedNames[leaf] {
 				return // at least one candidate body touches at least one enforced symbol
+			}
+		}
+		// A pin declared in a gate file the Enforced by names IS the
+		// mechanism (I-50's three sign-authority gate tests, I-61's two
+		// emission-coverage ones). Holding it to a separate symbol would
+		// mean inventing one; requiring it to live in the named file is
+		// what keeps that from being a loophole.
+		for _, gate := range gateFiles {
+			if b.file == gate {
+				return
+			}
+		}
+		// A pin that drives a DB-side mechanism names it in a query string.
+		for _, object := range dbObjects {
+			if strings.Contains(b.usedStrings, object) {
+				return
 			}
 		}
 	}
