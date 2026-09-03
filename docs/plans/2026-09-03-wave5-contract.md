@@ -1,6 +1,6 @@
 # Wave 5 — 独立复审（R3）发现的整改契约
 
-> 2026-09-03 · Status: **RUNNING（六条任务并行；2026-09-04 lead 已对六支全部完成 mutation 证伪，等 worker 收口后按 5.11 顺序合并）** · 基线 = main `c854c6e` 之后。
+> 2026-09-03 · Status: **DONE（2026-09-04 01:45 SGT：六支全部合入 main `0e7512a`，全量验证绿；进入 R3 复核——五名复审员对各自发现做零前情复核，零 Critical 复发才进入发版评估）** · 基线 = main `c854c6e` 之后。
 > 源：`docs/audits/2026-09-03-independent-review/*.md`（五个零前情 agent）。纪律沿用 `2026-09-02-remediation-contracts.md` §0（兄弟扫描——本轮明确：**粒度 = 算式项 × 谁能写这张表；对每张表分别问 INSERT / UPDATE / DELETE 三条路径**）、§3、§5、§6。
 
 ## 0. R3 的核心发现：三个此前三轮都没问过的问题
