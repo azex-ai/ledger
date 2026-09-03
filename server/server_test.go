@@ -1574,8 +1574,11 @@ func TestCreateBooking_NoLifecycle(t *testing.T) {
 	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
 	require.Equal(t, http.StatusBadRequest, w.Code,
 		"a classification with no lifecycle is a caller-fixable configuration problem, not a 500 -- body: %s", w.Body.String())
-	data := parseEnvelope(t, w.Body.Bytes())
-	assert.Nil(t, data["data"])
+
+	env := decodeErrorEnvelope(t, w.Body.Bytes())
+	require.Contains(t, env.Message.Fields, "classification_code",
+		"the actionable text belongs in message.fields (api-contract.md §1) -- message.text alone is a static per-code string")
+	assert.Contains(t, env.Message.Fields["classification_code"], "lifecycle")
 }
 
 func TestTransition_InvalidTransition(t *testing.T) {

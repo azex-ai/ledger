@@ -73,6 +73,61 @@ no spendable balance, so it has no verification term). Deployments that never
 call `ledger.WithAttestor` are unaffected entirely. Same guard, same reason as
 `ReserverStore.Reserve`'s `RequireVerifiedBalance`.
 
+### `(*ledger.Service).Worker(cfg)` returns `(*service.Worker, error)`
+
+**Landed (E-M5 / B-M6).**
+
+    worker := svc.Worker(cfg)
+    -> worker, err := svc.Worker(cfg)
+
+**What a consumer must do.** Capture the error. The only case that errors is
+calling `Worker` from inside a `RunInTx` callback -- previously this built a
+worker half-bound to the transaction, silently, and it started, logged
+"worker: started", and failed every expiration tick against a closed
+transaction forever. `docs/api-surface.txt` records the new signature
+(`ledger.Service.Worker = method (cfg service.WorkerConfig) (*service.Worker,
+error)`); README's own Quick Start went uncorrected across this change
+(2026-09-03 consumer audit F-C2) -- if you copied `worker := svc.Worker(...)`
+from an older revision of this repository's README rather than from this
+file, that is why it no longer compiles.
+
+### `(*service.Worker).Subscribe(handler)` returns `error`
+
+**Landed (E-M1).**
+
+    worker.Subscribe(handler)
+    -> if err := worker.Subscribe(handler); err != nil { ... }
+
+**What a consumer must do.** Check it. The only case that errors is calling
+`Subscribe` after `Run` has already started -- previously this only logged
+(Error level), and under the library's default `core.NopLogger` that line
+went nowhere, so a handler registered after `Run` silently never fired.
+`docs/api-surface.txt` records the new signature (`service.Worker.Subscribe
+= method (handler func(context.Context, core.Event) error) error`).
+
+### `(*service.Worker).Run` refuses to start under the default silent logger
+
+**Landed (E-M1 / I-M11).** A **runtime behavior change**, not a signature
+change -- no entry in `api-surface.txt`, but load-bearing for any deployment
+that never called `ledger.WithLogger`.
+
+A `Worker` built from a `Service` constructed `ledger.New(pool)` with no
+`WithLogger` option now has `Run` return an error immediately, before
+starting any job:
+
+    service: worker: refusing to start with the default silent logger: ...
+
+**What a consumer must do.** Pass `ledger.WithLogger(...)` at `ledger.New`
+(recommended -- every worker signal, including this one, travels over
+`core.Logger` and nowhere else, so a worker booted under `NopLogger` used to
+be indistinguishable from outside from one that never started at all), or
+opt into the previous silent behavior explicitly with
+`ledger.WithSilentWorker()` / `(*service.Worker).AllowSilent()`. A consumer
+wired per an older revision of this repository's README Quick Start (no
+`WithLogger`) previously ran with zero output and background jobs that
+never advanced; it now fails fast at `Run` instead (2026-09-03 consumer
+audit F-C2b).
+
 ### `server.New`, `server.NewWithConfig` drop the `snapshotter` and `systemRollup` parameters
 
 **Landed (2026-08-29 review, MJ-5).**

@@ -184,7 +184,14 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 			// sentinel would need to live) is outside this task's file
 			// scope -- see the same string in
 			// postgres/booking_store.go's "has no lifecycle" error.
-			httpx.Error(w, httpx.ErrBadRequest(
+			//
+			// httpx.ErrField, not ErrBadRequest: a plain AppError's Message
+			// is server-log-only (httpx.Error renders message.text on the
+			// wire from bizcode.DisplayMessage(code), a static per-code
+			// string) -- ErrField is what api-contract.md §1's
+			// message.fields exists for, and the only shortcut constructor
+			// that puts caller-specific text where the caller can read it.
+			httpx.Error(w, httpx.ErrField("classification_code",
 				"classification \""+req.ClassificationCode+"\" has no lifecycle attached, so no booking "+
 					"can be created against it -- call ClassificationStore.SetLifecycleIfEmpty(ctx, uid, "+
 					"lifecycle) first (README \"Add a custom lifecycle\", or presets.DepositLifecycle / "+

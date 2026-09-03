@@ -317,6 +317,40 @@ recipe wouldn't need:**
 See [`examples/tamper-evident`](../examples/tamper-evident/) for a complete,
 runnable demonstration of what (2) refuses and why.
 
+**This interacts with [Recipe 4](#recipe-4--spending-credits-reserve--settle)
+in a way that is easy to miss.** Recipe 4's `Settle` runs inside `RunInTx`,
+which means the journal it posts alongside `Settle` is always
+`auth_status=unsigned_tx_mode` (Recipe 4's own note above) — signing is an
+external call, and `financial.md` forbids those inside an open transaction.
+A *discharge claim* (the record that says "this reservation settled/released
+for real, stop holding its amount") is signed the same way a journal is, for
+the same reason: it is a claim about money, made against a database row an
+attacker with `DATABASE_URL` could otherwise forge. `Settle`'d **inside
+`RunInTx`**, that claim cannot be signed either, so the gated view
+`RequireVerifiedBalance` computes falls back to `core.ReserveInput`'s
+documented conservative rule: the reservation continues to hold its **full
+original amount** until `ExpiresAt`, regardless of what `Settle` actually
+released. `GetBalanceBreakdown` and `HeldAmount` show the ordinary,
+ungated view — spendable, `0` outstanding — the whole time; there is
+currently no accessor that reads the amount a `RequireVerifiedBalance`-gated
+`Reserve` would see, so the two views can disagree with no error, no log,
+and nothing to diff against.
+
+**What this means operationally:** a reservation `Settle`'d via Recipe 4's
+`RunInTx` pattern still counts as fully held, for the withdrawal gate in (2)
+above, until it expires — by default (`ReserveInput.ExpiresIn`), 15 minutes.
+A user who just spent 32 of a 50-credit reservation and now tries to cash
+out sees a normal `available` balance, but a `RequireVerifiedBalance: true`
+withdrawal reservation against the same dimension can still be constrained
+by the un-discharged 50, not the 18 that is actually free. Two ways to avoid
+surprising a support queue with this: shorten `ExpiresIn` on
+metered-spend reservations so the conservative hold self-clears quickly, or
+route `Settle`/`Release` for reservations a caller expects to withdraw
+against soon through the **top-level** `Service` (outside `RunInTx`) instead
+of Recipe 4's composed pattern — the discharge claim signs normally there,
+and the gated view frees the reservation immediately instead of waiting for
+`ExpiresAt`.
+
 ### Refunding a specific charge — use a reversal, never a hand-written "undo"
 
 If you need to void a prior journal (bad charge, disputed purchase), post a
@@ -360,8 +394,23 @@ it (a JOIN + state-machine check), so an in-flight run is never force-closed.
 **You must actually run the worker** for this to happen:
 
 ```go
-w := svc.Worker(service.WorkerConfig{}) // sensible defaults incl. ExpirationInterval
-go w.Run(ctx)                            // your composition root owns the worker's lifetime
+w, err := svc.Worker(service.WorkerConfig{}) // sensible defaults incl. ExpirationInterval
+if err != nil {
+    log.Fatal(err)
+}
+go func() {
+    // Run only errors for a misconfiguration -- most commonly a Service
+    // built without ledger.WithLogger (see README's "Background worker"
+    // Quick Start section): every signal this worker produces, this error
+    // included, travels over core.Logger and nowhere else, so a worker
+    // that "started" under the silent default is indistinguishable from
+    // one that never started -- which is exactly the failure mode this
+    // recipe exists to warn against, just for the expiration job instead
+    // of the reservation itself.
+    if err := w.Run(ctx); err != nil {
+        log.Fatal(err)
+    }
+}() // your composition root owns the worker's lifetime
 ```
 
 > **Anti-pattern (do not do this in a consumer):** sweeping stale holds by
