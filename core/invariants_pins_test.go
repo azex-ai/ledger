@@ -1208,6 +1208,16 @@ var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
 		objects:   []string{"ledger_log_config_table_change"},
 		reason:    "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
 	},
+	"I-68": {
+		migration: "postgres/sql/migrations/030_guard_function_search_path.up.sql",
+		objects: []string{
+			"SET search_path = public, pg_temp",
+			"ledger_assert_journal_balanced",
+			"trg_check_journal_balance_on_journal",
+			"REVOKE TEMPORARY ON DATABASE",
+		},
+		reason: "three DB-only facts with no Go face at all: a proconfig entry on every function, two constraint triggers, and a database-level ACL. The Go side never names any of them -- the application posts a journal and the database decides",
+	},
 }
 
 // TestDbOnlyMechanismsExistWhereRegistered checks the register's own claims:

@@ -313,6 +313,37 @@ written because it was true when `[0.6.0]` shipped.
   state; if you need the intermediate one, lower `Confirmations` or drive
   ingestion from the webhook path.
 
+### Go module — Security (guard-function `search_path`, and the balance guard's dedup)
+
+- **A leaked `ledger_app` credential could commit a one-sided journal entry,
+  by two independent routes through one function** (Wave 5, invariant I-68,
+  audit `docs/audits/2026-09-03-independent-review/install-roles.md` C1 and
+  C2; migration `030`). `check_journal_currency_balance()` was SECURITY
+  INVOKER with an empty `proconfig` and an unqualified `FROM journal_entries`,
+  and PostgreSQL searches `pg_temp` **first** for relation names whenever
+  pg_temp is not itself on the path -- so one `CREATE TEMP TABLE
+  journal_entries` made the balance trigger aggregate over an empty shadow and
+  a 999,999 imbalance committed (C1). Independently, the same function's dedup
+  set was a `pg_temp` table created with `IF NOT EXISTS`, so pre-creating it
+  and filling it with predictable journal ids made the aggregate never run at
+  all (C2). Nothing was going red because the search_path gate migration 013
+  shipped enumerated two SECURITY DEFINER partition functions by name; nine
+  SECURITY INVOKER guard functions were unpinned.
+
+  `030` pins `search_path = public, pg_temp` on every function in the schema
+  (the one exemption -- the two inlinable `ledger_signed_*` helpers -- is
+  bounded structurally, not by name), and replaces the dedup with a deferred
+  constraint trigger on `journals` plus a per-entry backstop keyed on
+  `journals.xmin`, so the guard keeps no state any caller can write. Cost is
+  unchanged to better at every journal size measured. **Consumers need no code
+  change**; see `docs/BREAKING.md` for the one operational requirement (`030`
+  also revokes `TEMPORARY` from `PUBLIC`, which needs a migration credential
+  that owns the database).
+
+  The gate is now derived from `pg_proc` rather than hand-written: a migration
+  that adds a function without pinning it is red on the first CI run
+  (`postgres.TestGuardFunctionSearchPath_EveryFunctionIsPinned`).
+
 ### Go module — Security (verified-balance gate: the hold term)
 
 - **A gated `Reserve` now holds conservatively, and an expired reservation

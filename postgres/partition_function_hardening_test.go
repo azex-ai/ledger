@@ -74,41 +74,13 @@ func TestLedgerCreateMonthlyPartition_AcceptsMatchingNameAndRange(t *testing.T) 
 	assert.False(t, created)
 }
 
-// TestPartitionFunctions_SearchPathIncludesPgTemp pins m-1: both SECURITY
-// DEFINER partition functions must pin search_path with pg_temp explicitly
-// listed (not left to PostgreSQL's implicit "pg_temp searched first for
-// relation names" default), closing the schema-shadowing vector migration
-// 007's own header comment already reasoned about but did not fully close.
-func TestPartitionFunctions_SearchPathIncludesPgTemp(t *testing.T) {
-	pool := postgrestest.SetupDB(t)
-	ctx := context.Background()
-
-	for _, fn := range []string{
-		"ledger_create_monthly_partition",
-		"ledger_rebalance_default_partition",
-	} {
-		t.Run(fn, func(t *testing.T) {
-			var proconfig []string
-			err := pool.QueryRow(ctx, `
-				SELECT p.proconfig
-				FROM pg_proc p
-				JOIN pg_namespace n ON n.oid = p.pronamespace
-				WHERE n.nspname = 'public' AND p.proname = $1
-			`, fn).Scan(&proconfig)
-			require.NoError(t, err)
-			require.NotEmpty(t, proconfig, "%s must have a proconfig (SET search_path) entry", fn)
-
-			var searchPath string
-			for _, cfg := range proconfig {
-				if len(cfg) > len("search_path=") && cfg[:len("search_path=")] == "search_path=" {
-					searchPath = cfg[len("search_path="):]
-				}
-			}
-			require.NotEmpty(t, searchPath, "%s: no search_path entry found in proconfig %v", fn, proconfig)
-			assert.Contains(t, searchPath, "pg_temp", "%s: search_path %q must explicitly include pg_temp", fn, searchPath)
-		})
-	}
-}
+// TestPartitionFunctions_SearchPathIncludesPgTemp used to live here. It pinned
+// m-1 by naming these two SECURITY DEFINER functions, and that hand-written
+// enumeration is why nine unpinned SECURITY INVOKER guard functions -- one of
+// them the balance guard C1 broke -- went three audit rounds without anything
+// going red. Migration 030 replaced it with a catalogue-derived gate over
+// every function in the schema:
+// postgres/guard_function_search_path_test.go.
 
 // TestLedgerRebalanceDefaultPartition_RejectsUnboundedRange pins D-m1
 // (2026-09-02 deep audit) and migration 021.

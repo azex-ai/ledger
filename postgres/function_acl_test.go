@@ -60,8 +60,20 @@ func TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist(t *testing.T) {
 	// good (w3-review/money-path.md m-4). The function is the only door, it
 	// runs as its owner, and it refuses any seq ahead of the local
 	// attestation chain.
+	//
+	// ledger_assert_journal_balanced is migration 030's per-journal balance
+	// aggregate, shared by the journals-level constraint trigger and the
+	// per-entry backstop so the two cannot drift apart. Both triggers are
+	// SECURITY INVOKER, and a function CALLED from a trigger function is
+	// EXECUTE-checked at call time against the invoker (unlike the trigger
+	// function itself, checked once at CREATE TRIGGER) -- so without this
+	// grant every ledger_app write fails with `permission denied for function
+	// ledger_assert_journal_balanced` instead of running the check. It reads
+	// journal_entries, which ledger_app can already SELECT, and either returns
+	// nothing or raises.
 	want := map[string][]string{
 		"ledger_app": {
+			"ledger_assert_journal_balanced(bigint)",
 			"ledger_create_monthly_partition(text,date,date)",
 			"ledger_rebalance_default_partition(date,date)",
 			"ledger_record_anchor_observation(uuid,bigint,bytea)",
