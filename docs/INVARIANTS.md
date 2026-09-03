@@ -1181,6 +1181,18 @@ every external reference stable across dump/restore.
   `TestNoInternalIDFieldsInCoreTypes_CatchesPlantedViolation` plants a
   tagged, an untagged and a non-json-tagged fixture; the untagged one is the
   case the previous scanner was structurally unable to fail on)
+- `core.TestEveryInt64OnACoreTypeIsClassified` — the TYPE-side half, added
+  2026-09-03 (F-7). Everything above derives its banned set from the
+  schema's column NAMES, so it can only catch a leak spelled the way the
+  schema spells it: adding `EventRef int64 `json:"event_ref"`` to
+  `core.JournalInput` left `core`, `server` and `service` green, and the one
+  test that noticed (`TestAPISurface_MatchesSnapshot`) is fixed by
+  regenerating the snapshot, in which `EventRef int64` reads as harmless.
+  This gate asks instead what every exported `int64` on an exported `core`
+  type IS: an identifier from a namespace the CALLER owns (account holder,
+  chain id, actor), a quantity, or -- registered one by one, with a reason
+  -- a stored row id the attestation digest has to bind. An unclassified one
+  is red, whatever it is called.
 - `core.TestNoInternalIDsInCoreInterfaceSignatures` (the interfaces half of
   this invariant: `idschema.ScanInterfaceParamsForBannedKeys` reads every
   `core` interface method's parameter NAMES, snake_cased, against the same
