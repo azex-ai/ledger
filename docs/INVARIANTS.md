@@ -554,6 +554,15 @@ also holds: an audit trail starting from the journal can always find its
 - `ledger.Service.RunInTx` provides the shared transaction boundary.
 
 **Pinned by**:
+- `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` and
+  `postgres.TestTxComposition_RunInTx_BookingEventJournalLinkage` — added
+  2026-09-03. The W5 mutation survey removed the
+  `linkJournalToEventAndBooking` call entirely and the three pins listed
+  below all stayed green; these two are what actually went red, alongside
+  the onchain deposit lifecycle test and migration 027's unlink tests
+  (neither cited here: they reach this mechanism through a service, so the
+  pin-vs-mechanism gate cannot hold them to it, and it says so). The
+  mechanism was enforced and pinned; the section named the wrong pins.
 - `postgres.TestAudit_TraceBooking` (booking → events → journals stitch --
   the `events.journal_id` direction)
 - `postgres.TestIntegration_FullLedgerFlow`
@@ -2583,6 +2592,18 @@ does not also touch the anchor is caught by comparing the two.
   the compile-time half of the same guard.
 
 **Pinned by**:
+- `service.TestVerifyLedger_AnchorHeadDisagreeingAtTheAnchoredSeqIsTampered`
+  — added 2026-09-03 after the W5 mutation survey found this section's
+  mechanism unpinned. `VerifyLedger`'s one comparison of the DB row at
+  `seq == anchorSeq` against the anchor's head could be disabled and
+  `go test ./...` stayed green across every package: the eleven pins listed
+  below are all about the cases AROUND it (an empty anchor, one that lags,
+  one that rolled back, one ahead of the DB), each decided by a different
+  branch. The new pin leaves the database genuine and changes what the
+  ANCHOR says, so every DB-side check still passes and the finding can only
+  come from this comparison — editing the DB row instead would also trip
+  the root_hash self-consistency check one branch above, which is how the
+  mechanism came to look covered.
 - `service.TestAttestationService_PublishesToAnchor` -- the happy path:
   after a successful `RunAttestBatch`, the anchor's `Head` reflects the
   new seq/root_hash.
