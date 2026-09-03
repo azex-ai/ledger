@@ -46,3 +46,18 @@ W5-searchpath（030）与 W5-insert（029）先后合（号段顺序）；其余
 | 5.12 | w5-readme 的 handler 用字符串匹配 `has no lifecycle` 判错误（discipline.md errors-as-data） | 越域授权：`core/errors.go` 加 `ErrNoLifecycle` 哨兵，`postgres/booking_store.go` 用 `%w` 包裹，handler `errors.Is`；ErrField 文案保留 |
 | 5.13 | RUNBOOK 新节撞号：w5-onchain-ops §18（dead-lettered）与 w5-money-misc §18/§19（corrupt reversal chain / anchor poisoned） | 合并顺序 onchain-ops 在前，其 §18 保留；money-misc 的两节由 lead 合并时改为 §19/§20（其错误文案按节名引用，不受影响） |
 | 5.14 | w5-gates 用 fuzz 30s 找到 money-path DoS：`amount="1E999999999"` 过 `Validate` / `checkAmountPrecision`（都是常数时间），到 `String()` 才展开 10^999999999，`PostJournal` 90s 不返回；持 write scope 的 key 一个请求即可挂死进程，library 模式同样中招 | **Critical 成立**，授权 w5-gates 在其分支修：core 层常数时间量级门（coefficient 位数 + exponent > 12 拒，NUMERIC(30,18) 只有 12 位整数位），置于任何算术之前；兄弟扫描覆盖全部 decimal 入口（Reserve/SettlePartial/AddPending/CreateBooking/Transition/ExecuteTemplate/holder API）；每入口 pin 计时上界；fuzz 语料入库为种子；I-70 + CHANGELOG/BREAKING。P-4/P-5 留 W5 后续 |
+
+## 5. R3 复核（recheck）遗留 TODO — install-roles
+
+由 w5-searchpath 在做 N1 / m4 / m1 时登记，**本轮不做**，供发版评估时排期。
+
+| # | 条目 | 为什么这轮不做 | 做的时候要注意 |
+|---|---|---|---|
+| m2 | `assertSoleSessionOnCredential` 用 `application_name` 排除「自己的连接」，而该键完全由客户端设置：一条 `SET application_name='azex-ledger-migrate'` 的旁路会话即可让守卫静默 fail-open | 落在 `postgres/migrate.go`，W5-money-misc 的独占域 | 修法是 per-run nonce（`azex-ledger-migrate-<nonce>`）+ 前缀/等值匹配；同时保留对「同名但非本 run」连接的计数，那正是要拒的东西 |
+| m3 | 安装凭证对**三个**角色都持 `ADMIN OPTION`（不止 `ledger_owner`），因此可 `ALTER ROLE ... PASSWORD` 接管应用与只读凭证；`revokeLedgerOwner` 错误信息给的 `REVOKE ledger_owner FROM <runner>` 是**单向**操作，执行后同集群新装会撞 M1 的另一种失败 | 纯文档（RUNBOOK「retire the bootstrap credential」节），且与 W5-money-misc 的 M1 改动同一节 | 要写的是三条 `REVOKE ADMIN OPTION FOR ledger_owner|ledger_app|ledger_ro FROM <runner>`（superuser 执行），并说明执行后同集群再装库需先由 superuser 补 `GRANT ... WITH SET TRUE` |
+| m7 | 没有面向运维的「ACL / ownership / trigger 矩阵」自检入口：I-22 的全部证据都在 CI 的新装容器上，生产库经过一次逻辑恢复（`DR.md` 自己记录了 `--no-owner` + 角色缺失）、一次人工 GRANT 或一次 owner 级抢救之后，没有任何命令能回答「这套隔离现在还成立吗」 | 新 `ledger-cli` 子命令 + `cmd/ledger-cli/` 是 W5-onchain-ops 的独占域，且要把三个测试的断言抽成库函数（跨 `postgres` 包边界，非 trivial） | 把 `grant_coverage_test.go` / `object_ownership_test.go` / `function_acl_test.go` 的断言抽成只读检查，做成 `ledger-cli verify-acl`（或 `health --acl`），`DR.md` §5 的验收清单加一步 |
+
+另外两条**非 install-roles、由本轮顺带发现**的记录：
+
+- **零分录 journal 无人拒绝**：`journals` 行可以 `total_debit > 0` 却一条 `journal_entries` 都没有。它不动钱（余额全部由分录推导），030 之前与之后都不被拒（030 的 journals 级触发器把它当作「平凡平衡」放行，031 删掉那个触发器后回到 001 的状态）。真正该管它的是对账层：目前没有任何检查会发现 `journals` 的总额没有分录支撑。建议作为 `reconcile` 的新检查项排期，而不是塞进写时触发器——写时拒绝需要「journal 必须有分录」这类跨语句约束，又会把求值时机重新变成语义的一部分（N1 的教训）。
+- **`SET CONSTRAINTS` 这一类「调用方可改变求值时机」的面**，031 只覆盖了平衡守卫。同类问题的其它可能载体（`SET session_replication_role`、`DEFERRABLE` 外键、`SET LOCAL` 可达的任何 GUC）没有系统扫过一遍。`TestBalanceGuard_RefusedUnderEveryConstraintTiming` 的形状（从目录枚举可调节的开关 × 重放攻击电池）值得推广到那些面上。
