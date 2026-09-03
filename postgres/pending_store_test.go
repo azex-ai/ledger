@@ -28,7 +28,11 @@ func TestPendingStore_AddPending(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-ADD", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	// nil verifiedBalance: these tests build no core.Attestor, so their journals
+	// are unsigned and ConfirmPending's V term (I-64) has nothing to verify --
+	// the same wiring ledger.New produces for an unsigned deployment. The V term
+	// itself is pinned in pending_gate_pin_test.go, which does configure one.
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1001)
 	amount := decimal.NewFromInt(500)
@@ -73,7 +77,7 @@ func TestPendingStore_AddPending_Idempotent(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-IDEM", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1002)
 	amount := decimal.NewFromInt(200)
@@ -120,7 +124,7 @@ func TestPendingStore_ConfirmPending(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-CONF", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1003)
 	addAmount := decimal.NewFromInt(1000)
@@ -190,7 +194,7 @@ func TestPendingStore_ConfirmPending_Idempotent(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-CONFIDEM", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1004)
 	amount := decimal.NewFromInt(300)
@@ -245,7 +249,7 @@ func TestPendingStore_CancelPending_Idempotent(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-CANCELIDEM", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(10041)
 	amount := decimal.NewFromInt(300)
@@ -300,7 +304,7 @@ func TestPendingStore_CancelPending(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-CANCEL", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1005)
 	amount := decimal.NewFromInt(400)
@@ -357,7 +361,7 @@ func TestPendingStore_CancelPending_OriginalNotMutated(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-NOMUT", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1006)
 	amount := decimal.NewFromInt(100)
@@ -399,7 +403,7 @@ func TestPendingStore_CancelPending_InsufficientBalance(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-INSUF", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(1007)
 	amount := decimal.NewFromInt(50)
@@ -445,7 +449,7 @@ func TestPendingStore_ExpirePendingOlderThan(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-EXP", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	// Add a "stale" deposit for user A.
 	userA := int64(2001)
@@ -510,7 +514,7 @@ func TestPendingStore_ExpirePendingOlderThan_AlreadySettled(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-SETTLED", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(3001)
 	amount := decimal.NewFromInt(150)
@@ -554,7 +558,7 @@ func TestPendingStore_AccountingEquation(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-EQ", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(4001)
 	amount := decimal.NewFromInt(777)
@@ -605,7 +609,7 @@ func TestConfirmPending_ConcurrentSameKey_NeverInsufficientBalance(t *testing.T)
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curUID := postgrestest.SeedCurrency(t, p, "USDT-RACE", "Test USDT")
-	store := postgres.NewPendingStore(p, ls, cs)
+	store := postgres.NewPendingStore(p, ls, cs, nil)
 	holder := int64(4242)
 
 	// Stage exactly the amount that one confirm will fully consume.
@@ -668,7 +672,7 @@ func TestPendingStore_ConfirmPending_SignsWhenAttestorConfigured(t *testing.T) {
 	ls := postgres.NewLedgerStore(p).WithAuth(attestor)
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-CSIGN", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(5001)
 	amount := decimal.NewFromInt(400)
@@ -717,7 +721,7 @@ func TestPendingStore_CancelPending_SignsWhenAttestorConfigured(t *testing.T) {
 	ls := postgres.NewLedgerStore(p).WithAuth(attestor)
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-XSIGN", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	userID := int64(5002)
 	amount := decimal.NewFromInt(150)
@@ -776,7 +780,7 @@ func TestPendingStore_ConfirmPending_GlobalLockOrder_NoDeadlockWithOrdinaryPost(
 
 	curUID := postgrestest.SeedCurrency(t, p, "USDT-LOCKORD", "Test USDT")
 	currencyID := postgrestest.InternalID(t, p, "currencies", curUID)
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	const userID = int64(1201)
 	amount := decimal.NewFromInt(100)
@@ -844,7 +848,7 @@ func TestPendingStore_ConfirmPending_InsufficientBalance(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curUID := postgrestest.SeedCurrency(t, p, "USDT-CONFINSUF", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 
 	const userID = int64(1202)
 
@@ -902,7 +906,7 @@ func TestPendingStore_ExpirePendingOlderThan_JoinsSentinelErrors(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	curUID := postgrestest.SeedCurrency(t, p, "USDT-EXPJOIN", "Test USDT")
-	ps := postgres.NewPendingStore(p, ls, cs)
+	ps := postgres.NewPendingStore(p, ls, cs, nil)
 	policies := postgres.NewAccountPolicyStore(p)
 
 	const userID = int64(1203)

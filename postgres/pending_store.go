@@ -45,6 +45,11 @@ type PendingStore struct {
 	q          *sqlcgen.Queries
 	ledger     *LedgerStore
 	classStore *ClassificationStore
+	// verifiedBalance turns ConfirmPending's V term on. Nil means the
+	// deployment configured no core.Attestor, so its journals are unsigned
+	// and there is nothing a verifier could confirm -- see ConfirmPending
+	// and I-64 for what that costs.
+	verifiedBalance core.VerifiedBalanceReader
 }
 
 // NewPendingStore constructs a PendingStore. It performs no I/O and cannot
@@ -53,25 +58,47 @@ type PendingStore struct {
 // Per-call resolution is also what keeps the store race-free across the
 // goroutines it is shared between (caching at construction time would freeze
 // in whatever ids happened to exist yet, and never notice a later install).
-func NewPendingStore(pool *pgxpool.Pool, ledger *LedgerStore, classStore *ClassificationStore) *PendingStore {
+//
+// verifiedBalance is ConfirmPending's authorization term (I-64, contract
+// §7.20). Pass the same core.VerifiedBalanceReader ReserverStore's gate uses
+// when the deployment has an Attestor, and nil when it does not — see
+// ConfirmPending for the two behaviours and I-64's boundary section for what
+// the nil case does not defend against.
+//
+// It is a positional parameter and not a chained WithVerifiedBalance option on
+// purpose: an option can be forgotten, and forgetting this one silently
+// disables the only check standing between a forged pending entry and
+// spendable balance — the exact "未运行 ≠ 通过" shape working-agreements §3
+// forbids. Typing nil is a decision a reader can see; an omission is not.
+// ReserverStore takes its own reader positionally for the same reason.
+func NewPendingStore(pool *pgxpool.Pool, ledger *LedgerStore, classStore *ClassificationStore, verifiedBalance core.VerifiedBalanceReader) *PendingStore {
 	return &PendingStore{
-		pool:       pool,
-		db:         pool,
-		q:          sqlcgen.New(pool),
-		ledger:     ledger,
-		classStore: classStore,
+		pool:            pool,
+		db:              pool,
+		q:               sqlcgen.New(pool),
+		ledger:          ledger,
+		classStore:      classStore,
+		verifiedBalance: verifiedBalance,
 	}
 }
 
 // WithDB returns a clone bound to an existing transaction or DBTX.  The caller
 // owns tx lifecycle.
+//
+// verifiedBalance is carried across so the clone can tell "no gate configured"
+// from "gate configured but unreachable from here". It is deliberately NOT
+// rebound to the transaction: the reader may call a remote AuthVerifier, and
+// financial.md forbids that inside an open transaction, so ConfirmPending
+// fails closed on a tx-bound clone rather than dialing out with the caller's
+// locks held. Same rule, same reason as VerifiedBalanceStore.WithDB.
 func (s *PendingStore) WithDB(db DBTX, ledger *LedgerStore, classStore *ClassificationStore) *PendingStore {
 	return &PendingStore{
-		pool:       nil,
-		db:         db,
-		q:          sqlcgen.New(db),
-		ledger:     ledger,
-		classStore: classStore,
+		pool:            nil,
+		db:              db,
+		q:               sqlcgen.New(db),
+		ledger:          ledger,
+		classStore:      classStore,
+		verifiedBalance: s.verifiedBalance,
 	}
 }
 
@@ -137,10 +164,29 @@ func (s *PendingStore) AddPending(ctx context.Context, in core.AddPendingInput) 
 //	CR custodial (system) — records platform custody gain
 //
 // Idempotent on IdempotencyKey.
-// Returns ErrInsufficientBalance if the pending balance is less than Amount,
-// where "the pending balance" is recomputed from journal_entries under the
-// balance lock and never read from balance_checkpoints — this call mints
-// spendable balance, so its input has to be the trusted figure (I-64).
+//
+// This call mints spendable balance, so what it may move is gated on two
+// figures, neither of which reads balance_checkpoints (I-64, contract §7.18 +
+// §7.20) — the same pair, for the same reasons, as Reserve's
+// RequireVerifiedBalance gate (I-49):
+//
+//   - V, when the deployment configured a core.Attestor: every journal
+//     contributing to the holder's pending dimension must pass a live
+//     signature check. One unauthorized contributor refuses the whole confirm
+//     with core.ErrUnauthorizedJournal — never "exclude the bad one and use
+//     the rest" (I-32's UNDEFINED rule). Computed BEFORE the transaction
+//     opens, because a core.AuthVerifier may be a remote call.
+//   - E: an entries-only recompute of the same dimension, taken under the
+//     (holder, currency) advisory lock in pure SQL.
+//
+// Returns ErrInsufficientBalance when Amount exceeds min(V, E), or
+// ErrUnauthorizedJournal when the V half refuses. With no Attestor configured
+// the journals this ledger writes are unsigned, there is nothing a verifier
+// could confirm, and the gate is E only — real entries, but unauthenticated
+// ones (I-64's boundary section).
+//
+// Returns ErrInvalidInput when called on a transaction-bound clone while V is
+// configured: see the guard below.
 func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendingInput) (*core.Journal, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
@@ -162,7 +208,24 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 	input := s.buildConfirmPendingJournalInput(in, clsIDs)
 	input.JournalTypeUID = pgToUID(jt.Uid)
 
-	// Idempotency check first — avoid acquiring a balance lock if already posted.
+	// Fail closed on a tx-bound clone before anything else, including the
+	// idempotency short-circuit -- "is this composition supported" must not
+	// depend on whether the caller happens to be retrying. s.pool == nil means
+	// this store came from WithDB, i.e. we are inside a caller's
+	// ledger.Service.RunInTx: a transaction is already open, and the V term
+	// needs a possibly-remote core.AuthVerifier, which financial.md forbids
+	// from inside one. Degrading to E-only here instead would be the silent
+	// downgrade working-agreements §3 exists to prevent -- the same
+	// ConfirmPending would be gated or ungated depending on how the consumer
+	// happened to compose it. Same guard, same wording, same reason as
+	// ReserverStore.Reserve's.
+	if s.pool == nil && s.verifiedBalance != nil {
+		return nil, fmt.Errorf("pending: confirm: called on a transaction-bound store while the verified-balance gate is configured; the gate may call a remote AuthVerifier and financial.md forbids that inside an open transaction -- call ConfirmPending on the top-level Service BEFORE opening a RunInTx, not from inside its callback: %w", core.ErrInvalidInput)
+	}
+
+	// Idempotency check first — avoid acquiring a balance lock if already
+	// posted, and avoid the verifier round trip below on a replay (the same
+	// saving LedgerStore.Authorize makes before signing).
 	existing, err := s.q.GetJournalByIdempotencyKey(ctx, in.IdempotencyKey)
 	if err == nil {
 		return s.ledger.ensureJournalMatchesInput(ctx, s.q, existing, input)
@@ -171,7 +234,16 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 		return nil, fmt.Errorf("pending: confirm: idempotency check: %w", err)
 	}
 
-	return s.checkPendingBalanceAndPost(ctx, "pending: confirm", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input)
+	var verifiedPendingBase *decimal.Decimal
+	if s.verifiedBalance != nil {
+		verified, err := s.verifiedBalance.VerifiedBalance(ctx, in.AccountHolder, in.CurrencyUID, clsIDs.pending)
+		if err != nil {
+			return nil, fmt.Errorf("pending: confirm: verified pending balance: %w", err)
+		}
+		verifiedPendingBase = &verified
+	}
+
+	return s.checkPendingBalanceAndPost(ctx, "pending: confirm", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input, verifiedPendingBase)
 }
 
 // CancelPending reverses a pending deposit (two-phase step 2 — cancel path).
@@ -210,7 +282,16 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 		return nil, fmt.Errorf("pending: cancel: idempotency check: %w", err)
 	}
 
-	return s.checkPendingBalanceAndPost(ctx, "pending: cancel", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input)
+	// No V term, deliberately (contract §7.20). Cancelling only ever moves
+	// pending back to the system's suspense account -- it creates no spendable
+	// balance and signs nothing into an available-role classification, so the
+	// laundering ConfirmPending's V term exists to stop has no counterpart
+	// here. Verifying would cost a possibly-remote round trip on the timeout
+	// sweeper's hot path (ExpirePendingOlderThan cancels up to 1 000 rows a
+	// call) to refuse an operation whose worst case is refusing itself. The
+	// entries-only E term still applies: a forged checkpoint cannot inflate
+	// what may be cancelled.
+	return s.checkPendingBalanceAndPost(ctx, "pending: cancel", in.AccountHolder, in.CurrencyUID, clsIDs.pending, in.Amount, input, nil)
 }
 
 // checkPendingBalanceAndPost serializes the (holder, currency_id) balance with
@@ -220,6 +301,12 @@ func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingI
 //
 // In pool mode this method begins and commits its own transaction. In tx mode
 // the caller's transaction is used; the caller owns commit/rollback.
+//
+// verifiedPendingBase is non-nil exactly when ConfirmPending's V term ran; it
+// carries the authorized pending figure computed before this transaction
+// opened, and the gate below takes the minimum of it and the under-lock
+// entries-only recompute. Nil (CancelPending always, ConfirmPending on a
+// deployment with no Attestor) leaves the gate at E alone.
 //
 // Signing: in pool mode this method owns its own transaction the same way
 // LedgerStore.PostJournal's pool-mode branch does, so it follows the same
@@ -244,6 +331,7 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 	currencyUID, pendingClsUID string,
 	required decimal.Decimal,
 	input core.JournalInput,
+	verifiedPendingBase *decimal.Decimal,
 ) (*core.Journal, error) {
 	run := func(qtx *sqlcgen.Queries, ledger *LedgerStore, authorized *core.AuthorizedJournal) (*core.Journal, error) {
 		cur, err := ledger.dims.currencyByUIDOrErr(ctx, qtx, currencyUID)
@@ -327,6 +415,28 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 		bal, err := pendingBalanceFromEntries(ctx, qtx, ledger.dims, holder, cur.ID, pendingClsUID)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", errPrefix, err)
+		}
+		// When the V term ran (ConfirmPending with an Attestor configured),
+		// the gate is min(V, E) -- I-49's rule, for I-49's reasons, and each
+		// figure covers exactly what the other cannot see:
+		//
+		//   V was authorized, but before this transaction opened, because a
+		//     core.AuthVerifier may be remote. It is therefore a fact about a
+		//     moment now past.
+		//   E is current -- it sees anything that committed before this
+		//     lock was granted -- but the sum is pure SQL with no external
+		//     call, so it cannot tell a genuine journal from a forged one.
+		//
+		// Taking the minimum is safe in both directions. A genuine AddPending
+		// committing in that window leaves V stale-LOW, and the confirm is
+		// refused (retryable; the honest AddPending-then-ConfirmPending
+		// sequence never hits it, because the add is committed before the
+		// gate runs). A forged, unsigned credit committing in that same
+		// window raises E -- V did not see it, V < E, and V wins, so the
+		// forgery buys nothing. Using E alone here would leave exactly that
+		// race open: verify, then let an unverified number decide the amount.
+		if verifiedPendingBase != nil {
+			bal = decimal.Min(*verifiedPendingBase, bal)
 		}
 		if bal.LessThan(required) {
 			return nil, fmt.Errorf(

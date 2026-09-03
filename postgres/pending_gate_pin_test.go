@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -362,89 +363,363 @@ func TestConfirmPending_RecomputesUnderLock(t *testing.T) {
 		"the drain really did land, so the refusal is about the recomputed 50; got %s", pending)
 }
 
-// TestConfirmPending_EntriesOnlyGateDoesNotAuthenticateEntries pins I-64's
-// stated boundary as measured behaviour rather than as a caveat in prose.
+// forgeUnsignedPendingCredit inserts, as ledger_app over a real socket, an
+// AddPending-shaped journal that nothing signed: DR suspense (system) / CR
+// pending (user). Two INSERTs, both within what the application's own
+// credential holds (migration 008 gives it column-scoped INSERT on
+// journal_entries), and the standing threat model assumes that credential is
+// leaked. Running it as the container superuser would prove nothing.
+func forgeUnsignedPendingCredit(t *testing.T, app *pgxpool.Pool, ctx context.Context, f pendingGateFixture, holder int64, key string, amount int64) int64 {
+	t.Helper()
+
+	var suspenseID, journalTypeID int64
+	require.NoError(t, app.QueryRow(ctx, `SELECT id FROM classifications WHERE code = 'suspense'`).Scan(&suspenseID))
+	require.NoError(t, app.QueryRow(ctx, `SELECT id FROM journal_types WHERE code = 'deposit_pending'`).Scan(&journalTypeID))
+
+	tx, err := app.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var journalID int64
+	require.NoError(t, tx.QueryRow(ctx, `
+		INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, uid)
+		VALUES ($1, $2, $3, $3, gen_random_uuid())
+		RETURNING id`, journalTypeID, key, amount).Scan(&journalID),
+		"setup: ledger_app must be able to INSERT a journal for this pin to mean anything")
+	_, err = tx.Exec(ctx, `
+		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+		VALUES ($1, $2, $3, $4, 'debit', $7), ($1, $5, $3, $6, 'credit', $7)`,
+		journalID, core.SystemAccountHolder(holder), f.currencyID, suspenseID, holder, f.pendingID, amount)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
+
+	var status string
+	require.NoError(t, app.QueryRow(ctx, `SELECT auth_status FROM journals WHERE id = $1`, journalID).Scan(&status))
+	require.Equal(t, "unsigned_no_attestor", status, "setup: the forged journal must be unsigned -- that is what V is supposed to catch")
+	return journalID
+}
+
+// TestConfirmPending_RefusesForgedPendingEntries is the V term's pin
+// (contract §7.20). It is the reversal of the boundary this task first
+// measured and reported: reading entries instead of the checkpoint made the
+// gate's figure real, but not authorized, and ConfirmPending was the one call
+// that could launder an unauthorized figure into an authorized one.
 //
-// The gate reads entries instead of the checkpoint, and entries carry no
-// authorization check -- summing them under the balance lock is pure SQL
-// precisely so it makes no external call while the transaction is open
-// (financial.md), which is the same trade I-49 names for its E term. I-49
-// covers it with a second term, V, verified before the transaction opens.
-// ConfirmPending has no V term, so the discipline it enforces is "the amount
-// exists in journal_entries", not "the amount was authorized".
+// The laundering, in full: `pending` is credited by a forged unsigned journal;
+// `ConfirmPending` moves it to `main_wallet` on a journal this store signs
+// with the deployment's real Attestor; the withdrawal gate (I-49) then sees
+// `main_wallet` funded by one genuinely signed journal and both of its terms
+// accept it. Forging into `main_wallet` directly does not work — that journal
+// is unsigned and I-49's V refuses it — so closing this call closes the path.
 //
-// That leaves ledger_app able to forge an AddPending-shaped journal (two
-// INSERTs, nothing signs it) and then launder it: ConfirmPending moves it into
-// main_wallet on a journal this store signs with the real Attestor, so the
-// withdrawal gate sees main_wallet funded by one genuinely signed journal and
-// both of its terms accept it. Forging into main_wallet directly does not work
-// -- that journal is unsigned and V refuses it -- so this call is the only
-// laundry on the path, which is exactly why the boundary is worth pinning.
-//
-// This test asserts the CURRENT boundary, deliberately. It must go RED the day
-// a V term is added to this gate, and whoever makes it red is expected to
-// delete it and rewrite I-64's "What this does not close" section rather than
-// adjust the assertion. It is not a claim that the behaviour is desirable.
-func TestConfirmPending_EntriesOnlyGateDoesNotAuthenticateEntries(t *testing.T) {
+// One unauthorized contributor refuses the whole confirm. There is no
+// "exclude the forged one and confirm the rest": that is I-32's UNDEFINED
+// rule, and the reason for it is that excluding an unauthorized entry can
+// report MORE money, not less.
+func TestConfirmPending_RefusesForgedPendingEntries(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 	f := setupPendingGateFixture(t, pool, ctx, "USDT-PGFE")
 	const holder int64 = 9404
-	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-residual")
+	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-forged")
 
-	suspense, err := f.svc.Classifications().GetByCode(ctx, "suspense")
+	// A genuine, signed deposit first, so the refusal below cannot be "the
+	// gate refuses everything" and so the forged journal is not the dimension's
+	// only contributor.
+	_, err := f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgfe-add"), Source: "test",
+	})
 	require.NoError(t, err)
-	mainWallet, err := f.svc.Classifications().GetByCode(ctx, "main_wallet")
-	require.NoError(t, err)
 
-	var suspenseID, journalTypeID int64
-	require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM classifications WHERE uid = $1`, suspense.UID).Scan(&suspenseID))
-	require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM journal_types WHERE code = 'deposit_pending'`).Scan(&journalTypeID))
+	// Control: the honest 100 confirms while it is the only contributor.
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(40),
+		IdempotencyKey: postgrestest.UniqueKey("pgfe-honest"), Source: "test",
+	})
+	require.NoError(t, err, "the V term must not refuse a dimension whose journals are all genuinely signed")
 
-	// The forgery, issued over a real socket AS ledger_app -- the claim is
-	// about what the application's own credential can reach, so running it as
-	// the container superuser would prove nothing (same rule I-49's hold pin
-	// follows).
-	tx, err := app.Begin(ctx)
-	require.NoError(t, err)
-	var forgedJournalID int64
-	require.NoError(t, tx.QueryRow(ctx, `
-		INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, uid)
-		VALUES ($1, 'w4-residual-forged', 5000, 5000, gen_random_uuid())
-		RETURNING id`, journalTypeID).Scan(&forgedJournalID),
-		"ledger_app must be able to INSERT a journal -- if this now fails the residual is closed and this pin should be deleted")
-	_, err = tx.Exec(ctx, `
-		INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-		VALUES ($1, $2, $3, $4, 'debit', 5000), ($1, $5, $3, $6, 'credit', 5000)`,
-		forgedJournalID, core.SystemAccountHolder(holder), f.currencyID, suspenseID, holder, f.pendingID)
-	require.NoError(t, err, "ledger_app holds column-scoped INSERT on journal_entries (migration 008)")
-	require.NoError(t, tx.Commit(ctx))
-
-	var forgedStatus string
-	require.NoError(t, pool.QueryRow(ctx, `SELECT auth_status FROM journals WHERE id = $1`, forgedJournalID).Scan(&forgedStatus))
-	require.Equal(t, "unsigned_no_attestor", forgedStatus, "setup: the forged journal is unsigned, which is why V would refuse it directly")
+	forgeUnsignedPendingCredit(t, app, ctx, f, holder, "pgfe-forged", 5000)
 
 	entriesOnly, err := f.svc.CheckpointIntegrity().RecomputeBalance(ctx, holder, f.currencyUID, f.pendingUID)
 	require.NoError(t, err)
-	require.True(t, entriesOnly.Equal(decimal.NewFromInt(5000)),
-		"the forged entries are real entries, so the entries-only recompute counts them; got %s", entriesOnly)
+	require.True(t, entriesOnly.Equal(decimal.NewFromInt(5060)),
+		"setup: the forged entries are real entries, so E counts them -- that is exactly why E alone was not enough; got %s", entriesOnly)
 
-	confirmed, err := f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
-		AccountHolder:  holder,
-		CurrencyUID:    f.currencyUID,
-		Amount:         decimal.NewFromInt(5000),
-		IdempotencyKey: postgrestest.UniqueKey("pgfe-launder"),
-		Source:         "test",
+	// The pin: the amount is now present in journal_entries and E would allow
+	// it, so only the signature check can refuse.
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(5000),
+		IdempotencyKey: postgrestest.UniqueKey("pgfe-launder"), Source: "test",
 	})
-	require.NoError(t, err, "BOUNDARY: the gate authenticates nothing, so a forged entry passes it. If this now errors, see this test's doc comment")
+	require.Error(t, err, "ConfirmPending must verify every journal contributing to the pending dimension before it signs anything into main_wallet")
+	require.ErrorIs(t, err, core.ErrUnauthorizedJournal)
 
-	var confirmStatus string
-	require.NoError(t, pool.QueryRow(ctx, `SELECT auth_status FROM journals WHERE uid = $1`, confirmed.UID).Scan(&confirmStatus))
-	require.Equal(t, "signed", confirmStatus,
-		"BOUNDARY: and the laundering journal is genuinely signed, which is what makes the result indistinguishable from a real deposit downstream")
+	// UNDEFINED, not "confirm the authorized remainder": even the 60 that is
+	// genuinely there is refused while an unauthorized contributor exists.
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(60),
+		IdempotencyKey: postgrestest.UniqueKey("pgfe-remainder"), Source: "test",
+	})
+	require.ErrorIs(t, err, core.ErrUnauthorizedJournal,
+		"one unauthorized contributor makes the whole dimension UNDEFINED (I-32); confirming the 'authorized remainder' is the excluded behaviour")
 
+	// And nothing reached main_wallet beyond the honest 40.
+	mainWallet, err := f.svc.Classifications().GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
 	spendable, err := f.svc.CheckpointIntegrity().RecomputeBalance(ctx, holder, f.currencyUID, mainWallet.UID)
 	require.NoError(t, err)
-	require.True(t, spendable.Equal(decimal.NewFromInt(5000)),
-		"BOUNDARY: 5000 of spendable balance now exists behind one signed journal; got %s", spendable)
+	require.True(t, spendable.Equal(decimal.NewFromInt(40)), "expected the honest 40 only, got %s", spendable)
+}
+
+// TestConfirmPending_VerifiedBaseCapsEntriesForgedInTheWindow is why the gate
+// takes min(V, E) rather than using V as a yes/no and letting E decide the
+// amount.
+//
+// V has to be computed before the transaction opens (a core.AuthVerifier may
+// be remote, and financial.md forbids external calls inside a transaction), so
+// there is a window between the verification and the advisory lock. An
+// attacker who lands a forged credit inside that window is not seen by V at
+// all, and E — pure SQL under the lock, no authorization check by
+// construction — counts it. "Verify, then let an unverified number decide how
+// much" is that window left open, and it is retryable until it hits.
+//
+// Constructed like RecomputesUnderLock, except the competing transaction takes
+// the (holder, currency) balance lock directly and forges inside it, so the
+// forgery becomes visible to E and only to E.
+func TestConfirmPending_VerifiedBaseCapsEntriesForgedInTheWindow(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupPendingGateFixture(t, pool, ctx, "USDT-PGWD")
+	const holder int64 = 9405
+	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-window")
+
+	_, err := f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgwd-add"), Source: "test",
+	})
+	require.NoError(t, err)
+
+	lockHeld := make(chan struct{})
+	committed := make(chan error, 1)
+	go func() {
+		tx, err := app.Begin(ctx)
+		if err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		// The same lock ConfirmPending will queue on, taken by key rather than
+		// by posting a journal: this transaction must hold the lock while
+		// writing something the gate has already looked past.
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('bal:' || $1::text, 0))`,
+			fmt.Sprintf("balance:%d:%d", holder, f.currencyID),
+		); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+
+		var suspenseID, journalTypeID int64
+		if err := tx.QueryRow(ctx, `SELECT id FROM classifications WHERE code = 'suspense'`).Scan(&suspenseID); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		if err := tx.QueryRow(ctx, `SELECT id FROM journal_types WHERE code = 'deposit_pending'`).Scan(&journalTypeID); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		var journalID int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO journals (journal_type_id, idempotency_key, total_debit, total_credit, uid)
+			VALUES ($1, 'pgwd-window-forged', 5000, 5000, gen_random_uuid())
+			RETURNING id`, journalTypeID).Scan(&journalID); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
+			VALUES ($1, $2, $3, $4, 'debit', 5000), ($1, $5, $3, $6, 'credit', 5000)`,
+			journalID, core.SystemAccountHolder(holder), f.currencyID, suspenseID, holder, f.pendingID); err != nil {
+			committed <- err
+			close(lockHeld)
+			return
+		}
+		close(lockHeld)
+
+		if err := waitForBlockedAdvisoryLock(ctx, pool); err != nil {
+			committed <- err
+			return
+		}
+		committed <- tx.Commit(ctx)
+	}()
+
+	<-lockHeld
+
+	// V runs now, outside any transaction: it sees only the committed, signed
+	// 100, and the forgery is still invisible. Then this blocks on the lock,
+	// the forgery commits, and E comes back 5100.
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(1000),
+		IdempotencyKey: postgrestest.UniqueKey("pgwd-gated"), Source: "test",
+	})
+	require.NoError(t, <-committed, "test setup: the window forgery must commit")
+	require.Error(t, err, "the confirm must be capped by V, which never saw the forgery; using E alone here leaves the verify-then-trust window open")
+	require.ErrorIs(t, err, core.ErrInsufficientBalance)
+
+	entriesOnly, err := f.svc.CheckpointIntegrity().RecomputeBalance(ctx, holder, f.currencyUID, f.pendingUID)
+	require.NoError(t, err)
+	require.True(t, entriesOnly.Equal(decimal.NewFromInt(5100)),
+		"the forgery really did land and E really would have allowed 1000; got %s", entriesOnly)
+
+	mainWallet, err := f.svc.Classifications().GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+	spendable, err := f.svc.CheckpointIntegrity().RecomputeBalance(ctx, holder, f.currencyUID, mainWallet.UID)
+	require.NoError(t, err)
+	require.True(t, spendable.IsZero(), "no spendable balance may have been created, got %s", spendable)
+}
+
+// TestConfirmPending_TxBoundStoreFailsClosed pins the RunInTx half of §7.20:
+// with the gate configured, a ConfirmPending composed inside a caller's
+// transaction is refused rather than run ungated.
+//
+// The alternative — degrade to E-only inside RunInTx — is the silent downgrade
+// working-agreements §3 exists to prevent: the same call would be gated or not
+// depending on how the consumer happened to compose it, with nothing in the
+// result saying which. Deliberately asserted BEFORE the callback writes
+// anything, and asserted again from outside, so "refused" means "the whole
+// transaction produced nothing", not "returned an error after posting".
+func TestConfirmPending_TxBoundStoreFailsClosed(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	f := setupPendingGateFixture(t, pool, ctx, "USDT-PGTX")
+	const holder int64 = 9406
+
+	_, err := f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgtx-add"), Source: "test",
+	})
+	require.NoError(t, err)
+
+	err = f.svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		_, err := tx.PendingBalanceWriter().ConfirmPending(ctx, core.ConfirmPendingInput{
+			AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
+			IdempotencyKey: postgrestest.UniqueKey("pgtx-inside"), Source: "test",
+		})
+		return err
+	})
+	require.Error(t, err, "a tx-bound ConfirmPending must fail closed while the verified-balance gate is configured")
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// Nothing moved.
+	pending, err := f.svc.CheckpointIntegrity().RecomputeBalance(ctx, holder, f.currencyUID, f.pendingUID)
+	require.NoError(t, err)
+	require.True(t, pending.Equal(decimal.NewFromInt(100)), "expected the pending 100 untouched, got %s", pending)
+
+	// The same confirm outside RunInTx is the documented remedy, and works.
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgtx-outside"), Source: "test",
+	})
+	require.NoError(t, err, "the error message tells the caller to confirm before opening RunInTx; that must actually work")
+
+	// CancelPending has no V term, so it is NOT refused in tx mode -- the
+	// asymmetry is deliberate (it creates no spendable balance) and is
+	// asserted rather than left to be discovered.
+	_, err = f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(70),
+		IdempotencyKey: postgrestest.UniqueKey("pgtx-add2"), Source: "test",
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		_, err := tx.PendingBalanceWriter().CancelPending(ctx, core.CancelPendingInput{
+			AccountHolder: holder, CurrencyUID: f.currencyUID, Amount: decimal.NewFromInt(70),
+			IdempotencyKey: postgrestest.UniqueKey("pgtx-cancel"), Source: "test",
+		})
+		return err
+	}), "CancelPending composes inside RunInTx as it always did")
+}
+
+// TestConfirmPending_WithoutAttestorIsEntriesOnly pins the other side of the
+// wiring: a deployment that configured no core.Attestor gets no V term, and
+// I-64 says so out loud instead of implying the gate is tamper-resistant
+// everywhere.
+//
+// There is nothing to verify in that deployment — its own journals are
+// unsigned, so a verifier would refuse every confirm, honest ones included.
+// The gate is E alone: real entries, unauthenticated. This test holds that
+// boundary as measured behaviour, and must go red if the wiring ever starts
+// verifying without an Attestor (at which point the honest path breaks, which
+// is precisely what this pin would catch).
+func TestConfirmPending_WithoutAttestorIsEntriesOnly(t *testing.T) {
+	pool := postgrestest.SetupDB(t)
+	ctx := context.Background()
+
+	svc, err := ledger.New(pool) // no WithAttestor
+	require.NoError(t, err)
+	require.NoError(t, presets.InstallPendingBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates()))
+
+	currencyUID := postgrestest.SeedCurrency(t, pool, "USDT-PGNA", "Pending gate no attestor")
+	pendingCls, err := svc.Classifications().GetByCode(ctx, "pending")
+	require.NoError(t, err)
+
+	f := pendingGateFixture{svc: svc, writer: svc.PendingBalanceWriter(), currencyUID: currencyUID, pendingUID: pendingCls.UID}
+	require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM currencies WHERE uid = $1`, currencyUID).Scan(&f.currencyID))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM classifications WHERE uid = $1`, pendingCls.UID).Scan(&f.pendingID))
+
+	const holder int64 = 9407
+	app := ledgerAppPool(t, ctx, pool, "w4-pending-gate-noattestor")
+
+	// The honest path works, which is the whole reason the gate is off here:
+	// with no Attestor these journals are unsigned, so a V term would refuse
+	// this too.
+	_, err = f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgna-add"), Source: "test",
+	})
+	require.NoError(t, err)
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(100),
+		IdempotencyKey: postgrestest.UniqueKey("pgna-confirm"), Source: "test",
+	})
+	require.NoError(t, err, "an unsigned deployment must still be able to confirm its own deposits")
+
+	// E still holds: a forged CHECKPOINT buys nothing even here.
+	inflatePendingCheckpoint(t, pool, ctx, f, holder, 1_000_000)
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(1000),
+		IdempotencyKey: postgrestest.UniqueKey("pgna-checkpoint"), Source: "test",
+	})
+	require.ErrorIs(t, err, core.ErrInsufficientBalance, "the entries-only term applies with or without an Attestor")
+
+	// BOUNDARY: forged ENTRIES do buy something, because nothing here can tell
+	// a signed journal from an unsigned one. Stated in I-64, pinned here.
+	forgeUnsignedPendingCredit(t, app, ctx, f, holder, "pgna-forged", 5000)
+	_, err = f.writer.ConfirmPending(ctx, core.ConfirmPendingInput{
+		AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(5000),
+		IdempotencyKey: postgrestest.UniqueKey("pgna-launder"), Source: "test",
+	})
+	require.NoError(t, err,
+		"BOUNDARY (I-64): with no Attestor there is no V term and forged entries pass. If this now errors, the wiring changed -- update I-64's boundary section rather than this assertion")
+
+	// And a tx-bound confirm is NOT refused here, because there is no remote
+	// call to keep out of the transaction.
+	_, err = f.writer.AddPending(ctx, core.AddPendingInput{
+		AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(20),
+		IdempotencyKey: postgrestest.UniqueKey("pgna-add2"), Source: "test",
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		_, err := tx.PendingBalanceWriter().ConfirmPending(ctx, core.ConfirmPendingInput{
+			AccountHolder: holder, CurrencyUID: currencyUID, Amount: decimal.NewFromInt(20),
+			IdempotencyKey: postgrestest.UniqueKey("pgna-tx"), Source: "test",
+		})
+		return err
+	}), "with no gate configured there is nothing to fail closed on, and RunInTx composition keeps working")
 }

@@ -325,7 +325,7 @@ func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
 
 	curID := postgrestest.SeedCurrency(t, p, "USDT-FROZEN-CONFIRM", "Test USDT")
 	jtID := postgrestest.SeedJournalType(t, p, "jt_frozen_confirm", "Test JT")
-	pendingStore := postgres.NewPendingStore(p, ls, cs)
+	pendingStore := postgres.NewPendingStore(p, ls, cs, nil)
 	policies := postgres.NewAccountPolicyStore(p)
 
 	userID := int64(4300)

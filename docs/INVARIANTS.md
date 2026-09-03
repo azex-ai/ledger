@@ -1029,9 +1029,9 @@ explicitly **not** part of the withdrawal path's defence against a leaked
 What *is* on the anti-tampering path, and where money leaving the ledger is
 actually gated: `core.ReserveInput.RequireVerifiedBalance` (I-49), which
 recomputes from entries and verifies signatures, and — for the one call that
-mints spendable balance out of a pending deposit — the entries-only gate in
-I-64. A deployment that needs a floor to survive a compromised credential must
-use those, not this.
+mints spendable balance out of a pending deposit — `ConfirmPending`'s
+`min(V, E)` gate in I-64, which does the same two things. A deployment that
+needs a floor to survive a compromised credential must use those, not this.
 
 **Enforced by**:
 - `postgres.LedgerStore.enforceAccountPolicies`, called from
@@ -6581,97 +6581,135 @@ re-examined, never how long the record is kept.
   wiring half: a chain reader with no recorder is `core.ErrInvalidInput` at
   startup.
 
-## I-64: The pending balance a deposit confirmation spends is recomputed from entries, never read from `balance_checkpoints`
+## I-64: What a deposit confirmation may mint is bounded by entries that verified — never by `balance_checkpoints`, and never by entries alone
 
-**Rule**: `postgres.PendingStore.ConfirmPending` and
-`postgres.PendingStore.CancelPending` decide whether the holder has enough
-pending balance by summing `journal_entries` for the
-`(holder, currency, pending-classification)` dimension from the beginning of
-history — `postgres.pendingBalanceFromEntries`, which runs
-`RecomputeCheckpointFromEntries`, the same query I-49's **E** term and
-`core.CheckpointIntegrityStore.RecomputeBalance` use. `balance_checkpoints`
-is referenced nowhere on that path.
+**Rule**: `postgres.PendingStore.ConfirmPending` decides how much it may move
+out of the holder's `pending` classification from `min(V, E)`, neither term of
+which reads `balance_checkpoints`:
 
-The recompute runs **inside** the transaction that posts the journal, while
-the `(holder, currency)` advisory lock is already held (I-4), in pure SQL —
-so it is current with respect to anything that committed before the lock was
-granted, and makes no external call inside an open transaction
-(`financial.md`). Insufficiency is `core.ErrInsufficientBalance`, unchanged.
+- **V** = `core.VerifiedBalanceReader.VerifiedBalance` on the pending
+  dimension, computed **before** the transaction opens (a `core.AuthVerifier`
+  may be a remote call, and `financial.md` forbids that inside an open
+  transaction). Every journal contributing to that dimension must pass a live
+  signature check; one that does not refuses the **whole** confirm with
+  `core.ErrUnauthorizedJournal` — never "exclude the unauthorized one and
+  confirm the rest", which is I-32's UNDEFINED rule and can report *more*
+  money, not less.
+- **E** = `postgres.pendingBalanceFromEntries`, which runs
+  `RecomputeCheckpointFromEntries` — the same query I-49's E term and
+  `core.CheckpointIntegrityStore.RecomputeBalance` use — **inside** the
+  transaction, while the `(holder, currency)` advisory lock is held (I-4), in
+  pure SQL with no external call.
+
+Insufficiency against that minimum is `core.ErrInsufficientBalance`.
+
+`postgres.PendingStore.CancelPending` uses **E only**: it moves pending back to
+the system's `suspense` account, creating no spendable balance, so it has
+nothing to launder and no V term. A forged checkpoint still cannot inflate what
+may be cancelled.
+
+**Deployment conditions.** V is wired on by `ledger.New` exactly when the
+deployment configured a `core.Attestor` (`ledger.WithAttestor`). Two
+consequences, both deliberate:
+
+- **`RunInTx` + V configured → `core.ErrInvalidInput`.** A `ConfirmPending`
+  reached through a transaction-bound clone is refused, not silently run
+  ungated. Degrading would mean the same call is gated or not depending on how
+  the consumer composed it, with nothing in the result saying which — the
+  silent downgrade `working-agreements.md` §3 exists to prevent. The remedy is
+  in the error text: confirm before opening the `RunInTx`.
+- **No `Attestor` → E only.** That ledger's own journals are unsigned, so a
+  verifier would refuse every confirm, honest ones included. See the boundary
+  section below for what such a deployment does not get. Note that an
+  `Attestor` configured *with a nil verifier* is treated as V-on and therefore
+  refuses every dimension with a contributing journal: "signs but cannot
+  verify" is a misconfiguration, and answering it loudly is the point.
 
 **Why**: `ConfirmPending` is a minting primitive. Its journal debits the
-credit-normal `pending` classification and credits the holder's
-`main_wallet` — a `balance_role='available'` classification — so it converts
-in-flight deposit balance into spendable balance. And in pool mode this store
-signs that journal with the deployment's real `core.Attestor` before opening
-its transaction.
+credit-normal `pending` classification and credits the holder's `main_wallet`
+— a `balance_role='available'` classification — and in pool mode this store
+signs that journal with the deployment's real `core.Attestor`. So whatever
+funds `pending` becomes spendable money **behind a genuine signature**, and
+both terms of the withdrawal gate (I-49) then accept the result: E sums it
+because it is a real entry, V accepts it because the signature is real.
+`ConfirmPending` is the only call on the path that can turn an unauthorized
+figure into an authorized one — forging into `main_wallet` directly does not
+work, because that journal is unsigned and I-49's V refuses it.
 
-Those two facts together made the checkpoint read on this path strictly worse
-than the one I-49 closed on `Reserve`. `balance_checkpoints` has to stay
-`UPDATE`-able (the rollup worker's job is writing it), so it carries no
-append-only trigger and the standing threat model's first row — an attacker
-holding `ledger_app`'s credential — raises a row in it with one statement.
-Raising the *pending* dimension and then calling `ConfirmPending` did not just
-buy a reservation; it produced a **genuinely signed** journal crediting
-`main_wallet`. Both terms of the withdrawal gate then accept the result: **E**
-sums it because it is a real entry, **V** accepts it because the signature is
-real. The forgery is laundered into verified, withdrawable money, and nothing
-the tamper-evidence machinery watches is wrong.
+That made both of this gate's original inputs load-bearing in a way neither was
+built for, and they were closed in two steps, both measured:
 
-Measured (`ledger_app`'s own credential, 2026-09-03): a forged pending
-checkpoint of 1,000,000 let `ConfirmPending(1000)` succeed against a true
-pending balance of 60. Reported as the sibling of
-`docs/audits/2026-09-02-deep-audit/w3-review/money-path.md` M-1, found by
-`w3-holds`' sibling scan; ruled in contract §7.18 (lead, under Aaron's
-mandate).
+1. **The checkpoint** (contract §7.18; the sibling of
+   `docs/audits/2026-09-02-deep-audit/w3-review/money-path.md` M-1, found by
+   `w3-holds`' sibling scan). The gate read `checkpoint + delta`.
+   `balance_checkpoints` has to stay `UPDATE`-able — the rollup worker's job is
+   writing it — so it carries no append-only trigger and one statement raises a
+   row. Measured: a forged pending checkpoint of 1,000,000 let
+   `ConfirmPending(1000)` through against a true pending balance of 60.
+2. **The entries** (contract §7.20, reported by this task's own boundary pin
+   after step 1 landed). Reading entries made the figure *real*; it did not
+   make it *authorized*. Measured as `ledger_app` over a real socket: two
+   `INSERT`s — a `journals` row plus a balanced `journal_entries` pair in
+   `AddPending`'s shape — forge an unsigned pending credit of 5,000, which the
+   entries-only gate accepted and then signed on the way into `main_wallet`.
+   Same one-statement class of attack as step 1, with a cleaner result.
 
-**Why the whole balance and not an incremental read**: the sum is over all of
-history rather than "checkpoint plus the entries after it", which is more
-expensive per call. That cost is the point — the cheap form is the one that
-trusts the row an attacker can write. It is the same trade I-49 accepted for
-**E**, and it is bounded by `idx_entries_account_id`, whose leading columns
+**Why `min` and not "V says yes, E says how much"**: V has to be computed
+before the transaction opens, so there is a window between the verification and
+the advisory lock. A forgery landing inside that window is invisible to V, and
+E — pure SQL under the lock, with no authorization check by construction —
+counts it. Verifying and then letting an unverified number decide the amount
+leaves that window open, and it is retryable until it hits. Each figure covers
+exactly what the other cannot see, so the minimum is safe in both directions:
+
+- A **forged, unsigned credit** committing in the window raises E. V never saw
+  it, `V < E`, V wins, the forgery buys nothing.
+- A **genuine `AddPending`** committing in the window leaves V stale-*low*, and
+  the confirm is refused. That is the cost, and it is the same one I-49
+  accepts: the gate can refuse a confirm a perfectly synchronized reader would
+  have allowed, and can never allow one that reader would have refused. The
+  honest sequence — `AddPending`, then `ConfirmPending` — never hits it,
+  because the add is committed before the gate runs; a concurrent add for the
+  same holder is refused and retryable (the idempotency key posted nothing).
+
+**Why the whole balance and not an incremental read**: E sums all of history
+rather than "checkpoint plus the entries after it", which is more expensive per
+call. That cost is the point — the cheap form is the one that trusts the row an
+attacker can write. Bounded by `idx_entries_account_id`, whose leading columns
 are exactly this dimension.
 
-**Why `CancelPending` too**: cancelling is not itself a minting path — it
-returns pending to the system's `suspense` account. It shares
-`checkPendingBalanceAndPost` with confirm, and an over-large cancel drives the
-holder's pending balance negative, which a later honest confirm would then
-have to work through. Splitting the two halves onto different amount sources
-would leave one of them to be re-derived by whoever touched it next.
+**What this does NOT close.** With no `Attestor` configured there is no V term,
+and forged entries pass — measured, and pinned as measured. That is not a gap
+in this rule so much as the shape of the threat model: in a ledger that signs
+nothing, no synchronous check can distinguish the application from an attacker
+holding its credential, because they issue identical statements. Such a
+deployment's defence is the asynchronous `checkpoint_balance` /
+`unauthorized_journals` reconcile checks, which is exactly the "the money is
+gone by then" fallback I-49 declined for signed deployments. A deployment that
+needs this gate to hold must configure `ledger.WithAttestor`.
 
-**What this does NOT close — the gate authenticates nothing.** Reading entries
-instead of the checkpoint makes the figure *real*; it does not make it
-*authorized*. The sum is taken under the balance lock and must therefore stay
-pure SQL, so — exactly like I-49's **E** — it cannot tell a genuine journal
-from a forged one, and unlike I-49 this gate has no **V** term to cover that
-blind spot. Measured, as `ledger_app` over a real socket (2026-09-03): two
-`INSERT`s (a `journals` row plus a balanced `journal_entries` pair in
-`AddPending`'s shape) forge an unsigned pending credit of 5,000;
-`ConfirmPending(5000)` accepts it and emits a journal with
-`auth_status = 'signed'`, leaving 5,000 of spendable `main_wallet` balance
-behind one genuinely signed journal. Forging into `main_wallet` *directly*
-does not work — that journal is unsigned and **V** refuses it — which is
-precisely why this call is the laundry.
-
-Closing it means giving this gate a **V** term: `PendingStore` would hold a
-`core.VerifiedBalanceReader`, verify the pending dimension before the
-transaction opens (a verifier may be remote), and take `min(V, E)` under the
-lock — I-49's shape. That is a composition-root change, and unlike
-`Reserve` this API has no per-call opt-in, so it also requires deciding what a
-`RunInTx`-composed `ConfirmPending` does (fail closed, breaking existing
-consumers, or degrade to E-only, which is a silent hole). Recorded as a
-decision, not an oversight; it is the same shape as I-49's own
-"Not closed: signing the settlement record" note.
+The residual window I-49 documents for the settle path has an analogue here and
+is stated rather than implied away: V is verified outside the lock, so between
+the verification and the lock the *set* of contributing journals can grow. The
+`min` above is what bounds the damage — a new contributor can only raise E, and
+V caps it.
 
 **Not in scope, and deliberately so**: `enforce_min_balance` keeps reading
 `checkpoint + delta`. See I-17's trust-boundary paragraph for the two reasons
 that ruling holds.
 
-**Enforced by**: `postgres.PendingStore.ConfirmPending` and
-`postgres.PendingStore.CancelPending`, both through
-`postgres.PendingStore.checkPendingBalanceAndPost`, which calls
-`postgres.pendingBalanceFromEntries` on the transaction's own
-`*sqlcgen.Queries` after `acquireBalanceLocks`. The query is
-`RecomputeCheckpointFromEntries` in
+**Enforced by**: `postgres.PendingStore.ConfirmPending`, which fails closed on
+a transaction-bound clone, then calls
+`core.VerifiedBalanceReader.VerifiedBalance` (V) before opening its
+transaction, and hands the result to
+`postgres.PendingStore.checkPendingBalanceAndPost`; that method calls
+`postgres.pendingBalanceFromEntries` (E) on the transaction's own
+`*sqlcgen.Queries` after `acquireBalanceLocks` and takes the minimum.
+`postgres.NewPendingStore` takes the reader positionally so it cannot be
+omitted by forgetting an option, and `ledger.New` supplies
+`postgres.VerifiedBalanceStore` exactly when a `core.Attestor` was configured.
+`postgres.PendingStore.CancelPending` deliberately passes no V.
+The query is `RecomputeCheckpointFromEntries` in
 `postgres/sql/queries/integrity_checkpoint.sql`, shared with
 `postgres.CheckpointIntegrityStore.RecomputeBalance` and
 `postgres.ReserverStore.sumAvailableFromEntriesWithQueries` so that
@@ -6682,34 +6720,51 @@ attempt and caps the amount, and the decision that moves money is
 `CancelPending`'s own check — both tampering directions there fail closed.
 
 **Pinned by**:
-- `postgres.TestConfirmPending_RejectsInflatedCheckpoint` — the money-path
-  pin, driven through `ledger.New` and `Service.PendingBalanceWriter` rather
-  than a hand-assembled store. A forged pending checkpoint of 1,000,000 must
-  not let `ConfirmPending(1000)` through, and `main_wallet` must still hold
-  only the honestly confirmed 40. Two controls make it load-bearing: an
-  honest partial confirm still succeeds, and `BalanceReader.GetBalance` — the
+- `postgres.TestConfirmPending_RejectsInflatedCheckpoint` — step 1, driven
+  through `ledger.New` and `Service.PendingBalanceWriter` rather than a
+  hand-assembled store. A forged pending checkpoint of 1,000,000 must not let
+  `ConfirmPending(1000)` through, and `main_wallet` must still hold only the
+  honestly confirmed 40. Two controls make it load-bearing: an honest partial
+  confirm still succeeds, and `BalanceReader.GetBalance` — the
   checkpoint + delta call this gate used to make — is asserted to report the
   forged figure, so the tampering is proven in effect rather than assumed.
 - `postgres.TestCancelPending_RejectsInflatedCheckpoint` — the same for the
   cancel half, with the true pending balance asserted intact after the
   refusal.
-- `postgres.TestPendingGate_LegitimatePathUnchanged` — the other direction:
-  full confirm, two partial confirms plus a cancel of the remainder, and the
-  refusal of an over-confirm all behave exactly as they did against
-  checkpoint + delta. Swapping the source must be invisible to honest
-  callers.
-- `postgres.TestConfirmPending_RecomputesUnderLock` — the placement, in
-  `RechecksUnderLock`'s construction: a second transaction drains the pending
-  balance to 50 while holding the `(holder, currency)` advisory lock and
-  commits only once the `ConfirmPending` under test is observably queued
-  behind it in `pg_locks`; the 500 confirm must be refused. Green before this
-  change (the old read was under the lock too) and kept so — the obvious way
-  to lose the placement is to hoist the heavier full-history recompute out of
-  the transaction as an optimization.
-- `postgres.TestConfirmPending_EntriesOnlyGateDoesNotAuthenticateEntries` —
-  the boundary above, as measured behaviour rather than as prose. Forges the
-  unsigned pending credit **as `ledger_app`** over a real socket, asserts the
-  gate accepts it, that the resulting journal is `signed`, and that spendable
-  balance now exists. It must go **red** the day a V term is added, and
-  whoever makes it red is expected to delete it and rewrite the
-  "What this does NOT close" section rather than adjust the assertion.
+- `postgres.TestConfirmPending_RefusesForgedPendingEntries` — step 2, and the
+  V term's own pin. The forgery is issued **as `ledger_app`** over a real
+  socket, because the claim is about what the application's credential can
+  reach. A genuine signed deposit is present too, and confirms normally before
+  the forgery lands, so the refusal is not "refuses everything"; afterwards
+  even the genuinely-present 60 is refused, which is the UNDEFINED rule as
+  behaviour rather than as prose.
+- `postgres.TestConfirmPending_VerifiedBaseCapsEntriesForgedInTheWindow` — why
+  the rule is `min` and not "verify, then trust E". A second transaction takes
+  the `(holder, currency)` balance lock directly, forges an unsigned credit of
+  5,000 inside it, and commits only once the `ConfirmPending` under test is
+  observably queued behind that lock in `pg_locks`. V saw 100, E sees 5,100,
+  and the confirm of 1,000 must be refused. Replacing the minimum with E alone
+  passes the confirm.
+- `postgres.TestConfirmPending_TxBoundStoreFailsClosed` — the `RunInTx` half:
+  refused with `core.ErrInvalidInput`, with the pending balance asserted
+  untouched afterwards, the same confirm outside `RunInTx` asserted to work
+  (the remedy the error text names), and `CancelPending` asserted to still
+  compose inside `RunInTx` — the asymmetry is deliberate and is pinned rather
+  than left to be discovered.
+- `postgres.TestConfirmPending_WithoutAttestorIsEntriesOnly` — the boundary
+  above, as measured behaviour. On a `ledger.New(pool)` with no `WithAttestor`:
+  the honest path works, a forged **checkpoint** still buys nothing (E applies
+  either way), a forged **entry** does pass, and a tx-bound confirm is not
+  refused because there is no remote call to keep out of the transaction. It
+  must go red if the wiring ever starts verifying without an `Attestor`, at
+  which point I-64's boundary section is what changes, not the assertion.
+- `postgres.TestPendingGate_LegitimatePathUnchanged` — honest callers see no
+  difference: full confirm, two partial confirms plus a cancel of the
+  remainder, and the refusal of an over-confirm, all with V configured.
+- `postgres.TestConfirmPending_RecomputesUnderLock` — E's placement, in
+  I-49's `RechecksUnderLock` construction: a second transaction drains the
+  pending balance to 50 while holding the advisory lock and commits only once
+  the confirm is queued behind it; the 500 confirm must be refused. This is
+  the `V` stale-*high* direction — the mirror of the window pin above — and
+  the reason E cannot simply be hoisted out of the transaction as an
+  optimization.

@@ -242,7 +242,22 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	// migration 002's DELETE grant) reaches the consumer's logger instead of
 	// slog.Default().
 	s.webhookSubscribers = postgres.NewWebhookSubscriberStore(pool).SetLogger(s.logger)
-	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore)
+	// ConfirmPending's V term (I-64, contract §7.20) is wired on exactly when
+	// this deployment signs its journals. Attestor, not authVerifier, is the
+	// condition on purpose: if journals are signed but WithAttestor was handed
+	// a nil verifier, VerifiedBalanceStore refuses every dimension with a
+	// contributing journal, and that loud refusal is the correct answer --
+	// "signs but cannot verify" is a misconfiguration, not a reason to run the
+	// only gate between a forged pending entry and spendable balance in
+	// name only. With no Attestor at all the ledger's journals are unsigned,
+	// there is nothing a verifier could confirm, and nil leaves ConfirmPending
+	// on its entries-only term (see I-64's boundary section for what that does
+	// not defend against).
+	var pendingVerifiedBalance core.VerifiedBalanceReader
+	if s.attestor != nil {
+		pendingVerifiedBalance = s.verifiedBalanceStore
+	}
+	s.pendingStore = postgres.NewPendingStore(pool, s.ledgerStore, s.classStore, pendingVerifiedBalance)
 	s.platformBalanceStore = postgres.NewPlatformBalanceStore(pool)
 	if len(s.custodialClassCodes) > 0 {
 		s.platformBalanceStore = s.platformBalanceStore.WithCustodialClassCodes(s.custodialClassCodes...)

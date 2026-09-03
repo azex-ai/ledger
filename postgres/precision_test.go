@@ -182,7 +182,7 @@ func TestPrecision_Pending_RejectsOverPrecisionAmount(t *testing.T) {
 	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
 	jpyID := postgrestest.SeedCurrencyWithExponent(t, pool, "JPY-PEND", "Japanese Yen Pending", 0)
-	ps := postgres.NewPendingStore(pool, ls, cs)
+	ps := postgres.NewPendingStore(pool, ls, cs, nil)
 
 	_, err := ps.AddPending(ctx, core.AddPendingInput{
 		AccountHolder:  int64(9006),

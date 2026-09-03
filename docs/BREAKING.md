@@ -31,6 +31,48 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `postgres.NewPendingStore` takes a `core.VerifiedBalanceReader`, and `ConfirmPending` refuses to run inside `RunInTx` when it is set
+
+**Landed (Wave 4, contract §7.20; invariant I-64).**
+
+    postgres.NewPendingStore(pool, ledger, classStore)
+    -> postgres.NewPendingStore(pool, ledger, classStore, verifiedBalance core.VerifiedBalanceReader)
+
+**What a consumer must do.** Through `ledger.New`: nothing. It supplies
+`postgres.VerifiedBalanceStore` exactly when `ledger.WithAttestor` was called,
+and `nil` otherwise. Constructing `PendingStore` directly: pass the same
+reader you pass `postgres.NewReserverStore`, or `nil` to keep the previous
+entries-only behaviour. The parameter is positional rather than a chained
+option deliberately -- an option can be forgotten, and forgetting this one
+silently disables the only check between a forged pending entry and spendable
+balance.
+
+**The run-time half, which is the part that can break a working deployment.**
+With a `core.Attestor` configured, `ConfirmPending` called on a
+transaction-bound clone -- i.e. from inside a `ledger.Service.RunInTx`
+callback -- now returns `core.ErrInvalidInput` instead of posting. Verifying
+the pending dimension may be a remote call, and `financial.md` forbids those
+inside an open transaction; degrading to the ungated path instead would make
+the same call gated or not depending on how it was composed, with nothing in
+the result saying which.
+
+    // before: worked, ungated
+    svc.RunInTx(ctx, func(tx *ledger.Service) error {
+        _, err := tx.PendingBalanceWriter().ConfirmPending(ctx, in)
+        return err
+    })
+
+    // after: confirm first, then open the transaction for your own writes
+    if _, err := svc.PendingBalanceWriter().ConfirmPending(ctx, in); err != nil {
+        return err
+    }
+    svc.RunInTx(ctx, func(tx *ledger.Service) error { /* your writes */ })
+
+`CancelPending` is unaffected and still composes inside `RunInTx` (it creates
+no spendable balance, so it has no verification term). Deployments that never
+call `ledger.WithAttestor` are unaffected entirely. Same guard, same reason as
+`ReserverStore.Reserve`'s `RequireVerifiedBalance`.
+
 ### `server.New`, `server.NewWithConfig` drop the `snapshotter` and `systemRollup` parameters
 
 **Landed (2026-08-29 review, MJ-5).**

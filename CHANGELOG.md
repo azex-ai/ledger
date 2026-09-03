@@ -35,6 +35,31 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`postgres.NewPendingStore` takes a fourth argument, and `ConfirmPending`
+  refuses to run inside `RunInTx` when it is set** (Wave 4, contract §7.20,
+  I-64). `NewPendingStore(pool, ledger, classStore)` becomes
+  `NewPendingStore(pool, ledger, classStore, verifiedBalance
+  core.VerifiedBalanceReader)`. Consumers going through `ledger.New` need no
+  change — it supplies `postgres.VerifiedBalanceStore` exactly when
+  `ledger.WithAttestor` was called. Anyone constructing the store directly
+  must pass the reader, or `nil` to keep the previous (entries-only)
+  behaviour. Positional rather than a chained option on purpose: an option
+  can be forgotten, and forgetting this one silently disables the only check
+  between a forged pending entry and spendable balance.
+
+  The behavioural half: with a `core.Attestor` configured, calling
+  `ConfirmPending` on a transaction-bound clone — i.e. from inside a
+  `ledger.Service.RunInTx` callback — now returns `core.ErrInvalidInput`
+  instead of posting. The verification may be a remote call and
+  `financial.md` forbids those inside an open transaction; degrading to the
+  ungated path instead would make the same call gated or not depending on how
+  it was composed, with nothing in the result saying which. **Consumers who
+  compose a confirm inside `RunInTx` must move it out** (confirm first, then
+  open the transaction) — the error text says so. `CancelPending` is
+  unaffected and still composes inside `RunInTx`. Deployments with no
+  `Attestor` are unaffected entirely. Same guard, same reason as
+  `ReserverStore.Reserve`'s `RequireVerifiedBalance`.
+
 - **`core.HolderReader.ListHolderHolds` is paginated and
   `core.JournalQuerier` gains `ListRecentJournals`** (H-m9, D-tamper).
   `ListHolderHolds(ctx, holder)` becomes
@@ -368,13 +393,33 @@ written because it was true when `[0.6.0]` shipped.
   which rows to attempt, and the decision that moves money is
   `CancelPending`'s own check.
 
-  Not closed, recorded rather than implied away: the gate reads *real*
-  entries, not *authorized* ones, and unlike I-49 it has no V term. Measured
-  as `ledger_app` over a real socket: two `INSERT`s forge an unsigned pending
-  credit that this gate accepts and then signs on the way into `main_wallet`.
-  Giving the gate a V term is a composition-root change and needs a ruling on
-  what a `RunInTx`-composed `ConfirmPending` does; I-64's "What this does NOT
-  close" carries the analysis and a pin that holds the boundary as measured.
+- **`ConfirmPending` also verifies: the gate is `min(V, E)`, not entries
+  alone** (Wave 4, contract §7.20). Reading entries instead of the checkpoint
+  made the figure *real*; it did not make it *authorized*, and this call is
+  the one place an unauthorized figure can become an authorized one — it
+  signs its own journal, so a forged pending credit came out the other side
+  as spendable `main_wallet` balance behind a genuine signature, which I-49's
+  gate then accepts. (Forging into `main_wallet` directly does not work; that
+  journal is unsigned and I-49's V refuses it.) Measured as `ledger_app` over
+  a real socket: two `INSERT`s forged an unsigned pending credit of 5,000
+  that the entries-only gate accepted.
+
+  When the deployment configured a `core.Attestor`, `ConfirmPending` now
+  verifies every journal contributing to the pending dimension before opening
+  its transaction — one unauthorized contributor refuses the whole confirm
+  with `core.ErrUnauthorizedJournal`, never "confirm the authorized
+  remainder" (I-32's UNDEFINED rule) — and caps the amount at `min(V, E)`.
+  The minimum, rather than "verify then trust E", closes the window between
+  the verification (which must run outside the transaction, because a
+  verifier may be remote) and the advisory lock; a forgery landing in that
+  window raises E and is invisible to V. `CancelPending` is unchanged and has
+  no V term: it creates no spendable balance.
+
+  **What consumers must do.** With an `Attestor` configured, a
+  `ConfirmPending` composed *inside* `RunInTx` now returns
+  `core.ErrInvalidInput` — see the Breaking entry below. Without an
+  `Attestor`, nothing changes and the gate stays E-only; I-64's boundary
+  section says plainly what that does not defend against.
 
 - **`core.AccountPolicy`'s `enforce_min_balance` keeps reading
   `checkpoint + delta`, and I-17 now says so** (contract §7.18, the M-1
