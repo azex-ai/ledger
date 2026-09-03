@@ -424,6 +424,17 @@ other way back in short of hand-written SQL — this is the one write action
 `ledger-cli` exposes outside `reconcile --full`'s resume cursor (see its
 package doc, `cmd/ledger-cli/main.go`).
 
+> **Which credential runs `reconcile --full`.** That resume cursor is a write,
+> so the scan wants `ledger_app`. On `ledger_ro` it still runs and still
+> reports its findings, but the cursor write is refused and the
+> `checkpoint_balance` check comes back `complete: false` with a finding
+> naming the permission error — `full_coverage` goes false with it. That is
+> the honest answer (not run is neither passed nor failed), and it is **not** a
+> reason to give a reporting credential write access: run the scan on
+> `ledger_app` instead. Until the 2026-09-03 review's m4 this shape was
+> reported as `passed: false, complete: true`, which read like the ledger
+> disagreeing with itself.
+
 ---
 
 ## 4. Checkpoint age is climbing

@@ -318,75 +318,19 @@ func TestBalanceGuard_DedupSetCannotBePreSeeded(t *testing.T) {
 	})
 }
 
-// TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal pins the bypass the
-// journals-level trigger would have had if it fired on INSERT only.
+// TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal used to live here. It
+// pinned the xmin-adoption bypass against migration 030's journals-level
+// trigger, and it was one `SET CONSTRAINTS ALL IMMEDIATE` away from red: the
+// recheck showed that statement moves the journals-level check to a moment
+// when the journal has no entries, after which the per-entry skip lets
+// everything through (N1). Migration 031 removed the skip and the
+// journals-level trigger with it, so there is no longer an INSERT-only variant
+// to contrast against.
 //
-// The per-entry check skips when `journals.xmin = pg_current_xact_id()`,
-// because a journal this transaction wrote already has the journals-level
-// aggregate queued. But UPDATE refreshes xmin too, and
-// `ledger_journals_block_arbitrary_update` compares to_jsonb(OLD) against
-// to_jsonb(NEW) -- so `UPDATE journals SET source = source` changes nothing,
-// passes the guard, and hands the caller ownership of an old journal's xmin.
-// With an INSERT-only trigger the entry check then skips and nothing else
-// fires.
-//
-// The first half of this test recreates that trigger INSERT-only and shows the
-// attack landing, so the second half is not vacuous -- the same technique
-// withBalanceTriggerDisabled uses, for the same reason.
-func TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal(t *testing.T) {
-	ctx := context.Background()
-	pool := postgrestest.SetupDB(t)
-	store, deps := setupInvariantsFixture(t, pool, ctx)
-	appPool := newAppPool(t, pool, "searchpath-xmin-adopt-not-a-real-secret") //nolint:gosec
-
-	currencyID := postgrestest.InternalID(t, pool, "currencies", deps.Currency)
-	classID := postgrestest.InternalID(t, pool, "classifications", deps.MainWallet)
-
-	// Adopt an old journal's xmin with a no-op UPDATE, then append a one-sided
-	// entry, all in one transaction.
-	attack := func(journalID int64, holder int64) error {
-		tx, err := appPool.Begin(ctx)
-		require.NoError(t, err)
-		defer func() { _ = tx.Rollback(ctx) }()
-
-		if _, err := tx.Exec(ctx, `UPDATE journals SET source = source WHERE id = $1`, journalID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
-			VALUES ($1, $2, $3, $4, 'debit', 50)`,
-			journalID, holder, currencyID, classID); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	}
-
-	// First half: the trigger as it would be if it only covered INSERT.
-	insertOnly := postBalancedJournal(t, store, pool, ctx, deps, 5301, decimal.NewFromInt(100), "xmin-adopt-open")
-	_, err := pool.Exec(ctx, `
-		DROP TRIGGER trg_check_journal_balance_on_journal ON journals;
-		CREATE CONSTRAINT TRIGGER trg_check_journal_balance_on_journal
-			AFTER INSERT ON journals
-			DEFERRABLE INITIALLY DEFERRED
-			FOR EACH ROW EXECUTE FUNCTION ledger_check_journal_balance();`)
-	require.NoError(t, err)
-	assert.NoError(t, attack(insertOnly, 5301),
-		"with an INSERT-only journals trigger the no-op UPDATE hands the caller the xmin and the entry check skips -- this is the bypass migration 030 covers with OR UPDATE")
-
-	// Second half: the trigger as migration 030 actually ships it.
-	_, err = pool.Exec(ctx, `
-		DROP TRIGGER trg_check_journal_balance_on_journal ON journals;
-		CREATE CONSTRAINT TRIGGER trg_check_journal_balance_on_journal
-			AFTER INSERT OR UPDATE ON journals
-			DEFERRABLE INITIALLY DEFERRED
-			FOR EACH ROW EXECUTE FUNCTION ledger_check_journal_balance();`)
-	require.NoError(t, err)
-
-	shipped := postBalancedJournal(t, store, pool, ctx, deps, 5302, decimal.NewFromInt(100), "xmin-adopt-closed")
-	err = attack(shipped, 5302)
-	require.Error(t, err, "the identical statements must be refused once the journals trigger also covers UPDATE")
-	assert.Contains(t, err.Error(), "unbalanced entries")
-}
+// The attack itself did not go away, it got a better home: it is one of the
+// three shapes in postgres/constraint_timing_test.go, replayed under every
+// constraint-timing mode the catalogue reports, with the reverse confirmation
+// (restore 030's skip, watch it succeed) alongside it.
 
 // TestBalanceGuard_LegitimateJournalsStillPost is the control: none of the
 // above is achieved by refusing everything. A many-legged, multi-statement

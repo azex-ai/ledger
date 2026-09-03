@@ -61,19 +61,18 @@ func TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist(t *testing.T) {
 	// runs as its owner, and it refuses any seq ahead of the local
 	// attestation chain.
 	//
-	// ledger_assert_journal_balanced is migration 030's per-journal balance
-	// aggregate, shared by the journals-level constraint trigger and the
-	// per-entry backstop so the two cannot drift apart. Both triggers are
-	// SECURITY INVOKER, and a function CALLED from a trigger function is
-	// EXECUTE-checked at call time against the invoker (unlike the trigger
-	// function itself, checked once at CREATE TRIGGER) -- so without this
-	// grant every ledger_app write fails with `permission denied for function
-	// ledger_assert_journal_balanced` instead of running the check. It reads
-	// journal_entries, which ledger_app can already SELECT, and either returns
-	// nothing or raises.
+	// Migration 030 briefly added a sixth entry here,
+	// ledger_assert_journal_balanced -- the shared aggregate its two balance
+	// triggers called, which needed a grant because a function CALLED from a
+	// SECURITY INVOKER trigger function is EXECUTE-checked at call time
+	// against the invoker (unlike the trigger function itself, checked once at
+	// CREATE TRIGGER). Migration 031 deleted the journals-level trigger, left
+	// one caller, inlined the aggregate back into it and dropped the function,
+	// so the grant went with it and this list is five again. Recorded because
+	// "the whitelist shrank" is exactly the kind of change that should be
+	// deliberate.
 	want := map[string][]string{
 		"ledger_app": {
-			"ledger_assert_journal_balanced(bigint)",
 			"ledger_create_monthly_partition(text,date,date)",
 			"ledger_rebalance_default_partition(date,date)",
 			"ledger_record_anchor_observation(uuid,bigint,bytea)",

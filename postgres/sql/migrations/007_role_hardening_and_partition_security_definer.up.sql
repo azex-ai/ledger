@@ -115,10 +115,35 @@
 -- postgres/roles_test.go asserts all five are false on all three roles, so a
 -- future Postgres attribute that is left out of this list is caught there
 -- rather than here.
+-- ####  EDITED 2026-09-04 (m1 of the 2026-09-03 independent review)  ####
+--
+-- Deliberate edit to an already-merged migration, under the exception this
+-- repository has now taken three times (`docs/plans/2026-09-02-remediation-
+-- contracts.md` §3 erratum, which itself records the 2026-08-26 precedent):
+-- golang-migrate verifies no file hash, a database that already ran 007 does
+-- not re-run it, the failure point is inside 007 so no later migration can
+-- reach it, and there is no external consumer. Scope of the edit: the wording
+-- of one RAISE. No statement, no condition and no privilege changes.
+--
+-- What was wrong: the diagnostic named `clauses[i]` -- the clause that CLEARS
+-- the attribute -- where it meant to name the attribute the role HOLDS. On a
+-- cluster where ledger_app was already SUPERUSER the install stopped with
+--
+--   ledger: role ledger_app already exists on this cluster with the
+--   NOSUPERUSER attribute and this migration credential cannot remove it.
+--
+-- which reads as the exact opposite of the situation. The remedy half of the
+-- sentence was right all along; only the diagnostic half was inverted. For a
+-- message whose entire value is being actionable at install time, that is
+-- worth one array.
 DO $$
 DECLARE
-    -- pg_authid column, and the ALTER ROLE clause that clears it.
+    -- pg_authid column, the attribute name a human recognises, and the ALTER
+    -- ROLE clause that clears it. Three parallel arrays rather than two: the
+    -- attribute a role HOLDS and the clause that REMOVES it are different
+    -- words, and printing one where the other belongs is m1.
     attrs   CONSTANT text[] := ARRAY['rolsuper',    'rolcreatedb', 'rolcreaterole', 'rolreplication', 'rolbypassrls'];
+    held_as CONSTANT text[] := ARRAY['SUPERUSER',   'CREATEDB',    'CREATEROLE',    'REPLICATION',    'BYPASSRLS'];
     clauses CONSTANT text[] := ARRAY['NOSUPERUSER', 'NOCREATEDB',  'NOCREATEROLE',  'NOREPLICATION',  'NOBYPASSRLS'];
     role_name text;
     i int;
@@ -134,7 +159,7 @@ BEGIN
             EXCEPTION WHEN insufficient_privilege THEN
                 RAISE EXCEPTION
                     'ledger: role % already exists on this cluster with the % attribute and this migration credential cannot remove it. This install would run on a % that holds a privilege I-22 assumes it does not. Strip it with a superuser connection (ALTER ROLE % %) and re-run the migration, or install into a cluster that does not already own these role names.',
-                    role_name, clauses[i], role_name, role_name, clauses[i]
+                    role_name, held_as[i], role_name, role_name, clauses[i]
                     USING ERRCODE = 'insufficient_privilege';
             END;
         END LOOP;

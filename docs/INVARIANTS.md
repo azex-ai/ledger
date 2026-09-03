@@ -1866,24 +1866,16 @@ debit==credit equality, which cannot see two journals that are each
 individually unbalanced but net to zero in aggregate.
 
 **Enforced by**:
-- `ledger_assert_journal_balanced(bigint)` — the aggregate itself, named once
-  so the two triggers below cannot drift apart
-  (`postgres/sql/migrations/030_guard_function_search_path.up.sql`).
-- `ledger_check_journal_balance()` deferred constraint trigger,
-  `AFTER INSERT OR UPDATE ON journals FOR EACH ROW`,
-  `DEFERRABLE INITIALLY DEFERRED`: runs the aggregate exactly once per
-  journals row the transaction wrote. `OR UPDATE` is load-bearing, not
-  symmetry — see I-68.
 - `check_journal_currency_balance()` deferred constraint trigger,
   `AFTER INSERT OR UPDATE OR DELETE ON journal_entries FOR EACH ROW`,
   `DEFERRABLE INITIALLY DEFERRED` (`001_baseline.up.sql` section 12, rewritten
-  by 030): the backstop for entries written against a journal the current
-  transaction did **not** write, which is the direct-SQL tampering shape. It
-  skips when `journals.xmin` is the current transaction's, because the
-  journals-level trigger already covers that journal. Between the two, the
-  aggregate runs once per journal rather than once per entry row — O(N)
-  overall, not migration 004's O(N^2) — with no dedup memo anywhere the
-  caller can write, which is what I-68 is about.
+  by `030_guard_function_search_path.up.sql` and again by
+  `031_balance_guard_timing_independence.up.sql`). It aggregates the affected
+  journal **unconditionally**: no memo, no dedup, no assumption about what
+  else will run. That costs O(N²) in entries per journal — migration 004's
+  original cost, which 018/030 twice tried to avoid and twice opened a bypass
+  doing it. I-68 records both attempts, their measured costs, and why the
+  quadratic is the affordable one.
 - `service.FullReconciliationService.runCheck11JournalBalance`
   ("journal_dr_cr" — `service/reconcile.go`), backed by
   `IntegrityUnbalancedJournalsCount` / `IntegrityUnbalancedJournalsSample`
@@ -1901,11 +1893,13 @@ individually unbalanced but net to zero in aggregate.
 - `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` — proves a
   direct-SQL unbalancing insert succeeds with the guard switched off, and
   that the identical insert fails with it on.
-- `postgres.TestBalanceGuard_SurvivesPgTempRelationShadowing`,
-  `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` and
-  `postgres.TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal` — the three
+- `postgres.TestBalanceGuard_SurvivesPgTempRelationShadowing` and
+  `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` — two of the three
   ways this DB half was fully bypassable by `ledger_app` until migration 030.
-  See I-68.
+- `postgres.TestBalanceGuard_RefusedUnderEveryConstraintTiming` — the third,
+  which was migration 030's own doing and is why the guard now makes no
+  assumption about when anything else runs. All three shapes, under every
+  constraint-timing mode the catalogue reports. See I-68.
 - `postgres.TestUnbalancedJournalsFleetScan_CatchesWhatGlobalEqualityMisses` —
   crafts two journals (via direct SQL, guard off) that are each individually
   unbalanced by currency but net to zero globally; proves the global
@@ -7426,7 +7420,7 @@ cursor-ahead-of-head report.
 
 ---
 
-## I-68: No guard function's relation lookup is caller-redirectable, and the balance guard keeps no state the caller can write
+## I-68: No guard function's relation lookup is caller-redirectable, and the balance guard depends on neither caller-writable state nor caller-controlled timing
 
 **Rule**: three statements, each independently load-bearing:
 
@@ -7436,20 +7430,22 @@ cursor-ahead-of-head report.
    shape rather than by name alone: an exempt function must be LANGUAGE sql,
    IMMUTABLE, not SECURITY DEFINER, backed by no trigger, and its source must
    name no relation.
-2. **The per-journal balance guard (I-1 / I-24's DB half) keeps no dedup memo
-   in any storage the caller can write.** The aggregate runs once per journal
-   through a deferred constraint trigger on `journals`, fired by INSERT **or**
-   UPDATE; the per-entry constraint trigger runs it for entries written
-   against a journal the current transaction did not write, deciding that on
-   `journals.xmin` — a system column nobody can write.
+2. **The per-journal balance guard (I-1 / I-24's DB half) keeps no state the
+   caller can write, and makes no assumption about when anything else runs.**
+   One deferred constraint trigger on `journal_entries` aggregates the
+   affected journal, unconditionally, on every entry write. There is no dedup
+   memo and no second trigger to defer to.
 3. **`PUBLIC` does not hold `TEMPORARY` on the ledger database**, so
    `ledger_app` cannot create a pg_temp relation at all.
 
-**Why**: C1 and C2 of `docs/audits/2026-09-03-independent-review/install-roles.md`.
-`ledger_app` owns nothing, holds no DDL and cannot DELETE from any table
-(I-22, re-measured statement by statement in that report's appendix B) — and
-could still commit a one-sided journal entry and mint 999,999 out of nothing,
-by two independent routes through one function:
+**Why**: C1 and C2 of `docs/audits/2026-09-03-independent-review/install-roles.md`,
+then N1 of that review's recheck. `ledger_app` owns nothing, holds no DDL and
+cannot DELETE from any table (I-22, re-measured statement by statement in that
+report's appendix B) — and could still commit a one-sided journal entry and
+mint 999,999 out of nothing, by **three** independent routes through one
+function. The first two are why migration 030 exists; the third is what
+migration 030 introduced while closing them, and is the reason clause 2 above
+now forbids assumptions rather than merely forbidding writable state:
 
 - **C1, relation shadowing.** `check_journal_currency_balance()` was SECURITY
   INVOKER with an empty `proconfig` and an unqualified `FROM journal_entries`.
@@ -7481,34 +7477,65 @@ proconfig" and "`pg_catalog, public`", and 3 only under "`... , pg_temp`" or a
 unqualified DDL (`permission denied to create "pg_catalog.x"`), which is
 exactly what `ledger_create_monthly_partition` does.
 
-Dropping the dedup outright was measured too, on the real schema through the
-real `PostJournal` path (median of 11, fresh database per variant, ms):
+- **N1, a schedule assumption** (found by the review's recheck, against
+  migration 030 itself). 030 replaced C2's writable memo with a
+  journals-level deferred constraint trigger, and let the per-entry trigger
+  skip whenever `journals.xmin` was the current transaction's — safe, it
+  argued, because that journal already had a check queued. **When it runs is
+  the caller's to choose.** `SET CONSTRAINTS ALL IMMEDIATE` needs no
+  privilege, applies to any DEFERRABLE trigger and lasts the rest of the
+  transaction; under it the journals-level check fires at the end of the
+  INSERT that created the journal, when it has no entries, and every entry
+  then skips. Confirmed in three shapes, the worst being a journal that had
+  **already committed balanced**: backfill its `event_id` (a legitimate,
+  guard-permitted UPDATE) to take its xmin, then append 777 of unmatched
+  debit. 030 had specifically covered UPDATE on the journals trigger because
+  UPDATE refreshes xmin; under IMMEDIATE that patch becomes part of the
+  attack.
+
+The general rule N1 leaves behind, and the reason clause 2 is phrased as it
+is: **evaluation timing is caller-controlled, so no guard may skip work on the
+grounds that another trigger will run later.** A skip is only as trustworthy
+as the schedule it assumes, and the schedule is not ours.
+
+The costs were measured, not guessed — on the real schema through the real
+`PostJournal` path (median of 11, fresh database per variant, ms per journal):
 
 | entries/journal | 2 | 6 | 20 | 100 | 500 | 2000 |
 |---|---|---|---|---|---|---|
-| pg_temp memo (pre-030) | 3.31 | 3.97 | 6.74 | 22.27 | 100.85 | 397.08 |
-| no dedup at all | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
-| journals-scoped (030) | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
+| pg_temp memo (pre-030, C2's bypass) | 3.31 | 3.97 | 6.74 | 22.27 | 100.85 | 397.08 |
+| journals-scoped skip (030, N1's bypass) | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
+| unconditional aggregate (031, shipped) | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
 
-Free at the sizes presets post, 5.7x at 2000 — and 2000 legs is one INSERT
-loop away for the very credential this guard exists to contain, so "just drop
-the dedup" trades a bypass for a quadratic lever. The journals-scoped form
-costs nothing and holds no caller-writable state.
+Both attempts at O(N) bought a bypass. The shipped form is migration 004's
+original O(N²) — free at the 2–6 legs the presets post, 5.7x at 2000, and
+`core` sets no cap on entries per journal, so a deliberately huge journal is a
+real cost lever. It is a lever that costs the attacker O(N) to pull and yields
+no wrong balance, which is the trade that was accepted.
+
+Not chosen: an owner-owned UNLOGGED memo keyed on `(pg_current_xact_id(),
+journal_id)` written by a SECURITY DEFINER trigger (the recheck's own first
+preference). Timing-independent and O(N), but it puts cross-transaction state
+on the money path, with a retention story, a cleanup job and its own "what if
+the cleanup does not run" questions — for a curve that only bends where
+nothing legitimate goes. Also not chosen, and noted only so the next reader
+does not re-derive it: making the journals-level check reject a journal with
+no entries kills the two fresh-journal shapes of N1 and does nothing to the
+third, because that journal genuinely balanced at the moment the check ran.
 
 **Enforced by**:
 - `postgres/sql/migrations/030_guard_function_search_path.up.sql` section 1 —
   `ALTER FUNCTION ... SET search_path = public, pg_temp` on the ten unpinned
   functions, joining the seven migrations 013 / 020 / 024 / 027 had already
   pinned.
-- Section 2 — `ledger_assert_journal_balanced(bigint)` (the aggregate, defined
-  once), `ledger_check_journal_balance()` on `journals` `AFTER INSERT OR
-  UPDATE`, and the rewritten `check_journal_currency_balance()` whose only
-  state is `journals.xmin`. `OR UPDATE` is not symmetry: UPDATE refreshes
-  xmin, `ledger_journals_block_arbitrary_update` compares `to_jsonb(OLD)`
-  against `to_jsonb(NEW)` and therefore permits `UPDATE journals SET source =
-  source`, and an INSERT-only trigger would let a caller adopt an old
-  journal's xmin with that no-op and then append a one-sided entry that
-  nothing checks.
+- `postgres/sql/migrations/031_balance_guard_timing_independence.up.sql` —
+  `check_journal_currency_balance()` on `journal_entries`, `AFTER INSERT OR
+  UPDATE OR DELETE FOR EACH ROW`, `DEFERRABLE INITIALLY DEFERRED`,
+  aggregating its journal with no skip. 031 also **deletes** 030's
+  journals-level trigger, the shared helper it called and the EXECUTE grant
+  that helper needed: the trigger's only purpose was to make the skip safe,
+  so with the skip gone it is a second deferrable trigger whose firing time a
+  caller can move, for no coverage.
 - Section 3 — `REVOKE TEMPORARY ON DATABASE ... FROM PUBLIC`. From PUBLIC, not
   from `ledger_app`: a privilege reaching a role through PUBLIC can only be
   revoked from PUBLIC, so the role-targeted form would have been a no-op that
@@ -7528,23 +7555,39 @@ costs nothing and holds no caller-writable state.
   is doing all the work and a future re-grant silently re-opens C1.
 - `postgres.TestBalanceGuard_DedupSetCannotBePreSeeded` — C2's red pin, same
   posture, in the strongest shape available to `ledger_app`: it writes both
-  the journals row and the one-sided entry itself, so the journals-level
-  trigger and the per-entry backstop are both in scope.
-- `postgres.TestBalanceGuard_NoOpUpdateCannotAdoptAnOldJournal` — the xmin
-  adoption bypass. Its first half recreates the journals trigger INSERT-only
-  and shows the attack landing, so the second half is not vacuous.
-- `postgres.TestLedgerApp_CannotCreateTemporaryRelations` — section 3, plus
+  the journals row and the one-sided entry itself.
+- `postgres.TestBalanceGuard_RefusedUnderEveryConstraintTiming` — N1's gate,
+  and the one that makes the two above complete. All three attack shapes are
+  replayed under the default DEFERRED mode, under `SET CONSTRAINTS ALL
+  IMMEDIATE`, and under `SET CONSTRAINTS <name> IMMEDIATE` for **every**
+  trigger `pg_trigger.tgdeferrable` reports — derived, not listed, so a
+  future deferrable trigger is enrolled by existing rather than by somebody
+  remembering. Every pin migration 030 shipped ran in the default mode and
+  the string `SET CONSTRAINTS` appeared nowhere in the repository, which is
+  precisely why the class was invisible.
+- `postgres.TestBalanceGuard_TheSkipIsWhatMadeTimingMatter` — the reverse
+  confirmation, which is what keeps the gate above from being a tautology:
+  it restores migration 030's skip in the live database and asserts the same
+  attacks then **succeed**. If they stop succeeding, the premise has changed
+  and the test says so rather than quietly passing.
+- `postgres.TestBalanceGuard_ImmediateModeRefusesHonestMultiStatementPosting`
+  and `postgres.TestBalanceGuard_DeferredModeStillPostsHonestJournals` — the
+  cost of an unconditional aggregate, stated as assertions so it is not
+  later mistaken for a bug: under IMMEDIATE an honest journal's first leg is
+  refused too (fail-closed, and nothing in this library issues `SET
+  CONSTRAINTS`), while the default mode is untouched.
+- `postgres.TestLedgerApp_CannotCreateTemporaryRelations` — clause 3, plus
   the datacl assertion that PUBLIC no longer holds TEMPORARY.
 - `postgres.TestBalanceGuard_LegitimateJournalsStillPost` — the control: a
   40-leg balanced journal still posts, so none of the above is achieved by
   refusing everything.
-- `postgres.TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist` — carries
-  the one grant this added. A trigger function's own EXECUTE right is checked
-  at CREATE TRIGGER time, but a function it *calls* is checked at call time
-  against the invoker, so `ledger_app` needs EXECUTE on
-  `ledger_assert_journal_balanced` for the check to run at all. Without it
-  every application write failed closed on the wrong error — found by running
-  the pins above as `ledger_app` rather than on the superuser test connection.
+- `postgres.TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist` — the
+  whitelist migration 030 grew by one and 031 shrank back. A trigger
+  function's own EXECUTE right is checked at CREATE TRIGGER time, but a
+  function it *calls* is checked at call time against the invoker, so 030's
+  shared helper had to be granted to `ledger_app` for the check to run at
+  all; 031 inlined the helper away and the grant went with it. The grant's
+  absence being asserted is what keeps it from creeping back unnoticed.
 
 ---
 

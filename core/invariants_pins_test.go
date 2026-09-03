@@ -1332,13 +1332,11 @@ var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
 		reason: "the INSERT-path guards and the AFTER INSERT half of the forensic trail are triggers, and deliberately so: the whole point is that they hold for a statement that never went through this library, so there is no Go entry point to name. The catalogue-derived `_audit_insert` triggers are created by a DO loop and cannot be named as declarations; chain_cursors_audit_insert is the one declared literally",
 	},
 	"I-68": {
-		migration: "postgres/sql/migrations/030_guard_function_search_path.up.sql",
+		migration: "postgres/sql/migrations/031_balance_guard_timing_independence.up.sql",
 		objects: []dbObject{
-			{kind: kindFunction, name: "ledger_assert_journal_balanced", detail: "SET search_path = public, pg_temp"},
-			{kind: kindTrigger, name: "trg_check_journal_balance_on_journal"},
-			{kind: kindPrivilege, name: "PUBLIC", detail: "TEMPORARY ON DATABASE"},
+			{kind: kindFunction, name: "check_journal_currency_balance", detail: "SET search_path = public, pg_temp"},
 		},
-		reason: "three DB-only facts with no Go face at all: a proconfig entry on every function, two constraint triggers, and a database-level ACL. The Go side of I-68 is the catalogue gate in postgres/guard_function_search_path_test.go, which is a pin, not an entry point",
+		reason: "the mechanism is a plpgsql trigger function with no Go face at all -- the application posts a journal and the database decides. Anchored on 031 rather than 030 because 031 is the version that runs: it removed the dedup skip 030 introduced, along with the journals-level trigger and helper that skip needed (N1). I-68's other two clauses are not anchored here because they are checked against the live catalogue instead, which is stronger than a file-text assertion: TestGuardFunctionSearchPath_EveryFunctionIsPinned reads every function's proconfig from pg_proc, and TestLedgerApp_CannotCreateTemporaryRelations reads the database ACL and then tries the thing",
 	},
 }
 

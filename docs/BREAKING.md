@@ -720,6 +720,47 @@ Rolling `030` back restores `TEMPORARY` to `PUBLIC` (best-effort, with a
 `pg_temp`-dedup balance guard -- i.e. it re-opens C1 and C2, which is what
 going back to the previous release means.
 
+### Migration `031`: the balance guard aggregates unconditionally, and is measurably slower on very large journals
+
+**Landed (Wave 5 follow-up; invariant I-68; recheck finding N1).**
+
+No API changes and no schema changes a consumer has to adapt to. This entry
+exists for the two run-time facts.
+
+**1. Journals with very many entries cost more to post.** Migration `030`
+arranged for the per-journal balance aggregate to run once per journal;
+`031` removes that arrangement because the caller could move when it ran
+(`SET CONSTRAINTS ALL IMMEDIATE`, no privilege required) and thereby skip it
+entirely. The aggregate is now unconditional -- once per entry write, O(N²) in
+entries per journal. Measured through the real `PostJournal` path, median of
+11, ms per journal:
+
+| entries/journal | 2 | 6 | 20 | 100 | 500 | 2000 |
+|---|---|---|---|---|---|---|
+| `030` | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
+| `031` | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
+
+**What a consumer must do.** Nothing, if journals have the handful of legs the
+presets produce -- at 2--6 legs `031` is marginally *faster*. If you post
+journals with hundreds of entries, expect the difference above and size for
+it (`docs/CAPACITY.md`). `core` places no cap on entries per journal, so the
+curve is yours to stay off.
+
+**2. `SET CONSTRAINTS ... IMMEDIATE` now breaks honest writes instead of
+silently disabling the check.** The balance guard is `DEFERRABLE INITIALLY
+DEFERRED` because a journal is written one entry per statement: after the
+first leg it genuinely does not balance. With the aggregate unconditional, a
+transaction that turns deferral off is refused at its first leg.
+
+**What a consumer must do.** Do not issue `SET CONSTRAINTS` on a connection
+that posts journals. Nothing in this library does, and there was never a
+reason to -- but before `031` doing so quietly turned the guard off, and now
+it fails loudly instead. That is the direction to prefer: the knob can make an
+honest write fail, never a dishonest one succeed.
+
+Rolling `031` back restores `030`'s journals-level trigger, its helper, the
+`ledger_app` EXECUTE grant and the xmin skip -- i.e. it re-opens N1.
+
 ---
 
 ## 0.6.0 and earlier
