@@ -80,14 +80,28 @@ no workspace file at all.
 
 ## Quick Start -- As a Library
 
-**Prerequisite**: the connection you pass to `ledger.Migrate` must be able to
-`CREATE ROLE` (superuser, or a role with the `CREATEROLE` attribute) the
-first time it runs against a fresh database — the baseline schema creates
-`ledger_owner`/`ledger_app`/`ledger_ro` and locks down `PUBLIC` as part of
-installing the schema (`docs/RUNBOOK.md` §9 "Database roles"). Every
-migration after that runs as `ledger_owner` and needs no elevated privilege.
-A local Postgres superuser, or the default user in a fresh managed-Postgres
-instance, satisfies this.
+**Prerequisite**: two connections, not one -- every `examples/*/main.go`
+reads `MIGRATE_DATABASE_URL` and `DATABASE_URL` as two separate environment
+variables, and the Quick Start below does the same:
+
+- **`MIGRATE_DATABASE_URL`** (passed to `ledger.Migrate`) must be able to
+  `CREATE ROLE` (superuser, or a role with the `CREATEROLE` attribute) the
+  first time it runs against a fresh database — the baseline schema creates
+  `ledger_owner`/`ledger_app`/`ledger_ro` and locks down `PUBLIC` as part of
+  installing the schema (`docs/RUNBOOK.md` §9 "Database roles"). Every
+  migration after that runs as `ledger_owner` and needs no elevated privilege.
+  A local Postgres superuser, or the default user in a fresh managed-Postgres
+  instance, satisfies this.
+- **`DATABASE_URL`** (passed to `pgxpool.New`, then `ledger.New`) is the
+  connection every request your process ever serves runs through, and should
+  authenticate as `ledger_app` — the role several of this schema's hardest
+  guarantees (I-22, I-42, the append-only guards) are enforced against by
+  GRANT, and *only* against. Connect this one as the migration superuser too
+  (as an earlier revision of this Quick Start did) and every one of those
+  guarantees is simply absent on this connection — not violated, not logged,
+  identical behavior until something goes wrong in a way the invariants said
+  could not happen. `(*Service).AssertRuntimeRole(ctx)` checks this for you;
+  the Quick Start below calls it, and [API Surface](#api-surface) lists it.
 
 Two tiers: pick where you want to start.
 
@@ -108,9 +122,17 @@ import (
     "github.com/azex-ai/ledger/core"
 )
 
-ledger.Migrate(dbURL)                       // schema only — no metadata yet
-pool, _ := pgxpool.New(ctx, dbURL)
+ledger.Migrate(migrateDBURL)                // schema only — no metadata yet
+pool, _ := pgxpool.New(ctx, dbURL)          // dbURL authenticates as ledger_app -- see Prerequisite above
 svc, _ := ledger.New(pool)
+
+// Not automatic -- (*Service).AssertRuntimeRole's own doc comment explains
+// why -- so a composition root calls it once, here, and decides what a
+// mismatch means. A wrong role usually means MORE access, not less, so this
+// warns rather than exits; wire it in dev too, not only production.
+if err := svc.AssertRuntimeRole(ctx); err != nil {
+    log.Println("warning:", err)
+}
 
 // Tier 1 still needs at least one Currency, Classification, and JournalType
 // row before any post — see examples/embed/main.go for a self-contained boot.
@@ -196,25 +218,38 @@ management, and — for anything you separately opted into — in-process event
 subscription and the P6 batch attestation chain):
 
 ```go
-worker := svc.Worker(service.DefaultWorkerConfig())
-go worker.Run(ctx)
+worker, err := svc.Worker(service.DefaultWorkerConfig())
+if err != nil {
+    log.Fatal(err)
+}
+go func() {
+    if err := worker.Run(ctx); err != nil {
+        // Run only returns non-nil for a misconfiguration -- most commonly
+        // the default silent logger (see "Observability" below): every
+        // signal this worker produces, including this one, travels over
+        // core.Logger and nowhere else, so a worker booted under the
+        // library's default NopLogger is indistinguishable from one that
+        // never started. Wire ledger.WithLogger(...) at ledger.New, or opt
+        // into silence explicitly with ledger.WithSilentWorker().
+        log.Fatal(err)
+    }
+}()
 ```
 
-`svc.Worker(cfg)` wires everything it can build from the Service alone:
-rollup/expiry/reconcile/snapshot/partition always run; `worker.Subscribe(fn)`
-(in-process event callbacks, no webhook server needed) works with no extra
-wiring call; and if this Service was constructed `WithAttestor`, the P6
-batch attestation job runs too.
-Two jobs still need an explicit call because they need something this
-constructor cannot see: outbound **webhook** delivery
-(`worker.SetEventDeliverer(...)`, needs a `delivery.SubscriberLister`) and
-the fleet-wide **full reconciliation suite**
-(`worker.SetFullReconciler(svc.FullReconciler(cfg))`, deliberately opt-in —
-it is a heavier scan than the lightweight accounting-equation check that
-always runs). `worker.Run` logs, once at startup, which optional jobs are
-enabled.
+`svc.Worker(cfg)` (note the two return values -- an invalid `WorkerConfig` or
+a call on a `RunInTx` clone is what the error reports) wires everything it
+can build from the Service alone: rollup/expiry/reconcile/snapshot/partition
+and the **full reconciliation suite** always run;
+`worker.Subscribe(fn)` (in-process event callbacks, no webhook server
+needed) works with no extra wiring call; and if this Service was constructed
+`WithAttestor`, the P6 batch attestation job runs too. One job still needs an
+explicit call because it needs something this constructor cannot see:
+outbound **webhook** delivery (`worker.SetEventDeliverer(...)`, needs a
+`delivery.SubscriberLister`). `worker.Run` logs, once at startup, which
+optional jobs are enabled -- and refuses to start at all under the default
+silent logger unless you opt out (see the comment in the snippet above).
 
-Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below.
+Observability (logger / metrics / tracing) is opt-in — see [Observability](#observability) below. A silent worker is not a safe default, though: inject `ledger.WithLogger(...)` at `ledger.New` before running one in anything but a throwaway script.
 
 ## Quick Start -- Serving the HTTP API
 
@@ -236,10 +271,22 @@ if err != nil {
 // Inbound-webhook replay protection. Not optional in any deployment that
 // exposes /api/v1/webhooks/: without it, a callback replayed inside the
 // signature's ±5 minute window verifies and reaches ingestion. The first
-// unprotected callback logs a warning saying exactly that.
+// unprotected callback logs a warning saying exactly that (at construction,
+// not on the first callback -- see "Security notes" below).
 srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())
 
-http.ListenAndServe(":8080", srv.Handler())
+// Only needed if you registered a channel adapter whose ParseSighting makes
+// it sighting-capable (channel/onchain's EVMAdapter is one -- see "Add a
+// custom channel adapter" above for the interface). Without this call, the
+// server still routes that adapter's callbacks to the deposit-ingestion
+// path -- it just answers every one of them 503/18102 "This feature is not
+// enabled on this server", because nothing told it what to ingest into. A
+// hand-written adapter that only implements channel.Adapter (no
+// ParseSighting) does not need this -- it stays on the legacy
+// booking_uid-transition path instead.
+srv.SetDepositIngester(svc.Onchain()) // nil if you never called svc.EnableOnchain -- fine, same effect as not calling this at all
+
+http.ListenAndServe(":8080", srv) // *server.Server implements http.Handler directly -- there is no separate .Handler() method
 ```
 
 Prefer `NewFromDeps` over the older `server.New` / `server.NewWithConfig`:
@@ -358,13 +405,17 @@ svc.InstallDefaultPresets(ctx)    // Deposit + Withdrawal only
 svc.InstallExtendedPresets(ctx)   // All 8 bundles
 ```
 
-Neither installer includes the pending two-phase deposit bundle or the
-developer-mode credit bundle — both are opt-in on purpose (the former adds a
-whole extra deposit path, the latter mints balance against no custodied
-asset) and are installed separately:
+Neither installer names `InstallPendingBundle` -- but both already install
+`DepositBundle()`, which ships the same `deposit_*_pending` journal types
+and templates `InstallPendingBundle` installs on its own, so
+`AddPending`/`ConfirmPending` work after either call above with no further
+step (see "Deposit / pending" below -- `InstallPendingBundle` is for
+installing that subset *without* the rest of `DepositBundle()`, not a gate
+you must clear first). The developer-mode credit bundle is the one that is
+genuinely opt-in on purpose (it mints balance against no custodied asset)
+and needs its own call:
 
 ```go
-presets.InstallPendingBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates())
 svc.InstallDevCreditPreset(ctx) // ENV=dev + DEV_CREDIT_ENABLED=true only
 ```
 
@@ -389,6 +440,10 @@ Preset lifecycles (state machines for `Booker.Transition`):
 presets.DepositLifecycle      // pending → confirming → confirmed | failed | expired
 presets.WithdrawalLifecycle   // locked → reserved → reviewing → processing → confirmed | failed
 ```
+<!-- readme-gate: snippet -- a list of exported *core.Lifecycle values for reference, not
+     statements: a bare selector with no call and no assignment is not valid Go in
+     statement position ("presets.DepositLifecycle evaluated but not used"), so this could
+     never compile standalone regardless of preamble. -->
 
 ## Recording Accounting
 
@@ -549,7 +604,15 @@ func (a *StripeAdapter) ParseCallback(h http.Header, body []byte) (*channel.Call
 svc.RegisterChannel(&StripeAdapter{secret: os.Getenv("STRIPE_SECRET")})
 ```
 
-`POST /api/v1/webhooks/stripe` will now route through your adapter.
+`POST /api/v1/webhooks/stripe` will now route through your adapter -- to
+`ParseCallback` and the classic booking_uid-transition path, since
+`StripeAdapter` here does not implement `ParseSighting`. An adapter that
+*does* implement it (channel/onchain's EVMAdapter is the shipped example)
+routes to the deposit-ingestion path instead, which needs one more call at
+server construction: see `srv.SetDepositIngester(...)` in
+[Quick Start -- Serving the HTTP API](#quick-start----serving-the-http-api)
+above. Registering the adapter here is not enough by itself for that path —
+every callback answers 503 until the ingester is wired too.
 
 ### Compose ledger writes with your own DB writes — `RunInTx`
 
@@ -713,10 +776,22 @@ All accessors return interfaces from `core/` so your application code depends on
 
 ### Deposit / pending
 
-Requires `presets.InstallPendingBundle(ctx, ...)` — unlike most of the API
-Surface below, this one is **not** included in `InstallDefaultPresets` or
-`InstallExtendedPresets`; install it explicitly before using either accessor
-(the calls below fail with `core.ErrNotFound` until you do).
+`presets.InstallPendingBundle(ctx, ...)` is **not** a gate on these two
+accessors, even though "install it separately" reads like one. It installs
+the minimal `PendingBundle()` -- the `pending`/`suspense` classifications,
+the three `deposit_*_pending` journal types, and their templates -- for a
+consumer who wants the two-phase pending API *without* the rest of
+`DepositBundle()`. But `DepositBundle()` (installed by both
+`InstallDefaultPresets` and `InstallExtendedPresets`) already ships those
+same three journal types and templates as part of itself (see "Built-in
+Presets" above), so if you have called either installer, `AddPending` /
+`ConfirmPending` work immediately -- calling `InstallPendingBundle` on top
+changes nothing (`presets.InstallPendingBundle`'s own doc comment: "If you
+are already calling InstallDefaultTemplatePresets you do NOT need to call
+this -- the pending bundle is a strict subset of the default presets").
+Call it on its own only when you deliberately installed something narrower
+than `DepositBundle()` (e.g. only `WithdrawalBundle()` + `FeeBundle()`) and
+still want the pending API.
 
 | Method | Interface | Description |
 |--------|-----------|-------------|
@@ -998,7 +1073,7 @@ the attacker can also rewrite makes the rest decorative.
 | Package | Use |
 |---|---|
 | `anchordev` | Local file. **Dev and tests only** -- same machine, same user as the database it is supposed to be independent of. |
-| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. **Not yet independently `go get`-able** (`docs/RUNBOOK.md`'s "Consuming the submodule today"): consume it from a local checkout via the parent-directory `go.work` above, not `go get github.com/azex-ai/ledger/anchors/r2@<tag>` -- that does not yet resolve. |
+| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. `go get github.com/azex-ai/ledger/anchors/r2@latest` (or `go get .../anchors/r2` from inside a module that already requires the root) resolves and `go build` against it works, as a nested Go module -- Go synthesizes a pseudo-version from the latest commit touching that path even without a submodule-scoped tag, and a dependency's own `replace` directives (root `go.work`'s local one included) are never applied outside that dependency's own build. **`go mod tidy` is the one command that currently fails** -- not for the `replace` reason an earlier revision of this line gave, but because the tagged root module version does not yet contain every package `anchors/r2`'s own test files import (`anchortest`, as of this writing); `go build`/`go get` never touch test-only imports, so they are unaffected. Until the release CI is extended to keep that in sync, either pin the root module to a commit that has it or vendor around `go mod tidy` specifically -- `go.work` from a local checkout (above) sidesteps the question entirely for in-repo development. |
 
 **Writing your own.** Object storage with a compliance-mode retention lock, a
 public chain, an RFC 3161 timestamp authority and an append-only database in a
@@ -1024,6 +1099,10 @@ func TestMyAnchorConformance(t *testing.T) {
     anchortest.RunConformance(t, func() core.Anchor { return newMyAnchor(bucket) })
 }
 ```
+<!-- readme-gate: snippet -- a template for a CONSUMER's own test, naming two functions
+     (newTestBucket, newMyAnchor) it is telling the reader to write, not functions this
+     library provides. It can never compile standalone; anchors/r2's own tests are the
+     executed version of this recipe (see the paragraph after this block). -->
 
 `anchors/r2` runs it against a real Object-Lock bucket in its own tests. An
 anchor that has not passed it is an unverified assumption sitting at the point
@@ -1077,8 +1156,8 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 - **Authentication**: bearer-token API keys via `Authorization: Bearer <key>`, required on every endpoint (probes and webhook callbacks excepted). Keys are `name:scope:secret` triples — scope `read` < `write` < `admin`; the key name lands in access logs for audit. Constant-time compare.
 - **Rate limits**: in-memory per-IP token bucket -- 100 req/min mutations, 1000 req/min reads. Single-instance only.
 - **Body size**: every request is capped at `MAX_BODY_BYTES`; webhooks have an additional 1 MB cap enforced in the handler.
-- **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected. That window is a staleness bound, **not** replay protection: an identical request replayed inside it verifies every time. Rejecting it needs the nonce cache, which is off unless you wire it — `srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())`. Leave it out and the first callback logs a warning saying so, and whether a replay double-books then rests entirely on the downstream idempotency key.
-- **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure; `/api/v1/system/ready` returns 503 until migrations + worker have booted.
+- **Webhook replay**: HMAC payload is `<timestamp>.<body>`; timestamps outside ±5 minutes are rejected. That window is a staleness bound, **not** replay protection: an identical request replayed inside it verifies every time. Rejecting it needs the nonce cache, which is off unless you wire it — `srv.SetWebhookNonceRecorder(svc.WebhookNonceRecorder())`. Leave it out and `server.NewFromDeps`/`NewWithConfig` logs a warning saying so **at construction** (not on the first callback), and whether a replay double-books then rests entirely on the downstream idempotency key.
+- **Health vs. readiness**: `/api/v1/system/health` returns 503 on DB failure. `/api/v1/system/ready` returns 200 only once the host process says it is ready — via `Deps.ReadyProbe` or `(*server.Server).SetReady(true)` — and 503 otherwise; the library observes neither migrations nor the worker itself (it ships no binary and runs no migrator), so a deployment that wires neither of those two lifecycle methods gets a permanent 503. See [`docs/api.md`](docs/api.md#get-systemready) for the full contract and wiring example.
 - **`write` scope and system classifications.** `POST /journals` accepts handwritten, per-currency-balanced entries, but by default **refuses any entry touching an `is_system` classification** (custodial, suspense, equity, …) — the handwritten-path counterpart to the protected-template guard, so a leaked `write`-scope key cannot mint deposit-shaped accounting through either endpoint (`docs/INVARIANTS.md` I-38). A deployment that legitimately hand-posts system-side journals over HTTP sets `Config.AllowSystemClassificationPost` (logs a startup warning). Non-system journals are unaffected. `write` scope still grants broad authority — don't issue it to a party that shouldn't record accounting.
 - **Authentication scope.** When `API_KEYS` is set, `authMiddleware` requires a valid bearer key on **every** endpoint regardless of HTTP method -- reads included (`server/middleware_auth.go`). The only exemptions are the unauthenticated probe paths (`/system/health`, `/system/ready`) and the inbound webhook paths (which authenticate via their channel's HMAC signature instead). The holder-token surface (`/holder/*`) authenticates with a minted holder token rather than an API key. Per-key holder scoping for the platform-wide read endpoints (`/platform/balances` / `/platform/solvency`) is not implemented -- any valid `read`-scope key can call them -- so still front standalone deployments with a network boundary you control. When `API_KEYS` is empty the server logs a startup warning and serves every endpoint unauthenticated; never run that way in production. This does not apply to library-mode consumption, where your own application owns the auth boundary.
 

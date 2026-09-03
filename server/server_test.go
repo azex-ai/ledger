@@ -1548,6 +1548,36 @@ func TestCreateBooking_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 
+// TestCreateBooking_NoLifecycle is F-M1's pin (2026-09-03 consumer audit):
+// postgres.BookingStore returns a plain, unwrapped error (no core.ErrXxx
+// sentinel) when the target classification has no lifecycle attached --
+// exactly what the out-of-the-box `deposit` classification looks like until
+// an operator calls SetLifecycleIfEmpty (README "Tier 2"). Before this pin,
+// that fell through resolveError's default case to 500/19999 "An unexpected
+// error occurred", and docs/api.md's error table marks 500 Retryable, so a
+// conformant client would retry a request that could never succeed.
+func TestCreateBooking_NoLifecycle(t *testing.T) {
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.booker = &mockBooker{
+			createFn: func(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
+				return nil, fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
+			},
+		}
+	})
+	body := map[string]any{
+		"classification_code": "deposit",
+		"account_holder":      100,
+		"currency_uid":        "cur-1",
+		"amount":              "500.00",
+		"idempotency_key":     "op-no-lifecycle",
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
+	require.Equal(t, http.StatusBadRequest, w.Code,
+		"a classification with no lifecycle is a caller-fixable configuration problem, not a 500 -- body: %s", w.Body.String())
+	data := parseEnvelope(t, w.Body.Bytes())
+	assert.Nil(t, data["data"])
+}
+
 func TestTransition_InvalidTransition(t *testing.T) {
 	srv := newTestServerWith(func(o *testServerOpts) {
 		o.booker = &mockBooker{
