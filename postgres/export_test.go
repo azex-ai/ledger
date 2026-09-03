@@ -57,14 +57,15 @@ func AcquireClusterLockForTest(databaseURL string) (func(), error) {
 	return acquireClusterLock(context.Background(), databaseURL, newMigrateConfig(nil))
 }
 
-// WithLedgerOwnerForTest is withLedgerOwner, exported for tests only.
+// PrepareLedgerOwnerIdentityForTest is prepareLedgerOwnerIdentity, exported
+// for tests only.
 //
-// Migrate has no seam for "make migration 014 raise": the migration set is
-// embedded, and the failure this needs to reproduce is a statement inside it
-// failing halfway through the elevated window. Driving withLedgerOwner with a
-// body that returns an error reproduces exactly that window and that exit
-// path, without a test that has to corrupt a real migration to get there.
-var WithLedgerOwnerForTest = withLedgerOwner
+// What it returns is invisible from the outside once a run has finished --
+// Migrate revokes what it granted -- so the test that pins "the narrowest
+// membership, and no more" has to look at the halfway state. Driving the
+// function directly is the only seam for that which does not involve breaking
+// a real migration file.
+var PrepareLedgerOwnerIdentityForTest = prepareLedgerOwnerIdentity
 
 // RevokeLedgerOwnerForTest is revokeLedgerOwner, exported for tests only.
 var RevokeLedgerOwnerForTest = revokeLedgerOwner

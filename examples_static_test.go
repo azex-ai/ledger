@@ -181,8 +181,9 @@ func TestExamplesUseASeparateMigrationURL(t *testing.T) {
 				poolVar := strings.TrimSpace(p[1])
 				if migrateVar == poolVar {
 					t.Errorf("%s passes %s to both Migrate and pgxpool.New -- migrations must run on their own credential "+
-						"(MIGRATE_DATABASE_URL), because Migrate's ledger_owner grant is role-wide and every session on that "+
-						"role inherits it for the length of the run (see docs/RUNBOOK.md \"Database roles\")", path, migrateVar)
+						"(MIGRATE_DATABASE_URL): a credential Migrate can reach ledger_owner through is one any session "+
+						"holding it can SET ROLE to, which a serving pool has no business being able to do "+
+						"(see docs/RUNBOOK.md \"Database roles\")", path, migrateVar)
 				}
 			}
 		}

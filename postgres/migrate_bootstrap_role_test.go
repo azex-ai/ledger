@@ -38,14 +38,17 @@ package postgres_test
 // ledger_owner's privileges for the span between 001 and the rest.
 //
 // It covers a third thing it did not originally set out to. Migration 018
-// opens that same membership window inside itself (001's "Keepsake 2 of 2"
-// idiom) and revokes it at the bottom of the file -- which, because the runner
-// is the only role that can issue either grant, revokes Migrate's window too.
-// Under one run-wide window this test went red at 020's `CREATE TRIGGER ... ON
+// once opened that same membership window inside itself (001's "Keepsake 2 of
+// 2" idiom) and revoked it at the bottom of the file -- which, because the
+// runner is the only role that can issue either grant, revoked Migrate's
+// window too: this test went red at 020's `CREATE TRIGGER ... ON
 // public.account_policies` ("permission denied for table account_policies",
-// database dirty at 20, 021 never applied). Migrate now takes the membership
-// per migration, so that coupling cannot exist; the assertions below (applied
-// to the latest version, not dirty) are what notices if it comes back.
+// database dirty at 20, 021 never applied). Migrations no longer manage that
+// membership at all (TestMigrationsDoNotManageLedgerOwnerMembership), and
+// Migrate's authority is now a role the migration connection switches to
+// rather than a grant on the credential, so nothing a migration does to
+// pg_auth_members can take it away. The assertions below (applied to the
+// latest version, not dirty) are what notices if that stops being true.
 //
 // Nothing else in the suite can notice any of this: every other test installs
 // as the container's superuser, which takes the no-op branch of the elevation.
@@ -125,14 +128,27 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 	// migration 007 section 1 was written for; it needs ADMIN OPTION on them,
 	// which the credential that created them always has.
 	//
-	// `INHERIT FALSE, SET TRUE` matters and is not decoration. It is the shape
-	// 001_baseline describes for the credential that creates these roles ("the
-	// runner holds SET but deliberately not INHERIT on ledger_owner"), and it
-	// is what makes this test exercise anything: a plain `GRANT ... WITH ADMIN
-	// OPTION` takes its INHERIT default from the member's rolinherit, which is
-	// true, so the bootstrap credential would arrive already inheriting
-	// ledger_owner, Migrate's elevation would find nothing to do, and this test
-	// would pass without the mechanism it exists to pin ever running.
+	// `INHERIT FALSE, SET TRUE` matters and is not decoration. SET is what 001
+	// itself needs on a cluster where these roles already exist: since
+	// PostgreSQL 16, `ALTER TABLE ... OWNER TO ledger_owner` requires the
+	// caller to be able to SET ROLE to the new owner, and 001's closing
+	// ownership sweep is nothing else. A cold cluster gets that from CREATE
+	// ROLE's `createrole_self_grant='set'`; here the roles were created by
+	// another test's superuser install, so it has to be granted.
+	//
+	// INHERIT stays FALSE because that is the half this test exists to
+	// exercise: a plain `GRANT ... WITH ADMIN OPTION` takes its INHERIT default
+	// from the member's rolinherit, which is true, so the bootstrap credential
+	// would arrive already holding ledger_owner's privileges and Migrate would
+	// have nothing to arrange.
+	//
+	// Which branch of that arrangement runs here depends on the cluster, and
+	// both are real: warm (this path) the credential can already SET ROLE, so
+	// Migrate touches no membership at all; cold -- `go test -run
+	// TestMigrate_Installs...` against a fresh container, where 001 creates the
+	// roles and its closing REVOKE takes the self-grant back out -- it holds
+	// admin option only and has to grant itself the SET membership. The
+	// residual assertion at the bottom holds in both.
 	for _, role := range []string{"ledger_owner", "ledger_app", "ledger_ro"} {
 		var exists bool
 		require.NoError(t, admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role).Scan(&exists))
@@ -185,13 +201,26 @@ func TestMigrate_InstallsUnderNonSuperuserBootstrapCredential(t *testing.T) {
 	`).Scan(&unowned))
 	assert.Zero(t, unowned, "I-57 must hold regardless of which credential ran the migrations")
 
-	// The elevation is released. Leaving the bootstrap credential inheriting
-	// ledger_owner would turn a bounded install-time window into a standing
-	// one, which is the opposite of what 001 asks operators to do with this
-	// credential (rotate or retire it).
+	// Nothing was left behind. Leaving the bootstrap credential holding a
+	// route to ledger_owner would turn a bounded install-time authority into a
+	// standing one, which is the opposite of what 001 asks operators to do
+	// with this credential (rotate or retire it).
 	var stillInherits bool
 	require.NoError(t, admin.QueryRow(ctx, "SELECT pg_has_role($1, 'ledger_owner', 'USAGE')", bootstrap).Scan(&stillInherits))
-	assert.False(t, stillInherits, "Migrate must hand ledger_owner's privileges back when it returns")
+	assert.False(t, stillInherits, "Migrate must not leave the credential inheriting ledger_owner")
+
+	// Scoped by grantor, because on a warm cluster the operator's own SET
+	// grant above is legitimately still there: what must be gone is anything
+	// the credential granted ITSELF in order to run 002..N.
+	var residual int
+	require.NoError(t, admin.QueryRow(ctx, `
+		SELECT count(*) FROM pg_auth_members am
+		JOIN pg_roles r ON r.oid = am.roleid
+		JOIN pg_roles m ON m.oid = am.member
+		JOIN pg_roles g ON g.oid = am.grantor
+		WHERE r.rolname = 'ledger_owner' AND m.rolname = $1 AND g.rolname = $1
+	`, bootstrap).Scan(&residual))
+	assert.Zero(t, residual, "nor holding a membership it granted itself to run 002..N")
 }
 
 // pgxIdent quotes a SQL identifier for interpolation into a statement that

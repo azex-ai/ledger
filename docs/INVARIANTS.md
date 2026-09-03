@@ -1498,6 +1498,24 @@ automatically — and any table with only a *partial* guard (`classifications`,
 `reservations`, `journals` — see A1-A4 under I-25) is correctly left with
 `UPDATE`, since those are legitimately mutated through controlled paths.
 
+**Note on the migration window** (2026-09-03, M-5): this invariant holds
+*while migrations run*, not only between runs. That is a correction. Until
+2026-09-03 `Migrate()` obtained `ledger_owner`'s privileges by granting them
+to the migration credential's **role** (`GRANT ledger_owner TO <runner> WITH
+INHERIT TRUE`, one window per migration). `pg_auth_members` is a cluster-wide
+shared catalog and Postgres's ownership check (`has_privs_of_role()`) does not
+distinguish sessions, so every other connection authenticated as that
+credential — the application's own pool, in a single-credential deployment —
+was owner-equivalent for the length of the run. Measured on postgres:17.10: a
+second connection dropped `journal_entries_no_update` mid-run and `Migrate`
+still returned `nil`. `Migrate` now switches **one connection** to
+`ledger_owner` (`SET ROLE`) and runs `002..N` there; where the credential
+cannot yet do that it grants itself `WITH SET TRUE, INHERIT FALSE` for the
+run and revokes it, which confers nothing on a session that does not
+deliberately switch roles. This does not make the migration credential safe to
+serve traffic on — see `docs/RUNBOOK.md`'s "Database roles" for what remains —
+it makes the *passive* elevation gone.
+
 **Enforced by**:
 - `postgres/sql/migrations/001_baseline.up.sql` — creates `ledger_owner` /
   `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on
@@ -1525,6 +1543,13 @@ automatically — and any table with only a *partial* guard (`classifications`,
   set is exactly the reviewed list, so a function reachable by the `PUBLIC`
   default is a capability nobody granted; the second derives every
   `journal_entries` partition's expected ACL from the parent.
+- `postgres.TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`
+  — the "Note on the migration window" above. A real `Migrate` run, parked
+  inside migrations `002..N` by an exclusive lock on a table migration 003
+  alters, while a second connection on the migration credential checks
+  `pg_has_role(..., 'USAGE')` and tries to drop the append-only trigger: the
+  first must be false and the second must be `42501`. `pg_stat_activity` is
+  the witness that the probe ran inside the window rather than after it.
 - `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant`
   — a partition created *after* the
   role grants were issued is still writable by `ledger_app` through the
@@ -3153,7 +3178,11 @@ on exactly these two functions — nothing that looks like DDL.
 the bottom of its own file, so nothing built by a later migration was ever
 swept: measured on a clean install of 001–015, both of these functions came
 back owned by the credential that ran the migration — a superuser in the
-common install — and `ledger_app` holds `EXECUTE` on both. The privilege this
+common install — and `ledger_app` holds `EXECUTE` on both. (Since 2026-09-03
+migrations `002..N` on a *non-superuser* credential execute as `ledger_owner`,
+so objects they create are owned correctly on their own; a superuser install
+still creates them as the superuser, which is why 019/021's resweep and I-57's
+gate stay load-bearing.) The privilege this
 invariant says is `ledger_owner`'s was whatever the bootstrap credential had.
 007's header argues the blast radius shrinks *because* these run as
 `ledger_owner`; that premise did not hold in any deployment. Migration 019
@@ -4998,6 +5027,16 @@ and carry no equivalent statement; their `GRANT`/`REVOKE` target tables and
 functions, whose ACLs (`pg_class.relacl`, `pg_proc.proacl`) are ordinary
 per-database catalog rows and need no lock.
 
+`Migrate` itself issues a ninth and tenth against the same shared catalog
+when the migration credential cannot yet `SET ROLE ledger_owner`: the
+`GRANT ledger_owner TO <runner> WITH SET TRUE, INHERIT FALSE` / `REVOKE`
+round trip `prepareLedgerOwnerIdentity` and `revokeLedgerOwner` perform
+around migrations `002..N` (I-22's "Note on the migration window"). Both run
+*inside* this lock, which is what keeps two concurrent installs on one
+cluster from revoking each other's membership — the same
+`tuple concurrently updated` shape described below, on the row rather than
+the role.
+
 Two `Migrate()` calls installing into two *different* databases on the same
 cluster used to run those 8 statements concurrently. PostgreSQL does not
 block the loser and let it proceed once the winner commits — it raises
@@ -5037,8 +5076,9 @@ that runs its migration job from more than one pod at once.
 
 **Enforced by**: `postgres.acquireClusterLock` and
 `postgres.maintenanceDatabaseURL` (`postgres/migrate.go`), called from
-`postgres.Migrate` / `postgres.MigrateContext` before
-`migrate.NewWithSourceInstance`.
+`postgres.Migrate` / `postgres.MigrateContext` before `applyBaseline` opens
+golang-migrate's connection for `001` and before `applyRemainingMigrations`
+opens the `ledger_owner` one for `002..N`.
 
 **Pinned by**:
 - `postgres.TestMigrate_ClusterLockHeldElsewhere_FailsWithinBudget` — a

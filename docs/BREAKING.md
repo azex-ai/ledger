@@ -130,13 +130,23 @@ Consumers: no action for a normal install. A migration window longer than
 five minutes needs `WithMigrateLockBudget`; routing "waiting for the cluster
 migration lock" into your own logs needs `WithMigrateLogger`.
 
-Also part of the same install path (D-M2): `Migrate` now runs `001` on its
-own and then grants `ledger_owner` to the migrating credential for the rest
-of the run, revoking on every exit path. Most deployments need no action,
-but running `Migrate` as a third-party role with no ADMIN OPTION on
-`ledger_owner` now fails up front with the three ways out listed, where it
-previously died at `002` with a bare `42501` and left the database marked
-dirty.
+Also part of the same install path (D-M2, amended by M-5): `Migrate` now runs
+`001` on its own and then runs `002..N` on a single connection it has switched
+to `ledger_owner` (`SET ROLE`) — not by granting the migrating credential
+`ledger_owner`'s privileges, which would elevate every other session holding
+that credential for the length of the run. Where the credential cannot yet
+switch roles, `Migrate` grants itself `ledger_owner WITH SET TRUE, INHERIT
+FALSE` for the run and revokes it on every exit path.
+
+Most deployments need no action. Two shapes do: running `Migrate` as a
+third-party role that can neither `SET ROLE ledger_owner` nor grant itself
+that (no ADMIN OPTION) now fails up front with the three ways out listed,
+where it previously died at `002` with a bare `42501` and left the database
+marked dirty; and on the non-superuser path `002..N` execute *as*
+`ledger_owner`, so migration `007` can no longer use the runner's own
+`CREATEROLE` to strip a privileged attribute off a pre-existing
+`ledger_owner`/`ledger_app`/`ledger_ro` — it stops the install and asks for a
+superuser connection instead. A fresh install is unaffected by the second.
 
 ### `core.Metrics.BalanceDrift`, `core.Metrics.NegativeBalanceDetected`, `core.Metrics.ReconcileGap`, `core.Metrics.ReservedAmount` take a currency uid
 

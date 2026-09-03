@@ -692,33 +692,51 @@ creates three least-privilege roles, grants them, revokes `PUBLIC`'s
 default schema access, and transfers every table/sequence to `ledger_owner`
 — all in the same migration that first creates the schema.
 
-> ⚠️ **The migration credential must not be the application credential, and
-> nothing else may be using it while `Migrate()` runs.** For a non-superuser
-> runner, `Migrate()` grants that role `ledger_owner WITH INHERIT TRUE` for
-> the duration of each migration (see the second operational note below).
-> That grant is a row in `pg_auth_members`, which is **cluster-wide and
-> role-scoped, not session-scoped**: while it is held, *every* session
-> connected as that role inherits `ledger_owner` — including your
-> application's connection pool, if it authenticates as the same role. A pool
-> in that state can `DROP TRIGGER journal_entries_no_update`, `TRUNCATE
-> journal_entries`, or detach a partition, i.e. I-22 does not hold for the
-> length of the migration run (2026-09-02 adversarial re-review,
-> `w3-review/money-path.md` M-5; this paragraph replaces a claim that there
-> was "no window ... where a connection has broader access than the table
-> below describes", which was true only for a superuser runner).
+> ℹ️ **`Migrate()`'s authority is scoped to the connection it migrates on,
+> not to the credential you hand it.** For a non-superuser runner it switches
+> that one connection to `ledger_owner` (`SET ROLE`) and runs migrations
+> `002..N` there. Other sessions on the same credential see nothing: while a
+> migration run is in flight, `pg_has_role(current_user, 'ledger_owner',
+> 'USAGE')` on such a session is still false and `DROP TRIGGER
+> journal_entries_no_update` still fails with `42501` — pinned, with a
+> deterministically parked run, by
+> `TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`.
 >
-> Two requirements follow, and the shipped examples now demonstrate both:
+> This replaces a mechanism that granted the *role* `ledger_owner WITH
+> INHERIT TRUE` for the duration of each migration. `pg_auth_members` is
+> cluster-wide and role-scoped, so that made **every** session on the
+> migration credential owner-equivalent for the length of the run — including
+> the application's own pool, in a single-credential deployment. Measured, not
+> theorised: a second connection dropped `journal_entries_no_update` mid-run
+> and `Migrate` still returned `nil`, i.e. I-22 did not hold while a deploy
+> was in flight (2026-09-02 adversarial re-review,
+> `w3-review/money-path.md` M-5).
+>
+> ⚠️ **What is left, and why a separate migration credential is still the
+> right shape.** `SET ROLE` needs a membership carrying the `SET` option, and
+> `001` deliberately leaves the runner without one (its closing `REVOKE`
+> deletes the row `CREATE ROLE` created; only the creator's permanent `ADMIN
+> OPTION` survives). So on a fresh install `Migrate()` grants itself the
+> narrowest membership that permits the switch — `WITH SET TRUE, INHERIT
+> FALSE` — and revokes it before returning; `pg_auth_members` ends where it
+> started. That membership confers nothing on a session that does not
+> deliberately switch roles, and it is nothing the credential could not grant
+> itself at any other moment via that same `ADMIN OPTION`. But an application
+> authenticating as the migration credential *could* issue `SET ROLE
+> ledger_owner` itself during the window, and a compromised one would. Two
+> requirements follow, and the shipped examples demonstrate both:
 >
 > 1. Point migrations at their own credential —  `MIGRATE_DATABASE_URL`
->    (superuser, `ledger_owner`, or a role with `ADMIN OPTION` on it) — and
->    the application at `DATABASE_URL` (`ledger_app`). Every
->    `examples/*/main.go` reads them separately and logs a warning when it
->    has to fall back to one URL for both.
+>    (superuser, `ledger_owner` itself, or a role that can `SET ROLE
+>    ledger_owner` / holds `ADMIN OPTION` on it) — and the application at
+>    `DATABASE_URL` (`ledger_app`). Every `examples/*/main.go` reads them
+>    separately and logs a warning when it has to fall back to one URL for
+>    both.
 > 2. Run migrations when the application is not serving on that credential
 >    (a deploy step or an init container, not an in-process call on a live
 >    pod). If your deployment must migrate in-process, use a superuser or
->    `ledger_owner` connection for it: neither needs the temporary grant, so
->    neither opens the window.
+>    `ledger_owner` connection for it: neither needs the temporary
+>    membership, so neither leaves anything to reason about.
 
 | Role | Can do | Used by |
 |---|---|---|
@@ -752,20 +770,34 @@ Operational notes:
   superuser.
 - **Every migration after `001` needs `ledger_owner`'s privileges**,
   because `001`'s last act transfers every object it created to that
-  role. `Migrate()` arranges this itself: it applies `001` alone, grants
-  the migration credential `ledger_owner WITH INHERIT TRUE` for the
-  remainder of the run, and revokes it on every exit path. That grant
-  uses the `ADMIN OPTION` Postgres permanently gives the creator of a
-  role — it is not a privilege the credential did not already command,
-  only a bounded, explicit window instead of a permission error two
-  migrations in. A superuser, or a connection as `ledger_owner` itself,
-  skips the whole step. The credential must be **one of the three**:
-  superuser, `ledger_owner` itself, or a role holding `ADMIN OPTION` on
-  `ledger_owner` (the only way a role other than `ledger_owner`'s own
-  creator gets there). Any other credential is refused before a single
-  migration runs, with a message naming all three ways out, rather than
-  failing partway through with a `pg_authid`-shaped permission error
-  (see `postgres.Migrate`'s own doc comment, the source for this list).
+  role. `Migrate()` arranges this itself: it applies `001` alone on the
+  credential you gave it, then opens **one** connection, switches that
+  connection to `ledger_owner` (`SET ROLE`), and runs `002..N` on it. A
+  superuser, or a connection as `ledger_owner` itself, skips the switch
+  and migrates exactly as it always did. Where the credential cannot yet
+  switch, `Migrate()` grants itself `ledger_owner WITH SET TRUE, INHERIT
+  FALSE` for the run and revokes it on every exit path, using the `ADMIN
+  OPTION` Postgres permanently gives the creator of a role — it is not a
+  privilege the credential did not already command, only a bounded,
+  explicit arrangement instead of a permission error two migrations in.
+  The credential must be **one of the three**: superuser, `ledger_owner`
+  itself, or a role that can `SET ROLE ledger_owner` — directly, or by
+  holding `ADMIN OPTION` on it (the only way a role other than
+  `ledger_owner`'s own creator gets there). Any other credential is
+  refused before a single migration runs, with a message naming all
+  three ways out, rather than failing partway through with a
+  `pg_authid`-shaped permission error (see `postgres.Migrate`'s own doc
+  comment, the source for this list).
+  - One consequence worth knowing before a shared cluster surprises you:
+    on that non-superuser path `002..N` execute **as `ledger_owner`**, so
+    they no longer carry the runner's own role attributes. The only
+    statement in the set that wants them is migration `007`'s attribute
+    hardening, and only when one of the three roles pre-existed on the
+    cluster holding `SUPERUSER`/`CREATEROLE`/… — `007` then stops the
+    install with its actionable message asking for a superuser
+    connection, where a `CREATEROLE` runner might previously have been
+    able to strip the attribute itself. A fresh install issues zero such
+    statements and is unaffected.
 - **`Migrate()` also needs `CONNECT` on the cluster's `postgres` maintenance
   database** (`docs/INVARIANTS.md` I-47) — it acquires a cluster-wide
   migration lock there before touching the target database, to serialize

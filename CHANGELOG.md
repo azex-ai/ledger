@@ -340,27 +340,57 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Fixed
 
-- **Migrations must run on their own credential** (W3 re-review M-5,
-  documentation layer only — no mechanism change). For a non-superuser
-  runner, `Migrate` grants that role `ledger_owner WITH INHERIT TRUE` for the
-  length of each migration, and that grant is a row in `pg_auth_members`:
-  **cluster-wide and role-scoped, not session-scoped**. Every session
-  authenticated as the same role inherits it while it is held. Measured on a
-  throwaway `postgres:17` with a non-superuser `CREATEROLE` runner: a second
-  connection on that role executed `DROP TRIGGER
-  journal_entries_no_update ON journal_entries` mid-run and it stayed
-  dropped, while `Migrate` returned `nil` — i.e. I-22 does not hold for the
-  duration of a migration run when the application shares the migration
-  credential. All eight `examples/**/main.go` now read
-  `MIGRATE_DATABASE_URL` separately from `DATABASE_URL` and log a warning
-  when they fall back to one URL for both; `docs/RUNBOOK.md`'s "Database
-  roles" section states the requirement and drops its previous claim that
-  "there is no window ... where a connection has broader access". A static
-  gate (`TestExamplesUseASeparateMigrationURL`) keeps the examples teaching
-  it. **Action for consumers**: point migrations at a superuser /
-  `ledger_owner` / `ADMIN OPTION` credential that the serving application
-  does not use, and run them as a deploy step rather than in-process on a
-  live pod.
+- **`Migrate`'s `ledger_owner` authority is now scoped to the connection it
+  migrates on, not to the credential** (W3 re-review M-5). Until now, for a
+  non-superuser runner, `Migrate` granted that **role** `ledger_owner WITH
+  INHERIT TRUE` for the length of each migration. `pg_auth_members` is a
+  cluster-wide shared catalog and Postgres's ownership check does not
+  distinguish sessions, so every connection authenticated as the same
+  credential — the application's own pool, in a single-credential deployment
+  — was owner-equivalent for the duration. Measured on `postgres:17.10` with
+  a non-superuser `CREATEROLE` runner: a second connection executed `DROP
+  TRIGGER journal_entries_no_update ON journal_entries` mid-run, it stayed
+  dropped, and `Migrate` returned `nil` — I-22 did not hold while a deploy
+  was in flight.
+
+  `Migrate` now applies `001` on the credential you give it, then opens **one**
+  connection, switches it to `ledger_owner` (`SET ROLE`) and runs `002..N`
+  there, via `migrate.NewWithInstance` over a `*sql.DB` pinned to that single
+  connection. A superuser, or a connection as `ledger_owner` itself, is
+  unaffected and migrates exactly as before. Where the credential cannot yet
+  switch roles — the state `001` leaves a fresh install in, since its closing
+  `REVOKE` removes the row `CREATE ROLE` created — `Migrate` grants itself the
+  narrowest membership that permits it (`WITH SET TRUE, INHERIT FALSE`) and
+  revokes it before returning; `pg_auth_members` ends byte-for-byte where it
+  started, and while it is held no session that does not deliberately `SET
+  ROLE` sees anything. This also removes the previous mechanism's side effect
+  of rewriting the operator's `SET`-only membership to `INHERIT` and then
+  deleting the row outright. Pinned by
+  `TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`, which
+  parks a real run inside `002..N` with an exclusive lock and requires `42501`
+  from a second connection on the same credential.
+
+  **Behaviour change worth knowing before a shared cluster surprises you**: on
+  the non-superuser path, `002..N` now execute *as* `ledger_owner` and no
+  longer carry the runner's own role attributes. The only statement in the set
+  that wants them is migration `007`'s attribute hardening, and only when one
+  of the three roles pre-existed on the cluster holding `SUPERUSER` /
+  `CREATEROLE` / …; `007` then stops the install with its actionable message
+  asking for a superuser connection, where a `CREATEROLE` runner could
+  previously have stripped the attribute itself. A fresh install issues zero
+  such statements. A credential that is neither superuser, nor `ledger_owner`,
+  nor able to reach `SET ROLE ledger_owner` is still refused before the first
+  migration runs, with a message naming all three ways out.
+
+  All eight `examples/**/main.go` read `MIGRATE_DATABASE_URL` separately from
+  `DATABASE_URL` and log a warning when they fall back to one URL for both; a
+  static gate (`TestExamplesUseASeparateMigrationURL`) keeps them teaching it.
+  `docs/RUNBOOK.md`'s "Database roles" section carries the operator-facing
+  version, including what is still worth a separate credential now that the
+  passive elevation is gone. **Action for consumers**: none required for a
+  superuser or `ledger_owner` migration credential; otherwise keep pointing
+  migrations at a credential the serving application does not use, and run
+  them as a deploy step rather than in-process on a live pod.
 - **`SolvencyCheck` no longer reads `balance_checkpoints`** (W3 re-review,
   w3-review/money-path.md M-2). Both of its figures are recomputed from
   `journal_entries` (the I-23 basis) instead of `checkpoint + delta`. A

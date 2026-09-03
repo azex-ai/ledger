@@ -10,7 +10,7 @@ import (
 
 // TestMigrationsDoNotManageLedgerOwnerMembership pins the rule D-M2 (2026-09-02
 // audit) settled on: postgres.Migrate is the only thing that grants and revokes
-// the runner's ledger_owner membership, one window per migration. A migration
+// the runner's ledger_owner membership, on one dedicated connection (M-5). A migration
 // that does it itself (018 used to) REVOKEs the very membership Migrate is
 // holding -- Postgres keeps a single grantor row -- and a NOSUPERUSER bootstrap
 // dies at the next owner-gated statement. 001 is the one legitimate site: it
