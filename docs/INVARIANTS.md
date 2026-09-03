@@ -660,16 +660,30 @@ onto each classification by `presets.InstallDefaultTemplatePresets` (and any
 direct `CreateClassification` / `SetBalanceRole` call) — the basis the two
 bullets above sum over.
 
-**Pinned by**:
-- `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit` (see I-4:
-  `TestReserverStore_Reserve_Concurrent` was removed from this list in the
-  2026-09-02 audit's F-m1 -- empty for this invariant too, same reason)
-- `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
-- `postgres.TestGetBalanceBreakdown_RolesPlusHolds`
-- `postgres.TestReserve_AvailableBasisExcludesPendingLockedAndRoleless`
-- `postgres.TestReserve_PendingOnlyBalanceNotReservable`
-- `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict` (expand-safe
-  role upgrade on preset re-install)
+**Pinned by** — annotated by *which* path each pin holds down, because the
+two paths compute the availability base with different code and the 2026-09-03
+independent review (`money-out.md` M-3) found every pin below sitting on the
+ungated one:
+- *ungated*: `postgres.TestReserverStore_Reserve_Concurrent_RejectsOverCommit`
+  (see I-4: `TestReserverStore_Reserve_Concurrent` was removed from this list
+  in the 2026-09-02 audit's F-m1 -- empty for this invariant too, same reason)
+- *ungated*: `postgres.TestReserverStore_SettlePartial_RemainderStillHeld`
+- *breakdown read path*: `postgres.TestGetBalanceBreakdown_RolesPlusHolds`
+- *ungated*: `postgres.TestReserve_AvailableBasisExcludesPendingLockedAndRoleless`
+- *ungated*: `postgres.TestReserve_PendingOnlyBalanceNotReservable`
+- *config*: `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict`
+  (expand-safe role upgrade on preset re-install)
+- *gated* (`RequireVerifiedBalance`, the path I-49 names as deciding how much
+  money may leave): `TestService_GatedReserve_AvailableRoleIsTheOnlyBasis`
+  and `TestService_GatedReserve_PendingOnlyHolderCanReserveNothing` (root
+  package, cited unqualified as every root-package pin in this document is).
+  Both drive `ledger.New` rather than constructing the store, because the
+  filters they hold down are re-derived inside I-49's two new sums
+  (`requireVerifiedAvailableBalance`, `sumAvailableFromEntriesWithQueries`)
+  and nothing above them repeats the rule. Deleting both filters made a
+  holder whose only funds were an unconfirmed deposit withdraw them, with
+  every one of the six pins above still green -- that is what these two are
+  for.
 
 ## I-12: Money conservation across the system
 
@@ -1557,9 +1571,16 @@ What that still leaves — a session on the migration credential *can* switch to
 `ledger_owner` deliberately, and a compromised application is a session that
 does what it is told — is not tolerated either: on the non-superuser path
 `Migrate` counts the other sessions connected as that credential
-(`pg_stat_activity`, its own connections excluded by `application_name`),
-before arranging anything and again after, and refuses the run with an
-actionable error if there are any. So the invariant's scope during a migration
+(`pg_stat_activity`, its own connections excluded by **backend pid** — every
+pid the run has opened, not just the probing one), before arranging anything
+and again after, and refuses the run with an actionable error if there are
+any. The exclusion key was `application_name` until 2026-09-03, which is a
+value the audited session sets for itself: one `SET application_name =
+'azex-ledger-migrate'` on the application pool made the guard fail *open*
+(`install-roles.md` M2, measured — the run completed). A pid is assigned by
+the server, and recording the run's own pids is what makes excluding by it
+stable across the several connections Migrate opens (see
+`assertSoleSessionOnCredential`). So the invariant's scope during a migration
 run is exact: either the credential is a superuser / `ledger_owner` (nothing
 is arranged and nothing changes for anyone), or it is the only session holding
 that credential and one connection of it acts as `ledger_owner`.
@@ -5703,6 +5724,40 @@ never accepted it. No attacker is needed — a consumer that runs its own
 correction flow and tags the correcting journal with `reversal_of` for
 auditability, which is what the field is for, lands on this.
 
+**Rules 2 and 3 also run where the chain is READ** (2026-09-03 independent
+review, `money-out.md` M-2). The three rules above are an *input* gate, and
+an input gate is a statement about this library's write paths, not about
+what is in the table: `journals.reversal_of` is an ordinary column and
+`ledger_app` holds INSERT on `journals`, so under this repo's standing threat
+model the exact repro above is one statement away — and it was measured, with
+`ReverseJournalFraction(J, 1, 1)` posting 50 of 100 and returning `nil`.
+
+So `cumulativeReversedByDimension` — the one function every figure derived
+from a reversal chain passes through — validates the history it is about to
+sum, and **refuses to answer** when a journal linked to `J` posts an entry on
+a dimension `J` never touched (rule 2) or the chain's total exceeds `J`'s own
+(rule 3). The error names the offending journal's uid and points at
+`docs/RUNBOOK.md`'s "Corrupt reversal chain" procedure. It does not attempt
+repair: journals are append-only (I-2), the forged row cannot be deleted, and
+unwinding it is a deliberate act.
+
+Two boundaries, stated so they are not mistaken for more than they are:
+
+- **A reversal journal with no entries at all is skipped, not refused.** It
+  contributes nothing to any sum and cannot shorten a clawback; failing every
+  reversal of `J` over a row that moves no money would be a denial of service
+  rather than a protection.
+- **Rule 3 on the read side is a better diagnosis, not a closed hole.** An
+  oversized chain was already refused by `reversalEntriesFor`'s own overshoot
+  check; what changes is that the refusal now says the chain is corrupt
+  instead of describing the caller's request as the thing that would
+  overshoot.
+
+`ReverseJournal` (the full-reversal API) never reaches this check on a
+corrupted chain: it refuses outright as soon as any reversal of `J` exists
+and routes the caller to `ReverseJournalFraction`, which is what then names
+the bad link. Fail-closed either way; only one of the two can say why.
+
 ### Rule 4: `event_uid`
 
 A journal carrying `event_uid = E` must be about what `E` happened to:
@@ -5774,6 +5829,11 @@ moved money, that is corrected by a reversal, not by the unlink.
   reversal history the rules above read cannot change before this journal
   commits — the same row lock `ReverseJournal` and `ReverseJournalFraction`
   take, in the same order relative to the balance locks.
+- `assertReversalChainIsWellFormed`, called from
+  `cumulativeReversedByDimension` (`postgres/reversal_fraction_store.go`) —
+  the read side of rules 2 and 3, reached by every caller that derives
+  anything from a reversal chain (`reverseJournalFractionWithQueries`,
+  `AuthorizeReversal`, `validateReversalOfInput` itself).
 
 **Pinned by**:
 - `postgres.TestPostJournal_ReversalOfUID_RejectsNonReversingEntries` — the
@@ -5783,6 +5843,22 @@ moved money, that is corrected by a reversal, not by the unlink.
 - `postgres.TestPostJournal_ReversalOfUID_RejectsAmountBeyondRemaining` —
   including the positive case: a correctly shaped hand-written reversal within
   the remaining amount must still post.
+- `postgres.TestReverseJournalFraction_RefusesACorruptReversalChain` — the
+  read side, driven with a forged `reversal_of` row inserted over a real
+  socket as `ledger_app` (not as the test superuser: the claim is about that
+  credential). Asserts the refusal, the offending journal's uid in the error,
+  and that the holder's balance is untouched by a refused clawback.
+- `postgres.TestReverseJournal_RefusesACorruptReversalChain` — the same
+  forgery against the full-reversal API, pinned as fail-closed-via-the-other-
+  guard rather than as something it does not do.
+- `postgres.TestReverseJournalFraction_RefusesAnOverReversedChain` (rule 3 on
+  the read side) and
+  `postgres.TestPostJournal_StillRefusesTheForgeryOnTheWayIn` (the input gate
+  is not being replaced by the read side; deleting it must still go red).
+- `postgres.TestReverseJournalFraction_HonestPartialChainStillReverses` — the
+  false-positive guard: two legitimate partial reversals, then the remainder,
+  then an already-fully-reversed refusal that stays distinguishable from a
+  corrupt-chain one.
 - `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` (rule 4) — a
   stranger's journal is refused, and then the booking's OWN journal still
   posts against the same event, proving the refusal consumed neither

@@ -54,7 +54,7 @@ var NewQueriesForTest = sqlcgen.New
 // so a test that holds it too becomes mutually exclusive with them rather than
 // racing them. See roles_test.go's TestRoleAttributeHardening... and I-47.
 func AcquireClusterLockForTest(databaseURL string) (func(), error) {
-	return acquireClusterLock(context.Background(), databaseURL, newMigrateConfig(nil))
+	return acquireClusterLock(context.Background(), databaseURL, newMigrateConfig(nil), newMigrateRun())
 }
 
 // PrepareLedgerOwnerIdentityForTest is prepareLedgerOwnerIdentity, exported
@@ -65,10 +65,17 @@ func AcquireClusterLockForTest(databaseURL string) (func(), error) {
 // membership, and no more" has to look at the halfway state. Driving the
 // function directly is the only seam for that which does not involve breaking
 // a real migration file.
-var PrepareLedgerOwnerIdentityForTest = prepareLedgerOwnerIdentity
+// Each call gets its own migrateRun (the set of backend pids belonging to one
+// Migrate run -- see assertSoleSessionOnCredential): driving one phase of a
+// run in isolation is one run as far as the session guard is concerned.
+func PrepareLedgerOwnerIdentityForTest(databaseURL string) (setRole bool, granted string, err error) {
+	return prepareLedgerOwnerIdentity(databaseURL, newMigrateRun())
+}
 
 // RevokeLedgerOwnerForTest is revokeLedgerOwner, exported for tests only.
-var RevokeLedgerOwnerForTest = revokeLedgerOwner
+func RevokeLedgerOwnerForTest(databaseURL, runner string) error {
+	return revokeLedgerOwner(databaseURL, runner, newMigrateRun())
+}
 
 // --- P6 (W3 adversarial review of the gates): the two mechanisms behind the
 // idempotent-replay label, each reachable on its own ---
