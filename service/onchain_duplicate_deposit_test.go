@@ -8,6 +8,7 @@ package service_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -215,6 +216,88 @@ func TestDepositIdentity_DuplicateBookingsAreNotCreditedWithoutTheIndex(t *testi
 
 	assert.True(t, h.logger(t).contains("already holds transfer"),
 		"the refusal must name the booking that already holds the log -- that is what an operator needs")
+}
+
+// TestDepositIdentity_UncorroboratedBookingReachesReviewEvenWhenTheLogIsTaken
+// pins N-2. The most natural forgery references a transfer that a REAL
+// booking already holds and inflates the amount; corroboration correctly
+// calls that a contradiction, and then the walk to review used the log's own
+// channel_ref -- which the real booking owns, and which is unique per
+// channel. The transition failed, routeToReview was never reached, and the
+// booking sat in `pending` forever emitting one Error line per tick, with
+// `review_reason` never landing and the review metric never firing. I-69
+// promises "a queue an operator works, not a log line"; this is the case
+// where it was exactly a log line.
+//
+// Runs on the pre-032 schema for the same reason the pin above does: after
+// 032 the row cannot be inserted at all, and the two halves must each hold.
+func TestDepositIdentity_UncorroboratedBookingReachesReviewEvenWhenTheLogIsTaken(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xr3taken"
+		holder  = int64(9901)
+	)
+	h, anchor, _ := realDepositHarness(t, chainID, token, "USDT-taken", txHash, holder)
+	ctx := context.Background()
+
+	dropDepositIdentityFence(t, h)
+
+	// Same log as the real booking, amount inflated 50 -> 5000, and under the
+	// SAME channel_name as the honest writer -- which is what makes the
+	// collision happen at all (uq_bookings_channel_ref is
+	// UNIQUE (channel_name, channel_ref); a forgery under its own channel
+	// name never contends for the reference). After migration 032 this is
+	// the only channel_name an appended deposit booking may have, so this is
+	// not the awkward case, it is the ONLY case.
+	_, err := h.pool.Exec(ctx, `
+		INSERT INTO bookings (classification_id, account_holder, currency_id, amount, status,
+		                      channel_name, channel_ref, idempotency_key, metadata, uid)
+		VALUES ((SELECT id FROM classifications WHERE code = 'deposit'), $1,
+		        (SELECT id FROM currencies WHERE code = 'USDT-taken'), 5000, 'pending',
+		        'onchain', '', 'r3-taken-forged',
+		        jsonb_build_object('chain_id','1','tx_hash',$2::text,'txlog_seq','0','token',$3::text,'block_number','100'),
+		        gen_random_uuid())`,
+		holder, txHash, token)
+	require.NoError(t, err, "pre-032 schema: the row goes in, which is this pin's premise")
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, h.svc.RunPendingRecheckOnce(ctx),
+			"the tick must not fail on a booking it is about to park: that is what made this invisible")
+	}
+
+	deposits, _, err := h.bookings.ListBookings(ctx, core.BookingFilter{
+		ClassificationUID: h.classificationUID(t, "deposit"), Limit: 20,
+	})
+	require.NoError(t, err)
+	require.Len(t, deposits, 2)
+
+	var forged *core.Booking
+	for i := range deposits {
+		if deposits[i].UID != anchor.UID {
+			forged = &deposits[i]
+		}
+	}
+	require.NotNil(t, forged)
+
+	assert.Equal(t, core.Status("review"), forged.Status,
+		"an uncorroborated booking must reach the queue even when the log it names is taken")
+	assert.Equal(t, "onchain_unverified", forged.Metadata["review_reason"],
+		"and the reason must LAND -- an operator reads the booking, not the process's logs")
+	assert.Empty(t, forged.JournalUID)
+	assert.True(t, strings.HasPrefix(forged.ChannelRef, txHash+"#0#unverified-"),
+		"the walk to review must not claim the reference the real booking holds")
+
+	reasons := h.metrics.reviewReasons()
+	assert.Contains(t, reasons, "onchain_unverified",
+		"the review-required counter is the alert this whole path exists to raise")
+
+	// The genuine deposit still owns its own reference and its own journal.
+	genuine, err := h.bookings.GetBooking(ctx, anchor.UID)
+	require.NoError(t, err)
+	assert.Equal(t, txHash+"#0", genuine.ChannelRef)
+	assert.Equal(t, core.Status("confirmed"), genuine.Status)
+	assert.NotEmpty(t, genuine.JournalUID)
 }
 
 // TestDepositIdentity_HonestIngestIsUnaffected is the control group: the

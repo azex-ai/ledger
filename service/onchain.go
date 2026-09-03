@@ -2473,6 +2473,11 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 			"booking_uid", b.UID, "chain_id", chainID, "tx_hash", txHash, "txlog_seq", txLogSeq,
 			"amount", b.Amount.String(), "account_holder", b.AccountHolder,
 			"detail", detail, "consecutive_misses", misses)
+		// One reference for both steps of the walk to review, and never the
+		// log's own: see the comment on the transition below (N-2). It is
+		// unique per booking, so two forgeries claiming the same log do not
+		// collide with each other either.
+		unverifiedRef := depositChannelRef(txHash, txLogSeq) + "#unverified-" + b.UID
 		if b.Status == "pending" {
 			// `review` is only reachable from `confirming`
 			// (presets.DepositLifecycle), and a booking can arrive here
@@ -2486,9 +2491,21 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 			// chain. Same idempotency key advanceConfirmation would use, so
 			// a later honest advance is a no-op rather than a conflict.
 			if _, err := o.deps.Booker.Transition(ctx, core.TransitionInput{
-				BookingUID:     b.UID,
-				ToStatus:       "confirming",
-				ChannelRef:     depositChannelRef(txHash, txLogSeq),
+				BookingUID: b.UID,
+				ToStatus:   "confirming",
+				// NOT depositChannelRef(txHash, txLogSeq) (N-2): the most
+				// natural forgery references a transfer some OTHER booking
+				// legitimately holds, and that ref is UNIQUE per channel
+				// (uq_bookings_channel_ref). Claiming it here made this
+				// transition fail, so routeToReview was never reached: the
+				// booking sat in `pending` forever, review_reason never
+				// landed, the metric never fired, and the only trace was one
+				// Error line per tick -- while I-69 promises "a queue an
+				// operator works, not a log line". This booking is on its
+				// way to review precisely BECAUSE its claim on that log was
+				// not corroborated, so it must not be given the log's
+				// reference on the way there.
+				ChannelRef:     unverifiedRef,
 				Source:         onchainSource,
 				IdempotencyKey: depositTransitionKey(b.UID, "confirming"),
 			}); err != nil {
@@ -2496,7 +2513,11 @@ func (o *Onchain) recheckOneDeposit(ctx context.Context, cache *blockCache, b *c
 			}
 			b.Status = "confirming"
 		}
-		if _, err := o.routeToReview(ctx, b, depositChannelRef(txHash, txLogSeq), reviewReasonOnchainUnverified); err != nil {
+		// routeToReview writes the ChannelRef too, so it takes the same
+		// non-colliding reference -- otherwise the review transition fails
+		// where the confirming one just succeeded, and the booking is stuck
+		// one step further along with the same silence (N-2).
+		if _, err := o.routeToReview(ctx, b, unverifiedRef, reviewReasonOnchainUnverified); err != nil {
 			return fmt.Errorf("recheck booking %s: route uncorroborated deposit to review: %w", b.UID, err)
 		}
 		o.clearEvidenceMiss(b.UID)
