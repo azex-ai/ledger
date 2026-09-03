@@ -660,7 +660,7 @@ type recordingMetrics struct {
 	balanceDriftCalls            []decimal.Decimal // every value passed to BalanceDrift, in call order
 	rollupProcessed              int
 	rollupItemFailed             int
-	negativeBalanceDetectedCalls int // count of NegativeBalanceDetected calls
+	negativeBalanceDetectedCalls int     // count of NegativeBalanceDetected calls
 	stuckRollups                 []int64 // every value passed to StuckRollups, in call order
 	pendingRollups               []int64 // ditto for PendingRollups
 }
