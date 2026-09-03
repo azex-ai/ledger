@@ -27,3 +27,13 @@ W5-searchpath（030）与 W5-insert（029）先后合（号段顺序）；其余
 
 ## 3. 通过标准
 同 `2026-09-03-independent-review-contract.md` §3。
+
+## 4. 整改期间的拍板（lead）
+
+| # | 问题 | 拍板 |
+|---|---|---|
+| 5.1 | `bookings.metadata` 在 INSERT 期合法带 `block_number`（recheck 依赖它），任务书那条「metadata 不含确认字段」约束会打死诚实充值 | 不做；bookings/reservations INSERT 只钉形状 + AFTER INSERT 审计 |
+| 5.2 | money-out C-2（插一行 confirming/pending booking 被 recheck 自动签出）无法在 DB 层预防（recheck 同时扫 pending 与 confirming） | 预防归 **W5-onchain-ops**：recheck 对任何推进到 confirmed 的 booking 无条件核链上包含（N 次连续观测）且金额/地址/token 与链上日志一致，核不到进 review；029 只留审计痕迹 |
+| 5.3 | `entry_template_lines` 的 `amount_key` 在出厂模板里本就重复，「不得重复」不可用 | 改用「父 template 必须是本事务创建」的同事务约束（`CreateTemplate` 与其 lines 同事务；`InstallTemplatePresets` 对已存在模板只校验不更新），能阻止而非只记录 C-1 |
+| 5.4 | money-out M-2：I-51 三条规则在应用写路径无漏，漏在读侧无条件采信 raw INSERT 的 `reversal_of` 行 | 扩成「用时门」：`cumulativeReversedByDimension` 只采信自身通过 rule 1–3 的行，不通过的不计入并写 Finding |
+| 5.5 | install-roles C2 的候选修法①（事务内 GUC）同样可被 `SET LOCAL` 预置（w5-searchpath 实测） | 由 w5-searchpath 在其余候选里按实测成本选 |
