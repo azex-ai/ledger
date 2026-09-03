@@ -116,12 +116,25 @@ func TestMigration016_CorrectsAnAlreadyInstalledDeployment(t *testing.T) {
 	require.NoError(t, presets.InstallExtendedPresets(ctx, classStore, classStore, tmplStore))
 }
 
+// execMigrationFile replays one migration file as the owner credential, out
+// of golang-migrate's ordering, so a test can reproduce the state a migration
+// was written against.
+//
+// The set_config prefix is migration 029's owner-only template-line repair
+// door (ledger_template_line_repair_is_authorized). 016 rewrites a template's
+// legs, which 029 otherwise permits only in the transaction that created the
+// template. No real deployment needs the flag: migrations are ordered, so 016
+// always ran before 029 existed, and on a fresh install it is a no-op. This
+// out-of-order replay is the only caller that meets the guard at all, and
+// opening the door explicitly is exactly what an owner-run repair is supposed
+// to do. pgx runs a multi-statement Exec inside one implicit transaction, so
+// the transaction-local setting covers the whole file.
 func execMigrationFile(ctx context.Context, pool *pgxpool.Pool, path string) error {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	_, err = pool.Exec(ctx, string(body))
+	_, err = pool.Exec(ctx, "SELECT set_config('ledger.repair_template_lines', 'on', true);\n"+string(body))
 	return err
 }
 

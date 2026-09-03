@@ -2043,6 +2043,7 @@ service.WithReorgPolicy = func(p core.ReorgPolicy) OnchainOption
 service.WithReorgRecheckInterval = func(d time.Duration) OnchainOption
 service.WithReorgRecheckWindow = func(blocks int64) OnchainOption
 service.WithReorgRecorder = func(r ReorgRecorder) OnchainOption
+service.WithRescanLookback = func(n int64) OnchainOption
 service.WithShallowReorgMisses = func(n int32) OnchainOption
 service.WithSweepPolicies = func(policies ...core.SweepPolicy) OnchainOption
 service.WithSweepStuckAfter = func(d time.Duration) OnchainOption

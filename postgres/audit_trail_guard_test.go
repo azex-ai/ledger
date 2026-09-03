@@ -232,17 +232,29 @@ func TestAuditTrailRowsStayImmutable(t *testing.T) {
 	for _, table := range []string{"config_table_changes", "reconcile_scan_cursor_changes", "account_policy_changes"} {
 		table := table
 		t.Run(table, func(t *testing.T) {
+			// Counted before the seed, not assumed to be zero: since
+			// migration 029 the account_policies INSERT above leaves its own
+			// forensic row in config_table_changes, so "exactly one row
+			// exists" would be asserting something this test never
+			// established.
+			before := countRows(t, pool, table)
+
 			_, err := pool.Exec(ctx, seed[table])
 			require.NoError(t, err, "sanity: the owner credential seeds a row so the row-level guard has something to fire on")
 
 			assertBlockedByGuard(t, pool, fmt.Sprintf("UPDATE %s SET id = id", table))
 			assertBlockedByGuard(t, pool, fmt.Sprintf("DELETE FROM %s", table))
 
-			var n int64
-			require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM "+table).Scan(&n))
-			assert.Equal(t, int64(1), n, "the seeded row must still be there")
+			assert.Equal(t, before+1, countRows(t, pool, table), "the seeded row must still be there, and nothing else may have gone")
 		})
 	}
+}
+
+func countRows(t *testing.T, pool *pgxpool.Pool, table string) int64 {
+	t.Helper()
+	var n int64
+	require.NoError(t, pool.QueryRow(context.Background(), "SELECT count(*) FROM "+table).Scan(&n))
+	return n
 }
 
 // assertBlockedByGuard runs stmt as the pool's own (owner-privileged)
@@ -263,29 +275,80 @@ var auditTriggerFunctions = []string{
 	"ledger_log_reconcile_scan_cursor_change",
 }
 
-// unauditedWritableTables maps a table ledger_app can UPDATE, with no blanket
-// refusal guard and no audit trigger, to why that is acceptable.
+// unauditedWrites maps a write ledger_app can perform -- keyed
+// "<schema>.<table>/<EVENT>" -- that no blanket refusal guard stops and no
+// audit trigger records, to why that is acceptable.
 //
-// Every entry has the same shape of argument: the table holds DERIVED or
+// Three columns, not one (2026-09-03 independent review, money-out M-1). The
+// map used to be keyed by table alone and derived from UPDATE privilege, so
+// it could only ever ask "can this row be changed without a trace". A row can
+// also be ADDED without a trace, and for entry_template_lines, bookings,
+// chain_cursors and account_policies that was the more valuable attack of the
+// two -- appending a template leg multiplied every future deposit, and
+// appending an account_policies tier undid a freeze, both with
+// config_table_changes at zero rows. DELETE joins them for completeness:
+// exactly one table grants it, and that fact should be derived rather than
+// remembered.
+//
+// Every entry has the same shape of argument: the row holds DERIVED or
 // OPERATIONAL state whose truth lives somewhere append-only, so tampering
 // shows up as a reconciliation gap rather than as a missing forensic row --
-// or it is a spool whose rows carry no authority at all. A table holding
-// authoritative state does not belong here; it belongs behind a guard, an
-// audit trigger, or both.
-var unauditedWritableTables = map[string]string{
-	"public.balance_checkpoints":  "derived cache: balance = checkpoint + SUM(entries after it), and journal_entries is blanket-guarded append-only. A tampered checkpoint is what reconciliation's checkpoint-vs-delta check (I-2) reports, which is a stronger control than a forensic row",
-	"public.balance_snapshots":    "point-in-time copies of the same derived figure as balance_checkpoints, recomputable from journal_entries",
-	"public.system_rollups":       "derived per-(classification, currency) aggregate, recomputed from journal_entries by the rollup worker",
-	"public.rollup_queue":         "work queue of pending recomputations; rows are claimed and consumed and hold no authoritative state",
-	"public.chain_cursors":        "scan progress per chain, monotonic-protected on write (B-m7). Corrupting it causes a rescan or a gap that deposit ingestion's idempotency keys absorb -- it cannot move money",
-	"public.registration_rescans": "bookkeeping for deposit-address rescans; the same rescan running twice is idempotent",
-	"public.deposit_reorgs":       "the reorg-anomaly record itself: rows are appended by ingestion and only their review status is updated. It is a forensic table, not a configuration one",
-	"public.ingest_dead_letters":  "spool of inbound payloads that failed to parse; rows are operator scratch space and authorize nothing",
-	"public.webhook_nonces":       "replay-protection cache with a TTL; a row is an opaque seen-nonce marker, and losing one costs at most one accepted replay that the ledger idempotency key then refuses",
+// or it is a spool whose rows carry no authority at all -- or it
+// authenticates itself. A table holding authoritative state does not belong
+// here; it belongs behind a guard, an audit trigger, or both.
+var unauditedWrites = map[string]string{
+	// ---- INSERT ----
+	//
+	// The two self-authenticating tables. Both are the ledger's highest-rate
+	// writes, and both carry the one signal this threat model says an
+	// attacker cannot forge, so a second full jsonb copy of every row would
+	// double the money path's write volume to re-detect what the signature
+	// already detects.
+	"public.journals/INSERT":        "the journal authenticates itself: auth_digest/auth_signature/auth_key_id (I-26). An appended journal is exactly what VerifyJournalAuth refuses, and I-49's gated withdrawal base is UNDEFINED for every dimension one touches -- fail-closed, at the rate money actually moves",
+	"public.journal_entries/INSERT": "append-only content of the journals above, covered exactly once by ledger_attestations/entry_attestations (I-27); VerifyLedger step 3b reports any entry no signed attestation covers. ledger_app's INSERT here is column-level (id excluded, I-42), so a table-privilege derivation would miss it -- this gate looks at column privileges too, which is why the entry is here rather than absent",
+
+	// The attestation chain: the row IS the record.
+	"public.ledger_attestations/INSERT": "the hash chain is its own forensic trail, and migration 029 refuses any row but seq = head+1 whose prev_root equals the head's root_hash (I-27, I-66). An appended row can only ever be the next one, and VerifyLedger checks its signature",
+	"public.entry_attestations/INSERT":  "coverage side table for the chain above; PRIMARY KEY (entry_id) makes double coverage a unique violation, and its content is recomputed from journal_entries by VerifyLedger",
+
+	// Derived caches, recomputable from journal_entries.
+	"public.balance_checkpoints/INSERT": "derived cache: balance = checkpoint + SUM(entries after it), and journal_entries is blanket-guarded append-only. A tampered checkpoint is what reconciliation's checkpoint-vs-delta check (I-2) reports, which is a stronger control than a forensic row",
+	"public.balance_snapshots/INSERT":   "point-in-time copies of the same derived figure as balance_checkpoints, recomputable from journal_entries",
+	"public.system_rollups/INSERT":      "derived per-(classification, currency) aggregate, recomputed from journal_entries by the rollup worker",
+	"public.rollup_queue/INSERT":        "work queue of pending recomputations; rows are claimed and consumed and hold no authoritative state",
+
+	// Operational spools and bookkeeping.
+	"public.registration_rescans/INSERT": "bookkeeping for deposit-address rescans; the same rescan running twice is idempotent",
+	"public.deposit_reorgs/INSERT":       "the reorg-anomaly record itself: appending one raises an operator alert, which is the safe direction. Suppressing a real one is an UPDATE, and that is audited",
+	"public.ingest_dead_letters/INSERT":  "spool of inbound payloads that failed to parse; rows are operator scratch space and authorize nothing",
+	"public.webhook_nonces/INSERT":       "replay-protection cache with a TTL; a row is an opaque seen-nonce marker, and appending one can only refuse a delivery, never accept one",
+	"public.checkpoint_rebuilds/INSERT":  "append-only record of a checkpoint rebuild having been asked for; the rebuild itself recomputes from journal_entries (I-23), so a forged row describes work that either happened or is redone",
+	"public.period_closes/INSERT":        "append-only accounting-period close. A forged row only ever ADDS a restriction (it makes effective-dated writes into that period violations the reconcile check reports), so the direction is denial-of-service, not money",
+
+	// The application-written forensic trail, and the idempotency receipts.
+	"public.account_policy_changes/INSERT":         "this IS a forensic trail, written by UpsertAccountPolicy in the caller's transaction with a business actor_id no trigger can produce (migration 020's header). The DB-role half of the same question is answered by the config_table_changes row account_policies now writes on INSERT as well as UPDATE",
+	"public.reservation_settlement_legs/INSERT":    "append-only settlement claims. Since migration 028 each carries auth_digest/auth_signature/auth_key_id, and a gated Reserve credits a claim with no valid signature as discharging nothing (I-65) -- a forged leg makes the hold larger, never smaller",
+	"public.reservation_operation_receipts/INSERT": "same table family and same signature (I-65, migration 028); an unsigned or forged receipt discharges no hold",
+	"public.booking_transition_receipts/INSERT":    "append-only idempotency receipts keyed by the caller-derived key (I-3). Recorded as a conscious call, with its residual stated: a forged receipt makes the next legitimate Transition for that key report success without re-applying, which is a stuck booking an operator sees, not a balance change -- the accounting itself is a journal, and a journal without a valid signature is refused (I-26)",
+
+	// ---- UPDATE ----
+	"public.balance_checkpoints/UPDATE":  "derived cache: balance = checkpoint + SUM(entries after it), and journal_entries is blanket-guarded append-only. A tampered checkpoint is what reconciliation's checkpoint-vs-delta check (I-2) reports, which is a stronger control than a forensic row",
+	"public.balance_snapshots/UPDATE":    "point-in-time copies of the same derived figure as balance_checkpoints, recomputable from journal_entries",
+	"public.system_rollups/UPDATE":       "derived per-(classification, currency) aggregate, recomputed from journal_entries by the rollup worker",
+	"public.rollup_queue/UPDATE":         "work queue of pending recomputations; rows are claimed and consumed and hold no authoritative state",
+	"public.registration_rescans/UPDATE": "bookkeeping for deposit-address rescans; the same rescan running twice is idempotent",
+	"public.deposit_reorgs/UPDATE":       "the reorg-anomaly record itself: rows are appended by ingestion and only their review status is updated. It is a forensic table, not a configuration one",
+	"public.ingest_dead_letters/UPDATE":  "spool of inbound payloads that failed to parse; rows are operator scratch space and authorize nothing",
+	"public.webhook_nonces/UPDATE":       "replay-protection cache with a TTL; a row is an opaque seen-nonce marker, and losing one costs at most one accepted replay that the ledger idempotency key then refuses",
+	"public.webhook_subscribers/UPDATE":  "column-level since migration 014: only last_status_code / last_delivered_at / last_error, the delivery bookkeeping RecordDeliveryStatus writes. url and secret -- the two columns that decide where a signed event goes and who can forge one -- are not writable at all, and INSERT is revoked. That is the same carve-out 020 made for events' delivery columns, enforced by the ACL instead of by a WHEN clause",
+
+	// ---- DELETE ----
+	"public.webhook_nonces/DELETE": "the one DELETE grant in the schema (migration 002): TryRecordNonce prunes expired nonces, and without it every inbound webhook failed on a permission error. Deleting a nonce costs at most one accepted replay that the ledger idempotency key then refuses",
 }
 
 // TestWritableTablesAreAuditedOrClassified is M-6 (W3 adversarial review of
-// the gates).
+// the gates), extended to all three write events by the 2026-09-03
+// independent review (money-out M-1).
 //
 // TestPartialGuardTablesAreAudited above derives its population from "has a
 // BEFORE UPDATE row trigger that is not the blanket refusal" -- i.e. from
@@ -298,63 +361,100 @@ var unauditedWritableTables = map[string]string{
 // lets updates through has a forensic trail" -- can be satisfied by not
 // having a guard.
 //
-// So the population here is derived from PRIVILEGE instead: every table
-// ledger_app can UPDATE without a blanket refusal in the way. Each one must
-// have an audit trigger or an entry above saying why it does not need one.
+// So the population here is derived from PRIVILEGE instead: for each of
+// INSERT, UPDATE and DELETE, every table ledger_app may perform that write on
+// without a blanket refusal in the way. Each must have an audit trigger
+// firing on THAT event, or an entry above saying why it does not need one.
+//
+// Deriving the events separately is the 2026-09-03 finding: a blanket refusal
+// guard is BEFORE UPDATE OR DELETE and never BEFORE INSERT, and every audit
+// trigger in the schema before migration 029 was AFTER UPDATE, so a
+// table-keyed, UPDATE-derived gate reported full coverage over a schema in
+// which not one appended row was recorded anywhere.
 func TestWritableTablesAreAuditedOrClassified(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
 
-	rows, err := pool.Query(ctx, `
-		SELECT n.nspname || '.' || c.relname,
-		       EXISTS (
-		         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-		         WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
-		           AND p.proname = ANY($1::text[])
-		       ) AS audited
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-		  AND n.nspname NOT LIKE 'pg\_%'
-		  AND c.relkind IN ('r', 'p')
-		  AND NOT c.relispartition
-		  AND has_table_privilege('ledger_app', c.oid, 'UPDATE')
-		  AND NOT EXISTS (
-		        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-		        WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
-		          AND p.proname = 'ledger_block_mutation'
-		          AND (t.tgtype & 2) <> 0 AND (t.tgtype & 16) <> 0 AND (t.tgtype & 1) <> 0
-		      )
-		ORDER BY 1
-	`, auditTriggerFunctions)
-	require.NoError(t, err)
-	defer rows.Close()
-
-	population, classified := 0, map[string]bool{}
-	for rows.Next() {
-		var table string
-		var audited bool
-		require.NoError(t, rows.Scan(&table, &audited))
-		population++
-		if audited {
-			continue
-		}
-		if _, ok := unauditedWritableTables[table]; ok {
-			classified[table] = true
-			continue
-		}
-		t.Errorf("ledger_app can UPDATE %s, no blanket guard refuses those updates, and no audit trigger records them -- "+
-			"so a change made with the leaked credential leaves no trace anywhere (I-58).\n\n"+
-			"Note the population this gate derives: PRIVILEGE, not guard shape. TestPartialGuardTablesAreAudited only sees tables "+
-			"that HAVE a partial guard, so a table with no guard at all used to satisfy I-58 by omission.\n\n"+
-			"Attach ledger_log_config_table_change, or -- if the table holds derived or operational state whose truth lives in an "+
-			"append-only table -- add %q to unauditedWritableTables with that argument.", table, table)
+	// tgtype bits, from PostgreSQL's TRIGGER_TYPE_* macros.
+	events := []struct {
+		name string
+		priv string
+		bit  int
+	}{
+		{"INSERT", "INSERT", 4},
+		{"UPDATE", "UPDATE", 16},
+		{"DELETE", "DELETE", 8},
 	}
-	require.NoError(t, rows.Err())
 
-	require.Positive(t, population, "no ledger_app-writable table was found -- the query regressed, and an empty population reads as a pass")
-	for table, reason := range unauditedWritableTables {
-		assert.Truef(t, classified[table],
-			"stale entry %q (%s): the table is gone, no longer writable by ledger_app, or now audited -- delete the entry", table, reason)
+	classified := map[string]bool{}
+	for _, ev := range events {
+		ev := ev
+		t.Run(ev.name, func(t *testing.T) {
+			rows, err := pool.Query(ctx, `
+				SELECT n.nspname || '.' || c.relname,
+				       EXISTS (
+				         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+				         WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+				           AND p.proname = ANY($1::text[])
+				           AND (t.tgtype & $2) <> 0
+				       ) AS audited
+				FROM pg_class c
+				JOIN pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+				  AND n.nspname NOT LIKE 'pg\_%'
+				  AND c.relkind IN ('r', 'p')
+				  AND NOT c.relispartition
+				  -- Column privileges count. journal_entries' INSERT is
+				  -- column-level (migration 008, I-42) and
+				  -- webhook_subscribers' UPDATE is (migration 014), so a
+				  -- table-level test would drop the ledger's most important
+				  -- append and its only credential-bearing table out of the
+				  -- population entirely. DELETE has no column form, so it is
+				  -- asked table-level -- and asking has_any_column_privilege
+				  -- for it is an error, not a false, which is why the two
+				  -- are separate branches rather than one clever expression.
+				  AND (CASE WHEN $3::text = 'DELETE'
+				            THEN has_table_privilege('ledger_app', c.oid, 'DELETE')
+				            ELSE has_any_column_privilege('ledger_app', c.oid, $3::text) END)
+				  AND NOT EXISTS (
+				        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+				        WHERE t.tgrelid = c.oid AND NOT t.tgisinternal
+				          AND p.proname = 'ledger_block_mutation'
+				          AND (t.tgtype & 2) <> 0 AND (t.tgtype & $2) <> 0 AND (t.tgtype & 1) <> 0
+				      )
+				ORDER BY 1
+			`, auditTriggerFunctions, ev.bit, ev.priv)
+			require.NoError(t, err)
+			defer rows.Close()
+
+			population := 0
+			for rows.Next() {
+				var table string
+				var audited bool
+				require.NoError(t, rows.Scan(&table, &audited))
+				population++
+				key := table + "/" + ev.name
+				if audited {
+					continue
+				}
+				if _, ok := unauditedWrites[key]; ok {
+					classified[key] = true
+					continue
+				}
+				t.Errorf("ledger_app can %s %s, no blanket guard refuses that, and no audit trigger records it -- "+
+					"so a write made with the leaked credential leaves no trace anywhere (I-58, I-66).\n\n"+
+					"Note the population this gate derives: PRIVILEGE, per event. A blanket refusal guard is BEFORE UPDATE OR DELETE "+
+					"and never BEFORE INSERT, so before migration 029 an appended row satisfied I-58 by there being no event to record.\n\n"+
+					"Attach ledger_log_config_table_change for this event, or -- if the row holds derived or operational state whose "+
+					"truth lives in an append-only table, or authenticates itself -- add %q to unauditedWrites with that argument.", ev.name, table, key)
+			}
+			require.NoError(t, rows.Err())
+			require.Positive(t, population, "no ledger_app-writable table was found for %s -- the query regressed, and an empty population reads as a pass", ev.name)
+		})
+	}
+
+	for key, reason := range unauditedWrites {
+		assert.Truef(t, classified[key],
+			"stale entry %q (%s): the table is gone, no longer writable by ledger_app for that event, or now audited -- delete the entry", key, reason)
 	}
 }

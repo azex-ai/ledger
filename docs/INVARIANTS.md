@@ -6289,6 +6289,16 @@ coverage note).
    `svc.ConfigHistory()`, queries all three forensic tables with filters and
    keyset paging.
 
+> **Extended by I-66 (2026-09-03).** Everything above is written in `UPDATE`
+> semantics, because in 001–028 that was the only event any guard or audit
+> trigger fired on. The 2026-09-03 independent review measured what that
+> left open: the same attacks performed by APPENDING a row succeeded and
+> recorded nothing, and rule 1's own derivation predicate ("carries a
+> `BEFORE UPDATE` row trigger") could not report it, because there was no
+> INSERT trigger anywhere to be missing from. Migration 029 extends both
+> the writer and the derivation to `INSERT`; read I-66 for the population,
+> the exemptions and what remains deliberately unclosed.
+
 **Why**: `account_policies` is the case that makes all three necessary at
 once. It is the only DB-enforced freeze/overdraft floor, and its guard's
 whitelist necessarily contains `status`, `min_balance` and
@@ -7017,3 +7027,208 @@ taken when no attestor/verifier is configured. Migration
   verify something unsigned, the answer to the caller is unchanged (the
   funds stay held), and the Warn line is therefore the only evidence the
   event happened. It must reach the logger passed to `ledger.WithLogger`.
+
+---
+
+## I-66: Appending a row is a mutation: it is refused where an invariant exists, and recorded where one does not
+
+**Rule**: For every configuration and state table `ledger_app` may write,
+an `INSERT` is subject to the same two-layer treatment `UPDATE` has had
+since migration 003 — a guard where the honest writer satisfies a
+structural property an appended row cannot, and a forensic row in
+`config_table_changes` where it does not. Concretely, and enforced by the
+database rather than by the application:
+
+- **`entry_template_lines`** — a template's legs may only be written by
+  the transaction that created the template row. This is a property of the
+  only writer there is: `postgres.TemplateStore.CreateTemplate` writes the
+  template and every one of its lines in a single transaction (pool mode
+  opens it, tx mode joins the caller's), the table has no upsert and no
+  repair path, and migration 003 already revoked `UPDATE` because it has no
+  legitimate mutation either. It is also why
+  `presets.InstallTemplatePresets` **validates an existing template and
+  refuses to update it** rather than reconciling its lines — the guard and
+  the installer agree that an installed template's legs are final. An
+  owner-run repair (migration 016's shape) opens
+  `ledger_template_line_repair_is_authorized` explicitly.
+- **`bookings`** — `status` must be the classification lifecycle's
+  `initial`, `journal_id` must be `NULL`, `settled_amount` must be 0. That
+  is exactly what `CreateBooking` writes; the UPDATE guard already
+  enforces the rest of the story (`settled_amount` never decreases,
+  `journal_id` is set-once).
+- **`reservations`** — `status` must be `active`, `settled_amount` 0,
+  `journal_id` `NULL`. Same argument, and the reason it matters is
+  `SumActiveReservations`: a reservation born `settled` is a hold that
+  never existed.
+- **`ledger_attestations`** — `seq` must be the chain head plus one and
+  `prev_root` must equal the head's `root_hash` (seq 1 links to
+  `core.GenesisRoot`). This is I-27's structural half, moved out of the
+  application into the database, and it is what makes `MAX(seq)` a
+  trustworthy ceiling for migration 024's anchor-observation rule again.
+- **`chain_cursors`** — see I-67.
+- **Everything else `ledger_app` may append that is not covered above**
+  either carries an `AFTER INSERT` audit trigger, or is named in
+  `postgres.unauditedWrites` with the argument for why its rows hold
+  derived state, operational state, or authenticate themselves.
+
+**Why**: every guard and every forensic trigger in this schema fired on
+`UPDATE` or `DELETE`. Counted on a clean install of 001–028: 24 `BEFORE
+UPDATE` row guards, 13 `BEFORE DELETE`, 6 audit trigger definitions over
+11 tables — and exactly one INSERT-time trigger in the whole schema, the
+per-currency debit=credit check. Migration 003's header describes this
+attack class precisely ("it does not forge anything, it makes the
+application sign a correct journal about the wrong facts") and then closes
+only the half its example happened to use.
+
+What the open half bought, each measured as a real `ledger_app` over a
+socket during the 2026-09-03 independent review:
+
+- Two appended `entry_template_lines` reusing an existing `amount_key`
+  made every subsequent honest deposit render at twice its real amount.
+  `EntryTemplate.Render` re-reads the lines on every call, so the inflated
+  journal is genuinely signed; I-49's verified base accepts it, all sixteen
+  reconciliation checks pass, `verify` reports `VERIFIED`, and
+  `SolvencyCheck` stays balanced because both sides grew together.
+  `config_table_changes`: zero rows.
+- One appended `account_policies` row at a more specific tier undid a
+  legitimate freeze and moved an overdraft floor to −1,000,000. I-17
+  already ruled prevention out for those knobs; I-58's compensating
+  promise — "a change a guard lets through is recorded" — was written in
+  `UPDATE` semantics and did not hold for the identical `INSERT`.
+- One appended `ledger_attestations` row at `seq = 888888` raised the
+  chain head that migration 024 measures its anchor ceiling against,
+  re-opening the weld 024 had just closed.
+- I-58's own self-enforcing gate could not find any of this: its
+  population predicate was "carries a `BEFORE UPDATE` row trigger", which
+  cannot see an event that has no trigger anywhere in the schema.
+
+**Not closed, stated plainly**: this invariant does **not** stop a forged
+`bookings` row from being auto-credited. `bookings.metadata` legitimately
+carries `block_number` at creation (`service.Onchain`'s `CreateBooking`
+persists it on purpose, because the recheck loop recomputes confirmations
+from it) and `recheckPendingDeposits` scans `pending` as well as
+`confirming`, so an append at the lifecycle's initial status with a low
+`block_number` reaches the same auto-credit. What the guard removes is the
+shorter path, and what the audit trigger adds is that the append is no
+longer invisible. The prevention that path needs is an application-layer
+fence in `service/onchain.go`, not a database rule.
+
+**Enforced by**: migration `029_insert_path_guards.up.sql` —
+`ledger_entry_template_lines_insert_guard`, `ledger_bookings_insert_guard`,
+`ledger_reservations_insert_guard`, `ledger_attestations_insert_guard`, the
+`AFTER INSERT` counterparts of `ledger_log_config_table_change` derived
+from the catalogue rather than listed, and the two owner-only doors
+(`ledger_template_line_repair_is_authorized`,
+`ledger_discard_attestations_from`) that keep a fail-closed rule from
+becoming a stuck one.
+
+**Pinned by**:
+- `postgres.TestTemplateLineCannotBeAppendedAfterInstall` — the C-1 attack
+  end to end as `ledger_app`, plus the two controls that make it mean
+  something: an honest 100 deposit still renders 100 (before the guard, the
+  same call rendered 200 with a valid signature on it), and installing a
+  second template still works.
+- `postgres.TestConfigTableInsertsLeaveAForensicRow` — the
+  `account_policies` tier append still succeeds, and now leaves a row
+  naming `ledger_app` with `old_row` = the JSON `null` that distinguishes a
+  creation from a change.
+- `postgres.TestDepositAddressRegistrationIsAudited` — the same rule on the
+  table migration 003 was written for.
+- `postgres.TestBookingIsBornAtTheStartOfItsLifecycle` — born-confirming,
+  born-linked and born-part-settled all refused; the honest
+  `CreateBooking` unaffected and audited.
+- `postgres.TestReservationIsBornActiveAndUnsettled` — the same for holds,
+  with the facade's `Reserve` as the control.
+- `postgres.TestAttestationInsertMustExtendTheChain` — `seq = 888888`
+  refused, migration 024's ceiling working again as a consequence, seq 1
+  required to link to `core.GenesisRoot`, an unsigned attestation refused,
+  and the honest writer extending the chain twice.
+- `postgres.TestPoisonedAttestationTailHasAWayBack` — the residual and its
+  door: a shape-valid row with an unverifiable signature can still be
+  appended at the true head, `ledger_app` can neither delete it nor call
+  the door, a raw owner `DELETE` is still refused, and
+  `ledger_discard_attestations_from` removes the poisoned suffix with a
+  mandatory reason and a forensic row, after which the honest job extends
+  the chain again.
+- `postgres.TestWritableTablesAreAuditedOrClassified` — the gate, now
+  derived per event: for each of `INSERT`, `UPDATE` and `DELETE`, every
+  table `ledger_app` may write that way (column privileges included, so
+  `journal_entries` and `webhook_subscribers` stay in the population) must
+  be audited for that event or carry a written reason.
+
+---
+
+## I-67: The forward scan's coverage does not depend on a value the application credential can write
+
+**Rule**: `chain_cursors.last_scanned_block` decides which on-chain money
+the ledger is ever told about, so it is treated as untrusted input in three
+ways:
+
+1. It only moves forward, enforced by a trigger and not by the `WHERE`
+   clause of the query that writes it. A deliberate rewind goes through
+   `ledger_rewind_chain_cursor(chain_id, to_block, reason)` — owner-only,
+   reason mandatory, and it writes a `config_table_changes` row.
+2. One write may not advance it by more than the per-write cap in
+   `ledger_chain_cursors_guard` (100,000 blocks; `service.Onchain` writes
+   at most `WithMaxBlocksPerScan`, default 2000).
+3. Every write, including the first, leaves a forensic row.
+
+On top of that, `scanChainOnce` re-covers the last
+`WithRescanLookback` blocks below the safe tip on **every** tick regardless
+of where the cursor stands (default 128; 0 disables), and reports a cursor
+that is ahead of the chain head — a state this scanner cannot produce,
+since I-53 keeps every write at or below the safe tip.
+
+**Why**: the forward scan never looks back (`from` = cursor+1; the recheck
+loops only revisit bookings that already exist, and registration rescans
+only cover newly registered addresses — I-52 says so in the same file), so
+a single forged advance made every real deposit in the skipped window
+permanently invisible. Not "hard to find": *invisible*. Such a deposit
+leaves no booking, no event, no journal and no entry, so none of the
+sixteen reconciliation checks can see it, `SolvencyCheck` reads
+**healthier** for it (the liability side is the one that is missing) and
+`chain_cursor_lag` reads **smaller**. The money still arrives at the
+CREATE2 address and is still swept into treasury.
+
+Until migration 029 this table carried zero triggers and `ledger_app` held
+a plain table `UPDATE`, and I-58's audit-exclusion list excluded it on
+three grounds, each of which was wrong: "monotonic-protected on write"
+described a protection living in the application layer this threat model
+assumes is bypassed; "a gap that idempotency keys absorb" confused a gap
+with a repeat; "it cannot move money" was contradicted by the I-52 comment
+three files away.
+
+The lookback exists because the database can bound and record a forged
+advance but cannot undo one. Re-scanning is free of consequence —
+`IngestDeposit` is idempotent on `deposit-{chain}-{tx}-{seq}` (I-3) — so
+a permanent lookback costs one bounded log query per tick and converts
+"the skipped window is gone forever" into "the skipped window comes back
+on the next tick, up to the lookback". A skip further back than that still
+needs the rewind, which is why the rewind exists at all.
+
+**Enforced by**: migration `029_insert_path_guards.up.sql`
+(`ledger_chain_cursors_guard`, the `chain_cursors_audit` /
+`chain_cursors_audit_insert` triggers, `ledger_rewind_chain_cursor`) and,
+on the application side, `service.WithRescanLookback` — the option whose
+value `service.Onchain.RunWatchOnce` (and Run's watch loop, through the
+same `scanChainOnce`) applies to every tick's window, alongside the
+cursor-ahead-of-head report.
+
+**Pinned by**:
+- `postgres.TestChainCursorCannotJumpAndEveryMoveIsRecorded` — the first
+  write and every advance recorded; a jump to 99,999,999, a backwards drag
+  and a `chain_id` rewrite all refused as `ledger_app`; the rewind door
+  refused to `ledger_app`, working for the owner with a reason and a
+  forensic row, and failing loudly when it would have done nothing.
+- `service.TestOnchain_Watch_LookbackRecoversAForgedCursorAdvance` — a
+  confirmed deposit skipped by a forged advance is booked anyway, and the
+  window the scanner asked for is the assertion that carries the weight
+  (the fake reader answers any range, so the booking assertions alone
+  would stay green).
+- `service.TestOnchain_Watch_CursorAheadOfTheChainIsLoudAndStillScans` — a
+  cursor past the chain head is reported and no longer wedges the scanner
+  into doing nothing forever, while the cursor itself is left for the
+  operator's rewind rather than silently dragged back.
+- `service.TestOnchain_Watch_LookbackDisabledKeepsTheOldWindow` — the knob
+  is a knob: with it off the window is exactly cursor+1..safeTip, which is
+  what the I-52/I-53 pins assert.

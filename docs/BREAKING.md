@@ -31,6 +31,70 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### Migration 029 (`029_insert_path_guards`): appended rows are guarded and recorded
+
+**Landed (Wave 5, `docs/plans/2026-09-03-wave5-contract.md` §0 R3-1;
+invariants I-66, I-67).** Schema / data break: a migration a consumer must
+run, plus writes the database now refuses that it previously accepted.
+
+**Why it exists.** Every guard and every audit trigger in migrations 001-028
+fired on `UPDATE` or `DELETE`; the only INSERT-time trigger in the whole
+schema was the per-currency balance check. So for every configuration and
+state table, an appended row of legal shape was neither refused nor recorded.
+Measured as a real `ledger_app` over a socket during the 2026-09-03
+independent review, two appended `entry_template_lines` made every subsequent
+honest deposit render at twice its amount with a genuine signature on it,
+while reconciliation, `verify` and `SolvencyCheck` all reported healthy and
+`config_table_changes` stayed empty.
+
+**What a consumer must do.** Run the migration. Then, if you write to any of
+these tables outside this library -- fixtures, seed scripts, backfills,
+repair runbooks -- adjust them:
+
+| Table | New rule at INSERT | What to change |
+|---|---|---|
+| `entry_template_lines` | a line may only be written by the transaction that created its `entry_templates` row | write the template and its lines together (what `TemplateStore.CreateTemplate` already does). An owner-run repair must set `ledger.repair_template_lines` to `on` transaction-locally first |
+| `bookings` | `status` = the classification lifecycle's `initial`; `journal_id` NULL; `settled_amount` 0 | create the booking, then `UPDATE` it into the state you want -- the guard on UPDATE already permits exactly that |
+| `reservations` | `status` = `active`; `settled_amount` 0; `journal_id` NULL | same |
+| `ledger_attestations` | `seq` = chain head + 1; `prev_root` = the head's `root_hash` (seq 1 links to `core.GenesisRoot`); `prev_root` / `root_hash` / `batch_digest` 32 bytes; `signature` and `key_id` non-empty | build attestations through `AttestationService` / `postgres.AttestationStore`; placeholder or out-of-order rows are refused |
+| `chain_cursors` | `last_scanned_block` never decreases and never advances more than 100,000 in one write; no other column may change | advance through `SetChainCursor`; rewind through `ledger_rewind_chain_cursor(chain_id, to_block, reason)`, which is owner-only |
+
+**Capacity.** Twelve tables now write a `config_table_changes` row when a row
+is CREATED, not only when it changes -- including `bookings`, `events` and
+`reservations` at business rate. `journals` is the named exception. If you
+size or retain that table, re-size it.
+
+**New owner-only operations** (no `ledger_app` grant, by design -- a repair
+capability in the leaked credential's hands is the attack with a nicer name):
+
+    ledger_rewind_chain_cursor(chain_id bigint, to_block bigint, reason text)
+    ledger_discard_attestations_from(seq bigint, reason text) -> bigint
+
+Both require a non-empty reason, both write a `config_table_changes` row, and
+both fail loudly rather than reporting success having done nothing.
+
+### `service.WithRescanLookback` changes the forward scan's window by default
+
+**Landed (Wave 5; invariant I-67).** Behavioural, not a compile break.
+
+Every forward-scan tick now re-covers the last **128 blocks** below the safe
+tip regardless of where `chain_cursors.last_scanned_block` stands. Previously
+the window was exactly `cursor+1 .. safeTip`, and a caught-up chain scanned
+nothing at all.
+
+**What a consumer must do.** Nothing, unless the extra RPC matters: this is
+one additional bounded `getLogs` per tick per chain, and re-ingesting a
+sighting is a no-op (`IngestDeposit` is idempotent on
+`deposit-{chain}-{tx}-{seq}`). Set `service.WithRescanLookback(0)` to restore
+the old window, or a larger value to widen the recovery. `ledger.EnableOnchain`
+consumers pass it the same way as any other `service.OnchainOption`.
+
+**Why it is on by default.** The scan never looked back, so a single forged
+cursor advance made every real deposit in the skipped window permanently
+invisible -- no booking, event, journal or entry, therefore nothing any
+reconciliation check can see, while the funds are still swept into treasury.
+The database can bound and record such an advance (029) but cannot undo one.
+
 ### `postgres.NewPendingStore` takes a `core.VerifiedBalanceReader`, and `ConfirmPending` refuses to run inside `RunInTx` when it is set
 
 **Landed (Wave 4, contract §7.20; invariant I-64).**

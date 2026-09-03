@@ -1208,6 +1208,18 @@ var unresolvableEnforcedCitations = map[string]dbOnlyMechanism{
 		objects:   []string{"ledger_log_config_table_change"},
 		reason:    "the audit trigger and its SECURITY DEFINER writer, attached by a catalogue-derived DO loop",
 	},
+	"I-66": {
+		migration: "postgres/sql/migrations/029_insert_path_guards.up.sql",
+		objects: []string{
+			"ledger_entry_template_lines_insert_guard",
+			"ledger_bookings_insert_guard",
+			"ledger_reservations_insert_guard",
+			"ledger_attestations_insert_guard",
+			"ledger_discard_attestations_from",
+			"_audit_insert",
+		},
+		reason: "the INSERT-path guards and the AFTER INSERT half of the forensic trail are triggers, and deliberately so: the whole point is that they hold for a statement that never went through this library, so there is no Go entry point to name",
+	},
 }
 
 // TestDbOnlyMechanismsExistWhereRegistered checks the register's own claims:
