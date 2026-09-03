@@ -1710,7 +1710,7 @@ individually unbalanced but net to zero in aggregate.
   004's O(N^2).
 - `service.FullReconciliationService.runCheck11JournalBalance`
   ("journal_dr_cr" — `service/reconcile.go`), backed by
-  `IntegrityUnbalancedJournalsCount`/`Sample`
+  `IntegrityUnbalancedJournalsCount` / `IntegrityUnbalancedJournalsSample`
   (`postgres/sql/queries/integrity_balance.sql`): a bulk, fleet-wide scan
   independent of the trigger, catching what the trigger cannot (rows
   written before 044 existed, or any future bypass of it).
@@ -2970,8 +2970,8 @@ then reads that cached verdict instead of re-deriving it:
   as authorized) nor as a failing one (would make every pre-T4 account
   permanently UNDEFINED the moment T4 ships).
 
-A journal that contributes some cached-`Authorized` entries and some
-cached-`Unknown` entries (its entries straddled an attestation batch
+A journal that contributes some cached-`core.JournalAuthVerdictAuthorized`
+entries and some cached-`core.JournalAuthVerdictUnknown` entries (its entries straddled an attestation batch
 boundary, the same ordering hazard design doc §8.2 documents for P6) is
 trusted on the strength of the `Authorized` verdict alone — safe because
 `core.VerifyJournalAuth` at attestation time reconstructs the journal's
@@ -3012,7 +3012,8 @@ attestation time, batched via `postgres.AttestationStore.JournalAuthMaterial`
 many distinct journals are in the batch); `postgres.VerifiedBalanceStore.VerifiedBalance`
 (the fast read path: partitions contributing entries by cached verdict,
 falls back to the pre-T4 naive per-journal check — `verifyJournalsNaively`
-— only for the `Unknown` set); `service.VerifyLedger`'s `isV3` branch (live
+— only for the `core.JournalAuthVerdictUnknown` set);
+`service.VerifyLedger`'s `isV3` branch (live
 drift recompute of `AuthVerdictDigest`, and `core.AttestationRootHashV3`
 self-consistency, alongside the existing v1/v2 checks — never gating on
 whether a row happens to be v3, so a v1/v2 row's original semantics are

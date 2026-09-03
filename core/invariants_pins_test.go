@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -378,11 +379,19 @@ func TestInvariantsDocEveryInvariantHasPinnedBy(t *testing.T) {
 type declaredSymbolIndex struct {
 	bare   map[string]bool
 	method map[string]bool // "Type.Method"
+	// mentioned is every identifier, selector and string literal the repo's
+	// Go source contains. A citation can name something this repo USES
+	// rather than declares -- an SDK call (`ListObjectsV2`), or a named
+	// conformance phase that exists as a string constant
+	// (`HeadNeverRegressesOnAnOlderPublish`) -- and "does this repository
+	// have it" must be true of those too, while staying false for a name
+	// nobody has written anywhere.
+	mentioned map[string]bool
 }
 
 func buildDeclaredSymbolIndex(t *testing.T) declaredSymbolIndex {
 	t.Helper()
-	idx := declaredSymbolIndex{bare: map[string]bool{}, method: map[string]bool{}}
+	idx := declaredSymbolIndex{bare: map[string]bool{}, method: map[string]bool{}, mentioned: map[string]bool{}}
 	fset := token.NewFileSet()
 
 	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
@@ -407,6 +416,21 @@ func buildDeclaredSymbolIndex(t *testing.T) declaredSymbolIndex {
 			// rather than failing the whole index.
 			return nil
 		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch e := n.(type) {
+			case *ast.Ident:
+				idx.mentioned[e.Name] = true
+			case *ast.SelectorExpr:
+				idx.mentioned[e.Sel.Name] = true
+			case *ast.BasicLit:
+				if e.Kind == token.STRING {
+					if unquoted, uerr := strconv.Unquote(e.Value); uerr == nil {
+						idx.mentioned[unquoted] = true
+					}
+				}
+			}
+			return true
+		})
 		for _, decl := range f.Decls {
 			switch d := decl.(type) {
 			case *ast.FuncDecl:
@@ -591,6 +615,47 @@ func repoFileNames(t *testing.T) (byPath, byBase map[string]bool) {
 	return byPath, byBase
 }
 
+// sqlAndGoCorpus is every .sql file under postgres/sql and every .go file in
+// the repository, concatenated as text.
+//
+// It is what a snake_case citation is checked against. A DB-side name --
+// a trigger, a SQL function, a column, a check constraint, a template code --
+// exists as TEXT, not as a Go declaration: it is written in a migration, in
+// a query, or in a Go string literal that executes it. Text is therefore the
+// honest index for it, and "this name appears nowhere in the schema or the
+// source" is a claim about the codebase that is checkable and false.
+func sqlAndGoCorpus(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", ".git", "web":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".sql") && !strings.HasSuffix(d.Name(), ".go") {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		b.Write(body)
+		b.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repo for the SQL/Go corpus: %v", err)
+	}
+	require.NotEmpty(t, b.String(), "the SQL/Go corpus is empty -- the walk regressed")
+	return b.String()
+}
+
 var (
 	// backtickToken matches one backtick-quoted token, whatever it is.
 	backtickToken = regexp.MustCompile("`([^`]+)`")
@@ -599,6 +664,22 @@ var (
 	fileCitation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:go|sql|md|yml|yaml|ts|tsx|js|json|sh)(?::\d+)?$`)
 	// bareIdentifier matches a single Go identifier.
 	bareIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// goSymbolShaped matches a citation written WITHOUT a package qualifier
+	// but shaped like a Go symbol: CamelCase, optionally dotted
+	// (`ReverseJournalFraction`, `PendingStore.AddPending`). This document's
+	// bare-citation convention (stated in I-13 and I-40) makes these as
+	// common as qualified ones, and until round 2's second pass they were
+	// checked by nothing: renaming `ReverseJournal` to `ZzReverseJournal`
+	// left every gate green.
+	// An all-caps token is a SQL keyword (`UNIQUE`, `MAX`, `NULL`), not a Go
+	// symbol; the caller excludes those separately, since the shape alone
+	// cannot tell them apart.
+	goSymbolShaped = regexp.MustCompile(`^[A-Z][A-Za-z0-9]*(\.[A-Za-z0-9]+)*$`)
+	// dbObjectShaped matches a snake_case name specific enough to look for:
+	// a trigger, a SQL function, a column, a constraint. Short or
+	// underscore-free tokens (`uid`, `status`) are prose as often as they
+	// are names, and are not checked.
+	dbObjectShaped = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 )
 
 // citationAudit is what one Enforced by block claims, and whether those
@@ -608,7 +689,7 @@ type citationAudit struct {
 	broken   []string // Go-symbol citations in a repo package that resolve to nothing
 }
 
-func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesByPath, filesByBase map[string]bool) citationAudit {
+func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesByPath, filesByBase map[string]bool, corpus string) citationAudit {
 	out := citationAudit{}
 	for _, m := range backtickToken.FindAllStringSubmatch(block, -1) {
 		token := strings.TrimSpace(m[1])
@@ -639,12 +720,32 @@ func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesBy
 			} else {
 				out.broken = append(out.broken, token)
 			}
-		case bareIdentifier.MatchString(token) && idx.bare[token]:
-			// A mechanism cited without its package (`ReverseJournal`,
-			// `mergeWorkerConfig`). Counted when it resolves; never an
-			// error when it does not, because most bare backticks in this
-			// document are SQL keywords and column names.
-			out.resolved++
+		default:
+			// A mechanism cited without its package. Two shapes, checked
+			// differently because they live in different indexes.
+			name := strings.SplitN(token, "(", 2)[0]
+			switch {
+			case goSymbolShaped.MatchString(name) && strings.ToUpper(name) != name:
+				leaf := name
+				if parts := strings.Split(name, "."); len(parts) > 1 {
+					leaf = parts[len(parts)-1]
+					if idx.method[parts[len(parts)-2]+"."+leaf] {
+						out.resolved++
+						continue
+					}
+				}
+				if idx.bare[leaf] || idx.mentioned[leaf] {
+					out.resolved++
+				} else {
+					out.broken = append(out.broken, token)
+				}
+			case dbObjectShaped.MatchString(name) && len(name) >= 6 && strings.Contains(name, "_"):
+				if strings.Contains(corpus, name) {
+					out.resolved++
+				} else {
+					out.broken = append(out.broken, token)
+				}
+			}
 		}
 	}
 	sort.Strings(out.broken)
@@ -661,20 +762,23 @@ func TestInvariantsEnforcedCitationsResolve(t *testing.T) {
 	idx := buildDeclaredSymbolIndex(t)
 	pkgs := repoGoPackages(t)
 	filesByPath, filesByBase := repoFileNames(t)
+	corpus := sqlAndGoCorpus(t)
 
 	sections := splitInvariantSections(string(raw))
 	require.NotEmpty(t, sections, "no invariant sections parsed -- the splitter regressed")
 
 	for _, sec := range sections {
 		enforced := blockBetween(sec.body, "**Enforced by**")
-		audit := auditEnforcedCitations(enforced, idx, pkgs, filesByPath, filesByBase)
+		audit := auditEnforcedCitations(enforced, idx, pkgs, filesByPath, filesByBase, corpus)
 
 		for _, citation := range audit.broken {
-			t.Errorf("%s's **Enforced by** cites %q, which this repository does not declare.\n\n"+
-				"The package segment names a package that exists here, so this is a claim about OUR code -- and it resolves to nothing. "+
-				"A citation naming a symbol that does not exist is worse than no citation: it reads as a mechanism, it is what the pin "+
-				"check holds pins to, and it silently stops holding them to anything. Rename it to the symbol that exists (a rename is "+
-				"the usual cause), or drop it.", sec.number, citation)
+			t.Errorf("%s's **Enforced by** cites %q, which this repository does not have.\n\n"+
+				"Three shapes are checked, each against the index it would live in: a package-qualified symbol (`postgres.Foo`) and a "+
+				"bare CamelCase one (`ReverseJournal`) against the Go declarations, and a snake_case name (`journals_no_arbitrary_update`) "+
+				"against every .sql and .go file in the repo, since a trigger or column exists as text rather than as a Go declaration.\n\n"+
+				"A citation naming something that does not exist is worse than no citation: it reads as a mechanism, it is what the pin "+
+				"check holds pins to, and it silently stops holding them to anything. Rename it to what exists (a rename is the usual "+
+				"cause), or drop it.", sec.number, citation)
 		}
 
 		if audit.resolved == 0 {
