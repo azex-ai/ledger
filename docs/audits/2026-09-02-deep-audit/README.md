@@ -17,7 +17,8 @@
 | Wave 2 | 8 个文件独占任务全部合入（207 条独立条目：修复 / 记为不修附结论 / 转后续） |
 | W3 复审 | money-path 3 攻破（1 Critical）+ gates 23 处盲区（3 Critical）→ 全部修复合入；M-5 经实跑升 Critical 并做了机制层 |
 | 新增契约 | I-49 … I-63；migration 016 … 027；`core.Metrics` 32→41；`docs/BREAKING.md`；openapi `x-required-scope` |
-| 留给 Aaron | `enforce_min_balance` / `ConfirmPending` 读 checkpoint（热路径信任边界）；hold 项方案 (A) 签名 receipt；契约 §7 十六条 lead 替拍的语义口径逐条确认 |
+| Wave 4 | Aaron 授权 lead 按原则决定：`ConfirmPending` 改 min(V,E)（它是洗白点，§7.20）；`enforce_min_balance` 保持并在 I-17 划定信任边界；hold 项做签名 receipt（方案 A，I-65，migration 028）；§7 全部口径确认（§7.19） |
+| 下一步 | 独立复审 + 对抗式审计（`docs/plans/2026-09-03-independent-review-contract.md`，五个零前情 agent），通过后才评估合并与发版 |
 
 后续单列项（TODO 文末「Lead 追加」表标 W3 后续）：B-m12 sweep 锁复核、postgres 测试套件 211s、reconcile check 读 `config_table_changes`、pin 门禁追一层本地 helper 后升回 28 条 pin、min_balance 信任边界。
 
