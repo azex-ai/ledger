@@ -221,6 +221,17 @@ type BookingReader interface {
 	// ListBookings returns one page plus the opaque cursor for the next
 	// page ("" when exhausted).
 	ListBookings(ctx context.Context, filter BookingFilter) ([]Booking, string, error)
+	// BookingsForDepositIdentity returns every booking claiming one on-chain
+	// transfer log -- the (chain, transaction, log position) triple the
+	// deposit path derives a booking's identity from (I-20) and carries in
+	// Booking.Metadata.
+	//
+	// Unpaginated and unfiltered by status on purpose: for the honest writer
+	// the answer is zero or one row (migration 032 makes that structural),
+	// and the question it answers -- "has this transfer already been
+	// booked?" -- must not be able to miss a booking because it was in an
+	// unexpected state or on the next page (I-71).
+	BookingsForDepositIdentity(ctx context.Context, chainID int64, txHash string, txLogSeq int32) ([]Booking, error)
 }
 
 // EventReader handles event queries.

@@ -263,6 +263,65 @@ func (q *Queries) LinkBookingJournal(ctx context.Context, arg LinkBookingJournal
 	return i, err
 }
 
+const listBookingsByDepositIdentity = `-- name: ListBookingsByDepositIdentity :many
+SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings
+WHERE metadata->>'chain_id'  = $1::text
+  AND metadata->>'tx_hash'   = $2::text
+  AND metadata->>'txlog_seq' = $3::text
+ORDER BY id
+`
+
+type ListBookingsByDepositIdentityParams struct {
+	ChainID  string `json:"chain_id"`
+	TxHash   string `json:"tx_hash"`
+	TxlogSeq string `json:"txlog_seq"`
+}
+
+// Every booking claiming one on-chain transfer log, by the identity the
+// deposit path derives its idempotency key from (I-20). Served by migration
+// 032's uq_bookings_deposit_identity, which also makes more than one row
+// impossible for the honest writer -- this query is what lets the
+// application say WHICH booking already holds the log rather than only
+// refusing (I-71), and what still answers correctly on a deployment that has
+// not applied 032 yet.
+func (q *Queries) ListBookingsByDepositIdentity(ctx context.Context, arg ListBookingsByDepositIdentityParams) ([]Booking, error) {
+	rows, err := q.db.Query(ctx, listBookingsByDepositIdentity, arg.ChainID, arg.TxHash, arg.TxlogSeq)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Booking{}
+	for rows.Next() {
+		var i Booking
+		if err := rows.Scan(
+			&i.ID,
+			&i.ClassificationID,
+			&i.AccountHolder,
+			&i.CurrencyID,
+			&i.Amount,
+			&i.SettledAmount,
+			&i.Status,
+			&i.ChannelName,
+			&i.ChannelRef,
+			&i.ReservationID,
+			&i.JournalID,
+			&i.IdempotencyKey,
+			&i.Metadata,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Uid,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBookingsByFilter = `-- name: ListBookingsByFilter :many
 SELECT id, classification_id, account_holder, currency_id, amount, settled_amount, status, channel_name, channel_ref, reservation_id, journal_id, idempotency_key, metadata, expires_at, created_at, updated_at, uid FROM bookings
 WHERE (account_holder = $1 OR $1 = 0)

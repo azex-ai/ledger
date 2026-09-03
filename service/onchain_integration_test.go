@@ -456,6 +456,7 @@ type recordingOnchainMetrics struct {
 	cursorLag              []cursorGaugeCall
 	cursorAdvanceAge       []cursorAgeCall
 	orphanedBroadcasts     []int64
+	reviewRequired         []string
 	reorgsDetected         []int64
 	jobTicksCompleted      map[string]int
 	jobTicksFailed         map[string]int
@@ -490,6 +491,18 @@ func (m *recordingOnchainMetrics) SweepAddressUnreadable(chainID int64, count in
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sweepAddressUnreadable = append(m.sweepAddressUnreadable, sweepAddressUnreadableCall{chainID, count})
+}
+
+func (m *recordingOnchainMetrics) DepositReviewRequired(chainID int64, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reviewRequired = append(m.reviewRequired, reason)
+}
+
+func (m *recordingOnchainMetrics) reviewReasons() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.reviewRequired...)
 }
 
 func (m *recordingOnchainMetrics) DepositIngestDeadLettered(chainID int64, reason string) {

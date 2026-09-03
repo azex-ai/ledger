@@ -466,6 +466,12 @@ CREATE TRIGGER reservations_insert_guard
 -- head is -- but it converts "one statement makes every deposit from here to
 -- eternity invisible" into "one statement skips at most one oversized
 -- window, and leaves a config_table_changes row saying so".
+--
+-- Amended by 032: that conclusion held for the UPDATE branch only. The
+-- INSERT branch -- a chain with no cursor row yet -- was unbounded, and
+-- ledger_app could create a cursor at any block (88,888,888 measured).
+-- 032 bounds it with the same cap, plus an owner-only seeding door for a
+-- chain that really does start high (I-67 rule 2).
 
 -- Same two-layer shape as 027: a transaction-local flag AND owner
 -- membership. Either alone is worthless -- set_config is available to every

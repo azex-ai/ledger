@@ -59,6 +59,64 @@ an amount neither is acceptable — so it returns an error.
 error and gained the same check without a signature change.
 
 
+### `core.BookingReader` gains `BookingsForDepositIdentity`
+
+**Landed (Wave 5 re-check, W5-onchain-ops-2; audit
+`docs/audits/2026-09-03-independent-review/recheck/money-out.md` N-1;
+invariant I-71.)**
+
+    core.BookingReader + BookingsForDepositIdentity(ctx, chainID int64, txHash string, txLogSeq int32) ([]Booking, error)
+
+**What a consumer must do.** Using `postgres.NewBookingStore` (what
+`ledger.New` does): nothing, it implements the method. Implementing
+`core.BookingReader` by hand: return every booking whose `metadata` carries
+that `(chain_id, tx_hash, txlog_seq)` triple, unpaginated and unfiltered by
+status. Returning nothing unconditionally disables a mint fence -- the
+deposit path asks this before crediting, to find out whether another booking
+already holds the transfer it is about to book.
+
+**Schema, in the same change**: migration `032` adds
+`uq_bookings_deposit_identity`, a unique index over those three metadata
+values. A deployment carrying duplicate deposit identities will fail to
+apply it -- those rows are the defect it exists to prevent; the migration
+header carries the query that finds them.
+
+**Severity note.** This does not require a database credential. `POST
+/api/v1/bookings` takes a **write**-scope API key and lets the caller choose
+the classification, the amount, the channel name and the whole metadata map,
+so the duplicate row is one authenticated HTTP call away, and the recheck
+job does not distinguish where a booking came from. Audit who holds
+write-scope keys.
+
+**Operational consequence of the index**: a booking created by anything
+other than the ingestion path can now hold a real transfer's identity first,
+and the honest ingestion will then fail to book that deposit. It is not lost
+silently -- the sighting is dead-lettered under the new bounded reason
+`identity_already_booked`, naming the booking in the way, counted by
+`ledger_deposit_ingest_dead_lettered_total`, and replayable once the
+squatter is resolved (docs/RUNBOOK.md §18).
+
+### Migration `032` also bounds the FIRST write to `chain_cursors`
+
+**Landed (Wave 5 re-check, W5-onchain-ops-2; audit
+`docs/audits/2026-09-03-independent-review/recheck/onchain-ops.md`;
+invariant I-67.)**
+
+Migration `029` bounded how far one write may MOVE a cursor. The branch that
+CREATES one -- a newly configured chain, or one whose row an owner deleted --
+was unbounded, so the application role could start a chain at any block and
+make every deposit below it invisible to every code path.
+
+**What a consumer must do.** Nothing, unless a chain is started above block
+100,000 (the same cap one write may advance by). The watcher never does that
+by itself: with no cursor it starts at genesis and walks up in
+`WithMaxBlocksPerScan` windows. A deployment on an established chain that
+does not want to scan from genesis must now seed the cursor through
+`ledger_seed_chain_cursor(chain_id, block, reason)` -- owner-only, reason
+mandatory, forensic row -- instead of a raw `INSERT`. The guard names the
+function in its error, and docs/RUNBOOK.md §9's install section has the
+exact call.
+
 ### Migration 029 (`029_insert_path_guards`): appended rows are guarded and recorded
 
 **Landed (Wave 5, `docs/plans/2026-09-03-wave5-contract.md` §0 R3-1;

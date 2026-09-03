@@ -82,9 +82,10 @@ func TestOnchain_DeadLetter_IsCountedBackloggedAndReplayable(t *testing.T) {
 		h.metrics.deadLetteredCalls(),
 		"a dead letter is the single most payment-affecting event on the pull path; it must be countable")
 
-	// 2. A queue with a depth and an age. Sampled from the reorg-recheck
-	//    tick, which is where "is anything still waiting on a human" lives.
-	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
+	// 2. A queue with a depth and an age. Sampled by a job of its own, so a
+	//    webhook-only deployment (no chain reader, no recheck loops) sees it
+	//    too -- see TestDeadLetterSignals_ReachAWebhookOnlyDeployment.
+	require.NoError(t, h.svc.RunDeadLetterBacklogSampleOnce(ctx))
 	backlog := h.metrics.backlogCalls()
 	require.NotEmpty(t, backlog, "the backlog must be sampled, or nothing reveals a forgotten queue")
 	assert.Equal(t, int64(1), backlog[len(backlog)-1].count)
@@ -127,7 +128,7 @@ func TestOnchain_DeadLetter_IsCountedBackloggedAndReplayable(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, replayed.Booked, "the row is never rewritten -- 'is it still true' is recomputed from bookings")
 
-	require.NoError(t, h.svc.RunReorgRecheckOnce(ctx))
+	require.NoError(t, h.svc.RunDeadLetterBacklogSampleOnce(ctx))
 	backlog = h.metrics.backlogCalls()
 	assert.Equal(t, int64(0), backlog[len(backlog)-1].count,
 		"a dead letter whose deposit was credited in the end must leave the queue on its own")

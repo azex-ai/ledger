@@ -121,8 +121,14 @@ func TestOnchain_Watch_CursorAheadOfTheChainIsLoudAndStillScans(t *testing.T) {
 		Confirmations: 20, BlockNumber: 980,
 	})
 
-	// Seeded through the store the way an operator's UPDATE would land it.
-	require.NoError(t, h.cursors.SetCursor(ctx, chainID, 99999999))
+	// Put there deliberately, by the owner-only door migration 032 requires
+	// for a cursor this far from genesis -- which is the only way this state
+	// can be reached now (the application role cannot create or advance a
+	// cursor past the per-write cap, I-67 rule 2), and matches what this pin
+	// is about: a cursor the scanner itself could not have written.
+	_, err = h.pool.Exec(ctx,
+		`SELECT ledger_seed_chain_cursor($1, 99999999, 'test fixture: a cursor ahead of the chain head')`, chainID)
+	require.NoError(t, err)
 
 	require.NoError(t, h.svc.RunWatchOnce(ctx, chainID))
 

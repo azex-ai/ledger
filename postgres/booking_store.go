@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -490,6 +491,37 @@ func (s *BookingStore) ListExpiredBookings(ctx context.Context, limit int) ([]co
 
 // ListBookings returns bookings matching the filter plus the opaque cursor
 // for the next page ("" when exhausted).
+// BookingsForDepositIdentity returns every booking claiming the given
+// on-chain transfer log (core.BookingReader). More than one is exactly the
+// N-1 attack -- and, since migration 032, impossible to create -- but this
+// query is what lets the ingestion path NAME the booking that already holds
+// a log instead of only refusing, and what still answers correctly on a
+// deployment that has not applied 032 yet.
+//
+// The metadata values are compared as the strings they are stored as, which
+// is what service/onchain.go writes them as (strconv.FormatInt) and what
+// migration 032's index keys on -- no numeric coercion anywhere, so the
+// query, the index and the writer all agree on one representation.
+func (s *BookingStore) BookingsForDepositIdentity(ctx context.Context, chainID int64, txHash string, txLogSeq int32) ([]core.Booking, error) {
+	rows, err := s.q.ListBookingsByDepositIdentity(ctx, sqlcgen.ListBookingsByDepositIdentityParams{
+		ChainID:  strconv.FormatInt(chainID, 10),
+		TxHash:   txHash,
+		TxlogSeq: strconv.FormatInt(int64(txLogSeq), 10),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: bookings for deposit identity: %w", err)
+	}
+	out := make([]core.Booking, len(rows))
+	for i, row := range rows {
+		b, err := bookingFromRow(ctx, s.dims, s.q, row)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = *b
+	}
+	return out, nil
+}
+
 func (s *BookingStore) ListBookings(ctx context.Context, filter core.BookingFilter) ([]core.Booking, string, error) {
 	classificationID := int64(0)
 	if filter.ClassificationUID != "" {

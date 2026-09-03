@@ -83,3 +83,62 @@ func TestPostJournal_RejectsMalformedEffectiveAt(t *testing.T) {
 	w := doRequest(srv, http.MethodPost, "/api/v1/journals", body)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+// TestCreateBooking_DepositMetadataPassesThrough is the HTTP half of
+// money-out N-1's reachability question (the re-check's §5.1, which named
+// this path as the one most worth measuring and did not measure it).
+//
+// POST /api/v1/bookings takes a WRITE-scope API key -- not a database
+// credential -- and this pins what the handler does with such a request:
+// classification_code, account_holder, amount, channel_name and the whole
+// metadata map arrive in core.CreateBookingInput unchanged. So a write-scope
+// key can file a booking on the `deposit` classification carrying any
+// on-chain identity it likes, and the recheck job does not distinguish where
+// a booking came from.
+//
+// That is not a defect in this handler -- a booking API that could not take
+// metadata would be useless -- it is the reason the fences live where they
+// do: the deposit-identity index (migration 032) and the pre-credit
+// corroboration (I-69/I-71), both of which sit BELOW this endpoint and apply
+// to every caller. service.TestDepositIdentity_ACallerSuppliedBookingCannotStealATransfer
+// is the other half.
+func TestCreateBooking_DepositMetadataPassesThrough(t *testing.T) {
+	var got core.CreateBookingInput
+	srv := newTestServerWith(func(o *testServerOpts) {
+		o.booker = &mockBooker{
+			createFn: func(_ context.Context, input core.CreateBookingInput) (*core.Booking, error) {
+				got = input
+				return &core.Booking{
+					UID: "bk-1", ClassificationUID: "cls-1", AccountHolder: input.AccountHolder,
+					CurrencyUID: input.CurrencyUID, Amount: input.Amount, Status: "pending",
+					ChannelName: input.ChannelName, IdempotencyKey: input.IdempotencyKey,
+					Metadata: input.Metadata, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+				}, nil
+			},
+		}
+	})
+
+	body := map[string]any{
+		"classification_code": "deposit",
+		"account_holder":      4242,
+		"currency_uid":        "cur-1",
+		"amount":              "999",
+		"idempotency_key":     "caller-chosen-1",
+		"channel_name":        "anything-i-like",
+		"metadata": map[string]string{
+			"chain_id": "1", "tx_hash": "0xcallerchosen", "txlog_seq": "0",
+			"token": "0xtoken", "block_number": "100",
+		},
+	}
+	w := doRequest(srv, http.MethodPost, "/api/v1/bookings", body)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	assert.Equal(t, "deposit", got.ClassificationCode, "the caller names the classification")
+	assert.Equal(t, int64(4242), got.AccountHolder)
+	assert.Equal(t, "999", got.Amount.String(), "and the amount")
+	assert.Equal(t, "anything-i-like", got.ChannelName, "and the channel name")
+	assert.Equal(t, "0xcallerchosen", got.Metadata["tx_hash"],
+		"and every metadata key, including the ones the deposit path derives a booking's identity from")
+	assert.Equal(t, "0", got.Metadata["txlog_seq"])
+	assert.Equal(t, "1", got.Metadata["chain_id"])
+}
