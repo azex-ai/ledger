@@ -516,7 +516,7 @@ plan [`docs/plans/2026-09-03-wave5-contract.md`](docs/plans/2026-09-03-wave5-con
   journal, already part-settled) and the invisibility. The prevention that
   path needs is an application-layer fence in `service/onchain.go`.
 
-### Go module — Security (guard-function `search_path`, and the balance guard's dedup)
+### Go module — Security (guard-function `search_path`, and the balance guard)
 
 - **A leaked `ledger_app` credential could commit a one-sided journal entry,
   by two independent routes through one function** (Wave 5, invariant I-68,
@@ -535,17 +535,51 @@ plan [`docs/plans/2026-09-03-wave5-contract.md`](docs/plans/2026-09-03-wave5-con
 
   `030` pins `search_path = public, pg_temp` on every function in the schema
   (the one exemption -- the two inlinable `ledger_signed_*` helpers -- is
-  bounded structurally, not by name), and replaces the dedup with a deferred
-  constraint trigger on `journals` plus a per-entry backstop keyed on
-  `journals.xmin`, so the guard keeps no state any caller can write. Cost is
-  unchanged to better at every journal size measured. **Consumers need no code
-  change**; see `docs/BREAKING.md` for the one operational requirement (`030`
-  also revokes `TEMPORARY` from `PUBLIC`, which needs a migration credential
-  that owns the database).
+  bounded structurally, not by name), and revokes `TEMPORARY` from `PUBLIC`.
+  **Consumers need no code change**; see `docs/BREAKING.md` for the one
+  operational requirement (the revoke needs a migration credential that owns
+  the database).
 
   The gate is now derived from `pg_proc` rather than hand-written: a migration
   that adds a function without pinning it is red on the first CI run
   (`postgres.TestGuardFunctionSearchPath_EveryFunctionIsPinned`).
+
+- **`SET CONSTRAINTS ALL IMMEDIATE` -- one statement, no privilege -- made
+  `030`'s replacement balance guard pass a one-sided journal** (Wave 5
+  follow-up, same invariant I-68, recheck finding N1; migration `031`).
+  `030` had replaced C2's caller-writable memo with a deferred constraint
+  trigger on `journals` plus a per-entry check that skipped whenever
+  `journals.xmin` was the current transaction's -- safe, it argued, because a
+  check was already queued for that journal. **When it runs is the caller's to
+  choose.** Under IMMEDIATE the journals-level check fires at the end of the
+  INSERT that created the journal, when it has no entries, and every entry
+  then skips. Confirmed in three shapes, the worst being a journal that had
+  already committed balanced: backfill its `event_id` (a legitimate,
+  guard-permitted UPDATE) to take its xmin, then append unmatched debit to it.
+
+  `031` deletes the skip. The per-entry constraint trigger aggregates its
+  journal unconditionally; the journals-level trigger, the shared helper and
+  the `ledger_app` EXECUTE grant that helper needed all go with it. **This is
+  slower and the number is not buried**: measured through the real
+  `PostJournal` path, median of 11, ms per journal --
+
+  | entries/journal | 2 | 6 | 20 | 100 | 500 | 2000 |
+  |---|---|---|---|---|---|---|
+  | `030` | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
+  | `031` | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
+
+  Free at the 2--6 legs the presets post, 5.7x at 2000, O(N²) in entries per
+  journal with no cap in `core`. **Consumers need no code change**, and the
+  default (deferred) behaviour is unchanged; a caller who issues `SET
+  CONSTRAINTS ... IMMEDIATE` will now find that an honest journal composed
+  across statements is refused after its first leg, which is fail-closed and
+  is stated as an assertion in
+  `postgres.TestBalanceGuard_ImmediateModeRefusesHonestMultiStatementPosting`.
+
+  The new gate derives its timing modes from `pg_trigger.tgdeferrable`, so a
+  future deferrable trigger is enrolled in the attack battery by existing
+  rather than by somebody remembering
+  (`postgres.TestBalanceGuard_RefusedUnderEveryConstraintTiming`).
 
 ### Go module — Security (verified-balance gate: the hold term)
 
