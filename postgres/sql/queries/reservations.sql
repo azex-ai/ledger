@@ -143,10 +143,17 @@ WHERE idempotency_key = $1;
 
 -- name: SumUnexpiredReservationHolds :one
 -- The hold Reserve subtracts when the caller opts into
--- RequireVerifiedBalance (I-49). Deliberately the crudest possible sum: the
--- full reserved_amount of every reservation on the dimension whose
--- expires_at is still in the future, with no credit for anything that claims
--- the reservation is over.
+-- RequireVerifiedBalance AND no Attestor/AuthVerifier is configured (I-49).
+-- Deliberately the crudest possible sum: the full reserved_amount of every
+-- reservation on the dimension whose expires_at is still in the future, with
+-- no credit for anything that claims the reservation is over.
+--
+-- With signing configured the gate uses ListUnexpiredReservationHolds
+-- instead and subtracts, per reservation, the discharge a VALIDLY SIGNED
+-- claim accounts for (I-65). A signature is the only other signal this
+-- comment's argument admits -- see "expires_at is the one exception" below,
+-- which says so -- so that path is the same reasoning carried one step
+-- further, not a relaxation of it.
 --
 -- SumActiveReservations, its ordinary-path twin, reads reservations.status
 -- and reservations.settled_amount, and ledger_reservations_guard permits
@@ -173,9 +180,9 @@ WHERE idempotency_key = $1;
 -- -- and it is therefore the only discharge signal this query accepts.
 --
 -- Consequence, intended and documented (core.ReserveInput.
--- RequireVerifiedBalance, docs/INVARIANTS.md I-49): a settled or released
--- reservation goes on holding its full reserved_amount under the gate until
--- it expires. The settled portion is double-counted (it already left through
+-- RequireVerifiedBalance, docs/INVARIANTS.md I-49): on THIS path a settled
+-- or released reservation goes on holding its full reserved_amount under the
+-- gate until it expires. The settled portion is double-counted (it already left through
 -- its own journal, so E fell too) and a released one is counted at all. Both
 -- errors are conservative -- they refuse reservations, never allow them --
 -- and both self-heal at expires_at. Callers who need faster recycling set a

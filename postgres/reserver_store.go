@@ -1133,10 +1133,11 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 // This is the state-machine answer (SumActiveReservations), which is what a
 // consumer asking "what is held right now" wants, and it reads two columns a
 // leaked ledger_app credential can write. It is deliberately NOT the figure a
-// gated Reserve sizes against — that one is SumUnexpiredReservationHolds
-// (I-49), which credits no discharge claim and is therefore larger once a
-// reservation has been settled or released. Do not use HeldAmount to decide
-// how much money may leave.
+// gated Reserve sizes against — that one credits only a discharge the
+// credential cannot manufacture: a validly signed claim when WithAuth is
+// configured (I-65), and nothing at all otherwise (I-49, where the figure is
+// therefore larger than this one once a reservation has been settled or
+// released). Do not use HeldAmount to decide how much money may leave.
 func (s *ReserverStore) HeldAmount(ctx context.Context, holder int64, currencyUID string) (decimal.Decimal, error) {
 	cur, err := s.dims.currencyByUIDOrErr(ctx, s.q, currencyUID)
 	if err != nil {
