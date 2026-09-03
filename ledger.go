@@ -1093,7 +1093,7 @@ func (c onchainTxComposer) AuthorizeTemplate(ctx context.Context, templateCode s
 //
 // The full reconciliation suite (Worker.SetFullReconciler) is wired the same
 // way, and for the same reason: DefaultWorkerConfig has always configured a
-// FullReconcileInterval, so the sixteen checks it runs -- including
+// FullReconcileInterval, so the seventeen checks it runs -- including
 // unauthorized_journals, checkpoint_balance and journal_dr_cr -- looked
 // enabled while nothing ever registered the reconciler that makes them run.
 // Override it after this returns if you want a non-default

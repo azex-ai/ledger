@@ -175,6 +175,33 @@ currency it books into (`service.Onchain.ValidateTokenPrecision`, additive);
 a push-only consumer that never calls `Run()` should call that method at
 startup.
 
+### `service.ReconcileQuerier` gains `CorruptReversalLinks`
+
+**Landed (Wave 5, W5-money-misc; independent review `money-out.md` M-2;
+invariant I-51).**
+
+    CorruptReversalLinks(ctx context.Context, pageLimit int) ([]CorruptReversalLink, error)
+
+**Who this breaks**: only a consumer that implements `service.ReconcileQuerier`
+itself — a test double, or a store that is not this repo's
+`postgres.ReconcileAdapter`. Consumers that build the reconciliation service
+the ordinary way (`ledger.New`, or `postgres.NewReconcileAdapter`) get the new
+method with the rest of the adapter and need to do nothing.
+
+**What to do**: implement it. It backs the new `reversal_chain_integrity`
+check, which scans for journals carrying `reversal_of = O` that are not
+reversals of `O` — the forged link that made `ReverseJournalFraction(J, 1, 1)`
+reverse half of `J` and return `nil`. Return up to `pageLimit` violations,
+oldest-first is not required. Returning an error is honest and safe: the check
+reports it as a Finding with `Passed=false, Complete=false`, never as a pass.
+**Do not stub it as `return nil, nil`** — that reads as "every reversal chain
+in this deployment is sound", which is the one answer an implementation that
+cannot look must not give.
+
+The check itself is additive: `RunFullReconciliation` now returns 16 checks
+without an `AuthVerifier` wired and 17 with one. A consumer asserting on the
+number of checks in a report has to move that number.
+
 ### `postgres.NewPendingStore` takes a `core.VerifiedBalanceReader`, and `ConfirmPending` refuses to run inside `RunInTx` when it is set
 
 **Landed (Wave 4, contract §7.20; invariant I-64).**

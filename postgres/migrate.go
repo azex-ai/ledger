@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -40,13 +41,86 @@ const clusterLockBudget = 5 * time.Minute
 const clusterLockPollInterval = 2 * time.Second
 
 // migrationAppName is the application_name every connection Migrate opens
-// reports. It is what makes the same-credential session guard able to tell
-// "the operator's application pool is online on this credential" from "this
-// is one of my own connections" -- see assertSoleSessionOnCredential. A
-// connection that has already been closed can linger in pg_stat_activity for
-// the moment it takes the backend to exit, so identifying our own by PID
-// alone would make the guard's answer depend on that timing.
+// reports. It is a LABEL -- for an operator reading pg_stat_activity, and for
+// the list of foreign sessions the guard's refusal prints -- and deliberately
+// not an identity: application_name is a value any client sets for itself,
+// so a session that wanted to be mistaken for one of ours only had to say so
+// (2026-09-03 independent review, install-roles.md M2, measured: one
+// `SET application_name` and a refused run became MIGRATE OK). What a
+// connection of ours actually IS, is recorded in migrateRun.
 const migrationAppName = "azex-ledger-migrate"
+
+// migrateRun is the identity of one Migrate call: the backend pids of every
+// connection it has opened, on any database of the cluster.
+//
+// A pid is assigned by the server and cannot be claimed by a client, which is
+// the whole point -- it is the property assertSoleSessionOnCredential
+// excludes ITSELF by, having previously excluded itself by application_name.
+//
+// Recording every pid of the run, rather than only the probing connection's,
+// is what makes this safe where `pid <> pg_backend_pid()` alone would not be:
+// Migrate opens several connections across a run (the cluster lock on the
+// maintenance database, the readiness probe, 001's, the identity probe,
+// 002..N's, the revoke), and a backend that has just been asked to close
+// still appears in pg_stat_activity for the moment it takes to exit. Those
+// are ours whether they are still open or not, so they are excluded by
+// identity instead of by timing. A random per-run application_name suffix
+// would have solved the self-report half only: a session holding the same
+// credential can read pg_stat_activity for rows of its own role, so it could
+// copy the nonce as easily as the constant.
+type migrateRun struct {
+	mu   sync.Mutex
+	pids map[uint32]struct{}
+}
+
+func newMigrateRun() *migrateRun {
+	return &migrateRun{pids: map[uint32]struct{}{}}
+}
+
+// note records a connection as belonging to this run. Nil-safe so a caller
+// that has no run to attribute a connection to (there is none today) cannot
+// panic; a nil run simply excludes nothing, which is fail-CLOSED for the
+// guard (it would count our own sessions and refuse).
+func (r *migrateRun) note(conn *pgx.Conn) {
+	if r == nil || conn == nil || conn.PgConn() == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pids[conn.PgConn().PID()] = struct{}{}
+}
+
+// ownPIDs returns the recorded pids as int4s, the type pg_stat_activity.pid
+// is compared against.
+func (r *migrateRun) ownPIDs() []int32 {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]int32, 0, len(r.pids))
+	for pid := range r.pids {
+		out = append(out, int32(pid))
+	}
+	return out
+}
+
+// afterConnectNoting returns an OptionOpenDB that records every connection
+// the returned *sql.DB opens, and then runs extra (if non-nil).
+//
+// One option, not two: stdlib.OptionAfterConnect OVERWRITES the hook rather
+// than chaining, so passing it twice would silently drop the first -- and the
+// first is the one that keeps Migrate's own connections out of the session
+// guard's count.
+func afterConnectNoting(run *migrateRun, extra func(context.Context, *pgx.Conn) error) stdlib.OptionOpenDB {
+	return stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		run.note(conn)
+		if extra != nil {
+			return extra(ctx, conn)
+		}
+		return nil
+	})
+}
 
 // migrationConnConfig parses databaseURL for pgx and stamps it with
 // migrationAppName. Every connection this file opens goes through it.
@@ -64,13 +138,19 @@ func migrationConnConfig(databaseURL string) (*pgx.ConnConfig, error) {
 	return cfg, nil
 }
 
-// connectForMigration opens a single pgx connection carrying migrationAppName.
-func connectForMigration(ctx context.Context, databaseURL string) (*pgx.Conn, error) {
+// connectForMigration opens a single pgx connection carrying migrationAppName
+// and records its backend pid against run (see migrateRun).
+func connectForMigration(ctx context.Context, databaseURL string, run *migrateRun) (*pgx.Conn, error) {
 	cfg, err := migrationConnConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.ConnectConfig(ctx, cfg)
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	run.note(conn)
+	return conn, nil
 }
 
 // migrateConfig holds the knobs MigrateContext exposes. Zero value means
@@ -195,6 +275,12 @@ func NewMigrationSource() (source.Driver, error) {
 // this cannot simply issue SET ROLE and be done. So when the runner cannot
 // switch roles yet, this grants itself the narrowest membership that lets it
 // (`WITH SET TRUE, INHERIT FALSE`) and revokes it again before returning.
+// That arrangement is made BEFORE 001 too, and not only before 002..N: on a
+// cluster whose ledger roles already exist (a second ledger database on one
+// server), 001 never gets the self-grant CREATE ROLE would have given it and
+// its own closing ownership sweep cannot run -- see
+// prepareBaselineOwnerMembership, and install-roles.md M1 for what that used
+// to look like from the outside.
 // That membership confers nothing on a session that does not deliberately
 // switch roles, and it is nothing the credential could not grant itself at
 // any other moment via that same ADMIN OPTION -- which 001's header already
@@ -207,11 +293,14 @@ func NewMigrationSource() (source.Driver, error) {
 // what it is told. That is not a configuration this library can make safe, so
 // it is one it declines to migrate on: before arranging anything, and again
 // after the membership exists, Migrate counts the other sessions connected as
-// this credential (pg_stat_activity, excluding its own connections by
-// application_name) and returns an error naming the count and the remedy if
-// there are any. A superuser or ledger_owner credential arranges nothing and
-// is not subject to the check. See assertSoleSessionOnCredential; pinned by
-// TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential.
+// this credential (pg_stat_activity, excluding its own connections by backend
+// pid) and returns an error naming the count and the remedy if there are any.
+// A superuser or ledger_owner credential arranges nothing and is not subject
+// to the check. See assertSoleSessionOnCredential for why the exclusion key
+// is a pid and not application_name (2026-09-03, install-roles.md M2: a name
+// the audited session sets for itself is not an identity); pinned by
+// TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential and
+// TestMigrate_RefusesASessionClaimingTheMigrationApplicationName.
 //
 // The check binds sessions that already exist, not one that connects while the
 // run is in progress: such a session can still SET ROLE ledger_owner
@@ -238,17 +327,29 @@ func Migrate(databaseURL string, opts ...MigrateOption) error {
 func MigrateContext(ctx context.Context, databaseURL string, opts ...MigrateOption) error {
 	cfg := newMigrateConfig(opts)
 	databaseURL = toMigrateURL(databaseURL)
+	run := newMigrateRun()
 
-	if err := waitForDatabase(databaseURL, 10*time.Second); err != nil {
+	if err := waitForDatabase(databaseURL, 10*time.Second, run); err != nil {
 		return fmt.Errorf("postgres: migrate: wait for database: %w", err)
 	}
 
-	unlock, err := acquireClusterLock(ctx, databaseURL, cfg)
+	unlock, err := acquireClusterLock(ctx, databaseURL, cfg, run)
 	if err != nil {
 		return fmt.Errorf("postgres: migrate: acquire cluster lock: %w", err)
 	}
 	defer unlock()
 
+	return applyAllMigrations(ctx, databaseURL, run)
+}
+
+// applyAllMigrations is MigrateContext's body from the cluster lock onwards,
+// split out for one reason: it needs a NAMED return so a deferred
+// errors.Join can add a failed revoke to whatever the run itself returned,
+// and `(err error)` on MigrateContext itself would change that function's
+// printed signature -- which docs/api-surface.txt records and
+// TestAPISurface_MatchesSnapshot compares. A cosmetic diff in the public API
+// snapshot is not a thing to spend a BREAKING.md entry on.
+func applyAllMigrations(ctx context.Context, databaseURL string, run *migrateRun) (err error) {
 	// 001_baseline is the only migration that can run on the bootstrap
 	// credential's own authority: it creates every object it touches, so it
 	// owns every object it touches. Its last act is to transfer all of them to
@@ -267,16 +368,124 @@ func MigrateContext(ctx context.Context, databaseURL string, opts ...MigrateOpti
 	// ("superuser, or a role with the CREATEROLE attribute") and states that
 	// "every migration after 001 runs as ledger_owner" -- a description of a
 	// mechanism that did not exist. This is that mechanism.
-	if err := applyBaseline(databaseURL); err != nil {
+	//
+	// 001 needs ledger_owner's SET membership too, on any cluster where the
+	// three roles already exist -- arranged here, before a single statement
+	// runs, so the alternative (dying inside 001 and leaving the database
+	// dirty) is unreachable rather than merely documented. See
+	// prepareBaselineOwnerMembership.
+	grantedForBaseline, err := prepareBaselineOwnerMembership(ctx, databaseURL, run)
+	if err != nil {
 		return err
 	}
-	return applyRemainingMigrations(databaseURL)
+	if grantedForBaseline != "" {
+		// Same errors.Join reasoning as applyRemainingMigrations': a failure
+		// to hand the membership back is an independent fact nobody else can
+		// see. Registered here rather than around applyBaseline alone
+		// because applyRemainingMigrations reuses the same membership --
+		// prepareLedgerOwnerIdentity finds SET ROLE already working and
+		// grants nothing of its own.
+		defer func() { err = errors.Join(err, revokeLedgerOwner(databaseURL, grantedForBaseline, run)) }()
+	}
+
+	if err := applyBaseline(databaseURL, run); err != nil {
+		return err
+	}
+	return applyRemainingMigrations(databaseURL, run)
+}
+
+// prepareBaselineOwnerMembership makes 001_baseline runnable on a cluster
+// that already carries the three ledger roles -- the second and every later
+// ledger database on one server, which is a documented deployment (I-47's
+// cluster lock exists for it) and was, until this existed, an install that
+// died halfway.
+//
+// What went wrong (2026-09-03 independent review, install-roles.md M1,
+// reproduced twice): 001 acquires its SET membership on ledger_owner as a
+// side effect of CREATING it (`SET LOCAL createrole_self_grant='set'` +
+// `CREATE ROLE`). With the roles already present, `IF NOT EXISTS` skips the
+// CREATE, the membership is never granted, and section 14's closing
+// `ALTER TABLE ... OWNER TO ledger_owner` fails -- since PostgreSQL 16 that
+// statement requires the caller to be able to SET ROLE to the new owner.
+// The failure surfaced as `must be able to SET ROLE "ledger_owner"` followed
+// by an echo of the entire 1600-line migration, with `schema_migrations`
+// left at `(1, dirty=t)` for a human to force. Migrate's own preflight
+// (prepareLedgerOwnerIdentity) had nothing to say about it because it ran
+// AFTER applyBaseline.
+//
+// Returns the credential a SET-only membership had to be created for (empty
+// when nothing was changed), which the caller must revoke when the run ends.
+//
+// Deliberately a no-op on a cold cluster: ledger_owner not existing means 001
+// is about to create it and self-grant, which is the path every first install
+// takes and the one this must not disturb. Also a no-op for a superuser or
+// for any credential an operator has already made a member -- the same three
+// exits prepareLedgerOwnerIdentity takes, asked one phase earlier.
+func prepareBaselineOwnerMembership(ctx context.Context, databaseURL string, run *migrateRun) (granted string, err error) {
+	conn, err := connectForMigration(ctx, databaseURL, run)
+	if err != nil {
+		return "", fmt.Errorf("postgres: migrate: baseline identity: connect: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	var runner string
+	var ownerExists, canActAsOwner bool
+	if err := conn.QueryRow(ctx, `
+		SELECT current_user,
+		       EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ledger_owner'),
+		       COALESCE((SELECT pg_has_role(current_user, oid, 'USAGE') FROM pg_roles WHERE rolname = 'ledger_owner'), false)
+	`).Scan(&runner, &ownerExists, &canActAsOwner); err != nil {
+		return "", fmt.Errorf("postgres: migrate: baseline identity: probe role: %w", err)
+	}
+	if !ownerExists || canActAsOwner {
+		return "", nil
+	}
+
+	// The capability, not the catalogue shape: more than one arrangement
+	// permits SET ROLE, and this is the only thing any of them is wanted for.
+	// A failed statement outside a transaction does not poison the session.
+	if _, roleErr := conn.Exec(ctx, "SET ROLE ledger_owner"); roleErr == nil {
+		if _, resetErr := conn.Exec(ctx, "RESET ROLE"); resetErr != nil {
+			return "", fmt.Errorf("postgres: migrate: baseline identity: reset role: %w", resetErr)
+		}
+		return "", nil
+	}
+
+	// Granting a route to ledger_owner is only a bounded thing to do if this
+	// credential is not simultaneously serving traffic -- the same refusal
+	// applyRemainingMigrations makes, for the same reason, now also covering
+	// the phase that used to run before it.
+	if err := assertSoleSessionOnCredential(ctx, conn, runner, run); err != nil {
+		return "", err
+	}
+
+	if _, grantErr := conn.Exec(ctx, fmt.Sprintf(
+		"GRANT ledger_owner TO %s WITH SET TRUE, INHERIT FALSE", pgx.Identifier{runner}.Sanitize()),
+	); grantErr != nil {
+		return "", fmt.Errorf("postgres: migrate: the roles ledger_owner/ledger_app/ledger_ro already exist on this cluster "+
+			"(another ledger database on the same server), and %q can neither SET ROLE to ledger_owner nor grant itself that "+
+			"membership. 001_baseline transfers every object it creates to ledger_owner, and since PostgreSQL 16 that requires "+
+			"the caller to be able to SET ROLE to it -- so the install would fail halfway and leave the database marked dirty. "+
+			"Nothing has been applied. Fix it with ONE of: run migrations as a superuser or as ledger_owner itself; or have a "+
+			"superuser (or a holder of ADMIN OPTION on ledger_owner -- the credential that installed the first ledger database "+
+			"on this cluster holds it permanently) run: GRANT ledger_owner TO %s WITH SET TRUE, INHERIT FALSE: %w",
+			runner, pgx.Identifier{runner}.Sanitize(), grantErr)
+	}
+
+	// And again, now that the membership exists: a pool that connected during
+	// the two statements above would otherwise hold a credential that can
+	// reach ledger_owner with nothing having noticed.
+	if err := assertSoleSessionOnCredential(ctx, conn, runner, run); err != nil {
+		return "", errors.Join(err, revokeLedgerOwner(databaseURL, runner, run))
+	}
+
+	return runner, nil
 }
 
 // applyBaseline runs 001_baseline, and only 001_baseline, on the credential in
 // databaseURL -- the one migration that needs that credential's own authority
 // (CREATE ROLE) and the one migration that can run without ledger_owner's.
-func applyBaseline(databaseURL string) error {
+func applyBaseline(databaseURL string, run *migrateRun) error {
 	connCfg, err := migrationConnConfig(databaseURL)
 	if err != nil {
 		return fmt.Errorf("postgres: migrate: %w", err)
@@ -286,7 +495,7 @@ func applyBaseline(databaseURL string) error {
 	// a URL makes golang-migrate open the connection, and this one has to
 	// carry migrationAppName like every other connection Migrate opens, or the
 	// session guard downstream would count it as somebody else's.
-	db := stdlib.OpenDB(*connCfg)
+	db := stdlib.OpenDB(*connCfg, afterConnectNoting(run, nil))
 	db.SetMaxOpenConns(1)
 
 	m, err := newMigrateOverDB(db, connCfg.Database)
@@ -340,13 +549,13 @@ func newMigrateOverDB(db *sql.DB, databaseName string) (*migrate.Migrate, error)
 // schema_migrations writes, so pinning the pool to one connection is what
 // makes "the session that switched roles" and "the session that migrates" the
 // same sentence.
-func applyRemainingMigrations(databaseURL string) (err error) {
+func applyRemainingMigrations(databaseURL string, run *migrateRun) (err error) {
 	connCfg, cfgErr := migrationConnConfig(databaseURL)
 	if cfgErr != nil {
 		return fmt.Errorf("postgres: migrate: %w", cfgErr)
 	}
 
-	setRole, granted, err := prepareLedgerOwnerIdentity(databaseURL)
+	setRole, granted, err := prepareLedgerOwnerIdentity(databaseURL, run)
 	if err != nil {
 		return err
 	}
@@ -354,20 +563,20 @@ func applyRemainingMigrations(databaseURL string) (err error) {
 		// errors.Join, not "return the first one": a migration failure and a
 		// failure to give the membership back are independent facts about
 		// different things, and the second one is the one nobody else can see.
-		defer func() { err = errors.Join(err, revokeLedgerOwner(databaseURL, granted)) }()
+		defer func() { err = errors.Join(err, revokeLedgerOwner(databaseURL, granted, run)) }()
 	}
 
-	var opts []stdlib.OptionOpenDB
+	var switchRole func(context.Context, *pgx.Conn) error
 	if setRole {
-		opts = append(opts, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		switchRole = func(ctx context.Context, conn *pgx.Conn) error {
 			if _, err := conn.Exec(ctx, "SET ROLE ledger_owner"); err != nil {
 				return fmt.Errorf("postgres: migrate: set role ledger_owner: %w", err)
 			}
 			return nil
-		}))
+		}
 	}
 
-	db := stdlib.OpenDB(*connCfg, opts...)
+	db := stdlib.OpenDB(*connCfg, afterConnectNoting(run, switchRole))
 	// One connection, never recycled: SET ROLE lives in the session, so a pool
 	// that quietly opened a second one would run the next migration as the
 	// runner again -- and the failure would be a permission error somewhere in
@@ -418,9 +627,9 @@ func applyRemainingMigrations(databaseURL string) (err error) {
 // credential that cannot act as ledger_owner cannot run any migration after
 // 001, so continuing only converts one actionable error into a dirty database
 // and a 42501 from whichever statement happens to be first.
-func prepareLedgerOwnerIdentity(databaseURL string) (setRole bool, granted string, err error) {
+func prepareLedgerOwnerIdentity(databaseURL string, run *migrateRun) (setRole bool, granted string, err error) {
 	ctx := context.Background()
-	conn, err := connectForMigration(ctx, databaseURL)
+	conn, err := connectForMigration(ctx, databaseURL, run)
 	if err != nil {
 		return false, "", fmt.Errorf("postgres: migrate: owner identity: connect: %w", err)
 	}
@@ -447,7 +656,7 @@ func prepareLedgerOwnerIdentity(databaseURL string) (setRole bool, granted strin
 	// ledger_owner, which is only a bounded thing to do if this credential is
 	// not simultaneously serving traffic. Checked before anything is arranged,
 	// so the refusal costs nothing and changes nothing.
-	if err := assertSoleSessionOnCredential(ctx, conn, runner); err != nil {
+	if err := assertSoleSessionOnCredential(ctx, conn, runner, run); err != nil {
 		return false, "", err
 	}
 
@@ -471,8 +680,8 @@ func prepareLedgerOwnerIdentity(databaseURL string) (setRole bool, granted strin
 	// reach ledger_owner, with nothing having noticed. Revoked here rather
 	// than left to the caller's defer, because the caller is being told the
 	// run never started.
-	if err := assertSoleSessionOnCredential(ctx, conn, runner); err != nil {
-		return false, "", errors.Join(err, revokeLedgerOwner(databaseURL, runner))
+	if err := assertSoleSessionOnCredential(ctx, conn, runner, run); err != nil {
+		return false, "", errors.Join(err, revokeLedgerOwner(databaseURL, runner, run))
 	}
 
 	return true, runner, nil
@@ -490,18 +699,38 @@ func prepareLedgerOwnerIdentity(databaseURL string) (setRole bool, granted strin
 // deploy with an instruction in it (working-agreements.md §3: fail-closed,
 // not fail-open).
 //
-// Our own connections are excluded by application_name rather than by pid.
-// Migrate opens several across a run -- the cluster lock, 001's, this one --
-// and a connection that has just been closed can still be listed for the
-// moment its backend takes to exit, so a pid-based answer would depend on
-// that timing. Everything this file opens carries migrationAppName; anything
-// else on this credential belongs to somebody else.
+// Our own connections are excluded by BACKEND PID -- every pid this run has
+// opened, not just the probing one (migrateRun). Two properties are needed at
+// once and only that combination has both:
+//
+//   - not self-reportable. The exclusion key was application_name until
+//     2026-09-03 (install-roles.md M2), and application_name is a value the
+//     session being audited sets for itself: an application pool that issued
+//     `SET application_name = 'azex-ledger-migrate'` was not counted, so the
+//     refusal below never fired and the whole run proceeded on a credential
+//     the application was holding -- measured, and precisely the deployment
+//     shape this guard exists for. A per-run random suffix would not have
+//     fixed it either: a session on this credential can read
+//     pg_stat_activity's rows for its own role and copy whatever it finds
+//     there. A pid is assigned by the server; nothing a client sends changes
+//     it.
+//   - stable across our own churn. Migrate opens several connections in a
+//     run (cluster lock on the maintenance database, readiness probe, 001's,
+//     this one, 002..N's, the revoke) and a backend asked to close still
+//     appears here for the moment it takes to exit. Excluding only
+//     pg_backend_pid() would count those and refuse the run for no reason,
+//     which is why the original chose a name over a pid; recording the run's
+//     pids removes the choice.
+//
+// application_name is still stamped on every connection and still printed in
+// the refusal, as the label that tells an operator which pool is in the way.
+// It is simply no longer trusted to say who WE are.
 //
 // Non-superusers see the full row for sessions of their own role (Postgres
 // masks only other roles' rows), so this reads the same on the CREATEROLE
 // bootstrap credential as it does on a superuser -- verified on
 // postgres:17.10.
-func assertSoleSessionOnCredential(ctx context.Context, conn *pgx.Conn, runner string) error {
+func assertSoleSessionOnCredential(ctx context.Context, conn *pgx.Conn, runner string, run *migrateRun) error {
 	var others int
 	var names string
 	if err := conn.QueryRow(ctx, `
@@ -510,17 +739,18 @@ func assertSoleSessionOnCredential(ctx context.Context, conn *pgx.Conn, runner s
 		FROM pg_stat_activity
 		WHERE usename = current_user
 		  AND pid <> pg_backend_pid()
-		  AND application_name IS DISTINCT FROM $1
-	`, migrationAppName).Scan(&others, &names); err != nil {
+		  AND pid <> ALL($1::int[])
+	`, run.ownPIDs()).Scan(&others, &names); err != nil {
 		return fmt.Errorf("postgres: migrate: check for other sessions on the migration credential: %w", err)
 	}
 	if others == 0 {
 		return nil
 	}
 	return fmt.Errorf("postgres: migrate: refusing to run: %d other session(s) are connected as %q "+
-		"(pg_stat_activity, application_name: %s). Migrations after 001_baseline need a connection that can act as "+
-		"ledger_owner, and every session holding this credential can reach that role deliberately for as long as the "+
-		"run lasts -- including an application pool. Give migrations their own credential (MIGRATE_DATABASE_URL, "+
+		"(pg_stat_activity, application_name: %s). Migrations need a connection that can act as "+
+		"ledger_owner -- 001_baseline's closing ownership sweep included, on a cluster where these roles already exist "+
+		"-- and every session holding this credential can reach that role deliberately for as long as the "+
+		"run lasts, including an application pool. Give migrations their own credential (MIGRATE_DATABASE_URL, "+
 		"separate from the application's DATABASE_URL), or stop the application before migrating. A superuser or "+
 		"ledger_owner connection needs no arrangement and is not subject to this check",
 		others, runner, names)
@@ -569,14 +799,14 @@ func migrateBaselineFirst(m *migrate.Migrate) error {
 // return an error after applying every migration successfully; Migrate's own
 // doc comment says so, and the alternative is a migration credential that
 // quietly keeps a standing route to ledger_owner for as long as it exists.
-func revokeLedgerOwner(databaseURL, runner string) error {
+func revokeLedgerOwner(databaseURL, runner string, run *migrateRun) error {
 	const remedy = "the migration credential %q is still a member of ledger_owner with the SET option this run gave it. " +
 		"Revoke it by hand (REVOKE ledger_owner FROM %q) -- until then any session on that credential can SET ROLE ledger_owner and from " +
 		"there ALTER, DROP and TRUNCATE every object in the schema, which is the standing authority 001_baseline asks operators not to " +
 		"leave lying around: %w"
 
 	ctx := context.Background()
-	conn, err := connectForMigration(ctx, databaseURL)
+	conn, err := connectForMigration(ctx, databaseURL, run)
 	if err != nil {
 		return fmt.Errorf("postgres: migrate: revoke: connect: "+remedy, runner, runner, err)
 	}
@@ -661,13 +891,13 @@ func toMigrateURL(databaseURL string) string {
 // session-level advisory lock anywhere in this repository, so nothing here
 // can participate in a wait-for cycle. Pinned by
 // TestNoBlockingSessionAdvisoryLocks.
-func acquireClusterLock(ctx context.Context, databaseURL string, cfg migrateConfig) (unlock func(), err error) {
+func acquireClusterLock(ctx context.Context, databaseURL string, cfg migrateConfig, run *migrateRun) (unlock func(), err error) {
 	lockURL, err := maintenanceDatabaseURL(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("derive maintenance database url: %w", err)
 	}
 
-	conn, err := connectForMigration(ctx, lockURL)
+	conn, err := connectForMigration(ctx, lockURL, run)
 	if err != nil {
 		return nil, fmt.Errorf("connect to maintenance database: %w", err)
 	}
@@ -725,13 +955,13 @@ func maintenanceDatabaseURL(databaseURL string) (string, error) {
 	return u.String(), nil
 }
 
-func waitForDatabase(databaseURL string, timeout time.Duration) error {
+func waitForDatabase(databaseURL string, timeout time.Duration, run *migrateRun) error {
 	ctx := context.Background()
 
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		conn, err := connectForMigration(ctx, databaseURL)
+		conn, err := connectForMigration(ctx, databaseURL, run)
 		if err == nil {
 			pingErr := conn.Ping(ctx)
 			conn.Close(ctx)

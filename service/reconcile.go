@@ -191,6 +191,37 @@ type PeriodCloseViolation struct {
 	ClosedAt    time.Time
 }
 
+// CorruptReversalLink is one way in which a journal carrying
+// `reversal_of = O` is not a reversal of O (I-51; 2026-09-03 independent
+// review, money-out.md M-2).
+//
+// Violation is one of:
+//
+//   - "unmatched_dimension" -- ReversalUID posts an entry that, flipped back
+//     onto O's grain, lands on a dimension O never posted. The net-zero
+//     forgery has this shape: no money moves, and the "already reversed"
+//     figure climbs anyway, so a later "reverse everything remaining"
+//     reverses less than everything.
+//   - "over_reversed" -- the total linked to O on this dimension exceeds
+//     what O posted there. ReversalUID is empty: an overshoot is a property
+//     of the total, and naming whichever journal happened to be last would
+//     point at the wrong row.
+//
+// Identified by uid only (I-18). AccountHolder is a dimension coordinate,
+// not an id in the internal-BIGSERIAL sense, and travels as-is; the currency
+// and classification are resolved to uid/code before they reach a Finding.
+type CorruptReversalLink struct {
+	OriginalUID      string
+	ReversalUID      string
+	Violation        string
+	AccountHolder    int64
+	CurrencyID       int64
+	ClassificationID int64
+	EntryType        string
+	ReversedAmount   decimal.Decimal
+	OriginalAmount   decimal.Decimal
+}
+
 // ---------------------------------------------------------------------------
 // ReconcileQuerier — the port consumed by FullReconciliationService
 // ---------------------------------------------------------------------------
@@ -275,6 +306,12 @@ type ReconcileQuerier interface {
 	// Independent of the advisory barrier that is supposed to make this
 	// impossible: a barrier still needs an observable that can falsify it.
 	PeriodCloseViolations(ctx context.Context, pageLimit int) ([]PeriodCloseViolation, error)
+	// reversal_chain_integrity (I-51) — journals linked with `reversal_of`
+	// that are not reversals of what they point at. The rules run on the
+	// way in and again where a reversal is derived; both are triggered by
+	// somebody posting or reversing something, so a forged link is
+	// otherwise unreported until then. Up to pageLimit rows.
+	CorruptReversalLinks(ctx context.Context, pageLimit int) ([]CorruptReversalLink, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +381,12 @@ type FullReconciliationConfig struct {
 	// NegativeBalancePageLimit). Reaching the cap marks the check incomplete
 	// rather than silently truncating the finding list.
 	PeriodCloseViolationPageLimit int
+
+	// CorruptReversalLinkPageLimit caps the number of reversal-chain
+	// violations fetched per run for the reversal_chain_integrity check
+	// (default 200, mirroring the two above). Reaching the cap marks the
+	// check incomplete rather than silently truncating the finding list.
+	CorruptReversalLinkPageLimit int
 }
 
 func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
@@ -380,6 +423,9 @@ func (c *FullReconciliationConfig) withDefaults() FullReconciliationConfig {
 	}
 	if out.PeriodCloseViolationPageLimit == 0 {
 		out.PeriodCloseViolationPageLimit = 200
+	}
+	if out.CorruptReversalLinkPageLimit == 0 {
+		out.CorruptReversalLinkPageLimit = 200
 	}
 	return out
 }
@@ -562,6 +608,9 @@ func (s *FullReconciliationService) RunFullReconciliation(ctx context.Context) (
 
 	// --- period_close_violations: journals written behind an already-active close line (I-59) ---
 	checks = append(checks, s.runCheckPeriodCloseViolations(ctx))
+
+	// --- reversal_chain_integrity: journals linked as reversals that are not (I-51) ---
+	checks = append(checks, s.runCheckReversalChainIntegrity(ctx))
 
 	// Compute overall result. Violations found and coverage achieved are
 	// tracked separately: a run that examined half the fleet and found
@@ -1894,6 +1943,96 @@ func (s *FullReconciliationService) runCheckPeriodCloseViolations(ctx context.Co
 	} else if len(result.Findings) == 0 {
 		result.Findings = append(result.Findings, core.Finding{
 			Description: "period close: no journal was written behind the active close line",
+		})
+	}
+
+	return result
+}
+
+// runCheckReversalChainIntegrity is the reversal_chain_integrity check
+// (docs/INVARIANTS.md I-51; 2026-09-03 independent review, money-out.md
+// M-2): it looks for journals carrying `reversal_of = O` that are not
+// reversals of O.
+//
+// Why a fleet scan when I-51 already has two enforcement points. The input
+// gate (validateReversalOfInput) covers what this library writes, and the
+// read-side gate (assertReversalChainIsWellFormed) covers every figure
+// derived from a chain -- but `journals.reversal_of` is an ordinary column
+// `ledger_app` holds INSERT on, and BOTH gates only fire when somebody tries
+// to post or reverse something. Between the forgery and the next reversal of
+// that journal, nothing looks. The measured incident is precisely that gap:
+// one appended row, no money moved, every other check green, and the corruption
+// surfaces only when a clawback runs -- possibly months later, and possibly
+// as a refusal in the middle of an incident. This makes the chain's shape an
+// observable in its own right.
+//
+// It cannot pass by failing. A query error is a Finding with Passed=false
+// AND Complete=false: "the scan could not run" must never be readable as
+// "the chains are fine" (working-agreements §3). Same for hitting the page
+// limit, which marks the run incomplete rather than truncating the list.
+//
+// It does not attempt repair and does not tell the operator to. Journals are
+// append-only (I-2); the correction is a human decision, and
+// docs/RUNBOOK.md section 19 is the procedure.
+func (s *FullReconciliationService) runCheckReversalChainIntegrity(ctx context.Context) core.CheckResult {
+	result := core.CheckResult{Name: "reversal_chain_integrity", Passed: true, Complete: true, Findings: []core.Finding{}, CheckedAt: time.Now()}
+
+	rows, err := s.querier.CorruptReversalLinks(ctx, s.cfg.CorruptReversalLinkPageLimit)
+	if err != nil {
+		result.Passed = false
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "reversal chain integrity scan could not run",
+			Detail:      err.Error(),
+		})
+		return result
+	}
+
+	for _, r := range rows {
+		result.Passed = false
+		currency := s.externalCurrencyRef(ctx, r.CurrencyID)
+		classification := s.externalClassificationRef(ctx, r.ClassificationID)
+
+		switch r.Violation {
+		case "over_reversed":
+			s.logger.Warn("service: reconcile: reversal chain claims more than the original posted",
+				"original_journal_uid", r.OriginalUID,
+				"account_holder", r.AccountHolder,
+				"currency", currency,
+				"classification", classification,
+			)
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf(
+					"journal %s: dimension (holder %d, %s, %s, %s) has been reversed by %s, more than the %s it posted",
+					r.OriginalUID, r.AccountHolder, currency, classification, r.EntryType,
+					r.ReversedAmount.String(), r.OriginalAmount.String()),
+				Detail: "violation=over_reversed; see docs/RUNBOOK.md section 19 for the query that lists every journal linked to this one",
+			})
+		default:
+			s.logger.Warn("service: reconcile: journal linked as a reversal of something it does not reverse",
+				"original_journal_uid", r.OriginalUID,
+				"reversal_journal_uid", r.ReversalUID,
+				"account_holder", r.AccountHolder,
+				"currency", currency,
+				"classification", classification,
+			)
+			result.Findings = append(result.Findings, core.Finding{
+				Description: fmt.Sprintf(
+					"journal %s is linked as a reversal of %s but its entry on (holder %d, %s, %s, %s) reverses nothing that journal posted",
+					r.ReversalUID, r.OriginalUID, r.AccountHolder, currency, classification, r.EntryType),
+				Detail: fmt.Sprintf("violation=%s amount=%s; see docs/RUNBOOK.md section 19", r.Violation, r.ReversedAmount.String()),
+			})
+		}
+	}
+
+	if len(rows) >= s.cfg.CorruptReversalLinkPageLimit {
+		result.Complete = false
+		result.Findings = append(result.Findings, core.Finding{
+			Description: fmt.Sprintf("reversal chain integrity scan incomplete: hit page limit (%d rows)", s.cfg.CorruptReversalLinkPageLimit),
+		})
+	} else if len(result.Findings) == 0 {
+		result.Findings = append(result.Findings, core.Finding{
+			Description: "reversal chains: every journal linked with reversal_of reverses what it points at",
 		})
 	}
 

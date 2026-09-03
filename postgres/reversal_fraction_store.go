@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -166,7 +167,7 @@ func (s *LedgerStore) reverseJournalFractionWithQueries(ctx context.Context, q *
 		return nil, fmt.Errorf("postgres: reverse journal fraction: journal %d has no entries: %w", journalID, core.ErrNotFound)
 	}
 
-	alreadyReversed, err := cumulativeReversedByDimension(ctx, q, journalID)
+	alreadyReversed, err := cumulativeReversedByDimension(ctx, q, original, entries)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +495,7 @@ func (s *LedgerStore) AuthorizeReversal(ctx context.Context, journalUID string, 
 		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: journal %q has no entries: %w", journalUID, core.ErrNotFound)
 	}
 
-	alreadyReversed, err := cumulativeReversedByDimension(ctx, s.q, original.ID)
+	alreadyReversed, err := cumulativeReversedByDimension(ctx, s.q, original, entries)
 	if err != nil {
 		return core.AuthorizedJournal{}, fmt.Errorf("postgres: authorize reversal: %w", err)
 	}
@@ -521,26 +522,193 @@ func (s *LedgerStore) AuthorizeReversal(ctx context.Context, journalUID string, 
 	return s.Authorize(ctx, input)
 }
 
+// entriesByDimension sums a journal's entries per (holder, currency,
+// classification, entry_type), keeping first-appearance order so callers that
+// report on a dimension name the same one every time.
+func entriesByDimension(entries []sqlcgen.ListJournalEntriesRow) (map[entryDimKey]decimal.Decimal, []entryDimKey) {
+	byDim := make(map[entryDimKey]decimal.Decimal, len(entries))
+	order := make([]entryDimKey, 0, len(entries))
+	for _, e := range entries {
+		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: core.EntryType(e.EntryType)}
+		if _, seen := byDim[key]; !seen {
+			order = append(order, key)
+		}
+		byDim[key] = byDim[key].Add(mustNumericToDecimal(e.Amount))
+	}
+	return byDim, order
+}
+
 // cumulativeReversedByDimension sums, per account dimension and *original*
 // entry_type, the amount already reversed across every prior reversal (full
-// or partial) of journalID.
-func cumulativeReversedByDimension(ctx context.Context, q *sqlcgen.Queries, journalID int64) (map[entryDimKey]decimal.Decimal, error) {
+// or partial) of original -- and refuses to answer at all when what it is
+// summing is not a well-formed reversal history.
+//
+// The refusal is I-51's read side (2026-09-03 independent review,
+// money-out.md M-2), and it is here rather than in each caller because this
+// function IS the consumption point: every figure derived from a reversal
+// chain -- reversalEntriesFor's "reverse everything remaining" remainder,
+// AuthorizeReversal's pre-signed intent, validateReversalOfInput's ceiling
+// -- passes through this map, and each of them reads a journal carrying
+// `reversal_of = J` as "a reversal of J worth this much" without ever
+// asking whether it is one.
+//
+// validateReversalOfInput enforces the same three rules on the way IN, but
+// only on the way in through this library: `journals.reversal_of` is an
+// ordinary column and `ledger_app` holds INSERT on `journals`. Under this
+// repo's standing threat model (an attacker with the application's DB
+// credential) the input gate is therefore not a guarantee about what is in
+// the table, and the measured consequence was specific: appending one
+// net-zero journal linked to a real 100 deposit made
+// `ReverseJournalFraction(J, 1, 1)` -- "reverse everything" -- post a
+// reversal of 50, return a nil error, and leave 50 on the books with all
+// sixteen reconciliation checks then in the suite green (the seventeenth,
+// "reversal_chain_integrity", exists because of this). Under-reversing is
+// the direction
+// that does not move money out, which is precisely why nothing noticed.
+//
+// So the answer is fail-closed and names the offending journal: an operator
+// running a full clawback is told the chain is corrupt instead of being told
+// the clawback succeeded. It does not attempt repair -- journals are
+// append-only (I-2), the forged row cannot be deleted, and unwinding it is a
+// deliberate act (a correcting journal, or the owner-only quarantine
+// procedure in docs/RUNBOOK.md), not something a reversal call should do on
+// somebody's behalf.
+//
+// Cost: one extra query (the reversal journals' own rows, for their uids --
+// internal ids appear in no public contract, I-18) plus arithmetic over
+// entries this function already reads. Reversals are rare and already take
+// the original journal's row lock; nothing on the hot posting path calls it
+// unless the caller supplied a `reversal_of`.
+func cumulativeReversedByDimension(ctx context.Context, q *sqlcgen.Queries, original sqlcgen.Journal, originalEntries []sqlcgen.ListJournalEntriesRow) (map[entryDimKey]decimal.Decimal, error) {
+	journalID := original.ID
 	rows, err := q.ListReversalEntriesByOriginal(ctx, int64ToInt8(&journalID))
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reverse journal fraction: list existing reversal entries: %w", err)
 	}
 	out := make(map[entryDimKey]decimal.Decimal, len(rows))
+	perReversal := make(map[int64]map[entryDimKey]decimal.Decimal, 4)
 	for _, r := range rows {
 		// Reversal entries are flipped relative to the original; invert back
 		// to the original entry_type to key the same dimension.
-		originalType := core.EntryTypeCredit
-		if core.EntryType(r.EntryType) == core.EntryTypeCredit {
-			originalType = core.EntryTypeDebit
+		key := entryDimKey{
+			holder:           r.AccountHolder,
+			currencyID:       r.CurrencyID,
+			classificationID: r.ClassificationID,
+			entryType:        flipEntryType(core.EntryType(r.EntryType)),
 		}
-		key := entryDimKey{holder: r.AccountHolder, currencyID: r.CurrencyID, classificationID: r.ClassificationID, entryType: originalType}
-		out[key] = out[key].Add(mustNumericToDecimal(r.Amount))
+		amount := mustNumericToDecimal(r.Amount)
+		out[key] = out[key].Add(amount)
+		if perReversal[r.JournalID] == nil {
+			perReversal[r.JournalID] = map[entryDimKey]decimal.Decimal{}
+		}
+		perReversal[r.JournalID][key] = perReversal[r.JournalID][key].Add(amount)
+	}
+	if len(perReversal) == 0 {
+		return out, nil
+	}
+	if err := assertReversalChainIsWellFormed(ctx, q, original, originalEntries, out, perReversal); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// assertReversalChainIsWellFormed applies validateReversalOfInput's rules 2
+// and 3 to the reversal journals ALREADY linked to original: every entry must
+// invert an entry the original actually has, and the cumulative amount per
+// dimension must not exceed the original's. See
+// cumulativeReversedByDimension's doc comment for why this runs on read.
+//
+// Rule 1 (the referenced journal must not itself be a reversal) is checked by
+// each caller on `original` before it gets here, and is a property of the
+// journal being reversed rather than of its history.
+//
+// reversedByDim is the cumulative map (all reversals summed); perReversal is
+// the same amounts split per reversal journal, so the error can name which
+// one is wrong rather than reporting a total nobody can act on.
+func assertReversalChainIsWellFormed(
+	ctx context.Context,
+	q *sqlcgen.Queries,
+	original sqlcgen.Journal,
+	originalEntries []sqlcgen.ListJournalEntriesRow,
+	reversedByDim map[entryDimKey]decimal.Decimal,
+	perReversal map[int64]map[entryDimKey]decimal.Decimal,
+) error {
+	originalUID := pgToUID(original.Uid)
+	originalByDim, _ := entriesByDimension(originalEntries)
+
+	journalID := original.ID
+	reversals, err := q.ListReversalsByOriginalJournalID(ctx, int64ToInt8(&journalID))
+	if err != nil {
+		return fmt.Errorf("postgres: reversal chain: list reversals of %q: %w", originalUID, err)
+	}
+
+	// Ordered by id (oldest first, the query's own ORDER BY) so the journal
+	// reported is the earliest offending one, which is the one an operator
+	// has to look at first.
+	for _, r := range reversals {
+		dims := perReversal[r.ID]
+		if len(dims) == 0 {
+			// A reversal journal with no entries at all contributes nothing
+			// to the sums and cannot make a clawback under-reverse. Left
+			// alone deliberately: the input gate already refuses to post
+			// one, and failing every reversal of the original over a row
+			// that moves no money would be a denial of service rather than
+			// a protection.
+			continue
+		}
+		for _, key := range sortedDimKeys(dims) {
+			if _, ok := originalByDim[key]; !ok {
+				return fmt.Errorf(
+					"postgres: reversal chain of journal %q is corrupt: journal %q is linked as a reversal but its entry "+
+						"(holder %d, currency %d, classification %d, %s) reverses nothing the original posted; "+
+						"the amount already-reversed figure derived from it is therefore not a reversal history. "+
+						"Refusing to derive a reversal from it -- see docs/RUNBOOK.md \"Corrupt reversal chain\": %w",
+					originalUID, pgToUID(r.Uid), key.holder, key.currencyID, key.classificationID, flipEntryType(key.entryType),
+					core.ErrConflict,
+				)
+			}
+		}
+	}
+
+	// The cumulative ceiling is checked once over the whole chain rather than
+	// per journal: an over-reversal is a property of the total, and blaming
+	// whichever journal happens to be last would point at the wrong row.
+	for _, key := range sortedDimKeys(reversedByDim) {
+		if reversedByDim[key].GreaterThan(originalByDim[key]) {
+			return fmt.Errorf(
+				"postgres: reversal chain of journal %q is corrupt: dimension (holder %d, currency %d, classification %d, %s) "+
+					"has already been reversed by %s, more than the original's %s. "+
+					"Refusing to derive a reversal from it -- see docs/RUNBOOK.md \"Corrupt reversal chain\": %w",
+				originalUID, key.holder, key.currencyID, key.classificationID, key.entryType,
+				reversedByDim[key], originalByDim[key], core.ErrConflict,
+			)
+		}
+	}
+	return nil
+}
+
+// sortedDimKeys orders a dimension map deterministically, so two runs over
+// the same corrupt chain report the same dimension. Map iteration order would
+// otherwise make the error text depend on the run.
+func sortedDimKeys(m map[entryDimKey]decimal.Decimal) []entryDimKey {
+	keys := make([]entryDimKey, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		switch {
+		case a.holder != b.holder:
+			return a.holder < b.holder
+		case a.currencyID != b.currencyID:
+			return a.currencyID < b.currencyID
+		case a.classificationID != b.classificationID:
+			return a.classificationID < b.classificationID
+		default:
+			return a.entryType < b.entryType
+		}
+	})
+	return keys
 }
 
 // scaleByFraction computes total*num/den rounded to exponent decimal places
@@ -613,13 +781,9 @@ func validateReversalOfInput(ctx context.Context, q *sqlcgen.Queries, original s
 		)
 	}
 
-	originalByDim := make(map[entryDimKey]decimal.Decimal, len(originalEntries))
-	for _, e := range originalEntries {
-		key := entryDimKey{holder: e.AccountHolder, currencyID: e.CurrencyID, classificationID: e.ClassificationID, entryType: core.EntryType(e.EntryType)}
-		originalByDim[key] = originalByDim[key].Add(mustNumericToDecimal(e.Amount))
-	}
+	originalByDim, _ := entriesByDimension(originalEntries)
 
-	alreadyReversed, err := cumulativeReversedByDimension(ctx, q, original.ID)
+	alreadyReversed, err := cumulativeReversedByDimension(ctx, q, original, originalEntries)
 	if err != nil {
 		return fmt.Errorf("postgres: post journal: reversal_of: %w", err)
 	}

@@ -29,6 +29,8 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 16. [P5 signing key rotation](#16-p5-signing-key-rotation)
 17. [A booking's event was claimed by the wrong journal](#17-a-bookings-event-was-claimed-by-the-wrong-journal)
 18. [A deposit was dead-lettered](#18-a-deposit-was-dead-lettered)
+19. [Corrupt reversal chain](#19-corrupt-reversal-chain)
+20. [The external anchor was poisoned (verify welded to TAMPERED)](#20-the-external-anchor-was-poisoned-verify-welded-to-tampered)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -107,6 +109,8 @@ proof of the count):
 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 | `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32). Without a `core.AuthVerifier` (wired via `SetAuthCheck`, or `ledger-cli reconcile --full --pubkey-hex/--key-id`) this check **does not appear in `checks[]` at all** -- it is named in `skipped_checks` and `full_coverage` goes false. Never-signed journals are a coverage gap, not tamper evidence, so they are skipped rather than flagged |
+| `period_close_violations` | journals whose `effective_at` is behind the active close line AND that were written after that line was committed (I-15/I-59) |
+| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): a leg on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§19](#19-corrupt-reversal-chain) |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -906,19 +910,28 @@ default schema access, and transfers every table/sequence to `ledger_owner`
 > **So that deployment is refused rather than tolerated.** Before arranging
 > anything, and again once the membership exists, `Migrate()` counts the other
 > sessions connected as the migration credential (`pg_stat_activity`,
-> excluding its own connections by `application_name = azex-ledger-migrate`).
-> If there are any it revokes whatever it granted and returns:
+> excluding its own connections by **backend pid** — every pid this run has
+> opened). If there are any it revokes whatever it granted and returns:
 >
 > ```
 > postgres: migrate: refusing to run: 1 other session(s) are connected as
 > "ledger_app_deploy" (pg_stat_activity, application_name: myapp). Migrations
-> after 001_baseline need a connection that can act as ledger_owner, and every
-> session holding this credential can reach that role deliberately for as long
-> as the run lasts -- including an application pool. Give migrations their own
-> credential (MIGRATE_DATABASE_URL, separate from the application's
+> need a connection that can act as ledger_owner -- 001_baseline's closing
+> ownership sweep included, on a cluster where these roles already exist -- and
+> every session holding this credential can reach that role deliberately for as
+> long as the run lasts, including an application pool. Give migrations their
+> own credential (MIGRATE_DATABASE_URL, separate from the application's
 > DATABASE_URL), or stop the application before migrating. A superuser or
 > ledger_owner connection needs no arrangement and is not subject to this check
 > ```
+>
+> `application_name` appears in that message as a **label**, so you can tell
+> which pool is in the way. It is not what identifies Migrate's own
+> connections, and was not a safe thing to identify them by: until 2026-09-03
+> the guard excluded `application_name = azex-ledger-migrate`, so an
+> application pool that set that name for itself was not counted and the run
+> proceeded — fail-open, on exactly the deployment this guard exists for
+> (`install-roles.md` M2).
 >
 > A superuser or `ledger_owner` credential arranges nothing and is never
 > subject to the check.
@@ -979,6 +992,32 @@ Operational notes:
   genuinely cannot strip `SUPERUSER`. Fix it with a superuser connection
   and re-run; do not work around it by granting the migration credential
   superuser.
+- **Installing a SECOND ledger database on the same cluster** (the roles are
+  cluster-wide; the databases are not — Aaron's shared local `dev-postgres`
+  is exactly this shape, and I-47's cluster migration lock exists because it
+  is expected). `001` normally acquires its own `SET` membership on
+  `ledger_owner` as a side effect of *creating* that role; when the role
+  already exists, `CREATE ROLE ... IF NOT EXISTS` skips and the membership is
+  never granted, so `001`'s closing `ALTER TABLE ... OWNER TO ledger_owner`
+  cannot run (PostgreSQL 16+ requires the caller to be able to `SET ROLE` to
+  the new owner). Until 2026-09-03 that failed *inside* `001`, echoed the
+  whole migration file back at you, and left `schema_migrations` at
+  `(1, dirty=t)` for a human to force (`install-roles.md` M1).
+  `Migrate()` now arranges the membership **before** applying anything, using
+  the `ADMIN OPTION` the cluster's first installer permanently holds, and
+  revokes it when the run ends. If the credential holds neither the ability
+  to `SET ROLE ledger_owner` nor `ADMIN OPTION` on it, the run is refused
+  before the first statement — nothing applied, nothing dirty — with the exact
+  statement to fix it:
+
+  ```
+  GRANT ledger_owner TO "<your-migration-role>" WITH SET TRUE, INHERIT FALSE
+  ```
+
+  issued by a superuser or by whoever holds `ADMIN OPTION` (typically the
+  credential that installed the first ledger database on this cluster).
+  Pinned by `postgres.TestMigrate_SecondLedgerDatabaseOnACluster` and
+  `postgres.TestMigrate_SecondInstallWithoutAdminOptionFailsBeforeTouchingAnything`.
 - **Every migration after `001` needs `ledger_owner`'s privileges**,
   because `001`'s last act transfers every object it created to that
   role. `Migrate()` arranges this itself: it applies `001` alone on the
@@ -2202,6 +2241,183 @@ since you asked for something to happen.
   ([§13](#13-large--unreconciled-deposit-parked-in-review)).
 - The SQL for both, plus cursors and registration rescans, is in
   [§8](#8-common-investigation-queries).
+## 19. Corrupt reversal chain
+
+**Symptom**: a reversal is refused with
+
+```
+postgres: reversal chain of journal "<J>" is corrupt: journal "<R>" is linked as a
+reversal but its entry (holder …, currency …, classification …, debit) reverses
+nothing the original posted; …
+```
+
+or the `more than the original` variant of the same error. Both carry
+`core.ErrConflict` (HTTP 409). Nothing was posted — the clawback you asked
+for did **not** happen.
+
+**How it happens**: `journals.reversal_of` is an ordinary column and
+`ledger_app` holds INSERT on `journals`. I-51's rules refuse a bad link on
+the way in through this library, but a row appended by any holder of the
+application's DB credential never passes that gate. Every figure derived
+from a reversal chain reads such a row as "this much of J has already been
+reversed", so one net-zero journal linked to J makes
+`ReverseJournalFraction(J, 1, 1)` — *reverse everything remaining* — reverse
+less than everything. Before the read-side check it did that with a `nil`
+error and every reconciliation check green (2026-09-03 independent review,
+`money-out.md` M-2). The refusal is the fix: the derivation now stops rather
+than quietly under-correcting.
+
+**Or the alert came first**: the `reversal_chain_integrity` reconcile check
+(§1's table) scans for this without anyone attempting a reversal, and its
+findings name both journals. Either way the confirmation below is the same.
+
+**Confirm** — look at the whole chain of the journal you tried to reverse:
+
+```sql
+SELECT r.uid          AS reversal_uid,
+       r.source,
+       r.idempotency_key,
+       r.auth_key_id <> '' AS signed,
+       r.created_at,
+       e.account_holder, e.classification_id, e.entry_type, e.amount
+FROM journals o
+JOIN journals r ON r.reversal_of = o.id
+JOIN journal_entries e ON e.journal_id = r.id
+WHERE o.uid = '<original-journal-uid>'
+ORDER BY r.id, e.id;
+```
+
+Compare against the original's own entries (§8, "Find every journal that
+touched an account dimension"). A legitimate reversal inverts the original
+leg for leg: same `(account_holder, currency_id, classification_id)`,
+opposite `entry_type`. The offending row is usually obvious — it has legs on
+BOTH sides of the same dimension (net zero, moves no money), or a `source`
+belonging to no flow you run, or `signed = false` in a deployment where
+every journal is signed.
+
+**Resolve**. Journals are append-only (I-2): the forged row cannot be
+deleted, and there is deliberately no owner-only unlink for `reversal_of`
+(unlike `event_id`'s, §17 — that one exists because a wrong `event_id`
+wedges a booking permanently, whereas a wrong `reversal_of` blocks nothing
+except the derivation that would have been wrong anyway).
+
+1. **Treat it as a compromise of the application's DB credential until
+   proven otherwise.** Nothing in the library can write that row; see §10's
+   credential boundary, and rotate before doing anything else.
+2. **Establish what the honest reversal history is** — the rows your own
+   application posted, identified by `idempotency_key` and (where signing is
+   configured) a verifying signature. `service.VerifyLedger` /
+   `ledger-cli verify` and the `unauthorized_journals` reconcile check tell
+   you which journals carry a valid P5 signature; a forged row has none.
+3. **Post the correction you actually want as an ordinary journal**, not as
+   a reversal: a normal `PostJournal` moving the amount the honest chain
+   still owes, with a `metadata.reason` naming this incident. It carries no
+   `reversal_of`, so it does not extend the corrupt chain, and the amount is
+   one a human decided rather than one derived from poisoned history.
+4. **Do not "balance out" the forgery with another `reversal_of` row.** It
+   would satisfy nothing (the read-side rules apply to every link in the
+   chain, including the compensating one) and it removes the evidence's
+   shape.
+
+**Afterwards**: the original journal stays permanently unreversable through
+`ReverseJournal` / `ReverseJournalFraction`, by design — the chain cannot be
+un-corrupted, and a reversal derived from it would be wrong. That is the
+cost of append-only, and it is bounded: it affects exactly the journals the
+attacker linked to. Record which ones in the postmortem.
+
+---
+
+## 20. The external anchor was poisoned (verify welded to TAMPERED)
+
+**Symptom**: `ledger-cli verify` (or `service.VerifyLedger`) reports
+`TAMPERED` with the finding
+
+```
+anchor knows about seq <huge> but the DB chain only reaches seq <N>
+```
+
+on every run, and nothing you do to the database changes it. Secondary
+symptom, and the one that actually costs you evidence: `anchor_lag_seqs`
+sits at 0 while **no new roots are being published** — `catchUpAnchor`
+returns early whenever `latest.Seq <= anchorSeq`, so an anchor claiming a
+seq the chain will not reach for years silently stops external anchoring
+altogether.
+
+**How it happens**: whoever holds the anchor's write credential can
+`PutObject` at any `seq`, including one far ahead of the chain. On R2 with
+Object Lock in compliance mode that object **cannot be deleted by anyone**,
+including the account root, for the whole retention period — which is the
+property the anchor is chosen for (§10, "Deploying the R2 carrier") and,
+in this direction, the reason the red light cannot be switched off. Reported
+2026-09-03 (`install-roles.md` M5).
+
+**What is NOT poisoned** — check before assuming the worst:
+
+- `anchor_observations` (the memory that turns a *rollback* into evidence)
+  refuses to record a seq ahead of this deployment's own chain: migration
+  024's `ledger_record_anchor_observation` raises instead
+  (`refusing to record an anchor observation at seq … while this
+  deployment's own attestation chain only reaches seq …`, logged by
+  `catchUpAnchor` as a non-fatal error). So the injection does not weld
+  itself into the DB. Confirm with:
+
+  ```sql
+  SELECT MAX(observed_seq) AS remembered, (SELECT MAX(seq) FROM ledger_attestations) AS chain_head
+  FROM anchor_observations;
+  ```
+
+  `remembered <= chain_head` means only the object store is affected.
+  `remembered > chain_head` is a different, worse incident: the DB
+  credential is compromised too (`money-out.md` M-4) — work that first.
+- The ledger's own chain. `TAMPERED` here is a statement about the anchor,
+  not about `journal_entries`; the per-batch digest and per-journal
+  signature findings in the same report are what speak to the data.
+
+**Resolve — rotate the anchor identity.** The anchor is identified by its
+object-key prefix (`r2.Config.Key`), and `Head` lists exactly that prefix.
+A clean prefix is a clean anchor; the poisoned one stays where it is, intact
+and immutable, as forensic material.
+
+1. **Rotate the ledger-side R2 token first** (§10 lists its exact scopes:
+   `GetObject` + `PutObject` + `ListBucket`, never `DeleteObject`). Until
+   that is done a new prefix is poisoned as easily as the old one. If the
+   R2 *account* is suspect rather than one token, provision a new bucket
+   with Object Lock in a new account and treat that as the new identity.
+2. **Preserve the old prefix.** Do not attempt deletion (it will fail, and
+   attempting it needs a scope the token must not have). Record: the
+   injected `seq`, the object's `LastModified` and version id, and — from
+   R2's access log if you have one — which token wrote it.
+3. **Point `r2.Config.Key` at a fresh prefix** in the composition root and
+   redeploy the attestation worker. Nothing else changes; the DB chain is
+   untouched.
+4. **Let the worker republish the whole chain before trusting verify
+   again.** `catchUpAnchor` republishes from `anchorSeq+1` in pages of 1000
+   per run, so a chain of length N takes ⌈N/1000⌉ runs to be fully
+   re-anchored. Watch `anchor_lag_seqs` fall to 0.
+5. **Expect `TAMPERED` during that window, and do not read it as "still
+   broken".** The fresh prefix answers `Head = 0` while
+   `anchor_observations` remembers the highest honestly observed seq, so
+   `VerifyLedger` reports the anchor as having gone backwards — which is
+   exactly what it should say about an anchor identity that just started
+   over. It clears itself once step 4 catches up past the previous high
+   water mark. Write the switch-over time and the previous
+   `MAX(observed_seq)` into the incident log so the next on-call can tell
+   this window from a real regression.
+
+**Verifying history that predates the incident**: the old prefix still holds
+every honest seq up to the injection, immutably. An auditor points
+read-only tooling (`service.VerifyLedger` with an `*r2.Anchor` configured on
+the OLD prefix) at it to verify the chain as of that point; only the
+injected top object is spurious, and it is provably so — no
+`ledger_attestations` row carries that seq.
+
+**Why the fix is a runbook entry and not a clamp in the carrier**: `Head`'s
+contract is "the highest seq I know about" (I-56, no-regression), and the
+carrier does not know the local chain height — teaching it that limit would
+put a ledger-side invariant in the object-store adapter and give a future
+attacker a value to sit just underneath. `VerifyLedger` already compares the
+two and says so precisely; what was missing was a way back, which is this
+section.
 
 ---
 
