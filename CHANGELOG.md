@@ -35,6 +35,40 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **Migration 029 refuses writes the schema previously accepted** (I-66 /
+  I-67). Nothing in this library's own write paths produces any of them, but
+  a consumer with its own SQL, its own fixtures, or its own repair scripts
+  may:
+
+  - `entry_template_lines`: a line may only be inserted by the transaction
+    that created its `entry_templates` row. Appending a leg to an installed
+    template is refused. An owner-run repair (migration 016's shape) must
+    open the door explicitly with
+    `set_config('ledger.repair_template_lines', 'on', true)` in the same
+    transaction.
+  - `bookings`: `status` must be the classification lifecycle's `initial`,
+    `journal_id` must be `NULL`, `settled_amount` must be 0. A fixture that
+    inserted a booking already `confirmed` and already linked now has to do
+    it in two statements — create, then update — which is what the
+    application does.
+  - `reservations`: `status` must be `active`, `settled_amount` 0,
+    `journal_id` `NULL`.
+  - `ledger_attestations`: `seq` must be the chain head plus one,
+    `prev_root` must equal the head's `root_hash` (seq 1 links to
+    `core.GenesisRoot`), the three digest columns must be 32 bytes, and
+    `signature` / `key_id` must be non-empty. Out-of-order or placeholder
+    attestation rows are refused.
+  - `chain_cursors`: `last_scanned_block` may not decrease and may not
+    advance by more than 100,000 in one write; no other column may change.
+    A deliberate rewind goes through `ledger_rewind_chain_cursor`.
+
+- **`config_table_changes` grows on INSERT as well as UPDATE.** Twelve
+  tables now write a forensic row when a row is created, including
+  `bookings`, `events` and `reservations` at business rate. `journals` is
+  the named exception (it authenticates itself, and it is the highest-rate
+  write in the schema). Size for it; the reasoning is in 029's header and
+  `docs/CAPACITY.md`'s existing note for the 020 population.
+
 - **`postgres.NewPendingStore` takes a fourth argument, and `ConfirmPending`
   refuses to run inside `RunInTx` when it is set** (Wave 4, contract §7.20,
   I-64). `NewPendingStore(pool, ledger, classStore)` becomes
@@ -312,6 +346,87 @@ written because it was true when `[0.6.0]` shipped.
   shows "pending → confirmed" for on-chain deposits will see only the final
   state; if you need the intermediate one, lower `Confirmations` or drive
   ingestion from the webhook path.
+
+### Go module — Security (the INSERT path: migration 029)
+
+Third-round independent review (2026-09-03,
+[`docs/audits/2026-09-03-independent-review/`](docs/audits/2026-09-03-independent-review/);
+plan [`docs/plans/2026-09-03-wave5-contract.md`](docs/plans/2026-09-03-wave5-contract.md)
+§0 R3-1). Invariants **I-66** and **I-67**.
+
+- **Appending a row is now guarded and recorded, not free and silent**
+  (money-out C-1 / C-2 / M-1 / M-4, onchain-ops C-1, install-roles M3 / M4).
+  Every guard and every audit trigger in 001–028 fired on `UPDATE` or
+  `DELETE`: 24 `BEFORE UPDATE` row guards, 13 `BEFORE DELETE`, 11 audited
+  tables — and exactly one INSERT-time trigger in the whole schema (the
+  per-currency balance check). So for every configuration and state table,
+  `ledger_app` could APPEND a row of legal shape and the append was neither
+  refused nor recorded. Measured as a real `ledger_app` over a socket: two
+  appended `entry_template_lines` made every subsequent honest deposit
+  render at twice its amount **with a genuine signature on it** (all sixteen
+  reconciliation checks passed, `verify` said `VERIFIED`, solvency stayed
+  balanced); one appended `account_policies` tier undid a freeze and moved
+  an overdraft floor to −1,000,000 with zero forensic rows; one appended
+  `ledger_attestations` row at `seq = 888888` re-opened the anchor-observation
+  weld migration 024 had just closed.
+
+  Migration `029_insert_path_guards` closes it in two layers — a guard where
+  the honest writer satisfies a structural property an appended row cannot,
+  and an `AFTER INSERT` forensic row where it does not. See **Breaking**
+  below for the writes that now fail, and `docs/BREAKING.md` for what a
+  consumer has to do about each.
+
+- **`chain_cursors` is treated as untrusted input** (onchain-ops C-1, I-67).
+  It is the only state deciding which on-chain money the ledger is ever told
+  about, it had zero triggers, and the audit-exclusion list excused it on
+  three grounds that were each wrong (the monotonicity it cited lives in the
+  application layer this threat model assumes is bypassed; idempotency keys
+  absorb repeats, not gaps; and a skipped window means the ledger never sees
+  a deposit that is nevertheless swept into treasury, which reads as
+  *healthier* solvency). Now: monotonic in the database, capped at 100,000
+  blocks per write, audited on every write including the first, with an
+  owner-only `ledger_rewind_chain_cursor(chain_id, to_block, reason)` as the
+  one way backwards.
+
+- **The forward scan re-covers the last `WithRescanLookback` blocks on every
+  tick** (default 128; 0 disables). The database can bound and record a
+  forged cursor advance but cannot undo one, and the scan never looked back
+  (`from` = cursor+1). Re-scanning is free of consequence — `IngestDeposit`
+  is idempotent — so this costs one bounded log query per tick and recovers
+  a skipped window up to the lookback. A cursor **ahead of the chain head**
+  (a state this scanner cannot produce) is now reported and no longer wedges
+  the watcher into doing nothing forever.
+
+- **`ledger_rebalance_default_partition` builds only the months the data is
+  actually in** (install-roles M3). Its 120-month argument cap was measured
+  against parameters the caller chose and then widened — uncapped, correctly
+  — to cover the default partition's contents, but it filled that widened
+  span densely. `journal_entries.created_at` has no upper bound and
+  `ledger_app` may write it, so one balanced pair of entries dated 2050 made
+  a compliant call build 286 partitions (1,716 relations), each taking
+  `ACCESS EXCLUSIVE`, none droppable by the credential that caused it. The
+  widening stays uncapped and is now sparse: one forged row costs one
+  partition.
+
+- **A poisoned attestation tail has a way back** (money-out M-4). A
+  shape-valid row with an unverifiable signature can still be appended at the
+  true chain head — the database cannot check a signature — and both
+  `UPDATE` and `DELETE` were refused to every role including `ledger_owner`,
+  so `verify` was welded to `TAMPERED` with no path back short of dropping a
+  trigger under incident pressure. `ledger_discard_attestations_from(seq,
+  reason)` (owner-only, reason mandatory, writes a forensic row) removes the
+  poisoned **suffix** — never an edit, so what remains is always a prefix of
+  what was written — and takes its `entry_attestations` coverage with it so
+  the next batch re-attests those entries.
+
+- **Not closed, said plainly**: this does **not** stop a forged `bookings`
+  row from being auto-credited (money-out C-2). `bookings.metadata`
+  legitimately carries `block_number` at creation and the recheck loop scans
+  `pending` as well as `confirming`, so an append at the lifecycle's initial
+  status with a low `block_number` still reaches auto-credit. What 029
+  removes is the shorter path (born already `confirming`, already linked to a
+  journal, already part-settled) and the invisibility. The prevention that
+  path needs is an application-layer fence in `service/onchain.go`.
 
 ### Go module — Security (verified-balance gate: the hold term)
 

@@ -584,13 +584,19 @@ func TestBookingsAndEventsGuards(t *testing.T) {
 		SELECT gen_random_uuid(), jt.id, 'beg-j2', 20, 20 FROM journal_types jt WHERE jt.uid = $1::uuid RETURNING id
 	`, jtUID).Scan(&journal2))
 
+	// Two statements, not one: migration 029 refuses a booking born already
+	// linked to a journal (bookings.journal_id is set by the transition that
+	// posts the accounting), so the fixture reaches the state under test the
+	// way the application does -- create, then link.
 	var bookingID int64
 	var bookingUID string
 	require.NoError(t, pool.QueryRow(ctx, `
-		INSERT INTO bookings (classification_id, account_holder, currency_id, amount, status, idempotency_key, journal_id, uid)
-		VALUES ($1, 900201, $2, 100, 'confirmed', 'beg-book-1', $3, gen_random_uuid())
+		INSERT INTO bookings (classification_id, account_holder, currency_id, amount, status, idempotency_key, uid)
+		VALUES ($1, 900201, $2, 100, 'pending', 'beg-book-1', gen_random_uuid())
 		RETURNING id, uid
-	`, classID, currencyID, journal1).Scan(&bookingID, &bookingUID))
+	`, classID, currencyID).Scan(&bookingID, &bookingUID))
+	_, err := pool.Exec(ctx, `UPDATE bookings SET status = 'confirmed', journal_id = $1 WHERE id = $2`, journal1, bookingID)
+	require.NoError(t, err)
 
 	var eventUID string
 	require.NoError(t, pool.QueryRow(ctx, `
@@ -679,12 +685,16 @@ func TestIdempotencyReceiptTablesAreAppendOnly(t *testing.T) {
 		INSERT INTO journals (uid, journal_type_id, idempotency_key, total_debit, total_credit)
 		SELECT gen_random_uuid(), jt.id, 'rct-j1', 10, 10 FROM journal_types jt WHERE jt.uid = $1::uuid RETURNING id
 	`, jtUID).Scan(&journalID))
+	// Create then link -- see the note in TestBookingsAndEventsGuards: 029
+	// refuses a booking born already linked to a journal.
 	var bookingID int64
 	require.NoError(t, pool.QueryRow(ctx, `
-		INSERT INTO bookings (classification_id, account_holder, currency_id, amount, status, idempotency_key, journal_id, uid)
-		VALUES ($1, 900301, $2, 10, 'confirmed', 'rct-book-1', $3, gen_random_uuid())
+		INSERT INTO bookings (classification_id, account_holder, currency_id, amount, status, idempotency_key, uid)
+		VALUES ($1, 900301, $2, 10, 'pending', 'rct-book-1', gen_random_uuid())
 		RETURNING id
-	`, classID, currencyID, journalID).Scan(&bookingID))
+	`, classID, currencyID).Scan(&bookingID))
+	_, err = pool.Exec(ctx, `UPDATE bookings SET status = 'confirmed', journal_id = $1 WHERE id = $2`, journalID, bookingID)
+	require.NoError(t, err)
 	var eventID int64
 	require.NoError(t, pool.QueryRow(ctx, `
 		INSERT INTO events (classification_code, booking_id, account_holder, currency_id, to_status, amount, journal_id, uid)
@@ -753,6 +763,7 @@ func TestReconcileScanCursorChangesAudited(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `
 		SELECT old_after_holder, new_after_holder, old_lap_dirty, new_lap_dirty
 		FROM reconcile_scan_cursor_changes WHERE check_name = 'rt_checkpoint_balance'
+		ORDER BY id DESC LIMIT 1
 	`).Scan(&oldHolder, &newHolder, &oldDirty, &newDirty))
 	assert.Equal(t, int64(-9223372036854775808), oldHolder)
 	assert.Equal(t, int64(9223372036854775807), newHolder)

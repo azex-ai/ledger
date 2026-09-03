@@ -330,6 +330,35 @@ func WithMaxBlocksPerScan(n int64) OnchainOption {
 	return func(o *Onchain) { o.maxBlocksPerScan = n }
 }
 
+// WithRescanLookback sets how many blocks below the safe tip every forward
+// scan re-covers, regardless of where the cursor is. Default: 128. Zero or
+// negative disables it.
+//
+// This is the detection layer for a cursor that moved without the scanner
+// moving it (docs/INVARIANTS.md I-67, 2026-09-03 independent review
+// onchain-ops C-1). chain_cursors.last_scanned_block decides which on-chain
+// money the ledger is ever told about, and the forward scan never looks back
+// (`from` = cursor+1), so a single forged advance made every real deposit in
+// the skipped window permanently invisible -- no booking, no event, no
+// journal, no entry, and therefore nothing for any reconciliation check to
+// notice.
+//
+// Re-scanning is free of consequence: IngestDeposit is idempotent on
+// deposit-{chain}-{tx}-{seq} (I-3), so a sighting seen twice resolves to the
+// same booking. The cost is one extra log query per tick per chain, over a
+// window bounded by this value.
+//
+// What it does and does not recover: a jump of up to this many blocks is
+// fully re-covered on the next tick, and a jump BEYOND the chain head -- the
+// shape the review measured, `SET last_scanned_block = 99999999` -- no longer
+// wedges the scanner into its "already past the safe tip, nothing to do"
+// branch, so recent deposits keep being ingested while the operator rewinds
+// the cursor (ledger_rewind_chain_cursor, migration 029). It does NOT recover
+// a window further back than the lookback; that needs the rewind.
+func WithRescanLookback(n int64) OnchainOption {
+	return func(o *Onchain) { o.rescanLookback = n }
+}
+
 // WithRecheckInterval sets the pending/confirming recheck tick interval. Default: 20s.
 func WithRecheckInterval(d time.Duration) OnchainOption {
 	return func(o *Onchain) { o.recheckInterval = d }
@@ -388,6 +417,7 @@ type Onchain struct {
 
 	watchInterval              time.Duration
 	maxBlocksPerScan           int64
+	rescanLookback             int64
 	recheckInterval            time.Duration
 	reorgRecheckInterval       time.Duration
 	reorgRecheckWindow         int64
@@ -453,6 +483,11 @@ type Onchain struct {
 const (
 	defaultShallowReorgMisses     = int32(3)
 	defaultWatcherStallAlertAfter = 3
+	// defaultRescanLookback is WithRescanLookback's default: how far below
+	// the safe tip every tick re-scans no matter where the cursor sits.
+	// 128 blocks is minutes on every chain this library targets and one
+	// extra bounded log query per tick.
+	defaultRescanLookback = int64(128)
 )
 
 // NewOnchain builds an Onchain from deps and chains. Options override the
@@ -470,6 +505,7 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		reorgPolicy:                core.ReorgPolicyManual,
 		watchInterval:              15 * time.Second,
 		maxBlocksPerScan:           2000,
+		rescanLookback:             defaultRescanLookback,
 		recheckInterval:            20 * time.Second,
 		reorgRecheckInterval:       5 * time.Minute,
 		reorgRecheckWindow:         500,
@@ -1555,9 +1591,14 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 
 	cursor, err := o.deps.Cursors.GetCursor(ctx, chainID)
 	from := int64(0)
+	// scanned is where the cursor actually stands, kept separate from `from`
+	// because the lookback below moves `from` backwards without moving the
+	// cursor -- and lag must keep measuring the cursor, not the window.
+	scanned := int64(-1)
 	switch {
 	case err == nil:
 		from = cursor.LastScannedBlock + 1
+		scanned = cursor.LastScannedBlock
 	case errors.Is(err, core.ErrNotFound):
 		// Never scanned: start from genesis. New chains are expected to be
 		// configured with cursors seeded out-of-band if genesis scanning is
@@ -1578,8 +1619,43 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 	reportLag := func(scanned int64) { o.metrics().ChainCursorLag(chainID, latest-scanned) }
 
 	safeTip := latest - int64(confirmationDepth(cfg)) + 1
+
+	// I-67: re-cover the last rescanLookback blocks below the safe tip on
+	// every tick, whatever the cursor says. The cursor is the one value that
+	// decides which on-chain money the ledger is ever told about, it lives in
+	// a table ledger_app can write, and until migration 029 a single forged
+	// advance was silent, permanent and invisible to every reconciliation
+	// check (2026-09-03 independent review, onchain-ops C-1). Re-scanning is
+	// idempotent (I-3), so this costs one bounded log query per tick and
+	// turns "the skipped window is gone forever" into "the skipped window
+	// comes back on the next tick, up to the lookback".
+	//
+	// It also un-wedges the shape the reviewer measured. Setting the cursor
+	// far past the chain head used to make `safeTip < from` true forever, so
+	// the scanner did nothing at all -- not even for blocks it had never
+	// seen. With the lookback the tick still scans, so new deposits keep
+	// being ingested while an operator rewinds the cursor
+	// (ledger_rewind_chain_cursor, migration 029).
+	if o.rescanLookback > 0 {
+		if lookbackFrom := safeTip - o.rescanLookback + 1; lookbackFrom < from {
+			if lookbackFrom < 0 {
+				lookbackFrom = 0
+			}
+			from = lookbackFrom
+		}
+	}
+
+	// A cursor ahead of the chain cannot be produced by this code: I-53 keeps
+	// every write at or below the safe tip. Never silent
+	// (working-agreements.md §3) -- the whole failure mode being defended
+	// against here is one that leaves no other trace.
+	if scanned > latest {
+		o.log().Error("service: onchain: watcher: chain cursor is ahead of the chain head, which this scanner cannot produce -- treat as tampering and rewind it (ledger_rewind_chain_cursor); until then only the lookback window is being scanned",
+			"chain_id", chainID, "last_scanned_block", scanned, "latest_block", latest)
+	}
+
 	if safeTip < from {
-		reportLag(from - 1)
+		reportLag(scanned)
 		return nil
 	}
 	to := safeTip
@@ -1595,7 +1671,7 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 		if err := o.deps.Cursors.SetCursor(ctx, chainID, to); err != nil {
 			return fmt.Errorf("set cursor: %w", err)
 		}
-		reportLag(to)
+		reportLag(max(scanned, to))
 		return nil
 	}
 	addrs := make([]string, len(addrRows))
@@ -1642,7 +1718,7 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 	}
 	if len(blocked) > 0 {
 		o.escalateWatcherStall(ctx, chainID, from, to, blocked)
-		reportLag(from - 1)
+		reportLag(scanned)
 		return fmt.Errorf("service: onchain: watcher: %d of %d sightings in [%d,%d] on chain %d could not be ingested, cursor left at %d: %w",
 			len(blocked), len(sightings), from, to, chainID, from-1, firstErr)
 	}
@@ -1651,7 +1727,10 @@ func (o *Onchain) scanChainOnce(ctx context.Context, chainID int64) error {
 		return fmt.Errorf("set cursor: %w", err)
 	}
 	o.clearScanFailures(chainID)
-	reportLag(to)
+	// SetCursor is monotonic, so a lookback tick that re-scanned below the
+	// cursor leaves it where it was; report the higher of the two rather
+	// than pretending the chain went backwards.
+	reportLag(max(scanned, to))
 	return nil
 }
 

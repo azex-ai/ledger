@@ -154,7 +154,10 @@ func TestConfigHistory_ReadsScanCursorWrites(t *testing.T) {
 
 	changes, _, err := history.ListScanCursorChanges(ctx, core.ConfigChangeFilter{CheckName: "unauthorized_journals"})
 	require.NoError(t, err)
-	require.Len(t, changes, 1)
+	// Two rows since migration 029: creating the cursor is itself recorded
+	// (old = the column defaults, i.e. "before every possible dimension
+	// key"), and the tamper is the newest one.
+	require.Len(t, changes, 2)
 	assert.Equal(t, int64(0), changes[0].OldAfterHolder)
 	assert.Equal(t, int64(9223372036854775807), changes[0].NewAfterHolder,
 		"skipping the whole keyspace is the exact move the audit trigger exists to record")
