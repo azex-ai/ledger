@@ -1,6 +1,6 @@
 # Wave 5 — 独立复审（R3）发现的整改契约
 
-> 2026-09-03 · Status: **RUNNING（六条任务并行）** · 基线 = main `c854c6e` 之后。
+> 2026-09-03 · Status: **RUNNING（六条任务并行；2026-09-04 lead 已对六支全部完成 mutation 证伪，等 worker 收口后按 5.11 顺序合并）** · 基线 = main `c854c6e` 之后。
 > 源：`docs/audits/2026-09-03-independent-review/*.md`（五个零前情 agent）。纪律沿用 `2026-09-02-remediation-contracts.md` §0（兄弟扫描——本轮明确：**粒度 = 算式项 × 谁能写这张表；对每张表分别问 INSERT / UPDATE / DELETE 三条路径**）、§3、§5、§6。
 
 ## 0. R3 的核心发现：三个此前三轮都没问过的问题
@@ -38,3 +38,10 @@ W5-searchpath（030）与 W5-insert（029）先后合（号段顺序）；其余
 | 5.4 | money-out M-2：I-51 三条规则在应用写路径无漏，漏在读侧无条件采信 raw INSERT 的 `reversal_of` 行 | 扩成「用时门」：`cumulativeReversedByDimension` 只采信自身通过 rule 1–3 的行，不通过的不计入并写 Finding |
 | 5.5 | install-roles C2 的候选修法①（事务内 GUC）同样可被 `SET LOCAL` 预置（w5-searchpath 实测） | 由 w5-searchpath 在其余候选里按实测成本选 |
 | 5.6 | 六个 worker 于 2026-09-03 13:21 同时撞会话额度上限，全部有未提交改动 | 额度重置后以 SendMessage 续做（先 WIP commit）。**协议追加**：worker 每完成一个子项立即 commit，不攒 |
+| 5.7 | **5.4 的措辞作废（2026-09-04）**：「不通过的不计入并写 Finding」= 排除后继续算，是出钱方向——违反 rule 2 的 journal 可能真动过钱（一条腿落在原 journal 没碰的维度即违规，其余腿可以是真冲正；排除它 → alreadyReversed 少算 → 多冲）。账本分不出被污染 journal 的哪些腿是真的，读侧只能拒绝不能择优采信 | `cumulativeReversedByDimension` 遇到 rule 2/3 不合格的链 **拒绝求值**（`core.ErrConflict`，点名最早那条 journal uid，指向 RUNBOOK「Corrupt reversal chain」）。无 entries 的 reversal 行跳过（不影响任何和，报了 = DoS） |
+| 5.8 | fleet-wide `reversal_chain_integrity` 对账检查：目前只有有人发起冲正时才发现链被污染 | GO，方案 (A)：给 `service.ReconcileQuerier` 正规加方法 + api-surface 快照 + `docs/BREAKING.md` 条目；**不采用** (B) 可选接口上转型（abstractions.md 禁止类型断言逃逸接口）。未接线方进 `SkippedChecks` 而非 pass |
+| 5.9 | `service/rollup.go` `ProcessBatch` 在 `len(items)==0` 时先 return 再发 `Pending/StuckRollups` gauge——队列全 stuck 时 gauge 一次都不发 | 改（working-agreements §3）：gauge 先发再 return，加 pin「items 为空但 stuck>0 时 gauge 必发射」；越域授权 w5-gates 只动这一处 |
+| 5.10 | 029 新建 9 个函数写 `SET search_path = pg_catalog, public`，与 030 的 catalogue 门禁（`proconfig` 精确 `search_path=public, pg_temp`）冲突 | 029 统一改 `public, pg_temp`（函数体已 schema 限定，语义不变；pg_catalog 不在列时隐式最先搜索） |
+| 5.11 | I-66/67（029）、I-68（030）、I-69（onchain-ops）分散在三条分支，各分支单独跑 gapless gate 必红 | 编号靠合并顺序保证：029 → 030 → onchain-ops；worker 不改号，lead 合并后在 main 复跑 gapless |
+| 5.12 | w5-readme 的 handler 用字符串匹配 `has no lifecycle` 判错误（discipline.md errors-as-data） | 越域授权：`core/errors.go` 加 `ErrNoLifecycle` 哨兵，`postgres/booking_store.go` 用 `%w` 包裹，handler `errors.Is`；ErrField 文案保留 |
+| 5.13 | RUNBOOK 新节撞号：w5-onchain-ops §18（dead-lettered）与 w5-money-misc §18/§19（corrupt reversal chain / anchor poisoned） | 合并顺序 onchain-ops 在前，其 §18 保留；money-misc 的两节由 lead 合并时改为 §19/§20（其错误文案按节名引用，不受影响） |
