@@ -338,6 +338,55 @@ written because it was true when `[0.6.0]` shipped.
   `status` cannot use the `status = 'active'` partial index the ordinary
   path uses.
 
+### Go module — Security (pending deposits: the confirmation amount)
+
+- **`ConfirmPending` / `CancelPending` size the confirmation from
+  `journal_entries`, not from `balance_checkpoints`** (Wave 4, contract
+  §7.18; the sibling of `w3-review/money-path.md` M-1, found by `w3-holds`'
+  sibling scan). New invariant **I-64**. `ConfirmPending` mints spendable
+  balance — it debits `pending` and credits the holder's `main_wallet` — and
+  in pool mode this store signs that journal with the deployment's real
+  `core.Attestor`. Deciding *how much* off `checkpoint + delta` therefore
+  made the checkpoint hole strictly worse than the one I-49 closed on
+  `Reserve`: one forged `balance_checkpoints` row on the pending dimension
+  was laundered into a **genuinely signed** credit to an available-role
+  classification, which both terms of the withdrawal gate then accept (E
+  sums it because it is a real entry; V accepts it because the signature is
+  real). Measured: a forged pending checkpoint of 1,000,000 let
+  `ConfirmPending(1000)` through against a true pending balance of 60.
+
+  Both calls now recompute the pending dimension with
+  `RecomputeCheckpointFromEntries` — the same query I-49's E term and
+  `CheckpointIntegrityStore.RecomputeBalance` use — inside the transaction,
+  under the `(holder, currency)` advisory lock, in pure SQL.
+
+  **What consumers must do: nothing.** No signature changed and no honest
+  call behaves differently; on an untampered database the two figures agree.
+  The cost is a full-history sum per confirm instead of a delta read, served
+  by `idx_entries_account_id`. `ExpirePendingOlderThan` keeps its
+  checkpoint-based pre-filter on purpose — it is lock-free, only chooses
+  which rows to attempt, and the decision that moves money is
+  `CancelPending`'s own check.
+
+  Not closed, recorded rather than implied away: the gate reads *real*
+  entries, not *authorized* ones, and unlike I-49 it has no V term. Measured
+  as `ledger_app` over a real socket: two `INSERT`s forge an unsigned pending
+  credit that this gate accepts and then signs on the way into `main_wallet`.
+  Giving the gate a V term is a composition-root change and needs a ruling on
+  what a `RunInTx`-composed `ConfirmPending` does; I-64's "What this does NOT
+  close" carries the analysis and a pin that holds the boundary as measured.
+
+- **`core.AccountPolicy`'s `enforce_min_balance` keeps reading
+  `checkpoint + delta`, and I-17 now says so** (contract §7.18, the M-1
+  ruling). It is a business rule for honest callers, not an anti-tampering
+  control: it can only refuse a journal (overstating the balance creates no
+  money), and `account_policies` is itself a config table the application's
+  credential writes, so hardening the balance term alone buys nothing. Money
+  leaving the ledger is gated by `core.ReserveInput.RequireVerifiedBalance`
+  (I-49) and, for pending deposits, by I-64. No behavior change; the
+  invariant, the `core.AccountPolicy` godoc and the enforcement site now
+  state the boundary instead of leaving it to be inferred.
+
 ### Go module — Fixed
 
 - **`Migrate`'s `ledger_owner` authority is now scoped to the connection it

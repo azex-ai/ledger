@@ -35,6 +35,19 @@ const accountPolicyNoteMaxLen = 2000
 // active, unconstrained. CurrencyUID == "" means "all currencies for this
 // holder"; ClassificationUID == "" means "all classifications for this
 // holder/currency". See docs/INVARIANTS.md I-17 for the enforcement contract.
+//
+// Trust boundary (contract §7.18, 2026-09-03): every field here is a business
+// rule evaluated inside the application's own trust boundary, not a
+// tamper-resistant control. The policy row itself is writable by the
+// application's DB credential, and EnforceMinBalance's floor is checked
+// against `checkpoint + delta` — so an attacker holding that credential can
+// disable the floor at the source in one statement, and hardening only the
+// balance term would buy nothing. It is not on the anti-tampering withdrawal
+// path: money leaving the ledger is gated by
+// core.ReserveInput.RequireVerifiedBalance (I-49), which recomputes from
+// entries and verifies signatures. Do not cite EnforceMinBalance as a defence
+// against a compromised credential; cite it as what it is — an overdraft rule
+// for honest callers.
 type AccountPolicy struct {
 	UID               string              `json:"uid"`
 	AccountHolder     int64               `json:"account_holder"`
@@ -42,10 +55,14 @@ type AccountPolicy struct {
 	ClassificationUID string              `json:"classification_uid,omitempty"`
 	Status            AccountPolicyStatus `json:"status"`
 	MinBalance        decimal.Decimal     `json:"min_balance"`
-	EnforceMinBalance bool                `json:"enforce_min_balance"`
-	Note              string              `json:"note"`
-	UpdatedAt         time.Time           `json:"updated_at"`
-	CreatedAt         time.Time           `json:"created_at"`
+	// EnforceMinBalance turns MinBalance into a floor on the dimension's
+	// balance. See the type's own doc comment for the trust boundary: this is
+	// a business rule for honest callers, not a control that survives a leaked
+	// DB credential.
+	EnforceMinBalance bool      `json:"enforce_min_balance"`
+	Note              string    `json:"note"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // AccountPolicyInput is the input to AccountPolicyStore.SetPolicy. Setting a

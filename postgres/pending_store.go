@@ -137,7 +137,10 @@ func (s *PendingStore) AddPending(ctx context.Context, in core.AddPendingInput) 
 //	CR custodial (system) — records platform custody gain
 //
 // Idempotent on IdempotencyKey.
-// Returns ErrInsufficientBalance if the pending balance is less than Amount.
+// Returns ErrInsufficientBalance if the pending balance is less than Amount,
+// where "the pending balance" is recomputed from journal_entries under the
+// balance lock and never read from balance_checkpoints — this call mints
+// spendable balance, so its input has to be the trusted figure (I-64).
 func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendingInput) (*core.Journal, error) {
 	if err := in.Validate(); err != nil {
 		return nil, err
@@ -174,7 +177,8 @@ func (s *PendingStore) ConfirmPending(ctx context.Context, in core.ConfirmPendin
 // CancelPending reverses a pending deposit (two-phase step 2 — cancel path).
 // Posts a compensating journal: DR pending (user), CR suspense (system).
 // The original AddPending journal is never mutated (append-only principle).
-// Returns ErrInsufficientBalance if the pending balance is already zero.
+// Returns ErrInsufficientBalance if the pending balance is already zero —
+// recomputed from journal_entries, on the same basis as ConfirmPending (I-64).
 // Idempotent on IdempotencyKey.
 func (s *PendingStore) CancelPending(ctx context.Context, in core.CancelPendingInput) (*core.Journal, error) {
 	if err := in.Validate(); err != nil {
@@ -300,9 +304,29 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("%s: idempotency recheck: %w", errPrefix, err)
 		}
-		bal, err := ledger.GetBalance(ctx, holder, currencyUID, pendingClsUID)
+		// The amount this gate authorizes is summed from journal_entries
+		// alone (I-64). It used to be ledger.GetBalance -- checkpoint +
+		// delta -- and balance_checkpoints is the one balance-bearing table
+		// that must stay UPDATE-able for the rollup worker, so it carries no
+		// append-only trigger and the standing threat model's first row (an
+		// attacker holding ledger_app's credential) raises a row in it with
+		// one statement. Measured: a forged pending checkpoint of 1,000,000
+		// let ConfirmPending move a pending balance that did not exist into
+		// main_wallet, on a journal this store then signed with the real
+		// Attestor -- which made the forgery indistinguishable from a genuine
+		// deposit to BOTH terms of the withdrawal gate (I-49: E sums it
+		// because it is a real entry, V accepts it because the signature is
+		// real). See docs/audits/2026-09-02-deep-audit/w3-review/money-path.md
+		// M-1's sibling and contract §7.18.
+		//
+		// Same query I-49's E term uses, for the same reason and in the same
+		// place: pure SQL, on this transaction, under the (holder, currency)
+		// advisory lock taken above -- so it is current (a concurrent drain
+		// that commits before the lock is released is visible) and makes no
+		// external call while the transaction is open (financial.md).
+		bal, err := pendingBalanceFromEntries(ctx, qtx, ledger.dims, holder, cur.ID, pendingClsUID)
 		if err != nil {
-			return nil, fmt.Errorf("%s: get pending balance: %w", errPrefix, err)
+			return nil, fmt.Errorf("%s: %w", errPrefix, err)
 		}
 		if bal.LessThan(required) {
 			return nil, fmt.Errorf(
@@ -347,6 +371,52 @@ func (s *PendingStore) checkPendingBalanceAndPost(
 		return nil, fmt.Errorf("%s: commit: %w", errPrefix, err)
 	}
 	return j, nil
+}
+
+// pendingBalanceFromEntries sums every journal_entries row for the
+// (holder, currency, pending-classification) dimension from the beginning of
+// history. balance_checkpoints is referenced nowhere in it -- that is the
+// whole point (I-64).
+//
+// It is deliberately the same generated query CheckpointIntegrityStore.
+// RecomputeBalance and ReserverStore.sumAvailableFromEntriesWithQueries run
+// (RecomputeCheckpointFromEntries), rather than a second hand-written sum: the
+// signed-amount convention lives in one SQL function (ledger_signed_amount,
+// I-50) reached through one query, so "entries-only recompute" cannot come to
+// mean two slightly different things in two gates.
+//
+// It takes the caller's *sqlcgen.Queries rather than a store handle because
+// its one caller runs inside an open transaction whose advisory locks are
+// already held; going through a pool-bound store there would read a different
+// snapshot on a different connection and silently drop the lock's protection.
+//
+// The classification is resolved through the same dimCache the surrounding
+// transaction uses (uid -> internal id; internal ids never cross back into
+// core types, api-contract §3).
+func pendingBalanceFromEntries(
+	ctx context.Context,
+	q *sqlcgen.Queries,
+	dims *dimCache,
+	holder, currencyID int64,
+	pendingClsUID string,
+) (decimal.Decimal, error) {
+	cls, err := dims.classByUIDOrErr(ctx, q, pendingClsUID)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("recompute pending balance from entries: %w", err)
+	}
+	row, err := q.RecomputeCheckpointFromEntries(ctx, sqlcgen.RecomputeCheckpointFromEntriesParams{
+		AccountHolder:    holder,
+		CurrencyID:       currencyID,
+		ClassificationID: cls.ID,
+	})
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("recompute pending balance from entries: %w", err)
+	}
+	balance, err := numericToDecimal(row.Balance)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("recompute pending balance from entries: convert: %w", err)
+	}
+	return balance, nil
 }
 
 func (s *PendingStore) buildConfirmPendingJournalInput(in core.ConfirmPendingInput, clsIDs pendingClassIDs) core.JournalInput {
@@ -463,6 +533,15 @@ func (s *PendingStore) ExpirePendingOlderThan(ctx context.Context, threshold tim
 		amount := mustNumericToDecimal(row.Amount)
 
 		// Check actual pending balance — skip if already drained (confirmed/cancelled).
+		//
+		// Deliberately still checkpoint + delta, and deliberately not a gate:
+		// this is a lock-free pre-filter and a cap, and the decision that
+		// actually moves money is CancelPending's own entries-only check
+		// under the balance lock (I-64). A tampered checkpoint here can only
+		// make the sweeper skip a row it should have swept, or attempt a
+		// cancel larger than the entries support — which CancelPending then
+		// refuses. Both directions fail closed, so paying for a full-history
+		// recompute per row (up to 1 000 rows a call) buys nothing.
 		rowCur, err := s.ledger.dims.currencyByIDOrErr(ctx, s.q, row.CurrencyID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("holder=%d resolve currency: %w", row.AccountHolder, err))

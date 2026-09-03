@@ -111,6 +111,24 @@ func (s *LedgerStore) enforceAccountPolicies(ctx context.Context, q *sqlcgen.Que
 			continue
 		}
 		minBalance := mustNumericToDecimal(policy.MinBalance)
+		// checkpoint + delta, deliberately, and reviewed as such (contract
+		// §7.18 after w3-review/money-path.md M-1 measured the forged
+		// checkpoint here). This is not the tamper-resistant amount source
+		// that ConfirmPending (I-64) and gated Reserve (I-49) use, for two
+		// reasons that both have to hold:
+		//
+		//   - It only ever REFUSES a journal. Making the figure larger cannot
+		//     create money; it can only let a spend through that a floor would
+		//     have stopped. Nothing downstream treats "passed min_balance" as
+		//     evidence that funds exist.
+		//   - Hardening it would buy nothing anyway. account_policies is a
+		//     config table the application's own credential writes, so the
+		//     attacker this would defend against deletes the policy row, or
+		//     flips enforce_min_balance, instead of forging a checkpoint --
+		//     same one statement, same result.
+		//
+		// The withdrawal path does not rely on this check; see I-17's trust
+		// boundary paragraph and core.AccountPolicy's doc comment.
 		before, err := s.getBalanceWithQueries(ctx, q, dim.holder, dim.currencyID, dim.classificationID)
 		if err != nil {
 			return fmt.Errorf("postgres: post journal: account policy: get balance: %w", err)
