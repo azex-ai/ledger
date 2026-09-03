@@ -37,3 +37,4 @@ W5-searchpath（030）与 W5-insert（029）先后合（号段顺序）；其余
 | 5.3 | `entry_template_lines` 的 `amount_key` 在出厂模板里本就重复，「不得重复」不可用 | 改用「父 template 必须是本事务创建」的同事务约束（`CreateTemplate` 与其 lines 同事务；`InstallTemplatePresets` 对已存在模板只校验不更新），能阻止而非只记录 C-1 |
 | 5.4 | money-out M-2：I-51 三条规则在应用写路径无漏，漏在读侧无条件采信 raw INSERT 的 `reversal_of` 行 | 扩成「用时门」：`cumulativeReversedByDimension` 只采信自身通过 rule 1–3 的行，不通过的不计入并写 Finding |
 | 5.5 | install-roles C2 的候选修法①（事务内 GUC）同样可被 `SET LOCAL` 预置（w5-searchpath 实测） | 由 w5-searchpath 在其余候选里按实测成本选 |
+| 5.6 | 六个 worker 于 2026-09-03 13:21 同时撞会话额度上限，全部有未提交改动 | 额度重置后以 SendMessage 续做（先 WIP commit）。**协议追加**：worker 每完成一个子项立即 commit，不攒 |
