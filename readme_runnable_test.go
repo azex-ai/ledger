@@ -132,9 +132,16 @@ import (
 func main() {
 	ctx := context.Background()
 	dbURL := os.Getenv("DATABASE_URL")
+	// The test fixture is a single connection playing both roles: real
+	// deployments point MIGRATE_DATABASE_URL at a CREATEROLE-capable
+	// connection and DATABASE_URL at ledger_app (README's "Prerequisite"),
+	// but postgrestest.SetupRawDB hands back one superuser connection to a
+	// database nothing has installed ledger_app's narrower grants against
+	// yet, so both names resolve to it here.
+	migrateDBURL := dbURL
 
-	// The block below also calls ledger.Migrate(dbURL) itself (its first
-	// statement, verbatim from README) -- that is fine, Migrate is
+	// The block below also calls ledger.Migrate(migrateDBURL) itself (its
+	// first statement, verbatim from README) -- that is fine, Migrate is
 	// idempotent (postgres/migrate.go tolerates migrate.ErrNoChange). It has
 	// to happen here too because the schema must exist before the seed
 	// writes below.
@@ -471,50 +478,31 @@ func main() {
 	runGoProgram(t, dbURL, src)
 }
 
-// --- M-12: every ```go block in README.md is classified ---
+// --- W5-readme: every ```go block in README.md is classified, and every
+// block that is not run against a real database must at least COMPILE ---
 //
-// The tests above run six blocks. README has twenty-four, and the other
-// eighteen had no runtime gate of any kind -- which is how the reviewer's
-// mutation of the promo_grant recipe (a second leg reading an AmountKey no
-// caller supplies: compiles, creates, fails on use) went unnoticed. E-M2
-// fixed one block; nothing covered the CLASS.
+// The six tests above run six blocks against a real, migrated database.
+// README has twenty-four blocks; the other eighteen used to be waved through
+// by a hand-maintained exemption table that only required the block to
+// PARSE. Parsing catches a truncated line or an unbalanced brace. It cannot
+// catch a snippet that calls a function with the wrong arity or a method
+// that no longer exists -- exactly what the 2026-09-03 consumer audit found
+// twice in the same README: `worker := svc.Worker(cfg)` (assignment mismatch
+// -- svc.Worker now returns two values) and `srv.Handler()` (*server.Server
+// has no such method, it implements http.Handler directly) both PARSE fine
+// -- a `:=` assignment and a method call are syntactically unremarkable --
+// and both fail to COMPILE. A gate that only parses cannot see either bug,
+// which is how both shipped and stayed broken through a full audit round.
 //
-// This is the fail-closed enumeration this repo uses elsewhere
-// (postgres/grant_coverage_test.go's table classification, the sign gate's
-// query exemptions): every block must either contain a runnable anchor, or
-// be classified below with the reason it is not executed. A new block
-// defaults to red.
-//
-// Blocks that are not executed still get the cheapest real check available:
-// they must PARSE as Go. That catches a truncated or mistyped snippet without
-// a type-checking harness for fragments that assume a dozen names.
-
-// readmeBlockExemptions maps a block's fingerprint -- its first line of code
-// -- to why the block is not run against a database.
-//
-// "Needs a live X" is a reason. "Nobody got around to it" is not: the three
-// entries marked FOLLOW-UP say what it would take, so the list can shrink
-// deliberately.
-var readmeBlockExemptions = map[string]string{
-	"import (": "an import list, not a program",
-	`import "github.com/azex-ai/ledger/presets"`:                                                     "an import line",
-	`import "log/slog"`:                                                                              "an import line",
-	`import "github.com/azex-ai/ledger/observability"`:                                               "an import line",
-	`import ledgerotel "github.com/azex-ai/ledger/pkg/otel"`:                                         "an import line",
-	"worker := svc.Worker(service.DefaultWorkerConfig())":                                            "starts a background worker with its own goroutines and tickers; a run would have to own its lifecycle, and service/worker_test.go already covers the worker",
-	"srv, err := server.NewFromDeps(cfg, server.Deps{":                                               "builds an http.Handler and expects the caller to serve it; server/*_test.go drives the real router through httptest instead",
-	"svc.InstallDefaultPresets(ctx)    // Deposit + Withdrawal only":                                 "one-line preset install, exercised by presets/*_test.go and by the Tier 2 block that is run",
-	"presets.InstallPendingBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates())":  "same: a bundle install line, covered by presets/*_test.go",
-	"presets.DepositLifecycle      // pending → confirming → confirmed | failed | expired":           "a list of exported lifecycle values, not statements",
-	"svc.JournalWriter().PostJournal(ctx, core.JournalInput{":                                        "the same call the Tier 1 block makes, shown without its surrounding boot; running it would duplicate TestREADMETier1QuickStartRuns",
-	`svc.JournalWriter().ExecuteTemplate(ctx, "fee_charge", core.TemplateParams{`:                    "FOLLOW-UP: runnable once the fee bundle's seed is factored out of the Tier 2 harness -- it needs the fee_charge template installed and a funded holder",
-	"svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{":         "FOLLOW-UP: same seed as the fee_charge block above, plus a second template",
-	"type StripeAdapter struct{ secret string }":                                                     "a channel.Adapter implementation sketch: the interface it satisfies is pinned by channel/*_test.go, and running it would need an inbound HTTP request with a real signature",
-	"err := svc.RunInTx(ctx, func(tx *ledger.Service) error {":                                       "FOLLOW-UP: runnable with the Tier 1 seed; examples/tx-compose is the executed version of this recipe today",
-	`key := ledger.NewIdempotencyKey("deposit")`:                                                     "a key-construction line; idempotency_test.go covers the helper",
-	`err := ledger.RetryIdempotent(ctx, "deposit", 3, func(ctx context.Context, key string) error {`: "retries a caller-supplied closure; idempotency_test.go drives the helper with a failing closure, which a README run could not do without inventing one",
-	"func TestMyAnchorConformance(t *testing.T) {":                                                   "a test a CONSUMER writes against anchortest.RunConformance; anchortest/conformance.go is exercised by anchors/r2 and anchordev",
-}
+// So: every block not covered by one of the six run-tests above is now
+// compiled -- spliced into a throwaway `package main` with an inferred
+// import list and a fixed preamble of the names README prose assumes
+// already exist (svc, ctx, pool, jtUID, ...) -- unless the README itself
+// marks it, on the line immediately after the closing fence, with
+// `<!-- readme-gate: snippet -- <reason> -->`. That marker is the only way
+// to opt a block out, it has to carry a real reason (checked below), and an
+// unmarked block that does not compile is red. A brand new block defaults to
+// red too: nothing here waves through what it has never seen classified.
 
 // readmeGoBlocks returns every ```go block in README.md.
 func readmeGoBlocks(t *testing.T) []string {
@@ -534,7 +522,7 @@ func readmeGoBlocks(t *testing.T) []string {
 }
 
 // blockFingerprint is a block's first line of actual code: stable across
-// edits to the rest of the block, and readable in an exemption table.
+// edits to the rest of the block, and readable in a test name / failure.
 func blockFingerprint(block string) string {
 	for _, line := range strings.Split(block, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -546,46 +534,422 @@ func blockFingerprint(block string) string {
 	return "(empty block)"
 }
 
-func TestREADMEGoBlocksAreAllClassified(t *testing.T) {
-	blocks := readmeGoBlocks(t)
+// readmeSnippetMarkerPrefix is the HTML comment a README author places on
+// the line immediately after a ```go block's closing fence to opt it out of
+// the compile gate below. It must be followed by "-- " and a reason; a bare
+// marker with no reason is itself a gate failure (see
+// TestREADMEGoBlocksCompileUnlessMarkedSnippet) -- "opted out" and "opted out
+// because X" are different claims, and only the second is checkable by a
+// future reader.
+const readmeSnippetMarkerPrefix = "<!-- readme-gate: snippet"
+
+// readmeSnippetMarker reports whether the text immediately following a
+// ```go block's closing fence is a readme-gate marker, and the reason text
+// it carries (empty if the marker is missing its reason, or missing
+// entirely).
+func readmeSnippetMarker(afterFence string) (marked bool, reason string) {
+	afterFence = strings.TrimLeft(afterFence, "\n")
+	line := afterFence
+	if i := strings.IndexByte(afterFence, '\n'); i >= 0 {
+		line = afterFence[:i]
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, readmeSnippetMarkerPrefix) {
+		return false, ""
+	}
+	reason = strings.TrimSuffix(line, "-->")
+	reason = strings.TrimPrefix(reason, readmeSnippetMarkerPrefix)
+	reason = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reason), "--"))
+	return true, reason
+}
+
+// readmeBlock pairs a ```go block's verbatim text with whatever
+// readme-gate marker immediately follows its closing fence.
+type readmeBlock struct {
+	text   string
+	marked bool
+	reason string
+}
+
+// readmeGoBlocksWithMarkers is readmeGoBlocks plus each block's marker --
+// found by looking at the README source immediately after the closing fence,
+// not by a second independent scan, so the marker can never drift from the
+// block it annotates.
+func readmeGoBlocksWithMarkers(t *testing.T) []readmeBlock {
+	t.Helper()
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(readme)
+	var out []readmeBlock
+	for _, m := range goFenceRE.FindAllStringSubmatchIndex(s, -1) {
+		text := s[m[2]:m[3]]
+		marked, reason := readmeSnippetMarker(s[m[1]:])
+		out = append(out, readmeBlock{text: text, marked: marked, reason: reason})
+	}
+	if len(out) < 20 {
+		t.Fatalf("found only %d ```go blocks in README.md -- the fence regexp regressed, and a scan that sees almost nothing reads as a pass", len(out))
+	}
+	return out
+}
+
+// readmeExtraImportsByPrefix maps a package short name a README block might
+// reference (as the block's own source spells it, e.g. "slog.New(...)") to
+// the import line needed to resolve it. The compile gate scans each block
+// (with line comments stripped, so a package named only in prose does not
+// pull in an import nothing in the block's actual code uses -- which would
+// itself fail to compile as "imported and not used") for these prefixes and
+// includes only the ones a block actually references.
+//
+// context / pgxpool / decimal / ledger / core / server / service are NOT
+// here: readmeCompilePreamble below uses all seven unconditionally, so they
+// are part of every compiled program's fixed import list regardless of
+// which of those packages a given block's own text happens to mention. A
+// hand-maintained miss in this table fails LOUD (the block will not
+// compile) rather than by silently resolving to the wrong package -- there
+// is no general resolver here, just a small, closed vocabulary this one
+// README uses.
+var readmeExtraImportsByPrefix = []struct {
+	prefix string
+	imp    string
+}{
+	{"presets", `"github.com/azex-ai/ledger/presets"`},
+	{"channel", `"github.com/azex-ai/ledger/channel"`},
+	{"observability", `"github.com/azex-ai/ledger/observability"`},
+	{"slog", `"log/slog"`},
+	{"otel", `"go.opentelemetry.io/otel"`},
+	{"trace", `"go.opentelemetry.io/otel/sdk/trace"`},
+	{"ledgerotel", `ledgerotel "github.com/azex-ai/ledger/pkg/otel"`},
+	{"http", `"net/http"`},
+	{"os", `"os"`},
+	{"log", `"log"`},
+	{"testing", `"testing"`},
+	{"anchortest", `"github.com/azex-ai/ledger/anchortest"`},
+}
+
+// stripLineComment returns line with any trailing `//` comment removed,
+// aware enough of string/rune literals not to cut on a `//` that appears
+// inside one (reusing braceDepth's scan style). Used before prefix-matching
+// a block for inferExtraImports, so a package named only in prose ("// see
+// slog for more") is not mistaken for actual usage.
+func stripLineComment(line string) string {
+	inString, inRune := false, false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inString:
+			switch c {
+			case '\\':
+				i++
+			case '"':
+				inString = false
+			}
+		case inRune:
+			switch c {
+			case '\\':
+				i++
+			case '\'':
+				inRune = false
+			}
+		case c == '"':
+			inString = true
+		case c == '\'':
+			inRune = true
+		case c == '/' && i+1 < len(line) && line[i+1] == '/':
+			return line[:i]
+		}
+	}
+	return line
+}
+
+// inferExtraImports returns the import lines from readmeExtraImportsByPrefix
+// that block's code (comments stripped) actually references.
+func inferExtraImports(block string) []string {
+	var out []string
+	for _, spec := range readmeExtraImportsByPrefix {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(spec.prefix) + `\.`)
+		for _, line := range strings.Split(block, "\n") {
+			if re.MatchString(stripLineComment(line)) {
+				out = append(out, spec.imp)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// leadingImportRE matches a single leading import declaration -- either a
+// parenthesized block or a single `import "path"` / `import alias "path"`
+// line -- at the very start of a README snippet.
+var leadingImportRE = regexp.MustCompile(`(?s)^import\s+(?:\([^)]*\)|(?:\w+\s+)?"[^"]*")\n+`)
+
+// stripLeadingImportAny is stripLeadingImport generalised to the single-line
+// import form several README blocks use (`import "log/slog"`,
+// `import ledgerotel "..."`) in addition to the parenthesized form. The
+// compile gate always regenerates the block's import list from
+// inferExtraImports plus the fixed preamble imports, rather than preserving
+// whatever the block declared for itself -- several blocks' own leading
+// import covers only PART of what they use (e.g. the slog adapter block
+// imports "log/slog" but not "os", which os.Stdout still needs), so keeping
+// it verbatim would under-import exactly the class of bug this gate exists
+// to catch.
+func stripLeadingImportAny(block string) string {
+	return leadingImportRE.ReplaceAllString(block, "")
+}
+
+// readmeCompileDeclKeywords are the keywords that open a top-level
+// declaration inside a compile-tested block -- everything else is a
+// statement, meant to run inside func main.
+var readmeCompileDeclKeywords = []string{"type", "func", "var", "const"}
+
+// bucketForCompile splits an (import-stripped) README snippet into top-level
+// declarations and plain statements, the same way TestREADMEGoBlocksParse's
+// syntheticFileFor does for parsing -- README blocks mix both shapes in one
+// fence (the slog adapter block is a type, three methods, and two
+// statements), so both gates need the split. Kept as its own copy rather
+// than shared with syntheticFileFor: the parse gate's synthetic file also
+// buckets bare `import` lines (this function does not -- callers strip
+// imports first via stripLeadingImportAny), and the two gates fail
+// independently on purpose.
+func bucketForCompile(block string) (decls []string, stmts []string) {
+	lines := strings.Split(block, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		isDecl := false
+		for _, kw := range readmeCompileDeclKeywords {
+			if strings.HasPrefix(line, kw+" ") || strings.HasPrefix(line, kw+"(") {
+				isDecl = true
+				break
+			}
+		}
+		if !isDecl {
+			stmts = append(stmts, line)
+			continue
+		}
+		decl := []string{line}
+		if depth := braceDepth(line); depth > 0 {
+			for i+1 < len(lines) {
+				i++
+				decl = append(decl, lines[i])
+				depth += braceDepth(lines[i])
+				if depth <= 0 {
+					break
+				}
+			}
+		}
+		decls = append(decls, strings.Join(decl, "\n"))
+	}
+	return decls, stmts
+}
+
+// topLevelShortDeclRE matches a `:=` short variable declaration at the very
+// start of a (trimmed) statement line -- `svc, _ := ledger.New(...)`,
+// `err := svc.RunInTx(...)`.
+var topLevelShortDeclRE = regexp.MustCompile(`^(\w+)(?:,\s*(\w+))?\s*:=`)
+
+// topLevelShortDecls returns the identifiers a block's own statements
+// short-declare at the statement list's OWN nesting level -- not inside a
+// nested if/for/closure literal, which has its own scope and is usually
+// already self-contained.
+//
+// Most of these blocks show a call, not a complete program: `svc, _ :=
+// ledger.New(pool, ledger.WithLogger(...))` with nothing after it is exactly
+// what a README paragraph about constructing a Service WITH a logger option
+// looks like, and Go's "declared and not used" check does not know that the
+// next paragraph of a reader's real program is what would use svc. This is
+// what compileSyntheticProgram's sink references (`_ = svc`) exist to
+// answer for -- not a workaround for a bug in the block, but the standalone
+// program's stand-in for "and then the caller's code goes on to use this".
+func topLevelShortDecls(stmts []string) []string {
+	var names []string
+	depth := 0
+	for _, line := range stmts {
+		if depth == 0 {
+			if m := topLevelShortDeclRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+				for _, name := range m[1:] {
+					if name != "" && name != "_" {
+						names = append(names, name)
+					}
+				}
+			}
+		}
+		depth += braceDepth(line)
+	}
+	return names
+}
+
+// readmeCompilePreamble is spliced, unmodified, into every compile-tested
+// block: a fixed set of package-level values covering every name README
+// prose assumes already exists (svc, ctx, pool, the *UID strings, ...).
+// Package-level declarations are exempt from Go's "declared and not used"
+// check (unlike locals), so the same preamble works for every block
+// regardless of which of these names that particular block's own text
+// happens to reference -- there is no per-block trimming to keep in sync,
+// and no risk of a block compiling today and failing tomorrow because a
+// sibling block's edit changed what the shared preamble needs to declare.
+const readmeCompilePreamble = `
+var (
+	svc  *ledger.Service
+	pool *pgxpool.Pool
+	ctx  = context.Background()
+	cfg  = &server.Config{Env: "dev"}
+
+	jtUID, currencyUID, walletUID, custodyUID, equityUID, feesUID, key string
+
+	amt                            = decimal.NewFromInt(100)
+	params, lockParams, feeParams  core.TemplateParams
+	err                            error
+
+	depositClass *core.Classification
+	booking      *core.Booking
+	jt           *core.JournalType
+	worker       *service.Worker
+)
+`
+
+// readmeCompileBaseImports are the imports readmeCompilePreamble itself
+// needs -- present in every compiled program regardless of which of
+// inferExtraImports' packages a given block additionally references.
+var readmeCompileBaseImports = []string{
+	`"context"`,
+	`"github.com/jackc/pgx/v5/pgxpool"`,
+	`"github.com/shopspring/decimal"`,
+	`"github.com/azex-ai/ledger"`,
+	`"github.com/azex-ai/ledger/core"`,
+	`"github.com/azex-ai/ledger/server"`,
+	`"github.com/azex-ai/ledger/service"`,
+}
+
+// compileSyntheticProgram reassembles a README snippet into a standalone
+// `package main` program: readmeCompileBaseImports plus whatever
+// inferExtraImports finds, readmeCompilePreamble's package-level values, the
+// block's own top-level declarations (if any), and the block's own
+// statements wrapped in a `func run() error` (not `func main()` directly --
+// the server Quick Start block's own text is `if err != nil { return err }`,
+// which only compiles inside a function that returns an error; run() ends
+// in `return nil` so a block that never returns for itself still compiles).
+// After the block's own statements and before that trailing return, one
+// `_ = name` sink line per topLevelShortDecls name silences "declared and
+// not used" for a variable the block constructs and, being a fragment
+// rather than a complete program, never goes on to use.
+//
+// Never run -- runGoBuild only compiles it -- so it needs no database and no
+// *testing.T inside the generated file.
+func compileSyntheticProgram(block string) string {
+	block = stripLeadingImportAny(block)
+	decls, stmts := bucketForCompile(block)
+	extra := inferExtraImports(block)
+	sinks := topLevelShortDecls(stmts)
+
+	var b strings.Builder
+	b.WriteString("package main\n\nimport (\n")
+	for _, imp := range readmeCompileBaseImports {
+		b.WriteString("\t" + imp + "\n")
+	}
+	for _, imp := range extra {
+		b.WriteString("\t" + imp + "\n")
+	}
+	b.WriteString(")\n")
+	b.WriteString(readmeCompilePreamble)
+	b.WriteString("\n")
+	for _, decl := range decls {
+		b.WriteString(decl)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("func run() error {\n")
+	b.WriteString(strings.Join(stmts, "\n"))
+	b.WriteString("\n")
+	for _, name := range sinks {
+		b.WriteString("_ = " + name + "\n")
+	}
+	b.WriteString("return nil\n}\n\nfunc main() {\n\t_ = run()\n}\n")
+	return b.String()
+}
+
+// runGoBuild compiles src (a throwaway package-main file, written inside the
+// module so `go build` resolves github.com/azex-ai/ledger and go.work
+// normally) and fails the test with the generated source and compiler
+// output on any error. Compile-only: no database, no execution.
+func runGoBuild(t *testing.T, src string) {
+	t.Helper()
+	dir, err := os.MkdirTemp(".", "readmecompile-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	mainPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(mainPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", os.DevNull, mainPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("README example failed to COMPILE:\n--- generated program ---\n%s\n--- output ---\n%s\n--- error ---\n%v",
+			src, out, err)
+	}
+}
+
+// readmeSnippetMinReasonLen is the shortest reason TestREADMEGoBlocksCompile
+// UnlessMarkedSnippet accepts next to a readme-gate marker. Not a precise
+// bar -- just enough to reject a bare `<!-- readme-gate: snippet -->` (no
+// "-- reason" at all) or a one-word placeholder, both of which are "opted
+// out" claims with nothing a future reader could check.
+const readmeSnippetMinReasonLen = 15
+
+// TestREADMEGoBlocksCompileUnlessMarkedSnippet is the fail-closed
+// enumeration this repo uses elsewhere (postgres/grant_coverage_test.go's
+// table classification, the sign gate's query exemptions): every ```go block
+// in README.md is either run against a real database by one of the six
+// tests above, marked `<!-- readme-gate: snippet -->` with a reason, or
+// compiled here. A block that is none of the three is a gate failure by
+// construction (it falls through to runGoBuild and, if the reassembled
+// program does not compile, fails there) -- there is no fourth bucket to
+// silently land in.
+func TestREADMEGoBlocksCompileUnlessMarkedSnippet(t *testing.T) {
+	blocks := readmeGoBlocksWithMarkers(t)
 
 	anchored := map[string]bool{}
-	usedExemptions := map[string]bool{}
-	for _, block := range blocks {
-		fingerprint := blockFingerprint(block)
+	for _, b := range blocks {
+		fingerprint := blockFingerprint(b.text)
 
 		runnable := false
 		for _, anchor := range readmeRunnableAnchors {
-			if strings.Contains(block, anchor) {
+			if strings.Contains(b.text, anchor) {
 				anchored[anchor] = true
 				runnable = true
 			}
 		}
 		if runnable {
+			// Covered end-to-end, against a real database, by its own
+			// TestREADME*Runs test above -- compiling it again here would
+			// just be a slower, weaker version of that check.
 			continue
 		}
-		if _, ok := readmeBlockExemptions[fingerprint]; ok {
-			usedExemptions[fingerprint] = true
+
+		if b.marked {
+			if len(b.reason) < readmeSnippetMinReasonLen {
+				t.Errorf("README ```go block starting %q is marked %s but gives no (or too short a) "+
+					"reason after \"-- \" -- working-agreements.md requires saying why, not just opting "+
+					"out: got %q", fingerprint, readmeSnippetMarkerPrefix, b.reason)
+			}
 			continue
 		}
-		t.Errorf("README ```go block starting %q is neither run by a test in this file nor classified in readmeBlockExemptions.\n\n"+
-			"A block with no runtime gate can compile, be wrong, and stay wrong: the promo_grant recipe's second leg read an AmountKey "+
-			"no caller supplies, which only fails when the template is USED (M-12). Either add a runnable test (the six above are the "+
-			"shape) or add an entry saying why this block cannot be executed.", fingerprint)
+
+		block := b.text
+		t.Run(fingerprint, func(t *testing.T) {
+			runGoBuild(t, compileSyntheticProgram(block))
+		})
 	}
 
-	// Every anchor must still match a block: a README rewrite that moves an
-	// anchored block must not leave its test silently pointing at nothing.
-	// (extractREADMEGoBlock also Fatals in that case, but only when that
-	// test runs, and only if it is not skipped for a missing database.)
+	// Every run-anchor must still match a block: a README rewrite that moves
+	// an anchored block must not leave its test silently pointing at
+	// nothing. (extractREADMEGoBlock also Fatals in that case, but only when
+	// that specific test runs, and only if it is not skipped for a missing
+	// database.)
 	for _, anchor := range readmeRunnableAnchors {
 		if !anchored[anchor] {
 			t.Errorf("runnable anchor %q matches no ```go block in README.md any more -- the test using it is pointing at nothing", anchor)
-		}
-	}
-	for fingerprint, reason := range readmeBlockExemptions {
-		if !usedExemptions[fingerprint] {
-			t.Errorf("stale readmeBlockExemptions entry %q (%s): no README block starts with that line any more -- delete it (or update it, if the block was edited)", fingerprint, reason)
 		}
 	}
 }

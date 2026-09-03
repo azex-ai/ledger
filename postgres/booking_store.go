@@ -118,7 +118,7 @@ func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBooki
 
 	var lifecycle core.Lifecycle
 	if len(class.Lifecycle) <= 2 {
-		retErr := fmt.Errorf("postgres: create booking: classification %q has no lifecycle", input.ClassificationCode)
+		retErr := fmt.Errorf("postgres: create booking: classification %q has no lifecycle: %w", input.ClassificationCode, core.ErrNoLifecycle)
 		ledgerotel.RecordError(span, retErr)
 		return nil, retErr
 	}

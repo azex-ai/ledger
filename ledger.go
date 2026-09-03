@@ -1156,6 +1156,21 @@ func (s *Service) Worker(cfg service.WorkerConfig) (*service.Worker, error) {
 	// of an absence nobody can observe (w3-review/money-path.md M-6). Passed
 	// unconditionally, nil included: nil is the case worth reporting.
 	w.SetAuthVerifier(s.authVerifier)
+	// Same check (*Service).AssertRuntimeRole exposes for a composition root
+	// to call by hand, run here so a Worker built through the facade always
+	// carries the answer without the consumer having to remember to call it
+	// themselves. Bounded so a database merely slow to answer "SELECT
+	// current_user" cannot hang Worker() construction; not treated as fatal
+	// (a wrong role usually means MORE access, not less -- see
+	// postgres.CheckRuntimeRole's doc comment), only surfaced, the same way
+	// every other degraded-but-permitted mode on this Worker is surfaced.
+	// Before this, ledger.New didn't warn (deliberately -- see
+	// CheckRuntimeRole) and neither did the worker startup report: of every
+	// subsystem this Worker can be degraded in, this was the one with no
+	// signal at all (2026-09 consumer audit F-C1).
+	roleCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w.SetRuntimeRoleWarning(postgres.CheckRuntimeRole(roleCtx, s.DBTX(), postgres.AppRole))
 	if s.silentWorker {
 		w.AllowSilent()
 	}

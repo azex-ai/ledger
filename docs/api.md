@@ -481,20 +481,35 @@ Response: paged envelope of event objects.
 
 Post a manually balanced journal. All entries must net to zero per currency.
 
+**This endpoint refuses any entry touching an `is_system` classification**
+(custodial, suspense, equity, fees, …) by default (403) — the
+handwritten-path counterpart to `POST /journals/template`'s protected-code
+guard just below, so a leaked `write`-scope key cannot mint deposit-shaped
+accounting through either endpoint (`docs/INVARIANTS.md` I-38). A deployment
+that legitimately hand-posts system-side journals over HTTP sets
+`Config.AllowSystemClassificationPost` (logs a startup warning).
+
+So the example below deliberately moves money between two non-system,
+per-holder classifications (`main_wallet` and `locked` — an earlier revision
+of this document used `main_wallet` debit / `custodial` credit, which the
+endpoint now answers with 403) rather than modeling a deposit confirmation,
+which real deployments post through `deposit_confirm`'s template, not this
+endpoint.
+
 Request:
 
 ```json
 {
-  "journal_type_uid": "jt-deposit_confirm",
-  "idempotency_key": "deposit:user1001:1",
+  "journal_type_uid": "jt-lock_funds",
+  "idempotency_key": "lock:user1001:1",
   "entries": [
-    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "entry_type": "debit", "amount": "500.00"},
-    {"account_holder": -1001, "currency_uid": "cur-usdt", "classification_uid": "cls-custodial", "entry_type": "credit", "amount": "500.00"}
+    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "entry_type": "credit", "amount": "500.00"},
+    {"account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-locked", "entry_type": "debit", "amount": "500.00"}
   ],
   "source": "api",
   "actor_id": 0,
   "effective_at": "2026-06-01T00:00:00Z",
-  "metadata": {"tx_hash": "0xabc"}
+  "metadata": {"reason": "manual-hold"}
 }
 ```
 
@@ -505,7 +520,7 @@ close line (see [§14 Periods](#14-periods)).
 
 Response `201 Created`: journal object with `uid`, `journal_type_uid`, `idempotency_key`, `total_debit`, `total_credit`, `actor_id`, `source`, `metadata`, `effective_at`, `created_at`. `entries` is omitted on the create response; use `GET /journals/{uid}` to retrieve.
 
-Status codes: `201`, `400`, `401`, `422` (`14002` duplicate, `14003` unbalanced, `14001` insufficient balance, `14009` period closed), `429`, `503`.
+Status codes: `201`, `400`, `401`, `403` (an entry touches an `is_system` classification and `AllowSystemClassificationPost` is off), `422` (`14002` duplicate, `14003` unbalanced, `14001` insufficient balance, `14009` period closed), `429`, `503`.
 
 Auth: required. Idempotency: required.
 
@@ -1324,6 +1339,285 @@ Response `200 OK`:
 ```
 
 Status codes: `200`, `400`.
+
+---
+
+## 16. Accounts
+
+Per-account (holder × currency × classification, any dimension may be
+omitted to mean "all currencies" / "all classifications" for that holder)
+freeze/close + balance-floor overrides — the HTTP face of
+`core.AccountPolicyStore`, the same store library-mode callers reach via
+`svc.AccountPolicies()`.
+
+### PUT /accounts/{holder}/policy
+
+Set (create or update) the policy for one account dimension.
+
+Request:
+
+```json
+{
+  "currency_uid": "cur-usdt",
+  "classification_uid": "cls-main_wallet",
+  "status": "frozen",
+  "min_balance": "0",
+  "enforce_min_balance": true,
+  "note": "chargeback investigation #4821",
+  "actor_id": 99
+}
+```
+
+`currency_uid` / `classification_uid` empty = the policy applies to every
+currency / classification for this holder. `status` is one of `active` /
+`frozen` / `closed` — `frozen` rejects the write side of a flow (e.g. a
+withdrawal reservation) while still allowing the credit side (e.g. a
+deposit); `closed` rejects both. `min_balance` overrides the platform-wide
+minimum-balance floor for this dimension and only takes effect when
+`enforce_min_balance` is `true`: `0` = no overdraft, negative = an overdraft
+limit, positive = a dust floor above zero.
+
+Response `200 OK`: the `AccountPolicy` row — `uid`, `account_holder`,
+`currency_uid`, `classification_uid`, `status`, `min_balance`,
+`enforce_min_balance`, `note`, `updated_at`, `created_at`.
+
+Status codes: `200`, `400`, `401`, `403`, `422`, `429`, `503`.
+
+Auth: required, `admin` scope.
+
+### GET /accounts/{holder}/policies
+
+List every policy row set for a holder, across every currency and
+classification.
+
+Response `200 OK`:
+
+```json
+{
+  "code": 200,
+  "message": null,
+  "data": {
+    "list": [
+      {"uid": "pol-1", "account_holder": 1001, "currency_uid": "cur-usdt", "classification_uid": "cls-main_wallet", "status": "frozen", "min_balance": "0", "enforce_min_balance": true, "note": "chargeback investigation #4821", "updated_at": "2026-06-01T00:00:00Z", "created_at": "2026-06-01T00:00:00Z"}
+    ],
+    "next_cursor": null
+  }
+}
+```
+
+Status codes: `200`, `400`, `401`.
+
+Auth: required, `read` scope.
+
+## 17. Crypto Deposit
+
+Address issuance and human-review-queue disposition for the CREATE2
+deposit + sweep add-on (`svc.EnableOnchain`,
+`docs/plans/2026-07-11-crypto-deposit-sweep-design.md`). Every endpoint in
+this section answers `503`/`18102` ("This feature is not enabled on this
+server") until that add-on is wired into the server's composition root — a
+crypto-deposit-shaped 404/409 elsewhere in this section means the add-on
+*is* wired in, just not for this particular booking.
+
+### POST /holders/{holder}/deposit-address
+
+Issue (idempotently) a holder's CREATE2 custody deposit address. Derives and
+registers the address on first call; repeated calls for the same holder
+always return the same one.
+
+Response `201 Created`: `uid`, `account_holder`, `address` (EIP-55
+checksummed), `created_at`. The CREATE2 derivation fingerprint
+(factory/init-code hash) is an internal audit-only detail, deliberately not
+part of this wire shape.
+
+Status codes: `201`, `400`, `401`, `503`.
+
+Auth: required, `write` scope. See [§18 Holder Wallet
+Surface](#18-holder-wallet-surface) for the holder-token-scoped mirror of
+this endpoint (`POST /holder/deposit-address`) — same address, issued to the
+token's own holder rather than a path parameter, for a frontend that only
+holds a holder token.
+
+### GET /holders/{holder}/deposit-address
+
+Look up a holder's already-registered deposit address. Does not create one.
+
+Status codes: `200`, `401`, `404` (no address registered yet — `POST` the
+same path first), `503`.
+
+Auth: required, `read` scope.
+
+### GET /deposits/reviews
+
+List deposit bookings parked in human review (the M3 compensating control —
+see `docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §9). A deposit
+lands here when it exceeds the configured auto-credit ceiling, or its
+second, independent confirmation source disagrees with the primary sighting.
+The `review` booking status *is* the review queue — this endpoint is a
+filtered `GET /bookings`, not a separate table. Zero ledger effect until
+approved.
+
+Query params: `cursor`, `limit` (default 50, max 200 — [§Pagination](#pagination)).
+
+Status codes: `200`, `401`, `503`.
+
+Auth: required, `read` scope.
+
+### POST /deposits/{uid}/review/approve
+
+Approve a review-parked deposit, posting its `deposit_confirm` journal.
+Idempotent — a no-op returning the current booking if it is already
+confirmed. Any other non-`review` status is a `409` conflict.
+
+Requires the `deposit_review` **capability** (`server.CapabilityDepositReview`),
+independent of scope — see [Authentication](#authentication) above. A key
+that only ingests/creates deposit bookings does not automatically get to
+approve its own review; grant `deposit_review` on a separate reviewer key.
+
+Status codes: `200`, `401`, `403` (missing the `deposit_review` capability),
+`409` (booking is not in `review` status), `503`.
+
+Auth: required, `deposit_review` capability.
+
+### POST /deposits/{uid}/review/reject
+
+Reject a review-parked deposit to `failed` — no journal is ever posted.
+Idempotent — a no-op returning the current booking if it is already
+`failed`. Any other non-`review` status is a `409` conflict.
+
+Request:
+
+```json
+{ "reason": "confirmation sources disagree on amount" }
+```
+
+`reason` is required and lands on the booking's audit trail and the emitted
+`deposit.review_rejected` event.
+
+Status codes: `200`, `400` (missing `reason`), `401`, `403` (missing the
+`deposit_review` capability), `409`, `503`.
+
+Auth: required, `deposit_review` capability.
+
+## 18. Holder Wallet Surface
+
+A second, narrower authentication scheme for the routes under `/holder/*`:
+instead of the platform's own `API_KEYS` bearer token, these authenticate
+with a **holder token** — short-lived, bound to exactly one account holder,
+read-only except for the two deposit-address routes, which only ever
+provision the token's own holder's receiving address and move no funds. This
+is the surface a host backend hands to *its own* frontend after its own
+session auth, so the frontend can render one user's wallet without ever
+holding a platform-wide key. Disabled (every route 404s) unless
+`HOLDER_TOKEN_SECRET` is configured — see [Configuration](../README.md#configuration).
+
+### POST /holder-tokens
+
+Mint a holder-scoped read token. Called by the **host backend** — with its
+own platform `API_KEYS` bearer token, `write` scope — after its own session
+auth, then handed to its frontend.
+
+Request:
+
+```json
+{ "holder": 1001, "ttl_seconds": 900 }
+```
+
+`ttl_seconds` is optional; defaults to 15 minutes and is capped server-side
+(default 1 hour) regardless of what a caller asks for. Leak blast radius: one
+holder, read-only (plus the two deposit-address routes' narrow write), until
+`exp`.
+
+Response `200 OK`: `token` (an `lht_`-prefixed bearer value — same
+`Authorization: Bearer <token>` header shape as an API key, but only the
+`/holder/*` routes below accept it), `expires_at`.
+
+Status codes: `200`, `400`, `401`.
+
+Auth: required (platform key), `write` scope.
+
+Every endpoint below authenticates with **the minted holder token** instead
+— `Authorization: Bearer lht_...`, not a platform `API_KEYS` entry — and
+scopes every response to that token's own holder; there is no holder path
+parameter to spoof.
+
+### GET /holder/balances
+
+The token-bound holder's balances, one row per currency.
+
+Query params: `currency_uid` (optional — omit for every currency the holder
+has a nonzero dimension in).
+
+Response `200 OK`:
+
+```json
+{
+  "code": 200,
+  "message": null,
+  "data": {
+    "list": [
+      {"currency_uid": "cur-usdt", "currency_code": "USDT", "available": "500.00", "pending": "0.00", "locked": "50.00", "total": "550.00"}
+    ],
+    "next_cursor": null
+  }
+}
+```
+
+`total` = `available` + `pending` + `locked`.
+
+Status codes: `200`, `401`.
+
+Auth: required, holder token.
+
+### GET /holder/transactions
+
+The token-bound holder's translated transaction view — one row per
+(journal, currency) net effect on the holder, newest first, in user
+language (`kind` / `kind_label` / `direction` / `amount`), no double-entry
+vocabulary. Cursor-paginated at journal granularity; see
+[Pagination](#pagination) above for the newest-first cursor direction this
+endpoint uses.
+
+Query params: `cursor`, `limit` (max 100).
+
+Status codes: `200`, `401`.
+
+Auth: required, holder token.
+
+### GET /holder/holds
+
+The token-bound holder's outstanding holds (locked amounts with expiry),
+cursor-paginated, newest first — same cursor shape and direction as `GET
+/holder/transactions` (H-m9: this endpoint used to return the holder's
+entire hold set with no limit).
+
+Query params: `cursor`, `limit` (default 20, max 100).
+
+Status codes: `200`, `401`.
+
+Auth: required, holder token.
+
+### GET /holder/deposit-address
+
+Holder-scoped mirror of `GET /holders/{holder}/deposit-address` — same
+`DepositAddressProvider`, but the holder comes exclusively from the token,
+never a request parameter. Does not create one.
+
+Status codes: `200`, `401`, `404` (no address registered yet), `503`
+(crypto-deposit add-on not enabled).
+
+Auth: required, holder token.
+
+### POST /holder/deposit-address
+
+Holder-scoped mirror of `POST /holders/{holder}/deposit-address` — derives
+and registers the address on first call, repeated calls return the same
+one. The holder is bound to the token; this route moves no funds, it only
+provisions the caller's own receiving address.
+
+Status codes: `201`, `401`, `503` (crypto-deposit add-on not enabled).
+
+Auth: required, holder token.
 
 ---
 

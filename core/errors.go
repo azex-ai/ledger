@@ -60,6 +60,19 @@ var (
 	// classifies it correctly without the caller needing to import a
 	// driver-specific error type.
 	ErrTransient = errors.New("transient failure, safe to retry")
+	// ErrNoLifecycle is returned (wrapped) by Booker.CreateBooking when the
+	// target classification has no Lifecycle attached (Classification.Lifecycle
+	// is absent/empty) -- a caller-fixable configuration problem, not an
+	// internal error: no booking can be created against a classification
+	// with no state machine to drive it. The out-of-the-box `deposit`/
+	// `withdraw` classifications ship label-only (see README "Tier 2 --
+	// With Built-in Presets") until an operator calls
+	// ClassificationStore.SetLifecycleIfEmpty. Before this sentinel existed,
+	// postgres.BookingStore returned a plain, unwrapped error here, which
+	// server/handler_bookings.go could only detect by matching its message
+	// text (2026-09-03 consumer audit F-M1) -- a one-word wording change in
+	// the store would have silently regressed the HTTP layer back to 500.
+	ErrNoLifecycle = errors.New("classification has no lifecycle")
 )
 
 // IsRetryable reports whether err represents a condition a caller may
@@ -110,7 +123,8 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrAccountClosed),
 		errors.Is(err, ErrPeriodClosed),
 		errors.Is(err, ErrUnauthorizedJournal),
-		errors.Is(err, ErrUnknownAuthKey):
+		errors.Is(err, ErrUnknownAuthKey),
+		errors.Is(err, ErrNoLifecycle):
 		return false
 	default:
 		return true

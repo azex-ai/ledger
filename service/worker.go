@@ -108,9 +108,12 @@ type Worker struct {
 	// authVerifier is never CALLED by the Worker -- it is held so
 	// StartupReport can report its absence. See SetAuthVerifier.
 	authVerifier core.AuthVerifier
-	config       WorkerConfig
-	logger       core.Logger
-	metrics      core.Metrics
+	// runtimeRoleWarning is never CALLED by the Worker either -- it is held
+	// so StartupReport can report it. See SetRuntimeRoleWarning.
+	runtimeRoleWarning error
+	config             WorkerConfig
+	logger             core.Logger
+	metrics            core.Metrics
 	// allowSilent opts out of Run's refusal to start under core.NopLogger --
 	// see AllowSilent.
 	allowSilent bool
@@ -208,6 +211,26 @@ func (w *Worker) SetPool(pool *pgxpool.Pool) {
 // given (nil included).
 func (w *Worker) SetAuthVerifier(v core.AuthVerifier) {
 	w.authVerifier = v
+}
+
+// SetRuntimeRoleWarning records that this Worker's connection does not
+// authenticate as postgres.AppRole ("ledger_app") -- the role several of
+// this schema's hardest guarantees (I-22, I-42, the append-only guards) are
+// enforced against by GRANT, not by anything the application layer checks.
+// nil clears it (the check passed).
+//
+// ledger.Service.Worker calls this once, at construction, with the result of
+// the same check (*ledger.Service).AssertRuntimeRole exposes for a
+// composition root to run directly -- so a Worker built through the facade
+// always carries the answer without the consumer having to call
+// AssertRuntimeRole themselves. A Worker built directly via NewWorker
+// (bypassing the facade) never has it set, and StartupReport stays silent on
+// it: there is no DBTX() to check against without a caller deciding what
+// "this connection" even means for their own composition (2026-09 consumer
+// audit F-C1: every other degraded mode this Worker can be in gets a
+// warning here, and this was the one gap that did not).
+func (w *Worker) SetRuntimeRoleWarning(err error) {
+	w.runtimeRoleWarning = err
 }
 
 // AllowSilent opts this Worker out of Run's refusal to start when its logger
@@ -315,6 +338,15 @@ type StartupReport struct {
 	// which is what makes every LockedJob single-runner across replicas.
 	// False means all six locked jobs run on every replica each tick.
 	LeaderElection bool `json:"leader_election"`
+	// RuntimeRoleWarning is non-empty when this Worker's connection does not
+	// authenticate as postgres.AppRole ("ledger_app") -- the role several of
+	// this schema's hardest guarantees (I-22, I-42, the append-only guards)
+	// are enforced against by GRANT, not by anything the application layer
+	// checks (see (*ledger.Service).AssertRuntimeRole). Empty means the
+	// check passed, or this Worker was built directly via NewWorker rather
+	// than through ledger.Service.Worker -- the only path that ever calls
+	// SetRuntimeRoleWarning.
+	RuntimeRoleWarning string `json:"runtime_role_warning,omitempty"`
 	// Warnings lists degraded-but-permitted states in the same words Run
 	// logs them. Empty means nothing to report.
 	Warnings []string `json:"warnings"`
@@ -337,6 +369,9 @@ func (w *Worker) StartupReport() StartupReport {
 		Partition:                  w.partition != nil,
 		LeaderElection:             w.pool != nil,
 		VerifiedBalanceVerifier:    w.authVerifier != nil,
+	}
+	if w.runtimeRoleWarning != nil {
+		r.RuntimeRoleWarning = w.runtimeRoleWarning.Error()
 	}
 	// Every subsystem that is OFF gets its own warning, naming what is not
 	// happening and how to turn it on (w3-review/money-path.md M-6). Before
@@ -364,6 +399,9 @@ func (w *Worker) StartupReport() StartupReport {
 	}
 	if strings.HasPrefix(r.AttestationAnchorType, devAnchorTypePrefix) {
 		r.Warnings = append(r.Warnings, developmentAnchorWarning+r.AttestationAnchorType)
+	}
+	if r.RuntimeRoleWarning != "" {
+		r.Warnings = append(r.Warnings, "worker: "+r.RuntimeRoleWarning)
 	}
 	return r
 }

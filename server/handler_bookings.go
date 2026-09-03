@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -165,6 +166,34 @@ func (s *Server) handleCreateBooking(w http.ResponseWriter, r *http.Request) {
 
 	op, err := s.booker.CreateBooking(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, core.ErrNoLifecycle) {
+			// F-M1 (2026-09-03 consumer audit): this is a caller-fixable
+			// configuration problem -- the out-of-the-box `deposit`
+			// classification ships label-only (README "Tier 2 -- With
+			// Built-in Presets": InstallExtendedPresets installs accounting
+			// templates, not lifecycles), and CreateBooking has no way to
+			// create a booking against a classification with no lifecycle
+			// attached -- not "internal error". Before core.ErrNoLifecycle
+			// existed, postgres.BookingStore returned a plain, unwrapped
+			// error here, and this handler could only detect it by matching
+			// the message text, which fell through resolveError's default
+			// case to 500/19999 the moment that wording changed; api.md's
+			// error table marks 500 as Retryable, so a conformant client
+			// retried a request that could never succeed.
+			//
+			// httpx.ErrField, not ErrBadRequest: a plain AppError's Message
+			// is server-log-only (httpx.Error renders message.text on the
+			// wire from bizcode.DisplayMessage(code), a static per-code
+			// string) -- ErrField is what api-contract.md §1's
+			// message.fields exists for, and the only shortcut constructor
+			// that puts caller-specific text where the caller can read it.
+			httpx.Error(w, httpx.ErrField("classification_code",
+				"classification \""+req.ClassificationCode+"\" has no lifecycle attached, so no booking "+
+					"can be created against it -- call ClassificationStore.SetLifecycleIfEmpty(ctx, uid, "+
+					"lifecycle) first (README \"Add a custom lifecycle\", or presets.DepositLifecycle / "+
+					"presets.WithdrawalLifecycle for the out-of-the-box deposit/withdraw classifications)"))
+			return
+		}
 		httpx.Error(w, err)
 		return
 	}
