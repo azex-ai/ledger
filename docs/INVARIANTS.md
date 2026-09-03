@@ -7731,3 +7731,79 @@ missing member of that set, in that file.
   found this (`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`), so
   the case is replayed on every plain `go test`, not only during a fuzzing
   run.
+
+## I-71: One on-chain transfer log is booked once
+
+**Rule**: a deposit booking's identity is the `(chain_id, tx_hash,
+txlog_seq)` triple it carries in `metadata` — the same triple
+`IngestDeposit` derives its idempotency key from (I-20) — and at most one
+booking may hold it. Two things enforce that, independently:
+
+1. **In the schema**: a unique index on those three metadata values
+   (migration 032, `uq_bookings_deposit_identity`), so a second row for one
+   log cannot exist. Keyed on the deposit's real identity rather than on
+   anything an `INSERT` chooses.
+2. **In the application**: before crediting, the recheck loop asks whether
+   any OTHER booking already holds this log (in any state) and, if one does,
+   treats the corroboration as contradicted — parking the booking for review
+   with the offending booking named, never crediting it. This half holds on
+   a deployment that has not applied 032 yet, and it is the half that can
+   say WHICH booking already has the log.
+
+The honest writer is unaffected: `IngestDeposit` resolves a re-observed
+transfer to the booking that already exists before attempting any insert, so
+a re-scanned window, a redelivered webhook and a registration rescan all
+converge on one booking, as they always did.
+
+**Why**: I-69 made a booking's claim answerable by the chain, and the
+re-check round of the 2026-09-03 audit (`money-out.md` N-1) showed what that
+still cannot answer. One real deposit of 50 was ingested and credited. Three
+further bookings were then appended describing THE SAME log — same chain,
+transaction, log position, token, amount and holder, differing only in
+`channel_name`, with `channel_ref` left empty. The honest recheck job
+confirmed all three and signed them: I-69's corroboration re-reads the chain
+and finds a log carrying exactly what the booking claims, because the row is
+a faithful copy of a real one. Verified balance went 50 → 200 while
+`SolvencyCheck` reported `solvent=true` and `RunFullReconciliation` reported
+`overall_passed=true, full_coverage=true, skipped_checks=[]` — both sides of
+the accounting equation grew together, so nothing that compares them could
+see it. A second confirmation source did not help either: asked "is this
+transfer 50?", it answered yes, and it was right.
+
+Every existing control was answering a different question. `I-3`'s
+idempotency says a key is unique, not that it names an unclaimed event.
+`uq_bookings_channel_ref` is `UNIQUE (channel_name, channel_ref)` — its
+first key column is the INSERT's to choose and `''` opts out of the partial
+index entirely; it exists because one transaction can carry several Transfer
+logs (I-20), and it blocked one variant of this by accident. Migration 029's
+INSERT guard constrains the row's SHAPE, which here was impeccable. P5
+faithfully signed the amount the row claimed. The missing question was the
+one only the ledger can answer: **have I already counted this?**
+
+**Enforced by**: migration `032_deposit_identity_uniqueness.up.sql`
+(`uq_bookings_deposit_identity`); and, in the application,
+`core.BookingReader.BookingsForDepositIdentity` consulted by the pre-credit
+corroboration reached through `service.Onchain.RunPendingRecheckOnce`.
+
+**Pinned by**:
+- `service.TestDepositIdentity_DuplicateBookingsAreRejectedAtInsert` — the
+  reported attack statement refused, under both a channel name of the
+  writer's choosing and the honest one, since the constraint is about the
+  deposit's identity and not about who wrote the row; and a second log
+  position in the same transaction still accepted, so the index does not
+  forbid what I-20 exists to allow.
+- `service.TestDepositIdentity_DuplicateBookingsAreNotCreditedWithoutTheIndex`
+  — the same attack on the pre-032 schema, where the rows do go in: the
+  honest job must park all three for review and credit none of them, and the
+  refusal must name the booking that already holds the log. Without the
+  application half this is the finding as measured — three confirmed
+  bookings with journals.
+- `service.TestDepositIdentity_UncorroboratedBookingReachesReviewEvenWhenTheLogIsTaken`
+  — N-2: the forgery references a log a real booking holds, under the same
+  channel name, and must still REACH the review queue. Its walk to review
+  may not claim the reference the genuine booking owns, or the transition
+  fails and the refusal degrades to one Error line per tick with
+  `review_reason` never landing.
+- `service.TestDepositIdentity_HonestIngestIsUnaffected` — the control
+  group: re-observing a transfer (twice through `IngestDeposit`, once
+  through a forward re-scan) still resolves to the one booking that exists.

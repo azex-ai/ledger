@@ -31,6 +31,7 @@ this runbook corresponds to a violated or at-risk invariant from that document.
 18. [A deposit was dead-lettered](#18-a-deposit-was-dead-lettered)
 19. [Corrupt reversal chain](#19-corrupt-reversal-chain)
 20. [The external anchor was poisoned (verify welded to TAMPERED)](#20-the-external-anchor-was-poisoned-verify-welded-to-tampered)
+21. [A forged attestation row was appended (discard is time-limited)](#21-a-forged-attestation-row-was-appended-discard-is-time-limited)
 
 Backup & disaster recovery (PITR, RPO/RTO, restore drill) lives in its own
 document: [`DR.md`](./DR.md).
@@ -2441,6 +2442,69 @@ put a ledger-side invariant in the object-store adapter and give a future
 attacker a value to sit just underneath. `VerifyLedger` already compares the
 two and says so precisely; what was missing was a way back, which is this
 section.
+
+---
+
+## 21. A forged attestation row was appended (discard is time-limited)
+
+**Symptom**: a row in `ledger_attestations` that is shape-valid — its `seq`
+extends the chain, its `prev_root` links correctly — but whose signature
+does not verify. `ledger-cli verify` reports `TAMPERED` naming that seq.
+Migration 029's `ledger_attestations_insert_guard` refuses everything a
+forger could get wrong about the SHAPE, so this is what is left: an append
+at the true head that only the signature can expose.
+
+**The way back**: `ledger_discard_attestations_from(seq, reason)` —
+owner-only, mandatory reason, leaves a forensic row. It removes the poisoned
+suffix so the honest attestation job can extend the chain again.
+
+> ### ⏱ It only works before the next `AttestInterval`
+>
+> **The window is one attestation tick** (`AttestInterval`, 60s by default),
+> and it is not the discard that closes it — it is the anchor.
+>
+> Once the attestation job has extended the chain past the poisoned row and
+> `catchUpAnchor` has PUBLISHED that head to the external anchor, the anchor
+> knows about a seq the DB will no longer reach after the discard. Verify
+> then reports
+>
+> ```
+> anchor knows about seq <N> but the DB chain only reaches seq <N-k>
+> ```
+>
+> permanently — I-28 defines `anchorSeq > maxSeqSeen` as `TAMPERED`, and
+> I-56 (correctly) forbids walking an anchor's head backwards. The door has
+> exchanged one permanent `TAMPERED` for another. Measured both ways on
+> 2026-09-03 (`money-out.md` N-3): discard BEFORE publication → next batch →
+> `VERIFIED`; discard AFTER publication → permanent `TAMPERED`.
+>
+> **So, on discovering a forged attestation row:**
+>
+> 1. **Stop the attestation worker first**, before anything else. It is the
+>    thing racing you. (Stop the process, or set `AttestInterval` to zero
+>    and redeploy — `runLoop` skips a job whose interval is non-positive.)
+> 2. Check whether the poisoned seq has already been published:
+>    ```sql
+>    SELECT MAX(observed_seq) AS anchored, (SELECT MAX(seq) FROM ledger_attestations) AS chain_head
+>    FROM anchor_observations;
+>    ```
+>    plus the anchor's own `Head` (`ledger-cli verify` prints it). `anchored`
+>    at or above the poisoned seq means the window has closed.
+> 3. **Window open** — discard, restart the worker, confirm the next batch
+>    verifies.
+> 4. **Window closed** — discarding will not restore verification. Treat it
+>    as an anchor-identity incident and follow
+>    [§20](#20-the-external-anchor-was-poisoned-verify-welded-to-tampered)'s
+>    rotation instead: a fresh prefix, republish, and the incident log
+>    carrying the switch-over point. The poisoned row and the old anchor
+>    prefix both stay as evidence.
+>
+> Making this structural rather than time-limited — recording the discard in
+> `anchor_observations` so `VerifyLedger` can tell "an operator discarded
+> this suffix" from "the anchor is ahead because someone poisoned it" — is
+> tracked as follow-up, not done. Until then this is an operational
+> discipline with a clock on it, which is exactly why it is written down
+> here rather than left implied by the door's existence.
 
 ---
 

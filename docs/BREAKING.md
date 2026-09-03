@@ -31,6 +31,28 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `core.BookingReader` gains `BookingsForDepositIdentity`
+
+**Landed (Wave 5 re-check, W5-onchain-ops-2; audit
+`docs/audits/2026-09-03-independent-review/recheck/money-out.md` N-1;
+invariant I-71.)**
+
+    core.BookingReader + BookingsForDepositIdentity(ctx, chainID int64, txHash string, txLogSeq int32) ([]Booking, error)
+
+**What a consumer must do.** Using `postgres.NewBookingStore` (what
+`ledger.New` does): nothing, it implements the method. Implementing
+`core.BookingReader` by hand: return every booking whose `metadata` carries
+that `(chain_id, tx_hash, txlog_seq)` triple, unpaginated and unfiltered by
+status. Returning nothing unconditionally disables a mint fence -- the
+deposit path asks this before crediting, to find out whether another booking
+already holds the transfer it is about to book.
+
+**Schema, in the same change**: migration `032` adds
+`uq_bookings_deposit_identity`, a unique index over those three metadata
+values. A deployment carrying duplicate deposit identities will fail to
+apply it -- those rows are the defect it exists to prevent; the migration
+header carries the query that finds them.
+
 ### Migration 029 (`029_insert_path_guards`): appended rows are guarded and recorded
 
 **Landed (Wave 5, `docs/plans/2026-09-03-wave5-contract.md` §0 R3-1;

@@ -35,6 +35,17 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`core.BookingReader` gains `BookingsForDepositIdentity`, and migration
+  `032` makes one on-chain transfer log bookable exactly once** (Wave 5
+  re-check; audit `recheck/money-out.md` N-1; invariant I-71). Consumers
+  going through `ledger.New` need no change. A hand-written `BookingReader`
+  must implement the method -- returning nothing unconditionally disables a
+  mint fence. Migration `032` adds `uq_bookings_deposit_identity` (unique
+  over the `chain_id`/`tx_hash`/`txlog_seq` metadata triple) and a guard
+  requiring `channel_name = 'onchain'` on deposit bookings; a database
+  holding duplicate deposit identities will fail to apply it, and the
+  migration header carries the query that finds them.
+
 - **Migration 029 refuses writes the schema previously accepted** (I-66 /
   I-67). Nothing in this library's own write paths produces any of them, but
   a consumer with its own SQL, its own fixtures, or its own repair scripts
