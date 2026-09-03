@@ -193,9 +193,7 @@ REVOKE ALL ON FUNCTION ledger_resweep_ownership() FROM PUBLIC;
 -- Measured (2026-09-03): 018 uses this idiom, and under Migrate's original
 -- single run-wide window it left 019, 020 and 021 unprivileged -- a CREATEROLE
 -- bootstrap install died at 020's CREATE TRIGGER with "permission denied for
--- table account_policies", dirty at 20. Migrate now opens one window per
--- migration precisely so that a migration cannot do this to its successors,
--- but the idiom is still dead weight and still misleading, so: don't.
+-- table account_policies", dirty at 20. Migrate now runs 002..N on one dedicated connection that has SET ROLE'd to ledger_owner (a SET-only, INHERIT FALSE membership that Migrate grants and revokes itself, and refuses to grant while any other session holds the same credential -- M-5, W3 review 2026-09-03; comment updated after merge under the remediation contract's §8 exception, text only).
 --
 -- What a migration creating new objects DOES still owe is a call to
 --
