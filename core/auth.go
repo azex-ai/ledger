@@ -184,6 +184,9 @@ func canonicalTimestamp(t time.Time) time.Time {
 //   - 0x02 / 0x03: core/attestation.go's batchDigestDomain / root hash
 //     (P6, merged). Do not touch.
 //   - 0x10: this constant (journal auth digest).
+//   - 0x11: core/reservation_auth.go's reservationDischargeDigestDomain
+//     (signed reservation discharge claims, remediation contract §7.18 /
+//     docs/INVARIANTS.md I-65). Do not touch.
 //
 // V1 (0x01, retired) included input.EventUID in the digest, which board
 // #12/#13's RunInTx signing-gap fix discovered cannot be known at

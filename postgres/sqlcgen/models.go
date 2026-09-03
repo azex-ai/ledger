@@ -388,6 +388,9 @@ type ReservationOperationReceipt struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	Amount         pgtype.Numeric `json:"amount"`
 	CreatedAt      time.Time      `json:"created_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
 }
 
 type ReservationSettlementLeg struct {
@@ -396,6 +399,9 @@ type ReservationSettlementLeg struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	Amount         pgtype.Numeric `json:"amount"`
 	CreatedAt      time.Time      `json:"created_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
 }
 
 type RollupQueue struct {

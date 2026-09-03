@@ -222,6 +222,22 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 	// (contracts §W2-2) depends on it.
 	s.verifiedBalanceStore = postgres.NewVerifiedBalanceStore(pool, s.authVerifier)
 	s.reserverStore = postgres.NewReserverStore(pool, s.ledgerStore, s.verifiedBalanceStore).WithMetrics(s.metrics)
+	// SetLogger so the one signal that a reservation discharge claim failed
+	// verification -- tamper evidence on an append-only row, which the gate
+	// answers by holding the funds rather than by erroring -- reaches the
+	// consumer's logger instead of nowhere (working-agreements §3).
+	s.reserverStore.SetLogger(s.logger)
+	if s.attestor != nil {
+		// The hold half of the verified-balance gate (docs/INVARIANTS.md
+		// I-65, remediation contract §7.18). Wired from the same option that
+		// wires LedgerStore.WithAuth above, on the same condition, so a
+		// deployment cannot end up signing journals but not the discharge
+		// claims that decide how much of a reservation still holds money.
+		// Without this line the reserver keeps I-49's conservative rule: a
+		// settled or released reservation holds its full amount until it
+		// expires.
+		s.reserverStore = s.reserverStore.WithAuth(s.attestor, s.authVerifier)
+	}
 	s.bookingStore = postgres.NewBookingStore(pool).WithMetrics(s.metrics)
 	s.eventStore = postgres.NewEventStore(pool)
 	// The composition root EventStore.SetLogger's own doc comment points at

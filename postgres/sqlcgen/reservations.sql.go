@@ -207,7 +207,7 @@ func (q *Queries) GetReservationForUpdateByUID(ctx context.Context, uid pgtype.U
 }
 
 const getReservationOperationReceiptByIdempotencyKey = `-- name: GetReservationOperationReceiptByIdempotencyKey :one
-SELECT id, reservation_id, operation, idempotency_key, amount, created_at
+SELECT id, reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 FROM reservation_operation_receipts
 WHERE idempotency_key = $1
 `
@@ -222,6 +222,9 @@ func (q *Queries) GetReservationOperationReceiptByIdempotencyKey(ctx context.Con
 		&i.IdempotencyKey,
 		&i.Amount,
 		&i.CreatedAt,
+		&i.AuthDigest,
+		&i.AuthSignature,
+		&i.AuthKeyID,
 	)
 	return i, err
 }
@@ -238,7 +241,7 @@ func (q *Queries) GetReservationUIDByID(ctx context.Context, id int64) (pgtype.U
 }
 
 const getSettlementLegByIdempotencyKey = `-- name: GetSettlementLegByIdempotencyKey :one
-SELECT id, reservation_id, idempotency_key, amount, created_at
+SELECT id, reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 FROM reservation_settlement_legs
 WHERE idempotency_key = $1
 `
@@ -252,6 +255,9 @@ func (q *Queries) GetSettlementLegByIdempotencyKey(ctx context.Context, idempote
 		&i.IdempotencyKey,
 		&i.Amount,
 		&i.CreatedAt,
+		&i.AuthDigest,
+		&i.AuthSignature,
+		&i.AuthKeyID,
 	)
 	return i, err
 }
@@ -299,10 +305,14 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 }
 
 const insertReservationOperationReceipt = `-- name: InsertReservationOperationReceipt :one
-INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount)
-VALUES ($1, $2, $3, $4)
+INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id)
+VALUES (
+    $1, $2, $3, $4,
+    COALESCE(NULLIF($5::timestamptz, 'epoch'::timestamptz), now()),
+    $6, $7, $8
+)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, reservation_id, operation, idempotency_key, amount, created_at
+RETURNING id, reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 `
 
 type InsertReservationOperationReceiptParams struct {
@@ -310,18 +320,30 @@ type InsertReservationOperationReceiptParams struct {
 	Operation      string         `json:"operation"`
 	IdempotencyKey string         `json:"idempotency_key"`
 	Amount         pgtype.Numeric `json:"amount"`
+	RecordedAt     time.Time      `json:"recorded_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
 }
 
 // Durable idempotency record for one Settle/Release/FinalizeSettlement
 // application (I-3), mirroring InsertReservationSettlementLeg's pattern. On
 // a replayed key this inserts nothing and returns no row; the caller then
 // fetches the existing receipt and compares payloads.
+//
+// The auth_* columns and the passed-in created_at are exactly
+// InsertReservationSettlementLeg's -- see that query's comment for why the
+// timestamp cannot be left to the column default once it is signed.
 func (q *Queries) InsertReservationOperationReceipt(ctx context.Context, arg InsertReservationOperationReceiptParams) (ReservationOperationReceipt, error) {
 	row := q.db.QueryRow(ctx, insertReservationOperationReceipt,
 		arg.ReservationID,
 		arg.Operation,
 		arg.IdempotencyKey,
 		arg.Amount,
+		arg.RecordedAt,
+		arg.AuthDigest,
+		arg.AuthSignature,
+		arg.AuthKeyID,
 	)
 	var i ReservationOperationReceipt
 	err := row.Scan(
@@ -331,28 +353,59 @@ func (q *Queries) InsertReservationOperationReceipt(ctx context.Context, arg Ins
 		&i.IdempotencyKey,
 		&i.Amount,
 		&i.CreatedAt,
+		&i.AuthDigest,
+		&i.AuthSignature,
+		&i.AuthKeyID,
 	)
 	return i, err
 }
 
 const insertReservationSettlementLeg = `-- name: InsertReservationSettlementLeg :one
-INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount)
-VALUES ($1, $2, $3)
+INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id)
+VALUES (
+    $1, $2, $3,
+    COALESCE(NULLIF($4::timestamptz, 'epoch'::timestamptz), now()),
+    $5, $6, $7
+)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, reservation_id, idempotency_key, amount, created_at
+RETURNING id, reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 `
 
 type InsertReservationSettlementLegParams struct {
 	ReservationID  int64          `json:"reservation_id"`
 	IdempotencyKey string         `json:"idempotency_key"`
 	Amount         pgtype.Numeric `json:"amount"`
+	RecordedAt     time.Time      `json:"recorded_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
 }
 
 // Durable idempotency record for one SettlePartial application (I-3). On a
 // replayed key this inserts nothing and returns no row; the caller then
 // fetches the existing leg and compares payloads.
+//
+// auth_digest / auth_signature / auth_key_id carry the signature over this
+// leg's canonical discharge digest (migration 028, docs/INVARIANTS.md I-65);
+// all three are ” when no Attestor is configured or the caller is inside
+// its own transaction, in which case a gated Reserve keeps holding the whole
+// reservation (I-49's conservative rule).
+//
+// created_at is passed rather than defaulted because it is COVERED by that
+// digest: a signature computed over one instant and a row storing a
+// different one can never be re-verified. 'epoch' is the sentinel for "no
+// signed instant, let the database assign it", which keeps the unsigned path
+// byte-for-byte what it was before 028.
 func (q *Queries) InsertReservationSettlementLeg(ctx context.Context, arg InsertReservationSettlementLegParams) (ReservationSettlementLeg, error) {
-	row := q.db.QueryRow(ctx, insertReservationSettlementLeg, arg.ReservationID, arg.IdempotencyKey, arg.Amount)
+	row := q.db.QueryRow(ctx, insertReservationSettlementLeg,
+		arg.ReservationID,
+		arg.IdempotencyKey,
+		arg.Amount,
+		arg.RecordedAt,
+		arg.AuthDigest,
+		arg.AuthSignature,
+		arg.AuthKeyID,
+	)
 	var i ReservationSettlementLeg
 	err := row.Scan(
 		&i.ID,
@@ -360,8 +413,126 @@ func (q *Queries) InsertReservationSettlementLeg(ctx context.Context, arg Insert
 		&i.IdempotencyKey,
 		&i.Amount,
 		&i.CreatedAt,
+		&i.AuthDigest,
+		&i.AuthSignature,
+		&i.AuthKeyID,
 	)
 	return i, err
+}
+
+const listReservationOperationReceiptsForReservations = `-- name: ListReservationOperationReceiptsForReservations :many
+SELECT o.id, o.reservation_id, r.uid AS reservation_uid, o.operation, o.idempotency_key,
+       o.amount, o.created_at, o.auth_digest, o.auth_signature, o.auth_key_id
+FROM reservation_operation_receipts o
+JOIN reservations r ON r.id = o.reservation_id
+WHERE o.reservation_id = ANY($1::bigint[])
+ORDER BY o.id
+`
+
+type ListReservationOperationReceiptsForReservationsRow struct {
+	ID             int64          `json:"id"`
+	ReservationID  int64          `json:"reservation_id"`
+	ReservationUid pgtype.UUID    `json:"reservation_uid"`
+	Operation      string         `json:"operation"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+	CreatedAt      time.Time      `json:"created_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
+}
+
+// Every operation receipt belonging to the given reservations, with the
+// signature material a verifier needs and the reservation uid the digest
+// covers. Read by the gate OUTSIDE the transaction (an AuthVerifier may be a
+// remote call and financial.md forbids that inside one), so the answer is
+// authorized-but-not-current; the under-lock recompute is what makes that
+// safe (see postgres.ReserverStore.reserveWithQueries and I-65).
+func (q *Queries) ListReservationOperationReceiptsForReservations(ctx context.Context, reservationIds []int64) ([]ListReservationOperationReceiptsForReservationsRow, error) {
+	rows, err := q.db.Query(ctx, listReservationOperationReceiptsForReservations, reservationIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReservationOperationReceiptsForReservationsRow{}
+	for rows.Next() {
+		var i ListReservationOperationReceiptsForReservationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReservationID,
+			&i.ReservationUid,
+			&i.Operation,
+			&i.IdempotencyKey,
+			&i.Amount,
+			&i.CreatedAt,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReservationSettlementLegsForReservations = `-- name: ListReservationSettlementLegsForReservations :many
+SELECT l.id, l.reservation_id, r.uid AS reservation_uid, l.idempotency_key,
+       l.amount, l.created_at, l.auth_digest, l.auth_signature, l.auth_key_id
+FROM reservation_settlement_legs l
+JOIN reservations r ON r.id = l.reservation_id
+WHERE l.reservation_id = ANY($1::bigint[])
+ORDER BY l.id
+`
+
+type ListReservationSettlementLegsForReservationsRow struct {
+	ID             int64          `json:"id"`
+	ReservationID  int64          `json:"reservation_id"`
+	ReservationUid pgtype.UUID    `json:"reservation_uid"`
+	IdempotencyKey string         `json:"idempotency_key"`
+	Amount         pgtype.Numeric `json:"amount"`
+	CreatedAt      time.Time      `json:"created_at"`
+	AuthDigest     []byte         `json:"auth_digest"`
+	AuthSignature  []byte         `json:"auth_signature"`
+	AuthKeyID      string         `json:"auth_key_id"`
+}
+
+// The settlement-leg half of the same fetch. Legs have no `operation`
+// column: the record kind IS the operation, and the caller labels these
+// core.ReservationOpSettlePartial when it rebuilds the digest preimage (see
+// that constant's doc comment for why the two record kinds must not share
+// one).
+func (q *Queries) ListReservationSettlementLegsForReservations(ctx context.Context, reservationIds []int64) ([]ListReservationSettlementLegsForReservationsRow, error) {
+	rows, err := q.db.Query(ctx, listReservationSettlementLegsForReservations, reservationIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReservationSettlementLegsForReservationsRow{}
+	for rows.Next() {
+		var i ListReservationSettlementLegsForReservationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ReservationID,
+			&i.ReservationUid,
+			&i.IdempotencyKey,
+			&i.Amount,
+			&i.CreatedAt,
+			&i.AuthDigest,
+			&i.AuthSignature,
+			&i.AuthKeyID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listReservationsByAccount = `-- name: ListReservationsByAccount :many
@@ -411,6 +582,68 @@ func (q *Queries) ListReservationsByAccount(ctx context.Context, arg ListReserva
 			&i.UpdatedAt,
 			&i.Uid,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnexpiredReservationHolds = `-- name: ListUnexpiredReservationHolds :many
+SELECT r.id, r.uid, r.reserved_amount
+FROM reservations r
+WHERE r.account_holder = $1
+  AND r.currency_id = $2
+  AND r.expires_at > now()
+ORDER BY r.id
+`
+
+type ListUnexpiredReservationHoldsParams struct {
+	AccountHolder int64 `json:"account_holder"`
+	CurrencyID    int64 `json:"currency_id"`
+}
+
+type ListUnexpiredReservationHoldsRow struct {
+	ID             int64          `json:"id"`
+	Uid            pgtype.UUID    `json:"uid"`
+	ReservedAmount pgtype.Numeric `json:"reserved_amount"`
+}
+
+// The per-reservation form of SumUnexpiredReservationHolds, for the gated
+// path that can subtract a VERIFIED discharge (docs/INVARIANTS.md I-65).
+//
+// Same WHERE clause, same trust basis: only columns ledger_reservations_guard
+// refuses to let anyone change (reserved_amount, expires_at, uid) are read.
+// status and settled_amount are deliberately absent, exactly as in the SUM
+// form -- the discharge is decided by signature, not by the state machine.
+//
+// Returned per row rather than summed because the caller subtracts a
+// different, individually-verified discharge from each reservation and must
+// floor each difference at zero independently; summing first would let one
+// reservation's over-discharge (only reachable via a claim that fails
+// verification, hence never credited) offset another's hold.
+//
+// uid is returned because it is what the discharge digest covers -- the
+// verifier recomputes a uid-space preimage and never needs to know the
+// BIGSERIAL id, which is only used to join the claims back to their
+// reservation.
+//
+// now() (transaction start, the earliest reading in this transaction) for
+// the same reason SumUnexpiredReservationHolds uses it: a row on the
+// boundary is treated as still held.
+func (q *Queries) ListUnexpiredReservationHolds(ctx context.Context, arg ListUnexpiredReservationHoldsParams) ([]ListUnexpiredReservationHoldsRow, error) {
+	rows, err := q.db.Query(ctx, listUnexpiredReservationHolds, arg.AccountHolder, arg.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnexpiredReservationHoldsRow{}
+	for rows.Next() {
+		var i ListUnexpiredReservationHoldsRow
+		if err := rows.Scan(&i.ID, &i.Uid, &i.ReservedAmount); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

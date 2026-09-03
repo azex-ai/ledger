@@ -92,13 +92,29 @@ SELECT uid FROM reservations WHERE id = $1;
 -- Durable idempotency record for one SettlePartial application (I-3). On a
 -- replayed key this inserts nothing and returns no row; the caller then
 -- fetches the existing leg and compares payloads.
-INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount)
-VALUES ($1, $2, $3)
+--
+-- auth_digest / auth_signature / auth_key_id carry the signature over this
+-- leg's canonical discharge digest (migration 028, docs/INVARIANTS.md I-65);
+-- all three are '' when no Attestor is configured or the caller is inside
+-- its own transaction, in which case a gated Reserve keeps holding the whole
+-- reservation (I-49's conservative rule).
+--
+-- created_at is passed rather than defaulted because it is COVERED by that
+-- digest: a signature computed over one instant and a row storing a
+-- different one can never be re-verified. 'epoch' is the sentinel for "no
+-- signed instant, let the database assign it", which keeps the unsigned path
+-- byte-for-byte what it was before 028.
+INSERT INTO reservation_settlement_legs (reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id)
+VALUES (
+    $1, $2, $3,
+    COALESCE(NULLIF(sqlc.arg(recorded_at)::timestamptz, 'epoch'::timestamptz), now()),
+    sqlc.arg(auth_digest), sqlc.arg(auth_signature), sqlc.arg(auth_key_id)
+)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, reservation_id, idempotency_key, amount, created_at;
+RETURNING id, reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id;
 
 -- name: GetSettlementLegByIdempotencyKey :one
-SELECT id, reservation_id, idempotency_key, amount, created_at
+SELECT id, reservation_id, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 FROM reservation_settlement_legs
 WHERE idempotency_key = $1;
 
@@ -107,13 +123,21 @@ WHERE idempotency_key = $1;
 -- application (I-3), mirroring InsertReservationSettlementLeg's pattern. On
 -- a replayed key this inserts nothing and returns no row; the caller then
 -- fetches the existing receipt and compares payloads.
-INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount)
-VALUES ($1, $2, $3, $4)
+--
+-- The auth_* columns and the passed-in created_at are exactly
+-- InsertReservationSettlementLeg's -- see that query's comment for why the
+-- timestamp cannot be left to the column default once it is signed.
+INSERT INTO reservation_operation_receipts (reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id)
+VALUES (
+    $1, $2, $3, $4,
+    COALESCE(NULLIF(sqlc.arg(recorded_at)::timestamptz, 'epoch'::timestamptz), now()),
+    sqlc.arg(auth_digest), sqlc.arg(auth_signature), sqlc.arg(auth_key_id)
+)
 ON CONFLICT (idempotency_key) DO NOTHING
-RETURNING id, reservation_id, operation, idempotency_key, amount, created_at;
+RETURNING id, reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id;
 
 -- name: GetReservationOperationReceiptByIdempotencyKey :one
-SELECT id, reservation_id, operation, idempotency_key, amount, created_at
+SELECT id, reservation_id, operation, idempotency_key, amount, created_at, auth_digest, auth_signature, auth_key_id
 FROM reservation_operation_receipts
 WHERE idempotency_key = $1;
 
@@ -179,3 +203,60 @@ WHERE r.account_holder = $1
 -- toward "the funds are still held" (I-49).
 SELECT (expires_at <= clock_timestamp())::boolean AS expired
 FROM reservations WHERE id = $1;
+
+-- name: ListUnexpiredReservationHolds :many
+-- The per-reservation form of SumUnexpiredReservationHolds, for the gated
+-- path that can subtract a VERIFIED discharge (docs/INVARIANTS.md I-65).
+--
+-- Same WHERE clause, same trust basis: only columns ledger_reservations_guard
+-- refuses to let anyone change (reserved_amount, expires_at, uid) are read.
+-- status and settled_amount are deliberately absent, exactly as in the SUM
+-- form -- the discharge is decided by signature, not by the state machine.
+--
+-- Returned per row rather than summed because the caller subtracts a
+-- different, individually-verified discharge from each reservation and must
+-- floor each difference at zero independently; summing first would let one
+-- reservation's over-discharge (only reachable via a claim that fails
+-- verification, hence never credited) offset another's hold.
+--
+-- uid is returned because it is what the discharge digest covers -- the
+-- verifier recomputes a uid-space preimage and never needs to know the
+-- BIGSERIAL id, which is only used to join the claims back to their
+-- reservation.
+--
+-- now() (transaction start, the earliest reading in this transaction) for
+-- the same reason SumUnexpiredReservationHolds uses it: a row on the
+-- boundary is treated as still held.
+SELECT r.id, r.uid, r.reserved_amount
+FROM reservations r
+WHERE r.account_holder = $1
+  AND r.currency_id = $2
+  AND r.expires_at > now()
+ORDER BY r.id;
+
+-- name: ListReservationOperationReceiptsForReservations :many
+-- Every operation receipt belonging to the given reservations, with the
+-- signature material a verifier needs and the reservation uid the digest
+-- covers. Read by the gate OUTSIDE the transaction (an AuthVerifier may be a
+-- remote call and financial.md forbids that inside one), so the answer is
+-- authorized-but-not-current; the under-lock recompute is what makes that
+-- safe (see postgres.ReserverStore.reserveWithQueries and I-65).
+SELECT o.id, o.reservation_id, r.uid AS reservation_uid, o.operation, o.idempotency_key,
+       o.amount, o.created_at, o.auth_digest, o.auth_signature, o.auth_key_id
+FROM reservation_operation_receipts o
+JOIN reservations r ON r.id = o.reservation_id
+WHERE o.reservation_id = ANY(sqlc.arg(reservation_ids)::bigint[])
+ORDER BY o.id;
+
+-- name: ListReservationSettlementLegsForReservations :many
+-- The settlement-leg half of the same fetch. Legs have no `operation`
+-- column: the record kind IS the operation, and the caller labels these
+-- core.ReservationOpSettlePartial when it rebuilds the digest preimage (see
+-- that constant's doc comment for why the two record kinds must not share
+-- one).
+SELECT l.id, l.reservation_id, r.uid AS reservation_uid, l.idempotency_key,
+       l.amount, l.created_at, l.auth_digest, l.auth_signature, l.auth_key_id
+FROM reservation_settlement_legs l
+JOIN reservations r ON r.id = l.reservation_id
+WHERE l.reservation_id = ANY(sqlc.arg(reservation_ids)::bigint[])
+ORDER BY l.id;

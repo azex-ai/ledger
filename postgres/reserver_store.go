@@ -41,8 +41,29 @@ type ReserverStore struct {
 	// signing-enabled case, not a nil-pointer bug.
 	verifiedBalance *VerifiedBalanceStore
 
+	// attestor/verifier back the signed-discharge half of the gate
+	// (docs/INVARIANTS.md I-65, remediation contract §7.18), wired by
+	// WithAuth. Both nil (never calling WithAuth) is the default and keeps
+	// I-49's conservative rule exactly as it was: nothing is signed, no
+	// discharge claim is credited, and a settled or released reservation
+	// goes on holding its full reserved_amount until expires_at.
+	//
+	// attestor signs a discharge claim as it is written (Settle /
+	// SettlePartial / Release / FinalizeSettlement, pool mode only -- see
+	// attestDischarge). verifier checks those signatures before the
+	// transaction opens, in requireVerifiedAvailableBalance.
+	attestor core.Attestor
+	verifier core.AuthVerifier
+
 	// metrics is core.NopMetrics() unless WithMetrics is called (I-M1).
 	metrics core.Metrics
+	// logger is core.NopLogger() unless SetLogger is called. Its one job is
+	// that a discharge claim which FAILS verification -- as opposed to one
+	// that simply carries no signature -- is not degraded silently: the
+	// gate's response is to keep holding the funds, which is safe but
+	// invisible to the operator, and a failing signature on an append-only
+	// row is tamper evidence (working-agreements §3).
+	logger core.Logger
 }
 
 // NewReserverStore creates a new ReserverStore backed by a connection pool.
@@ -55,25 +76,53 @@ func NewReserverStore(pool *pgxpool.Pool, ledger *LedgerStore, verifiedBalance *
 		dims:            dimCacheFor(pool),
 		verifiedBalance: verifiedBalance,
 		metrics:         core.NopMetrics(),
+		logger:          core.NopLogger(),
 	}
+}
+
+// WithAuth returns a clone of s wired for signed reservation discharge
+// claims (docs/INVARIANTS.md I-65). Same shape and same role as
+// LedgerStore.WithAuth: additive, so a consumer that never calls it keeps
+// the pre-028 behaviour byte for byte.
+//
+// attestor signs each discharge claim (settlement receipt, settlement leg,
+// release, finalize) as it is written. verifier checks those signatures
+// before a gated Reserve opens its transaction, and only a verified claim
+// reduces the hold that Reserve subtracts.
+//
+// Both arguments are required for the signed path to engage. A non-nil
+// attestor with a nil verifier writes signatures nobody can check, and a
+// nil attestor with a non-nil verifier has nothing to check; either way
+// every reservation falls back to holding its full amount, which is I-49's
+// conservative rule and is exactly what an unconfigured deployment gets. It
+// is therefore safe rather than surprising -- but it is not useful, so
+// ledger.WithAttestor passes both or neither.
+func (s *ReserverStore) WithAuth(attestor core.Attestor, verifier core.AuthVerifier) *ReserverStore {
+	clone := *s
+	clone.attestor = attestor
+	clone.verifier = verifier
+	return &clone
+}
+
+// SetLogger installs the logger the gate uses to report a discharge claim
+// whose signature does not verify. Mutates s (it is called from the
+// composition root before the store is shared) and returns s so it can be
+// chained, matching WebhookSubscriberStore.SetLogger.
+func (s *ReserverStore) SetLogger(l core.Logger) *ReserverStore {
+	if l != nil {
+		s.logger = l
+	}
+	return s
 }
 
 // WithMetrics returns a clone of s configured to emit core.Metrics (I-M1).
 // The default (never calling this) is core.NopMetrics().
 func (s *ReserverStore) WithMetrics(m core.Metrics) *ReserverStore {
-	metrics := s.metrics
+	clone := *s
 	if m != nil {
-		metrics = m
+		clone.metrics = m
 	}
-	return &ReserverStore{
-		pool:            s.pool,
-		db:              s.db,
-		q:               s.q,
-		ledger:          s.ledger,
-		dims:            s.dims,
-		verifiedBalance: s.verifiedBalance,
-		metrics:         metrics,
-	}
+	return &clone
 }
 
 // WithDB returns a clone of the ReserverStore bound to an existing
@@ -83,16 +132,24 @@ func (s *ReserverStore) WithMetrics(m core.Metrics) *ReserverStore {
 // only ever consulted from Reserve's top level, strictly before any
 // transaction is opened (mirroring Authorize's own "outside the
 // transaction" placement rule) -- see Reserve's doc comment.
+//
+// attestor/verifier ride along on the clone (they are plain configuration,
+// not connection-bound), but the clone can never USE the attestor:
+// attestDischarge refuses to sign in tx mode, because the caller's
+// transaction is already open and an Attestor may be a remote call
+// (financial.md), exactly as PostJournal's tx-mode branch never signs. A
+// discharge claim written from inside a caller's transaction is therefore
+// unsigned, and a gated Reserve keeps holding that reservation in full until
+// it expires -- I-49's conservative rule, reached by the fail-closed path
+// rather than by configuration. See attestDischarge and I-65.
 func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
-	return &ReserverStore{
-		dims:            dimCacheForTx(s.dims),
-		pool:            nil, // tx mode
-		db:              db,
-		q:               sqlcgen.New(db),
-		ledger:          ledger,
-		verifiedBalance: s.verifiedBalance,
-		metrics:         s.metrics,
-	}
+	clone := *s
+	clone.dims = dimCacheForTx(s.dims)
+	clone.pool = nil // tx mode
+	clone.db = db
+	clone.q = sqlcgen.New(db)
+	clone.ledger = ledger
+	return &clone
 }
 
 // Reserve creates an amount reservation with advisory lock serialization.
@@ -150,6 +207,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	// caps the reservation below, together with an under-lock recompute of
 	// the same sum (I-49).
 	var verifiedAvailableBase *decimal.Decimal
+	var verifiedDischarges map[int64]decimal.Decimal
 	if input.RequireVerifiedBalance {
 		if s.pool == nil {
 			err := fmt.Errorf("postgres: reserve: called on a transaction-bound store with RequireVerifiedBalance=true; the verified-balance gate may call a remote AuthVerifier and financial.md forbids that inside an open transaction -- call Reserve with RequireVerifiedBalance set BEFORE opening a RunInTx, not from inside its callback: %w", core.ErrInvalidInput)
@@ -162,6 +220,17 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 			return nil, err
 		}
 		verifiedAvailableBase = &verified
+
+		// The hold half of the same gate (I-65): verify each outstanding
+		// reservation's discharge claims here, on the same side of the
+		// transaction boundary and for the same reason -- an AuthVerifier may
+		// be remote. Nil when signing is not configured, which restores
+		// I-49's conservative hold exactly.
+		verifiedDischarges, err = s.verifiedDischarges(ctx, input.AccountHolder, cur.ID)
+		if err != nil {
+			ledgerotel.RecordError(span, err)
+			return nil, err
+		}
 	}
 
 	// Check idempotency first (outside tx / on the current db handle).
@@ -176,7 +245,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID, verifiedAvailableBase)
+		res, err := s.reserveWithQueries(ctx, s.q, input, cur.ID, verifiedAvailableBase, verifiedDischarges)
 		ledgerotel.RecordError(span, err)
 		if err == nil {
 			s.metrics.ReserveCreated()
@@ -193,7 +262,7 @@ func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*
 	defer tx.Rollback(ctx)
 
 	qtx := s.q.WithTx(tx)
-	res, err := s.reserveWithQueries(ctx, qtx, input, cur.ID, verifiedAvailableBase)
+	res, err := s.reserveWithQueries(ctx, qtx, input, cur.ID, verifiedAvailableBase, verifiedDischarges)
 	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return nil, err
@@ -331,7 +400,13 @@ func (s *ReserverStore) sumAvailableFromEntriesWithQueries(ctx context.Context, 
 // outside the transaction, and is combined with an under-lock recompute to
 // form the available base below. Nil restores the ungated behavior byte for
 // byte.
-func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64, verifiedAvailableBase *decimal.Decimal) (*core.Reservation, error) {
+//
+// verifiedDischarges is non-nil only when the gate ran AND signing is
+// configured (WithAuth): it maps reservations.id to the amount of that
+// reservation's reserved_amount that a VERIFIED discharge claim has already
+// released (I-65). Nil falls back to SumUnexpiredReservationHolds, I-49's
+// rule that credits no discharge at all.
+func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReserveInput, currencyID int64, verifiedAvailableBase *decimal.Decimal, verifiedDischarges map[int64]decimal.Decimal) (*core.Reservation, error) {
 	if err := acquireIdempotencyLock(ctx, qtx, input.IdempotencyKey); err != nil {
 		return nil, fmt.Errorf("postgres: reserve: %w", err)
 	}
@@ -431,18 +506,28 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// authorized 2000 against a balance of 1000 (2026-09-02 audit,
 	// docs/audits/2026-09-02-deep-audit/w3-review/money-path.md C-1).
 	//
-	// Under the gate the hold is therefore SumUnexpiredReservationHolds: the
-	// full reserved_amount of every not-yet-expired reservation on the
-	// dimension, crediting NOTHING for settlement or release. Not the
-	// append-only settlement record either — ledger_app must keep INSERT on
-	// those tables, so a forged receipt discharges a hold just as cheaply as
-	// the UPDATE did. expires_at is the only claim about a reservation a
-	// leaked credential cannot manufacture (the guard refuses to let anyone
-	// change it), so it is the only discharge this path accepts. The cost is
-	// paid in one direction only: a settled or released reservation keeps
-	// holding until it expires, which refuses reservations that a perfect
-	// reader would allow and never the reverse. See that query's doc comment
-	// and I-49.
+	// So under the gate the hold is never read from a writable claim. Which of
+	// the two rules below applies depends only on whether signing is
+	// configured, and both are conservative:
+	//
+	//   - WithAuth configured (I-65, the preferred rule): the hold is the
+	//     reserved_amount of every not-yet-expired reservation MINUS, per
+	//     reservation, the discharge that a claim with a VALID signature
+	//     accounts for. verifiedDischarges computed that outside the
+	//     transaction (an AuthVerifier may be remote); the reservations
+	//     themselves are re-read here, under the lock, from immutable columns
+	//     only. A claim that fails verification, or carries none, discharges
+	//     nothing and its reservation holds in full.
+	//   - No Attestor/AuthVerifier (I-49, the fallback): the hold is the full
+	//     reserved_amount of every not-yet-expired reservation, crediting
+	//     NOTHING. Not the append-only settlement record either — ledger_app
+	//     must keep INSERT on those tables, so a forged receipt discharges a
+	//     hold just as cheaply as the UPDATE did. expires_at is then the only
+	//     claim about a reservation a leaked credential cannot manufacture (the
+	//     guard refuses to let anyone change it), so it is the only discharge
+	//     this path accepts. The cost is a settled or released reservation
+	//     holding until it expires: it refuses reservations that a perfect
+	//     reader would allow, never the reverse.
 	//
 	// The ungated path keeps SumActiveReservations — the state machine's own
 	// answer, which is right for a consumer asking "what is held" and wrong
@@ -466,24 +551,30 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 	// advisory lock — not alongside the pre-transaction verification. A
 	// reservation that commits in the gate's window has to be visible, which
 	// is the same over-sell race I-4/I-11 exist to close.
-	var heldRaw any
-	if verifiedAvailableBase != nil {
-		heldRaw, err = qtx.SumUnexpiredReservationHolds(ctx, sqlcgen.SumUnexpiredReservationHoldsParams{
+	var heldDecimal decimal.Decimal
+	switch {
+	case verifiedAvailableBase != nil && verifiedDischarges != nil:
+		heldDecimal, err = s.sumHoldsNetOfVerifiedDischarge(ctx, qtx, input.AccountHolder, currencyID, verifiedDischarges)
+		if err != nil {
+			return nil, err
+		}
+	case verifiedAvailableBase != nil:
+		heldDecimal, err = s.sumHoldsIgnoringDischarge(ctx, qtx, input.AccountHolder, currencyID)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		heldRaw, sumErr := qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
 			AccountHolder: input.AccountHolder,
 			CurrencyID:    currencyID,
 		})
-	} else {
-		heldRaw, err = qtx.SumActiveReservations(ctx, sqlcgen.SumActiveReservationsParams{
-			AccountHolder: input.AccountHolder,
-			CurrencyID:    currencyID,
-		})
-	}
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: sum outstanding holds: %w", err)
-	}
-	heldDecimal, err := anyToDecimal(heldRaw)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: reserve: convert outstanding holds: %w", err)
+		if sumErr != nil {
+			return nil, fmt.Errorf("postgres: reserve: sum outstanding holds: %w", sumErr)
+		}
+		heldDecimal, err = anyToDecimal(heldRaw)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reserve: convert outstanding holds: %w", err)
+		}
 	}
 
 	available := availableBase.Sub(heldDecimal)
@@ -532,10 +623,15 @@ func resolveReservationExpiresIn(d time.Duration) time.Duration {
 // (migration 005). These identify WHICH terminal transition applied a given
 // idempotency key, so reusing a key for a different operation on the same
 // reservation is a payload mismatch (ErrConflict), not a silent success.
+//
+// Aliases of the core constants rather than duplicate literals: these values
+// are part of the discharge digest preimage
+// (core.ReservationDischargeIntent), so two spellings could drift into two
+// different signatures for the same claim.
 const (
-	reservationOpSettle             = "settle"
-	reservationOpRelease            = "release"
-	reservationOpFinalizeSettlement = "finalize_settlement"
+	reservationOpSettle             = core.ReservationOpSettle
+	reservationOpRelease            = core.ReservationOpRelease
+	reservationOpFinalizeSettlement = core.ReservationOpFinalizeSettlement
 )
 
 // ensureReservationOperationReceiptMatches is Settle/Release/FinalizeSettlement's
@@ -606,12 +702,22 @@ func refuseExpiredSettlement(ctx context.Context, qtx *sqlcgen.Queries, operatio
 // same-reservation racers, so this can only be a cross-reservation collision
 // and is reported as ErrConflict, matching InsertReservationSettlementLeg's
 // existing race-handling shape.
-func (s *ReserverStore) recordReservationOperationReceipt(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, operation string, amount decimal.Decimal, idempotencyKey string) error {
+//
+// auth carries the signature attestDischarge produced for this claim, or
+// unsignedDischarge() when there is none (see that function for the three
+// cases). auth.createdAt is persisted as the row's created_at because the
+// digest covers it -- passing the DB's now() instead would store a different
+// instant than was signed and make the claim unverifiable forever (I-65).
+func (s *ReserverStore) recordReservationOperationReceipt(ctx context.Context, qtx *sqlcgen.Queries, reservationID int64, operation string, amount decimal.Decimal, idempotencyKey string, auth reservationDischargeAuth) error {
 	if _, err := qtx.InsertReservationOperationReceipt(ctx, sqlcgen.InsertReservationOperationReceiptParams{
 		ReservationID:  reservationID,
 		Operation:      operation,
 		IdempotencyKey: idempotencyKey,
 		Amount:         decimalToNumeric(amount),
+		RecordedAt:     auth.createdAt,
+		AuthDigest:     auth.digest,
+		AuthSignature:  auth.signature,
+		AuthKeyID:      auth.keyID,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("postgres: %s: idempotency key %q raced a concurrent application: %w", operation, idempotencyKey, core.ErrConflict)
@@ -638,12 +744,27 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	defer span.End()
 
 	if s.pool == nil {
-		// Tx mode: use the caller's transaction directly.
-		err := s.settleWithQueries(ctx, s.q, input)
+		// Tx mode: use the caller's transaction directly. Unsigned by
+		// construction -- see attestDischarge on why a transaction-bound store
+		// must not call an Attestor.
+		err := s.settleWithQueries(ctx, s.q, input, unsignedDischarge())
 		ledgerotel.RecordError(span, err)
 		if err == nil {
 			s.metrics.ReserveSettled()
 		}
+		return err
+	}
+
+	// Sign the discharge claim BEFORE opening the transaction (I-65,
+	// financial.md): an Attestor may be a remote call.
+	auth, err := s.attestDischarge(ctx, s.q, core.ReservationDischargeIntent{
+		ReservationUID: input.ReservationUID,
+		Operation:      core.ReservationOpSettle,
+		Amount:         input.Amount,
+		IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return err
 	}
 
@@ -654,7 +775,7 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
+	if err := s.settleWithQueries(ctx, s.q.WithTx(tx), input, auth); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -668,7 +789,7 @@ func (s *ReserverStore) Settle(ctx context.Context, input core.SettleInput) erro
 	return nil
 }
 
-func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettleInput) error {
+func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettleInput, auth reservationDischargeAuth) error {
 	reservationUID, actualAmount := input.ReservationUID, input.Amount
 	if !actualAmount.IsPositive() {
 		return fmt.Errorf("postgres: settle: actual amount must be positive, got %s: %w", actualAmount, core.ErrInvalidInput)
@@ -742,7 +863,7 @@ func (s *ReserverStore) settleWithQueries(ctx context.Context, qtx *sqlcgen.Quer
 		return wrapStoreError("postgres: settle: update", err)
 	}
 
-	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpSettle, actualAmount, input.IdempotencyKey)
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpSettle, actualAmount, input.IdempotencyKey, auth)
 }
 
 // SettlePartial settles part of a reservation, accumulating settled_amount.
@@ -763,7 +884,18 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.settlePartialWithQueries(ctx, s.q, input)
+		err := s.settlePartialWithQueries(ctx, s.q, input, unsignedDischarge())
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	auth, err := s.attestDischarge(ctx, s.q, core.ReservationDischargeIntent{
+		ReservationUID: reservationUID,
+		Operation:      core.ReservationOpSettlePartial,
+		Amount:         amount,
+		IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -775,7 +907,7 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
+	if err := s.settlePartialWithQueries(ctx, s.q.WithTx(tx), input, auth); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -788,7 +920,7 @@ func (s *ReserverStore) SettlePartial(ctx context.Context, input core.SettlePart
 	return nil
 }
 
-func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettlePartialInput) error {
+func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.SettlePartialInput, auth reservationDischargeAuth) error {
 	reservationUID, amount := input.ReservationUID, input.Amount
 	if !amount.IsPositive() {
 		return fmt.Errorf("postgres: settle partial: amount must be positive, got %s: %w", amount, core.ErrInvalidInput)
@@ -875,6 +1007,10 @@ func (s *ReserverStore) settlePartialWithQueries(ctx context.Context, qtx *sqlcg
 		ReservationID:  reservationID,
 		IdempotencyKey: input.IdempotencyKey,
 		Amount:         decimalToNumeric(amount),
+		RecordedAt:     auth.createdAt,
+		AuthDigest:     auth.digest,
+		AuthSignature:  auth.signature,
+		AuthKeyID:      auth.keyID,
 	}); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// ON CONFLICT DO NOTHING fired: the key landed concurrently from
@@ -915,7 +1051,18 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, input core.Final
 	defer span.End()
 
 	if s.pool == nil {
-		err := s.finalizeSettlementWithQueries(ctx, s.q, input)
+		err := s.finalizeSettlementWithQueries(ctx, s.q, input, unsignedDischarge())
+		ledgerotel.RecordError(span, err)
+		return err
+	}
+
+	auth, err := s.attestDischarge(ctx, s.q, core.ReservationDischargeIntent{
+		ReservationUID: input.ReservationUID,
+		Operation:      core.ReservationOpFinalizeSettlement,
+		Amount:         decimal.Zero,
+		IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -927,7 +1074,7 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, input core.Final
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
+	if err := s.finalizeSettlementWithQueries(ctx, s.q.WithTx(tx), input, auth); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -940,7 +1087,7 @@ func (s *ReserverStore) FinalizeSettlement(ctx context.Context, input core.Final
 	return nil
 }
 
-func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.FinalizeSettlementInput) error {
+func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.FinalizeSettlementInput, auth reservationDischargeAuth) error {
 	reservationUID := input.ReservationUID
 	pgUID, err := uidToPG(reservationUID)
 	if err != nil {
@@ -973,7 +1120,7 @@ func (s *ReserverStore) finalizeSettlementWithQueries(ctx context.Context, qtx *
 		return wrapStoreError("postgres: finalize settlement: update", err)
 	}
 
-	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpFinalizeSettlement, decimal.Zero, input.IdempotencyKey)
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpFinalizeSettlement, decimal.Zero, input.IdempotencyKey, auth)
 }
 
 // HeldAmount returns the holder's outstanding holds in the given currency:
@@ -1026,11 +1173,22 @@ func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) er
 
 	if s.pool == nil {
 		// Tx mode: use the caller's transaction directly.
-		err := s.releaseWithQueries(ctx, s.q, input)
+		err := s.releaseWithQueries(ctx, s.q, input, unsignedDischarge())
 		ledgerotel.RecordError(span, err)
 		if err == nil {
 			s.metrics.ReserveReleased()
 		}
+		return err
+	}
+
+	auth, err := s.attestDischarge(ctx, s.q, core.ReservationDischargeIntent{
+		ReservationUID: input.ReservationUID,
+		Operation:      core.ReservationOpRelease,
+		Amount:         decimal.Zero,
+		IdempotencyKey: input.IdempotencyKey,
+	})
+	if err != nil {
+		ledgerotel.RecordError(span, err)
 		return err
 	}
 
@@ -1041,7 +1199,7 @@ func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) er
 	}
 	defer tx.Rollback(ctx)
 
-	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), input); err != nil {
+	if err := s.releaseWithQueries(ctx, s.q.WithTx(tx), input, auth); err != nil {
 		ledgerotel.RecordError(span, err)
 		return err
 	}
@@ -1055,7 +1213,7 @@ func (s *ReserverStore) Release(ctx context.Context, input core.ReleaseInput) er
 	return nil
 }
 
-func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReleaseInput) error {
+func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Queries, input core.ReleaseInput, auth reservationDischargeAuth) error {
 	reservationUID := input.ReservationUID
 	pgUID, err := uidToPG(reservationUID)
 	if err != nil {
@@ -1091,5 +1249,5 @@ func (s *ReserverStore) releaseWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return wrapStoreError("postgres: release: update", err)
 	}
 
-	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpRelease, decimal.Zero, input.IdempotencyKey)
+	return s.recordReservationOperationReceipt(ctx, qtx, reservationID, reservationOpRelease, decimal.Zero, input.IdempotencyKey, auth)
 }
