@@ -173,3 +173,9 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | W3-gates-fixes-3（裸引用「必须是本仓声明」） | `8e0d63e`（ff） | I-1 `VerifyJournalBalanced`→`Zz…` 红；核心 + 根包 doc gate 绿 | ff | 解析标准从「本仓 mention 过」收紧到「本仓声明」；anchortest 阶段名与 `s3.ListObjectsV2` 改为非符号写法 |
 | W3-migrate（复审 M-5 机制层，Critical） | `152fc53` + `8b7443f`（rebase 后 ff；gate 测试冲突取 main 的语句级实现） | `assertSoleSessionOnCredential` 置为恒 nil → `RefusesWhileAnotherSessionHoldsTheMigrationCredential` 红；worker 变异 INHERIT TRUE → 窗口探针双红；migration 测试族 -race 绿；make lint 0、make test 18 包绿 | ff | 三层：SET-only/INHERIT FALSE 成员 + 专用连接 `SET ROLE` + `pg_stat_activity` 同角色会话守卫（GRANT 前后各一次，fail-closed）；BREAKING：单凭证在线 pod 内迁移被拒绝；`RESET ROLE` 以关闭连接代替（接受）；019 注释过期由 lead 在 main 上改（文本，§8） |
 | W3-migrate-residual | `da936d2` | 测试与文档：把迁移中途新开连接可显式 `SET ROLE` 的残留钉成实测（谁关掉它 pin 就红、要求同步改文档）+ 边界断言（Migrate 返回后同一连接 `SET ROLE` → 42501）；migration 测试族 -race 绿 | merge commit | lead 事故：在 worker 尚在跑 `make test` 时 force 删了它的 worktree，导致 4 条读磁盘的静态门禁假红并丢了它未提交的残留 pin（worker 已在新 worktree 重做）。规矩：删 worktree 前确认 worker 已 done 且无未提交改动 |
+
+# Wave 4 复核
+
+| 任务 | commit | lead 证伪 | 备注 |
+|---|---|---|---|
+| W4-pending-gate（§7.18 E 项 + §7.20 V 项） | `47d4d23` + `d89d8fc` | `decimal.Min(V, E)` 换成 E → `VerifiedBaseCapsEntriesForgedInTheWindow` 红；worker 的 `if false` 注入 → 三条 V pin 红；postgres pending 族 -race、core、根包绿 | ff | `ConfirmPending` = min(V,E)（偏离「锁内仍用 E」，接受：与 I-49 同形，窗口内伪造靛 V 封顶）；tx 模式 + Attestor fail-closed；Attestor 配了但 verifier nil 视为 V-on（接受）；`NewPendingStore` 加位置参数（破坏性）；I-17 划定 `enforce_min_balance` 信任边界；I-64 |
