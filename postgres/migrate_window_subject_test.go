@@ -180,6 +180,33 @@ func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing
 	assert.Equal(t, "42501", pgErr.Code,
 		"the refusal must be insufficient_privilege, not some incidental failure: %s", dropErr)
 
+	// ---- the residual, pinned as what it is rather than as what one would
+	// prefer it to be ----
+	//
+	// This connection did not exist when the session guard ran, so nothing
+	// refused it, and the SET-only membership Migrate granted itself is live
+	// for the rest of the run. An explicit SET ROLE therefore SUCCEEDS here,
+	// and from there so does dropping the trigger: measured on postgres:17.10,
+	// both return nil. That is the boundary of what a per-connection window
+	// plus a start-of-run guard can do -- a session that arrives mid-run and
+	// deliberately switches roles is outside both -- and it is written down
+	// here, in I-22's "Note on the migration window" and in docs/RUNBOOK.md
+	// rather than left for the next reader to discover. It is also why a
+	// migration credential the application does not hold is still the
+	// requirement and not a suggestion.
+	//
+	// Rolled back, both of them: a pin must not be the thing that destroys the
+	// guard it is reporting on.
+	residual, err := attacker.Begin(ctx)
+	require.NoError(t, err)
+	_, switchErr := residual.Exec(ctx, "SET ROLE ledger_owner")
+	require.NoError(t, switchErr,
+		"if this now fails, the residual documented in I-22 has been closed -- good, but the note and this pin have to say so")
+	_, dropAsOwnerErr := residual.Exec(ctx, "DROP TRIGGER journal_entries_no_update ON journal_entries")
+	assert.NoError(t, dropAsOwnerErr,
+		"having switched roles, the session is ledger_owner and the trigger is droppable -- this is the residual, not a surprise")
+	require.NoError(t, residual.Rollback(ctx))
+
 	// ---- release, and let the run finish ----
 	require.NoError(t, brake.Commit(ctx))
 	released = true
@@ -190,6 +217,14 @@ func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing
 	case <-time.After(120 * time.Second):
 		t.Fatal("Migrate did not return after the lock was released")
 	}
+
+	// And the residual is bounded by the run: the membership is revoked when
+	// Migrate returns, so the same statement on the same connection now fails.
+	_, afterErr := attacker.Exec(ctx, "SET ROLE ledger_owner")
+	require.Error(t, afterErr, "the window has to close when Migrate returns, or it is not a window")
+	var afterPgErr *pgconn.PgError
+	require.ErrorAs(t, afterErr, &afterPgErr)
+	assert.Equal(t, "42501", afterPgErr.Code)
 
 	var triggerStillThere bool
 	require.NoError(t, admin.QueryRow(ctx, `

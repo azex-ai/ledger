@@ -1525,6 +1525,24 @@ run is exact: either the credential is a superuser / `ledger_owner` (nothing
 is arranged and nothing changes for anyone), or it is the only session holding
 that credential and one connection of it acts as `ledger_owner`.
 
+⚠️ **The residual, stated rather than implied away.** The guard is a check at
+the start of a run, so it binds sessions that already exist — not one that
+connects while the run is in progress. A connection opened on the migration
+credential *after* both checks can issue `SET ROLE ledger_owner` deliberately
+and, from there, drop the trigger: measured on postgres:17.10, both statements
+succeed, and
+`postgres.TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`
+pins that outcome as what it is, so that closing it later shows up as a pin
+change rather than as a surprise. The same shape covers the narrower race the
+second check exists for (a connection arriving between the two checks). Three
+things bound it: the membership is `SET`-only, so nothing is inherited and the
+switch has to be deliberate; it is revoked when `Migrate` returns, and the
+same statement then fails with `42501` (also pinned); and it does not exist at
+all for a superuser or `ledger_owner` credential, which arrange nothing. What
+removes it entirely is the requirement `docs/RUNBOOK.md` states and every
+`examples/*/main.go` warns about: a migration credential the application does
+not hold.
+
 **Enforced by**:
 - `postgres/sql/migrations/001_baseline.up.sql` — creates `ledger_owner` /
   `ledger_app` (`SELECT`/`INSERT`/`UPDATE`, no `UPDATE` on

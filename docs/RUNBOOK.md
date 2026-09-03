@@ -743,8 +743,19 @@ default schema access, and transfers every table/sequence to `ledger_owner`
 > ```
 >
 > A superuser or `ledger_owner` credential arranges nothing and is never
-> subject to the check. Two requirements follow, and the shipped examples
-> demonstrate both:
+> subject to the check.
+>
+> **What the check cannot cover**: it runs at the start, so it binds sessions
+> that already exist. A connection opened on the migration credential *while*
+> the run is in progress can still `SET ROLE ledger_owner` deliberately and
+> drop a guard — measured, and pinned as such. That is bounded (the membership
+> is `SET`-only, so nothing is inherited; it is revoked when `Migrate`
+> returns; a superuser or `ledger_owner` credential never has one), and it is
+> removed entirely by the requirement below. Do not read the guard as making a
+> shared credential safe: it makes the common case fail loudly instead of
+> quietly.
+>
+> Two requirements follow, and the shipped examples demonstrate both:
 >
 > 1. Point migrations at their own credential —  `MIGRATE_DATABASE_URL`
 >    (superuser, `ledger_owner` itself, or a role that can `SET ROLE
