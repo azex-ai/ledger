@@ -76,6 +76,14 @@ const authAmountEncodedLen = 16
 // fractional digits (rescaling would lose precision) or its scaled
 // magnitude does not fit in a signed 128-bit integer.
 func EncodeAmount(amt decimal.Decimal) ([]byte, error) {
+	// Before the Exp below. The `shift > 0` branch computes
+	// 10^(18+exponent) as a big.Int, which for a positive exponent of any
+	// size is unbounded work -- and the range check that used to be the
+	// only guard here (bigIntToFixedTwosComplement) runs AFTER it, on the
+	// result it never gets (R-4, 2026-09-04 recheck).
+	if err := validateAmountIsRescalable("encode amount", "amount", amt); err != nil {
+		return nil, err
+	}
 	coeff := amt.Coefficient() // value = coeff * 10^exp; copy before mutating below.
 	exp := amt.Exponent()
 

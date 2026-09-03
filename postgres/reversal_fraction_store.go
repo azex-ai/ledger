@@ -358,7 +358,10 @@ func (s *LedgerStore) reversalEntriesFor(ctx context.Context, q *sqlcgen.Queries
 			weights[wi] = amt
 		}
 
-		scaledTotal := scaleByFraction(groupTotal, num, den, exponent)
+		scaledTotal, err := scaleByFraction(groupTotal, num, den, exponent)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reverse journal fraction: scale currency %d %s: %w", gk.currencyID, gk.entryType, err)
+		}
 
 		shares, err := core.Allocate(scaledTotal, weights, exponent)
 		if err != nil {
@@ -715,7 +718,15 @@ func sortedDimKeys(m map[entryDimKey]decimal.Decimal) []entryDimKey {
 // using core.RoundHalfUp. The intermediate DivRound keeps reversalScaleGuardDigits
 // of extra precision so the final rounding is accurate regardless of num/den
 // (e.g. 1/3 is not exactly representable in decimal).
-func scaleByFraction(total decimal.Decimal, num, den int64, exponent int32) decimal.Decimal {
+//
+// core.Round now returns an error for an amount outside what NUMERIC(30,18)
+// can hold (I-70). It cannot happen here -- total is summed from
+// journal_entries.amount rows, which the column type already bounds -- so
+// the error is propagated rather than swallowed, and the caller turns it
+// into a refusal. discipline.md §6: an impossible error is still an error,
+// and returning a zero amount for one would be a silent reversal of the
+// wrong size.
+func scaleByFraction(total decimal.Decimal, num, den int64, exponent int32) (decimal.Decimal, error) {
 	raw := total.Mul(decimal.NewFromInt(num)).DivRound(decimal.NewFromInt(den), exponent+reversalScaleGuardDigits)
 	return core.Round(raw, exponent, core.RoundHalfUp)
 }

@@ -102,6 +102,58 @@ const MaxAmountIntegerDigits = 30 - 18
 // consumption modes, before it reaches an adapter.
 const MaxAmountFractionalDigits = 18
 
+// MaxAmountWorkingFractionalDigits bounds the fractional width the money
+// HELPERS will operate on, as opposed to what the ledger stores.
+//
+// It is deliberately looser than MaxAmountFractionalDigits, because
+// reducing precision is what several of those helpers are FOR. An
+// intermediate value legitimately carries guard digits beyond the target
+// exponent -- postgres.scaleByFraction keeps twelve of them so that a
+// fraction like 1/3, which no decimal represents exactly, cannot let the
+// guard digits themselves influence the final rounding. Refusing that
+// intermediate would mean refusing correct arithmetic; the first draft of
+// this check did exactly that, and postgres's own reversal-chain test
+// caught it.
+//
+// Two multiples of the stored width is generous for that pattern and still
+// nowhere near the pathological range: rescaling by 10^36 is instantaneous,
+// while the values this guards against are around 10^9 DIGITS.
+const MaxAmountWorkingFractionalDigits = 2 * MaxAmountFractionalDigits
+
+// validateAmountIsRescalable is the money helpers' bound: an amount they can
+// finish operating on.
+//
+// It differs from ValidateAmountMagnitude on the fractional side only. The
+// integer side is identical, because a helper's result still has to be an
+// amount this ledger can store.
+//
+// Both directions matter, which is the part that is easy to get wrong.
+// shopspring rescales by computing 10^|exponent difference| whichever way
+// the difference points, so `1E-999999999` rounded to two places is exactly
+// as non-terminating as `1E999999999` -- measured, neither returns. A bound
+// on "very large" alone would leave the mirror image open.
+func validateAmountIsRescalable(scope, field string, amount decimal.Decimal) error {
+	exponent := int(amount.Exponent())
+	if exponent > 0 && exponent > MaxAmountIntegerDigits {
+		return fmt.Errorf(
+			"core: %s: %s has an exponent of %d, and this ledger stores NUMERIC(30,18) -- at most %d integer digits: %w",
+			scope, field, exponent, MaxAmountIntegerDigits, ErrInvalidInput)
+	}
+	if exponent < -MaxAmountWorkingFractionalDigits {
+		return fmt.Errorf(
+			"core: %s: %s has %d fractional digits, which is beyond the %d this ledger will compute on "+
+				"(NUMERIC(30,18) stores %d; the rest is working precision): %w",
+			scope, field, -exponent, MaxAmountWorkingFractionalDigits, MaxAmountFractionalDigits, ErrInvalidInput)
+	}
+	integerDigits := len(strings.TrimPrefix(amount.Coefficient().String(), "-")) + exponent
+	if integerDigits > MaxAmountIntegerDigits {
+		return fmt.Errorf(
+			"core: %s: %s needs %d integer digits, and this ledger stores NUMERIC(30,18) -- at most %d: %w",
+			scope, field, integerDigits, MaxAmountIntegerDigits, ErrInvalidInput)
+	}
+	return nil
+}
+
 // ValidateAmountMagnitude refuses an amount this ledger could not store.
 //
 // It is constant time and does not materialize the value: Exponent() is a

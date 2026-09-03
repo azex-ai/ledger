@@ -2116,7 +2116,10 @@ three now fails the test loudly instead of defaulting to full access.
     F-2: it writes as `ledger_app`, which has no UPDATE grant on these
     tables, so what it measures is least privilege, not append-onlyness)
   - `postgres.TestAppendOnlyGuards_EveryTriggerRefusesItsMutation` -- every
-    trigger running `ledger_block_mutation()`, derived from `pg_trigger` and
+    trigger running one of the append-only guard functions
+    (`ledger_block_mutation()` and, since migration 029,
+    `ledger_attestation_chain_block_delete()` on the two attestation
+    tables), derived from `pg_trigger` and
     provoked as the table OWNER, so the statement reaches the trigger. Added
     2026-09-03 (F-2): rewriting that function to `RETURN NEW` disabled all
     twenty-five append-only guards and turned exactly three tests red
@@ -7748,6 +7751,39 @@ missing member of that set, in that file.
 - `core.MaxAmountIntegerDigits` / `core.MaxAmountFractionalDigits` — derived
   from `NUMERIC(30,18)` rather than chosen, so the bound and the column
   cannot drift apart.
+- Every exported money helper in `core`, at its own entry: `core.Allocate`
+  (the total and each weight), `core.Round`, `core.ConvertAt` (the amount and
+  the rate), `core.Delta` (both sums), `core.EncodeAmount`. Added 2026-09-04
+  (R-4): this invariant originally reached only the `*Input.Validate`
+  boundary, and these five are documented API that `docs/COOKBOOK.md` teaches
+  consumers to call directly with decimals they parsed themselves. All five
+  failed to return within three seconds. `core.Round` and `core.ConvertAt`
+  gained an `error` return to say so — see `docs/BREAKING.md`; a helper that
+  cannot refuse can only panic or silently truncate, and neither is
+  acceptable for an amount.
+
+  The helpers use a **second, looser bound** on the fractional side
+  (`core.MaxAmountWorkingFractionalDigits`, 36): reducing precision is what
+  several of them are for, and an intermediate legitimately carries guard
+  digits beyond the target exponent — `postgres.scaleByFraction` keeps twelve
+  so that a fraction like 1/3 cannot let the guard digits themselves
+  influence the final rounding. The integer side is identical, because a
+  helper's result still has to be storable. The first draft applied the
+  storage bound here and refused correct arithmetic; postgres's own
+  reversal-chain tests caught it.
+
+  Both directions of the exponent are bounded, which is the easy half to
+  miss: shopspring rescales by computing `10^|difference|` whichever way the
+  difference points, so `1E-999999999` rounded to two places is exactly as
+  non-terminating as `1E999999999`. Measured: neither returns.
+
+  Which bound belongs where is itself machine-checked
+  (`core.TestStorageBoundariesUseTheStorageBound`) — the two differ by one
+  word at the call site and by eighteen digits in effect, and the R-4 change
+  got it wrong in the writing: a search-and-replace moved
+  `AccountPolicyInput.Validate`, a storage boundary, onto the working bound.
+  Nothing failed. It was found by counting occurrences by hand, which is not
+  a method.
 - Every caller-supplied amount's `Validate()`: `core.JournalInput`
   (which is also how `core.EntryTemplate.Render`, and therefore
   `ExecuteTemplate`, inherits it), `core.ReserveInput`, `core.SettleInput`,
@@ -7774,3 +7810,16 @@ missing member of that set, in that file.
   found this (`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`), so
   the case is replayed on every plain `go test`, not only during a fuzzing
   run.
+- `core.FuzzAllocateFromStrings` — added 2026-09-04 (R-4). `core.FuzzAllocate`
+  builds its inputs with `decimal.NewFromBigInt(x, -exp)` under
+  `exp ∈ [0, 18]`, so a POSITIVE exponent — this entire class — is not
+  expressible in its input space, and no fuzzing budget finds a bug the
+  encoding cannot state. Verified in both directions: against an ungated
+  `Allocate` the int64-shaped target passes and the string-fed one fails on
+  its seeds. Its assertion is a time bound, not an outcome: `Allocate` may
+  accept or refuse, but not spend unbounded time deciding.
+- `core.TestEncodeAmount_RejectsOutOfRangeMagnitude` — its original case
+  (~2^127) has a BOUNDED exponent and is refused on the cheap path, so the
+  test's name promised this class while covering half of it. It now also
+  drives a positive exponent, which takes the `10^(18+exponent)` branch that
+  runs *before* the range check that was the only guard.

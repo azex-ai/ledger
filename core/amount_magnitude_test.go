@@ -20,6 +20,11 @@ package core_test
 // require.Error and still be the denial of service.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -38,6 +43,12 @@ var pathologicalAmounts = map[string]string{
 	"1E13":         "just past the NUMERIC(30,18) integer width -- the boundary, not the extreme",
 	"-1E999999999": "sign must not be a way around it",
 }
+
+// Note on the negative case and core.Allocate's weight slot: a negative
+// weight is refused by Allocate's own rule, so that one cell of the table
+// passes for a reason other than magnitude. It is left in rather than
+// special-cased -- the assertion is "this input is rejected quickly", and it
+// is, for a reason that is also correct.
 
 // rejectionBudget is how long a magnitude check may take. The real check is
 // three field reads and a small integer's digit count; 100ms is four orders
@@ -175,9 +186,53 @@ func TestEveryAmountEntryPointRejectsAPathologicalAmount(t *testing.T) {
 		return err
 	}
 
-	require.GreaterOrEqual(t, len(entries), 14,
-		"the sibling scan found fourteen caller-supplied amount entry points in core; a table that has drifted below "+
-			"that is a table that stopped covering one")
+	// R-4 (2026-09-04 recheck): I-70 covered the *Input.Validate boundary
+	// and stopped there, so five exported money helpers -- documented API
+	// that docs/COOKBOOK.md teaches consumers to call directly with their
+	// own decimals -- were still in the pre-I-70 state. Measured: all five
+	// failed to return within three seconds. Same bug class, same
+	// reachability (library mode; the REST surface is incidentally covered
+	// by parseWireAmount's refusal of e/E either way), and the table that
+	// was supposed to be "every amount entry point" did not have them.
+	//
+	// They live in this table rather than a separate one precisely so that
+	// "entry point" means what it says.
+	entries["core.Allocate (total)"] = func(d decimal.Decimal) error {
+		_, err := core.Allocate(d, []decimal.Decimal{decimal.NewFromInt(1), decimal.NewFromInt(1)}, 2)
+		return err
+	}
+	entries["core.Allocate (weight)"] = func(d decimal.Decimal) error {
+		_, err := core.Allocate(decimal.NewFromInt(100), []decimal.Decimal{d, decimal.NewFromInt(1)}, 2)
+		return err
+	}
+	entries["core.Round"] = func(d decimal.Decimal) error {
+		_, err := core.Round(d, 2, core.RoundHalfUp)
+		return err
+	}
+	entries["core.ConvertAt (amount)"] = func(d decimal.Decimal) error {
+		_, err := core.ConvertAt(d, decimal.NewFromInt(1), 2, core.RoundHalfUp)
+		return err
+	}
+	entries["core.ConvertAt (rate)"] = func(d decimal.Decimal) error {
+		_, err := core.ConvertAt(decimal.NewFromInt(1), d, 2, core.RoundHalfUp)
+		return err
+	}
+	entries["core.Delta (debit sum)"] = func(d decimal.Decimal) error {
+		_, err := core.Delta(core.NormalSideDebit, d, decimal.Zero)
+		return err
+	}
+	entries["core.Delta (credit sum)"] = func(d decimal.Decimal) error {
+		_, err := core.Delta(core.NormalSideDebit, decimal.Zero, d)
+		return err
+	}
+	entries["core.EncodeAmount"] = func(d decimal.Decimal) error {
+		_, err := core.EncodeAmount(d)
+		return err
+	}
+
+	require.GreaterOrEqual(t, len(entries), 22,
+		"the sibling scan found fourteen caller-supplied amount inputs plus eight exported money-helper entry points "+
+			"in core; a table that has drifted below that is a table that stopped covering one")
 
 	for name, validate := range entries {
 		t.Run(name, func(t *testing.T) {
@@ -186,4 +241,95 @@ func TestEveryAmountEntryPointRejectsAPathologicalAmount(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStorageBoundariesUseTheStorageBound keeps the two bounds from being
+// swapped for each other.
+//
+// I-70 has two: ValidateAmountMagnitude, which refuses what the column
+// cannot store (18 fractional digits), and validateAmountIsRescalable,
+// which is looser on the fractional side because reducing precision is what
+// the money helpers are for and an intermediate legitimately carries guard
+// digits. They differ by one word at the call site and by 18 digits in
+// effect.
+//
+// This exists because the R-4 change got it wrong in the writing: a
+// search-and-replace across core/ moved AccountPolicyInput.Validate -- a
+// STORAGE boundary -- onto the working bound, which would have let a
+// min_balance with 36 fractional digits into a NUMERIC(30,18) column with
+// nothing else to catch it. Nothing failed; it was found by counting
+// occurrences by hand. So: counted by machine from here on.
+func TestStorageBoundariesUseTheStorageBound(t *testing.T) {
+	// Files declaring a caller-supplied *Input.Validate. Their amount
+	// checks must all be the storage bound.
+	storageBoundaryFiles := []string{
+		"journal.go", "reserve.go", "pending.go", "booking.go", "account_policy.go", "onchain.go",
+	}
+	// The money helpers, which may use either: the working bound for their
+	// own arithmetic, the storage bound where they also gate an input.
+	helperFiles := map[string]bool{"money.go": true, "auth.go": true}
+
+	fset := token.NewFileSet()
+	seenStorage, seenWorking := 0, 0
+	for _, name := range storageBoundaryFiles {
+		path := filepath.Join(".", name)
+		src, err := os.ReadFile(path)
+		require.NoErrorf(t, err, "read %s", path)
+		file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
+		require.NoErrorf(t, err, "parse %s", path)
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			fn, ok := n.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "Validate" || fn.Recv == nil {
+				return true
+			}
+			ast.Inspect(fn.Body, func(inner ast.Node) bool {
+				call, ok := inner.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				ident, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch ident.Name {
+				case "ValidateAmountMagnitude":
+					seenStorage++
+				case "validateAmountIsRescalable":
+					seenWorking++
+					pos := fset.Position(call.Pos())
+					t.Errorf("%s:%d: %s's Validate() uses validateAmountIsRescalable.\n\n"+
+						"A *Input.Validate is a STORAGE boundary: whatever it accepts goes into NUMERIC(30,18). The "+
+						"working bound is 36 fractional digits, which that column cannot hold, and nothing downstream "+
+						"re-checks. Use ValidateAmountMagnitude here; the working bound is for the money helpers, "+
+						"whose job is to REDUCE precision and which therefore have to accept guard digits (R-4)",
+						name, pos.Line, recvTypeNameOf(fn))
+				}
+				return true
+			})
+			return true
+		})
+	}
+	_ = helperFiles
+
+	require.GreaterOrEqualf(t, seenStorage, 13,
+		"only %d storage-boundary amount check(s) were found across %v -- I-70 wires thirteen, so a scan finding "+
+			"fewer has stopped seeing them and reads as a pass", seenStorage, storageBoundaryFiles)
+	require.Zero(t, seenWorking, "see the failures above")
+}
+
+// recvTypeNameOf returns a method's receiver type name for an error message.
+func recvTypeNameOf(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return "?"
+	}
+	switch v := fn.Recv.List[0].Type.(type) {
+	case *ast.Ident:
+		return v.Name
+	case *ast.StarExpr:
+		if id, ok := v.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	}
+	return "?"
 }

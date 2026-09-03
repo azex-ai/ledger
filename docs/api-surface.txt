@@ -394,7 +394,7 @@ core.ConfirmPendingInput.IdempotencyKey = field string
 core.ConfirmPendingInput.Metadata = field map[string]string
 core.ConfirmPendingInput.Source = field string
 core.ConfirmPendingInput.Validate = method () error
-core.ConvertAt = func(amount, rate decimal.Decimal, targetExponent int32, mode RoundingMode) decimal.Decimal
+core.ConvertAt = func(amount, rate decimal.Decimal, targetExponent int32, mode RoundingMode) (decimal.Decimal, error)
 core.CreateBookingInput = type struct
 core.CreateBookingInput.AccountHolder = field int64
 core.CreateBookingInput.Amount = field decimal.Decimal
@@ -718,6 +718,7 @@ core.Logger.Info = interface method (msg string, args ...any)
 core.Logger.Warn = interface method (msg string, args ...any)
 core.MaxAmountFractionalDigits = const = 18
 core.MaxAmountIntegerDigits = const
+core.MaxAmountWorkingFractionalDigits = const
 core.MaxMetadataKeyLen = const = 128
 core.MaxMetadataKeys = const = 64
 core.MaxMetadataTotalLen = const = 16384
@@ -949,7 +950,7 @@ core.Reserver.Settle = interface method (ctx context.Context, input SettleInput)
 core.Reserver.SettlePartial = interface method (ctx context.Context, input SettlePartialInput) error
 core.RollupWorker = type interface
 core.RollupWorker.ProcessBatch = interface method (ctx context.Context, batchSize int) (int, error)
-core.Round = func(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.Decimal
+core.Round = func(d decimal.Decimal, exponent int32, mode RoundingMode) (decimal.Decimal, error)
 core.RoundDown = const
 core.RoundHalfEven = const
 core.RoundHalfUp = const RoundingMode

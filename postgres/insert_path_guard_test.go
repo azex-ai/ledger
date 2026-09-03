@@ -573,6 +573,13 @@ func TestPoisonedAttestationTailHasAWayBack(t *testing.T) {
 		assert.Contains(t, err.Error(), "not allowed")
 	})
 
+	// entry_attestations carries the same guard, and this test's fixture
+	// writes no coverage rows -- a DELETE here would match nothing, and a
+	// BEFORE ROW trigger that is never reached is not a refusal. It is
+	// pinned where a row can be made to exist:
+	// TestAppendOnlyGuards_EveryTriggerRefusesItsMutation seeds one from the
+	// catalogue and drives the DELETE as the owner (R-2, 2026-09-04).
+
 	t.Run("the owner can discard the poisoned suffix, with a reason", func(t *testing.T) {
 		var removed int64
 		require.NoError(t, pool.QueryRow(ctx, `SELECT ledger_discard_attestations_from(2, 'seq 2 signature does not verify -- incident 2026-09-03')`).Scan(&removed))
