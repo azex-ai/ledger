@@ -581,6 +581,30 @@ plan [`docs/plans/2026-09-03-wave5-contract.md`](docs/plans/2026-09-03-wave5-con
   rather than by somebody remembering
   (`postgres.TestBalanceGuard_RefusedUnderEveryConstraintTiming`).
 
+- **`reconcile --full` on the read-only credential no longer reports a
+  permission error as a failed check** (recheck finding m4). The
+  `checkpoint_balance` scan's resume cursor is a write; on `ledger_ro` it is
+  refused, and the run used to come back `passed: false, complete: true` with
+  `full_coverage: true` -- claiming both that the ledger disagreed with itself
+  (it did not) and that the fleet was covered (it could not know). It now
+  leaves `passed` alone and sets `complete: false`, which drags
+  `full_coverage` down where an operator sees it. Not run is neither passed
+  nor failed. `docs/RUNBOOK.md` gains the operational half: run the scan on
+  `ledger_app`; the read-only answer is honest but partial, and is not a
+  reason to widen a reporting credential.
+
+- **Migration `007`'s fail-closed install error named the wrong attribute**
+  (recheck finding m1). On a cluster where `ledger_app` already held
+  `SUPERUSER` and the migration credential could not strip it, the install
+  stopped with "already exists on this cluster with the **NOSUPERUSER**
+  attribute" -- the clause that clears the privilege, printed where the
+  privilege belonged, i.e. the opposite of the truth. The remedy half of the
+  sentence was always right. Wording only: no statement, condition or
+  privilege changed. This is the third deliberate edit to a merged migration
+  in this repository, under the exception recorded in
+  `docs/plans/2026-09-02-remediation-contracts.md` §3, and 007's header now
+  says so.
+
 ### Go module — Security (verified-balance gate: the hold term)
 
 - **A gated `Reserve` now holds conservatively, and an expired reservation
