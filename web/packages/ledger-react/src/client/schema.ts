@@ -1466,6 +1466,7 @@ export interface paths {
                         "application/json": components["schemas"]["BookingEnvelope"];
                     };
                 };
+                400: components["responses"]["DomainError"];
                 422: components["responses"]["DomainError"];
             };
         };

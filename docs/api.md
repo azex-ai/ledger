@@ -287,11 +287,12 @@ Request:
   "channel_ref": "0xabc123",
   "amount": "500.00",
   "metadata": {"confirmations": 12},
-  "actor_id": 0
+  "actor_id": 0,
+  "idempotency_key": "confirm-0xabc123-0"
 }
 ```
 
-`amount` is optional; when set it overrides the booking's pending amount (for confirm-with-actual flows). `actor_id` of `0` denotes the system actor.
+`idempotency_key` is **required** (a request without it is `400` / `10001`); reuse the same key on retry — see [Idempotency](#idempotency). `amount` is optional; when set it overrides the booking's pending amount (for confirm-with-actual flows). `actor_id` of `0` denotes the system actor.
 
 Response `200 OK`:
 
@@ -367,8 +368,12 @@ This is the legacy `ParseCallback` shape (transitions an existing booking by
 `booking_uid`). The `evm` adapter's current, preferred ingestion path is
 `ParseSighting` (`channel/onchain/evm.go`), a reorg-safe
 `{chain_id, tx_hash, txlog_seq, token, from, to, amount, block_number,
-confirmations}` payload that the server routes to automatically whenever the
-resolved channel adapter implements it (I-20; see
+confirmations}` payload that the server routes to whenever the resolved
+channel adapter implements it **and** the host wired a deposit ingester
+(`srv.SetDepositIngester(svc.Onchain())`) -- without that call every callback
+on a sighting-capable channel answers `503` / `18102` "This feature is not
+enabled on this server" (the 2026-09-03 consumer review measured exactly
+that; README "Quick Start -- Serving the HTTP API" has the call) (I-20; see
 `docs/plans/2026-07-11-crypto-deposit-sweep-design.md` §3 and
 [COOKBOOK Recipe 9](COOKBOOK.md#recipe-9--crypto-deposit--sweep-create2-shared-address-custody)).
 
@@ -412,7 +417,7 @@ protection and the `409` below cannot occur** — the library does not install
 one for you, because an inbound channel that is not exposed does not need one.
 If you register any channel, make the call.
 
-Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (the three refusals above), `404` (unknown channel or booking), `409` / `10901` (in-window replay — only once a nonce recorder is wired), `422` (transition rejected), `429`, `503`.
+Status codes: `200`, `400` (signature, parsing, replay window), `401` (channel auth fails), `403` (the three refusals above), `404` (unknown channel or booking), `409` / `10901` (in-window replay — only once a nonce recorder is wired), `422` (transition rejected), `429`, `503` (also, unconditionally, for a sighting-capable channel when `SetDepositIngester` was never called — `18102`).
 
 Body cap: 1 MB regardless of `MAX_BODY_BYTES`.
 
@@ -1496,6 +1501,75 @@ Request:
 
 Status codes: `200`, `400` (missing `reason`), `401`, `403` (missing the
 `deposit_review` capability), `409`, `503`.
+
+Auth: required, `deposit_review` capability.
+
+### GET /deposits/dead-letters
+
+List dead-lettered deposit sightings: transfers that **are on chain**, to a
+registered address, in a whitelisted token, that the ingestion path refused
+(an idempotency-key payload conflict, an unregistered currency, an amount the
+currency's exponent cannot represent, a watcher wedged on this sighting) after
+which the forward scan moved past them. No booking exists for one, so nothing
+else in the system revisits it: this queue and the replay below are the only
+way back (`docs/RUNBOOK.md` §18).
+
+Cursor-paginated, newest first (`?cursor=&limit=`, `limit` max 200). Each row
+carries the sighting as recorded (`token`, `to`, `amount`) plus `booked`,
+recomputed on every read: `true` means a booking now exists for that
+sighting's idempotency key -- it was replayed, or the cause self-healed -- and
+the row needs no action.
+
+Response `200 OK`:
+
+```json
+{
+  "code": 200,
+  "message": null,
+  "data": {
+    "list": [
+      {
+        "uid": "01a0…",
+        "chain_id": 1,
+        "tx_hash": "0xdead…",
+        "txlog_seq": 0,
+        "idempotency_key": "deposit-1-0xdead…-0",
+        "reason": "currency \"USDT-late\" is not registered",
+        "booked": false,
+        "token": "0xusdt…",
+        "to": "0xabc…",
+        "amount": "7",
+        "created_at": "2026-09-04T00:00:00Z"
+      }
+    ],
+    "next_cursor": null
+  }
+}
+```
+
+Status codes: `200`, `401`, `503` (crypto-deposit add-on not wired:
+`server.SetDeadLetterService`).
+
+Auth: required, `read` scope.
+
+### POST /deposits/dead-letters/{uid}/replay
+
+Re-drive one dead-lettered sighting through the **real** ingestion path
+(`service.Onchain.ReplayDeadLetter` → `IngestDeposit`), after the cause has
+been fixed -- a currency registered, an exponent corrected, a token added
+back to `CreditTokens`. Runs the identical path a watcher sighting takes,
+review gate included, so it is idempotent (a sighting already booked resolves
+to the same booking and posts nothing new) and it cannot credit anything the
+ordinary path would refuse. Returns the resulting booking.
+
+Requires the `deposit_review` **capability**, not `write` scope: a replay can
+end in the same `deposit_confirm` journal an approval posts, so the key that
+can forge a sighting must not also be able to push one back in.
+
+Status codes: `200`, `400` (this ledger has nothing to book for that sighting
+-- the address is not registered or the token is not in the chain's
+allowlist; deliberately an error rather than a silent no-op), `401`, `403`
+(missing the capability), `404` (unknown dead-letter uid), `503`.
 
 Auth: required, `deposit_review` capability.
 

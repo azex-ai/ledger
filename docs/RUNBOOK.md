@@ -1404,24 +1404,24 @@ testcontainers dependency lives in a test-only sibling module,
 module — see the root CLAUDE.md "go.work" gotcha for the exact SBOM/lockfile
 semantics).
 
-**Consuming the submodule today (MJ-7, partly closed).** `anchors/r2` and
+**Consuming the submodule today (MJ-7, not closed).** `anchors/r2` and
 `chains/evm` pin the root module with a local `replace ... => ../..` for
 in-repo development, and the release workflow does not yet push a
-submodule-scoped tag (`anchors/r2/vX.Y.Z`). That is less of an obstacle than
-an earlier revision of this paragraph claimed (2026-09-03 consumer review
-F-M10, re-measured): `go get github.com/azex-ai/ledger/anchors/r2@latest`
-(or `go get .../anchors/r2` from a module that already requires the root)
-**resolves, and `go build` against it works** -- Go synthesizes a
-pseudo-version from the latest commit touching that path, and a dependency's
-own `replace` directives are never applied outside its own build. What still
-fails is **`go mod tidy`**, and not for the `replace` reason: the tagged root
-module version does not yet contain every package `anchors/r2`'s own test
-files import (`anchortest`, as of this writing), and `tidy` walks test-only
-imports where `build`/`get` do not. Until the release CI keeps the two in
-sync, either pin the root module to a commit that has the package or keep
-consuming from a local checkout via a parent-directory `go.work` (see the
-README's "Local Development with go.work"), which sidesteps the question
-entirely. Tracked as a release-engineering follow-up.
+submodule-scoped tag (`anchors/r2/vX.Y.Z`). Measured twice (2026-09-03 and
+the 2026-09-04 re-check), the practical answer is **proxy-dependent**:
+`go get github.com/azex-ai/ledger/anchors/r2@latest` resolves and `go build`
+works when the module proxy synthesizes a pseudo-version for the nested
+path (`proxy.golang.org` does); a mirror that answers `@latest` with the root
+tag `v0.6.0` (`goproxy.cn` measured) fails with `does not contain package
+.../anchors/r2`, whether or not the root module is already required. And
+`go mod tidy` fails everywhere, for two independent reasons: the tagged root
+does not contain `anchortest` (a test-only import of `anchors/r2`, which
+`tidy` walks and `build`/`get` do not), and `anchors/r2`'s own `replace` of
+`internal/miniotest` names a relative path with no published version. Until
+the release CI pushes a submodule-scoped tag and keeps the root in sync,
+consume the submodules from a local checkout via a parent-directory `go.work`
+(see the README's "Local Development with go.work"), which sidesteps all of
+this. Tracked as a release-engineering follow-up.
 
 **What a deployer must set up, before wiring `r2.New` into the
 composition root:**

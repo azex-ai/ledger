@@ -33,7 +33,7 @@ component library:
 ## 1. Backend — chi app importing the ledger
 
 What a fresh chi scaffold plus the ledger amounts to (see
-[`backend/main.go`](backend/main.go), ~230 lines including seed data):
+[`backend/main.go`](backend/main.go), ~350 lines including seed data):
 
 ```go
 svc, _ := ledger.New(pool)                     // the library facade

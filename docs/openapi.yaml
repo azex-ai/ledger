@@ -998,6 +998,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BookingEnvelope" }
+        "400": { $ref: "#/components/responses/DomainError" }
         "422": { $ref: "#/components/responses/DomainError" }
   /bookings/{uid}:
     get:

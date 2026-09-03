@@ -337,7 +337,7 @@ written because it was true when `[0.6.0]` shipped.
 - **`(*ledger.Service).Worker` now auto-wires `SetFullReconciler`**
   (I-M11): a consumer that already called `SetFullReconciler` themselves is
   unaffected (the later call wins); one that didn't now gets the full
-  15-check reconciliation suite running on `FullReconcileInterval` by
+  17-check reconciliation suite running on `FullReconcileInterval` by
   default — new DB read load and a new alerting surface where there was
   previously silence.
 - **`(*ledger.Service).RegisterChannel` now errors on a `RunInTx` clone**
