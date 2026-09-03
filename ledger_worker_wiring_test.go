@@ -277,7 +277,7 @@ func TestServiceWorker_ExtendsThePartitionHorizon(t *testing.T) {
 
 // TestServiceWorker_WiresTheFullReconciler pins the auto-wiring this round
 // adds. DefaultWorkerConfig has always set FullReconcileInterval, so the
-// sixteen-check suite -- unauthorized_journals, checkpoint_balance,
+// seventeen-check suite -- unauthorized_journals, checkpoint_balance,
 // journal_dr_cr among them -- looked configured while nothing ever registered
 // a reconciler for it to run: the whole suite was off for every library
 // consumer, and the one line that would have said so went to the default

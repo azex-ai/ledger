@@ -440,3 +440,44 @@ func (a *ReconcileAdapter) PeriodCloseViolations(ctx context.Context, pageLimit 
 	}
 	return result, nil
 }
+
+// CorruptReversalLinks returns journals linked with `reversal_of` that are
+// not reversals of what they point at (the reversal_chain_integrity check,
+// I-51). See the query's own comment in
+// sql/queries/integrity_reversal_chain.sql for the two violation shapes and
+// why the over-reversed one names no single journal.
+//
+// numericToDecimal, not mustNumericToDecimal: this check exists because the
+// rows it reads may have been written by something other than this library,
+// so "the DB constraints guarantee it converts" is exactly the assumption
+// that does not hold here. An unconvertible amount is returned as an error
+// and the check reports it as a Finding, never as a pass.
+func (a *ReconcileAdapter) CorruptReversalLinks(ctx context.Context, pageLimit int) ([]service.CorruptReversalLink, error) {
+	rows, err := a.q.CorruptReversalLinks(ctx, int32(pageLimit)) //nolint:gosec // page limits are small, bounded internally
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconcile: corrupt reversal links: %w", err)
+	}
+	result := make([]service.CorruptReversalLink, len(rows))
+	for i, r := range rows {
+		reversed, err := numericToDecimal(r.ReversedAmount)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: corrupt reversal links: reversed amount on journal %s: %w", r.OriginalUid, err)
+		}
+		original, err := numericToDecimal(r.OriginalAmount)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconcile: corrupt reversal links: original amount on journal %s: %w", r.OriginalUid, err)
+		}
+		result[i] = service.CorruptReversalLink{
+			OriginalUID:      r.OriginalUid,
+			ReversalUID:      r.ReversalUid,
+			Violation:        r.Violation,
+			AccountHolder:    r.AccountHolder,
+			CurrencyID:       r.CurrencyID,
+			ClassificationID: r.ClassificationID,
+			EntryType:        r.EntryType,
+			ReversedAmount:   reversed,
+			OriginalAmount:   original,
+		}
+	}
+	return result, nil
+}

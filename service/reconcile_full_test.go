@@ -68,6 +68,9 @@ type mockReconcileQuerier struct {
 
 	periodCloseViolations []PeriodCloseViolation
 
+	// corruptReversalLinks drives the reversal_chain_integrity check (I-51).
+	corruptReversalLinks []CorruptReversalLink
+
 	// force errors
 	errOrphanCount           error
 	errOrphanSample          error
@@ -87,6 +90,7 @@ type mockReconcileQuerier struct {
 	errSystemRollups         error
 	errSnapshotDrifts        error
 	errPeriodCloseViolations error
+	errCorruptReversalLinks  error
 }
 
 func (m *mockReconcileQuerier) OrphanEntriesCount(_ context.Context) (int64, error) {
@@ -204,6 +208,16 @@ func (m *mockReconcileQuerier) PeriodCloseViolations(_ context.Context, pageLimi
 	return m.periodCloseViolations, nil
 }
 
+func (m *mockReconcileQuerier) CorruptReversalLinks(_ context.Context, pageLimit int) ([]CorruptReversalLink, error) {
+	if m.errCorruptReversalLinks != nil {
+		return nil, m.errCorruptReversalLinks
+	}
+	if len(m.corruptReversalLinks) > pageLimit {
+		return m.corruptReversalLinks[:pageLimit], nil
+	}
+	return m.corruptReversalLinks, nil
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -245,7 +259,7 @@ func TestFullReconciliation_AllPass(t *testing.T) {
 	// Complete=false placeholder, which made FullCoverage permanently false
 	// for every deployment that never enabled signing -- the same dead vote
 	// that got check #8 deleted.
-	assert.Len(t, report.Checks, 15, "should run exactly 15 checks when no AuthVerifier is wired (D-lock added period_close_violations)")
+	assert.Len(t, report.Checks, 16, "should run exactly 16 checks when no AuthVerifier is wired (W5 added reversal_chain_integrity)")
 	assert.Equal(t, []string{"unauthorized_journals"}, report.SkippedChecks,
 		"a check that could not run must be NAMED, not silently absent")
 	assert.True(t, report.FullCoverage,
@@ -278,7 +292,7 @@ func TestFullReconciliation_FullCoverageCanBeTrue(t *testing.T) {
 	assert.True(t, report.FullCoverage,
 		"every check ran to completion with nothing capped or skipped -- FullCoverage must be able to be true")
 	assert.Empty(t, report.SkippedChecks, "with the auth check wired, nothing should be skipped")
-	assert.Len(t, report.Checks, 16, "with SetAuthCheck wired, all 16 checks run")
+	assert.Len(t, report.Checks, 17, "with SetAuthCheck wired, all 17 checks run")
 	for _, c := range report.Checks {
 		assert.True(t, c.Complete, "check %s: expected Complete=true", c.Name)
 	}

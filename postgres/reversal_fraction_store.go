@@ -561,7 +561,9 @@ func entriesByDimension(entries []sqlcgen.ListJournalEntriesRow) (map[entryDimKe
 // net-zero journal linked to a real 100 deposit made
 // `ReverseJournalFraction(J, 1, 1)` -- "reverse everything" -- post a
 // reversal of 50, return a nil error, and leave 50 on the books with all
-// sixteen reconciliation checks green. Under-reversing is the direction
+// sixteen reconciliation checks then in the suite green (the seventeenth,
+// "reversal_chain_integrity", exists because of this). Under-reversing is
+// the direction
 // that does not move money out, which is precisely why nothing noticed.
 //
 // So the answer is fail-closed and names the offending journal: an operator

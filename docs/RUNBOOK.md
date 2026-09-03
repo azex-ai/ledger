@@ -83,6 +83,8 @@ proof of the count):
 | `system_rollup_integrity` | `system_rollups.total_balance` vs. a fresh recompute from entries directly — never via checkpoints, which is the pollution source `system_rollups` would otherwise inherit (I-23) |
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 | `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32); skipped (`Complete=false`) unless a `core.AuthVerifier` is wired via `SetAuthCheck`; never-signed journals are a coverage gap, not tamper evidence, so they're skipped rather than flagged |
+| `period_close_violations` | journals whose `effective_at` is behind the active close line AND that were written after that line was committed (I-15/I-59) |
+| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): a leg on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§18](#18-corrupt-reversal-chain) |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -1902,6 +1904,10 @@ less than everything. Before the read-side check it did that with a `nil`
 error and every reconciliation check green (2026-09-03 independent review,
 `money-out.md` M-2). The refusal is the fix: the derivation now stops rather
 than quietly under-correcting.
+
+**Or the alert came first**: the `reversal_chain_integrity` reconcile check
+(§1's table) scans for this without anyone attempting a reversal, and its
+findings name both journals. Either way the confirmation below is the same.
 
 **Confirm** — look at the whole chain of the journal you tried to reverse:
 

@@ -5834,6 +5834,16 @@ moved money, that is corrected by a reversal, not by the unlink.
   the read side of rules 2 and 3, reached by every caller that derives
   anything from a reversal chain (`reverseJournalFractionWithQueries`,
   `AuthorizeReversal`, `validateReversalOfInput` itself).
+- The `reversal_chain_integrity` reconcile check
+  (`service.FullReconciliationService.runCheckReversalChainIntegrity`, backed
+  by `CorruptReversalLinks` in
+  `postgres/sql/queries/integrity_reversal_chain.sql`) — the *detection*
+  layer, and the reason the two gates above are not the whole story: both of
+  them only fire when somebody posts or reverses something, so between a
+  forged link landing and the next clawback nothing looks at all. The scan
+  reports the same two violations per (original, dimension), names the
+  offending journal for `unmatched_dimension`, and marks itself incomplete
+  rather than passing when it cannot run.
 
 **Pinned by**:
 - `postgres.TestPostJournal_ReversalOfUID_RejectsNonReversingEntries` — the
@@ -5859,6 +5869,14 @@ moved money, that is corrected by a reversal, not by the unlink.
   false-positive guard: two legitimate partial reversals, then the remainder,
   then an already-fully-reversed refusal that stays distinguishable from a
   corrupt-chain one.
+- `postgres.TestCorruptReversalLinks_FindsTheForgedLink` /
+  `TestCorruptReversalLinks_FindsAnOverReversedChain` /
+  `TestCorruptReversalLinks_HonestPartialReversalsAreNotFindings` — the
+  fleet scan against a real database, run without anyone attempting a
+  reversal first.
+- `service.TestFullReconciliation_ReversalChainIntegrity_*` — what the suite
+  does with the answer: a violation fails the run and names both journals;
+  a scan that could not run is `Passed=false, Complete=false`, never a pass.
 - `postgres.TestPostJournal_EventUID_RejectsUnrelatedJournal` (rule 4) — a
   stranger's journal is refused, and then the booking's OWN journal still
   posts against the same event, proving the refusal consumed neither

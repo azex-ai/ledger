@@ -35,6 +35,39 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`service.ReconcileQuerier` gains `CorruptReversalLinks`, and the suite
+  runs one more check** (Wave 5, W5-money-misc; independent review
+  `money-out.md` M-2, I-51). Self-built `ReconcileQuerier` implementations
+  must add it; `postgres.NewReconcileAdapter` users need no change. The new
+  `reversal_chain_integrity` check scans for journals carrying
+  `reversal_of = O` that are not reversals of `O` — the forged link that
+  made `ReverseJournalFraction(J, 1, 1)` reverse half of `J` and return
+  `nil`, with every other check green. A consumer asserting on the number of
+  checks in a report moves it: 16 without an `AuthVerifier` wired, 17 with
+  one. Do not stub the new method as `return nil, nil`; an error is reported
+  as a Finding (`Passed=false, Complete=false`), a silent empty list reads as
+  "every reversal chain here is sound".
+
+  The behavioural half, same finding: `ReverseJournal`,
+  `ReverseJournalFraction` and `AuthorizeReversal` now **refuse**
+  (`core.ErrConflict`, naming the offending journal) when the chain they
+  would derive from contains such a link, instead of quietly reversing less
+  than asked. Nothing an honest chain does changes; a deployment that has
+  been tampered with gets a loud failure where it used to get a `nil` and a
+  short reversal. `docs/RUNBOOK.md` §18 is the procedure.
+
+- **Migrate's session guard identifies its own connections by backend pid,
+  and arranges 001's owner membership before applying anything** (Wave 5;
+  independent review `install-roles.md` M1/M2). Not a Go API change — two
+  behaviour changes an operator can see: installing a **second** ledger
+  database on a cluster that already carries `ledger_owner`/`ledger_app`/
+  `ledger_ro` now works (it used to die inside `001` and leave the database
+  `dirty`), and a credential that can neither `SET ROLE ledger_owner` nor
+  grant itself that membership is refused *before* anything is applied, with
+  the exact `GRANT` to run. The same-credential refusal can no longer be
+  bypassed by an application pool that sets
+  `application_name = 'azex-ledger-migrate'` for itself.
+
 - **`postgres.NewPendingStore` takes a fourth argument, and `ConfirmPending`
   refuses to run inside `RunInTx` when it is set** (Wave 4, contract §7.20,
   I-64). `NewPendingStore(pool, ledger, classStore)` becomes
@@ -93,7 +126,8 @@ written because it was true when `[0.6.0]` shipped.
   for a uid that matches no row instead of `nil`. `service.ReconcileQuerier`
   gains `PeriodCloseViolations` (self-built implementations must add it;
   `postgres.NewReconcileAdapter` users need no change), and the suite runs
-  sixteen checks rather than fifteen. I-3's wording is scoped to money
+  sixteen checks rather than fifteen (seventeen as of Wave 5's
+  `reversal_chain_integrity`). I-3's wording is scoped to money
   movement, with the configuration writes that need no idempotency key
   listed explicitly.
 
@@ -523,7 +557,10 @@ written because it was true when `[0.6.0]` shipped.
   instruction in it rather than a silent risk. Before arranging anything, and
   again once the membership exists, `Migrate` counts the other sessions
   connected as that credential (`pg_stat_activity`, its own connections
-  excluded by `application_name = azex-ledger-migrate`) and returns an error
+  excluded by backend pid — every pid the run has opened; it was
+  `application_name = azex-ledger-migrate` until Wave 5, which is a value the
+  audited session sets for itself, see the reversal/install entry below) and
+  returns an error
   naming the count, what it saw, and the remedy. In-process migration on a
   live pod sharing one credential with its own pool will hit this; a separate
   `MIGRATE_DATABASE_URL`, a deploy-step migration, or a superuser /

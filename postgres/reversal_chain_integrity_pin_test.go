@@ -11,7 +11,9 @@ package postgres_test
 // but every consumer of the chain reads it as "50 of J has already been
 // reversed". A platform then clawing the deposit back in full got
 // `ReverseJournalFraction(J, 1, 1) -> err=nil` posting a reversal of 50, a
-// holder left holding 50, and all sixteen reconciliation checks green.
+// holder left holding 50, and all sixteen reconciliation checks then in the
+// suite green -- the seventeenth, "reversal_chain_integrity", was added for
+// exactly this and has its own pin in service/.
 //
 // I-51 already forbids exactly this shape on the way in
 // (validateReversalOfInput rules 2 and 3), and that gate is real -- the last
@@ -47,6 +49,7 @@ import (
 // reversalChainFixture is one honest 100 deposit and the ids needed to append
 // raw rows beside it.
 type reversalChainFixture struct {
+	pool         *pgxpool.Pool
 	store        *postgres.LedgerStore
 	attacker     *pgxpool.Pool
 	holder       int64
@@ -84,6 +87,7 @@ func seedReversalChainFixture(t *testing.T, ctx context.Context) reversalChainFi
 	require.NoError(t, err)
 
 	fx := reversalChainFixture{
+		pool:         pool,
 		store:        store,
 		attacker:     ledgerAppPool(t, ctx, pool, "reversal-chain-app-credential"),
 		holder:       holder,
@@ -313,4 +317,103 @@ func TestReverseJournalFraction_HonestPartialChainStillReverses(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already fully reversed",
 		fmt.Sprintf("expected the already-reversed refusal, got: %v", err))
+}
+
+// TestCorruptReversalLinks_FindsTheForgedLink is the SQL half of the
+// reversal_chain_integrity reconcile check (I-51): the fleet scan has to see
+// the same forgery the read-side gate refuses, without anyone attempting a
+// reversal first.
+//
+// This is what makes the check a detection layer rather than a restatement.
+// Both existing enforcement points fire only when somebody posts or reverses
+// something; between the forgery landing and the next clawback, nothing
+// looks. Here nothing is posted after the forgery at all -- the scan is run
+// straight against the table.
+func TestCorruptReversalLinks_FindsTheForgedLink(t *testing.T) {
+	ctx := context.Background()
+	fx := seedReversalChainFixture(t, ctx)
+	adapter := postgres.NewReconcileAdapter(fx.pool)
+
+	clean, err := adapter.CorruptReversalLinks(ctx, 200)
+	require.NoError(t, err)
+	require.Empty(t, clean, "sanity: an honest ledger must produce no findings, or every assertion below is meaningless")
+
+	forgedUID := fx.forgeLinkedJournal(t, ctx, postgrestest.UniqueKey("rc-scan-forged"), fx.netZeroLegs())
+
+	rows, err := adapter.CorruptReversalLinks(ctx, 200)
+	require.NoError(t, err)
+	// Two, not one: the forgery puts a leg on BOTH sides of both dimensions,
+	// so the wallet's extra DEBIT leg and the custodial's extra CREDIT leg
+	// each flip onto a dimension the deposit never posted. Asserted as two
+	// rather than "at least one" so a later change that starts reporting
+	// only the first offending leg per journal shows up here.
+	require.Len(t, rows, 2, "both extra legs land on dimensions the original never posted: %+v", rows)
+
+	for _, r := range rows {
+		assert.Equal(t, "unmatched_dimension", r.Violation)
+		assert.Equal(t, forgedUID, r.ReversalUID, "the finding has to name the forged journal, not just the original")
+		assert.Equal(t, fx.journalUID, r.OriginalUID)
+		assert.True(t, r.ReversedAmount.Equal(decimal.NewFromInt(50)), "got %s", r.ReversedAmount)
+	}
+
+	// The holder-side row, spelled out: the deposit posted a DEBIT on the
+	// wallet, so a credit dimension there is one the original never touched.
+	// (The other row is its system-side mirror on the custodial account.)
+	holderSide := rows[1]
+	if rows[0].AccountHolder == fx.holder {
+		holderSide = rows[0]
+	}
+	assert.Equal(t, fx.holder, holderSide.AccountHolder)
+	assert.Equal(t, "credit", holderSide.EntryType,
+		"the reported dimension is the ORIGINAL's grain: the forged DEBIT leg flips to a credit dimension the deposit never posted")
+}
+
+// TestCorruptReversalLinks_FindsAnOverReversedChain covers the other
+// violation, and pins the deliberate choice not to name a journal for it.
+func TestCorruptReversalLinks_FindsAnOverReversedChain(t *testing.T) {
+	ctx := context.Background()
+	fx := seedReversalChainFixture(t, ctx)
+	adapter := postgres.NewReconcileAdapter(fx.pool)
+	system := core.SystemAccountHolder(fx.holder)
+
+	// Well-shaped (every leg inverts a real one) but for more than the
+	// original was worth.
+	fx.forgeLinkedJournal(t, ctx, postgrestest.UniqueKey("rc-scan-over"), []forgedLeg{
+		{holder: fx.holder, classID: fx.walletID, entryType: "credit", amount: "150"},
+		{holder: system, classID: fx.custodialID, entryType: "debit", amount: "150"},
+	})
+
+	rows, err := adapter.CorruptReversalLinks(ctx, 200)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "both of the original's dimensions are over-reversed: %+v", rows)
+
+	for _, r := range rows {
+		assert.Equal(t, "over_reversed", r.Violation)
+		assert.Equal(t, fx.journalUID, r.OriginalUID)
+		assert.Empty(t, r.ReversalUID,
+			"an overshoot is a property of the total; naming whichever journal happened to be last would point at the wrong row")
+		assert.True(t, r.ReversedAmount.Equal(decimal.NewFromInt(150)), "got %s", r.ReversedAmount)
+		assert.True(t, r.OriginalAmount.Equal(decimal.NewFromInt(100)), "got %s", r.OriginalAmount)
+	}
+}
+
+// TestCorruptReversalLinks_HonestPartialReversalsAreNotFindings is the
+// false-positive guard. A check that fires on legitimate partial reversals
+// would be turned off within a week, and then it protects nothing.
+func TestCorruptReversalLinks_HonestPartialReversalsAreNotFindings(t *testing.T) {
+	ctx := context.Background()
+	fx := seedReversalChainFixture(t, ctx)
+	adapter := postgres.NewReconcileAdapter(fx.pool)
+
+	_, err := fx.store.ReverseJournalFraction(ctx, fx.journalUID, 1, 3, "first third",
+		postgrestest.UniqueKey("rc-scan-third"))
+	require.NoError(t, err)
+	_, err = fx.store.ReverseJournalFraction(ctx, fx.journalUID, 1, 1, "the rest",
+		postgrestest.UniqueKey("rc-scan-rest"))
+	require.NoError(t, err)
+	require.True(t, fx.balance(t, ctx).IsZero(), "sanity: the journal must be fully reversed, got %s", fx.balance(t, ctx))
+
+	rows, err := adapter.CorruptReversalLinks(ctx, 200)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "a fully and honestly reversed journal is not a corrupt chain: %+v", rows)
 }
