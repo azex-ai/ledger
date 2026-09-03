@@ -1512,9 +1512,18 @@ still returned `nil`. `Migrate` now switches **one connection** to
 `ledger_owner` (`SET ROLE`) and runs `002..N` there; where the credential
 cannot yet do that it grants itself `WITH SET TRUE, INHERIT FALSE` for the
 run and revokes it, which confers nothing on a session that does not
-deliberately switch roles. This does not make the migration credential safe to
-serve traffic on — see `docs/RUNBOOK.md`'s "Database roles" for what remains —
-it makes the *passive* elevation gone.
+deliberately switch roles.
+
+What that still leaves — a session on the migration credential *can* switch to
+`ledger_owner` deliberately, and a compromised application is a session that
+does what it is told — is not tolerated either: on the non-superuser path
+`Migrate` counts the other sessions connected as that credential
+(`pg_stat_activity`, its own connections excluded by `application_name`),
+before arranging anything and again after, and refuses the run with an
+actionable error if there are any. So the invariant's scope during a migration
+run is exact: either the credential is a superuser / `ledger_owner` (nothing
+is arranged and nothing changes for anyone), or it is the only session holding
+that credential and one connection of it acts as `ledger_owner`.
 
 **Enforced by**:
 - `postgres/sql/migrations/001_baseline.up.sql` — creates `ledger_owner` /
@@ -1546,10 +1555,17 @@ it makes the *passive* elevation gone.
 - `postgres.TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`
   — the "Note on the migration window" above. A real `Migrate` run, parked
   inside migrations `002..N` by an exclusive lock on a table migration 003
-  alters, while a second connection on the migration credential checks
+  alters, while a connection opened mid-run on the migration credential checks
   `pg_has_role(..., 'USAGE')` and tries to drop the append-only trigger: the
   first must be false and the second must be `42501`. `pg_stat_activity` is
   the witness that the probe ran inside the window rather than after it.
+- `postgres.TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential`
+  — the other half: with an application-shaped session already connected on
+  that credential, `Migrate` must refuse before applying anything and before
+  touching `pg_auth_members`, with an error naming both `pg_stat_activity` and
+  `MIGRATE_DATABASE_URL`. The same run succeeds once that session is gone,
+  which is what keeps the refusal from being a credential that simply cannot
+  migrate.
 - `postgres.TestLedgerAppInsertsIntoPartitionCreatedAfterGrant`
   — a partition created *after* the
   role grants were issued is still writable by `ledger_app` through the

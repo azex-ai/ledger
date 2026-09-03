@@ -368,7 +368,24 @@ written because it was true when `[0.6.0]` shipped.
   deleting the row outright. Pinned by
   `TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential`, which
   parks a real run inside `002..N` with an exclusive lock and requires `42501`
-  from a second connection on the same credential.
+  from a connection opened on the same credential mid-run.
+
+  **`Migrate` also refuses to run while another session holds the migration
+  credential** (non-superuser path only, and a behaviour change worth reading
+  before your next deploy). What the SET-only membership cannot take away is
+  that a session on that credential can switch to `ledger_owner`
+  deliberately — a compromised application is a session that does what it is
+  told — so a single-credential deployment is now a failed deploy with an
+  instruction in it rather than a silent risk. Before arranging anything, and
+  again once the membership exists, `Migrate` counts the other sessions
+  connected as that credential (`pg_stat_activity`, its own connections
+  excluded by `application_name = azex-ledger-migrate`) and returns an error
+  naming the count, what it saw, and the remedy. In-process migration on a
+  live pod sharing one credential with its own pool will hit this; a separate
+  `MIGRATE_DATABASE_URL`, a deploy-step migration, or a superuser /
+  `ledger_owner` connection will not. Pinned by
+  `TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential`, which
+  also asserts the same run succeeds once the other session is gone.
 
   **Behaviour change worth knowing before a shared cluster surprises you**: on
   the non-superuser path, `002..N` now execute *as* `ledger_owner` and no

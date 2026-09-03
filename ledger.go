@@ -797,6 +797,12 @@ func (s *Service) withTx(tx pgx.Tx) *Service {
 // five-minute default for a long migration window. A re-export that quietly
 // dropped them would put those exactly where they cannot be reached from the
 // facade this library tells consumers to use.
+//
+// Read postgres.Migrate's doc comment for what the credential in databaseURL
+// has to be able to do -- and, unless it is a superuser or ledger_owner
+// itself, what nothing else may be doing with it: Migrate refuses to run while
+// another session is connected as that credential, because a credential it can
+// reach ledger_owner through is one any session holding it can switch to.
 func Migrate(databaseURL string, opts ...postgres.MigrateOption) error {
 	return postgres.Migrate(databaseURL, opts...)
 }

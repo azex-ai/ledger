@@ -138,15 +138,26 @@ that credential for the length of the run. Where the credential cannot yet
 switch roles, `Migrate` grants itself `ledger_owner WITH SET TRUE, INHERIT
 FALSE` for the run and revokes it on every exit path.
 
-Most deployments need no action. Two shapes do: running `Migrate` as a
-third-party role that can neither `SET ROLE ledger_owner` nor grant itself
-that (no ADMIN OPTION) now fails up front with the three ways out listed,
-where it previously died at `002` with a bare `42501` and left the database
-marked dirty; and on the non-superuser path `002..N` execute *as*
-`ledger_owner`, so migration `007` can no longer use the runner's own
-`CREATEROLE` to strip a privileged attribute off a pre-existing
-`ledger_owner`/`ledger_app`/`ledger_ro` — it stops the install and asks for a
-superuser connection instead. A fresh install is unaffected by the second.
+⚠️ **`Migrate` now refuses to run while another session is connected as the
+migration credential** (non-superuser path only). A credential that can act as
+`ledger_owner` is one any session holding it can `SET ROLE` to, so a
+single-credential deployment is refused rather than silently tolerated: the
+error names the session count from `pg_stat_activity` and the remedy. **This
+breaks in-process migration on a live pod that shares one credential with its
+own pool** — the shape every `examples/*/main.go` warns about. Fix it with a
+separate `MIGRATE_DATABASE_URL`, by migrating as a deploy step before the
+application starts, or by migrating on a superuser / `ledger_owner`
+connection, which arranges nothing and is not subject to the check.
+
+Two more shapes need action: running `Migrate` as a third-party role that can
+neither `SET ROLE ledger_owner` nor grant itself that (no ADMIN OPTION) now
+fails up front with the three ways out listed, where it previously died at
+`002` with a bare `42501` and left the database marked dirty; and on the
+non-superuser path `002..N` execute *as* `ledger_owner`, so migration `007`
+can no longer use the runner's own `CREATEROLE` to strip a privileged
+attribute off a pre-existing `ledger_owner`/`ledger_app`/`ledger_ro` — it
+stops the install and asks for a superuser connection instead. A fresh install
+is unaffected by the last.
 
 ### `core.Metrics.BalanceDrift`, `core.Metrics.NegativeBalanceDetected`, `core.Metrics.ReconcileGap`, `core.Metrics.ReservedAmount` take a currency uid
 

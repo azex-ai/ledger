@@ -62,7 +62,8 @@ func run() error {
 		migrateURL = dbURL
 		log.Printf("warning: MIGRATE_DATABASE_URL is unset, so migrations run on DATABASE_URL. " +
 			"That credential can act as ledger_owner -- able to drop the append-only guards -- which is not something " +
-			"a serving pool should be able to do. Acceptable for a local example, not for production.")
+			"a serving pool should be able to do; Migrate refuses outright if any other session is already connected " +
+			"as it. Acceptable for a local example, which migrates before it opens a pool. Not for production.")
 	}
 	// postgres.Migrate uses golang-migrate's pgx5 driver (pgx5:// scheme);
 	// pgxpool.New wants postgres://. Accept a standard postgres:// URL and

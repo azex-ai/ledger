@@ -1,25 +1,35 @@
 package postgres_test
 
-// The attack probe for M-5 (docs/audits/2026-09-02-deep-audit/w3-review/
-// money-path.md): Migrate's ledger_owner window must be scoped to the
-// connection running the migrations, not to the credential running them.
+// The two pins for M-5 (docs/audits/2026-09-02-deep-audit/w3-review/
+// money-path.md): what a session holding the migration credential can see and
+// do while migrations run.
 //
-// The mechanism it replaced narrowed the window in TIME (one membership per
+// The mechanism these replaced narrowed the window in TIME (one membership per
 // migration) and never in SUBJECT: `GRANT ledger_owner TO <runner> WITH
 // INHERIT TRUE` writes pg_auth_members, a cluster-wide shared catalog, and
 // Postgres's ownership checks consult has_privs_of_role() per statement
 // without regard for which session is asking. Every other session holding the
 // same credential -- in a single-credential deployment, the application's own
-// pool -- therefore became owner-equivalent for the duration, and I-22's
-// append-only triggers were droppable by the application while the deploy ran.
+// pool -- was therefore owner-equivalent for the duration, and I-22's
+// append-only triggers were droppable by the application while a deploy ran.
+// Measured, not reasoned: on the previous mechanism the second test below
+// failed on both of its assertions.
 //
-// This test is the assertion nobody had written: a SECOND connection on the
-// SAME credential, opened while migrations 002..N are in flight, must see
-// nothing. It is deterministic rather than racing a fast migration run: an
-// exclusive lock on a table migration 002 touches parks the run inside the
-// window, and pg_stat_activity is the witness that the probe really ran there.
-// Without that witness the probe would pass just as happily by arriving after
-// the run finished, which is the shape working-agreements.md §3 is about.
+// Two layers replaced it, and there is one test each:
+//
+//   - Migrate refuses to start at all while another session holds the
+//     migration credential (assertSoleSessionOnCredential). A credential that
+//     can act as ledger_owner is not one to serve traffic on, and this is
+//     where that stops being advice.
+//   - What it arranges for itself, when it does run, is invisible to any
+//     session that does not deliberately switch roles: SET-only membership,
+//     used by exactly one connection.
+//
+// The second is deterministic rather than racing a fast migration run: an
+// exclusive lock on a table migration 003 alters parks the run, and
+// pg_stat_activity is the witness that the probe ran inside the window.
+// Without that witness it would pass just as happily by arriving after the run
+// finished, which is the shape working-agreements.md §3 is about.
 
 import (
 	"context"
@@ -38,6 +48,48 @@ import (
 	"github.com/azex-ai/ledger/postgres"
 )
 
+func TestMigrate_RefusesWhileAnotherSessionHoldsTheMigrationCredential(t *testing.T) {
+	ctx := context.Background()
+	raw := postgrestest.SetupRawDB(t)
+
+	admin, err := pgxpool.New(ctx, raw)
+	require.NoError(t, err)
+	defer admin.Close()
+
+	runner, runnerURL := newMigrationRunner(t, admin, raw, "ledger_guard")
+	applyBaselineAsRunner(t, admin, runner, runnerURL)
+
+	before := ledgerOwnerMembership(t, admin)
+
+	// The application pool, online on the migration credential. One connection
+	// is the whole scenario: the deployment shape every `examples/*/main.go`
+	// warns about, and the one M-5 found the ledger silently tolerating.
+	app, err := pgx.Connect(ctx, runnerURL)
+	require.NoError(t, err)
+	defer func() { _ = app.Close(context.Background()) }()
+
+	err = postgres.Migrate(runnerURL)
+	require.Error(t, err, "a credential that is simultaneously serving traffic must not be elevated to run migrations on")
+	assert.Contains(t, err.Error(), "pg_stat_activity",
+		"the operator has to be able to check the claim, which means being told where it came from")
+	assert.Contains(t, err.Error(), "MIGRATE_DATABASE_URL",
+		"and being told what to do about it: a refusal without a remedy is a deploy nobody can unblock")
+
+	assert.Equal(t, before, ledgerOwnerMembership(t, admin),
+		"a refused run must not have arranged anything first")
+
+	var version int
+	require.NoError(t, admin.QueryRow(ctx, "SELECT version FROM schema_migrations").Scan(&version))
+	assert.Equal(t, 1, version, "and must not have applied any migration past the baseline")
+
+	// The same run, once the application is gone, succeeds -- otherwise this
+	// test would pass for a credential that simply cannot migrate at all.
+	require.NoError(t, app.Close(ctx))
+	waitForNoSessionsAs(t, admin, runner)
+	require.NoError(t, postgres.Migrate(runnerURL))
+	assert.Equal(t, before, ledgerOwnerMembership(t, admin))
+}
+
 func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing.T) {
 	ctx := context.Background()
 	raw := postgrestest.SetupRawDB(t)
@@ -50,22 +102,7 @@ func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing
 	require.NoError(t, admin.QueryRow(ctx, "SELECT current_database()").Scan(&dbName))
 
 	runner, runnerURL := newMigrationRunner(t, admin, raw, "ledger_window")
-
-	// 001 first, on the runner's own authority, so that the window this test
-	// is about (migrations 002..N) is the only thing postgres.Migrate has left
-	// to do -- and so the lock below can park it there deterministically.
-	src, err := postgres.NewMigrationSource()
-	require.NoError(t, err)
-	baseline, err := migrate.NewWithSourceInstance("iofs", src,
-		strings.Replace(runnerURL, "postgres://", "pgx5://", 1))
-	require.NoError(t, err)
-	require.NoError(t, baseline.Migrate(1))
-	_, _ = baseline.Close()
-
-	// And the credential is left in the state 001 leaves a fresh install in:
-	// admin option on ledger_owner, no way to act as it without arranging one.
-	// See newMigrationRunner.
-	stripLedgerOwnerSetOption(t, admin, runner)
+	applyBaselineAsRunner(t, admin, runner, runnerURL)
 
 	membersBefore := ledgerOwnerMembership(t, admin)
 
@@ -115,6 +152,10 @@ func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing
 		"sanity: migrations 002..N must actually be in flight and parked, or this probe proves nothing")
 
 	// ---- the attack, on a second connection holding the same credential ----
+	//
+	// Opened here, mid-run, and therefore after the session guard has already
+	// had its say: this is the residual that guard cannot cover, and the one
+	// the SET-only membership exists to make worthless.
 	attacker, err := pgx.Connect(ctx, runnerURL)
 	require.NoError(t, err)
 	defer func() { _ = attacker.Close(context.Background()) }()
@@ -166,6 +207,52 @@ func TestMigrate_WindowIsNotVisibleToOtherSessionsOfTheSameCredential(t *testing
 	// in order to act as ledger_owner, it did not leave any of it behind.
 	assert.Equal(t, membersBefore, ledgerOwnerMembership(t, admin),
 		"Migrate must leave pg_auth_members exactly as it found it")
+}
+
+// applyBaselineAsRunner installs 001 on the migration credential and leaves it
+// in the state a fresh install reaches 002 in, with no session of its own
+// still connected.
+//
+// 001 has to be out of the way before either test above, for opposite reasons:
+// the refusal test needs a run that gets as far as the session guard, and the
+// parking test needs `002..N` to be the only thing left for the lock to park.
+// Driving golang-migrate directly is how the test gets exactly `001` --
+// postgres.Migrate always runs to the latest version.
+func applyBaselineAsRunner(t *testing.T, admin *pgxpool.Pool, runner, runnerURL string) {
+	t.Helper()
+
+	src, err := postgres.NewMigrationSource()
+	require.NoError(t, err)
+	baseline, err := migrate.NewWithSourceInstance("iofs", src,
+		strings.Replace(runnerURL, "postgres://", "pgx5://", 1))
+	require.NoError(t, err)
+	require.NoError(t, baseline.Migrate(1))
+	_, _ = baseline.Close()
+
+	// See newMigrationRunner: admin option only, which is what 001 leaves
+	// behind and the branch that has something to arrange.
+	stripLedgerOwnerSetOption(t, admin, runner)
+
+	// And no leftovers of our own: `baseline` above connected as this
+	// credential, and a backend that has been asked to close is still listed
+	// until it exits. The session guard counts by application_name precisely
+	// so that Migrate's own connections cannot trip it -- but golang-migrate
+	// opened that one from a URL, so it carries none, and a test that did not
+	// wait here would fail intermittently for a reason that is not a finding.
+	waitForNoSessionsAs(t, admin, runner)
+}
+
+// waitForNoSessionsAs blocks until the given role has no backends left.
+func waitForNoSessionsAs(t *testing.T, admin *pgxpool.Pool, role string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var n int
+		if err := admin.QueryRow(context.Background(),
+			"SELECT count(*) FROM pg_stat_activity WHERE usename = $1", role).Scan(&n); err != nil {
+			return false
+		}
+		return n == 0
+	}, 15*time.Second, 25*time.Millisecond, "a leftover session on %s would make the guard fire for the wrong reason", role)
 }
 
 // ledgerOwnerMembership snapshots every membership row in ledger_owner --
