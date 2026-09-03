@@ -411,9 +411,13 @@ financial sums is unacceptable. 18 digits accommodates Ethereum wei
 (1e18 base units per ether) and is a Postgres-native scale.
 
 **Enforced by**:
-- Schema: every amount column is `NUMERIC(30,18) NOT NULL`.
+- Schema: every amount column is `NUMERIC(30,18) NOT NULL`
+  (`postgres/sql/migrations/001_baseline.up.sql`).
 - Go: every amount field is `decimal.Decimal`. No `float64` or `int64-as-amount`
-  at any boundary.
+  at any boundary. `postgres.decimalToNumeric` / `postgres.numericToDecimal` /
+  `postgres.mustNumericToDecimal` (`postgres/convert.go`) are the single
+  conversion boundary every amount crosses in either direction -- there is no
+  other place a Go amount becomes a DB value or back.
 - JSON: `decimal.Decimal` serialises as quoted string by default.
 
 **Pinned by**:
@@ -465,9 +469,11 @@ field is `*int64` (in Go structs that expose the column directly — the
 this one, as `pgtype.Int8`; `core.Journal` exposes it as `EventUID string`).
 
 **Enforced by**:
-- Migration `017_no_null_cleanup` for the bulk move.
-- Migration `018_restore_referential_integrity` for the four exceptions.
-- Migration `045_mutation_guards` for `journals.event_id`.
+- `postgres/sql/migrations/001_baseline.up.sql` -- the flattened schema every
+  column's `NOT NULL` and default now lives in (the historical migrations
+  `017_no_null_cleanup`, `018_restore_referential_integrity` and
+  `045_mutation_guards`, which did the bulk move, the four FK exceptions and
+  `journals.event_id` respectively, were squashed into it).
 
 **Pinned by** (F-P7, 2026-09-02 audit: this section had no Pinned by at all):
 - `postgres.TestSchema_NullableColumnsExactlyMatchI7Exceptions` — queries
@@ -660,7 +666,11 @@ value — every debit has a matching credit.
 fails, the ledger is broken.
 
 **Enforced by**: I-1 + I-2 together (every journal balances; nothing is ever
-deleted).
+deleted). Concretely, the DB-side half of I-1 --
+`check_journal_currency_balance()`, the deferred constraint trigger declared
+in `postgres/sql/migrations/001_baseline.up.sql` -- is what makes the
+conservation hold for writes that never went through this library's Go
+layer at all, which is the case this invariant has to survive.
 
 **Pinned by**:
 - `postgres.TestMoneyConservation_Network` (N×M×K large-scale random journal
@@ -904,7 +914,7 @@ reconciliation time (or in an external settlement mismatch).
   `PendingStore.AddPending/ConfirmPending/CancelPending` inherit the check
   for free because they all post through `postgres.LedgerStore.PostJournal`
   rather than writing entries directly.
-- `postgres.validateSingleAmountPrecision` / `checkAmountPrecision`, called
+- `postgres.checkAmountPrecision` (`postgres/precision.go`), called
   from every amount-bearing write path that does **not** flow through
   `PostJournal`: `postgres.ReserverStore.Reserve`,
   `postgres.ReserverStore.Settle`, `postgres.ReserverStore.SettlePartial`,

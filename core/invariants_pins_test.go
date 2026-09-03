@@ -424,6 +424,33 @@ func buildDeclaredSymbolIndex(t *testing.T) declaredSymbolIndex {
 					switch s := spec.(type) {
 					case *ast.TypeSpec:
 						idx.bare[s.Name.Name] = true
+						// Struct fields and interface methods are cited by
+						// INVARIANTS.md the same way methods are
+						// (`core.TokenConfig.ReconcileFailureLimit`,
+						// `core.Metrics.JournalPosted`), so they belong in
+						// the index: without them, a citation that names a
+						// real field reads as unresolved, which the
+						// resolution check below turns into a false red.
+						switch ty := s.Type.(type) {
+						case *ast.StructType:
+							if ty.Fields != nil {
+								for _, field := range ty.Fields.List {
+									for _, n := range field.Names {
+										idx.method[s.Name.Name+"."+n.Name] = true
+										idx.bare[n.Name] = true
+									}
+								}
+							}
+						case *ast.InterfaceType:
+							if ty.Methods != nil {
+								for _, m := range ty.Methods.List {
+									for _, n := range m.Names {
+										idx.method[s.Name.Name+"."+n.Name] = true
+										idx.bare[n.Name] = true
+									}
+								}
+							}
+						}
 					case *ast.ValueSpec:
 						for _, n := range s.Names {
 							idx.bare[n.Name] = true
@@ -469,6 +496,195 @@ var enforcedSymbolRef = regexp.MustCompile("`([a-z][a-z0-9_]*(?:/[a-z][a-z0-9_]*
 var nonSymbolExtensions = map[string]bool{
 	"go": true, "sql": true, "md": true, "yml": true, "yaml": true,
 	"json": true, "sh": true, "ts": true, "tsx": true, "js": true,
+}
+
+// --- W3 round 2: every citation in an Enforced by block must resolve ---
+//
+// The round-1 gate held a section's PINS to its Enforced-by symbols, and
+// dropped any citation that did not resolve. Team-lead's two mutations
+// before the merge both stayed green on that:
+//
+//	(1) strip every backtick from I-2's Enforced by -- nothing resolves, so
+//	    the section had no leaves and was skipped (registered, silently);
+//	(2) point I-2's first three citations at symbols that do not exist,
+//	    leaving the rest -- the section still had leaves from the survivors,
+//	    and a citation naming a symbol this repo does not declare cost
+//	    nothing.
+//
+// Both are the same hole from two ends: the doc's claim about WHICH
+// mechanism enforces an invariant was never itself checked. A citation that
+// resolves to nothing is a claim about code that does not exist, and it is
+// worse than no citation at all, because it reads as one.
+//
+// So, independently of the pin check:
+//
+//   - every citation that LOOKS like a Go symbol in a package this repo
+//     declares must resolve to a symbol this repo declares (exported or
+//     not -- an unexported mechanism is still a real one, it just cannot be
+//     a leaf a black-box pin is held to);
+//   - every section must have at least one citation that resolves to
+//     SOMETHING -- a Go symbol, or a file that exists. Being registered in
+//     unresolvableEnforcedCitations does not exempt a section from this: the
+//     register says "no EXPORTED symbol to hold a pin to", never "this
+//     section cites nothing real".
+
+// repoGoPackages returns the set of package directory names that contain Go
+// source. It is what tells `postgres.checkAmountPrecision` (a claim about
+// this repo, checkable) from `decimal.Decimal` or `migrate.NewWithSourceInstance`
+// (third-party) and from `journals.idempotency_key` or `job.Attempts` (a DB
+// column and a local variable, neither of which is a package).
+func repoGoPackages(t *testing.T) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		switch d.Name() {
+		case "node_modules", ".git", "web":
+			return filepath.SkipDir
+		}
+		matches, globErr := filepath.Glob(filepath.Join(path, "*.go"))
+		if globErr != nil {
+			return globErr
+		}
+		if len(matches) > 0 {
+			out[filepath.Base(path)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repo for package names: %v", err)
+	}
+	require.NotEmpty(t, out, "found no Go packages -- the walk regressed")
+	return out
+}
+
+// repoFileNames returns every file in the repository, by path and by base
+// name, so a citation like `postgres/sql/migrations/001_baseline.up.sql` or
+// `postgres/convert.go` can be told from one that names a file nobody has.
+func repoFileNames(t *testing.T) (byPath, byBase map[string]bool) {
+	t.Helper()
+	byPath, byBase = map[string]bool{}, map[string]bool{}
+	err := filepath.WalkDir("..", func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel := filepath.ToSlash(strings.TrimPrefix(path, "../"))
+		byPath[rel] = true
+		byBase[filepath.Base(rel)] = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk repo for file names: %v", err)
+	}
+	return byPath, byBase
+}
+
+var (
+	// backtickToken matches one backtick-quoted token, whatever it is.
+	backtickToken = regexp.MustCompile("`([^`]+)`")
+	// fileCitation matches a path or bare filename with a known extension,
+	// optionally with a `:line` suffix.
+	fileCitation = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.(?:go|sql|md|yml|yaml|ts|tsx|js|json|sh)(?::\d+)?$`)
+	// bareIdentifier matches a single Go identifier.
+	bareIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+// citationAudit is what one Enforced by block claims, and whether those
+// claims are true.
+type citationAudit struct {
+	resolved int      // citations pointing at something that exists
+	broken   []string // Go-symbol citations in a repo package that resolve to nothing
+}
+
+func auditEnforcedCitations(block string, idx declaredSymbolIndex, pkgs, filesByPath, filesByBase map[string]bool) citationAudit {
+	out := citationAudit{}
+	for _, m := range backtickToken.FindAllStringSubmatch(block, -1) {
+		token := strings.TrimSpace(m[1])
+		switch {
+		case fileCitation.MatchString(token):
+			path := strings.SplitN(token, ":", 2)[0]
+			// Historical migrations squashed into 001_baseline, and the
+			// cross-cutting rule files that live outside this repo
+			// (financial.md, deployment.md), are cited as prose about where
+			// a decision came from. They count for nothing and are not
+			// errors: a missing FILE is a documentation-archaeology
+			// question, not a claim about code that does not exist.
+			if filesByPath[path] || filesByBase[filepath.Base(path)] {
+				out.resolved++
+			}
+		case strings.Contains(token, "."):
+			parts := strings.Split(token, ".")
+			leaf := parts[len(parts)-1]
+			if !pkgs[parts[0]] || len(parts) < 2 || !bareIdentifier.MatchString(leaf) {
+				continue // not a claim about a symbol in this repository
+			}
+			resolves := idx.bare[leaf]
+			if len(parts) > 2 {
+				resolves = idx.method[parts[len(parts)-2]+"."+leaf] || idx.bare[leaf]
+			}
+			if resolves {
+				out.resolved++
+			} else {
+				out.broken = append(out.broken, token)
+			}
+		case bareIdentifier.MatchString(token) && idx.bare[token]:
+			// A mechanism cited without its package (`ReverseJournal`,
+			// `mergeWorkerConfig`). Counted when it resolves; never an
+			// error when it does not, because most bare backticks in this
+			// document are SQL keywords and column names.
+			out.resolved++
+		}
+	}
+	sort.Strings(out.broken)
+	return out
+}
+
+// TestInvariantsEnforcedCitationsResolve is the round-2 gate: what the
+// document CLAIMS about the code has to be true of the code.
+func TestInvariantsEnforcedCitationsResolve(t *testing.T) {
+	raw, err := os.ReadFile("../docs/INVARIANTS.md")
+	if err != nil {
+		t.Fatalf("read INVARIANTS.md: %v", err)
+	}
+	idx := buildDeclaredSymbolIndex(t)
+	pkgs := repoGoPackages(t)
+	filesByPath, filesByBase := repoFileNames(t)
+
+	sections := splitInvariantSections(string(raw))
+	require.NotEmpty(t, sections, "no invariant sections parsed -- the splitter regressed")
+
+	for _, sec := range sections {
+		enforced := blockBetween(sec.body, "**Enforced by**")
+		audit := auditEnforcedCitations(enforced, idx, pkgs, filesByPath, filesByBase)
+
+		for _, citation := range audit.broken {
+			t.Errorf("%s's **Enforced by** cites %q, which this repository does not declare.\n\n"+
+				"The package segment names a package that exists here, so this is a claim about OUR code -- and it resolves to nothing. "+
+				"A citation naming a symbol that does not exist is worse than no citation: it reads as a mechanism, it is what the pin "+
+				"check holds pins to, and it silently stops holding them to anything. Rename it to the symbol that exists (a rename is "+
+				"the usual cause), or drop it.", sec.number, citation)
+		}
+
+		if audit.resolved == 0 {
+			t.Errorf("%s's **Enforced by** names nothing that exists: no symbol in any package of this repository, and no file in it.\n\n"+
+				"Whatever enforces this invariant, the document has to point at it -- a section citing only prose can never be checked "+
+				"against anything, and stripping the backticks off a section's citations must not be a way to make this gate quiet. "+
+				"Registering the section in unresolvableEnforcedCitations does NOT cover this: that register says there is no EXPORTED "+
+				"symbol to hold a pin to, not that the section cites nothing real.", sec.number)
+		}
+	}
 }
 
 // enforcedLeafNames extracts, from an "Enforced by" block's text, the set of
@@ -688,6 +904,15 @@ func TestCitationStyleGapListStaysClosed(t *testing.T) {
 // The recurring honest reason: the mechanism is a DDL object -- a trigger, a
 // constraint, a GRANT, a partition -- and the invariant is enforced by
 // Postgres, not by a Go function a test can name.
+//
+// ⚠️ What an entry here does NOT do (round 2): it does not exempt the section
+// from TestInvariantsEnforcedCitationsResolve. A registered section must
+// still cite something that exists -- an unexported mechanism, a file -- and
+// any Go-symbol citation it makes must still resolve. The register means
+// "nothing here is an EXPORTED symbol a black-box pin can be held to", never
+// "nothing here is checkable at all". Team-lead's mutation of stripping
+// I-2's backticks was green precisely because those two meanings had been
+// collapsed into one.
 var unresolvableEnforcedCitations = map[string]string{
 	"I-2":  "the mechanism is the journals.reversal_of FK plus SELECT ... FOR UPDATE; the two Go methods it names are cited bare, without a package qualifier",
 	"I-3":  "UNIQUE constraints on five tables' idempotency_key columns",
