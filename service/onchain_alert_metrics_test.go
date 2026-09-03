@@ -124,6 +124,10 @@ func (s stubBookingReader) ListBookings(context.Context, core.BookingFilter) ([]
 	return nil, "", errors.New("stubBookingReader: ListBookings not used by this path")
 }
 
+func (s stubBookingReader) BookingsForDepositIdentity(context.Context, int64, string, int32) ([]core.Booking, error) {
+	return nil, errors.New("stubBookingReader: BookingsForDepositIdentity not used by this path")
+}
+
 // TestRouteToReview_EmitsDepositReviewRequired pins the review-queue alert. A
 // deposit parked for human review credits nothing until someone acts on it
 // (I-21), so an unnoticed review queue is a user whose deposit silently never

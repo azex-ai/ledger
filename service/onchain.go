@@ -2578,6 +2578,37 @@ const (
 // the moment it would be credited -- once per booking in practice, since it
 // leaves `confirming` on that same tick either way.
 func (o *Onchain) corroborateBeforeConfirm(ctx context.Context, cache *blockCache, b *core.Booking, chainID int64, txHash string, txLogSeq int32, blockNumber int64) (depositEvidence, string) {
+	// Asked first, because it is the ledger's OWN fact and costs no RPC: has
+	// this transfer already been booked by somebody else?
+	//
+	// Everything below this point answers "is this log on the chain, and does
+	// it say what the booking says" -- and a faithful COPY of a real booking
+	// passes all of it, which is exactly what money-out N-1 did: one real
+	// deposit of 50, three appended duplicates of it, all four credited,
+	// solvency and reconciliation green throughout because both sides of the
+	// equation grew together. The chain cannot answer "how many times have
+	// you already counted this?"; only we can (I-71).
+	if siblings, err := o.deps.BookingReader.BookingsForDepositIdentity(ctx, chainID, txHash, txLogSeq); err != nil {
+		return evidenceUnavailable, fmt.Sprintf("look up bookings for %s#%d failed: %v", txHash, txLogSeq, err)
+	} else {
+		for _, other := range siblings {
+			if other.UID == b.UID {
+				continue
+			}
+			// Any other booking on the same log, in any state. A confirmed
+			// one has already moved the money; a pending or review one has
+			// not yet, but two bookings for one transfer is a claim the
+			// chain cannot support either way, and whichever of them is
+			// genuine, deciding that here would be guessing.
+			credited := ""
+			if other.JournalUID != "" {
+				credited = fmt.Sprintf(", already credited by journal %s", other.JournalUID)
+			}
+			return evidenceContradicted, fmt.Sprintf("booking %s (status %s%s) already holds transfer %s#%d -- one on-chain log may be booked once",
+				other.UID, other.Status, credited, txHash, txLogSeq)
+		}
+	}
+
 	included, err := o.deps.Reader.TxIncluded(ctx, chainID, txHash)
 	if err != nil {
 		return evidenceUnavailable, fmt.Sprintf("tx inclusion check failed: %v", err)

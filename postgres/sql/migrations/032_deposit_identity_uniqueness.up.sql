@@ -1,0 +1,74 @@
+-- One deposit booking per on-chain transfer log (2026-09-03 independent
+-- review, re-check round: money-out N-1; docs/INVARIANTS.md I-71).
+--
+-- What N-1 showed. A real deposit of 50 is ingested and credited. An attacker
+-- holding `ledger_app` then appends three more bookings describing THE SAME
+-- on-chain log -- same chain_id, tx_hash, txlog_seq, token, block_number,
+-- same amount, same holder -- differing only in `channel_name` (their own
+-- choice) and with `channel_ref` left empty. The honest recheck job confirms
+-- all three: I-69's corroboration re-reads the chain and finds a log carrying
+-- exactly that tx hash, log position, token, amount and a recipient
+-- registered to that holder, because the row is a faithful COPY of a real
+-- one. Verified balance goes 50 -> 200. Solvency and full reconciliation stay
+-- green throughout (both sides of the equation grow together). Configuring a
+-- second confirmation source does not help either: it is asked "is this
+-- transfer 50?", answers "yes", and is right.
+--
+-- Why nothing existing caught it:
+--
+--   * uq_bookings_idempotency is UNIQUE on a column the INSERT chooses.
+--   * uq_bookings_channel_ref is UNIQUE (channel_name, channel_ref) WHERE
+--     channel_ref <> '' -- its FIRST key column is also the INSERT's to
+--     choose, and '' opts out of the index entirely. It exists because one
+--     transaction can carry several Transfer logs (I-20), not to stop
+--     duplicates; it blocked one variant of this attack by accident.
+--   * migration 029's INSERT guard constrains `status`, `journal_id` and
+--     `settled_amount` -- the shape of the row, which here is impeccable.
+--   * `deposit-{chain}-{tx}-{seq}` is derived by IngestDeposit in Go. An
+--     attacker who does not call IngestDeposit never meets it.
+--
+-- The fix is to key the constraint on the deposit's REAL identity, which is
+-- already carried on the row: the (chain, transaction, log position) triple
+-- the ledger itself uses to decide the booking is the same deposit. This is
+-- I-66's argument applied to a different table -- a property of the only
+-- honest writer there is: IngestDeposit writes at most one booking per log,
+-- ever, so the index cannot reject anything the ledger legitimately does.
+--
+-- Scope. The predicate names our own metadata vocabulary rather than the
+-- deposit classification, because an index expression cannot join to
+-- classifications. All three keys must be present, so:
+--
+--   * deposit bookings (chain_id + tx_hash + txlog_seq) are covered;
+--   * sweep bookings are NOT (their metadata is chain_id/token/nonce, no
+--     tx_hash) -- deliberate, and recorded as a follow-up: a sweep booking
+--     never posts a journal, so a duplicate cannot mint;
+--   * a consumer whose own classification happens to carry all three of
+--     these keys, with duplicates, would fail this migration. That
+--     combination is this library's deposit vocabulary; if it fires, the
+--     rows are almost certainly the very duplicates this index exists to
+--     prevent. Find them with:
+--
+--       SELECT metadata->>'chain_id', metadata->>'tx_hash',
+--              metadata->>'txlog_seq', count(*), array_agg(uid)
+--       FROM bookings
+--       WHERE metadata ? 'tx_hash' AND metadata ? 'txlog_seq'
+--         AND metadata ? 'chain_id'
+--       GROUP BY 1, 2, 3 HAVING count(*) > 1;
+--
+-- Plain CREATE UNIQUE INDEX, not CONCURRENTLY: golang-migrate runs each
+-- migration in a transaction and CONCURRENTLY cannot run inside one (the
+-- same note 015, 023 and 025 carry). Build it out-of-band first on a large
+-- deployment if the lock window matters.
+CREATE UNIQUE INDEX uq_bookings_deposit_identity
+    ON bookings ((metadata->>'chain_id'), (metadata->>'tx_hash'), (metadata->>'txlog_seq'))
+    WHERE metadata ? 'tx_hash' AND metadata ? 'txlog_seq' AND metadata ? 'chain_id';
+
+-- Not included, deliberately: a companion guard requiring
+-- channel_name = 'onchain' on deposit-classification bookings. It was
+-- written and then removed, because it is false that the ingestion path is
+-- the only honest writer of a deposit booking -- README's Tier 2 example
+-- creates one directly through Booker.CreateBooking with a channel name of
+-- the consumer's choosing, and so may any consumer driving their own deposit
+-- flow. The index above needs no such assumption: it constrains only rows
+-- that carry an on-chain identity, and for those, uniqueness is what every
+-- writer wants.

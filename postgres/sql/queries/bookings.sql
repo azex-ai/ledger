@@ -54,3 +54,17 @@ SELECT * FROM bookings WHERE uid = $1 FOR UPDATE;
 
 -- name: GetBookingUIDByID :one
 SELECT uid FROM bookings WHERE id = $1;
+
+-- name: ListBookingsByDepositIdentity :many
+-- Every booking claiming one on-chain transfer log, by the identity the
+-- deposit path derives its idempotency key from (I-20). Served by migration
+-- 032's uq_bookings_deposit_identity, which also makes more than one row
+-- impossible for the honest writer -- this query is what lets the
+-- application say WHICH booking already holds the log rather than only
+-- refusing (I-71), and what still answers correctly on a deployment that has
+-- not applied 032 yet.
+SELECT * FROM bookings
+WHERE metadata->>'chain_id'  = @chain_id::text
+  AND metadata->>'tx_hash'   = @tx_hash::text
+  AND metadata->>'txlog_seq' = @txlog_seq::text
+ORDER BY id;

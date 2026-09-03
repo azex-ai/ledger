@@ -213,6 +213,13 @@ func (m *mockBookingReader) ListBookings(ctx context.Context, filter core.Bookin
 	}, "", nil
 }
 
+// BookingsForDepositIdentity is only reached from the onchain ingestion
+// path, which this HTTP mock never drives; answering "no other booking holds
+// this log" keeps it honest for anything that does reach it.
+func (m *mockBookingReader) BookingsForDepositIdentity(context.Context, int64, string, int32) ([]core.Booking, error) {
+	return nil, nil
+}
+
 type mockEventReader struct {
 	getFn  func(ctx context.Context, uid string) (*core.Event, error)
 	listFn func(ctx context.Context, filter core.EventFilter) ([]core.Event, string, error)
