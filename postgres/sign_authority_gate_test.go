@@ -122,6 +122,30 @@ var (
 	// and the gate stayed green. Comparing against the bare literal is now
 	// itself the offence -- use core.NormalSideDebit / core.EntryTypeDebit,
 	// whichever the value is, and let core.Sign do the branching.
+	//
+	// F-4 (2026-09-03 independent review) added the last three
+	// alternatives. Branching is not the only way to spell a decision
+	// procedure. The reviewer wrote a complete second implementation as a
+	// LOOKUP TABLE --
+	//
+	//	var t = map[core.NormalSide]map[core.EntryType]int{
+	//	    core.NormalSideDebit:  {core.EntryTypeDebit: 1, core.EntryTypeCredit: -1},
+	//	    core.NormalSideCredit: {core.EntryTypeDebit: -1, core.EntryTypeCredit: 1},
+	//	}
+	//
+	// -- and all three gates stayed green, because every constant sits in
+	// map-key position, followed by `:` rather than preceded by `==`. A
+	// table is an ordinary way to write this, not an evasion, which is
+	// exactly why it had to be covered.
+	//
+	// The map-key patterns are deliberately one-sided: `core.NormalSideDebit:`
+	// (constant BEFORE the colon) is a key, while `NormalSide:
+	// core.NormalSideDebit` (constant AFTER it) is a struct-literal field --
+	// a declaration of a classification's polarity, which is the
+	// convention's INPUT and is what all of presets/ consists of.
+	//
+	// EqualFold is the other reviewer bypass: the literal is an argument, so
+	// nothing sits next to it for an operator pattern to match.
 	normalSideBranchRE = regexp.MustCompile(
 		`(==|!=)\s*core\.NormalSide(Debit|Credit)` +
 			`|core\.NormalSide(Debit|Credit)\s*(==|!=)` +
@@ -129,7 +153,17 @@ var (
 			`|\bswitch\s+[^\n]*\bnormalSide\b` +
 			`|(==|!=)\s*"(debit|credit)"` +
 			`|"(debit|credit)"\s*(==|!=)` +
-			`|\bcase\s+"(debit|credit)"`)
+			`|\bcase\s+"(debit|credit)"` +
+			`|map\[core\.NormalSide\]` +
+			`|strings\.\w+\([^\n]*"(debit|credit)"`)
+
+	// normalSideMapKeyRE is checked only on lines that are not `case`
+	// labels. `core.NormalSideDebit:` in key position is a lookup table;
+	// `case core.NormalSideDebit:` is a branch, already matched above, and
+	// `case core.EntryTypeDebit:` is neither -- entry_type alone, with no
+	// normal_side in sight, is the debit-minus-credit question, which is
+	// what the SQL side has always exempted for the same reason.
+	normalSideMapKeyRE = regexp.MustCompile(`core\.NormalSide(Debit|Credit)\s*:`)
 )
 
 // sqlBlock is one `-- name: X` query (or a file's preamble), with comments
@@ -198,27 +232,65 @@ func parseSQLBlocks(t *testing.T, paths []string) []sqlBlock {
 	return out
 }
 
-// caseSpanRE matches one flattened `case ... end` expression, non-greedily so
-// sibling CASEs in the same block are separate matches.
-var caseSpanRE = regexp.MustCompile(`case\b.*?\bend\b`)
+// signShapedSpanREs are the ways SQL turns entry_type into a signed amount.
+//
+// caseSpan is the classic one, non-greedy so sibling CASEs in the same block
+// are separate matches.
+//
+// F-4 (2026-09-03 independent review) added the other two. The gate matched
+// only `case ... end`, so any spelling that avoids CASE was invisible, and
+// the reviewer wrote a complete second implementation out of standard
+// Postgres:
+//
+//	  SUM(je.amount) FILTER (WHERE je.entry_type = 'debit'  AND c.normal_side = 'debit')
+//	- SUM(je.amount) FILTER (WHERE je.entry_type = 'credit' AND c.normal_side = 'debit')
+//	+ SUM(je.amount * (1 - 2 * (je.entry_type = 'debit')::int)) FILTER (...)
+//
+// The bug that made this gate necessary -- balance_trends.sql reporting a
+// 500 deposit as a 500 outflow, because it tested entry_type without
+// joining classifications -- is expressible in either spelling.
+//
+//   - aggregateFilterSpan: an aggregate with a FILTER clause. The amount is
+//     in the aggregate and entry_type is in the filter, so the span has to
+//     cover both, which is why this is not just "a FILTER containing
+//     entry_type".
+//   - booleanCastSpan: `(je.entry_type = 'debit')::int` and friends --
+//     arithmetic on a boolean, the other way to get a sign without a branch.
+var signShapedSpanREs = []*regexp.Regexp{
+	regexp.MustCompile(`case\b.*?\bend\b`),
+	regexp.MustCompile(`\b(sum|count|avg|min|max|bool_or|bool_and)\s*\([^()]*\)\s*filter\s*\(\s*where[^()]*\)`),
+	regexp.MustCompile(`\([^()]*entry_type[^()]*\)\s*::\s*(int|int2|int4|int8|integer|smallint|bigint|numeric|decimal)`),
+}
 
-// bareEntryTypeSpans returns the `case ... end` expressions in a normalized
-// block that turn entry_type into an amount without going through the sign
-// authority.
+// bareEntryTypeSpans returns the expressions in a normalized block that turn
+// entry_type into an amount without going through the sign authority.
 func bareEntryTypeSpans(text string) []string {
 	var out []string
-	for _, span := range caseSpanRE.FindAllString(text, -1) {
-		if !strings.Contains(span, "entry_type") || !strings.Contains(span, "amount") {
-			continue
-		}
-		authoritative := false
-		for _, fn := range signAuthoritySQLFuncs {
-			if strings.Contains(span, fn) {
-				authoritative = true
+	for i, re := range signShapedSpanREs {
+		for _, span := range re.FindAllString(text, -1) {
+			if !strings.Contains(span, "entry_type") {
+				continue
 			}
-		}
-		if !authoritative {
-			out = append(out, span)
+			// The boolean-cast shape IS the arithmetic; requiring the word
+			// "amount" inside the cast's own parentheses would never match.
+			if i != 2 && !strings.Contains(span, "amount") {
+				continue
+			}
+			// ...and a cast of a CASE result -- `(CASE ... END)::numeric` --
+			// is the CASE the first pattern already reported, not a second
+			// expression. Counting it twice would inflate every exemption.
+			if i == 2 && strings.Contains(span, "case ") {
+				continue
+			}
+			authoritative := false
+			for _, fn := range signAuthoritySQLFuncs {
+				if strings.Contains(span, fn) {
+					authoritative = true
+				}
+			}
+			if !authoritative {
+				out = append(out, span)
+			}
 		}
 	}
 	return out
@@ -328,7 +400,12 @@ func TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch(t *testing.T) {
 			if j := strings.Index(code, "//"); j >= 0 {
 				code = code[:j]
 			}
-			if !normalSideBranchRE.MatchString(code) {
+			trimmed := strings.TrimSpace(code)
+			matched := normalSideBranchRE.MatchString(code)
+			if !matched && !strings.HasPrefix(trimmed, "case ") {
+				matched = normalSideMapKeyRE.MatchString(code)
+			}
+			if !matched {
 				continue
 			}
 			perFile[rel]++
