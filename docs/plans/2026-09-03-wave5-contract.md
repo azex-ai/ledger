@@ -1,6 +1,6 @@
 # Wave 5 — 独立复审（R3）发现的整改契约
 
-> 2026-09-03 · Status: **R3 RECHECK IN PROGRESS（2026-09-04：六支合入 main `0e7512a` 后，五名复审员复核——install-roles / consumer / money-out 已交：原 Critical 零复发，但发现两条新 Critical（5.15 N1、5.16 N-1），分别由 w5-searchpath（031）与 w5-onchain-ops（032）修复中；gates-pins / onchain-ops 复核已交：零复发；新发现 R-2/R-3/R-4（5.18）与 onchain-ops 残余（5.17）分别由 w5-gates-2 / w5-onchain-ops-2 修复中；031（5.15）已合入）** · 基线 = main `c854c6e` 之后。
+> 2026-09-03 · Status: **DONE（2026-09-04 06:xx SGT：六支 + 复核修复 031/032/w5-gates-2 全部合入 main `79ff80a`，全量验证绿；R3 复核零 Critical 复发；发版评估交 Aaron）** · 基线 = main `c854c6e` 之后。
 > 源：`docs/audits/2026-09-03-independent-review/*.md`（五个零前情 agent）。纪律沿用 `2026-09-02-remediation-contracts.md` §0（兄弟扫描——本轮明确：**粒度 = 算式项 × 谁能写这张表；对每张表分别问 INSERT / UPDATE / DELETE 三条路径**）、§3、§5、§6。
 
 ## 0. R3 的核心发现：三个此前三轮都没问过的问题
