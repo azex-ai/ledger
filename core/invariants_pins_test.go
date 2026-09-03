@@ -836,10 +836,32 @@ func enforcedDBObjects(enforced string) []string {
 	var out []string
 	for _, m := range backtickToken.FindAllStringSubmatch(enforced, -1) {
 		token := strings.TrimSpace(m[1])
+		// The doc cites a column with its whole declaration inside one
+		// backtick span (`currencies.exponent SMALLINT NOT NULL DEFAULT 18
+		// CHECK (0..18)`); the name is the first word of it.
+		if i := strings.IndexAny(token, " \t\n"); i > 0 {
+			token = token[:i]
+		}
 		// `ledger_unlink_event_journal(uuid)` -- the doc cites SQL functions
 		// with their argument list; the name is what a query string carries.
 		if i := strings.Index(token, "("); i > 0 {
 			token = token[:i]
+		}
+		// `classifications.balance_role` names a column. Take the column,
+		// not the table: a pin whose SQL merely mentions `classifications`
+		// has not shown it touches the constraint on that one column, and
+		// admitting the table name here would let almost any query in the
+		// package stand in for almost any claim. F-1, 2026-09-03: without
+		// this, a doc that cites its mechanism as table.column got no DB
+		// object out of the citation at all, so a direct-SQL pin held to
+		// exactly that column read as touching nothing.
+		if i := strings.LastIndex(token, "."); i >= 0 {
+			token = token[i+1:]
+			if len(token) < 5 || !regexp.MustCompile(`^[a-z][a-z0-9_]*$`).MatchString(token) {
+				continue
+			}
+			out = append(out, token)
+			continue
 		}
 		if len(token) < 6 || !strings.Contains(token, "_") {
 			continue
@@ -1387,4 +1409,128 @@ func checkPinTouchesLeaves(t *testing.T, sectionNum, pkg, fn string, leaves map[
 	sort.Strings(leafList)
 	*failures = append(*failures, sectionNum+"'s pin "+fn+" never references any of its Enforced by symbols ("+
 		strings.Join(leafList, ", ")+") -- it may not actually exercise this invariant's mechanism")
+}
+
+// --- F-1: a DB-side claim needs a pin that talks to the DB directly ---
+
+// dbMechanismClaim matches an **Enforced by** bullet that names Postgres
+// itself as the enforcer: a constraint, an index, a trigger, a grant, a
+// partition. These are the claims a pin written against the Go API cannot
+// substantiate, because the Go API's own guards stand in front of them.
+//
+// F-1 (2026-09-03 independent review) is the general form of that: dropping
+// `UNIQUE` from journals.idempotency_key left all fifteen of I-3's pins
+// green, because every one of them called PostJournal, where an advisory
+// lock and a pre-read settle a duplicate before Postgres ever sees it. The
+// constraint exists for the writers that do not hold that lock -- a second
+// replica, a leaked ledger_app credential, a replayed WAL -- and only a pin
+// that writes the way those writers write can tell whether it is still
+// there.
+var dbMechanismClaim = regexp.MustCompile(`(?i)\b(unique (constraint|index)|check constraint|foreign key|not null|` +
+	`trigger|grant|revoke|deferrable|partition|column-level)\b`)
+
+// directSQLStatement matches a raw SQL statement among a pin's string
+// literals -- the signature of a test that reaches the database without
+// going through this library's write path.
+//
+// Catalogue reads (`FROM pg_index`, `information_schema`) count: asking
+// Postgres what it built is a direct interrogation of the mechanism, and it
+// is the only way to see an index left INVALID by a failed concurrent
+// build, which no INSERT can distinguish from a missing one.
+var directSQLStatement = regexp.MustCompile(`(?is)(insert\s+into|update\s+[a-z_"]|delete\s+from|alter\s+table|` +
+	`\bgrant\s+|\brevoke\s+|create\s+(table|index|trigger|temp)|from\s+(pg_|information_schema)|` +
+	`has_table_privilege|has_column_privilege|set\s+role)`)
+
+// dbClaimsWithoutDirectPin registers sections whose Enforced by names a
+// Postgres-side mechanism but whose pins legitimately do not issue SQL.
+//
+// This list is closed the way unresolvableEnforcedCitations is closed
+// (TestDbOnlyMechanismRegisterOnlyShrinks): the count is snapshotted, so an
+// entry cannot be added without editing a number a reviewer sees. That is
+// the shape C-2 established and F-3 found missing on the sister list.
+// It is empty, and W5 emptied it: the five sections that failed when this
+// gate was written (I-1, I-6, I-11, I-12, I-16) each turned out to be
+// fixable at the mechanism rather than at the register -- three by adding a
+// direct-SQL pin that did not exist, two by citing one that did but was
+// filed under a neighbouring invariant. Empty is therefore the honest
+// starting state, and "may only shrink" at zero means "may not grow".
+var dbClaimsWithoutDirectPin = map[string]string{}
+
+func TestDatabaseSideClaimsHaveADirectSQLPin(t *testing.T) {
+	raw, err := os.ReadFile("../docs/INVARIANTS.md")
+	require.NoError(t, err, "read INVARIANTS.md")
+
+	testBodies := buildTestFuncBodyIndex(t)
+
+	checked := 0
+	var claimed []string
+	for _, sec := range splitInvariantSections(string(raw)) {
+		enforced := blockBetween(sec.body, "**Enforced by**")
+		if !dbMechanismClaim.MatchString(enforced) {
+			continue
+		}
+		claimed = append(claimed, sec.number)
+		pinned := blockBetween(sec.body, "**Pinned by**")
+		if pinned == "" {
+			continue // a missing Pinned by is another test's failure
+		}
+
+		names := map[string]bool{}
+		for _, m := range pinReference.FindAllStringSubmatch(pinned, -1) {
+			names[m[2]] = true
+		}
+		for _, m := range bareReference.FindAllStringSubmatch(pinned, -1) {
+			names[m[1]] = true
+		}
+
+		direct := ""
+		for name := range names {
+			for _, body := range testBodies[name] {
+				if directSQLStatement.MatchString(body.usedStrings) {
+					direct = name
+					break
+				}
+			}
+			if direct != "" {
+				break
+			}
+		}
+		if _, exempt := dbClaimsWithoutDirectPin[sec.number]; exempt {
+			assert.Emptyf(t, direct,
+				"%s is registered in dbClaimsWithoutDirectPin, but its pin %s does issue direct SQL. "+
+					"The register is for sections that cannot have one; delete the entry", sec.number, direct)
+			continue
+		}
+		checked++
+		assert.NotEmptyf(t, direct,
+			"%s's **Enforced by** claims a Postgres-side mechanism (constraint / index / trigger / grant / partition), "+
+				"but not one of its pins issues SQL of its own -- every one of them goes through this library's write "+
+				"path.\n\nThat is the F-1 shape: the Go path holds an advisory lock and pre-reads, so it returns the right "+
+				"answer whether or not the database constraint is still there. Dropping UNIQUE from "+
+				"journals.idempotency_key left all fifteen of I-3's pins green. Add a pin that writes the way an "+
+				"unlocked writer writes -- a direct INSERT asserting 23505 (see "+
+				"postgres.TestJournalIdempotencyKey_RejectsDirectSQLDuplicate), a catalogue read, or a permission probe "+
+				"-- or register %s in dbClaimsWithoutDirectPin with the reason it cannot have one.\n\nPins seen: %v",
+			sec.number, sec.number, sortedNames(names))
+	}
+
+	sort.Strings(claimed)
+	require.GreaterOrEqualf(t, len(claimed), 20,
+		"only %d invariant section(s) were read as claiming a Postgres-side mechanism (%v). The doc has around twenty; "+
+			"a matcher that finds almost none inspects nothing and reads as a pass", len(claimed), claimed)
+	require.Greaterf(t, checked, len(dbClaimsWithoutDirectPin),
+		"%d section(s) actually checked against %d registered exemptions -- the register has swallowed the check", checked, len(dbClaimsWithoutDirectPin))
+	assert.Emptyf(t, dbClaimsWithoutDirectPin,
+		"dbClaimsWithoutDirectPin is not empty: %v.\n\nIt was emptied when this gate was written, by fixing the five "+
+			"sections that failed rather than registering them, so at zero \"may only shrink\" means \"may not grow\". "+
+			"An entry here un-gates one DB-side claim; F-3 is what happens to a register nobody locks", dbClaimsWithoutDirectPin)
+}
+
+func sortedNames(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

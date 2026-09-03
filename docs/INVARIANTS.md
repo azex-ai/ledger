@@ -47,6 +47,14 @@ is meaningless — debits and credits in different currencies are not comparable
   (covers global totals as a defense-in-depth check).
 
 **Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` -- the
+  deferred trigger named above, exercised by direct SQL rather than through
+  `PostJournal`. Added to this list 2026-09-03 (F-1): the four Go-side pins
+  below all go through `Validate`, which rejects the imbalance before the
+  database is asked, so none of them can tell whether the DB-layer backstop
+  is still installed. It was cited only under I-24 until now.
+- `postgres.TestJournalTotalsCheck_RejectsDirectSQLImbalance` -- the
+  `chk_journal_balance` header CHECK, likewise by direct SQL.
 - `core.TestJournalInvariant_BalancedRandomEntries` (200 random trials)
 - `core.TestJournalInvariant_MultiCurrencyEachMustBalance`
 - `core.TestJournalInvariant_UnbalancedAlwaysRejected` (100 random drift trials)
@@ -655,7 +663,10 @@ must be checked **inside** the advisory lock (see I-4), not before.
 
 **Enforced by**: `postgres.ReserverStore.Reserve` (lock → check → insert),
 `postgres.LedgerStore.sumBalancesByRoleWithQueries` (shared basis),
-`classifications.balance_role` CHECK constraint (migration `032`), tagged
+`classifications.balance_role` CHECK constraint (declared in
+`postgres/sql/migrations/001_baseline.up.sql`, widened for `memo` by
+`011_balance_role_memo.up.sql`; the "migration `032`" this line used to cite
+has not existed since the baseline squash), tagged
 onto each classification by `presets.InstallDefaultTemplatePresets` (and any
 direct `CreateClassification` / `SetBalanceRole` call) — the basis the two
 bullets above sum over.
@@ -670,6 +681,11 @@ bullets above sum over.
 - `postgres.TestReserve_PendingOnlyBalanceNotReservable`
 - `postgres.TestInstallPresets_BalanceRoleUpgradeAndConflict` (expand-safe
   role upgrade on preset re-install)
+- `postgres.TestBalanceRoleCheck_RejectsDirectSQLUnknownRole` -- the CHECK
+  named above, by direct SQL. Added 2026-09-03 (F-1): every pin above reaches
+  `balance_role` through `CreateClassification`, which validates the role in
+  Go, so none of them notices if the constraint is dropped. A role no reader
+  matches is money silently absent from the available basis.
 
 ## I-12: Money conservation across the system
 
@@ -688,6 +704,12 @@ conservation hold for writes that never went through this library's Go
 layer at all, which is the case this invariant has to survive.
 
 **Pinned by**:
+- `postgres.TestJournalBalanceTrigger_RejectsDirectSQLImbalance` -- the
+  deferred trigger this section's **Enforced by** names, exercised by direct
+  SQL. Added 2026-09-03 (F-1, and the reviewer's "I-12 is indistinguishable"
+  row): gutting `check_journal_currency_balance()` left all four pins below
+  green, because each of them writes through the Go layer, which is exactly
+  the case this invariant says it has to survive without.
 - `postgres.TestMoneyConservation_Network` (N×M×K large-scale random journal
   sequence)
 - `service.TestReconciliationService_BalancedSystem`
@@ -920,7 +942,9 @@ reconciliation time (or in an external settlement mismatch).
 
 **Enforced by**:
 - `currencies.exponent SMALLINT NOT NULL DEFAULT 18 CHECK (0..18)`
-  (`postgres/sql/migrations/027_currency_exponent.up.sql`). Existing rows
+  (`postgres/sql/migrations/001_baseline.up.sql`; the
+  `027_currency_exponent.up.sql` this line used to cite has not existed since
+  the baseline squash -- 027 is now `unlink_event_journal`). Existing rows
   default to 18 (the loosest setting) so no historical data is invalidated.
 - `postgres.validateEntriesPrecision` (`postgres/precision.go`), called from
   `LedgerStore.postJournalWithQueries` — the single choke point behind
@@ -962,6 +986,10 @@ database.
 - `postgres.TestPrecision_SettlePartial_RejectsOverPrecisionAmount`
 - `postgres.TestCurrencyStore_CreateCurrency_RejectsInvalidExponent`
 - `postgres.TestCurrencyStore_CreateCurrency_ExponentZero`
+- `postgres.TestCurrencyExponentCheck_RejectsDirectSQLOutOfRange` -- the CHECK
+  named above, by direct SQL. Added 2026-09-03 (F-1): the two pins above call
+  `CreateCurrency`, which validates the exponent in Go and returns before the
+  column is written, so neither can see the constraint disappear.
 - `core.TestCurrencyInput_Validate`
 - `core.TestRound_HalfUp` / `TestRound_HalfEven` / `TestRound_Down` / `TestRound_Up`
 - `core.TestConvertAt_MatchesHandCalculation`
