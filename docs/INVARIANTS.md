@@ -7100,3 +7100,84 @@ taken when no attestor/verifier is configured. Migration
   verify something unsigned, the answer to the caller is unchanged (the
   funds stay held), and the Warn line is therefore the only evidence the
   event happened. It must reach the logger passed to `ledger.WithLogger`.
+
+---
+
+## I-66: An amount this ledger could not store is refused before anything expands it
+
+`decimal.Decimal` is arbitrary precision; `NUMERIC(30,18)` is not. An amount
+needing more than 12 integer digits or more than 18 fractional ones cannot
+be stored, and it is refused at the `core` boundary — in both consumption
+modes, before any arithmetic, and in constant time.
+
+**The bound is not about correctness, it is about termination.**
+`shopspring/decimal` holds a value as a coefficient and an exponent and
+never expands the `10^exponent` scaling factor until something asks for the
+digits. So `1E999999999` — nineteen bytes — parses, compares, adds and
+truncates in microseconds. It is only when the value is *rendered* (to bind
+a `NUMERIC` parameter, or to put on the wire) that `String()` materializes a
+billion digits, at which point the process spends unbounded CPU in
+`math/big` and allocates without bound.
+
+That means the usual guards do not see it. `core.JournalInput.Validate`
+accepted it: `IsPositive()` is a field read. The per-currency precision check
+(I-16) accepted it: `amount.Equal(amount.Truncate(18))` is true for a value
+with no fractional digits. Measured, before this invariant existed:
+`LedgerStore.PostJournal` did not return after ninety seconds. Afterwards it
+returns in 58µs.
+
+**Where it was reachable**: library mode everywhere, with nothing in front
+of it. Over HTTP, `server.parseWireAmount` happens to refuse `e`/`E`
+(a wire-format rule, api-contract §4 — not a magnitude bound), so the REST
+handlers were incidentally covered; the inbound webhook adapter was not.
+`channel/onchain.EVMAdapter.ParseSighting` calls `decimal.NewFromString` on
+the raw body directly, so a `DepositSighting` was the one remotely reachable
+path. Relying on the wire-format rule would have been relying on an
+accident: it is one relaxation, or one new handler that parses an amount its
+own way, from being untrue.
+
+**Why the check must precede arithmetic, not just storage**: adding two
+decimals with different exponents rescales one of them, which expands it the
+same way rendering does. So it runs first in `JournalInput.Validate`'s
+per-entry loop, before `totalsByCurrency()`.
+
+**Why in `core`**: the same reasoning `core/limits.go` already states for
+`MaxSourceLen` and the metadata bounds — the HTTP body cap covers one of two
+consumption modes, so a bound that lives in a handler leaves library
+consumers unprotected. For amounts the body cap does not cover even the HTTP
+mode, because a short string can name an enormous number. This was the
+missing member of that set, in that file.
+
+**Enforced by**:
+- `core.ValidateAmountMagnitude` (`core/limits.go`) — reads
+  `Exponent()` and the coefficient's digit count and nothing else, so the
+  check itself cannot be the expansion it prevents.
+- `core.MaxAmountIntegerDigits` / `core.MaxAmountFractionalDigits` — derived
+  from `NUMERIC(30,18)` rather than chosen, so the bound and the column
+  cannot drift apart.
+- Every caller-supplied amount's `Validate()`: `core.JournalInput`
+  (which is also how `core.EntryTemplate.Render`, and therefore
+  `ExecuteTemplate`, inherits it), `core.ReserveInput`, `core.SettleInput`,
+  `core.SettlePartialInput`, `core.AddPendingInput`,
+  `core.ConfirmPendingInput`, `core.CancelPendingInput`,
+  `core.CreateBookingInput`, `core.TransitionInput`,
+  `core.AccountPolicyInput`, `core.DepositSighting`, `core.SweepPolicy`,
+  `core.TokenConfig`.
+
+**Pinned by**:
+- `core.TestEveryAmountEntryPointRejectsAPathologicalAmount` — the sibling
+  scan made executable: all fourteen entry points, each against
+  `1E999999999`, the fuzzer's own `10E777777070`, the boundary `1E13`, and a
+  negative, **with a 100ms time bound on each**. The time bound is the
+  assertion: a check that eventually rejects the amount after expanding it
+  satisfies `require.Error` and is still the denial of service.
+- `core.TestValidateAmountMagnitude_RejectsWhatNumericCannotStore` and
+  `core.TestValidateAmountMagnitude_AcceptsWhatNumericCanStore` — the bound
+  itself, in both directions. The acceptance half is not decoration: it
+  caught a real bug in the first draft, where a negative coefficient's
+  leading `-` was counted as a digit and `-999999999999` (a storable
+  overdraft limit) was refused.
+- `core.FuzzJournalValidate` — the seed corpus now carries the input that
+  found this (`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`), so
+  the case is replayed on every plain `go test`, not only during a fuzzing
+  run.

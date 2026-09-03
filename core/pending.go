@@ -57,6 +57,9 @@ type AddPendingInput struct {
 }
 
 func (i AddPendingInput) Validate() error {
+	if err := ValidateAmountMagnitude("add pending", "amount", i.Amount); err != nil {
+		return err
+	}
 	if err := validateFreeformFields("pending: add", i.Source, i.Metadata); err != nil {
 		return err
 	}
@@ -87,6 +90,9 @@ type ConfirmPendingInput struct {
 }
 
 func (i ConfirmPendingInput) Validate() error {
+	if err := ValidateAmountMagnitude("confirm pending", "amount", i.Amount); err != nil {
+		return err
+	}
 	if err := validateFreeformFields("pending: confirm", i.Source, i.Metadata); err != nil {
 		return err
 	}
@@ -118,6 +124,9 @@ type CancelPendingInput struct {
 }
 
 func (i CancelPendingInput) Validate() error {
+	if err := ValidateAmountMagnitude("cancel pending", "amount", i.Amount); err != nil {
+		return err
+	}
 	if err := validateFreeformFields("pending: cancel", i.Source, i.Metadata); err != nil {
 		return err
 	}

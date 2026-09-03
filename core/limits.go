@@ -1,6 +1,11 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/shopspring/decimal"
+)
 
 // Field-level upper bounds for the two free-form fields every write carries.
 //
@@ -55,6 +60,88 @@ func validateFreeformFields(scope string, source string, metadata map[string]str
 	}
 	if total > MaxMetadataTotalLen {
 		return fmt.Errorf("core: %s: metadata totals %d bytes, limit %d: %w", scope, total, MaxMetadataTotalLen, ErrInvalidInput)
+	}
+	return nil
+}
+
+// --- Amount magnitude ---
+
+// MaxAmountIntegerDigits is the widest amount this ledger can store: the
+// integer part of NUMERIC(30,18), which is 30 total digits minus 18
+// fractional ones.
+//
+// It is a bound against pathology in exactly the sense the Metadata and
+// Source bounds above are, and it was missing for the same reason they
+// were: the HTTP surface looked like it covered the problem (a body cap
+// bounds how many DIGITS a caller can type) and library mode has no such
+// cap. But for amounts the body cap does not cover it even in HTTP mode,
+// because a short string can name an enormous number.
+//
+// The failure it prevents (found by FuzzJournalValidate inside its 30s CI
+// budget, 2026-09-03): `{"amount": "1E999999999"}` is nineteen bytes.
+// shopspring/decimal stores it lazily as coefficient 1 with exponent
+// 999999999, so parsing, IsPositive, Equal, Add and Truncate are all
+// microseconds -- JournalInput.Validate passed it, and so did the
+// per-currency precision check, whose `amount.Equal(amount.Truncate(18))`
+// is true for a value with no fractional digits. Nothing looked at it
+// until pgx rendered the decimal to bind a NUMERIC parameter, at which
+// point String() expands a billion digits: PostJournal did not return
+// after ninety seconds, burning CPU in math/big and allocating without
+// bound. Any credential that can post a journal could stop the process,
+// and library-mode callers had nothing in front of them at all.
+//
+// The check has to run before any arithmetic, not just before storage:
+// adding two decimals with different exponents rescales one of them, which
+// expands it the same way.
+const MaxAmountIntegerDigits = 30 - 18
+
+// MaxAmountFractionalDigits is the other side of NUMERIC(30,18). Currency
+// exponents bound this more tightly per currency (I-16, enforced in the
+// adapter where the currency is known); this is the absolute floor, so a
+// value that no currency could ever accept is refused in core, in both
+// consumption modes, before it reaches an adapter.
+const MaxAmountFractionalDigits = 18
+
+// ValidateAmountMagnitude refuses an amount this ledger could not store.
+//
+// It is constant time and does not materialize the value: Exponent() is a
+// field read, and Coefficient() is the integer the caller's digits parsed
+// into -- already bounded by the length of what they sent. Neither expands
+// the 10^exponent scaling factor, which is the operation that does not
+// terminate.
+//
+// scope and field name the caller for the error message ("journal
+// entry[0]", "reserve"), because an amount rejected with no indication of
+// which one it was is a support ticket.
+func ValidateAmountMagnitude(scope, field string, amount decimal.Decimal) error {
+	exponent := int(amount.Exponent())
+	if exponent > 0 && exponent > MaxAmountIntegerDigits {
+		// Short-circuit before Coefficient(): an exponent this large is
+		// already unstorable whatever the coefficient is, and this is the
+		// shape the fuzz target found.
+		return fmt.Errorf(
+			"core: %s: %s has an exponent of %d, and this ledger stores NUMERIC(30,18) -- at most %d integer digits: %w",
+			scope, field, exponent, MaxAmountIntegerDigits, ErrInvalidInput)
+	}
+	if exponent < -MaxAmountFractionalDigits {
+		return fmt.Errorf(
+			"core: %s: %s has %d fractional digits, and this ledger stores NUMERIC(30,18) -- at most %d: %w",
+			scope, field, -exponent, MaxAmountFractionalDigits, ErrInvalidInput)
+	}
+
+	// coefficientDigits + exponent is the number of integer digits the
+	// value would need. Both operands are small by now: the exponent is
+	// bounded above, and the coefficient's digit count is bounded by the
+	// caller's own input length.
+	//
+	// TrimPrefix, not len(): a negative coefficient renders with a leading
+	// "-", which would count as a digit and refuse -999999999999 -- a
+	// perfectly storable overdraft limit. The acceptance control caught it.
+	integerDigits := len(strings.TrimPrefix(amount.Coefficient().String(), "-")) + exponent
+	if integerDigits > MaxAmountIntegerDigits {
+		return fmt.Errorf(
+			"core: %s: %s needs %d integer digits, and this ledger stores NUMERIC(30,18) -- at most %d: %w",
+			scope, field, integerDigits, MaxAmountIntegerDigits, ErrInvalidInput)
 	}
 	return nil
 }

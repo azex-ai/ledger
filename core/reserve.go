@@ -130,6 +130,9 @@ type ReserveInput struct {
 }
 
 func (i ReserveInput) Validate() error {
+	if err := ValidateAmountMagnitude("reserve", "amount", i.Amount); err != nil {
+		return err
+	}
 	if i.AccountHolder == 0 {
 		return fmt.Errorf("core: reserve: account_holder required: %w", ErrInvalidInput)
 	}
@@ -199,6 +202,9 @@ type SettleInput struct {
 }
 
 func (i SettleInput) Validate() error {
+	if err := ValidateAmountMagnitude("settle", "amount", i.Amount); err != nil {
+		return err
+	}
 	if i.ReservationUID == "" {
 		return fmt.Errorf("core: settle: reservation_uid required: %w", ErrInvalidInput)
 	}
@@ -279,6 +285,9 @@ type SettlePartialInput struct {
 }
 
 func (i SettlePartialInput) Validate() error {
+	if err := ValidateAmountMagnitude("settle partial", "amount", i.Amount); err != nil {
+		return err
+	}
 	if i.ReservationUID == "" {
 		return fmt.Errorf("core: settle partial: reservation_uid required: %w", ErrInvalidInput)
 	}

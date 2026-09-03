@@ -505,7 +505,7 @@ section 的主张是「最新的外部 anchor head 与数据库的 attestation �
 
 ## 6. 门禁面 #5 的产物：`FuzzJournalValidate` 30 秒内找到 money-path DoS（**CRITICAL，待拍板**）
 
-**没有 fix 进本分支** —— money-path 行为改动，已按 `working-agreements.md` §2 上报 team-lead 等裁决。证据链（端到端实证，不是推断）：
+**已修**（team-lead 2026-09-04 裁决 Critical 成立并授权在本分支修 —— 见本节末「处置」）。证据链（端到端实证，不是推断）：
 
 失败输入：`amount = "10E777777070"`。最小复现用 `"1E999999999"`。
 
@@ -518,13 +518,31 @@ section 的主张是「最新的外部 anchor head 与数据库的 attestation �
 | `d.String()`（上 wire / 绑 SQL 参数） | **不返回** |
 | `LedgerStore.PostJournal(...)` | **90 秒不返回**，栈停在 `math/big.karatsubaSqr` —— 真的在展开 10^999999999 的十进制数字 |
 
-即：任何持 write scope 的 key 发一个 `POST /api/v1/journals`，body 里 `"amount": "1E999999999"`，就能挂死进程（CPU 打满 + 无界分配直到 OOM）。**library 模式同样中招**，且没有 HTTP body cap 兜底。
+**可达面（修正我上报时的说法）**：我最初报的是「任何持 write scope 的 key 发 `POST /api/v1/journals` 就能挂死进程」。修的时候回查了每一个 untrusted 金额解析点，**这句话是过度陈述**，据实更正：
+
+- `server/amount.go` 的 `parseWireAmount` 会拒绝含 `e`/`E` 的字符串（api-contract §4 的 wire 格式规则），而**全部 14 个 REST handler 的金额都走它** —— 所以 REST 面对这个形式是**偶然被挡住的**。
+- `channel/onchain/evm.go:124,156` 的 `EVMAdapter.ParseSighting` **直接对原始 body 调 `decimal.NewFromString`，不经过 `parseWireAmount`** —— 入站 webhook → `DepositSighting` → `IngestDeposit` 是**真正远程可达**的那条路径。
+- **library 模式全面暴露**，前面什么都没有（而 library 模式是本库的主消费形态）。
+
+「REST 面被挡住」不能当缓解：挡它的是一条 wire 格式规则而不是量级上界，离「不成立」只差一次放宽、或一个自己解析金额的新 handler。这也正是 I-66 把门放在 `core` 而不是 handler 的理由 —— 和 `core/limits.go` 为 Metadata/Source 写的理由同一条。
 
 `core/limits.go` 已经为 Metadata/Source 立了「防病态上界」，并在它自己的注释里写明理由是「HTTP body cap 只覆盖两种消费模式中的一种，所以要放在 core 一次性检查」。金额没有对应的上界 —— **同一个形状的缺口，同一个文件里缺的那一条**。
 
 建议修法（小而定向，判据本身常数时间）：`NUMERIC(30,18)` 本来就只能存 12 位整数位，所以 `len(coefficient.String()) + exponent > 12` 的金额根本不可存 —— 在 `Validate` 的 per-entry 循环**最前面**拒（必须在任何算术之前：不同 exponent 相加会触发 rescale，同样爆），`Reserve` / `AddPending` / `CreateBooking` / `Transition` 的金额入口同理。
 
-那条失败输入被 go 写进了 `core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`，**本分支没有 commit 它**：修好之前入库会让 CI 的 30s fuzz job 挂 10 分钟再 panic timeout，把其他 W5 worker 一起堵住。正确顺序是先修、再把它作为种子入库。语料内容已在上面逐字记录，不会丢。
+### 处置（team-lead 裁决后）
+
+`core.ValidateAmountMagnitude`（`core/limits.go`，与 `validateFreeformFields` 同形同文件）+ **I-66**。判据由 `NUMERIC(30,18)` 自己的宽度派生，不是拍的：整数位 > 12 或小数位 > 18 一律 `core.ErrInvalidInput`。常数时间，只读 `Exponent()` 和 coefficient 的位数 —— 检查本身绝不能变成它要防的那次展开。
+
+先做兄弟扫描（core 里 59 个 `decimal.Decimal` 字段，筛出 13 个调用方提供的入口），**不是只修 `PostJournal`**：`JournalInput`（`EntryTemplate.Render` → `ExecuteTemplate` 由此继承）、`ReserveInput`、`SettleInput`、`SettlePartialInput`、`AddPendingInput`、`ConfirmPendingInput`、`CancelPendingInput`、`CreateBookingInput`、`TransitionInput`、`AccountPolicyInput`、`DepositSighting`（webhook 那条）、`SweepPolicy`、`TokenConfig`。在 `JournalInput.Validate` 里放在 per-entry 循环**最前面**，早于 `totalsByCurrency()` —— 不同 exponent 相加会 rescale，和渲染一样会炸。
+
+pin：`core.TestEveryAmountEntryPointRejectsAPathologicalAmount`，14 个入口 × 4 个病态值，**每条带 100ms 时间上界**。时间上界才是断言本身：一个「先展开再拒绝」的检查能满足 `require.Error`，而它就是那个 DoS。接受侧的 control 当场抓到一个真 bug —— 第一版把负 coefficient 的 `-` 号数成了一位，`-999999999999`（合法的透支下限）被拒。
+
+失败输入现已作为种子入库（`core/testdata/fuzz/FuzzJournalValidate/7ec58597750a4f04`），每次普通 `go test` 都重放，不只在 fuzz 时。修后复跑 CI 的同一个 30s 预算：528 万次执行，PASS。
+
+实测：`PostJournal` 从「90 秒不返回」变成 **58µs 返回 `ErrInvalidInput`**。
+
+⚠️ **编号偏差待你确认**：你指定 I-70，但 66–69 是兄弟分支的号段，在我这条分支上还不存在 —— 写 I-70 会让 `TestInvariantsDocIsOrderedAndGapless` 直接红（"I-70 follows I-65"），违反 Done 的全绿要求。我用了 **I-66**（本分支绿）。合并时二选一：先合我这条则 66 本来就对、兄弟们顺延；后合则按 gate 的提示改成当时空出的号。
 
 ## 7. 方法论：两条必须交代的事（复审员自己交代过两条，这是新的两条）
 

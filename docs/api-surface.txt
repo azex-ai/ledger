@@ -713,6 +713,8 @@ core.Logger = type interface
 core.Logger.Error = interface method (msg string, args ...any)
 core.Logger.Info = interface method (msg string, args ...any)
 core.Logger.Warn = interface method (msg string, args ...any)
+core.MaxAmountFractionalDigits = const = 18
+core.MaxAmountIntegerDigits = const
 core.MaxMetadataKeyLen = const = 128
 core.MaxMetadataKeys = const = 64
 core.MaxMetadataTotalLen = const = 16384
@@ -1082,6 +1084,7 @@ core.TrialBalanceRow.TotalCredit = field decimal.Decimal
 core.TrialBalanceRow.TotalDebit = field decimal.Decimal
 core.UnboundedAutoCredit = var
 core.UserHolderFromSystem = func(holder int64) int64
+core.ValidateAmountMagnitude = func(scope, field string, amount decimal.Decimal) error
 core.ValidateReversalFraction = func(num, den int64) error
 core.VerifiedBalanceReader = type interface
 core.VerifiedBalanceReader.VerifiedBalance = interface method (ctx context.Context, holder int64, currencyUID, classificationUID string) (decimal.Decimal, error)
