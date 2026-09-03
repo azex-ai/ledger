@@ -10,12 +10,14 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/service"
 )
 
 // dropDepositIdentityFence removes migration 032's index, putting the schema
@@ -375,4 +377,271 @@ func TestDepositIdentity_HonestIngestIsUnaffected(t *testing.T) {
 	assert.Equal(t, core.Status("confirmed"), confirmed.Status,
 		"the only booking holding a log is not a duplicate of itself")
 	assert.NotEmpty(t, confirmed.JournalUID, "and it must still be credited")
+}
+
+// --- N-1 (a): the same row is reachable from POST /bookings ---------------
+
+// TestDepositIdentity_ACallerSuppliedBookingCannotStealATransfer covers the
+// entry point the review named but did not measure (§5.1): N-1 does not need
+// a database credential. `POST /api/v1/bookings` takes a write-scope API key
+// and lets the caller choose classification_code, account_holder, amount,
+// channel_name AND metadata, so the same row is one authenticated HTTP call
+// away -- and the recheck job does not distinguish where a booking came
+// from.
+//
+// This drives the domain call the handler makes (server's own
+// TestCreateBooking_DepositMetadataPassesThrough pins that the handler
+// passes those fields through unchanged, so the two together are the path).
+// Two claims: a caller cannot take over a transfer another booking already
+// holds, and a caller-invented transfer is not credited on its own say-so.
+func TestDepositIdentity_ACallerSuppliedBookingCannotStealATransfer(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xhttpcaller"
+		holder  = int64(9301)
+	)
+	h, anchor, _ := realDepositHarness(t, chainID, token, "USDT-http", txHash, holder)
+	ctx := context.Background()
+
+	currencies, err := h.currencies.ListCurrencies(ctx, false)
+	require.NoError(t, err)
+	require.Len(t, currencies, 1)
+
+	// Exactly what handleCreateBooking builds from a write-scope request
+	// body naming the deposit classification and the real transfer.
+	_, err = h.booker.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: "deposit",
+		AccountHolder:      holder,
+		CurrencyUID:        currencies[0].UID,
+		Amount:             decimal.NewFromInt(50),
+		IdempotencyKey:     "caller-chosen-key-1",
+		ChannelName:        "my-own-channel",
+		Metadata: map[string]string{
+			"chain_id": "1", "tx_hash": txHash, "txlog_seq": "0",
+			"token": token, "block_number": "100",
+		},
+	})
+	require.Error(t, err, "a write-scope key must not be able to file a second claim on a booked transfer")
+	assert.ErrorIs(t, err, core.ErrConflict)
+
+	// And an invented transfer, which no index can refuse because it is the
+	// first claim on it, is still not credited: the corroboration re-read
+	// finds no such log.
+	invented, err := h.booker.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: "deposit",
+		AccountHolder:      holder,
+		CurrencyUID:        currencies[0].UID,
+		Amount:             decimal.NewFromInt(9999),
+		IdempotencyKey:     "caller-chosen-key-2",
+		ChannelName:        "my-own-channel",
+		Metadata: map[string]string{
+			"chain_id": "1", "tx_hash": "0xnosuchtransfer", "txlog_seq": "0",
+			"token": token, "block_number": "100",
+		},
+	})
+	require.NoError(t, err, "the ledger has no way to refuse a first claim at creation time -- that is what I-69 is for")
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, h.svc.RunPendingRecheckOnce(ctx))
+	}
+	after, err := h.bookings.GetBooking(ctx, invented.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("review"), after.Status)
+	assert.Empty(t, after.JournalUID, "a caller-supplied booking is a claim, not a credit")
+
+	// The genuine deposit is untouched throughout.
+	genuine, err := h.bookings.GetBooking(ctx, anchor.UID)
+	require.NoError(t, err)
+	assert.Equal(t, core.Status("confirmed"), genuine.Status)
+}
+
+// --- N-1 (b): the honest deposit must not be lost behind a squatted row ---
+
+// TestDepositIdentity_HonestIngestSaysWhoTookTheTransfer pins the boundary
+// migration 032 introduces. A caller-supplied booking (write-scope HTTP key,
+// or a leaked database credential) can claim a REAL transfer's identity
+// BEFORE the watcher reaches it. The honest IngestDeposit then cannot create
+// its own booking -- the index refuses it -- and that must not be a silent
+// loss: the deposit is real, unbooked, and nothing else will revisit it.
+//
+// So the dead letter that results says which booking is in the way, under
+// its own bounded reason, and the counter fires. RUNBOOK section 18 has the
+// triage; the row carries the sighting, so a replay works once the squatter
+// is resolved.
+func TestDepositIdentity_HonestIngestSaysWhoTookTheTransfer(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xsquatted"
+		holder  = int64(9302)
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-squat", 1,
+		decimal.NewFromInt(100_000), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-squat"})
+	ctx := context.Background()
+
+	da, err := h.svc.EnsureDepositAddress(ctx, holder)
+	require.NoError(t, err)
+	currencies, err := h.currencies.ListCurrencies(ctx, false)
+	require.NoError(t, err)
+
+	// The squatter gets there first, with its own idempotency key.
+	squatter, err := h.booker.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: "deposit",
+		AccountHolder:      holder,
+		CurrencyUID:        currencies[0].UID,
+		Amount:             decimal.NewFromInt(1),
+		IdempotencyKey:     "squatter-key",
+		ChannelName:        "not-the-watcher",
+		Metadata: map[string]string{
+			"chain_id": "1", "tx_hash": txHash, "txlog_seq": "0",
+			"token": token, "block_number": "100",
+		},
+	})
+	require.NoError(t, err)
+
+	// Then the real transfer arrives.
+	h.reader.setLatestBlock(chainID, 500)
+	h.reader.setIncluded(chainID, txHash, true)
+	_, err = h.svc.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.NewFromInt(50),
+		Confirmations: 5, BlockNumber: 100,
+	})
+	require.Error(t, err, "the index refuses the second booking, which is the point -- but the deposit is real")
+
+	letters, _, err := h.deadLetters.ListDeadLetters(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, letters, 1, "a real deposit the ledger could not book must leave the only trace it can")
+	assert.Contains(t, letters[0].Reason, squatter.UID,
+		"and the trace must name the booking that is in the way -- an operator cannot resolve what it cannot find")
+	assert.Equal(t, decimal.NewFromInt(50).String(), letters[0].Sighting.Amount.String(),
+		"the sighting rides along, so a replay works once the squatter is dealt with")
+
+	assert.Equal(t, []deadLetteredCall{{chainID: chainID, reason: "identity_already_booked"}},
+		h.metrics.deadLetteredCalls(),
+		"and it is counted under its own reason: this is not a normalization bug, it is a stolen identity")
+
+	assert.True(t, h.logger(t).contains("deposit.identity_already_booked"),
+		"the log line names it too -- this is the one dead-letter reason where the SIGHTING is not at fault")
+}
+
+// --- webhook-only deployments get the dead-letter signals too -------------
+
+// TestDeadLetterSignals_ReachAWebhookOnlyDeployment pins the two signals a
+// push-only deployment was missing (2026-09-03 re-check, onchain-ops).
+//
+// A webhook-only consumer drives IngestDeposit straight from an HTTP handler
+// and configures no ChainReader -- a supported configuration (Run says so
+// and skips the watcher jobs). Both dead-letter signals were nevertheless
+// wired to the watcher's world: the counter was only emitted on the
+// scanChainOnce path, because IngestDeposit's own conflict branch called the
+// store directly and skipped it, and the backlog gauge was sampled from the
+// deep-reorg tick, which such a deployment never runs. So the one ingestion
+// path they DO have could dead-letter a deposit with both signals reading
+// zero.
+func TestDeadLetterSignals_ReachAWebhookOnlyDeployment(t *testing.T) {
+	const (
+		chainID = int64(1)
+		token   = "0xusdttoken"
+		txHash  = "0xwebhookonly"
+		holder  = int64(9401)
+	)
+	chains := chainSetWithCeilings(chainID, token, "USDT-push", 1,
+		decimal.NewFromInt(100_000), decimal.Zero)
+	h := setupOnchain(t, chains, []string{"USDT-push"})
+	ctx := context.Background()
+
+	// Webhook-only: same deps, no chain reader, no scanner, no sweeper.
+	deps := h.deps
+	deps.Reader = nil
+	deps.Scanner = nil
+	deps.Sweeper = nil
+	push := service.NewOnchain(deps, chains,
+		service.WithPool(h.pool),
+		service.WithDeadLetterSampleInterval(20*time.Millisecond),
+	)
+
+	da, err := push.EnsureDepositAddress(ctx, holder)
+	require.NoError(t, err)
+
+	booked, err := push.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.NewFromInt(50),
+		Confirmations: 0, BlockNumber: 100,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, booked)
+
+	// The same transfer redelivered with a different amount: one sighting,
+	// two stories. CreateBooking refuses it (I-3's three-state idempotency)
+	// and the ledger dead-letters it, which is the design -- what must not
+	// happen is that nothing says so.
+	_, err = push.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: txHash, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.NewFromInt(5000),
+		Confirmations: 0, BlockNumber: 100,
+	})
+	require.Error(t, err)
+
+	assert.Equal(t, []deadLetteredCall{{chainID: chainID, reason: "payload_conflict"}},
+		h.metrics.deadLetteredCalls(),
+		"IngestDeposit's own conflict branch must count the dead letter, not just write the row")
+
+	letters, _, err := h.deadLetters.ListDeadLetters(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, letters, 1)
+	assert.True(t, letters[0].Booked,
+		"this transfer IS booked -- the redelivery disagreed about the amount, and the original booking stands")
+
+	// A second transfer, whose identity a caller-supplied booking took
+	// first: this one leaves a dead letter that is genuinely OWED, which is
+	// what the backlog gauge is for.
+	const squatted = "0xwebhooksquatted"
+	currencies, err := h.currencies.ListCurrencies(ctx, false)
+	require.NoError(t, err)
+	_, err = h.booker.CreateBooking(ctx, core.CreateBookingInput{
+		ClassificationCode: "deposit",
+		AccountHolder:      holder,
+		CurrencyUID:        currencies[0].UID,
+		Amount:             decimal.NewFromInt(1),
+		IdempotencyKey:     "webhook-squatter-key",
+		ChannelName:        "not-the-webhook",
+		Metadata: map[string]string{
+			"chain_id": "1", "tx_hash": squatted, "txlog_seq": "0",
+			"token": token, "block_number": "100",
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = push.IngestDeposit(ctx, core.DepositSighting{
+		ChainID: chainID, TxHash: squatted, TxLogSeq: 0, Token: token,
+		From: "0xsender", To: da.Address, Amount: decimal.NewFromInt(77),
+		Confirmations: 0, BlockNumber: 100,
+	})
+	require.Error(t, err)
+	assert.Equal(t,
+		[]deadLetteredCall{
+			{chainID: chainID, reason: "payload_conflict"},
+			{chainID: chainID, reason: "identity_already_booked"},
+		},
+		h.metrics.deadLetteredCalls(),
+		"the two conflicts are different incidents with different fixes, so they carry different reasons")
+
+	// And the backlog gauge is sampled by a job that does not need a chain
+	// reader to exist.
+	runCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, push.Run(runCtx))
+
+	backlog := h.metrics.backlogCalls()
+	require.NotEmpty(t, backlog, "a deployment that can create a dead letter must be able to see how many it has")
+	assert.Equal(t, int64(1), backlog[len(backlog)-1].count,
+		"one owed deposit, not two: the redelivered one was booked all along, and the queue answers that from bookings")
+	assert.Positive(t, backlog[len(backlog)-1].oldestAge)
+
+	completed, failed := h.metrics.tickCounts()
+	assert.Positive(t, completed["onchain_dead_letter_backlog"]+failed["onchain_dead_letter_backlog"],
+		"and the sampling job reports its own ticks like every other (M-9)")
 }

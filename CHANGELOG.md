@@ -40,11 +40,24 @@ written because it was true when `[0.6.0]` shipped.
   re-check; audit `recheck/money-out.md` N-1; invariant I-71). Consumers
   going through `ledger.New` need no change. A hand-written `BookingReader`
   must implement the method -- returning nothing unconditionally disables a
-  mint fence. Migration `032` adds `uq_bookings_deposit_identity` (unique
-  over the `chain_id`/`tx_hash`/`txlog_seq` metadata triple) and a guard
-  requiring `channel_name = 'onchain'` on deposit bookings; a database
+  mint fence. Migration `032` adds `uq_bookings_deposit_identity`, unique
+  over the `chain_id`/`tx_hash`/`txlog_seq` metadata triple; a database
   holding duplicate deposit identities will fail to apply it, and the
-  migration header carries the query that finds them.
+  migration header carries the query that finds them. **The attack needs no
+  database credential**: `POST /bookings` takes a write-scope API key and
+  lets the caller choose the classification, amount, channel name and
+  metadata. Where a non-ingestion booking now holds a real transfer's
+  identity first, the honest ingestion dead-letters the sighting under the
+  new bounded reason `identity_already_booked` rather than losing it.
+
+- **Migration `032` also bounds the first write to `chain_cursors`** (Wave 5
+  re-check; audit `recheck/onchain-ops.md`; invariant I-67). `029` bounded
+  how far a write may move a cursor but not the write that creates one, so
+  the application role could start a chain at any block and make every
+  deposit below it invisible. Starting a chain above block 100,000 now goes
+  through `ledger_seed_chain_cursor(chain_id, block, reason)` (owner-only,
+  reason mandatory, forensic row); the watcher itself always starts at
+  genesis, so only deployments that deliberately skip history are affected.
 
 - **Migration 029 refuses writes the schema previously accepted** (I-66 /
   I-67). Nothing in this library's own write paths produces any of them, but

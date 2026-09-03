@@ -7359,9 +7359,22 @@ ways:
    clause of the query that writes it. A deliberate rewind goes through
    `ledger_rewind_chain_cursor(chain_id, to_block, reason)` — owner-only,
    reason mandatory, and it writes a `config_table_changes` row.
-2. One write may not advance it by more than the per-write cap in
-   `ledger_chain_cursors_guard` (100,000 blocks; `service.Onchain` writes
-   at most `WithMaxBlocksPerScan`, default 2000).
+2. No single write may put it more than the per-write cap ahead of where it
+   was — **any write, the first one included** (100,000 blocks;
+   `service.Onchain` writes at most `WithMaxBlocksPerScan`, default 2000).
+   For an existing cursor that is the advance bound in
+   `ledger_chain_cursors_guard`; for a cursor that does not exist yet it is
+   the creation bound in `ledger_chain_cursors_insert_guard`, measured from
+   genesis. Starting a chain higher than that is a deliberate act and goes
+   through `ledger_seed_chain_cursor(chain_id, block, reason)` — owner-only,
+   reason mandatory, forensic row — the same shape as the rewind.
+
+   The word this rule used to use was "advance", and it let the creation
+   case through: `ledger_app` could INSERT a cursor for a chain that had
+   none at block 88,888,888 (measured), leaving only an audit row, after
+   which every deposit below that block was invisible to every code path.
+   The first write does not advance anything; it decides where advancing
+   starts from, which is the same power.
 3. Every write, including the first, leaves a forensic row.
 
 On top of that, `scanChainOnce` re-covers the last
@@ -7399,13 +7412,24 @@ needs the rewind, which is why the rewind exists at all.
 
 **Enforced by**: migration `029_insert_path_guards.up.sql`
 (`ledger_chain_cursors_guard`, the `chain_cursors_audit` /
-`chain_cursors_audit_insert` triggers, `ledger_rewind_chain_cursor`) and,
+`chain_cursors_audit_insert` triggers, `ledger_rewind_chain_cursor`),
+migration `032_deposit_identity_uniqueness.up.sql`
+(`ledger_chain_cursors_insert_guard` and its owner-only door
+`ledger_seed_chain_cursor`, which bound the creating write 029 left open)
+and,
 on the application side, `service.WithRescanLookback` — the option whose
 value `service.Onchain.RunWatchOnce` (and Run's watch loop, through the
 same `scanChainOnce`) applies to every tick's window, alongside the
 cursor-ahead-of-head report.
 
 **Pinned by**:
+- `postgres.TestChainCursorFirstWriteIsBoundedToo` — the creating write:
+  `ledger_app` refused at 88,888,888 and at one block past the cap, allowed
+  at the cap, the owner refused outside the door, the door working with a
+  reason and a forensic row, refused without one, refused on a chain that
+  already has a cursor, its flag not surviving its transaction, and a
+  seeded cursor still advancing normally afterwards while 029's jump bound
+  still applies to it.
 - `postgres.TestChainCursorCannotJumpAndEveryMoveIsRecorded` — the first
   write and every advance recorded; a jump to 99,999,999, a backwards drag
   and a `chain_id` rewrite all refused as `ledger_app`; the rewind door
@@ -7755,6 +7779,19 @@ transfer to the booking that already exists before attempting any insert, so
 a re-scanned window, a redelivered webhook and a registration rescan all
 converge on one booking, as they always did.
 
+What the rule cannot decide is which of two claimants is the real deposit,
+and that has a consequence worth stating: a booking created by somebody
+else — `POST /api/v1/bookings` takes a **write**-scope API key and lets the
+caller choose the classification, the amount, the channel name and the whole
+metadata map, so this needs no database credential — can hold a real
+transfer's identity before the watcher reaches it. The honest ingestion then
+cannot create its booking, and that must not be a silent loss: it
+dead-letters the sighting under its own bounded reason
+(`identity_already_booked`), naming the booking in the way, with the
+sighting on the row so a replay works once the squatter is resolved
+(docs/RUNBOOK.md §18). The deposit is real and uncredited until a human
+acts; what it is not is forgotten.
+
 **Why**: I-69 made a booking's claim answerable by the chain, and the
 re-check round of the 2026-09-03 audit (`money-out.md` N-1) showed what that
 still cannot answer. One real deposit of 50 was ingested and credited. Three
@@ -7782,8 +7819,11 @@ one only the ledger can answer: **have I already counted this?**
 
 **Enforced by**: migration `032_deposit_identity_uniqueness.up.sql`
 (`uq_bookings_deposit_identity`); and, in the application,
-`core.BookingReader.BookingsForDepositIdentity` consulted by the pre-credit
-corroboration reached through `service.Onchain.RunPendingRecheckOnce`.
+`core.BookingReader.BookingsForDepositIdentity` consulted both by the
+pre-credit corroboration reached through
+`service.Onchain.RunPendingRecheckOnce` and by
+`service.Onchain.IngestDeposit`, which uses it to say WHICH booking took a
+transfer it could not book.
 
 **Pinned by**:
 - `service.TestDepositIdentity_DuplicateBookingsAreRejectedAtInsert` — the
@@ -7806,4 +7846,18 @@ corroboration reached through `service.Onchain.RunPendingRecheckOnce`.
   `review_reason` never landing.
 - `service.TestDepositIdentity_HonestIngestIsUnaffected` — the control
   group: re-observing a transfer (twice through `IngestDeposit`, once
-  through a forward re-scan) still resolves to the one booking that exists.
+  through a forward re-scan) still resolves to the one booking that exists,
+  and a booking the recheck loop drives to `confirmed` is not blocked by the
+  already-booked check finding itself.
+- `service.TestDepositIdentity_ACallerSuppliedBookingCannotStealATransfer`
+  — the same attack from the entry point that needs no database credential:
+  the domain call that endpoint makes, refused on a booked transfer, and a
+  caller-invented transfer parked in review rather than credited. Its HTTP
+  half lives in server's own wire-passthrough suite, which pins that the
+  handler forwards classification, amount, channel name and every metadata
+  key unchanged.
+- `service.TestDepositIdentity_HonestIngestSaysWhoTookTheTransfer` — the
+  boundary this rule introduces: when a caller-supplied booking holds a real
+  transfer's identity first, the honest ingestion dead-letters under
+  `identity_already_booked`, names the booking in the way, counts it, and
+  keeps the sighting for the replay.

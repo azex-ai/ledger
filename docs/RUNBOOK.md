@@ -1019,6 +1019,35 @@ Operational notes:
   credential that installed the first ledger database on this cluster).
   Pinned by `postgres.TestMigrate_SecondLedgerDatabaseOnACluster` and
   `postgres.TestMigrate_SecondInstallWithoutAdminOptionFailsBeforeTouchingAnything`.
+- **Pointing the watcher at a chain that starts above block 100,000**
+  (migration `032`, I-67 rule 2). The watcher has no "start block": with no
+  cursor row it starts at genesis and walks up in `WithMaxBlocksPerScan`
+  windows, so its own first write is small by construction. A deployment on
+  an established chain that does not want to scan from genesis seeds the
+  cursor once, before starting the watcher — and since a cursor created too
+  high makes every deposit below it invisible to every code path, that is an
+  owner-only act with a reason attached:
+
+  ```sql
+  -- as the migration/owner credential, once per chain, before the watcher runs
+  SELECT ledger_seed_chain_cursor(8453, 12000000,
+      'Base mainnet; this deployment starts at the contract deployment block');
+  ```
+
+  A plain `INSERT` is still fine up to 100,000 (the same cap one write may
+  advance by), and above it the guard names this function in the error. The
+  call refuses a chain that already has a cursor — advancing one is
+  `SetChainCursor`'s job, moving it back is `ledger_rewind_chain_cursor`'s —
+  and writes a `config_table_changes` row under
+  `ledger_seed_chain_cursor` with the reason. Check what a chain was seeded
+  with:
+
+  ```sql
+  SELECT new_row->>'chain_id', new_row->>'last_scanned_block',
+         new_row->>'reason', changed_by, changed_at
+  FROM config_table_changes WHERE table_name = 'ledger_seed_chain_cursor'
+  ORDER BY id DESC;
+  ```
 - **The migration credential must be able to revoke a database-level
   privilege** (migration `030`, I-68): `030` runs `REVOKE TEMPORARY ON
   DATABASE <db> FROM PUBLIC` so that `ledger_app` can no longer create a
@@ -2224,11 +2253,25 @@ one has a different fix:
 | `reason` | What it means | What fixes it |
 |---|---|---|
 | `currency_unregistered` | The token's configured `CurrencyCode` names no currency in this ledger. | Create the currency (`POST /api/v1/currencies`), then replay. Configuration, fully recoverable. |
-| `precision_exceeded` | The amount has more decimal places than the currency's `exponent` can represent. | Normally impossible after startup — `Onchain.Run` refuses to start when a token's `Decimals` exceeds its currency's `exponent` (I-69). Reaching it means the currency's exponent changed under a running deployment, or `Run()` was never called. Fix the exponent mismatch, then replay. |
+| `precision_exceeded` | The amount has more decimal places than the currency's `exponent` can represent. | Normally impossible after startup — `Onchain.Run` refuses to start when a token's `Decimals` exceeds its currency's `exponent` (`service.Onchain.ValidateTokenPrecision`; not an invariant, a startup check). Reaching it means the currency's exponent changed under a running deployment, or `Run()` was never called — a push-only consumer that never calls `Run()` should call `ValidateTokenPrecision` itself at startup. Fix the exponent mismatch, then replay. |
+| `identity_already_booked` | Another booking already claims this transfer's `(chain_id, tx_hash, txlog_seq)`, so the ingestion path could not create its own (I-71, migration 032's `uq_bookings_deposit_identity`). **The deposit is real and is NOT booked** — this is the one reason on this table where the sighting is not at fault. | Find the booking in the way: the dead letter's `reason` names its uid. It did not come from the ingestion path, so ask where it did — a write-scope API key can `POST /bookings` on the `deposit` classification with any metadata (see below). Resolve that booking (reject it through the review queue if it is parked there, or correct whatever produced it), then replay this dead letter. Until then the real deposit is uncredited. |
 | `payload_conflict` | An existing booking holds this sighting's idempotency key with a **different payload**. | A normalization bug on the producing side, not a chain event (design doc §6). Compare the dead letter's payload against the existing booking (`ledger-cli trace`); do NOT replay until you know which of the two is right. |
 | `account_unavailable` / `period_closed` | The holder's account is frozen/closed, or the accounting period is closed. | Usually self-healing noise: the booking is created before the journal is attempted, so these normally surface on a booking the recheck loop keeps retrying — expect `booked: true` on the row shortly. If not, unfreeze / reopen, then replay. |
 | `watcher_wedged` | Not a verdict about this sighting at all: the chain's scan has failed for several consecutive ticks and this sighting is one of the ones in the way. **The cursor has NOT moved past it.** | Fix the underlying failure (the watcher logs name it); the sighting is re-ingested by itself. Nothing to replay. |
 | `invalid_input` / `unclassified` | The sighting is malformed, or the error matched no known sentinel. | Read the row's `reason` text — it is the raw error. `unclassified` is worth reporting: the classifier defaults unknown errors to *retryable*, so reaching this label means something else marked it permanent. |
+
+> **Where an `identity_already_booked` row comes from.** `POST
+> /api/v1/bookings` takes a **write**-scope API key and lets the caller
+> choose the classification, the amount, the channel name and the whole
+> metadata map — so a booking on the `deposit` classification carrying a
+> real transfer's identity is one authenticated HTTP call away, and does not
+> need a database credential. That endpoint is not going to stop taking
+> metadata, so the fences sit below it and apply to every caller: the
+> identity index refuses a second claim on one transfer, and the pre-credit
+> corroboration (I-69) refuses to credit a claim the chain does not support.
+> What the fences cannot do is decide which of two claimants is the real
+> deposit — that is this section's job. If these appear at all, audit who
+> holds write-scope keys.
 
 ### Replay one, after fixing the cause
 

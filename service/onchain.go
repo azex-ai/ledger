@@ -438,6 +438,14 @@ func WithReorgRecheckInterval(d time.Duration) OnchainOption {
 	return func(o *Onchain) { o.reorgRecheckInterval = d }
 }
 
+// WithDeadLetterSampleInterval sets how often the dead-letter backlog gauge
+// is sampled (core.Metrics.DeadLetterBacklog). Default: 5m -- one indexed
+// anti-join on a human-scale interval, since what it measures is a queue a
+// human works.
+func WithDeadLetterSampleInterval(d time.Duration) OnchainOption {
+	return func(o *Onchain) { o.deadLetterSampleInterval = d }
+}
+
 // WithReorgRecheckWindow bounds the deep-reorg recheck to confirmed deposits
 // within this many blocks of the current tip -- older confirmations are
 // treated as final, bounding the recheck query's cost. Default: 500.
@@ -490,6 +498,7 @@ type Onchain struct {
 	recheckInterval            time.Duration
 	reorgRecheckInterval       time.Duration
 	reorgRecheckWindow         int64
+	deadLetterSampleInterval   time.Duration
 	registrationRescanTimeout  time.Duration
 	registrationRescanInterval time.Duration
 	sweepStuckAfter            time.Duration
@@ -627,6 +636,7 @@ func NewOnchain(deps OnchainDeps, chains core.ChainSet, opts ...OnchainOption) *
 		recheckInterval:            20 * time.Second,
 		reorgRecheckInterval:       5 * time.Minute,
 		reorgRecheckWindow:         500,
+		deadLetterSampleInterval:   5 * time.Minute,
 		registrationRescanTimeout:  10 * time.Minute,
 		registrationRescanInterval: time.Second,
 		sweepStuckAfter:            5 * time.Minute,
@@ -1230,14 +1240,73 @@ func (o *Onchain) IngestDeposit(ctx context.Context, s core.DepositSighting) (*c
 	})
 	if err != nil {
 		if errors.Is(err, core.ErrConflict) {
-			if dlErr := o.deps.DeadLetters.RecordDeadLetter(ctx, s, idemKey, err.Error()); dlErr != nil {
-				o.log().Error("service: onchain: ingest deposit: record dead letter failed", "idempotency_key", idemKey, "error", dlErr)
-			}
+			// Through recordIngestDeadLetter, not RecordDeadLetter directly:
+			// this branch used to write the row and skip the counter, so a
+			// webhook-only deployment -- which never runs the watcher path
+			// that does count -- dead-lettered deposits with
+			// ledger_deposit_ingest_dead_lettered_total sitting at zero
+			// (2026-09-03 re-check, onchain-ops).
+			//
+			// Which conflict it is matters to whoever gets paged, so the
+			// reason is resolved before recording: an idempotency-key
+			// conflict is a normalization bug on the producing side, while
+			// an identity conflict means some OTHER booking already claims
+			// this transfer -- a row that, since migration 032, can only
+			// have come from somewhere other than this path.
+			o.recordIngestDeadLetter(ctx, s, o.classifyIngestConflict(ctx, s, txHash, idemKey, err))
 		}
 		return nil, fmt.Errorf("service: onchain: ingest deposit: create booking: %w", err)
 	}
 
 	return o.advanceConfirmation(ctx, booking, s.Confirmations, depositChannelRef(txHash, s.TxLogSeq), cfg)
+}
+
+// errDepositIdentityTaken marks the conflict where another booking already
+// holds this sighting's (chain, transaction, log position) -- migration
+// 032's uq_bookings_deposit_identity, or its application-level twin. It is
+// its own sentinel so deadLetterReason can label it, and so the honest
+// ingestion path's refusal is never confused with an idempotency-key
+// conflict, which is a different defect with a different fix.
+var errDepositIdentityTaken = errors.New("another booking already holds this transfer")
+
+// classifyIngestConflict turns CreateBooking's ErrConflict into the cause
+// recorded on the dead letter, distinguishing the two conflicts that reach
+// here.
+//
+// Since migration 032 there are two ways to conflict on one sighting: the
+// idempotency key (some earlier row claims deposit-{chain}-{tx}-{seq} with a
+// DIFFERENT payload -- design doc §6's normalization bug) and the deposit
+// identity index (some row claims the transfer itself, under any key). The
+// second is new, and it is the one that can strand an HONEST deposit: a
+// write-scope API key can POST /bookings a deposit-classification booking
+// carrying any metadata it likes, including a real transfer's identity,
+// BEFORE the watcher gets there. The ledger must not silently lose the real
+// deposit behind that: the row says which booking is in the way, the counter
+// says it happened, and docs/RUNBOOK.md section 18 says what to do.
+func (o *Onchain) classifyIngestConflict(ctx context.Context, s core.DepositSighting, txHash, idemKey string, cause error) error {
+	if o.deps.BookingReader == nil {
+		return cause
+	}
+	holders, lookupErr := o.deps.BookingReader.BookingsForDepositIdentity(ctx, s.ChainID, txHash, s.TxLogSeq)
+	if lookupErr != nil {
+		// Not knowing which conflict this is does not change that it IS one;
+		// record the original cause rather than dropping the dead letter.
+		o.log().Error("service: onchain: ingest deposit: could not tell an identity conflict from a key conflict",
+			"chain_id", s.ChainID, "tx_hash", txHash, "txlog_seq", s.TxLogSeq, "error", lookupErr)
+		return cause
+	}
+	for _, other := range holders {
+		if other.IdempotencyKey == idemKey {
+			continue // our own earlier row: an ordinary key conflict
+		}
+		o.log().Error("service: onchain: deposit.identity_already_booked: a real deposit could not be booked because another booking already claims its transfer",
+			"chain_id", s.ChainID, "tx_hash", txHash, "txlog_seq", s.TxLogSeq,
+			"amount", s.Amount.String(), "holding_booking_uid", other.UID,
+			"holding_booking_status", other.Status, "holding_booking_key", other.IdempotencyKey)
+		return fmt.Errorf("%w: booking %s (status %s, key %s) claims %s#%d: %w",
+			errDepositIdentityTaken, other.UID, other.Status, other.IdempotencyKey, txHash, s.TxLogSeq, cause)
+	}
+	return cause
 }
 
 func depositIdempotencyKey(chainID int64, txHash string, txLogSeq int32) string {
@@ -2082,6 +2151,13 @@ const (
 	// deadLetterReasonInvalidInput: the sighting itself, or the state it
 	// asks for, is malformed. Not replayable without fixing the producer.
 	deadLetterReasonInvalidInput = "invalid_input"
+	// deadLetterReasonIdentityAlreadyBooked: another booking already claims
+	// this transfer, so the honest ingestion path could not create its own
+	// (migration 032). Unlike every other reason here this one is not about
+	// the sighting being wrong -- the deposit is real and unbooked, and the
+	// row that is in the way came from somewhere other than this path.
+	// docs/RUNBOOK.md section 18 has the triage.
+	deadLetterReasonIdentityAlreadyBooked = "identity_already_booked"
 	// deadLetterReasonWatcherWedged: not a verdict about this sighting at
 	// all -- the chain's scan has been failing for watcherStallAlertAfter
 	// consecutive ticks and this is one of the sightings in the way. The
@@ -2108,6 +2184,10 @@ func deadLetterReason(cause error) string {
 	switch {
 	case errors.Is(cause, errWatcherWedged):
 		return deadLetterReasonWatcherWedged
+	case errors.Is(cause, errDepositIdentityTaken):
+		// Checked before ErrConflict: an identity conflict wraps the
+		// ErrConflict it came from, and the two are different incidents.
+		return deadLetterReasonIdentityAlreadyBooked
 	case errors.Is(cause, core.ErrConflict), errors.Is(cause, core.ErrDuplicateJournal):
 		return deadLetterReasonPayloadConflict
 	case errors.Is(cause, core.ErrPrecisionExceeded):
@@ -2212,12 +2292,25 @@ func (o *Onchain) ReplayDeadLetter(ctx context.Context, uid string) (*core.Booki
 	return booking, nil
 }
 
+// RunDeadLetterBacklogSampleOnce samples the dead-letter backlog gauge once,
+// outside Run's ticker loop -- mirrors RunWatchOnce / RunSweepOnce /
+// RunPendingRecheckOnce / RunReorgRecheckOnce, for an ops-triggered reading
+// and for tests.
+func (o *Onchain) RunDeadLetterBacklogSampleOnce(ctx context.Context) error {
+	return o.sampleDeadLetterBacklog(ctx)
+}
+
 // sampleDeadLetterBacklog reports the dead-letter queue's depth and the age
-// of its oldest still-unbooked row (core.Metrics.DeadLetterBacklog). Sampled
-// from the deep-reorg recheck tick because that loop already exists to ask
-// "is anything still wrong that a human has to close out", runs on a
-// human-scale interval (5 minutes by default), and is the cheapest place to
-// add one indexed anti-join.
+// of its oldest still-unbooked row (core.Metrics.DeadLetterBacklog).
+//
+// Its own job, on purpose. It used to ride the deep-reorg recheck tick --
+// which only runs when a ChainReader is configured, so a webhook-only
+// deployment (push ingestion, no watcher: a supported configuration, see
+// Run) had no backlog signal at all, on the very path most likely to
+// dead-letter something (2026-09-03 re-check, onchain-ops). A dead letter is
+// created by IngestDeposit, which every deployment calls; the gauge that
+// says how many are outstanding must not depend on a component some of them
+// do not run.
 func (o *Onchain) sampleDeadLetterBacklog(ctx context.Context) error {
 	if o.deps.DeadLetters == nil {
 		// Run refuses to start without one (validateCore); reaching here
@@ -2743,13 +2836,6 @@ func (o *Onchain) recordReorgAnomaly(ctx context.Context, kind, bookingUID strin
 
 func (o *Onchain) recheckConfirmedDeposits(ctx context.Context) error {
 	var errs []error
-	// The dead-letter backlog is sampled from this tick (see
-	// sampleDeadLetterBacklog): both this and the anomaly sweep below answer
-	// "is there anything a human still has to close out".
-	if err := o.sampleDeadLetterBacklog(ctx); err != nil {
-		o.log().Error("service: onchain: reorg recheck: sample dead letter backlog failed", "error", err)
-		errs = append(errs, err)
-	}
 	// Open anomalies are revisited FIRST, and unconditionally: the recheck
 	// window below is a cost bound on FINDING new anomalies, never a licence
 	// to stop reporting one already found (G-M8).
@@ -3603,6 +3689,18 @@ func (o *Onchain) Run(ctx context.Context) error {
 	} else {
 		o.log().Info("service: onchain: no ChainReader configured, watcher/recheck/reorg jobs skipped (webhook-only ingestion)")
 	}
+
+	// Outside the ChainReader branch above: every deployment can create a
+	// dead letter (IngestDeposit does), so every deployment must be able to
+	// see how many are outstanding.
+	g.Go(func() error {
+		return o.runLoop(ctx, onchainJob{
+			name:       "onchain_dead_letter_backlog",
+			interval:   o.deadLetterSampleInterval,
+			tick:       o.sampleDeadLetterBacklog,
+			countTicks: true,
+		})
+	})
 
 	if o.deps.Scanner != nil && o.deps.Sweeper != nil && len(o.sweepPolicies) > 0 {
 		for _, policy := range o.sweepPolicies {
