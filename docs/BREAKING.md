@@ -31,6 +31,34 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `core.Round` and `core.ConvertAt` return `(decimal.Decimal, error)`
+
+**Landed (Wave 5 recheck R-4; invariant I-70).**
+
+    core.Round(d, exponent, mode)                    decimal.Decimal
+    -> core.Round(d, exponent, mode)                 (decimal.Decimal, error)
+
+    core.ConvertAt(amount, rate, targetExp, mode)    decimal.Decimal
+    -> core.ConvertAt(amount, rate, targetExp, mode) (decimal.Decimal, error)
+
+**What a consumer must do.** Take the second return value. The error is
+`core.ErrInvalidInput` and is only ever returned for an amount outside what
+`NUMERIC(30,18)` can hold — the same bound I-70 already applied at every
+`*Input.Validate`. Any amount that round-tripped through this ledger before
+still rounds and converts exactly as it did.
+
+**Why the signature had to change.** `Round`'s doc comment used to say
+"Round never fails". It did not fail; it failed to come back. Rounding is
+precisely the operation a pathological magnitude cannot survive: rescaling
+`1E999999999` to two decimal places multiplies its coefficient by
+`10^1000000001`. Measured: no return after three seconds. A helper with no
+error return can only panic or silently truncate in that situation, and for
+an amount neither is acceptable — so it returns an error.
+
+`core.Allocate`, `core.Delta` and `core.EncodeAmount` already returned an
+error and gained the same check without a signature change.
+
+
 ### Migration 029 (`029_insert_path_guards`): appended rows are guarded and recorded
 
 **Landed (Wave 5, `docs/plans/2026-09-03-wave5-contract.md` §0 R3-1;

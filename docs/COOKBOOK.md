@@ -447,7 +447,10 @@ round explicitly, before you call the ledger, using `core/money.go`.
 | Under-crediting the user is the unacceptable direction (gas estimates, minimum payout unit) | `RoundUp` | Rounding away from zero guarantees the user never receives less than earned. |
 
 ```go
-fee := core.Round(rawFee, feeCurrency.Exponent, core.RoundHalfEven)
+fee, err := core.Round(rawFee, feeCurrency.Exponent, core.RoundHalfEven)
+if err != nil {
+    return err // the amount is outside what NUMERIC(30,18) can hold (I-70)
+}
 ```
 
 ### Who eats the remainder: FX and splits
@@ -458,7 +461,10 @@ for you, it just posts whatever amount you give it on each leg:
 
 ```go
 // Converting 100 USDT -> CNY at a quoted rate, rounding to CNY's own exponent.
-cnyAmount := core.ConvertAt(decimal.RequireFromString("100"), rate, cnyCurrency.Exponent, core.RoundHalfUp)
+cnyAmount, err := core.ConvertAt(decimal.RequireFromString("100"), rate, cnyCurrency.Exponent, core.RoundHalfUp)
+if err != nil {
+    return err // amount or rate is outside what NUMERIC(30,18) can hold (I-70)
+}
 
 key := ledger.NewIdempotencyKey("fx-convert")
 _, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{

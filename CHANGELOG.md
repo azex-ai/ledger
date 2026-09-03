@@ -35,6 +35,20 @@ written because it was true when `[0.6.0]` shipped.
 
 ### Go module — Breaking
 
+- **`core.Round` and `core.ConvertAt` return `(decimal.Decimal, error)`, and
+  the five exported money helpers refuse an amount `NUMERIC(30,18)` cannot
+  store** (Wave 5 recheck R-4, I-70). I-70 originally reached the
+  `*Input.Validate` boundary only, so `core.Allocate`, `core.Round`,
+  `core.ConvertAt`, `core.Delta` and `core.EncodeAmount` — documented API
+  that `docs/COOKBOOK.md` teaches consumers to call directly — were still in
+  the pre-I-70 state, and none of them returned within three seconds for
+  `1E999999999`. `Allocate`, `Delta` and `EncodeAmount` already returned an
+  error; `Round` and `ConvertAt` did not, and now do. Consumers take the
+  second return value; amounts that previously round-tripped are unaffected.
+  `core.FuzzAllocate` could not have found this — its inputs are built with
+  a non-positive exponent by construction — so `core.FuzzAllocateFromStrings`
+  was added to make the class expressible.
+
 - **Migration 029 refuses writes the schema previously accepted** (I-66 /
   I-67). Nothing in this library's own write paths produces any of them, but
   a consumer with its own SQL, its own fixtures, or its own repair scripts

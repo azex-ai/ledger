@@ -176,6 +176,14 @@ func SignedAmount(normalSide NormalSide, entryType EntryType, amount decimal.Dec
 // SignedAmount(normalSide, EntryTypeCredit, creditSum), by linearity of the
 // same sign rule Sign encodes.
 func Delta(normalSide NormalSide, debitSum, creditSum decimal.Decimal) (decimal.Decimal, error) {
+	// Before the Add at the end: adding two decimals with different
+	// exponents rescales one of them (I-70).
+	if err := validateAmountIsRescalable("delta", "debit_sum", debitSum); err != nil {
+		return decimal.Decimal{}, err
+	}
+	if err := validateAmountIsRescalable("delta", "credit_sum", creditSum); err != nil {
+		return decimal.Decimal{}, err
+	}
 	debitPart, err := SignedAmount(normalSide, EntryTypeDebit, debitSum)
 	if err != nil {
 		return decimal.Decimal{}, err

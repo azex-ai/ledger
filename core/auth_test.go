@@ -103,6 +103,32 @@ func TestEncodeAmount_RejectsOutOfRangeMagnitude(t *testing.T) {
 	if _, err := EncodeAmount(amt); err == nil {
 		t.Fatal("EncodeAmount with out-of-range magnitude: expected error, got nil")
 	}
+
+	// R-4 (2026-09-04 recheck): the case above has a BOUNDED exponent, so it
+	// is refused on the cheap path by bigIntToFixedTwosComplement. The name
+	// of this test promised the whole magnitude class and covered only that
+	// half. A positive exponent takes the other branch --
+	// new(big.Int).Exp(10, 18+exponent) -- which is unbounded work computed
+	// BEFORE the range check that was the only guard, so the range check
+	// never runs. Measured before the fix: no return after three seconds.
+	for _, pathological := range []string{"1E999999999", "10E777777070"} {
+		amt, err := decimal.NewFromString(pathological)
+		if err != nil {
+			t.Fatalf("decimal.NewFromString(%q): %v", pathological, err)
+		}
+		done := make(chan error, 1)
+		go func() { _, encErr := EncodeAmount(amt); done <- encErr }()
+		select {
+		case encErr := <-done:
+			if encErr == nil {
+				t.Fatalf("EncodeAmount(%q): expected an error, got nil", pathological)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("EncodeAmount(%q) did not return within 100ms. Returning an error eventually is not the "+
+				"property: the value is cheap to hold and ruinous to expand, so a check that computes "+
+				"10^(18+exponent) before refusing it IS the hang", pathological)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

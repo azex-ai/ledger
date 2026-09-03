@@ -34,9 +34,26 @@ const (
 )
 
 // Round rounds d to exponent decimal places using mode. exponent is
-// typically a currency's Currency.Exponent. Round never fails — an
-// unrecognized mode falls back to RoundHalfUp.
-func Round(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.Decimal {
+// typically a currency's Currency.Exponent. An unrecognized mode falls back
+// to RoundHalfUp.
+//
+// It returns core.ErrInvalidInput for an amount outside what this ledger
+// can store (I-70). Rounding is exactly the operation that cannot survive
+// one: rescaling 1E999999999 to two decimal places multiplies its
+// coefficient by 10^1000000001, which does not terminate in any useful
+// sense. This function used to have no error return and the doc comment
+// above used to say "Round never fails" -- it did not fail, it failed to
+// come back (R-4, 2026-09-04 recheck).
+func Round(d decimal.Decimal, exponent int32, mode RoundingMode) (decimal.Decimal, error) {
+	if err := validateAmountIsRescalable("round", "amount", d); err != nil {
+		return decimal.Decimal{}, err
+	}
+	return roundChecked(d, exponent, mode), nil
+}
+
+// roundChecked is Round's arithmetic, for callers that have already
+// established the magnitude is in range.
+func roundChecked(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.Decimal {
 	switch mode {
 	case RoundHalfEven:
 		return d.RoundBank(exponent)
@@ -56,7 +73,16 @@ func Round(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.Decimal
 // resulting entries themselves (e.g. via the fx_sell/fx_buy presets); the FX
 // residue introduced by rounding is expected to land on a settlement account
 // — see docs/COOKBOOK.md's rounding decision table.
-func ConvertAt(amount, rate decimal.Decimal, targetExponent int32, mode RoundingMode) decimal.Decimal {
+func ConvertAt(amount, rate decimal.Decimal, targetExponent int32, mode RoundingMode) (decimal.Decimal, error) {
+	// Both operands, before the multiply: Mul adds the exponents, so a
+	// pathological rate is as good as a pathological amount, and the
+	// product's magnitude is the thing Round would then have to rescale.
+	if err := validateAmountIsRescalable("convert at", "amount", amount); err != nil {
+		return decimal.Decimal{}, err
+	}
+	if err := validateAmountIsRescalable("convert at", "rate", rate); err != nil {
+		return decimal.Decimal{}, err
+	}
 	return Round(amount.Mul(rate), targetExponent, mode)
 }
 
@@ -88,12 +114,21 @@ func Allocate(total decimal.Decimal, weights []decimal.Decimal, exponent int32) 
 	if exponent < 0 {
 		return nil, fmt.Errorf("core: allocate: exponent must not be negative: %w", ErrInvalidInput)
 	}
+	if err := validateAmountIsRescalable("allocate", "total", total); err != nil {
+		return nil, err
+	}
 	if !total.Equal(total.Truncate(exponent)) {
 		return nil, fmt.Errorf("core: allocate: total %s has more than %d decimal place(s): %w", total.String(), exponent, ErrInvalidInput)
 	}
 
 	totalWeight := decimal.Zero
 	for i, w := range weights {
+		// Before IsNegative, and before the Add below: a weight is summed
+		// into totalWeight and then used as a big.Rat numerator, both of
+		// which expand it.
+		if err := validateAmountIsRescalable("allocate", fmt.Sprintf("weight[%d]", i), w); err != nil {
+			return nil, err
+		}
 		if w.IsNegative() {
 			return nil, fmt.Errorf("core: allocate: weight[%d] must not be negative: %w", i, ErrInvalidInput)
 		}

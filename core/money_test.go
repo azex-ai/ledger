@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
@@ -27,7 +28,8 @@ func TestRound_HalfUp(t *testing.T) {
 	}
 	for _, tc := range cases {
 		d := decimal.RequireFromString(tc.in)
-		got := Round(d, tc.places, RoundHalfUp)
+		got, err := Round(d, tc.places, RoundHalfUp)
+		require.NoError(t, err)
 		assert.Truef(t, got.Equal(decimal.RequireFromString(tc.want)), "Round(%s, %d, HalfUp) = %s, want %s", tc.in, tc.places, got, tc.want)
 	}
 }
@@ -44,7 +46,8 @@ func TestRound_HalfEven(t *testing.T) {
 	}
 	for _, tc := range cases {
 		d := decimal.RequireFromString(tc.in)
-		got := Round(d, tc.places, RoundHalfEven)
+		got, err := Round(d, tc.places, RoundHalfEven)
+		require.NoError(t, err)
 		assert.Truef(t, got.Equal(decimal.RequireFromString(tc.want)), "Round(%s, %d, HalfEven) = %s, want %s", tc.in, tc.places, got, tc.want)
 	}
 }
@@ -60,7 +63,8 @@ func TestRound_Down(t *testing.T) {
 	}
 	for _, tc := range cases {
 		d := decimal.RequireFromString(tc.in)
-		got := Round(d, tc.places, RoundDown)
+		got, err := Round(d, tc.places, RoundDown)
+		require.NoError(t, err)
 		assert.Truef(t, got.Equal(decimal.RequireFromString(tc.want)), "Round(%s, %d, Down) = %s, want %s", tc.in, tc.places, got, tc.want)
 	}
 }
@@ -76,7 +80,8 @@ func TestRound_Up(t *testing.T) {
 	}
 	for _, tc := range cases {
 		d := decimal.RequireFromString(tc.in)
-		got := Round(d, tc.places, RoundUp)
+		got, err := Round(d, tc.places, RoundUp)
+		require.NoError(t, err)
 		assert.Truef(t, got.Equal(decimal.RequireFromString(tc.want)), "Round(%s, %d, Up) = %s, want %s", tc.in, tc.places, got, tc.want)
 	}
 }
@@ -101,7 +106,8 @@ func TestConvertAt_MatchesHandCalculation(t *testing.T) {
 	for _, tc := range cases {
 		amount := decimal.RequireFromString(tc.amount)
 		rate := decimal.RequireFromString(tc.rate)
-		got := ConvertAt(amount, rate, tc.targetExponent, tc.mode)
+		got, err := ConvertAt(amount, rate, tc.targetExponent, tc.mode)
+		require.NoError(t, err)
 		want := decimal.RequireFromString(tc.want)
 		assert.Truef(t, got.Equal(want), "ConvertAt(%s, %s, %d, %v) = %s, want %s", tc.amount, tc.rate, tc.targetExponent, tc.mode, got, tc.want)
 	}
@@ -287,4 +293,77 @@ func TestAllocateInvariant_SumAlwaysEqualsTotal(t *testing.T) {
 
 func TestErrPrecisionExceededIsDistinctSentinel(t *testing.T) {
 	assert.False(t, errors.Is(ErrPrecisionExceeded, ErrInvalidInput))
+}
+
+// FuzzAllocateFromStrings closes FuzzAllocate's structural blind spot
+// (R-4, 2026-09-04 recheck).
+//
+// FuzzAllocate builds its inputs with decimal.NewFromBigInt(x, -exp) under
+// `if exp < 0 || exp > 18 { t.Skip() }`, so the exponent it produces is
+// always in [-18, 0]. A POSITIVE exponent -- the entire magnitude class
+// I-70 is about, and the one that made Allocate not return -- is not
+// reachable from that input space at all. No fuzzing budget finds a bug
+// the encoding cannot express, so W5's "the 30s budget is effective"
+// conclusion was only ever true of FuzzJournalValidate, which fuzzes
+// strings that decimal.NewFromString parses.
+//
+// This target feeds strings for the same reason. The property is the same
+// one FuzzAllocate asserts, plus the one that was missing: Allocate must
+// ALWAYS come back.
+func FuzzAllocateFromStrings(f *testing.F) {
+	f.Add("10000", "2", "3", int32(2))
+	f.Add("-99999", "1", "7", int32(2))
+	f.Add("0.01", "1", "1", int32(2))
+	// The seeds that matter: an exponent the old encoding could not reach.
+	f.Add("1E999999999", "1", "1", int32(2))
+	f.Add("10E777777070", "1", "1", int32(2))
+	f.Add("1", "1E999999999", "1", int32(2))
+
+	f.Fuzz(func(t *testing.T, totalStr, w1Str, w2Str string, exp int32) {
+		total, err := decimal.NewFromString(totalStr)
+		if err != nil {
+			t.Skip("not a decimal")
+		}
+		w1, err1 := decimal.NewFromString(w1Str)
+		w2, err2 := decimal.NewFromString(w2Str)
+		if err1 != nil || err2 != nil {
+			t.Skip("not a decimal")
+		}
+		if exp < 0 || exp > 18 {
+			t.Skip()
+		}
+
+		// The assertion is a TIME bound, not an outcome: Allocate is
+		// entitled to reject any of this, and entitled to succeed. It is
+		// not entitled to spend an unbounded amount of time deciding,
+		// which is exactly what a pathological magnitude used to make it
+		// do (and what the int64-shaped target above cannot express).
+		type result struct {
+			shares []decimal.Decimal
+			err    error
+		}
+		done := make(chan result, 1)
+		go func() {
+			shares, aerr := Allocate(total, []decimal.Decimal{w1, w2}, exp)
+			done <- result{shares, aerr}
+		}()
+
+		select {
+		case got := <-done:
+			if got.err != nil {
+				return // a refusal is a fine answer; an unbounded one is not
+			}
+			// When it succeeds, the largest-remainder property still holds.
+			sum := decimal.Zero
+			for _, share := range got.shares {
+				require.Truef(t, share.Equal(share.Truncate(exp)),
+					"share %s is not representable at %d decimal places", share, exp)
+				sum = sum.Add(share)
+			}
+			require.Truef(t, sum.Equal(total),
+				"shares sum to %s, want exactly %s -- no unit may be lost or manufactured", sum, total)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Allocate(total=%q, weights=[%q %q], exponent=%d) did not return within 2s", totalStr, w1Str, w2Str, exp)
+		}
+	})
 }
