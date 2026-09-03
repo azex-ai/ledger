@@ -1018,6 +1018,21 @@ Operational notes:
   credential that installed the first ledger database on this cluster).
   Pinned by `postgres.TestMigrate_SecondLedgerDatabaseOnACluster` and
   `postgres.TestMigrate_SecondInstallWithoutAdminOptionFailsBeforeTouchingAnything`.
+- **The migration credential must be able to revoke a database-level
+  privilege** (migration `030`, I-68): `030` runs `REVOKE TEMPORARY ON
+  DATABASE <db> FROM PUBLIC` so that `ledger_app` can no longer create a
+  `pg_temp` relation that shadows a guard function's table lookup. Only the
+  database owner (or a superuser) may revoke a database privilege, and
+  `002+` run as `ledger_owner` -- so `030` steps back to the session user
+  for that one statement (`SET LOCAL ROLE NONE`, restored on commit). On the
+  documented install path the bootstrap credential owns the database and
+  this just works. The one shape it cannot handle is "migrate an already
+  installed database as `ledger_owner` itself": `030` then **fails closed**
+  with the exact statement for a DBA to run once (`REVOKE TEMPORARY ON
+  DATABASE <db> FROM PUBLIC`), after which re-running the migration treats
+  the revoke as done. It is an error rather than a warning on purpose
+  (working-agreements §3); `docs/BREAKING.md` carries the consumer-facing
+  entry.
 - **Every migration after `001` needs `ledger_owner`'s privileges**,
   because `001`'s last act transfers every object it created to that
   role. `Migrate()` arranges this itself: it applies `001` alone on the
@@ -1389,16 +1404,24 @@ testcontainers dependency lives in a test-only sibling module,
 module — see the root CLAUDE.md "go.work" gotcha for the exact SBOM/lockfile
 semantics).
 
-**Consuming the submodule today (MJ-7, not yet closed).** `anchors/r2` and
+**Consuming the submodule today (MJ-7, partly closed).** `anchors/r2` and
 `chains/evm` pin the root module with a local `replace ... => ../..` for
-in-repo development, and the release workflow does not yet rewrite that
-`replace`/`require` to a published version or push a submodule-scoped tag
-(`anchors/r2/vX.Y.Z`). Go ignores a dependency's own `replace` directives,
-so `go get github.com/azex-ai/ledger/anchors/r2@<tag>` from an external
-module does **not** resolve as-is. Until the release CI is extended to
-version the submodules, consume them from a local checkout via a
-parent-directory `go.work` (see the README's "Local Development with
-go.work"), not `go get`. Tracked as a release-engineering follow-up.
+in-repo development, and the release workflow does not yet push a
+submodule-scoped tag (`anchors/r2/vX.Y.Z`). That is less of an obstacle than
+an earlier revision of this paragraph claimed (2026-09-03 consumer review
+F-M10, re-measured): `go get github.com/azex-ai/ledger/anchors/r2@latest`
+(or `go get .../anchors/r2` from a module that already requires the root)
+**resolves, and `go build` against it works** -- Go synthesizes a
+pseudo-version from the latest commit touching that path, and a dependency's
+own `replace` directives are never applied outside its own build. What still
+fails is **`go mod tidy`**, and not for the `replace` reason: the tagged root
+module version does not yet contain every package `anchors/r2`'s own test
+files import (`anchortest`, as of this writing), and `tidy` walks test-only
+imports where `build`/`get` do not. Until the release CI keeps the two in
+sync, either pin the root module to a commit that has the package or keep
+consuming from a local checkout via a parent-directory `go.work` (see the
+README's "Local Development with go.work"), which sidesteps the question
+entirely. Tracked as a release-engineering follow-up.
 
 **What a deployer must set up, before wiring `r2.New` into the
 composition root:**
