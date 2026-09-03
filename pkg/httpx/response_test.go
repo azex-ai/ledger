@@ -144,6 +144,7 @@ var coreSentinels = map[string]error{
 	"ErrUnknownAuthKey":      core.ErrUnknownAuthKey,
 	"ErrRollupPending":       core.ErrRollupPending,
 	"ErrTransient":           core.ErrTransient,
+	"ErrNoLifecycle":         core.ErrNoLifecycle,
 }
 
 // declaredCoreSentinels parses core/errors.go and returns every top-level

@@ -160,6 +160,12 @@ func resolveError(err error) *bizcode.AppError {
 	// that arrives on its own, e.g. straight from an AuthVerifier.
 	case errors.Is(err, core.ErrUnknownAuthKey):
 		return bizcode.Wrap(14011, "unknown authorization key", err)
+	// ErrNoLifecycle is a caller-fixable configuration error (the target
+	// classification has no state machine to drive a booking), so it shares
+	// ErrInvalidInput's band and retryability verdict; handler_bookings.go
+	// answers it with a field-level message before it ever reaches here.
+	case errors.Is(err, core.ErrNoLifecycle):
+		return bizcode.Wrap(10001, "classification has no lifecycle", err)
 	case errors.Is(err, core.ErrInvalidInput):
 		return bizcode.Wrap(10001, "invalid input", err)
 	case errors.Is(err, core.ErrConflict):
