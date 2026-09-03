@@ -351,17 +351,67 @@ written because it was true when `[0.6.0]` shipped.
   change. The ungated `Reserve`, `HeldAmount` and `GetBalanceBreakdown` keep
   reporting the state machine's own figure.
 
-  Not closed, recorded rather than implied away: signing the settlement
-  receipts (attested on write, verified before the transaction opens like V
-  is) would make the discharge unforgeable and restore immediate recycling.
-  That is a composition-root change and is deferred; I-49 carries the
-  analysis, including the residual boundary window between a settle
-  transaction and the gate.
+  The conservative rule above is now the **fallback**, not the only rule —
+  see the next entry, which closes what this one recorded as deferred.
 
 - Migration **025** (`gated_hold_expiry_index`) adds
   `idx_reservations_account_currency_expiry` — a query that must not mention
   `status` cannot use the `status = 'active'` partial index the ordinary
   path uses.
+
+- **Reservation discharge claims are signed, so a gated hold can credit
+  them** (Wave 4, remediation contract §7.18; `docs/INVARIANTS.md` I-65).
+  The entry above credited no discharge at all and trusted only
+  `expires_at`, because every discharge signal is writable or appendable
+  with the application's own database credential. Its own argument named the
+  only other signal that escapes that threat model: a signature over a key
+  the database credential does not hold. This adds it.
+
+  With an `Attestor` and an `AuthVerifier` configured (`ledger.WithAttestor`,
+  which now also wires `postgres.ReserverStore.WithAuth`), each `Settle` /
+  `SettlePartial` / `Release` / `FinalizeSettlement` signs the claim it
+  writes — before opening its transaction, since an `Attestor` may be a
+  remote call — and a gated `Reserve` subtracts `reserved_amount` minus the
+  discharge those **verified** claims account for. So a legitimate settle or
+  release returns the funds immediately instead of at `ExpiresAt`, while a
+  claim appended without a valid signature returns nothing. One unverifiable
+  claim distrusts its whole reservation, which then holds in full.
+
+  **What consumers must do.** Nothing, unless you want the behaviour: a
+  deployment that never calls `ledger.WithAttestor` keeps the conservative
+  rule above, byte for byte, and runs the same query it ran before. If you
+  DO configure an attestor, two things are worth knowing: (1) a
+  `Settle`/`Release` composed inside your own `RunInTx` cannot be signed
+  (there is no safe point to call a possibly-remote signer inside an open
+  transaction), so that reservation still holds until expiry — call those
+  four operations on the top-level `Service` if you need the funds back at
+  once; (2) claims written before this change carry no signature and are
+  treated the same way, so holds recycle at expiry until new claims are
+  written. Neither case can release more money than it should; both hold
+  more.
+
+  `postgres.ReserverStore` gained `WithAuth(core.Attestor,
+  core.AuthVerifier)` and `SetLogger(core.Logger)` — both additive, both
+  wired by `ledger.New`. `SetLogger` exists because a claim that FAILS
+  verification is tamper evidence and the gate's reaction (hold the funds)
+  is otherwise invisible; it is logged at Warn rather than returned as an
+  error, so a single forged `INSERT` cannot make a holder permanently
+  un-reservable.
+
+  `core` gained `ReservationDischargeIntent`,
+  `CanonicalReservationDischargeDigest`,
+  `VerifyReservationDischargeAuth` and the `ReservationOp*` operation
+  constants. The digest takes domain separator `0x11` (allocated in
+  `core/auth.go`'s table) and covers the reservation `uid`, operation,
+  amount, idempotency key and the recorded instant.
+
+- Migration **028** (`signed_reservation_discharge`) adds `auth_digest` /
+  `auth_signature` / `auth_key_id` to `reservation_operation_receipts` and
+  `reservation_settlement_legs`, shaped exactly like `journals`' own three
+  columns (`NOT NULL DEFAULT ''`). No `auth_status`: the only consumer is a
+  synchronous gate whose answer to "unsigned" is "keep holding the funds",
+  which is right for every unsigned case. Both tables' `created_at` is now
+  written explicitly on the signed path, because the digest covers it.
 
 ### Go module — Security (pending deposits: the confirmation amount)
 

@@ -300,3 +300,122 @@ func TestServiceWorker_EventPollerClaimLostWarningsReachTheInjectedLogger(t *tes
 			"ledger.WithLogger; without that wiring it goes to slog.Default() and a stolen lease is invisible. Logs: %v",
 		logger.snapshot())
 }
+
+// TestService_WithAttestor_WiresTheSignedDischargeHold pins the OTHER line
+// ledger.New's WithAttestor branch owns: `s.reserverStore =
+// s.reserverStore.WithAuth(s.attestor, s.authVerifier)` (I-65).
+//
+// It exists for the identical reason the verifier pin above does, and against
+// the identical blind spot. Every I-65 pin in the postgres package builds
+// `postgres.NewReserverStore(...).WithAuth(attestor, verifier)` by hand --
+// the one step a consumer of the facade never performs. Deleting that line
+// from ledger.go leaves the whole postgres suite green while silently giving
+// every facade consumer I-49's conservative hold instead of the signed one
+// they configured an Attestor to get: safe, but not what they asked for, and
+// invisible to CI.
+//
+// Everything here goes through ledger.New. postgres.NewReserverStore and
+// ReserverStore.WithAuth are never named.
+func TestService_WithAttestor_WiresTheSignedDischargeHold(t *testing.T) {
+	ctx := context.Background()
+	pool := postgrestest.SetupDB(t)
+
+	attestor, verifier := newTestAttestor(t, "signed-discharge-facade-key")
+	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier))
+	require.NoError(t, err)
+
+	fx := seedGateFixture(t, ctx, svc, 9302, decimal.NewFromInt(100))
+
+	gatedReserve := func(amount int64, key string) (*core.Reservation, error) {
+		return svc.Reserver().Reserve(ctx, core.ReserveInput{
+			AccountHolder:          fx.holder,
+			CurrencyUID:            fx.currencyUID,
+			Amount:                 decimal.NewFromInt(amount),
+			IdempotencyKey:         postgrestest.UniqueKey(key),
+			ExpiresIn:              time.Hour,
+			RequireVerifiedBalance: true,
+		})
+	}
+
+	res, err := gatedReserve(100, "signed-discharge-facade-reserve")
+	require.NoError(t, err)
+
+	// Control: the whole balance is held, so the pin below cannot pass by
+	// the gate being permissive.
+	_, err = gatedReserve(100, "signed-discharge-facade-control")
+	require.ErrorIs(t, err, core.ErrInsufficientBalance)
+
+	require.NoError(t, svc.Reserver().Release(ctx, core.ReleaseInput{
+		ReservationUID: res.UID,
+		IdempotencyKey: postgrestest.UniqueKey("signed-discharge-facade-release"),
+	}))
+
+	// The pin: the release was signed on the way in and verified on the way
+	// out, so the funds are back at once. Without the WithAuth line this is
+	// core.ErrInsufficientBalance until the reservation expires an hour from
+	// now.
+	again, err := gatedReserve(100, "signed-discharge-facade-after")
+	require.NoError(t, err,
+		"a release issued through the facade must discharge the gated hold immediately; ledger.WithAttestor's "+
+			"attestor/verifier are not reaching the reserver")
+	require.NotEmpty(t, again.UID)
+}
+
+// TestService_UnverifiableDischargeWarningReachesTheInjectedLogger pins the
+// other half of ledger.New's reserver wiring: `s.reserverStore.SetLogger`.
+//
+// A discharge claim that FAILS verification is tamper evidence, and the
+// gate's reaction to it -- keep holding the funds -- is correct but
+// invisible: the caller just sees a smaller available balance. That is the
+// shape working-agreements §3 calls out (a degradation indistinguishable
+// from nothing having happened), and a Warn line is the whole signal. If it
+// goes to a NopLogger because the composition root forgot to wire one, the
+// signal does not exist.
+//
+// Drives it end to end: a forged 'release' receipt appended straight to the
+// append-only table (the C-1 statement) makes the gate verify a claim that
+// carries no signature.
+func TestService_UnverifiableDischargeWarningReachesTheInjectedLogger(t *testing.T) {
+	ctx := context.Background()
+	pool := postgrestest.SetupDB(t)
+
+	attestor, verifier := newTestAttestor(t, "discharge-warning-facade-key")
+	logger := &recordingLogger{}
+	svc, err := ledger.New(pool, ledger.WithAttestor(attestor, verifier), ledger.WithLogger(logger))
+	require.NoError(t, err)
+
+	fx := seedGateFixture(t, ctx, svc, 9303, decimal.NewFromInt(100))
+
+	res, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
+		AccountHolder:          fx.holder,
+		CurrencyUID:            fx.currencyUID,
+		Amount:                 decimal.NewFromInt(100),
+		IdempotencyKey:         postgrestest.UniqueKey("discharge-warning-reserve"),
+		ExpiresIn:              time.Hour,
+		RequireVerifiedBalance: true,
+	})
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO reservation_operation_receipts
+			(reservation_id, operation, idempotency_key, amount)
+		SELECT id, 'release', 'facade-forged-release-' || id, 0
+		FROM reservations WHERE uid = $1`, res.UID)
+	require.NoError(t, err)
+
+	// The gate runs the verification during this call; the answer it gives
+	// the caller is unchanged (the funds stay held), which is exactly why the
+	// log line is the only evidence.
+	_, err = svc.Reserver().Reserve(ctx, core.ReserveInput{
+		AccountHolder:          fx.holder,
+		CurrencyUID:            fx.currencyUID,
+		Amount:                 decimal.NewFromInt(100),
+		IdempotencyKey:         postgrestest.UniqueKey("discharge-warning-after"),
+		ExpiresIn:              time.Hour,
+		RequireVerifiedBalance: true,
+	})
+	require.ErrorIs(t, err, core.ErrInsufficientBalance, "control: the forged claim must not discharge the hold")
+
+	require.True(t, logger.contains("discharge claim does not verify", res.UID),
+		"a claim that fails verification must be reported through the logger passed to ledger.WithLogger; got %v", logger.snapshot())
+}

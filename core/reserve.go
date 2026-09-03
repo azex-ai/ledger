@@ -72,8 +72,27 @@ type ReserveInput struct {
 	//     recomputed base is ErrInsufficientBalance, not
 	//     ErrUnauthorizedJournal.
 	//
-	//   - It counts holds conservatively, and this one is visible in ordinary
-	//     use, not just under attack: a gated Reserve subtracts the full
+	//   - It counts holds from a signal an attacker cannot forge, and WHICH
+	//     signal depends on whether signing is configured. This is the one
+	//     effect of the flag that is visible in ordinary use, not just under
+	//     attack:
+	//
+	//     With an Attestor and an AuthVerifier configured (ledger.WithAttestor
+	//     -> postgres.ReserverStore.WithAuth, docs/INVARIANTS.md I-65): each
+	//     Settle / SettlePartial / Release / FinalizeSettlement signs the
+	//     claim it writes, and a gated Reserve subtracts
+	//     ReservedAmount MINUS the discharge those SIGNED claims account for.
+	//     A legitimate settle or release therefore returns the funds
+	//     immediately, and a claim written without a valid signature returns
+	//     nothing. One exception, by construction: a claim written from
+	//     inside your own transaction (Settle/Release called on a store bound
+	//     by RunInTx) cannot be signed -- there is no safe point to call a
+	//     possibly-remote Attestor inside an open transaction -- so that
+	//     reservation falls back to the conservative rule below. Call these
+	//     four operations on the top-level Service if you need the funds back
+	//     at once.
+	//
+	//     Without one (the default): a gated Reserve subtracts the FULL
 	//     ReservedAmount of every not-yet-expired reservation on the
 	//     dimension, giving no credit for one that has been settled or
 	//     released. So after Settle or Release the funds stay unavailable TO
@@ -81,14 +100,16 @@ type ReserveInput struct {
 	//     to the real lifetime of the operation if you need the balance back
 	//     sooner; the default is 15 minutes.
 	//
-	//     Why: every other signal that a reservation is over -- its status,
-	//     its settled_amount, its settlement legs, its operation receipts --
-	//     is writable or appendable with the application's own database
+	//     Why either rule rather than the state machine's own answer: every
+	//     other signal that a reservation is over -- its status, its
+	//     settled_amount, its settlement legs, its operation receipts -- is
+	//     writable or appendable with the application's own database
 	//     credential, which is exactly the credential this gate assumes an
 	//     attacker holds; one such statement used to zero a live hold and let
-	//     the gate authorize the same balance twice. ExpiresAt is the only
-	//     property of a reservation that credential cannot manufacture. See
-	//     docs/INVARIANTS.md I-49.
+	//     the gate authorize the same balance twice. Exactly two signals
+	//     escape that: a signature over a key the database credential does
+	//     not hold (I-65), and the passage of time (I-49). ExpiresAt is the
+	//     second, and it is why the unsigned fallback has the shape it does.
 	//
 	// Related consequence on the settlement side: a reservation that has
 	// expired can no longer be settled (Settle and SettlePartial return

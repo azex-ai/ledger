@@ -238,6 +238,11 @@ func New(pool *pgxpool.Pool, opts ...Option) (*Service, error) {
 		// expires.
 		s.reserverStore = s.reserverStore.WithAuth(s.attestor, s.authVerifier)
 	}
+	// Pinned from the consumer's side by
+	// TestService_WithAttestor_WiresTheSignedDischargeHold: every I-65 pin in
+	// the postgres package calls WithAuth by hand, which is the one step a
+	// facade consumer never performs, so deleting this line would leave that
+	// suite green.
 	s.bookingStore = postgres.NewBookingStore(pool).WithMetrics(s.metrics)
 	s.eventStore = postgres.NewEventStore(pool)
 	// The composition root EventStore.SetLogger's own doc comment points at

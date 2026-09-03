@@ -71,7 +71,7 @@ type reservationDischargeAuth struct {
 // as a decision rather than as an omission.
 //
 // digest/signature are EMPTY-BUT-NON-NIL slices, not nil: the columns are
-// NOT NULL DEFAULT ''::bytea (migration 028, per this schema's no-NULL
+// NOT NULL DEFAULT ”::bytea (migration 028, per this schema's no-NULL
 // rule), and pgx encodes a nil []byte as SQL NULL -- which is a 23502, not
 // an empty value. Measured: every unsigned Release/Settle failed with
 // "invalid database input" until these were non-nil.

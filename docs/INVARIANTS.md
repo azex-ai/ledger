@@ -576,13 +576,25 @@ standing threat model (an attacker holding the application's DB credential)
 the hold that query reports is therefore not trustworthy, and a single
 permitted `UPDATE` used to make the verified-balance gate authorize the same
 balance twice (2026-09-02 audit, `w3-review/money-path.md` C-1). Callers who
-opt into `RequireVerifiedBalance` get `SumUnexpiredReservationHolds`
-instead: the full `reserved_amount` of every not-yet-expired reservation,
-with no credit for settlement or release, because `expires_at` is the only
-claim about a reservation that credential cannot manufacture. That figure
-is **deliberately larger** than the one below once a reservation has been
-settled or released — see **I-49** for why, what it costs, and the paired
-rule that an expired reservation can no longer be settled.
+opt into `RequireVerifiedBalance` get one of two other figures, neither
+read from a writable column, and which one depends only on whether signing
+is configured:
+
+- **`WithAuth` configured** (**I-65**): the `reserved_amount` of every
+  not-yet-expired reservation, minus — per reservation — the discharge
+  accounted for by a claim whose *signature verifies*. A legitimate
+  settle/release/finalize therefore returns the funds immediately, and a
+  claim the application's credential merely appended returns nothing.
+- **No Attestor/AuthVerifier** (**I-49**): `SumUnexpiredReservationHolds`
+  — the full `reserved_amount` of every not-yet-expired reservation, with
+  no credit for settlement or release at all, because `expires_at` is then
+  the only claim about a reservation that credential cannot manufacture.
+  **Deliberately larger** than the one below once a reservation has been
+  settled or released; see **I-49** for what it costs.
+
+Both are paired with the rule that an expired reservation can no longer be
+settled (**I-49**), which is what makes dropping expired rows from either
+sum sound.
 
 The ordinary path, the breakdown below and `HeldAmount` keep
 `SumActiveReservations`: they report what the ledger's own state machine
@@ -5246,7 +5258,8 @@ that holder's outstanding holds, where both terms sum over every
 `balance_role='available'` classification the holder has entries in and
 **neither reads `balance_checkpoints`** — and where the hold that is
 subtracted reads neither `reservations.status` nor
-`reservations.settled_amount` (see **The hold term** below):
+`reservations.settled_amount` (see **The hold term** below, and **I-65**
+for the signed refinement of it):
 
 - **V** = Σ `VerifiedBalance(holder, currency, cls)`, computed by the gate
   *before* the transaction opens (I-32 → an entries-only recompute plus an
@@ -5341,6 +5354,17 @@ Under the gate the hold is therefore `SumUnexpiredReservationHolds`:
 and nothing else. No credit for `status`, for `settled_amount`, for
 settlement legs, or for operation receipts.
 
+**That rule is now the FALLBACK, not the only rule** (2026-09-03,
+remediation contract §7.18, lead's ruling under Aaron's mandate). The
+"Not closed" paragraph at the end of this invariant has been closed:
+`ReserverStore.WithAuth` makes each discharge claim carry a signature, and
+a gated `Reserve` subtracts `reserved_amount − verified discharge` per
+reservation instead. **I-65** is that rule and states the switch precisely.
+Everything below still holds exactly as written for a deployment that has
+not configured an `Attestor` and an `AuthVerifier` — which is every
+deployment that does not opt in, and is what makes turning the feature on
+the only way to change this behaviour.
+
 **Why nothing else can be credited.** The obvious repair — keep crediting
 settlement, but read it from the append-only record (`reservation_settlement_legs`
 / `reservation_operation_receipts`, which migration `006` made refuse
@@ -5365,6 +5389,15 @@ passage of time. `expires_at` is the second kind: the guard refuses every
 rejected), no `INSERT` can shorten another row's lifetime, and a credential
 cannot make the clock run slower. That is the whole reason the rule above
 has the shape it has.
+
+**I-65 takes the first kind.** The two-signal argument above is not a list
+of one usable option and one theoretical one — it is a list of the only two
+things that work, and this invariant used only the second because the first
+needed schema and composition-root changes it did not make. Migration `028`
+and `ReserverStore.WithAuth` made them. A future attempt at this problem
+that reaches for a third signal — a new trigger, a stricter ACL, a
+`SECURITY DEFINER` discharge function, a separate "trusted" table — is
+reaching for something the argument above already rules out.
 
 **What it costs, deliberately.** A settled or released reservation goes on
 holding its full `reserved_amount` under the gate until it expires. For a
@@ -5410,15 +5443,17 @@ reservation's row lock, not the `(holder, currency)` advisory lock the gate
 holds. Closing it entirely means putting the settle path under the balance
 lock too, which changes this store's lock ordering and was not done here.
 
-**Not closed: signing the settlement record.** The alternative to the
-conservative rule is to make the discharge unforgeable rather than
-unnecessary — attest each settlement receipt with `core.Attestor` when it is
-written and verify it before the transaction opens (where V is verified,
-since a verifier may be remote), counting anything unverified as still held.
-That would restore immediate recycling after `Settle`/`Release` without
-trusting a writable claim. It is a composition-root change (`ReserverStore`
-has no attestor today) and is recorded as a decision for a later wave, not
-an oversight.
+**Closed: signing the settlement record** (2026-09-03; this paragraph
+previously read "Not closed"). The alternative to the conservative rule is
+to make the discharge unforgeable rather than unnecessary — attest each
+settlement receipt and leg with `core.Attestor` when it is written and
+verify it before the transaction opens (where V is verified, since a
+verifier may be remote), counting anything unverified as still held. That is
+what **I-65** now does, and it restores immediate recycling after
+`Settle`/`Release`/`FinalizeSettlement` without trusting a writable claim.
+The composition-root change this paragraph named as the obstacle
+(`ReserverStore` had no attestor) is `ReserverStore.WithAuth`, wired by
+`ledger.WithAttestor`.
 
 **Enforced by**: `postgres.ReserverStore.Reserve` — through
 `postgres.ReserverStore.requireVerifiedAvailableBalance` (V, outside the
@@ -5428,7 +5463,9 @@ transaction), `postgres.ReserverStore.sumAvailableFromEntriesWithQueries`
 `availableBase` whenever the gate ran (in place of
 `sumBalancesByRoleWithQueries`) and, on the same condition, sums the hold
 with the SumUnexpiredReservationHolds query in
-`postgres/sql/queries/reservations.sql` instead of SumActiveReservations.
+`postgres/sql/queries/reservations.sql` instead of SumActiveReservations
+(`postgres.ReserverStore.sumHoldsIgnoringDischarge`, the branch taken when
+no `Attestor`/`AuthVerifier` is configured; I-65 owns the other branch).
 The settle-side half is `postgres.ReserverStore.Settle` and
 `postgres.ReserverStore.SettlePartial`, both routed through
 `refuseExpiredSettlement` and the ReservationExpiredNow query;
@@ -6768,3 +6805,215 @@ attempt and caps the amount, and the decision that moves money is
   the `V` stale-*high* direction — the mirror of the window pin above — and
   the reason E cannot simply be hoisted out of the transaction as an
   optimization.
+---
+## I-65: A discharge claim reduces a gated hold only if its signature verifies
+
+**Rule**: When `core.ReserveInput.RequireVerifiedBalance` is set **and** the
+reserver was built with `postgres.ReserverStore.WithAuth` (which
+`ledger.WithAttestor` wires), the hold `Reserve` subtracts is
+
+    Σ over the holder's reservations in the currency
+      whose expires_at is still in the future
+      of max(0, reserved_amount − verified discharge for that reservation)
+
+where the *verified discharge* of one reservation is:
+
+- `reserved_amount`, if a claim with a **valid signature** records a
+  terminal operation on it (`settle`, `release` or `finalize_settlement` —
+  all three end the reservation: `Settle` records the settled portion and
+  implicitly releases the remainder, `FinalizeSettlement` does the same for
+  the accumulated legs);
+- otherwise the sum of the amounts of its **validly signed** settlement
+  legs;
+- **zero**, if *any* claim on that reservation fails verification or carries
+  no signature at all — one bad claim distrusts the whole reservation, which
+  then holds in full.
+
+Each of `Settle` / `SettlePartial` / `Release` / `FinalizeSettlement` signs
+its claim with the configured `core.Attestor` **before** opening its
+transaction, and persists the signed instant as the claim row's
+`created_at`, because the digest covers it. The digest
+(`core.CanonicalReservationDischargeDigest`, domain separator `0x11`) covers
+the reservation `uid`, the operation, the amount, the idempotency key and
+that instant — every field of `core.ReservationDischargeIntent`, with no
+deliberate omission.
+
+With `WithAuth` **not** configured, `Reserve` is unchanged from **I-49**:
+the hold is `SumUnexpiredReservationHolds`, the full `reserved_amount` of
+every not-yet-expired reservation, crediting nothing.
+
+**Why**: I-49 established that the hold may not be read from anything the
+application's own database credential can write, enumerated every discharge
+signal, and found that all of them fail that test — `reservations.status`
+and `reservations.settled_amount` because `ledger_app` holds `UPDATE` and
+`ledger_reservations_guard` permits exactly the transitions that zero a
+hold, and the append-only `reservation_settlement_legs` /
+`reservation_operation_receipts` because `ledger_app` must keep `INSERT` on
+them (the application is what writes them), so `INSERT ... ('release', 0)`
+discharges a hold at the same one-statement cost as the `UPDATE`.
+
+It therefore credited nothing and trusted only `expires_at`. That is safe,
+and it costs a settled or released reservation its full hold until expiry —
+double-counting the settled portion (which already left through its own
+journal) and counting a released reservation at all.
+
+I-49's own argument names the way out. In this threat model the
+application's credential *is* the attacker, so any discharge the
+application can perform the attacker can perform, and exactly two signals
+escape that: the passage of time, and **a signature over a key the database
+credential does not hold**. I-49 used the first and recorded the second as
+"not closed" because it needed schema and composition-root changes it did
+not make. Migration `028` (three columns per discharge table, shaped exactly
+like `journals`' own) and `ReserverStore.WithAuth` made them (remediation
+contract §7.18, lead's ruling under Aaron's 2026-09-03 mandate).
+
+**Why the signature is checked outside the transaction, and the
+reservations inside it.** This is the same split, for the same reason, as
+I-49's `min(V, E)`: an `AuthVerifier` may be a remote call and
+`financial.md` forbids external calls inside a transaction. So
+`verifiedDischarges` runs before the transaction opens, next to V, and only
+the *discharge* comes from there; `reserveWithQueries` re-reads the
+reservations themselves under the `(holder, currency)` advisory lock, in
+pure SQL, from columns the guard refuses to let anyone change
+(`reserved_amount`, `expires_at`).
+
+Every way the two reads can disagree errs toward holding the funds:
+
+- A reservation created in the window is in the under-lock read but not in
+  the pre-verified map, so it is credited nothing and holds in full. Without
+  the under-lock read this is precisely the over-sell race I-4/I-11 exist to
+  close.
+- A reservation that expired in the window is in the map but not in the
+  under-lock read, so it is simply not held — correct, since expiry is the
+  discharge no credential can manufacture.
+- A claim written in the window is not in the map, so it discharges nothing
+  *yet*. This one self-corrects rather than merely erring safe: claim rows
+  are append-only (migration `006` refuses `UPDATE` and `DELETE`), so a
+  discharge that verified once can never stop being true, and the next call
+  credits it.
+
+**Why one bad claim distrusts the whole reservation.** Crediting the claims
+that did verify while ignoring one that did not would let an attacker append
+a forged claim beside genuine ones and still collect the genuine discharge —
+and would make a tampered reservation numerically indistinguishable from a
+clean one. Same fail-closed shape as I-32's "one unauthorized classification
+refuses the whole reservation".
+
+**What is deliberately NOT signed, and what that costs.** A claim written
+from inside a caller's transaction (a store bound via `WithDB`, i.e. any
+`Settle`/`Release` composed inside `ledger.Service.RunInTx`) is **unsigned**:
+the transaction is already open, so there is no safe point left to call a
+possibly-remote `Attestor`, and the fail-closed answer is to write the claim
+without a signature rather than to dial out — the identical choice
+`PostJournal`'s tx-mode branch makes (I-26). The consequence is I-49's cost,
+for that reservation only: it holds in full until `expires_at`. A consumer
+who needs immediate recycling calls these four operations on the top-level
+store rather than inside their own transaction. There is no
+`Authorize`/`PostAuthorized` split for discharge claims (`journals` has one);
+adding one is a decision for a later wave, not an oversight.
+
+There is also no `auth_status` column, and the asymmetry with `journals` is
+deliberate. `journals.auth_status` exists because three unsigned cases were
+indistinguishable there and one of them — a journal legitimately posted
+inside a caller's transaction — must not be reported as tamper evidence by
+the asynchronous verifier that reads the table. Nothing here has that
+problem: the only consumer is this synchronous gate, whose answer to "no
+signature" is not "raise an alarm" but "keep holding the funds", which is
+correct for all three unsigned cases. A status column would only add a
+fourth writable claim.
+
+**A claim that fails verification is not silently swallowed.** The gate's
+reaction is to hold the funds, which is safe but invisible, and a signature
+that fails on an append-only row is tamper evidence. It is logged at Warn
+through `postgres.ReserverStore.SetLogger` (wired by `ledger.New` to the
+consumer's logger). It is deliberately not turned into an error: the caller
+asked to reserve money, and one bad row must not make a holder permanently
+un-reservable — that would be a denial of service an attacker could trigger
+with a single `INSERT`.
+
+**Enforced by**: `postgres.ReserverStore.WithAuth` installs the
+`core.Attestor`/`core.AuthVerifier` pair (wired from `ledger.WithAttestor`
+in `ledger.New`). `postgres.ReserverStore.attestDischarge` signs each claim
+outside any transaction, before `Settle` / `SettlePartial` / `Release` /
+`FinalizeSettlement` open theirs, over
+`core.CanonicalReservationDischargeDigest`;
+`postgres.ReserverStore.recordReservationOperationReceipt` and the
+InsertReservationSettlementLeg query persist the signature and the signed
+`created_at`. `postgres.ReserverStore.verifiedDischarges` re-verifies every
+outstanding claim through `core.VerifyReservationDischargeAuth` before the
+reserve transaction opens, and
+`postgres.ReserverStore.sumHoldsNetOfVerifiedDischarge` computes the hold
+from it under the advisory lock via the ListUnexpiredReservationHolds query;
+`postgres.ReserverStore.sumHoldsIgnoringDischarge` is the I-49 fallback
+taken when no attestor/verifier is configured. Migration
+`028_signed_reservation_discharge` adds the three columns.
+
+**Pinned by**:
+- `core.TestCanonicalReservationDischargeDigest_GoldenVector` — the byte
+  layout, with the expected digest derived from the documented layout by an
+  independent implementation rather than copied from this package's output.
+- `core.TestCanonicalReservationDischargeDigest_EveryFieldIsCovered` — every
+  field of the intent moves the digest, which is what makes an edit to any
+  persisted column detectable.
+- `core.TestCanonicalReservationDischargeDigest_SeparatesRecordKinds` and
+  `core.TestCanonicalReservationDischargeDigest_IsDomainSeparatedFromJournals`
+  — a settlement leg, a settlement receipt and a journal cannot share a
+  preimage, so no signature minted for one verifies as another.
+- `core.TestCanonicalReservationDischargeDigest_TruncatesToMicroseconds` —
+  the digest depends only on the instant a `TIMESTAMPTZ` can store, and not
+  on the `time.Time`'s location. Without this every signed claim would fail
+  verification on Linux and pass on macOS.
+- `core.TestVerifyReservationDischargeAuth` — the fail-closed cases (no
+  verifier, no digest, digest not matching the row, no signature, no key id,
+  verifier rejects), each of which must make the gate hold the funds.
+- `postgres.TestReserve_SignedDischarge_ForgedClaimDischargesNothing` —
+  C-1's attack aimed at the signed path, in three shapes appended **as
+  `ledger_app` over a real socket**: unsigned, garbage-signed, and carrying
+  a signature copied verbatim from a genuinely signed claim on another
+  reservation. The third is the one a digest covering too little would let
+  through. Two controls make it load-bearing: the untampered hold already
+  refuses the second reservation, and the forged row is asserted to be in
+  the table.
+- `postgres.TestReserve_SignedDischarge_RestoresAvailabilityImmediately` —
+  the product half, and the reason this invariant exists rather than leaving
+  I-49's rule in place: a signed `Release` returns the whole amount at once,
+  a signed `Settle` discharges the hold while the spend shows in the base
+  (and 601 against a 600 balance is still refused, so an over-credit would
+  be just as red as an under-credit), and signed legs discharge only their
+  own amount until `FinalizeSettlement`.
+- `postgres.TestReserve_SignedDischarge_RejectsTamperedAmount` — the digest
+  binds the amount. Issued as the migration runner with the append-only
+  trigger disabled, because `ledger_app` cannot `UPDATE` these tables at
+  all: the claim is that even a party ABOVE the application credential
+  cannot make a rewritten amount verify.
+- `postgres.TestReserve_SignedDischarge_NoAttestorKeepsConservativeHold` —
+  the control group. The identical script (reserve everything, release it
+  legitimately, try again) run against two stores differing in exactly one
+  call: the unsigned one must still refuse, the signed one must allow. This
+  is what makes "configuring an Attestor is the only way to change this
+  behaviour" a checked claim.
+- `postgres.TestReserve_SignedDischarge_RecomputedUnderLock` — signing moved
+  the discharge outside the transaction and must not have taken the
+  reservations with it. A reservation committed while a second transaction
+  holds the `(holder, currency)` advisory lock has no claim at all, so it
+  must be visible to the gated `Reserve` queued behind that lock.
+- `postgres.TestReserverStore_SignedDischarge_RefusesExpiredSettlement` —
+  I-49's other half under signing: which discharges count changed, whether
+  an expired reservation may settle did not.
+- `postgres.TestReserve_SignedDischarge_ReplayDoesNotResign` — a retried
+  discharge short-circuits on its existing claim row instead of asking a
+  possibly-remote signer for a second signature, the same pre-check
+  `attestJournal` makes.
+- `TestService_WithAttestor_WiresTheSignedDischargeHold` — the facade path.
+  Every pin above builds `postgres.ReserverStore.WithAuth` by hand, which is
+  the one step a consumer of `ledger.New` never performs, so deleting the
+  wiring line from `ledger.go` would leave all of them green while giving
+  every facade consumer I-49's rule instead of the one they configured an
+  `Attestor` to get. Goes end to end through `ledger.New` and never names
+  `WithAuth`. (Same blind spot, and same remedy, as
+  `TestService_WithAttestor_WiresTheWithdrawalGateVerifier` for I-32.)
+- `TestService_UnverifiableDischargeWarningReachesTheInjectedLogger` — the
+  non-silence half, also through the facade: a forged claim makes the gate
+  verify something unsigned, the answer to the caller is unchanged (the
+  funds stay held), and the Warn line is therefore the only evidence the
+  event happened. It must reach the logger passed to `ledger.WithLogger`.

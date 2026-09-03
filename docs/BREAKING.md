@@ -370,6 +370,48 @@ encoder the HTTP surface uses. On a deployment whose process TZ is not UTC,
 what `api-contract.md` §5 always required; a subscriber that string-compared
 the previous rendering must parse instead.
 
+### Migration `028`: signed reservation discharge claims (schema + gated-hold behaviour)
+
+**Landed (2026-09-03, Wave 4, remediation contract §7.18;
+`docs/INVARIANTS.md` I-65.)** No Go symbol was removed or re-signed --
+`postgres.ReserverStore.WithAuth` and `.SetLogger` are additive, and
+`ledger.WithAttestor` keeps its signature. This entry is here under kind 3
+(schema / data) and for one **run-time** behaviour change.
+
+**What a consumer must do.** Run migration `028`. It adds `auth_digest`,
+`auth_signature` and `auth_key_id` (`NOT NULL DEFAULT ''`) to
+`reservation_operation_receipts` and `reservation_settlement_legs`. Existing
+rows are not backfilled and need no backfill -- an empty signature means
+"this claim is not trusted", which produces exactly the pre-028 hold. Both
+tables' `created_at` is now written explicitly by the application when the
+claim is signed (the digest covers it) instead of defaulting to `now()`;
+same instant to microsecond resolution, but a consumer that queried those
+columns expecting a strictly server-assigned clock should know it is now
+application-assigned on the signed path. Nothing outside those two tables
+changes, and no HTTP field changes.
+
+**The run-time change, and who sees it.** Only a consumer that BOTH calls
+`ledger.WithAttestor` AND sets `core.ReserveInput.RequireVerifiedBalance`:
+for those calls, a legitimate `Settle` / `SettlePartial` / `Release` /
+`FinalizeSettlement` now discharges the hold **immediately** instead of at
+`ExpiresAt`. That is strictly more permissive than the rule migration `025`
+shipped -- so if you have code that depended on the funds staying held until
+expiry (a de-facto cooldown, say), it no longer does. Everyone else is
+unaffected: without `WithAttestor` the gate runs the same query with the
+same result, and the ungated `Reserve`, `HeldAmount` and
+`GetBalanceBreakdown` were never involved.
+
+**One asymmetry worth planning around.** A discharge claim written from
+inside your own transaction (`Settle`/`Release` on a store bound by
+`ledger.Service.RunInTx`) cannot be signed -- there is no safe point to call
+a possibly-remote `Attestor` inside an open transaction -- so those
+reservations keep holding until expiry even with signing on. Call those four
+operations on the top-level `Service` if you need the funds back at once.
+
+Rolling `028` back drops the columns and returns every gated hold to the
+conservative rule; safe in the direction that matters (it can only hold more
+money, never release more).
+
 ---
 
 ## 0.6.0 and earlier

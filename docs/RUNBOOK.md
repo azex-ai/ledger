@@ -181,6 +181,60 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   wired via `SetAuthCheck` for this run — that is a coverage gap in the
   reconcile job's own configuration, not a finding about the ledger.
 
+### `reservation discharge claim does not verify` (Warn log, I-65)
+
+Not a reconcile check — a **log line only**, emitted by the gated `Reserve`
+path when a `reservation_operation_receipts` or
+`reservation_settlement_legs` row fails `core.VerifyReservationDischargeAuth`.
+
+It is a log line rather than an error on purpose: the gate's reaction is to
+keep holding that reservation's full `reserved_amount`, which is the safe
+answer, and the caller only sees a smaller available balance. Making it an
+error would let a single forged `INSERT` render a holder permanently
+un-reservable. So this Warn is the only evidence the event happened.
+
+Triage, in order:
+
+1. **Was signing recently turned on, or is this an old row?** Claims written
+   before migration `028`, and claims written from inside a consumer's own
+   transaction (`Settle`/`Release` composed inside `RunInTx`, which cannot be
+   signed — I-65), carry no signature at all and log here legitimately. The
+   log includes the `operation` and `idempotency_key`; check the row's
+   `created_at` against the deployment's cutover.
+
+    ```sql
+    SELECT o.operation, o.idempotency_key, o.amount, o.created_at,
+           length(o.auth_signature) AS sig_len, o.auth_key_id
+    FROM reservation_operation_receipts o
+    JOIN reservations r ON r.id = o.reservation_id
+    WHERE r.uid = '<reservation_uid>'
+    UNION ALL
+    SELECT 'settle_partial', l.idempotency_key, l.amount, l.created_at,
+           length(l.auth_signature), l.auth_key_id
+    FROM reservation_settlement_legs l
+    JOIN reservations r ON r.id = l.reservation_id
+    WHERE r.uid = '<reservation_uid>'
+    ORDER BY created_at;
+    ```
+
+    `sig_len = 0` on a row older than the cutover, or on one written through
+    `RunInTx`, is expected. Nothing to do; the hold recycles at `expires_at`.
+
+2. **`sig_len = 0` on a row that should have been signed** → treat as
+   `unauthorized_journals` above: something appended a discharge claim
+   without going through this library. Those tables refuse `UPDATE` and
+   `DELETE` (migration `006`), so the row is preserved evidence.
+
+3. **`sig_len > 0` but verification fails** → the row was written signed and
+   then altered, which takes `ledger_owner` or a superuser. Confirmed
+   tampering above the application credential. Escalate as for
+   `unauthorized_journals`, and check `anchor_observations` / the attestation
+   chain for the same window.
+
+4. **`auth_key_id` names a key this deployment no longer holds** → key
+   rotation (I-45), not tampering. The verifier must keep retired public keys
+   for as long as any unexpired reservation's claims reference them.
+
 ### Common queries (Postgres)
 
 ```sql
