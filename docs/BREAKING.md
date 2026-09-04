@@ -826,8 +826,8 @@ entries per journal. Measured through the real `PostJournal` path, median of
 | `030` | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
 | `031` | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
 
-**What a consumer must do.** Nothing, if journals have the handful of legs the
-presets produce -- at 2--6 legs `031` is marginally *faster*. If you post
+**What a consumer must do.** Nothing, if journals have the handful of entries the
+presets produce -- at 2--6 entries `031` is marginally *faster*. If you post
 journals with hundreds of entries, expect the difference above and size for
 it (`docs/CAPACITY.md`). `core` places no cap on entries per journal, so the
 curve is yours to stay off.
@@ -835,8 +835,8 @@ curve is yours to stay off.
 **2. `SET CONSTRAINTS ... IMMEDIATE` now breaks honest writes instead of
 silently disabling the check.** The balance guard is `DEFERRABLE INITIALLY
 DEFERRED` because a journal is written one entry per statement: after the
-first leg it genuinely does not balance. With the aggregate unconditional, a
-transaction that turns deferral off is refused at its first leg.
+first entry it genuinely does not balance. With the aggregate unconditional, a
+transaction that turns deferral off is refused at its first entry.
 
 **What a consumer must do.** Do not issue `SET CONSTRAINTS` on a connection
 that posts journals. Nothing in this library does, and there was never a

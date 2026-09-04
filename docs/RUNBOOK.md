@@ -111,7 +111,7 @@ proof of the count):
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 | `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32). Without a `core.AuthVerifier` (wired via `SetAuthCheck`, or `ledger-cli reconcile --full --pubkey-hex/--key-id`) this check **does not appear in `checks[]` at all** -- it is named in `skipped_checks` and `full_coverage` goes false. Never-signed journals are a coverage gap, not tamper evidence, so they are skipped rather than flagged |
 | `period_close_violations` | journals whose `effective_at` is behind the active close line AND that were written after that line was committed (I-15/I-59) |
-| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): a leg on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§19](#19-corrupt-reversal-chain) |
+| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): an entry on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§19](#19-corrupt-reversal-chain) |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -329,7 +329,7 @@ A real solvency failure does **not** mean money was stolen — the ledger sees
 its own books only. Three plausible causes:
 
 1. **Withdrawal posted but custodial not debited** — the withdraw journal is
-   unbalanced or skipped a leg. Check recent `withdraw_confirm` journals.
+   unbalanced or skipped an entry. Check recent `withdraw_confirm` journals.
 2. **Deposit credited but custodial not credited** — symmetric: a deposit
    confirmed without crediting custodial. Check recent `deposit_confirm`.
 3. **External custody loss not yet reflected** — funds physically moved out
@@ -2187,7 +2187,7 @@ LEFT JOIN bookings b ON b.id = e.booking_id
 WHERE e.uid = '<event-uid>';
 ```
 
-A claim is wrong when that journal's legs are not this booking's settlement —
+A claim is wrong when that journal's entries are not this booking's settlement —
 typically a much smaller amount, an unrelated classification, or a source
 belonging to a different flow. **If it moved money, it is still a real
 journal**: fix that separately with a reversal (I-51). Do not treat the
@@ -2367,8 +2367,8 @@ ORDER BY r.id, e.id;
 
 Compare against the original's own entries (§8, "Find every journal that
 touched an account dimension"). A legitimate reversal inverts the original
-leg for leg: same `(account_holder, currency_id, classification_id)`,
-opposite `entry_type`. The offending row is usually obvious — it has legs on
+entry for entry: same `(account_holder, currency_id, classification_id)`,
+opposite `entry_type`. The offending row is usually obvious — it has entries on
 BOTH sides of the same dimension (net zero, moves no money), or a `source`
 belonging to no flow you run, or `signed = false` in a deployment where
 every journal is signed.

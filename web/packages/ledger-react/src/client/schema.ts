@@ -223,7 +223,7 @@ export interface paths {
         put?: never;
         /**
          * Render a template into a journal and post it.
-         * @description Answers 403 for any template with a leg on an is_system classification -- derived from the template's own lines, so a deployment's own system-side template is covered without being named -- and for any template_code in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
+         * @description Answers 403 for any template with a line on an is_system classification -- derived from the template's own lines, so a deployment's own system-side template is covered without being named -- and for any template_code in the effective protected set: presets.ProtectedTemplateCodes() (deposit_confirm and its siblings, protected by default) plus Config.ProtectedTemplateCodes (a deployment's own additional system-only codes), minus Config.AllowGenericTemplatePost (an explicit per-code opt-out). Those codes are meant to be posted only by the deployment's own verified-deposit orchestration, never by naming the code directly through this generic endpoint.
          */
         post: {
             parameters: {
@@ -247,7 +247,7 @@ export interface paths {
                         "application/json": components["schemas"]["JournalEnvelope"];
                     };
                 };
-                /** @description Refused: the template has a leg on an is_system classification (structurally derived from its own lines, whoever defined it), or template_code is in the effective protected set (presets.ProtectedTemplateCodes() plus Config.ProtectedTemplateCodes). ALLOW_GENERIC_TEMPLATE_POST is the single per-code opt-out for both rules. */
+                /** @description Refused: the template has a line on an is_system classification (structurally derived from its own lines, whoever defined it), or template_code is in the effective protected set (presets.ProtectedTemplateCodes() plus Config.ProtectedTemplateCodes). ALLOW_GENERIC_TEMPLATE_POST is the single per-code opt-out for both rules. */
                 403: {
                     headers: {
                         [name: string]: unknown;
@@ -2902,7 +2902,7 @@ export interface paths {
          * Credit a holder with no custodied asset behind it (developer mode).
          * @description Simulates a deposit: posts the `dev_credit` template (DR main_wallet holder / CR dev_credit system counterpart), so the credited funds land in the holder's available balance and can drive real downstream flows. Disabled by default and answers FeatureNotEnabled (503) unless DEV_CREDIT_ENABLED=true, which the server only accepts when ENV=dev -- boot fails otherwise.
          *
-         *     The resulting journal is an ordinary journal: append-only, corrected only through POST /journals/{uid}/reverse. Because its system leg is `dev_credit` rather than `custodial`, GET /platform/solvency counts the new liability with no offsetting asset and reports the shortfall -- by design. The shortfall equals the `dev_credit` account balance.
+         *     The resulting journal is an ordinary journal: append-only, corrected only through POST /journals/{uid}/reverse. Because its system entry is `dev_credit` rather than `custodial`, GET /platform/solvency counts the new liability with no offsetting asset and reports the shortfall -- by design. The shortfall equals the `dev_credit` account balance.
          */
         post: {
             parameters: {

@@ -139,7 +139,7 @@ pattern for "extend the ledger with a new business template"):
 
 ```
 credits_topup  (currency = credits)
-    DR user.main_wallet(credits) 100   ← purchased  (CR settlement — the paid leg)
+    DR user.main_wallet(credits) 100   ← purchased  (CR settlement — the paid entries)
     DR user.main_wallet(credits)  20   ← bonus      (CR equity — platform-funded)
     CR settlement(credits)       100
     CR equity(credits)            20
