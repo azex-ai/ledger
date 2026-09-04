@@ -16,10 +16,10 @@ import (
 // TestPresetDirection_MovesMoneyTheRightWay pins what the preset tests could
 // not: the balance each template actually produces.
 //
-// transfer_out, transfer_in and fee_charge shipped with their holder leg
+// transfer_out, transfer_in and fee_charge shipped with their holder entry
 // inverted against main_wallet's declared polarity. A P2P transfer of 100 left
 // the sender 100 richer and the receiver 100 in debt, and charging a fee paid
-// the payer. Every preset test passed throughout, because both legs of these
+// the payer. Every preset test passed throughout, because both entries of these
 // templates draw on the same amount key, which makes "total debits equal total
 // credits" true no matter which side each classification lands on. The
 // assertion could not fail, so it never did.
@@ -75,9 +75,9 @@ func TestPresetDirection_MovesMoneyTheRightWay(t *testing.T) {
 		post("transfer_in", receiver, "xfer-in", decimal.NewFromInt(100))
 
 		require.True(t, balance(sender).Equal(decimal.NewFromInt(400)),
-			"the sender must be 100 poorer, got %s -- if this reads 600 the holder leg is inverted again", balance(sender))
+			"the sender must be 100 poorer, got %s -- if this reads 600 the holder entry is inverted again", balance(sender))
 		require.True(t, balance(receiver).Equal(decimal.NewFromInt(100)),
-			"the receiver must be 100 richer, got %s -- if this reads -100 the holder leg is inverted again", balance(receiver))
+			"the receiver must be 100 richer, got %s -- if this reads -100 the holder entry is inverted again", balance(receiver))
 	})
 
 	t.Run("a fee takes money from the payer", func(t *testing.T) {

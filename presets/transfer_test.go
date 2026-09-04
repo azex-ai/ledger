@@ -89,7 +89,7 @@ func TestTransferBundle_Idempotent(t *testing.T) {
 
 // assertBalanced verifies total debits equal total credits.
 //
-// ⚠️ On its own this says almost nothing about a template. Two legs sharing
+// ⚠️ On its own this says almost nothing about a template. Two entries sharing
 // one amount key are balanced whichever way round their entry types are, so
 // every preset whose only guard was this helper had its DIRECTION unchecked --
 // which is how three shipped presets went out with the sign reversed and how
@@ -113,15 +113,15 @@ func assertBalanced(t *testing.T, entries []core.EntryInput) {
 }
 
 // assertJournalEffect is the direction-aware assertion assertBalanced cannot
-// make: it resolves every leg's classification, applies the ledger's single
+// make: it resolves every entry's classification, applies the ledger's single
 // sign authority (core.SignedAmount, docs/INVARIANTS.md I-43) and compares the
 // resulting per-account effect against what the caller says the template is
 // supposed to DO.
 //
 // want is keyed "<classification code>/<user|system>" and valued as a decimal
 // string, signed: positive means "this account's balance goes up by that
-// much". Every leg of the journal must be accounted for and every declared
-// key must be produced, so adding or dropping a leg fails the test too.
+// much". Every entry of the journal must be accounted for and every declared
+// key must be produced, so adding or dropping an entry fails the test too.
 //
 // Writing expectations this way is deliberate: a reviewer reads "custodial
 // increases by 1000" rather than "entries[0].EntryType == credit", and the
@@ -162,7 +162,7 @@ func assertJournalEffect(
 		expected := decimal.RequireFromString(raw)
 		actual, ok := got[key]
 		if !ok {
-			t.Errorf("no leg touched %s (want effect %s); journal produced %v", key, expected, effectStrings(got))
+			t.Errorf("no entry touched %s (want effect %s); journal produced %v", key, expected, effectStrings(got))
 			continue
 		}
 		assert.Truef(t, expected.Equal(actual),
@@ -170,7 +170,7 @@ func assertJournalEffect(
 		delete(got, key)
 	}
 	for key, actual := range got {
-		t.Errorf("unexpected leg: %s moved by %s and the test did not declare it", key, actual)
+		t.Errorf("unexpected entry: %s moved by %s and the test did not declare it", key, actual)
 	}
 }
 

@@ -10,8 +10,8 @@ import (
 //
 // equity is DEBIT-normal, which is the opposite of what standard accounting's
 // A = L + E would suggest, and the reason is this ledger's own polarity rule
-// rather than a preference: a journal must satisfy sum(DR) == sum(CR), and a
-// leg increases its account when entry_type == normal_side (core.Sign,
+// rather than a preference: a journal must satisfy sum(DR) == sum(CR), and an
+// entry increases its account when entry_type == normal_side (core.Sign,
 // docs/INVARIANTS.md I-43 / I-50). Two accounts that both INCREASE in the
 // same journal must therefore carry OPPOSITE normal_sides. A capital
 // injection increases custodial and equity together, and custodial is
@@ -44,7 +44,7 @@ var capitalJournalTypes = []JournalTypePreset{
 //	capital_injection: CR custodial (system, +amount)  DR equity (system, +amount)
 //	capital_withdraw:  DR custodial (system, -amount)  CR equity (system, -amount)
 //
-// Both legs of an injection increase; both legs of a withdrawal decrease.
+// Both entries of an injection increase; both entries of a withdrawal decrease.
 // custodial is credit-normal and equity debit-normal, so "increase" reads CR
 // on one and DR on the other -- see capitalClassifications above for why the
 // polarities have to be opposite.

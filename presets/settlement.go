@@ -18,7 +18,7 @@ var settlementJournalTypes = []JournalTypePreset{
 	{Code: "checkout_settlement", Name: "Checkout Settlement", DisplayLabel: "Payment", HolderKind: core.HolderTxKindDeposit},
 }
 
-// settlementTemplates: merchant settlement with an optional fee leg.
+// settlementTemplates: merchant settlement with an optional fee entry.
 //
 // #### The one reading of "checkout settlement" this package has ####
 //
@@ -56,7 +56,7 @@ var settlementJournalTypes = []JournalTypePreset{
 // stays at zero through a settlement instead of drifting by one fee per
 // transaction. postgres/solvency_test.go pins that.
 //
-// There is no leg for gross_amount and there cannot be one: expressing
+// There is no entry for gross_amount and there cannot be one: expressing
 // "custodial +gross AND fees +fee" needs 2*fee of debits with no account to
 // put them against, because custodial and fees are both credit-normal (the
 // audit's proposed shape does not balance). gross is implied by net + fee, so
@@ -69,7 +69,7 @@ var settlementJournalTypes = []JournalTypePreset{
 var settlementTemplates = []TemplatePreset{
 	{
 		// Use when the platform fee is zero: the merchant receives the whole
-		// gross amount, so there is no fee leg and no fee_expense memo.
+		// gross amount, so there is no fee entry and no fee_expense memo.
 		Code:            "checkout_settlement_gross",
 		Name:            "Checkout Settlement (Gross)",
 		JournalTypeCode: "checkout_settlement",

@@ -84,7 +84,7 @@ var depositOnlyClassifications = []ClassificationPreset{
 // explicitly declared as such rather than leaving balance_role blank (see
 // docs/INVARIANTS.md I-37's addendum for why "no role" alone can no longer
 // mean that). Being memo also keeps it out of the holder's own statement
-// aggregate, which is what stops a fee's two holder-side legs netting to
+// aggregate, which is what stops a fee's two holder-side entries netting to
 // zero and hiding the charge from the user (holder.sql's balance_role
 // predicate, audit A-M3).
 var feeExpenseClassification = ClassificationPreset{
