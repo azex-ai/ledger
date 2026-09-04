@@ -512,7 +512,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | Hook | Signature | Endpoint |
 |------|-----------|----------|
 | `useClassifications` | `(activeOnly?: boolean)` | `GET /api/v1/classifications` |
-| `useCreateClassification` | `()` — body `{code, name, normal_side, is_system}` | `POST /api/v1/classifications` |
+| `useCreateClassification` | `()` — body `{code, name, normal_side, is_system, balance_role}` (`balance_role` is mandatory for a non-system classification; the server answers 400 without it) | `POST /api/v1/classifications` |
 | `useDeactivateClassification` | `()` — variables `id: string` | `POST /api/v1/classifications/{uid}/deactivate` |
 | `useJournalTypes` | `(activeOnly?)` | `GET /api/v1/journal-types` |
 | `useCreateJournalType` | `()` — body `{code, name}` | `POST /api/v1/journal-types` |

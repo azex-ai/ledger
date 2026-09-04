@@ -7,6 +7,7 @@ import {
   useCreateClassification,
   useDeactivateClassification,
 } from "../../hooks/use-metadata";
+import type { BalanceRole } from "../../client/types";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -31,7 +32,7 @@ import { useClientPage } from "../../lib/use-client-page";
 
 function CreateDialog() {
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean }>({ code: "", name: "", normal_side: "debit", is_system: false });
+  const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean; balance_role: BalanceRole }>({ code: "", name: "", normal_side: "debit", is_system: false, balance_role: "available" });
   // J-8 (2026-09-02 web audit): server-side field-level validation errors
   // (api-contract.md §1's message.fields — e.g. a duplicate `code`) used to
   // collapse into the same generic toast as any other error. No
@@ -86,6 +87,19 @@ function CreateDialog() {
                 <SelectItem value="credit">Credit</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="cls-balance-role">Balance Role</Label>
+            <Select value={form.balance_role} onValueChange={(v) => { if (v) setForm({ ...form, balance_role: v as BalanceRole }); }}>
+              <SelectTrigger id="cls-balance-role"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="available">Available — spendable funds</SelectItem>
+                <SelectItem value="pending">Pending — inbound, awaiting confirmation</SelectItem>
+                <SelectItem value="locked">Locked — held for an in-flight withdrawal</SelectItem>
+                <SelectItem value="memo">Memo — cost / memo account, not a liability</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">How this classification counts in a holder&apos;s balance breakdown. Required by the server.</p>
           </div>
         </div>
         <DialogFooter>
@@ -174,6 +188,7 @@ export function ClassificationsPage() {
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Normal Side</TableHead>
+              <TableHead>Balance Role</TableHead>
               <TableHead>System</TableHead>
               <TableHead>Active</TableHead>
               <TableHead>Actions</TableHead>
@@ -188,6 +203,7 @@ export function ClassificationsPage() {
                 <TableCell className="font-mono text-xs">{c.code}</TableCell>
                 <TableCell>{c.name}</TableCell>
                 <TableCell><StatusBadge status={c.normal_side} /></TableCell>
+                <TableCell className="text-xs">{c.balance_role || "—"}</TableCell>
                 <TableCell>{c.is_system ? "Yes" : "No"}</TableCell>
                 <TableCell><StatusBadge status={c.is_active ? "active" : "inactive"} /></TableCell>
                 <TableCell>

@@ -7,6 +7,7 @@ import {
   useCreateClassification,
   useDeactivateClassification,
 } from "../../hooks/use-metadata";
+import type { BalanceRole } from "../../client/types";
 import {
   AlertDialog,
   Button,
@@ -26,7 +27,7 @@ import { useClientPage } from "../../lib/use-client-page";
 
 function CreateClassificationModal() {
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean }>({ code: "", name: "", normal_side: "debit", is_system: false });
+  const [form, setForm] = useState<{ code: string; name: string; normal_side: "debit" | "credit"; is_system: boolean; balance_role: BalanceRole }>({ code: "", name: "", normal_side: "debit", is_system: false, balance_role: "available" });
   // J-8 (2026-09-02 web audit): see ClassificationsPage (shadcn skin)'s
   // matching comment — server-side field-level errors (api-contract.md §1's
   // message.fields) used to collapse into the same generic toast as any
@@ -39,7 +40,7 @@ function CreateClassificationModal() {
       onSuccess: () => {
         toast.success("Classification created");
         setOpen(false);
-        setForm({ code: "", name: "", normal_side: "debit", is_system: false });
+        setForm({ code: "", name: "", normal_side: "debit", is_system: false, balance_role: "available" });
       },
       onError: (err) => {
         const fields = apiFieldErrors(err);
@@ -112,6 +113,38 @@ function CreateClassificationModal() {
                   </ListBox>
                 </Select.Popover>
               </Select>
+              <Select
+                fullWidth
+                value={form.balance_role}
+                onChange={(v) => { if (typeof v === "string") setForm({ ...form, balance_role: v as BalanceRole }); }}
+              >
+                <Label>Balance Role</Label>
+                <Select.Trigger>
+                  <Select.Value />
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id="available" textValue="Available — spendable funds">
+                      Available — spendable funds
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                    <ListBox.Item id="pending" textValue="Pending — inbound, awaiting confirmation">
+                      Pending — inbound, awaiting confirmation
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                    <ListBox.Item id="locked" textValue="Locked — held for an in-flight withdrawal">
+                      Locked — held for an in-flight withdrawal
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                    <ListBox.Item id="memo" textValue="Memo — cost / memo account, not a liability">
+                      Memo — cost / memo account, not a liability
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+              <p className="text-muted text-xs">How this classification counts in a holder&apos;s balance breakdown. Required by the server.</p>
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" isDisabled={mutation.isPending} onPress={() => setOpen(false)}>Cancel</Button>
@@ -201,6 +234,7 @@ export function ClassificationsPage() {
                 <Table.Column>Code</Table.Column>
                 <Table.Column>Name</Table.Column>
                 <Table.Column>Normal Side</Table.Column>
+                <Table.Column>Balance Role</Table.Column>
                 <Table.Column>System</Table.Column>
                 <Table.Column>Active</Table.Column>
                 <Table.Column className="text-end">Actions</Table.Column>
@@ -214,6 +248,7 @@ export function ClassificationsPage() {
                     <Table.Cell className="font-mono text-xs">{c.code}</Table.Cell>
                     <Table.Cell>{c.name}</Table.Cell>
                     <Table.Cell><StatusChip status={c.normal_side} /></Table.Cell>
+                    <Table.Cell className="text-xs">{c.balance_role || "—"}</Table.Cell>
                     <Table.Cell>{c.is_system ? "Yes" : "No"}</Table.Cell>
                     <Table.Cell><StatusChip status={c.is_active ? "active" : "inactive"} /></Table.Cell>
                     <Table.Cell className="text-end">

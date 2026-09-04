@@ -246,8 +246,12 @@ describe("classifications", () => {
       name: "X",
       normal_side: "debit",
       is_system: false,
+      balance_role: "available",
     });
     expect(c.captured()?.auth).toBe(`Bearer ${API_KEY}`);
+    // The server refuses a non-system classification without balance_role
+    // (400 / 12003); the field must reach the wire, not just the type.
+    expect((c.captured()?.body as { balance_role?: string }).balance_role).toBe("available");
 
     const d = intercept(
       "post",

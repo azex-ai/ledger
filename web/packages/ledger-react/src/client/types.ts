@@ -116,6 +116,12 @@ export interface Event {
   occurred_at: string;
 }
 
+// Semantic liquidity tag of a classification in the holder-facing balance
+// breakdown (core.BalanceRole). "" is only valid for is_system
+// classifications; the server refuses a non-system classification that
+// does not declare one of the four named roles (INVARIANTS I-37 addendum).
+export type BalanceRole = "" | "available" | "pending" | "locked" | "memo";
+
 export interface Classification {
   uid: string;
   code: string;
@@ -123,6 +129,7 @@ export interface Classification {
   normal_side: "debit" | "credit";
   is_system: boolean;
   is_active: boolean;
+  balance_role: BalanceRole;
   // Absent (not present as `null`) for a label-only classification with no
   // lifecycle — classificationResponse.go: `*core.Lifecycle` with
   // `omitempty`, so Go's own JSON encoding drops the key entirely rather

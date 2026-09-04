@@ -377,6 +377,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
         name: string;
         normal_side: "debit" | "credit";
         is_system: boolean;
+        // Required on the wire for every non-system classification
+        // (ClassificationInput.Validate) -- without it the server answers
+        // 400 / 12003, so the type does not let a caller forget it.
+        balance_role: Classification["balance_role"];
       },
       idempotencyKey?: string,
     ) =>

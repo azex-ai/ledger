@@ -51,6 +51,34 @@ describe.each([
     expect(errorSpy).not.toHaveBeenCalled();
     expect(dangerSpy).not.toHaveBeenCalled();
   });
+
+  // Every non-system classification must declare a balance_role
+  // (core ClassificationInput.Validate); a body without it is a guaranteed
+  // 400 / 12003, so the create dialog must always put one on the wire.
+  test("the create body carries a balance_role", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    server.use(
+      getOk("/api/v1/classifications", []),
+      http.post(`${BASE}/api/v1/classifications`, async ({ request }) => {
+        capturedBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          code: 200,
+          message: null,
+          data: { uid: "cls-new", code: "main_wallet", name: "Main Wallet", normal_side: "debit", is_system: false, is_active: true, balance_role: "available", created_at: "2026-01-01T00:00:00Z" },
+        });
+      }),
+    );
+    renderPage(<Page />);
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    fireEvent.change(await screen.findByPlaceholderText("main_wallet"), { target: { value: "main_wallet" } });
+    fireEvent.change(screen.getByPlaceholderText("Main Wallet"), { target: { value: "Main Wallet" } });
+    const submitButtons = await screen.findAllByRole("button", { name: "Create" });
+    fireEvent.click(submitButtons[submitButtons.length - 1]);
+
+    await waitFor(() => expect(capturedBody).toBeDefined());
+    expect(capturedBody?.balance_role).toBe("available");
+    expect(capturedBody?.is_system).toBe(false);
+  });
 });
 
 describe("CurrenciesPage", () => {
@@ -73,7 +101,7 @@ describe("ClassificationsPage", () => {
   test("renders heading and classification rows", async () => {
     server.use(
       getOk("/api/v1/classifications", [
-        { id: 1, code: "main_wallet", name: "Main Wallet", normal_side: "debit", is_system: false, is_active: true },
+        { id: 1, code: "main_wallet", name: "Main Wallet", normal_side: "debit", is_system: false, is_active: true, balance_role: "available" },
       ]),
     );
     renderPage(<ClassificationsPage />);
