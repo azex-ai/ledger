@@ -5,7 +5,7 @@
 > 每条带 id / `file:line` / 修法 / pin 要求）。完整论证与最小复现在同目录各 territory 报告原文与
 > `lead-verification.md` —— **不要只看 TODO 的一行标题就动手**。
 >
-> **Status（2026-09-03）：Wave 4 进行中。** Aaron 授权 lead 按库的原则自行决定 §7.14 的信任边界项并确认 §7 全部口径（见 §7.18 §7.19）；Wave 4 两条合入后，进行**一轮独立 review + 对抗式审计（新 agent、无前情）**，通过后才考虑合并与发版。
+> **Status（2026-09-04）：DONE。** Aaron 授权 lead 按库的原则自行决定 §7.14 的信任边界项并确认 §7 全部口径（见 §7.18 §7.19）；Wave 4 两条已合入（`fd3ad25` `2c56d98` → `c854c6e`），随后的**独立 review + 对抗式审计（五个零前情 agent）**已完成并出 Wave 5 —— 契约 `2026-09-03-independent-review-contract.md` / `2026-09-03-wave5-contract.md`，结论见 `docs/audits/2026-09-03-independent-review/README.md`；发版评估交 Aaron。
 >
 > Aaron 2026-09-02 拍板：**全量修复**（6 Critical + 全部 Major + 全部 Minor）。
 > 沿用无外部消费方期的 no-compat 约定（lead 已核：两条产品线 go.mod 零引用），允许破坏性变更，

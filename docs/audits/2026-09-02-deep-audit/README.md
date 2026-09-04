@@ -1,7 +1,7 @@
 # 全代码库深度审计（第二轮）— 2026-09-02
 
 > 十个 territory 的只读审计 + lead 交叉分析。契约见 `docs/plans/2026-09-02-deep-audit-contract.md`。
-> 基线 commit `fd87cae`（0.6.0 之后，含 R2 anchor、I-42 符号权威收敛、三轮整改）。
+> 基线 commit `fd87cae`（0.6.0 之后，含 R2 anchor、I-43 符号权威收敛、三轮整改）。
 >
 > **本目录是审计当时的快照。** 各 territory 报告保持交付时原文；本 README 与 `lead-verification.md`
 > 是唯一随处置状态维护的两份。上一轮（2026-08-25）的方法与结论见
@@ -18,14 +18,14 @@
 | W3 复审 | money-path 3 攻破（1 Critical）+ gates 23 处盲区（3 Critical）→ 全部修复合入；M-5 经实跑升 Critical 并做了机制层 |
 | 新增契约 | I-49 … I-63；migration 016 … 027；`core.Metrics` 32→41；`docs/BREAKING.md`；openapi `x-required-scope` |
 | Wave 4 | Aaron 授权 lead 按原则决定：`ConfirmPending` 改 min(V,E)（它是洗白点，§7.20）；`enforce_min_balance` 保持并在 I-17 划定信任边界；hold 项做签名 receipt（方案 A，I-65，migration 028）；§7 全部口径确认（§7.19） |
-| 下一步 | 独立复审 + 对抗式审计（`docs/plans/2026-09-03-independent-review-contract.md`，五个零前情 agent），通过后才评估合并与发版 |
+| 独立复审（已完成 2026-09-04） | 五个零前情 agent（`docs/plans/2026-09-03-independent-review-contract.md`）+ 五份复核：原 Critical 零复发，复核新发现两条 Critical 已修并合入（migration 031 / 032，main `79ff80a`）。对照表见 `docs/audits/2026-09-03-independent-review/README.md`；发版评估交 Aaron |
 
 后续单列项（TODO 文末「Lead 追加」表标 W3 后续）：B-m12 sweep 锁复核、postgres 测试套件 211s、reconcile check 读 `config_table_changes`、pin 门禁追一层本地 helper 后升回 28 条 pin、min_balance 信任边界。
 
 
 Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contracts.md`，任务清单 `TODO.md`，lead 逐条证伪记录在 `lead-verification.md`。
 
-**Wave 1（六条 Critical + 契约层）已合入五条，第六条待 ff：**
+**Wave 1（六条 Critical + 契约层）六条全部合入：**
 
 | # | 处置 | 合入 | lead 证伪 |
 |---|---|---|---|
@@ -35,7 +35,7 @@ Aaron 拍板 **全量修复**。契约 `docs/plans/2026-09-02-remediation-contra
 | C-4 扫链失败推进游标 | 任何 ingest 失败不推进 + 死信 + wedged 告警（I-52）；扫描停在 reorg 可变链尖之后（I-53） | ff `0774ef3` | hold-cursor 守卫置 false 红 |
 | C-5 TxLogSeq 依赖地址集 | 改为 receipt 内零基位置，pin 经过 `FetchDeposits`；I-20 重写 | ff `0774ef3` | 随上 |
 | C-6 dev_credit 不在名单 | 模板保护改结构派生（任一腿落 is_system 分类即拒），`deposit-tolerance` 同闸 + admin scope（§7.11） | `0c86040` | 拆回 handler/routes 四 pin 红 |
-| W1-facade（默认与 clone 边界） | `Worker.Run` 在 NopLogger 下拒绝启动除非 opt-in；clone 逃逸四入口全堵；I-40 换 go/ast 门禁；I-54 | 待 ff | 守卫置 false 两 pin 红 |
+| W1-facade（默认与 clone 边界） | `Worker.Run` 在 NopLogger 下拒绝启动除非 opt-in；clone 逃逸四入口全堵；I-40 换 go/ast 门禁；I-54 | ff `34d6b57`（收口 `9eb2a19`） | 守卫置 false 两 pin 红 |
 
 Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径、`EventUID` 输入门、`EnableOnchain` 从不传 pool 使单飞锁全死、`advanceSweep` dispatch 分支绕过 GasCeiling。
 
@@ -58,7 +58,7 @@ Wave 1 的兄弟扫描额外挖出并修掉：`deposit-tolerance` 铸币路径�
 
 | 复审 | 结果 | 处置 |
 |---|---|---|
-| money-path（8 个攻击面） | 3 攻破 1 部分。**Critical：I-49 修了 `min(V,E)`，但被减掉的 hold 项读 `reservations` 可写列，一条 UPDATE 让闸对 1000 授权 2000**；另 `SolvencyCheck` / `enforce_min_balance` / `ConfirmPending` 仍读 checkpoint、未覆盖伪造 journal 自称 tx_mode 只 DRIFT、默认全关无 Warning、`unauthorized_journals` 一页一条签名即跳过其余、`Migrate` 窗口角色级、`event_uid` 冒领锁死无解除 | W3-holds ✅（闸内 hold = Σ 未过期 `reserved_amount`，不读任何结算声明；`Settle` 拒过期）；W3-fixes ✅（SolvencyCheck entries-only、未覆盖 entry 不看自称、StartupReport 五条 Warning、Complete = 全核、custodial scope 逐 code、`anchor_observations` owner 写入且拒超链高）；W3-fixes-2 ✅（M-3 owner-only 解除函数 migration 027；M-5 文档层：examples 拆 `MIGRATE_DATABASE_URL` + 静态门禁；**M-5 实跑定级 Critical**）；W3-migrate 进行中（M-5 机制层：迁移改专用连接 `SET ROLE`，窗口从角色级降到连接级，契约 §7.16）；M-1 / ConfirmPending / 签名 receipt → Aaron |
+| money-path（8 个攻击面） | 3 攻破 1 部分。**Critical：I-49 修了 `min(V,E)`，但被减掉的 hold 项读 `reservations` 可写列，一条 UPDATE 让闸对 1000 授权 2000**；另 `SolvencyCheck` / `enforce_min_balance` / `ConfirmPending` 仍读 checkpoint、未覆盖伪造 journal 自称 tx_mode 只 DRIFT、默认全关无 Warning、`unauthorized_journals` 一页一条签名即跳过其余、`Migrate` 窗口角色级、`event_uid` 冒领锁死无解除 | W3-holds ✅（闸内 hold = Σ 未过期 `reserved_amount`，不读任何结算声明；`Settle` 拒过期）；W3-fixes ✅（SolvencyCheck entries-only、未覆盖 entry 不看自称、StartupReport 五条 Warning、Complete = 全核、custodial scope 逐 code、`anchor_observations` owner 写入且拒超链高）；W3-fixes-2 ✅（M-3 owner-only 解除函数 migration 027；M-5 文档层：examples 拆 `MIGRATE_DATABASE_URL` + 静态门禁；**M-5 实跑定级 Critical**）；W3-migrate ✅（M-5 机制层：迁移改专用连接 `SET ROLE`，窗口从角色级降到连接级，契约 §7.16；残留窗口的实测 pin `da936d2`）；M-1 / ConfirmPending / 签名 receipt → Aaron |
 | gates（34 次 mutation） | 23 处盲区，3 Critical：路由 scope 降级全绿；pin 引用门禁 63 条只 10 条真红；破坏性变更门禁在 CI 恒绿 / 恒 skip | W3-citations ✅（白名单清空）；W3-gates-fixes ✅（23 处全关：路由→scope 门禁运行中间件链对照 openapi；pin 引用门禁白名单恒空、跳过登记制、money-path invariant 全部 blocking；破坏性变更门禁对照上一 release tag 且 `fetch-depth: 0`） |
 
 方法教训（进本 README 的正文）：契约 §0 的兄弟扫描仍被**形态描述**框住——C-1 的兄弟被写成「读了 checkpoint」，真正的形态是「决定放多少钱的算式里有项来自攻击者可写的表」，`reservations` 是第二项、receipt 表是第三项。下一轮的扫描要按「谁能写这张表」列算式的每一项，而不是按上一处 bug 的表名。

@@ -41,7 +41,7 @@ _ = svc.InstallDefaultPresets(ctx)             // deposit/withdrawal bundles
 
 r := chi.NewRouter()                           // your scaffold's router
 r.Get("/", yourOwnHandler)                     // your routes stay yours
-r.Handle("/api/v1/*", newLedgerAPI(svc, pool)) // ledger API mounted alongside
+r.Handle("/api/v1/*", newLedgerAPI(svc))       // ledger API mounted alongside
 ```
 
 Run it:

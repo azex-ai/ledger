@@ -15,6 +15,15 @@ codebase for the **Pinned by** identifier to find the test that pins it.
 - **Amount**: `decimal.Decimal` in Go, `NUMERIC(30,18)` in Postgres, JSON string.
 - **Journal**: a balanced set of debit/credit entries. Append-only. Identified
   by a unique `idempotency_key`.
+- **Migration numbers**: the schema's 53 original migrations were squashed into
+  a single `001_baseline` (commit `4740c74`), and numbering restarted from
+  `002`. `postgres/sql/migrations/` today holds `001_baseline` through `032`.
+  Sections below that cite a number above `032` — or a pre-squash *filename*
+  such as `045_mutation_guards` — are recording history that now survives only
+  in git and inside `001_baseline`; the mechanism they describe is in the
+  baseline. Where a low number is cited with a filename, the filename is what
+  disambiguates: today's `017` / `018` / `027` are not the pre-squash files of
+  those numbers.
 
 ---
 
@@ -33,7 +42,9 @@ is meaningless — debits and credits in different currencies are not comparable
   query (`postgres/sql/queries/journals.sql`) — one query per posted
   journal, in the same transaction as the entry inserts, before commit.
 - `check_journal_currency_balance()` deferred constraint trigger
-  (`postgres/sql/migrations/044_journal_balance_trigger.up.sql`) — the
+  (`trg_check_journal_currency_balance`, declared in
+  `postgres/sql/migrations/001_baseline.up.sql` section 12; it arrived
+  pre-squash as `044_journal_balance_trigger`) — the
   DB-layer backstop for direct SQL / a compromised app credential that
   bypasses everything above. The mechanism is in `001_baseline.up.sql`
   section 12 as amended by `030_guard_function_search_path.up.sql`; getting
@@ -756,11 +767,13 @@ default partition prevents that, and the read invariant must hold across
 partition boundaries.
 
 **Enforced by**:
-- Migration `004_ledger` declares partitioning.
-- Migration `010_default_partition` creates the catch-all.
-- Migration `037_journal_entries_monthly_partitions` moves historical rows
-  into named monthly partitions (`journal_entries_yYYYYmMM`) and pre-creates
-  a rolling horizon.
+- `postgres/sql/migrations/001_baseline.up.sql` — declares the partitioning,
+  creates the `journal_entries_default` catch-all, and pre-creates the named
+  monthly partitions (`journal_entries_yYYYYmMM`) with a rolling horizon. This
+  arrived pre-squash as three separate migrations (`004_ledger`,
+  `010_default_partition`, `037_journal_entries_monthly_partitions`, the last
+  of which also moved historical rows into the named partitions); today's
+  `004` and `010` are different migrations entirely — see Notation.
 - The worker's `partition` job (`service/partition.go` +
   `postgres/partition_store.go`) keeps the horizon `PartitionMonthsAhead`
   months ahead of the clock (advisory-locked, `PartitionInterval` cadence),
@@ -2735,8 +2748,11 @@ mismatch, mirroring I-26's existing treatment of an empty `auth_key_id`
   independent checks per seq: (1) live entries vs `batch_digest`/
   `merkle_root`, (2) stored `leaf_hash` values vs `merkle_root`, (3)
   root_hash self-consistency under the row's own version (v1 or v2).
-- `postgres/sql/migrations/048_ledger_attestations_merkle_root.up.sql` --
-  both columns additive, `NOT NULL DEFAULT ''::bytea`.
+- `postgres/sql/migrations/001_baseline.up.sql` -- both columns
+  (`ledger_attestations.merkle_root`, `entry_attestations.leaf_hash`)
+  `NOT NULL DEFAULT ''::bytea`. They arrived pre-squash as the additive
+  `048_ledger_attestations_merkle_root`, which is where the expand-safe
+  default and the `''` sentinel below come from (see Notation).
 
 **Pinned by** (`core/attestation_test.go` / `service/attest_verify_merkle_test.go`):
 - `core.TestAttestationRootHashV2_GenesisGoldenVector` /

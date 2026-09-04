@@ -593,7 +593,13 @@ exactly what a confirmed crypto deposit posts).
 ```go
 classStore := postgres.NewClassificationStore(pool)
 tmplStore := postgres.NewTemplateStore(pool)
-if err := presets.InstallCryptoDepositBundle(ctx, classStore, classStore, tmplStore); err != nil {
+// The journal-type port must be the adapter, not the ClassificationStore
+// itself: both types have a SetDisplayLabelIfEmpty with the same signature,
+// and the installer calls it on the journal-type side (presets/templates.go).
+// Passing classStore directly compiles and silently labels classifications
+// instead. `ledger.New` wires it the same way (see ledger.go's JournalTypes()).
+jtStore := postgres.JournalTypeStoreAdapter{ClassificationStore: classStore}
+if err := presets.InstallCryptoDepositBundle(ctx, classStore, jtStore, tmplStore); err != nil {
     return err
 }
 ```
@@ -791,6 +797,10 @@ key alone cannot forge a deposit and then approve its own review. See
 
 ```bash
 export DATABASE_URL="postgres://user:pass@localhost:5432/ledger_dev?sslmode=disable"
+# Optional but recommended: migrations on their own credential — without it the
+# example logs a warning and migrates on DATABASE_URL (README's Quick Start
+# Prerequisite, docs/RUNBOOK.md §9 "Database roles").
+export MIGRATE_DATABASE_URL="postgres://ledger_owner:pass@localhost:5432/ledger_dev?sslmode=disable"
 go run ./examples/credits-topup
 ```
 

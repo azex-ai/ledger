@@ -14,7 +14,8 @@ no registry config or auth token required:
 npm install @azex/ledger-react @tanstack/react-query
 ```
 
-Peer deps: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`.
+Peer deps: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`, plus
+`@heroui/react@^3` — optional, and only for the HeroUI skin below.
 
 ## Setup
 
@@ -81,6 +82,7 @@ import {
   JournalDetailPage,
   ReservationsPage,
   DepositsPage,
+  DepositReviewsPage,
   WithdrawalsPage,
   ClassificationsPage,
   JournalTypesPage,
@@ -88,6 +90,7 @@ import {
   CurrenciesPage,
   ReconciliationPage,
   SnapshotsPage,
+  SweepMonitorPage,
 } from "@azex/ledger-react";
 ```
 
@@ -143,7 +146,9 @@ Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
 
 Building on HeroUI v3 instead of the default shadcn-style components? The same
 admin surface (provider, `<LedgerAdmin/>`, all pages) ships as a second skin
-on the `./heroui` subpath, backed by the identical headless core:
+on the `./heroui` subpath, backed by the identical headless core — with the
+same chart split as the root barrel, so `DashboardPage` / `BalancesPage` come
+from `@azex/ledger-react/heroui/charts`:
 
 ```tsx
 import { LedgerAdmin, LedgerProvider } from "@azex/ledger-react/heroui";
@@ -181,7 +186,7 @@ stay on the same banding table instead of reimplementing it:
 `formatUTC`, `formatDateUTC`, `shortenAddress`, `shortenHash`, viem's
 `parseUnits`/`formatUnits` (and friends), plus the amount-string arithmetic
 helpers (`addAmounts`, `subAmounts`, `gtAmount`, `gteAmount`, `isZeroAmount`).
-Full reference: [`docs/frontend.md`](../../../docs/frontend.md#display--decimal-utilities).
+Full reference: [`docs/frontend.md`](../../../docs/frontend.md#display-and-decimal-utilities).
 
 ## End-user wallet — `@azex/ledger-react/wallet`
 
@@ -202,7 +207,7 @@ import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
 `POST /holder-tokens` or in-process `server.MintHolderToken`); it is called
 lazily and once more after a 401. Omit it behind a same-origin BFF.
 Components: `WalletPanel`, `WalletBalances`, `WalletBalanceCard`,
-`TransactionList`. HeroUI variant at `@azex/ledger-react/wallet/heroui`,
+`TransactionList`, `DepositAddressCard`. HeroUI variant at `@azex/ledger-react/wallet/heroui`,
 UI-free core (client + hooks) at `@azex/ledger-react/wallet/headless`.
 
 ## Theming
@@ -265,14 +270,23 @@ the `/server` RSC prefetch pattern with a Next.js `linkComponent` adapter.
 - **Root (`@azex/ledger-react`)** — `LedgerProvider`, `useLedgerClient`,
   `createLedgerClient`, all hooks (`useJournals`, `useBalances`,
   `useReservations`, …), `Sidebar`, `LEDGER_NAV_ITEMS`, `HealthCards`,
-  `RecentJournals`, `StatusBadge`, the 11 non-chart `*Page` components,
+  `RecentJournals`, `StatusBadge`, the 13 non-chart `*Page` components,
   `LedgerAdmin`, and `Toaster`.
 - **`@azex/ledger-react/charts`** — `DashboardPage`, `BalancesPage`,
   `BalanceTrend` (recharts-backed).
+- **`@azex/ledger-react/headless`** — the UI-free core both skins build on:
+  client, provider, every hook, and the display/decimal helpers.
+- **`@azex/ledger-react/heroui`** — the HeroUI v3 skin: same provider,
+  `LedgerAdmin` and 13 non-chart pages; **`./heroui/charts`** carries its
+  `DashboardPage` / `BalancesPage`.
+- **`@azex/ledger-react/wallet`** — the end-user wallet surface
+  (`WalletProvider`, `WalletPanel`, …), with `./wallet/heroui` and
+  `./wallet/headless` variants.
 - **`@azex/ledger-react/server`** (server-only) — `createServerLedgerClient`,
   the `prefetch*` helpers, and `ledgerKeys`. No `"use client"` directive; never
   import from a client component.
-- **`@azex/ledger-react/styles.css`** — bundled Tailwind styles.
+- **`@azex/ledger-react/styles.css`** / **`./heroui.css`** — the bundled
+  stylesheet for each skin.
 
 The complete API reference (per-hook signatures, endpoints, component props,
 prefetch helpers, query-key factory) lives in the repo at
@@ -292,6 +306,6 @@ version must match `package.json` — CI fails fast otherwise.
    git push --tags
    ```
 
-The workflow re-runs the full verify gate (typecheck, test, build, artifact
-assertions), asserts the tag matches `package.json`, then publishes to GitHub
-Packages.
+The workflow re-runs the full verify gate (`codegen:check` against
+`docs/openapi.yaml`, typecheck, test, build, artifact assertions), asserts the
+tag matches `package.json`, then publishes to the public npm registry.

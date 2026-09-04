@@ -902,9 +902,16 @@ Query: `holder` (int64), `status` (string), `cursor` (base64), `limit` (default 
   "name": "Main Wallet",
   "normal_side": "debit",
   "is_system": false,
+  "balance_role": "available",
   "lifecycle": null
 }
 ```
+
+`balance_role` (`available` / `pending` / `locked` / `memo`) is **required for
+every non-system classification** — `core.ClassificationInput.Validate` rejects
+an empty one with `400` / `10001`, because the role decides whether the money in
+that bucket is reservable (see [INVARIANTS I-25 / I-37](INVARIANTS.md) and the
+README's Core Concepts table). `is_system: true` classifications leave it unset.
 
 `lifecycle` is optional; `null` means the classification is label-only (cannot create bookings against it). When present, must be a valid finite-state machine: see `core/types.go#Lifecycle`.
 
@@ -1692,6 +1699,49 @@ provisions the caller's own receiving address.
 Status codes: `201`, `401`, `503` (crypto-deposit add-on not enabled).
 
 Auth: required, holder token.
+
+---
+
+## 19. Developer mode
+
+### POST /dev/credits
+
+Credits a holder with **no custodied asset behind it** — the developer-mode
+stand-in for a real deposit. Posts the `dev_credit` template
+(DR `main_wallet` holder / CR `dev_credit` system counterpart), so the funds
+land in the holder's available balance and can drive real downstream flows,
+while `GET /platform/solvency` counts the new liability with no offsetting
+asset and reports the shortfall — by design.
+
+Off by default: the route answers `503` / `18102` unless
+`Config.DevCreditEnabled` (`DEV_CREDIT_ENABLED=true`) is set, which
+`Config.Validate` only permits when `ENV=dev` — boot fails otherwise. The
+`dev_credit` bundle is also opt-in in library mode
+(`svc.InstallDevCreditPreset`), absent from both preset installers.
+
+Request:
+
+```json
+{
+  "holder_id": 1001,
+  "currency_uid": "cur-usdt",
+  "amount": "500.00",
+  "idempotency_key": "dev-credit:user1001:1",
+  "actor_id": 0,
+  "source": "dev",
+  "metadata": {}
+}
+```
+
+Response `201 Created`: journal object, same shape as `POST /journals`. The
+result is an ordinary journal — append-only, corrected only through
+`POST /journals/{uid}/reverse`.
+
+Status codes: `201`, `400` (non-positive or malformed `amount`), `422`, `503`
+(not enabled).
+
+Auth: required, **admin** scope — minting unbacked balance is a control-plane
+act, not a business write.
 
 ---
 

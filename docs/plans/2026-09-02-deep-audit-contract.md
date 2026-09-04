@@ -1,6 +1,6 @@
 # 全代码库深度审计（第二轮）— Phase 0 契约
 
-> 2026-09-02 · Status: **REPORTS DELIVERED — 待 Aaron 拍板处置**（十份报告 2026-09-02 全部交付，lead 复核记录见 `docs/audits/2026-09-02-deep-audit/lead-verification.md`）。原文：Status: OPEN · 基线 commit `fd87cae`（0.6.0 之后，含 R2 anchor / 符号权威收敛 / 三轮整改）。
+> 2026-09-02 · Status: **CLOSED**（十份报告 2026-09-02 全部交付，lead 复核记录见 `docs/audits/2026-09-02-deep-audit/lead-verification.md`；Aaron 当日拍板全量修复，Wave 1–4 整改已全部合入 —— 处置表见 `docs/audits/2026-09-02-deep-audit/README.md`，整改契约 `2026-09-02-remediation-contracts.md`，随后的独立复审见 `2026-09-03-independent-review-contract.md`）。原文：Status: OPEN · 基线 commit `fd87cae`（0.6.0 之后，含 R2 anchor / 符号权威收敛 / 三轮整改）。
 > 方法沿用 `2026-08-25-financial-audit-contract.md`（§1 纪律与 §3 产出格式**原文有效**，本文不复述），
 > 只重定 territory：上一轮之后代码变了一大块（防篡改链接线、I-42 符号权威、`journal_entries.id` 序列化、
 > `anchors/r2` 新模块、web 整改），且上一轮自己承认漏了「可运维性」与「链上资金路径」两个维度，本轮补成独立 territory。

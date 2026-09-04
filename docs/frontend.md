@@ -16,7 +16,7 @@ The repo's [`web/`](../web/) app is the working reference integration.
 
 ## Overview
 
-The package exposes **four entry points** (plus the `./wallet*` entries — see
+The package exposes **six entry points** (plus the `./wallet*` entries — see
 the [End-user wallet](#end-user-wallet) section below), each with a deliberate
 isolation boundary:
 
@@ -24,16 +24,21 @@ isolation boundary:
 |-------|-------------|----------|--------------|
 | Root | `@azex/ledger-react` | Client factory, provider, all hooks, sidebar/widgets, 13 non-chart page components, `LedgerAdmin`, `Toaster` | The default surface — shadcn-style skin |
 | Charts | `@azex/ledger-react/charts` | `DashboardPage`, `BalancesPage`, `BalanceTrend` | These statically import `recharts` (~275 KB); keeping them off the root barrel keeps recharts out of consumers' main bundle |
-| HeroUI | `@azex/ledger-react/heroui` | Same admin surface as the root barrel (all 15 pages, including the two chart pages — no separate `/charts` split here), rendered with HeroUI v3 components instead of shadcn. Shares the headless core | Alternative skin for hosts already on HeroUI v3 — see [HeroUI skin](#heroui-skin) |
+| Headless | `@azex/ledger-react/headless` | Client, wire types, provider, the full hook set, display/decimal helpers — no components, no styles | The UI-free core both skins build on; for hosts bringing their own UI (both skins re-export it, so a skin consumer needs no second import) |
+| HeroUI | `@azex/ledger-react/heroui` | The root barrel's 13 non-chart pages, `LedgerAdmin`, `Sidebar` and shared primitives, rendered with HeroUI v3 components instead of shadcn. Re-exports the headless core | Alternative skin for hosts already on HeroUI v3 — see [HeroUI skin](#heroui-skin) |
+| HeroUI charts | `@azex/ledger-react/heroui/charts` | `DashboardPage`, `BalancesPage` (HeroUI-skinned) | Same recharts isolation as the root `./charts`, mirrored for this skin |
 | Server | `@azex/ledger-react/server` | `createServerLedgerClient`, `prefetch*` helpers, `ledgerKeys` | Server-only (no `"use client"`); takes the **server API key**, which must never enter the client bundle |
 
 Plus `@azex/ledger-react/styles.css` (shadcn skin) and
 `@azex/ledger-react/heroui.css` (HeroUI skin) — the bundled stylesheets, scoped
 under `.ledger-root` (see [Theming](#theming)).
 
-**Peer dependencies**: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`.
-The package is framework-agnostic — no Next.js coupling; routing is injected
-via a `linkComponent` prop.
+**Peer dependencies**: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`,
+plus `@heroui/react@^3.2.0` as an **optional** peer
+(`peerDependenciesMeta`) — required only by the `./heroui` and
+`./wallet/heroui` skins; the shadcn skin and the headless entry never import
+it. The package is framework-agnostic — no Next.js coupling; routing is
+injected via a `linkComponent` prop.
 
 All amounts are **strings** (backend `NUMERIC(30,18)`), never `number`. The
 frontend only displays; the backend does all arithmetic.
@@ -260,10 +265,11 @@ inline style on the `.ledger-root` div):
 ## HeroUI skin
 
 `@azex/ledger-react/heroui` renders the same admin surface as the package
-root — all 15 pages, including the two chart pages (there is no separate
-`/charts` split on this entry) — with HeroUI v3 components instead of shadcn.
-It shares the exact same headless core (client, provider, hooks, `ledgerKeys`)
-as every other skin, so switching skins never touches your data layer.
+root — the 13 non-chart pages, with the two chart pages on
+`@azex/ledger-react/heroui/charts` (the same recharts split the root barrel
+makes, mirrored) — with HeroUI v3 components instead of shadcn. It shares the
+exact same headless core (client, provider, hooks, `ledgerKeys`) as every
+other skin, so switching skins never touches your data layer.
 
 Host contract:
 
@@ -348,17 +354,17 @@ dedicated hook (call these via `useLedgerClient()`):
 | System | `getHealth()`, `getSystemBalances()` |
 | Journals | `listJournals({cursor?, limit?})`, `getJournal(id)`, `postJournal(body)`, `postTemplateJournal(body)`, `reverseJournal(id, reason)` |
 | Entries | `listEntries({holder?, currency_uid?, cursor?, limit?})` |
-| Balances | `getBalances(holder)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyId)` |
+| Balances | `getBalances(holder)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyUid)` |
 | Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount)`, `settlePartialReservation(id, amount, idempotencyKey)`, `finalizeReservationSettlement(id)`, `releaseReservation(id)` |
 | Bookings | `createBooking(CreateBookingBody)`, `transitionBooking(id, TransitionBookingBody)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
 | Deposit address (admin) | `getDepositAddress(holder)`, `ensureDepositAddress(holder)` |
 | Deposit reviews | `listDepositReviews({cursor?, limit?})`, `approveDepositReview(uid)`, `rejectDepositReview(uid, reason)` |
-| Events | `getEvent(id)`, `listEvents({classification_code?, booking_id?, to_status?, cursor?, limit?})` |
+| Events | `getEvent(id)`, `listEvents({classification_code?, booking_uid?, to_status?, cursor?, limit?})` |
 | Classifications | `listClassifications(activeOnly?)`, `createClassification(body)`, `deactivateClassification(id)` |
 | Journal types | `listJournalTypes(activeOnly?)`, `createJournalType(body)`, `deactivateJournalType(id)` |
 | Templates | `listTemplates(activeOnly?)`, `createTemplate(body)`, `deactivateTemplate(id)`, `previewTemplate(code, params)` |
 | Currencies | `listCurrencies(activeOnly?)`, `createCurrency(body)`, `deactivateCurrency(id)` |
-| Reconciliation | `reconcileGlobal()`, `reconcileAccount(holder, currencyId)` |
+| Reconciliation | `reconcileGlobal()`, `reconcileAccount(holder, currencyUid)` |
 | Snapshots | `listSnapshots({holder?, currency_uid?, start?, end?})` |
 
 ## Provider
@@ -413,7 +419,7 @@ const mutation = useLedgerMutation((body) => client.postJournal(body), ["journal
 |------|-----------|--------------------|-------|
 | `useJournals` | `(limit = 20)` | Infinite query → `GET /api/v1/journals` | Cursor pagination via `next_cursor` |
 | `useJournal` | `(id: string)` | Query → `GET /api/v1/journals/{uid}` (`JournalWithEntries`) | `enabled: id !== ""`. Keyed `["ledger","journal",id]` (singular) so list-namespace invalidation doesn't refetch every detail page |
-| `usePostJournal` | `()` | Mutation → `POST /api/v1/journals` | Body: `{journal_type_id, idempotency_key, entries[], source?, metadata?}`. Invalidates `journals` |
+| `usePostJournal` | `()` | Mutation → `POST /api/v1/journals` | Body: `{journal_type_uid, idempotency_key, entries[], source?, metadata?}`. Invalidates `journals` |
 | `usePostTemplateJournal` | `()` | Mutation → `POST /api/v1/journals/template` | Body: `{template_code, holder_id, currency_uid, idempotency_key, amounts, source?}`. Invalidates `journals` |
 | `useReverseJournal` | `()` | Mutation → `POST /api/v1/journals/{uid}/reverse` | Variables: `{id, reason}`. Invalidates `journals` |
 | `useEntries` | `(params: {holder?, currency_uid?}, limit = 50)` | Infinite query → `GET /api/v1/entries` | `enabled: params.holder !== undefined && params.holder !== 0` |
@@ -424,21 +430,21 @@ const mutation = useLedgerMutation((body) => client.postJournal(body), ["journal
 |------|-----------|--------------------|-------|
 | `useBalances` | `(holder: number)` | Query → `GET /api/v1/balances/{holder}` (`Balance[]`) | `enabled: holder !== 0`; **polls every 15 s** |
 | `useBalanceBreakdown` | `(holder, currency)` | Query → `GET /api/v1/balances/{holder}/{currency}/breakdown` | `enabled: holder !== 0 && currency !== ""`; polls every 15 s |
-| `useBalancesByCurrency` | `(holder, currency)` | Query → `GET /api/v1/balances/{holder}/{currency}` | `enabled: holder !== 0 && currency > 0`; polls every 15 s |
+| `useBalancesByCurrency` | `(holder, currency: string)` | Query → `GET /api/v1/balances/{holder}/{currency}` | `enabled: holder !== 0 && currency !== ""` (currency is a uid); polls every 15 s |
 
 ### Deposits — `src/hooks/use-deposits.ts`
 
 Deposits are bookings under the classification with code `"deposit"`. The
-classification id is resolved at runtime from a shared, long-cached
+classification **uid** is resolved at runtime from a shared, long-cached
 (`staleTime: 5 min`) classifications query.
 
 | Hook | Signature | Returns / Endpoint | Notes |
 |------|-----------|--------------------|-------|
-| `useDepositClassificationId` | `()` | `number` | Returns `0` (falsy) until classifications load |
-| `useDeposits` | `(params: {holder?, status?})` | Query → `GET /api/v1/bookings?classification_uid=…` (`Booking[]`) | `enabled: classificationId > 0` |
-| `useConfirmingDeposit` | `()` | Mutation → transition `pending → confirming` | Variables: `{id, channelRef}` (external tx ref) |
-| `useConfirmDeposit` | `()` | Mutation → transition `confirming → confirmed` | Variables: `{id, actual_amount, channel_ref}` — actual amount may differ from expected within tolerance |
-| `useFailDeposit` | `()` | Mutation → transition `→ failed` | Variables: `{id, reason}` (stored in metadata) |
+| `useDepositClassificationId` | `()` | `string` | The classification uid; `""` (falsy) until classifications load |
+| `useDeposits` | `(params: {holder?, status?}, limit = 20)` | Infinite query → `GET /api/v1/bookings?classification_uid=…` | `enabled: classificationUid !== ""`; flatten `data?.pages.flatMap((p) => p.list)` |
+| `useConfirmingDeposit` | `()` | Mutation → transition `pending → confirming` | Variables: `{id: string, channelRef, idempotencyKey}` (external tx ref) |
+| `useConfirmDeposit` | `()` | Mutation → transition `confirming → confirmed` | Variables: `{id: string, actual_amount, channel_ref, idempotencyKey}` — actual amount may differ from expected within tolerance |
+| `useFailDeposit` | `()` | Mutation → transition `→ failed` | Variables: `{id: string, reason}` (stored in metadata) |
 
 All transitions hit `POST /api/v1/bookings/{uid}/transition` and invalidate
 the `bookings` namespace.
@@ -475,14 +481,14 @@ not terminal.
 
 | Hook | Signature | Transition | Notes |
 |------|-----------|-----------|-------|
-| `useWithdrawClassificationId` | `()` | — | Returns `0` until classifications load |
-| `useWithdrawals` | `(params: {holder?, status?})` | — | Query (`Booking[]`), `enabled: classificationId > 0` |
-| `useReserveWithdraw` | `()` | `→ reserved` | Variables: `id: number` |
-| `useReviewWithdraw` | `()` | `→ processing` (approved) / `→ failed` (rejected) | Variables: `{id, approved: boolean}` |
-| `useProcessWithdraw` | `()` | `→ processing` | Variables: `{id, channelRef}` |
-| `useConfirmWithdraw` | `()` | `→ confirmed` | Variables: `id: number` |
-| `useFailWithdraw` | `()` | `→ failed` | Variables: `{id, reason}` |
-| `useRetryWithdraw` | `()` | `failed → reserved` | Variables: `id: number` |
+| `useWithdrawClassificationId` | `()` | — | The classification uid; `""` until classifications load |
+| `useWithdrawals` | `(params: {holder?, status?}, limit = 20)` | — | Infinite query, `enabled: classificationUid !== ""` |
+| `useReserveWithdraw` | `()` | `→ reserved` | Variables: `id: string` |
+| `useReviewWithdraw` | `()` | `→ processing` (approved) / `→ failed` (rejected) | Variables: `{id: string, approved: boolean}` |
+| `useProcessWithdraw` | `()` | `→ processing` | Variables: `{id: string, channelRef, idempotencyKey}` — payload-keyed, because the transition receipt matches on `channel_ref` |
+| `useConfirmWithdraw` | `()` | `→ confirmed` | Variables: `id: string` |
+| `useFailWithdraw` | `()` | `→ failed` | Variables: `{id: string, reason}` |
+| `useRetryWithdraw` | `()` | `failed → reserved` | Variables: `id: string` |
 
 ### Sweeps — `src/hooks/use-sweeps.ts`
 
@@ -512,7 +518,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | `useCreateJournalType` | `()` — body `{code, name}` | `POST /api/v1/journal-types` |
 | `useDeactivateJournalType` | `()` — variables `id` | `POST /api/v1/journal-types/{uid}/deactivate` |
 | `useTemplates` | `(activeOnly?)` | `GET /api/v1/templates` |
-| `useCreateTemplate` | `()` — body `{code, name, journal_type_id, lines[]}` | `POST /api/v1/templates` |
+| `useCreateTemplate` | `()` — body `{code, name, journal_type_uid, lines[]}` | `POST /api/v1/templates` |
 | `useDeactivateTemplate` | `()` — variables `id` | `POST /api/v1/templates/{uid}/deactivate` |
 | `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_uid, ...amounts}` | `POST /api/v1/templates/{code}/preview` (returns `PreviewResult`, no invalidation — read-only preview) |
 | `useCurrencies` | `(activeOnly?)` | `GET /api/v1/currencies` |
@@ -523,9 +529,9 @@ invalidates its own namespace only (metadata changes don't move balances).
 
 | Hook | Signature | Endpoint | Notes |
 |------|-----------|----------|-------|
-| `useReservations` | `(params: {holder?, status?})` | `GET /api/v1/reservations` | |
-| `useSettleReservation` | `()` — variables `{id, actualAmount: string}` | `POST /api/v1/reservations/{uid}/settle` | Invalidates `reservations` (+ balances) |
-| `useSettlePartialReservation` | `()` — variables `{id, amount, idempotencyKey}` | `POST /api/v1/reservations/{uid}/settle-partial` | Invalidates `reservations` (+ balances) |
+| `useReservations` | `(params: {holder?, status?, limit?})` | `GET /api/v1/reservations` | Infinite query — flatten `data?.pages.flatMap((p) => p.list)` |
+| `useSettleReservation` | `()` — variables `{id, actualAmount: string, idempotencyKey}` | `POST /api/v1/reservations/{uid}/settle` | Payload-keyed idempotency (the server receipt matches on the amount, so the key must change when the amount is corrected). Invalidates `reservations` (+ balances) |
+| `useSettlePartialReservation` | `()` — variables `{id, amount, idempotencyKey}` | `POST /api/v1/reservations/{uid}/settle-partial` | Same payload-keyed rule. Invalidates `reservations` (+ balances) |
 | `useFinalizeReservationSettlement` | `()` — variables `id: string` | `POST /api/v1/reservations/{uid}/finalize` | Closes out a reservation after one or more partial settlements. Invalidates `reservations` (+ balances) |
 | `useReleaseReservation` | `()` — variables `id: string` | `POST /api/v1/reservations/{uid}/release` | Invalidates `reservations` (+ balances) |
 
@@ -536,7 +542,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | `useHealth` | `()` | `GET /api/v1/system/health` (`HealthStatus`) | **Polls every 10 s** |
 | `useSystemBalances` | `()` | `GET /api/v1/system/balances` (`SystemBalance[]`) | |
 | `useReconcileGlobal` | `()` | Mutation → `POST /api/v1/reconcile` (`ReconcileResult`) | Plain mutation, no invalidation |
-| `useReconcileAccount` | `()` — variables `{holder, currencyId}` | Mutation → `POST /api/v1/reconcile/account` | Plain mutation, no invalidation |
+| `useReconcileAccount` | `()` — variables `{holder, currencyUid}` | Mutation → `POST /api/v1/reconcile/account` | Plain mutation, no invalidation |
 | `useSnapshots` | `(params: {holder?, currency_uid?, start?, end?})` | `GET /api/v1/snapshots` (`Snapshot[]`) | `enabled: params.holder !== undefined && params.holder !== 0` |
 
 ## Components
@@ -563,7 +569,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 ### Page components
 
 Thirteen non-chart pages on the root barrel, two chart pages on `/charts`
-(the same 15 are all on the single `/heroui` entry — see
+(the HeroUI skin mirrors both barrels: `/heroui` and `/heroui/charts` — see
 [HeroUI skin](#heroui-skin)). All are `"use client"`
 components that fetch their own data through the hooks — mount inside
 `<LedgerProvider>` and they work.
@@ -571,7 +577,7 @@ components that fetch their own data through the hooks — mount inside
 | Component | Entry | Props |
 |-----------|-------|-------|
 | `JournalsPage` | root | `{ linkComponent?: LinkComponent }` |
-| `JournalDetailPage` | root | `{ id: number; linkComponent?: LinkComponent }` — host extracts `id` from its route param |
+| `JournalDetailPage` | root | `{ id: string; linkComponent?: LinkComponent }` — the journal **uid**, which the host extracts from its route param |
 | `ReservationsPage` | root | none |
 | `DepositsPage` | root | none |
 | `DepositReviewsPage` | root | none — approve/reject queue for bookings held in `review` status (M3 compensating control); optimistic list removal on approve/reject, rolled back on error |
@@ -736,13 +742,58 @@ this is the orientation map:
 
 | Group | Types | Key fields |
 |-------|-------|-----------|
-| Journals | `Journal`, `Entry`, `JournalWithEntries` | `total_debit`/`total_credit`/`amount` are strings; `Journal.reversal_of: number \| null` |
+| Journals | `Journal`, `Entry`, `JournalWithEntries` | `total_debit`/`total_credit`/`amount` are strings; `Journal.reversal_of_uid?: string` (absent = not a reversal) |
 | Balances | `Balance`, `SystemBalance` | `(account_holder, currency_uid, classification_uid)` dimensions; `balance: string` |
-| Bookings | `Booking`, `Event`, `CreateBookingBody`, `TransitionBookingBody`, `ListBookingsParams` | `Booking.reservation_id`/`journal_id` are `number \| null` (not yet linked); lifecycle governed by the classification |
+| Bookings | `Booking`, `Event`, `CreateBookingBody`, `TransitionBookingBody`, `ListBookingsParams` | `Booking.reservation_uid?`/`journal_uid?` are absent (not `""`) until linked; `expires_at: string \| null`; lifecycle governed by the classification |
 | Reservations | `Reservation` | `status: "active" \| "settling" \| "settled" \| "released"` |
 | Metadata | `Classification`, `Lifecycle`, `JournalType`, `EntryTemplate`, `TemplateLine`, `Currency` | `Classification.lifecycle: Lifecycle \| null` (null = label-only) |
 | System | `HealthStatus`, `ReconcileResult`, `Snapshot` | |
-| Plumbing | `ApiError`, `PaginatedResponse<T>`, `PreviewResult` | `PaginatedResponse = { data: T[]; next_cursor: string }` |
+| Plumbing | `ApiError`, `PaginatedResponse<T>`, `PreviewResult` | `PaginatedResponse = { list: T[]; next_cursor?: string }` (absent/empty = exhausted) |
+
+## Display and decimal utilities
+
+Every amount on the wire is a raw `NUMERIC(30,18)` **string** — never parse it
+as a `number`. So the same formatters the shipped UI uses are exported from
+`./headless` (and therefore from the root and `./heroui` barrels, which
+re-export it) and from `./wallet/headless` (and therefore `./wallet` and
+`./wallet/heroui`), so a host building its own components stays on one banding
+table instead of reimplementing it. `cn` (a Tailwind class-merge helper) and
+`useCopyToClipboard` (a DOM hook) are deliberately **not** on the headless
+surfaces; the `./charts` and `./server` entries do not carry these helpers.
+
+### Amount display — `formatAmount(value: string): string`
+
+The `financial.md` banding table, applied on BigInt comparisons (viem-parsed,
+so no precision loss):
+
+| Magnitude | Rendering | Example |
+|---|---|---|
+| `>= 1000` | 1 decimal + thousands separators | `"72,845.3"` |
+| `>= 1` | 4 decimals | `"1.2345"` |
+| `>= 0.01` | 5 decimals | `"0.01234"` |
+| `>= 0.0001` | 6 decimals | `"0.000123"` |
+| `< 0.0001` | subscript notation | `"0.0₆7120"` |
+| zero | `"0.00"` | |
+| `""` (absent, not zero) | `"—"` | |
+
+The four digits after the subscript come from a fixed 18-decimal
+representation, so a value with fewer meaningful digits is right-padded
+(`"0.000000712"` → `0.0₆7120`, not `…712`) — pre-existing, documented in
+`display.ts` rather than changed.
+
+### The rest
+
+| Helper | Signature | Notes |
+|---|---|---|
+| `formatSignedAmount` | `(value) => { text, isPositive, isNegative }` | `text` is `formatAmount(value)`; the two booleans are for colouring PnL-style rows. Unparseable input passes through as-is |
+| `formatCompact` | `(value) => string` | Dashboard-scale only, **not** a banded precise amount: `"1.23M"` / `"45.7K"` / `"1.50B"`, falling back to `formatAmount` under 1000. Self-clamps at ~1e15 before its lossy `Number` conversion |
+| `validateAmount` | `(value) => string \| null` | Form-input validation against `NUMERIC(30,18)`: `null` = valid; otherwise a user-readable message (required / format / max 12 integer digits / max 18 decimals / must be greater than zero) |
+| `formatUTC` / `formatDateUTC` | `(isoString) => string` | Always UTC, `formatUTC` with an explicit `UTC` suffix (`"Apr 25, 2026, 08:30:00 UTC"`) — operators across regions must not read a local offset |
+| `addAmounts` / `subAmounts` / `gtAmount` / `gteAmount` / `isZeroAmount` | `(a, b, decimals = 18)` | Amount-string arithmetic and comparison via BigInt; results come back as strings, so no float ever touches an amount |
+| `leadingZeros` / `significantDigits` | `(value: bigint, decimals = 18)` | The primitives behind the subscript branch above |
+| `parseUnits` / `formatUnits` / `parseEther` / `formatEther` / `parseGwei` / `formatGwei` | viem re-exports | Re-exported so a consumer needs no direct viem dependency; prefer viem-style usage for anything the helpers above don't cover |
+| `getAddress` / `isAddress` / `isAddressEqual` | viem re-exports | Checksumming + validation (relevant for the CREATE2 deposit addresses) |
+| `shortenAddress` / `shortenHash` | `(value, chars = 4) => string` | `"0x8ba1...DBA72"` display form |
 
 ## Design notes
 

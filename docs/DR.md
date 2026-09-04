@@ -119,8 +119,11 @@ harmless evidence-wise (it advances the *check's own* bookkeeping, not
 ledger data), but if you are examining a database that is itself under
 forensic hold for an unrelated incident, run `reconcile --full` (and only
 that command) against a **clone**, per the same rule any other write tool
-would follow. Every other `ledger-cli` command (`solvency`, `journals`,
-`balance`, `trace`, ...) only reads.
+would follow. Two other commands also write, and neither is part of this
+verification: `rollup reset-claim` and `reorgs resolve` are the tool's two
+deliberate operator write actions (see `cmd/ledger-cli/main.go`'s package
+doc). Every command this section uses (`solvency`, `journals`, `balance`,
+`trace`, ...) only reads.
 
 ```bash
 export DATABASE_URL=<restored instance>
@@ -199,8 +202,8 @@ Results:
   drill validated the *mechanism* reads correctly, not a live-lag figure.
 - **Verification (§5)**: `ledger-cli reconcile --full` — **every runnable
   check `passed: true`**, `overall_passed: true` (a literal check count
-  is deliberately not given here: the suite has grown from 13 to 15 checks
-  since this drill was run, and would drift again — see
+  is deliberately not given here: the suite has kept growing since this
+  drill was run, and any number written down would drift again — see
   `TestReconcileFullFlagUsage_DoesNotHardcodeACheckCount`).
   `full_coverage: false` at drill time (2026-08-26) because `reconcile --full`
   had no flag to wire an `AuthVerifier` at all, so `unauthorized_journals`
@@ -240,7 +243,7 @@ two triggers for the cross-partition duplicate-`id` risk it closes for
 the table has already seen in an older partition." Only the first is
 guarded by 008 (a column-level `GRANT` that blocks `ledger_app` specifically
 from naming `id`). This drill tested the second claim directly, since
-nothing in this repo — not `DR.md` §4, not `reconcile`'s 13 checks — ever
+nothing in this repo — not `DR.md` §4, not any of `reconcile`'s checks — ever
 checks sequence health, so if the claim is true it's a live, unguarded gap.
 
 **Verdict: the claim does not hold for either restore path this repo

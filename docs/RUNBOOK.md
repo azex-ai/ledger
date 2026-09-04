@@ -127,9 +127,11 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   The finding logs the offending `journal_id`/`currency_id` internally (never
   in the report itself, I-18) — check server logs for
   `"service: reconcile: unbalanced journal sample"`. Post a reversal for that
-  journal; do not touch `journal_entries` directly. If this fires at all on a
-  journal newer than migration `044`, treat it as a security incident: the
-  DB-layer trigger should have rejected the insert outright.
+  journal; do not touch `journal_entries` directly. If this fires at all,
+  treat it as a security incident: the DB-layer trigger
+  (`trg_check_journal_currency_balance`, `001_baseline.up.sql` section 12, as
+  rewritten by `030` and `031` — see INVARIANTS I-24/I-68) should have
+  rejected the insert outright.
 - **`settlement_netting`** — usually a stuck FX or transfer journal
   (one side posted, the other didn't). Check `journals` table for orphan
   half-pair on the `settlement` classification.
@@ -461,8 +463,10 @@ the worker itself is slow / stopped.
 
 ## 5. Webhook delivery backlog
 
-**Alert source**: rising count of events with `attempts > 3` and
-`next_attempt_at < now()`.
+**Alert source**: rising count of events with `attempts >= 5` and
+`next_attempt_at < now()` — i.e. events well into the backoff schedule but
+not yet parked (`events.max_attempts` defaults to 10; at that point the
+deliverer marks the event `dead`, see "Dead-letter handling" below).
 
 **Severity**: P2. Consumers are not getting events; ledger correctness
 unaffected.
@@ -2123,8 +2127,13 @@ verifier, err := authdev.NewLocalVerifierSet(map[string]ed25519.PublicKey{
 })
 ```
 
-`ledger-cli verify` takes the same set: pass `--pubkey` once per key, as
-`keyID:hex` (repeatable).
+`ledger-cli verify` does **not** take the set: it wires a single-key verifier
+from `--pubkey-hex <hex> --key-id <id>` (both required, neither repeatable —
+`cmd/ledger-cli/main.go`'s `cmdVerify`), so mid-rotation it can only be run
+against one generation at a time. Its journal-signature sample is the most
+recent journals, so run it with the key those were signed under; a chain-wide
+multi-key verification has to go through `service.VerifyLedger` with an
+`authdev.NewLocalVerifierSet` from your own tooling.
 
 Three things an operator has to know before rotating:
 

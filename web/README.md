@@ -42,8 +42,9 @@ server-held key.
 
 ## Getting Started
 
-Start the backend (from the repo root: `docker compose up --build`, or run
-`examples/fullstack/backend` against a local PostgreSQL), then:
+This repository ships no server binary: bring your own host application, or
+run `examples/fullstack/backend` against a local PostgreSQL (`docker compose up
+-d postgres` from the repo root starts the database and nothing else). Then:
 
 ```bash
 npm install
@@ -51,7 +52,9 @@ npm run dev
 ```
 
 Open <http://localhost:3000>. Without env config the app targets
-`http://localhost:8080` in development.
+`http://localhost:8080` in development, so point it at the fullstack example's
+port with `LEDGER_API_URL_INTERNAL=http://localhost:8090` (or start that
+example with `HTTP_PORT=8080`).
 
 The `@azex/ledger-react` package itself lives in
 [`packages/ledger-react/`](packages/ledger-react/) and is consumed here via

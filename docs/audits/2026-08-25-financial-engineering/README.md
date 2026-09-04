@@ -32,7 +32,7 @@
 | **Wave 1** | 契约层三条：终态操作幂等键、`BalanceCheckpoint` uid 化 + I-18 门禁重建、错误分类（bizcode 14010 + 瞬时可重试） | 已合入 |
 | **Wave 1.5** | Aaron 拍板恢复被弱化的两条不变式：`Transition` 幂等键改必填（I-3 恢复全称）、id-keyed checkpoint 类型移出 `core`（I-18 恢复原措辞） | 已合入 |
 | **Wave 2** | 八个域并行：记账正确性 / 锁与键空间 / 防篡改接线 / DB 角色与守卫 / HTTP 与契约面 / 可观测与链上 / 文档与 examples / 测试可信度 | 已合入 |
-| **Wave 3** | 符号语义收敛、`journal_entries.id` 跨分区不唯一、发版收口 | 进行中 |
+| **Wave 3** | 符号语义收敛（migration 009，`15d110e`，merge `5a4570e`）、`journal_entries.id` 跨分区不唯一（migration 008，`4eab202`）、发版收口 | 已合入 |
 
 **这一轮真正的产出不是「修了 N 条」，是把「靠人记得」换成了「机器会拦」**：
 
@@ -199,7 +199,16 @@ C2 里我实测成功的那条攻击（改 `deposit_addresses.account_holder`）
 
 > **C2 修复后的现状**（`7ec13ff`）：上面那句「没有 trigger」已不成立 —— 四张配置表现在有
 > append-only 守卫，那条 UPDATE 会被**拒绝**。但可见性一分没变：**拒绝本身不留痕迹**，
-> 一次失败的攻击尝试与从未发生仍然没有区别。本节要的审计列/变更表仍未落地，见 `TODO.md` §9。
+> 一次失败的攻击尝试与从未发生仍然没有区别。
+>
+> **本节要的变更表已落地**（写于 2026-08-26 14:58 之后）：append-only 的
+> `config_table_changes`（全行 `to_jsonb(OLD)`/`(NEW)` 差异 + `changed_by`）与
+> `currencies` / `classifications` / `journal_types` / `entry_templates` 的 AFTER UPDATE
+> 审计由 migration 006 加入（`816481f`）；migration 020（`7b60ec0`，invariant I-58）把审计
+> trigger 改成**从目录派生**，于是本表其余两张（`entry_template_lines`、`deposit_addresses`）
+> 也被覆盖，且审计表只能经 trigger 写。**仍未落地的只剩「业务 actor 归因」**——`changed_by`
+> 是 `current_user`（各部署恒为 `ledger_app`），规则表本身仍无 `actor_id` / `updated_at`
+> 列（migration 006 头注已声明这超出它的文件范围）。「拒绝不留痕迹」也仍成立。
 
 ## 4. 流程数据点（不是代码发现，但值得记）
 
@@ -222,7 +231,7 @@ C2 里我实测成功的那条攻击（改 `deposit_addresses.account_holder`）
 | C3 | T4 缓存判定是否保留 | **保留，但缓存 Authorized 不再跳过 live check** | `51afad8` |
 | C5 | 修 example 还是改 `Settle` 语义 | **修 example**（`examples/billing` 进 `RunInTx` 并断言余额） | `6eecc7c` |
 | C6 | `balance_role` 跃迁是否需要额外授权 | **有历史的分类不得升为可支配**（`004_balance_role_upgrade_guard`） | `305d6f3` |
-| — | §3 的审计盲区是否补（规则表加 `updated_at` + actor + 变更表） | **仍未做** —— 唯一一条拍了「建议补」却没落地的 | `TODO.md` §9 |
+| — | §3 的审计盲区是否补（规则表加 `updated_at` + actor + 变更表） | **变更表已补**（`config_table_changes` + 从目录派生的 AFTER UPDATE 审计，覆盖本表六张规则表）；**规则表自己的 `actor_id` / `updated_at` 列仍未做** | migration 006 `816481f` / migration 020 `7b60ec0`（I-58）；见 `TODO.md` §9 |
 
 ⚠️ C1 的拍法解决的是「谁来装配」，**没有**解决「库模式下四步接线全靠消费方自觉」——
 那部分仍然开着，见 `TODO.md` §3。
