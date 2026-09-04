@@ -2163,7 +2163,7 @@ sits in its lifecycle indefinitely.
 **How it happens**: `event_uid` is a caller-supplied link and I-51 rule 4 only
 requires the claiming journal to touch the booking's
 `(account_holder, currency)` — deliberately weak, because amounts and
-classifications legitimately vary across fees, spreads and multi-leg
+classifications legitimately vary across fees, spreads and multi-entry
 settlements. A buggy caller (or a credential with write scope) can therefore
 take the link with any journal at all, and both `events.journal_id` and
 `bookings.journal_id` are set-once. Journals are append-only, so the claimant

@@ -393,8 +393,8 @@ func main() {
 // verbatim AND then executes the template it defines.
 //
 // M-12 (W3 adversarial review of the gates): the reviewer changed this
-// block's second leg to read a different AmountKey than its first. It still
-// compiles, and CreateTemplate still succeeds -- the two legs are only
+// block's second line to read a different AmountKey than its first. It still
+// compiles, and CreateTemplate still succeeds -- the two lines are only
 // reconciled when the template is RENDERED, which is when a reader following
 // the README discovers their promo grant cannot be posted. Creating the
 // template is therefore not enough to pin the recipe; executing it is.
@@ -461,7 +461,7 @@ func main() {
 ` + block + `
 	// --- end README block ---
 
-	// Now USE it, which is the half a create-only check cannot see: a leg
+	// Now USE it, which is the half a create-only check cannot see: a line
 	// whose AmountKey no caller supplies renders as an unbalanced (or
 	// missing-parameter) journal, and only here does that surface.
 	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "promo_grant", core.TemplateParams{

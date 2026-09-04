@@ -89,8 +89,8 @@ func TestSnapshotSparse_SameBalanceTwoDays(t *testing.T) {
 //
 // All three inserts run in one explicit transaction: migration 044's
 // deferred per-journal balance trigger defers to the END OF THE CURRENT
-// TRANSACTION, so if the debit and credit legs were each their own
-// autocommitted statement (as this helper used to do), the debit leg would
+// TRANSACTION, so if the debit and credit entries were each their own
+// autocommitted statement (as this helper used to do), the debit entry would
 // commit alone -- unbalanced on its own -- and the trigger would correctly
 // reject it. Real journal posts (postgres.LedgerStore.PostJournal) already
 // write every entry inside one transaction; this helper now matches that.

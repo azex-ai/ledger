@@ -187,7 +187,7 @@ func run() error {
 
 	// ---------------------------------------------------------------------
 	// 5. Forge a journal the way an attacker with DATABASE_URL would: direct
-	//    SQL, perfectly balanced, both legs in one transaction so the
+	//    SQL, perfectly balanced, both entries in one transaction so the
 	//    per-journal balance trigger is satisfied. It has no signature,
 	//    which is the only thing separating it from a genuine credit.
 	// ---------------------------------------------------------------------
@@ -392,10 +392,10 @@ func runInTxAuthorizationDemo(ctx context.Context, svc *ledger.Service, jtUID, w
 	return nil
 }
 
-// forgeJournal writes a balanced journal and its two legs with no signature,
-// the way a holder of DATABASE_URL would. Both legs go in one transaction
+// forgeJournal writes a balanced journal and its two entries with no signature,
+// the way a holder of DATABASE_URL would. Both entries go in one transaction
 // because migration 044's deferred trigger evaluates per-journal balance at
-// commit -- a lone leg on its own connection is refused as unbalanced, so a
+// commit -- a lone entry on its own connection is refused as unbalanced, so a
 // real attacker would use a transaction too. event_id is omitted rather than
 // written as 0: migration 045 turned it into a real nullable foreign key.
 func forgeJournal(ctx context.Context, pool *pgxpool.Pool, jtUID, currencyUID, walletUID, custodyUID string) error {
@@ -431,10 +431,10 @@ func forgeJournal(ctx context.Context, pool *pgxpool.Pool, jtUID, currencyUID, w
 		return err
 	}
 	if err := insertLeg(userID, walletUID, "debit"); err != nil {
-		return fmt.Errorf("insert debit leg: %w", err)
+		return fmt.Errorf("insert debit entry: %w", err)
 	}
 	if err := insertLeg(core.SystemAccountHolder(userID), custodyUID, "credit"); err != nil {
-		return fmt.Errorf("insert credit leg: %w", err)
+		return fmt.Errorf("insert credit entry: %w", err)
 	}
 	return tx.Commit(ctx)
 }

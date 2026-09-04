@@ -37,7 +37,7 @@ type attestFixture struct {
 }
 
 // journalInput builds a minimal balanced two-line posting (debit the
-// holder, credit its system mirror, same classification on both legs --
+// holder, credit its system mirror, same classification on both entries --
 // classification distinctness is irrelevant to JournalInput.Validate's
 // per-currency balance check) for tests that need to post through the
 // real, uid-space LedgerStore.PostJournal path rather than
