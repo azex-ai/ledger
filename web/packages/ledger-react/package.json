@@ -86,10 +86,10 @@
     "jsdom": "^30",
     "msw": "^2.15.0",
     "openapi-typescript": "^7",
-    "postcss": "^8",
+    "postcss": "^8.5.26",
     "tailwindcss": "^4",
     "tsup": "^8",
-    "typescript": "5.9.3",
+    "typescript": "7.0.2",
     "vitest": "^4.1.11"
   },
   "publishConfig": {
