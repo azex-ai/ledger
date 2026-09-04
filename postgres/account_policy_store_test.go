@@ -565,7 +565,7 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 	holder := int64(4700)
 
 	// Seed to exactly the floor so any per-entry (non-netted) evaluation of
-	// the credit-30 leg below would read as "10 - 30 = -20 < 10" and
+	// the credit-30 entry below would read as "10 - 30 = -20 < 10" and
 	// incorrectly reject.
 	_, err := ls.PostJournal(ctx, core.JournalInput{
 		JournalTypeUID: jtID,
@@ -590,7 +590,7 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 
 	// Two entries on the SAME (holder,currency,classification) dimension in
 	// one journal: debit 100 (increase), credit 30 (decrease). Net +70.
-	// Balanced against a single custodial leg of 70.
+	// Balanced against a single custodial entry of 70.
 	_, err = ls.PostJournal(ctx, core.JournalInput{
 		JournalTypeUID: jtID,
 		IdempotencyKey: postgrestest.UniqueKey("minbal-net-journal"),
@@ -601,7 +601,7 @@ func TestLedgerStore_AccountPolicy_MinBalance_SameJournalNetting(t *testing.T) {
 		},
 		Source: "test",
 	})
-	require.NoError(t, err, "net-positive journal must not be rejected by an intermediate decrease leg")
+	require.NoError(t, err, "net-positive journal must not be rejected by an intermediate decrease entry")
 
 	bal, err := ls.GetBalance(ctx, holder, curID, walletID)
 	require.NoError(t, err)

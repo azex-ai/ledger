@@ -114,20 +114,20 @@ func TestSolvencyCheck_WithdrawFee_DoesNotManufactureDeficit(t *testing.T) {
 // closes that blind spot structurally: every template this repository ships
 // gets one row, and the row states the exact expected effect on the solvency
 // report rather than "it balances" (presets.assertBalanced is true by
-// construction for two legs sharing one amount key and can never catch a
+// construction for two entries sharing one amount key and can never catch a
 // direction error).
 //
 // The sign rule every row is derived from -- the ledger's only sign
 // authority, core.Sign / ledger_signed_amount (docs/INVARIANTS.md I-43):
 //
-//	signed(leg) = +amount when entry_type == classification.normal_side
+//	signed(entry) = +amount when entry_type == classification.normal_side
 //	              -amount otherwise
 //
 // A journal must satisfy sum(DR amounts) == sum(CR amounts). Two accounts
 // that both INCREASE in the same journal must therefore carry OPPOSITE
 // normal_sides, and two accounts where one increases while the other
 // decreases must carry the SAME normal_side. That constraint -- not standard
-// accounting's "debit an asset to increase it" -- is what fixes every leg
+// accounting's "debit an asset to increase it" -- is what fixes every entry
 // direction in presets/.
 //
 // Solvency scope (see postgres/sql/queries/platform_balances.sql):
@@ -261,7 +261,7 @@ func TestPresetSolvency_EveryShippedTemplate(t *testing.T) {
 		},
 		{
 			name: "withdraw_fee + withdraw_confirm",
-			why:  "the reference four-leg shape: the fee leaves the custodial pool into fee_revenue while the holder's locked claim drops by the same amount, and the payout removes asset and liability together",
+			why:  "the reference four-entry shape: the fee leaves the custodial pool into fee_revenue while the holder's locked claim drops by the same amount, and the payout removes asset and liability together",
 			steps: []solvencyStep{
 				{"deposit_confirm", user, map[string]string{"amount": "500"}},
 				{"lock_funds", user, map[string]string{"amount": "105"}},

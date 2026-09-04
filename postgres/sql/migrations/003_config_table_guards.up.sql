@@ -41,7 +41,7 @@
 -- What that leaves immutable is the point: currencies.exponent (the precision
 -- every amount is validated against), classifications.normal_side and .code
 -- (the sign of every historical rollup, and the key presets resolve by), every
--- column of a template line (which account each leg hits and in which
+-- column of a template line (which account each entry hits and in which
 -- direction), and the holder a deposit address belongs to.
 --
 -- The whitelist is compared generically -- to_jsonb(OLD) minus the allowed

@@ -132,7 +132,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, equityBal.Equal(decimal.NewFromInt(1000)), "equity after injection, want 1000 got %s", equityBal)
 
-	// The other leg of capital_injection must land on custodial specifically
+	// The other entry of capital_injection must land on custodial specifically
 	// (not, say, settlement or fees) -- a template line pointed at the wrong
 	// classification code still renders and posts a perfectly balanced
 	// journal (Render only checks debit==credit per currency, not which
@@ -174,7 +174,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// "must move" was all this asserted, so it stayed green while the leg
+	// "must move" was all this asserted, so it stayed green while the entry
 	// moved custody the wrong way (audit A-M2). A merchant settlement brings
 	// money IN: custody rises by gross.
 	custodialAfterGross, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
@@ -200,7 +200,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 
 	feesBal, err := ledgerStore.GetBalance(ctx, -merchant, curC, fees.UID)
 	require.NoError(t, err)
-	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount leg, want 5 got %s", feesBal)
+	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount entry, want 5 got %s", feesBal)
 
 	custodialAfterNet, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
 	require.NoError(t, err)

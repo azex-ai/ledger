@@ -15,7 +15,7 @@
 --   unmatched_dimension -- an entry of a journal linked to O that, flipped
 --     back onto O's grain, lands on a (holder, currency, classification,
 --     entry_type) dimension O never posted. That is what the net-zero
---     forgery looks like: legs on both sides of a real dimension, so the
+--     forgery looks like: entries on both sides of a real dimension, so the
 --     money does not move and the "already reversed" figure still climbs.
 --
 --   over_reversed -- the cumulative amount linked to O on one dimension

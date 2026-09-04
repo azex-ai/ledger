@@ -226,7 +226,7 @@ func TestMoneyConservation_Network(t *testing.T) {
 			to = int64(rng.Intn(userCount) + 1)
 		}
 		amt := decimal.NewFromInt(int64(1 + rng.Intn(100)))
-		// Two-leg transfer with settlement intermediary, all in one journal.
+		// Four-entry transfer with settlement intermediary, all in one journal.
 		_, err := store.PostJournal(ctx, core.JournalInput{
 			JournalTypeUID: deps.JournalType,
 			IdempotencyKey: postgrestest.UniqueKey(fmt.Sprintf("xfer-%d", k)),
@@ -295,14 +295,14 @@ func TestMoneyConservation_Network(t *testing.T) {
 	// in a real deployment, confirm existing data has zero violations --
 	// upgrading with pre-existing corruption would mean the trigger (which
 	// only guards future writes) papers over it silently. This network of
-	// 200+ real multi-leg journals (seed deposits + 4-entry settlement
+	// 200+ real multi-entry journals (seed deposits + 4-entry settlement
 	// transfers), all written through the normal PostJournal path with the
 	// trigger active the whole time, is the realistic-usage stand-in for
 	// that scan: it must report zero.
 	reconcileAdapter := postgres.NewReconcileAdapter(pool)
 	unbalancedCount, err := reconcileAdapter.UnbalancedJournalsCount(ctx)
 	require.NoError(t, err)
-	assert.Zero(t, unbalancedCount, "fleet-wide per-journal scan must find zero violations after normal multi-leg usage")
+	assert.Zero(t, unbalancedCount, "fleet-wide per-journal scan must find zero violations after normal multi-entry usage")
 }
 
 // invariantsFixture bundles the IDs and stores reused across the postgres

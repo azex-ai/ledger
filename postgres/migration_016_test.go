@@ -122,7 +122,7 @@ func TestMigration016_CorrectsAnAlreadyInstalledDeployment(t *testing.T) {
 //
 // The set_config prefix is migration 029's owner-only template-line repair
 // door (ledger_template_line_repair_is_authorized). 016 rewrites a template's
-// legs, which 029 otherwise permits only in the transaction that created the
+// lines, which 029 otherwise permits only in the transaction that created the
 // template. No real deployment needs the flag: migrations are ordered, so 016
 // always ran before 029 existed, and on a fresh install it is a no-op. This
 // out-of-order replay is the only caller that meets the guard at all, and
@@ -148,7 +148,7 @@ func classificationNormalSide(ctx context.Context, t *testing.T, pool *pgxpool.P
 
 // templateLineShape renders a template's lines as
 // "<classification code>/<entry_type>/<amount_key>" in sort order -- the three
-// facts that decide which account a leg hits, in which direction, and for how
+// facts that decide which account a line hits, in which direction, and for how
 // much.
 func templateLineShape(ctx context.Context, t *testing.T, pool *pgxpool.Pool, templateCode string) []string {
 	t.Helper()

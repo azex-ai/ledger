@@ -105,15 +105,15 @@ func TestJournalEntries_DuplicateIDAcrossPartitions_Rejected(t *testing.T) {
 
 	// 3. Attempt the forged pair -- same ids as the anchor entries, landing
 	// in a different (much older) partition -- AS ledger_app, the credential
-	// migration 008's column-level GRANT restricts. Both legs go in one
-	// transaction, exactly like the pre-fix form of this test: a single leg
+	// migration 008's column-level GRANT restricts. Both entries go in one
+	// transaction, exactly like the pre-fix form of this test: a single entry
 	// inserted alone is unbalanced by itself and would be refused by the
 	// deferred per-journal balance trigger (23514) regardless of the id
 	// column -- confirmed by running this test against migration 007 alone,
 	// where the two forged rows succeed and commit together, and only THEN
 	// do steps 4/5 below show the split this migration exists to prevent.
 	// With migration 008 applied, the very first statement inside the
-	// transaction is refused at the ACL layer (42501) before the second leg
+	// transaction is refused at the ACL layer (42501) before the second entry
 	// is ever attempted, so nothing here ever reaches a commit.
 	forgedAt := time.Now().AddDate(0, -2, 0)
 	tx, err := appPool.Begin(ctx)

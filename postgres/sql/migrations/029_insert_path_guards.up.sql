@@ -244,11 +244,11 @@ BEGIN
 END $$;
 
 ------------------------------------------------------------
--- 2. entry_template_lines: a template's legs are written once, by the
+-- 2. entry_template_lines: a template's lines are written once, by the
 --    transaction that created it (money-out C-1).
 ------------------------------------------------------------
 
--- The property that separates the honest writer from an appended leg is not
+-- The property that separates the honest writer from an appended line is not
 -- the content of the line -- an attacker can copy an existing one verbatim
 -- -- it is WHEN it is written. postgres.TemplateStore.CreateTemplate inserts
 -- the template row and every one of its lines in a single transaction, in
@@ -266,18 +266,18 @@ END $$;
 --
 -- Considered and rejected: a UNIQUE (template_id, classification_id,
 -- entry_type, holder_role, amount_key) index. It blocks the measured attack
--- (which duplicated two existing legs) and nothing else -- an attacker who
--- points the extra credit leg at a different classification walks through
+-- (which duplicated two existing lines) and nothing else -- an attacker who
+-- points the extra credit line at a different classification walks through
 -- it. Also rejected: "amount_key must be unique within a template", which is
--- not true of the shipped presets (deposit_confirm's two legs both key on
+-- not true of the shipped presets (deposit_confirm's two lines both key on
 -- 'amount').
 --
 -- The cost of being wrong here is loud, not silent: a writer this refuses
--- gets an exception at install time, not a quietly missing leg.
+-- gets an exception at install time, not a quietly missing line.
 -- The one sanctioned way past the rule, in 027's two-layer shape (a
 -- transaction-local flag AND owner membership; neither alone is worth
 -- anything). It exists because migration 016 is the precedent: a preset's
--- legs were shipped with the wrong polarity, and correcting an
+-- lines were shipped with the wrong polarity, and correcting an
 -- already-installed deployment meant deleting a template's lines and writing
 -- new ones from inside a migration. That is a real, recurring operator need,
 -- and a guard with no door for it is a guard the next author will drop
@@ -322,12 +322,12 @@ BEGIN
     -- hand ledger_app a bare 42501 instead of the sentence that explains what
     -- it just tried to do.
     IF NOT pg_has_role(current_user, 'ledger_owner', 'USAGE') THEN
-        RAISE EXCEPTION 'ledger: template % already exists, and a template''s legs may only be written by the transaction that created it -- appending a leg to an installed template silently multiplies every journal that template renders (see migration 029)', NEW.template_id
+        RAISE EXCEPTION 'ledger: template % already exists, and a template''s lines may only be written by the transaction that created it -- appending a line to an installed template silently multiplies every journal that template renders (see migration 029)', NEW.template_id
             USING ERRCODE = 'check_violation';
     END IF;
 
     IF NOT ledger_template_line_repair_is_authorized() THEN
-        RAISE EXCEPTION 'ledger: template % already exists, and a template''s legs may only be written by the transaction that created it; an owner-run repair (migration 016''s shape) must say so explicitly with set_config(''ledger.repair_template_lines'', ''on'', true) in the same transaction', NEW.template_id
+        RAISE EXCEPTION 'ledger: template % already exists, and a template''s lines may only be written by the transaction that created it; an owner-run repair (migration 016''s shape) must say so explicitly with set_config(''ledger.repair_template_lines'', ''on'', true) in the same transaction', NEW.template_id
             USING ERRCODE = 'check_violation';
     END IF;
 

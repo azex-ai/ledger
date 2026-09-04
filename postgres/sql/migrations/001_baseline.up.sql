@@ -201,7 +201,7 @@ CREATE UNIQUE INDEX uq_journal_types_uid   ON journal_types (uid);
 -- A template renders a balanced set of entries from a named-amount map, so
 -- callers describe "a deposit of X" rather than assembling debits and credits
 -- by hand. holder_role picks the user side or the system counterpart side of
--- each leg.
+-- each line.
 ------------------------------------------------------------------------------
 CREATE TABLE entry_templates (
     id              BIGSERIAL PRIMARY KEY,
@@ -229,8 +229,8 @@ CREATE UNIQUE INDEX uq_entry_templates_uid ON entry_templates (uid);
 ------------------------------------------------------------------------------
 -- 4. THE LEDGER: journals AND journal_entries
 --
--- Double entry, append-only. A journal is one balanced accounting event; its
--- entries are the legs. Corrections are made by posting a reversal journal,
+-- Double entry, append-only. A journal is one balanced accounting event, made
+-- up of its individual entries. Corrections are made by posting a reversal journal,
 -- never by editing history -- which is why section 12 blocks UPDATE and
 -- DELETE on both tables at the database level rather than trusting callers.
 --

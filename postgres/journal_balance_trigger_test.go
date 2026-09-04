@@ -67,7 +67,7 @@ func withBalanceTriggerDisabled(t *testing.T, pool *pgxpool.Pool, ctx context.Co
 	enable()
 }
 
-// postBalancedJournal posts a legitimate two-leg journal through the real
+// postBalancedJournal posts a legitimate two-entry journal through the real
 // write path and returns its internal id.
 func postBalancedJournal(
 	t *testing.T,
@@ -121,7 +121,7 @@ func TestJournalBalanceTrigger_RejectsDirectSQLImbalance(t *testing.T) {
 	journalA := postBalancedJournal(t, store, pool, ctx, deps, 4201, decimal.NewFromInt(100), "bal-trig-off")
 	withBalanceTriggerDisabled(t, pool, ctx, func() {
 		require.NoError(t, unbalance(journalA, 4201),
-			"with the guard off, an extra debit leg with no matching credit goes in -- this is what the guard is preventing")
+			"with the guard off, an extra debit entry with no matching credit goes in -- this is what the guard is preventing")
 	})
 
 	journalB := postBalancedJournal(t, store, pool, ctx, deps, 4202, decimal.NewFromInt(200), "bal-trig-on")

@@ -53,7 +53,7 @@
 --   with the skip       3.35   3.71   6.13   20.81   96.78   363.61
 --   without (this)      2.92   3.47   6.43   26.09  211.81  2268.63
 --
--- Free at the sizes the presets post (2-6 legs), 5.7x at 2000. The bound is
+-- Free at the sizes the presets post (2-6 entries), 5.7x at 2000. The bound is
 -- O(N^2) in entries per journal and `core` sets no cap on that number, so a
 -- deliberately huge journal is a real cost lever -- but it is a lever the
 -- attacker pays O(N) to pull and it produces no wrong balance, which is
@@ -86,7 +86,7 @@
 --
 -- Under `SET CONSTRAINTS ... IMMEDIATE` this now fires at the end of every
 -- entry INSERT, which means an honest multi-statement journal is refused too:
--- after its first leg the journal genuinely is unbalanced. That is the correct
+-- after its first entry the journal genuinely is unbalanced. That is the correct
 -- direction to fail in and nothing in this library ever issues `SET
 -- CONSTRAINTS` -- the deferral is what makes multi-statement posting possible,
 -- so a caller who turns it off is opting out of composing a journal across

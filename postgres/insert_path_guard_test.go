@@ -60,20 +60,20 @@ func TestTemplateLineCannotBeAppendedAfterInstall(t *testing.T) {
 			{ClassificationUID: custodialUID, EntryType: core.EntryTypeCredit, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
 		},
 	})
-	require.NoError(t, err, "sanity: the honest installer writes a template and its legs together")
+	require.NoError(t, err, "sanity: the honest installer writes a template and its lines together")
 	require.Len(t, tmpl.Lines, 2)
 
 	templateID := postgrestest.InternalID(t, pool, "entry_templates", tmpl.UID)
 	walletID := postgrestest.InternalID(t, pool, "classifications", walletUID)
 	custodialID := postgrestest.InternalID(t, pool, "classifications", custodialUID)
 
-	t.Run("ledger_app cannot append a leg to an installed template", func(t *testing.T) {
+	t.Run("ledger_app cannot append a line to an installed template", func(t *testing.T) {
 		_, err := appPool.Exec(ctx, `
 			INSERT INTO entry_template_lines (template_id, classification_id, entry_type, holder_role, amount_key, sort_order)
 			VALUES ($1, $2, 'debit',  'user',   'amount', 98),
 			       ($1, $3, 'credit', 'system', 'amount', 99)
 		`, templateID, walletID, custodialID)
-		require.Error(t, err, "appending a leg reusing the same amount_key doubles every journal this template renders, with a real signature on it")
+		require.Error(t, err, "appending a line reusing the same amount_key doubles every journal this template renders, with a real signature on it")
 		assert.Contains(t, err.Error(), "may only be written by the transaction that created it")
 	})
 

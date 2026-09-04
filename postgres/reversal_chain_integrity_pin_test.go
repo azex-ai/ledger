@@ -104,7 +104,7 @@ func seedReversalChainFixture(t *testing.T, ctx context.Context) reversalChainFi
 }
 
 // forgeLinkedJournal appends, as ledger_app, a balanced journal carrying
-// reversal_of = the fixture's deposit. legs are (holder, classification id,
+// reversal_of = the fixture's deposit. Entries are (holder, classification id,
 // entry_type, amount) and must balance per currency or the deferred
 // per-journal balance trigger (I-1) rejects the transaction -- which is the
 // point: this forgery is invisible to every DB-side guard there is.
@@ -151,7 +151,7 @@ func (fx reversalChainFixture) forgeLinkedJournal(t *testing.T, ctx context.Cont
 	return journalUID
 }
 
-// netZeroLegs is the reviewer's forgery: four legs that cancel out on every
+// netZeroLegs is the reviewer's forgery: four entries that cancel out on every
 // dimension, so no balance moves, while registering 50 of "already reversed"
 // on the deposit's wallet dimension.
 func (fx reversalChainFixture) netZeroLegs() []forgedLeg {
@@ -246,7 +246,7 @@ func TestReverseJournalFraction_RefusesAnOverReversedChain(t *testing.T) {
 	fx := seedReversalChainFixture(t, ctx)
 	system := core.SystemAccountHolder(fx.holder)
 
-	// A well-SHAPED reversal (every leg inverts a real one) for more than the
+	// A well-SHAPED reversal (every entry inverts a real one) for more than the
 	// original was worth: rule 2 is satisfied, rule 3 is not.
 	forgedUID := fx.forgeLinkedJournal(t, ctx, postgrestest.UniqueKey("rc-over"), []forgedLeg{
 		{holder: fx.holder, classID: fx.walletID, entryType: "credit", amount: "150"},
@@ -342,12 +342,12 @@ func TestCorruptReversalLinks_FindsTheForgedLink(t *testing.T) {
 
 	rows, err := adapter.CorruptReversalLinks(ctx, 200)
 	require.NoError(t, err)
-	// Two, not one: the forgery puts a leg on BOTH sides of both dimensions,
-	// so the wallet's extra DEBIT leg and the custodial's extra CREDIT leg
+	// Two, not one: the forgery puts an entry on BOTH sides of both dimensions,
+	// so the wallet's extra DEBIT entry and the custodial's extra CREDIT entry
 	// each flip onto a dimension the deposit never posted. Asserted as two
 	// rather than "at least one" so a later change that starts reporting
-	// only the first offending leg per journal shows up here.
-	require.Len(t, rows, 2, "both extra legs land on dimensions the original never posted: %+v", rows)
+	// only the first offending entry per journal shows up here.
+	require.Len(t, rows, 2, "both extra entries land on dimensions the original never posted: %+v", rows)
 
 	for _, r := range rows {
 		assert.Equal(t, "unmatched_dimension", r.Violation)
@@ -365,7 +365,7 @@ func TestCorruptReversalLinks_FindsTheForgedLink(t *testing.T) {
 	}
 	assert.Equal(t, fx.holder, holderSide.AccountHolder)
 	assert.Equal(t, "credit", holderSide.EntryType,
-		"the reported dimension is the ORIGINAL's grain: the forged DEBIT leg flips to a credit dimension the deposit never posted")
+		"the reported dimension is the ORIGINAL's grain: the forged DEBIT entry flips to a credit dimension the deposit never posted")
 }
 
 // TestCorruptReversalLinks_FindsAnOverReversedChain covers the other
@@ -376,7 +376,7 @@ func TestCorruptReversalLinks_FindsAnOverReversedChain(t *testing.T) {
 	adapter := postgres.NewReconcileAdapter(fx.pool)
 	system := core.SystemAccountHolder(fx.holder)
 
-	// Well-shaped (every leg inverts a real one) but for more than the
+	// Well-shaped (every entry inverts a real one) but for more than the
 	// original was worth.
 	fx.forgeLinkedJournal(t, ctx, postgrestest.UniqueKey("rc-scan-over"), []forgedLeg{
 		{holder: fx.holder, classID: fx.walletID, entryType: "credit", amount: "150"},

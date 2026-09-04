@@ -251,7 +251,7 @@ JOIN journal_entries je ON je.journal_id = j.id
 JOIN classifications c ON c.id = je.classification_id
 WHERE jt.holder_kind = ''
   AND je.account_holder > 0
-  -- Same predicate as holder.sql: a journal type whose only holder-side legs
+  -- Same predicate as holder.sql: a journal type whose only holder-side entries
   -- are memo trackers never surfaces in a user's transaction list, so it does
   -- not need a holder_kind tag and must not be reported as missing one
   -- (2026-09-02 audit A-N4).

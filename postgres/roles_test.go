@@ -233,7 +233,7 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 		currencyID := postgrestest.InternalID(t, pool, "currencies", currencyUID)
 		classID := postgrestest.InternalID(t, pool, "classifications", classUID)
 
-		// Both legs, one transaction. The per-journal balance trigger
+		// Both entries, one transaction. The per-journal balance trigger
 		// evaluates balance at commit, so a lone debit on its own autocommit
 		// connection is correctly refused as unbalanced -- which would look
 		// like a permission failure here and silently invert what this
@@ -311,7 +311,7 @@ func TestLedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.T) {
 	currencyID := postgrestest.InternalID(t, pool, "currencies", currencyUID)
 	classID := postgrestest.InternalID(t, pool, "classifications", classUID)
 
-	// Both legs in one transaction -- see the note in
+	// Both entries in one transaction -- see the note in
 	// TestLedgerAppIsLeastPrivilege: the deferred balance trigger would
 	// reject a lone debit at commit, which here would read as "ledger_app
 	// cannot write the new partition" and invert the finding.

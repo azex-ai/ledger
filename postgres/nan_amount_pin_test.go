@@ -59,7 +59,7 @@ func TestJournals_RejectsNaNTotals(t *testing.T) {
 // TestNaNConstraintsExistWithTheRightDefinition is m-7 (W3 adversarial
 // review of the gates): TestJournalEntries_RejectsNaNAmount below does go red
 // when migration 018's CHECK is replaced by CHECK (true) -- but not because
-// it notices the CHECK is gone. The balance trigger refuses the single-leg
+// it notices the CHECK is gone. The balance trigger refuses the single-entry
 // insert first (SQLSTATE 23514, "unbalanced entries by currency"), and the
 // pin fails only because that message does not contain "not_nan". It is
 // therefore a pin on two mechanisms at once that cannot say which one broke,

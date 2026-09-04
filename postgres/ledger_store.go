@@ -1113,7 +1113,7 @@ func (s *LedgerStore) postJournalWithQueries(ctx context.Context, q *sqlcgen.Que
 		// (account_holder, currency) to appear among this journal's entries
 		// is the weakest rule that makes the claim mean something; it does
 		// not constrain amounts or classifications, which legitimately vary
-		// (fees, spreads, multi-leg settlements).
+		// (fees, spreads, multi-entry settlements).
 		if linkHolder == 0 || linkCurrencyID == 0 {
 			return nil, fmt.Errorf(
 				"postgres: post journal: event %q has no account dimension to link against: %w",

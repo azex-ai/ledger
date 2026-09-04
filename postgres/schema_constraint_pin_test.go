@@ -194,7 +194,7 @@ func TestEveryIdempotencyKeyColumnHasATotalUniqueIndex(t *testing.T) {
 // TestJournalTotalsCheck_RejectsDirectSQLImbalance pins the second half of
 // I-1's DB layer: `chk_journal_balance` on journals.total_debit =
 // total_credit. The deferred per-currency trigger (I-24's pin) covers the
-// entry legs; this covers the header row, which is what every balance
+// entries; this covers the header row, which is what every balance
 // summary and reconcile scan reads first.
 func TestJournalTotalsCheck_RejectsDirectSQLImbalance(t *testing.T) {
 	ctx := context.Background()

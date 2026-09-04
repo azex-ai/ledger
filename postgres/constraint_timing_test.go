@@ -367,7 +367,7 @@ func TestBalanceGuard_TheSkipIsWhatMadeTimingMatter(t *testing.T) {
 // cost of 031 out loud so it is not later mistaken for a bug.
 //
 // The guard is DEFERRABLE INITIALLY DEFERRED because a journal is written one
-// entry per statement: after the first leg it genuinely does not balance. With
+// entry per statement: after the first entry it genuinely does not balance. With
 // the aggregate unconditional, a caller who turns deferral off is opting out
 // of composing a journal across statements -- the write fails, no money moves,
 // and nothing in this library ever issues `SET CONSTRAINTS`.
@@ -397,7 +397,7 @@ func TestBalanceGuard_ImmediateModeRefusesHonestMultiStatementPosting(t *testing
 	_, err = tx.Exec(env.ctx, `
 		INSERT INTO public.journal_entries (journal_id, account_holder, currency_id, classification_id, entry_type, amount)
 		VALUES ($1, $2, $3, $4, 'debit', 100)`, journalID, 8404, env.currencyID, env.classID)
-	require.Error(t, err, "under IMMEDIATE the first leg of an honest journal is refused -- fail-closed, and the documented cost of not trusting the schedule")
+	require.Error(t, err, "under IMMEDIATE the first entry of an honest journal is refused -- fail-closed, and the documented cost of not trusting the schedule")
 	assert.Contains(t, err.Error(), "unbalanced entries")
 }
 

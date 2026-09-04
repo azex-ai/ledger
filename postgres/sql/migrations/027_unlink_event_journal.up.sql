@@ -6,7 +6,7 @@
 -- I-51 rule 4 requires a journal claiming an `event_uid` to touch the
 -- booking's (account_holder, currency). That is the weakest rule that makes
 -- the claim mean something, and it was chosen deliberately: amounts and
--- classifications legitimately vary across fees, spreads and multi-leg
+-- classifications legitimately vary across fees, spreads and multi-entry
 -- settlements. For a credential holding write scope it is also no obstacle --
 -- holder and currency are exactly what it already knows. Measured:
 --

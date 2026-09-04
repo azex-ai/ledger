@@ -138,7 +138,7 @@ func TestAudit_ListEntriesByJournal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, entries, 2, "expected 2 entries (debit + credit)")
 
-	// Both legs must reference the parent journal.
+	// Both entries must reference the parent journal.
 	if len(entries) == 2 {
 		assert.Equal(t, j.UID, entries[0].JournalUID)
 		assert.Equal(t, j.UID, entries[1].JournalUID)
