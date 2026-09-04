@@ -22,6 +22,10 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    # A whole green run takes ~2 min; the only thing that has ever taken
+    # longer was `npm audit` hanging on a registry outage (2026-09-04, 15 min
+    # before the 503 surfaced). Fail fast instead of holding the runner.
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: web
