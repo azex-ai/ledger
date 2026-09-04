@@ -210,3 +210,9 @@ F 报告其反转实验共 19 个污染窗口，窗口内他人的测试结论�
 | W5-onchain-ops-2（5.16 N-1/N-2/N-3 + 5.17 ①②③ + (a)(b)，migration 032，I-71） | `0791cbb` `65663f9` `f4cd795` `6c4200a` | lead 六组 mutation 全红：关掉 `corroborateBeforeConfirm` 的「已入账」检查 → `DuplicateBookingsAreNotCreditedWithoutTheIndex`；review 过渡改回抢占真 `channel_ref` → `UncorroboratedBookingReachesReviewEvenWhenTheLogIsTaken`；去掉唯一索引 → `DuplicateBookingsAreRejectedAtInsert`；放开 cursor INSERT 守卫 → `TestChainCursorFirstWriteIsBoundedToo`；跳过 `classifyIngestConflict` → `HonestIngestSaysWhoTookTheTransfer`；`sampleDeadLetterBacklog` 空转 → `TestDeadLetterSignals_ReachAWebhookOnlyDeployment` | merge `79ff80a`（CHANGELOG/BREAKING/INVARIANTS 与 w5-gates-2 尾部追加冲突保留双方）；main 全量绿含 web 225 | 偏离接受：不加 `channel_name='onchain'` 补充闸（README Tier 2 直接 CreateBooking 建 deposit booking，前提不成立，头注写明）；`POST /bookings` 实测可达（write-scope key）→ 严重性按此写进 BREAKING/RUNBOOK；`identity_already_booked` 是唯一「sighting 无过错」的 dead-letter reason；`core.BookingReader` 加方法（BREAKING） |
 
 **R3 复核收口（2026-09-04）**：五份复核零 Critical 复发；复核新发现两条 Critical（install-roles N1 → 031；money-out N-1 → 032）与 gates-pins 三条中级（→ w5-gates-2）当日修完合入。最终 main `79ff80a` 全量绿。发版评估交 Aaron；main 未 push。
+
+# 术语统一（2026-09-04，Aaron 拍板：文档与注释统一用代码术语，不用口语 leg）
+
+| 任务 | commit | lead 复核 | 合入 | 备注 |
+|---|---|---|---|---|
+| term-entry（w5-term-entry，sonnet） | `b830ebe`..`cd9b892`（5 commit，77 文件，约 215 处） | 抽查 029/031 头注、`core/limits.go`、INVARIANTS 的替换语义正确；合并后重跑 grep，非保留项剩余 = 0 | merge `24d2234` | 三条规则：journal 分录处 leg → entry；`EntryTemplateLine` 处 leg → line；成对整笔 journal（fx_sell/fx_buy、transfer_out/transfer_in）leg → journal。保留：预留结算凭据行的 `settlement leg`/`discharge leg` 领域术语与标识符、测试局部标识符、preset `Name` 数据 "FX Sell Leg"/"FX Buy Leg"（落库数据，改名要走 expand/migrate/contract，记 TODO）；`docs/audits/**`、`docs/plans/**` 为历史记录不改 |
