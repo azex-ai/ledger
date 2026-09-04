@@ -116,7 +116,7 @@ type Server struct {
 	// allowGenericTemplatePost indexes Config.AllowGenericTemplatePost as
 	// given, before it is subtracted from protectedTemplateCodes above. It is
 	// kept separately because it is also the opt-out for handlePostTemplate's
-	// structural is_system-leg rule, which has no code list to subtract from
+	// structural is_system-line rule, which has no code list to subtract from
 	// (D-C1).
 	allowGenericTemplatePost map[string]bool
 
@@ -180,7 +180,7 @@ type Config struct {
 	// template code directly.
 	//
 	// This list is the SECOND of that endpoint's two layers, not its primary
-	// guard: the endpoint also refuses, structurally, any template with a leg
+	// guard: the endpoint also refuses, structurally, any template with a line
 	// on an is_system classification, whoever defined it (D-C1, 2026-09-02
 	// audit — the four-code list left dev_credit reachable, and covered no
 	// deployment-defined system-side template at all). A name list is still
@@ -216,7 +216,7 @@ type Config struct {
 	// guards: it removes codes from the effective protected set computed
 	// above (applied last, so it can opt a library-default code such as
 	// "deposit_confirm" back in), and it exempts the named code from the
-	// structural is_system-leg rule. A deployment with its own reason to
+	// structural is_system-line rule. A deployment with its own reason to
 	// post one of these through the generic endpoint (e.g. a reviewed,
 	// admin-scope-only internal tool) names it here. Empty by default: the
 	// library defaults land closed, and only a deployment that explicitly

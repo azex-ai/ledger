@@ -69,7 +69,7 @@ func postTemplateBody(code string) map[string]any {
 // --- installed-config fakes (D-C1 / D-m9) ---------------------------------
 //
 // The derived gate below needs a template table with real classification
-// legs, so these three fakes are just enough of the config stores for the
+// lines, so these three fakes are just enough of the config stores for the
 // package's own exported installers (presets.InstallExtendedPresets,
 // InstallPendingBundle, InstallDevCreditBundle) to run against. The template
 // rows the gate then enumerates come from those installers -- not from the
@@ -78,7 +78,7 @@ func postTemplateBody(code string) map[string]any {
 // dev_credit was missing from the protected set (D-m9).
 //
 // mockTemplateStore/mockClassificationStore in server_test.go stay untouched:
-// they answer every code with one non-system leg, which is what the
+// they answer every code with one non-system line, which is what the
 // hand-configured tests above want.
 
 type fakeClassificationStore struct {
@@ -332,7 +332,7 @@ func installedPresets(t *testing.T) *installedPresetConfig {
 
 // templateCodesBySystemLeg partitions the installed template table by the
 // structural property the guard is supposed to derive its verdict from: does
-// any leg of this template post to a classification flagged is_system.
+// any line of this template post to a classification flagged is_system.
 func (c *installedPresetConfig) templateCodesBySystemLeg(t *testing.T) (withSystemLeg, withoutSystemLeg []string) {
 	t.Helper()
 	ctx := context.Background()
@@ -369,7 +369,7 @@ func (c *installedPresetConfig) templateCodesBySystemLeg(t *testing.T) (withSyst
 
 // newInstalledTemplateServer wires a server against config stores holding the
 // real installed preset rows, so handlePostTemplate's structural check reads
-// the same template legs a deployment's database would hold.
+// the same template lines a deployment's database would hold.
 func newInstalledTemplateServer(
 	cfg *installedPresetConfig,
 	templates core.TemplateStore,
@@ -424,7 +424,7 @@ func refuseExecuteTemplate(t *testing.T) *mockJournalWriter {
 
 // TestPostTemplate_ProtectsEveryInstalledTemplateWithASystemLeg is the derived
 // gate D-C1 / D-m9 ask for: enumerate the template table this library's own
-// installers produce, and require a 403 on every template with a leg on an
+// installers produce, and require a 403 on every template with a line on an
 // is_system classification. The verdict comes from the installed rows, so a
 // new preset that touches a system account is covered the moment it exists --
 // nobody has to remember to add its code to a list.
@@ -451,7 +451,7 @@ func TestPostTemplate_ProtectsEveryInstalledTemplateWithASystemLeg(t *testing.T)
 
 // TestPostTemplate_AllowsInstalledTemplatesWithoutASystemLeg is the control
 // for the gate above: the structural rule is not a blanket deny of every
-// installed template. Templates whose legs are all holder-side still execute.
+// installed template. Templates whose lines are all holder-side still execute.
 func TestPostTemplate_AllowsInstalledTemplatesWithoutASystemLeg(t *testing.T) {
 	cfg := installedPresets(t)
 	_, withoutSystemLeg := cfg.templateCodesBySystemLeg(t)
@@ -485,7 +485,7 @@ func TestPostTemplate_RefusesTheAuditedMintingCodes(t *testing.T) {
 	for _, code := range []string{"dev_credit", "capital_injection", "fee_charge"} {
 		t.Run(code, func(t *testing.T) {
 			require.Contains(t, withSystemLeg, code,
-				"template %q is no longer installed with a system leg -- if a preset renamed it, update this pin with the new code", code)
+				"template %q is no longer installed with a system line -- if a preset renamed it, update this pin with the new code", code)
 
 			srv := newInstalledTemplateServer(cfg, cfg.templates, nil, refuseExecuteTemplate(t))
 			w := doRequest(srv, http.MethodPost, "/api/v1/journals/template", postTemplateBody(code))
@@ -554,7 +554,7 @@ func TestPostTemplate_ProtectedCodeIsRefused(t *testing.T) {
 }
 
 // TestPostTemplate_UnprotectedCodeStillWorks: a code that is neither in the
-// library default set nor in Config.ProtectedTemplateCodes, and whose legs
+// library default set nor in Config.ProtectedTemplateCodes, and whose lines
 // are all holder-side, still executes normally.
 func TestPostTemplate_UnprotectedCodeStillWorks(t *testing.T) {
 	var gotCode string
@@ -613,7 +613,7 @@ func TestPostTemplate_DefaultProtectsDepositCodes(t *testing.T) {
 // (TestPostTemplate_ProtectsEveryInstalledTemplateWithASystemLeg /
 // TestPostTemplate_AllowsInstalledTemplatesWithoutASystemLeg); the mock
 // template store this server is wired with answers every code with one
-// holder-side leg.
+// holder-side line.
 func TestPostTemplate_DefaultDoesNotProtectUnrelatedCodes(t *testing.T) {
 	var gotCode string
 	srv := newProtectedTemplateServer(nil, nil, &mockJournalWriter{

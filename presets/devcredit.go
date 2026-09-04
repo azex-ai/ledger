@@ -61,7 +61,7 @@ var devCreditJournalTypes = []JournalTypePreset{
 //
 //	dev_credit: DR main_wallet (user) CR dev_credit (system)
 //
-// which is the deposit_confirm shape with the custodial leg swapped for the
+// which is the deposit_confirm shape with the custodial entry swapped for the
 // unbacked counterparty. The credited funds land in main_wallet, so they
 // carry BalanceRoleAvailable and are immediately spendable and reservable —
 // the point of the feature is that the holder can exercise real downstream

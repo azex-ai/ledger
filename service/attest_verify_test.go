@@ -155,7 +155,7 @@ func TestVerifyLedger_TamperedOnDeletedEntry(t *testing.T) {
 
 	// A balanced pair (P3's migration 044 deferred constraint trigger now
 	// enforces per-journal, per-currency balance at commit time even for
-	// direct-SQL inserts) -- deleting one leg afterward is what actually
+	// direct-SQL inserts) -- deleting one entry afterward is what actually
 	// simulates "a row disappeared", not an unbalanced insert.
 	journalID := insertForgedJournal(t, ctx, pool, f, postgrestest.UniqueKey("verify-delete"))
 	tx := beginWithCleanup(t, ctx, pool)
@@ -168,7 +168,7 @@ func TestVerifyLedger_TamperedOnDeletedEntry(t *testing.T) {
 
 	// Simulate the owner-role deletion this wave's threat model is built
 	// around: disable both guards (append-only AND the balance check --
-	// deleting one leg of a balanced journal is, by definition, exactly
+	// deleting one entry of a balanced journal is, by definition, exactly
 	// what P3's trigger exists to reject), delete the row, re-enable both.
 	_, err = pool.Exec(ctx, "ALTER TABLE journal_entries DISABLE TRIGGER journal_entries_no_delete")
 	require.NoError(t, err)

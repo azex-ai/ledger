@@ -41,7 +41,7 @@ const (
 //
 // This is deliberately a hardcoded name list and NOT the primary defense.
 // The primary defense is structural and lives at the endpoint: any template
-// with a leg on an is_system classification is refused, whether this package
+// with a line on an is_system classification is refused, whether this package
 // shipped it or the deployment defined it (server's
 // rejectSystemClassificationTemplate, docs/INVARIANTS.md I-38). A hand-kept
 // list can only ever cover what somebody remembered to name -- dev_credit was

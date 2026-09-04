@@ -33,7 +33,7 @@ type devCreditRequest struct {
 // The result is an ordinary journal — append-only, reversible only through
 // POST /journals/{uid}/reverse. What separates it from a real deposit is the
 // counterparty account, not the strength of the record: because the credit
-// leg is dev_credit rather than custodial, /platform/solvency counts the new
+// entry is dev_credit rather than custodial, /platform/solvency counts the new
 // liability without any offsetting asset and reports the shortfall.
 //
 // Answers bizcode.FeatureNotEnabled unless Config.DevCreditEnabled is set,

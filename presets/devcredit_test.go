@@ -27,7 +27,7 @@ func TestDevCreditBundle_Classifications(t *testing.T) {
 	// counterparty, never a holder-facing bucket.
 	assert.Equal(t, core.BalanceRoleNone, dc.BalanceRole)
 
-	// main_wallet rides along (shared) — it is the credited leg.
+	// main_wallet rides along (shared) — it is the credited entry.
 	mw, err := cs.GetByCode(ctx, "main_wallet")
 	require.NoError(t, err)
 	assert.Equal(t, core.BalanceRoleAvailable, mw.BalanceRole)

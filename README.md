@@ -391,12 +391,12 @@ end-to-end.
 |--------|---------------------------|---------------|-----------|---------|
 | `DepositBundle()` | `pending`, `main_wallet`, `suspense`, `custodial` | `deposit_pending`, `deposit_confirm`, `deposit_confirm_pending`, `deposit_release_pending`, `deposit_record_overage`, `deposit_resolve_overage`, `deposit_release_overage` | matching templates, one per journal type | Two-phase deposit (pending → confirmed) with tolerance & overage handling |
 | `WithdrawalBundle()` | `locked`, `fee_expense`, `fee_revenue` | `lock_funds`, `unlock_funds`, `withdraw_confirm`, `withdraw_fee` | `lock_funds`, `unlock_funds`, `withdraw_confirm`, `withdraw_fee` | Lock → reserve → confirm; fee templates |
-| `TransferBundle()` | `settlement` (system) | `transfer` | `transfer_out`, `transfer_in` | User-to-user via shared settlement pool (sender leg + receiver leg) |
+| `TransferBundle()` | `settlement` (system) | `transfer` | `transfer_out`, `transfer_in` | User-to-user via shared settlement pool (sender journal + receiver journal) |
 | `FeeBundle()` | `fees` (system) | `fee` | `fee_charge` | Generic platform fee: DR user main_wallet, CR system fees |
 | `CapitalBundle()` | `equity` (system) | `capital_injection`, `capital_withdraw` | matching | Platform equity movements |
 | `SettlementBundle()` | `settlement` (system), `fees` (system) | `checkout_settlement` | `checkout_settlement_gross`, `checkout_settlement_net` | Checkout settlement (gross or net-of-fee) into user wallet |
 | `SpreadBundle()` | `spread` (system) | (none) | (none) | Registers the `spread` classification only — caller posts via `PostJournal` |
-| `FXBundle()` | (shared only) | `fx_sell`, `fx_buy` | matching | Per-currency FX leg pair sharing the settlement pool |
+| `FXBundle()` | (shared only) | `fx_sell`, `fx_buy` | matching | Per-currency FX journal pair sharing the settlement pool |
 
 Two convenience installers:
 
@@ -1022,7 +1022,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 102 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
-- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (FX two-leg), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
+- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (two-journal FX), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
 
 ## Examples
 
@@ -1137,7 +1137,7 @@ nothing from the environment):
 | `API_KEYS` | Comma-separated `name:scope:secret` bearer keys (scope: `read`\|`write`\|`admin`). Required on every endpoint except probes/webhooks. | (none) |
 | `TRUSTED_PROXY_CIDRS` | Comma-separated CIDR ranges of your trusted edge proxies (e.g. `10.0.0.0/8,172.16.0.0/12`). When set, the client IP is derived from `X-Forwarded-For` (walked right-to-left, skipping trusted hops) / `X-Real-IP` / `True-Client-IP` for rate limiting and logs — but **only** for requests whose socket peer is inside these ranges, so a direct caller cannot spoof its IP. Every candidate is IP-validated. Invalid value = startup error. | (empty; socket peer) |
 | `DEV_CREDIT_ENABLED` | Enables `POST /api/v1/dev/credits` (mints holder balance against no custodied asset). Requires `ENV=dev`; boot fails otherwise. | `false` |
-| `PROTECTED_TEMPLATE_CODES` | Comma-separated extra template codes to protect beyond the structural rule (any template with a leg on an `is_system` classification) and the built-in list — see "write scope and system classifications" below | (built-in list only) |
+| `PROTECTED_TEMPLATE_CODES` | Comma-separated extra template codes to protect beyond the structural rule (any template with a line on an `is_system` classification) and the built-in list — see "write scope and system classifications" below | (built-in list only) |
 | `ALLOW_GENERIC_TEMPLATE_POST` | Comma-separated template codes exempted from the protected-template gate (`POST /journals/template` normally refuses these) | (none exempted) |
 | `ALLOW_SYSTEM_CLASSIFICATION_POST` | `true` allows `POST /classifications` to create `is_system` classifications. Off by default; `newServer` logs a warning at boot when it is on, because a system classification is one side of every money-path template. | `false` |
 

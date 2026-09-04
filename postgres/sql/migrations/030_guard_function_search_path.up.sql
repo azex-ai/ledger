@@ -111,8 +111,8 @@ ALTER FUNCTION ledger_resweep_ownership()               SET search_path = public
 --   no dedup            2.92   3.47   6.43   26.09  211.81 2268.63  ms
 --   this migration      3.35   3.71   6.13   20.81   96.78  363.61  ms
 --
--- So "just drop it" is free at the sizes presets actually post (2-6 legs) and
--- 5.7x at 2000 -- and 2000 legs is one INSERT loop away for the very
+-- So "just drop it" is free at the sizes presets actually post (2-6 entries) and
+-- 5.7x at 2000 -- and 2000 entries is one INSERT loop away for the very
 -- credential this guard exists to contain, which makes the quadratic a lever
 -- rather than a footnote. Hence a dedup, but one keyed on something the
 -- caller cannot write.

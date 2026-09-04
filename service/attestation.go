@@ -348,7 +348,7 @@ func (s *AttestationService) RunAttestBatch(ctx context.Context, batchSize int32
 // referenced by entries (design doc §8 extended / contracts §W3-B: "worker
 // 每批验一次每笔 journal 的授权") and returns a verdict per entry, same
 // order/length as entries. A journal referenced by several entries in this
-// batch (a multi-leg journal, or several entries from the same 2-leg
+// batch (a multi-entry journal, or several entries from the same 2-entry
 // journal landing in the same batch) is checked exactly once, not once per
 // entry -- the same amortization principle T4 exists to extend all the way
 // to VerifiedBalance's callers.

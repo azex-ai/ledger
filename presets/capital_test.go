@@ -75,7 +75,7 @@ func TestCapitalBundle_Templates_Balance(t *testing.T) {
 	//	assert.Equal(t, core.EntryTypeDebit, injJournal.Entries[0].EntryType) // custodial DR
 	//
 	// three lines below an assertion that custodial is credit-normal -- so
-	// the test knew the polarity and still demanded the leg that contradicts
+	// the test knew the polarity and still demanded the entry that contradicts
 	// it. Injecting 1000 of platform capital drove the custody figure DOWN by
 	// 1000 and pinned SolvencyCheck at solvent=false permanently (2026-09-02
 	// audit A-C1). The pin is inverted rather than deleted so the disproof

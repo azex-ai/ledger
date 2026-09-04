@@ -250,7 +250,7 @@ func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries 
 // rejectSystemClassificationTemplate is handlePostTemplate's structural
 // counterpart to handlePostJournal's rejectSystemClassificationEntries, and
 // the primary guard on that endpoint (D-C1): it resolves the named template's
-// own legs and refuses the request if any of them posts to an is_system
+// own lines and refuses the request if any of them posts to an is_system
 // classification, exactly as the handwritten path refuses the same entries
 // spelled out by hand.
 //
@@ -267,7 +267,7 @@ func (s *Server) rejectSystemClassificationEntries(ctx context.Context, entries 
 // (working-agreements.md §3).
 // refuseProtectedTemplate is the whole of the "a caller must not be able to
 // name a system-side template and have it posted" rule: the hardcoded name
-// set, then the structural is_system-leg rule, with
+// set, then the structural is_system-line rule, with
 // Config.AllowGenericTemplatePost as the single per-code opt-out from both.
 //
 // Every endpoint that executes a template the caller named -- directly

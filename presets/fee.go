@@ -30,7 +30,7 @@ var feeJournalTypes = []JournalTypePreset{
 	{Code: "fee", Name: "Fee Charge", DisplayLabel: "Fee", HolderKind: core.HolderTxKindFee},
 }
 
-// feeTemplates: fee_charge, the four-leg direct fee.
+// feeTemplates: fee_charge, the four-entry direct fee.
 //
 //	fee_expense  DR amount  (user)    holder's cost tracker  +amount  (memo)
 //	main_wallet  CR amount  (user)    holder's balance       -amount
@@ -39,13 +39,13 @@ var feeJournalTypes = []JournalTypePreset{
 //
 //	sum(DR) = 2*amount = sum(CR)   ✓
 //
-// The holder leg follows main_wallet's declared polarity (NormalSideDebit): a
+// The holder entry follows main_wallet's declared polarity (NormalSideDebit): a
 // fee is money leaving the holder, so it credits. It used to debit, which
 // added the fee to the payer's balance instead of taking it.
 //
-// #### Why this is four legs and not two ####
+// #### Why this is four entries and not two ####
 //
-// The 2026-08-25 audit fixed the holder leg and left the counterpart's
+// The 2026-08-25 audit fixed the holder entry and left the counterpart's
 // direction open, on the reading that "how the fee account reads" was a
 // presentation choice. It was not. fees is credit-normal (feeClassifications
 // below), so revenue accumulates on CR -- that is what
@@ -55,7 +55,7 @@ var feeJournalTypes = []JournalTypePreset{
 // Aggregate fee income read as checkout_fees - direct_fees, which is not
 // revenue and not any other meaningful quantity.
 //
-// Crediting fees requires a second debit, because main_wallet's leg is also a
+// Crediting fees requires a second debit, because main_wallet's entry is also a
 // credit. That debit pair is the holder's memo cost tracker and the custodial
 // pool -- exactly the shape withdraw_fee has always had
 // (presets/templates.go), with fees standing in for fee_revenue and
@@ -81,7 +81,7 @@ var feeTemplates = []TemplatePreset{
 // required to post first-class fee charge journals.
 func FeeBundle() TemplateBundle {
 	return TemplateBundle{
-		// fee_expense (the payer's memo cost tracker) is part of the four-leg
+		// fee_expense (the payer's memo cost tracker) is part of the four-entry
 		// fee_charge shape, so the bundle carries it even when installed
 		// without the withdrawal bundle.
 		Classifications: combineClassifications(

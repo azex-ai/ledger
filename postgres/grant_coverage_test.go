@@ -103,7 +103,7 @@ func TestGrantCoverage_EveryTableHasExpectedLedgerAppAndLedgerRoGrants(t *testin
 	// Tables whose UPDATE was revoked outright because they have no
 	// legitimate one. entry_template_lines is written once when a template
 	// bundle installs and never touched again -- no upsert, no deactivation
-	// -- and every column of it decides which account a journal leg hits and
+	// -- and every column of it decides which account a journal entry hits and
 	// in which direction, so migration 003 took the privilege away as well as
 	// guarding the rows.
 	//

@@ -256,7 +256,7 @@ func TestVerifyLedger_LocalizesTamperedEntry_SelfContainedNoReferenceNeeded(t *t
 	_, seq, err := attestSvc.RunAttestBatch(ctx, 100)
 	require.NoError(t, err)
 
-	// Tamper the debit leg's amount. Both the append-only guard and the
+	// Tamper the debit entry's amount. Both the append-only guard and the
 	// per-journal balance trigger (044) must be bypassed -- the same
 	// owner-role-bypass pattern TestVerifyLedger_TamperedOnDeletedEntry
 	// already uses, because an update that unbalances a journal is

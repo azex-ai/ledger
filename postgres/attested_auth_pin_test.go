@@ -131,7 +131,7 @@ func TestVerifiedBalance_RefusesTamperedEntryAmount(t *testing.T) {
 	require.NoError(t, err, "the untampered journal must verify")
 	require.True(t, before.Equal(decimal.NewFromInt(250)))
 
-	// Double both legs so the journal still balances per currency -- a
+	// Double both entries so the journal still balances per currency -- a
 	// single-sided edit would trip the balance trigger and never reach the
 	// question this test is asking.
 	internalID := postgrestest.InternalID(t, pool, "journals", journal.UID)

@@ -261,8 +261,8 @@ func TestForgedDirectSQLJournalIsUnauthorized(t *testing.T) {
 	// the empty auth columns, which is exactly what this test is about.
 	// All three writes go in ONE transaction. Migration 044's deferred
 	// constraint trigger evaluates per-journal balance at commit, so
-	// inserting the debit leg on its own autocommit connection is correctly
-	// rejected as unbalanced before the credit leg ever lands. An attacker
+	// inserting the debit entry on its own autocommit connection is correctly
+	// rejected as unbalanced before the credit entry ever lands. An attacker
 	// with a DB write credential would use a transaction too -- that is the
 	// realistic forgery, and it is what this pin must model.
 	tx, err := pool.Begin(ctx)

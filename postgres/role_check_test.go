@@ -80,7 +80,7 @@ func TestAssertRuntimeRole_CatchesAConnectionTheACLsDoNotConstrain(t *testing.T)
 			RETURNING id
 		`, typeID).Scan(&journalID))
 
-		// Both legs, so the deferred per-journal balance trigger is satisfied at
+		// Both entries, so the deferred per-journal balance trigger is satisfied at
 		// commit and the only thing under test is the id column. Ids the sequence
 		// never issued: as ledger_app the first of these is refused at the ACL
 		// layer with 42501 (TestJournalEntries_DuplicateIDAcrossPartitions_Rejected).

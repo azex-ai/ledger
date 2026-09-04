@@ -4,7 +4,7 @@
 -- ####  What was wrong  ####
 --
 -- This ledger does not have a global "assets are debit-normal" convention.
--- Each classification declares its own normal_side, a leg increases its
+-- Each classification declares its own normal_side, an entry increases its
 -- account when entry_type == normal_side (ledger_signed_amount, migration
 -- 009), and a journal must satisfy sum(DR) == sum(CR). The consequence a
 -- template author has to hold in mind is narrow and unforgiving: two accounts
@@ -41,7 +41,7 @@
 -- On top of that, entry_template_lines carries a BEFORE UPDATE guard that
 -- permits no column change at all and has had UPDATE revoked from ledger_app
 -- (migration 003), because a template line is what decides which account each
--- leg hits and in which direction -- exactly the thing an attacker with the
+-- entry hits and in which direction -- exactly the thing an attacker with the
 -- application credential would want to move. That guard is doing its job;
 -- the only sanctioned way past it is a migration running as the owner.
 --
@@ -195,7 +195,7 @@ SELECT ledger_replace_template_lines_016('checkout_settlement_gross', ARRAY[
 ]);
 
 -- checkout_settlement_net: gross splits into the merchant's claim (custody
--- backs it) and the platform's fee (revenue). No gross leg -- see
+-- backs it) and the platform's fee (revenue). No gross entry -- see
 -- presets/settlement.go for why one cannot exist.
 SELECT ledger_replace_template_lines_016('checkout_settlement_net', ARRAY[
     ARRAY['main_wallet', 'debit',  'user',   'net_amount', '1'],

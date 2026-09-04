@@ -21,9 +21,9 @@ Four ideas make every recipe below fall out mechanically:
 2. **Every journal is single-currency.** The template renderer applies one
    `currency_uid` to all lines (`core/template.go`). So anything cross-currency
    (buying credits with USDT, cashing credits back out) is modeled as **two
-   single-currency legs**, each balancing on its own. Post them atomically
+   single-currency journals**, each balancing on its own. Post them atomically
    (`ExecuteTemplateBatch`, or two `ExecuteTemplate` calls inside `RunInTx`) so a
-   bad rate quote can never leave one leg without the other.
+   bad rate quote can never leave one journal without the other.
 
 3. **Classifications are shared across currencies.** The same `main_wallet`,
    `settlement`, `equity` classifications work for every currency. A user's
@@ -41,7 +41,7 @@ Four ideas make every recipe below fall out mechanically:
 |---|---|---|
 | `main_wallet` | debit (user) | a user's spendable balance in a given currency |
 | `custodial` | credit (system) | assets the platform actually holds (real USDT in custody) |
-| `settlement` | credit (system) | per-currency net exposure absorber for FX legs |
+| `settlement` | credit (system) | per-currency net exposure absorber for FX journals |
 | `equity` | credit (system) | platform equity — the funding source for giveaways/bonuses |
 | `spread` | credit (system) | price-differential revenue (markup earned on conversion) |
 | `fee_revenue` | credit (system) | fee income |
@@ -51,7 +51,7 @@ Install them once: `svc.InstallExtendedPresets(ctx)` (idempotent).
 ### Invariants the ledger enforces for you
 
 - **Per-currency balance**: each journal must balance *within its currency*
-  (DB trigger + Go validator). A mis-quoted FX rate makes one leg unbalanced and
+  (DB trigger + Go validator). A mis-quoted FX rate makes one journal unbalanced and
   is rejected — it can never silently pass.
 - **Append-only**: journals are never mutated. Corrections are new **reversal**
   journals (`ReverseJournal`). Refunds below use this.
@@ -65,7 +65,7 @@ Install them once: `svc.InstallExtendedPresets(ctx)` (idempotent).
 
 **Scenario:** a user pays 1 USDT and receives 100 credits.
 
-Two currencies (`USDT`, `credits`), one cross-currency conversion → FX two-leg.
+Two currencies (`USDT`, `credits`), one cross-currency conversion → two-journal FX.
 Assuming the user already holds USDT in `main_wallet` (from a prior deposit),
 the purchase is:
 
@@ -79,9 +79,9 @@ fx_buy   (currency = credits, amount = 100)
     CR settlement(credits)       100
 ```
 
-- Each leg balances **inside its own currency**. Rate `100` (and a shared
-  `quote_id`) go in both legs' metadata so audit can stitch them back together.
-- Post both legs **atomically** — one bad amount and the whole purchase rolls back.
+- Each journal balances **inside its own currency**. Rate `100` (and a shared
+  `quote_id`) go in both journals' metadata so audit can stitch them back together.
+- Post both journals **atomically** — one bad amount and the whole purchase rolls back.
 - **`settlement(credits)` credit balance = total credits the platform has
   issued**, and is your reconciliation anchor for outstanding credit liability.
   `settlement(USDT)` debit balance = USDT taken in against those credits (sweep
@@ -108,7 +108,7 @@ _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateE
 ```
 
 > **Direct purchase (no USDT balance first):** if the user pays externally and
-> you never hold their USDT as a spendable balance, skip the `fx_sell` leg and
+> you never hold their USDT as a spendable balance, skip the `fx_sell` journal and
 > issue credits with a single journal `DR user.main_wallet(credits) / CR
 > settlement(credits)` for 100. The external USDT receipt is recorded separately
 > against `custodial`.
@@ -139,7 +139,7 @@ pattern for "extend the ledger with a new business template"):
 
 ```
 credits_topup  (currency = credits)
-    DR user.main_wallet(credits) 100   ← purchased  (CR settlement — the paid leg)
+    DR user.main_wallet(credits) 100   ← purchased  (CR settlement — the paid entries)
     DR user.main_wallet(credits)  20   ← bonus      (CR equity — platform-funded)
     CR settlement(credits)       100
     CR equity(credits)            20
@@ -163,7 +163,7 @@ _, _ = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
     },
 })
 
-// per top-up (the paid USDT leg is a separate fx_sell as in Recipe 1):
+// per top-up (the paid USDT journal is a separate fx_sell as in Recipe 1):
 _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_topup", core.TemplateParams{
     HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: ledger.NewIdempotencyKey("topup"),
     Amounts: map[string]decimal.Decimal{
@@ -206,10 +206,10 @@ amount.
 
 - **Loyalty points**: issue with `DR main_wallet(POINTS) / CR equity(POINTS)`
   (points are platform-funded); redeem with the reverse.
-- **Coupons**: same issuance pattern; "spend a coupon toward credits" is an FX
-  two-leg `COUPON → credits`.
-- **Multi-fiat**: `EUR`, `USD`, … each balance independently; cross-fiat is an
-  FX two-leg with `spread` capturing your markup.
+- **Coupons**: same issuance pattern; "spend a coupon toward credits" is a
+  two-journal FX `COUPON → credits`.
+- **Multi-fiat**: `EUR`, `USD`, … each balance independently; cross-fiat is a
+  two-journal FX with `spread` capturing your markup.
 
 Each currency balances on its own — a bug in POINTS accounting can never
 corrupt USDT. This isolation is why "just add a currency" is safe.
@@ -289,14 +289,14 @@ err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
 
 ## Recipe 5 — Refunds and cashing credits back to USDT
 
-### Cashing out (credits → USDT), the reverse FX two-leg
+### Cashing out (credits → USDT), the reverse two-journal FX
 
 ```
 fx_sell  (credits, amount = 100)   CR user.main_wallet(credits) 100 / DR settlement(credits) 100
 fx_buy   (USDT,    amount = 1)     DR user.main_wallet(USDT)     1  / CR settlement(USDT)     1
 ```
 
-Same atomic two-leg as Recipe 1, currencies swapped. The user's credits balance
+Same atomic two-journal FX as Recipe 1, currencies swapped. The user's credits balance
 drops by 100, USDT rises by 1. `settlement(credits)` debit reduces outstanding
 credit liability. (Real USDT payout to an external wallet is a separate
 withdrawal against `custodial`.)
@@ -457,7 +457,7 @@ if err != nil {
 
 **FX (currency conversion)** — call `core.ConvertAt` yourself before posting;
 the `fx_sell`/`fx_buy` template pair (`presets/fx.go`) does **not** convert
-for you, it just posts whatever amount you give it on each leg:
+for you, it just posts whatever amount you give it on each journal:
 
 ```go
 // Converting 100 USDT -> CNY at a quoted rate, rounding to CNY's own exponent.
@@ -477,10 +477,10 @@ _, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
 })
 ```
 
-Any residue between the "ideal" rate-implied amount and what the two legs
+Any residue between the "ideal" rate-implied amount and what the two journals
 actually post is the platform's, by construction: `settlement` absorbs the
 net exposure (see `presets/fx.go`'s "Net effect on system books" comment). The
-caller decides the rounding mode; the ledger never adjusts a leg to make it
+caller decides the rounding mode; the ledger never adjusts a journal to make it
 "come out even" on your behalf.
 
 **Splitting one total across several accounts** (e.g. a fee split across

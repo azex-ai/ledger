@@ -11,7 +11,7 @@ import (
 // when both bundles are installed together.
 var transferClassifications = []ClassificationPreset{
 	// settlement: credit-normal system account that acts as an intermediary
-	// for P2P transfers, ensuring each leg is independently settled and
+	// for P2P transfers, ensuring each journal is independently settled and
 	// the double-entry constraint is never violated mid-flight.
 	{Code: "settlement", Name: "Settlement", NormalSide: core.NormalSideCredit, IsSystem: true},
 }
@@ -20,28 +20,29 @@ var transferJournalTypes = []JournalTypePreset{
 	{Code: "transfer", Name: "User-to-user Transfer", DisplayLabel: "Transfer", HolderKind: core.HolderTxKindTransfer},
 }
 
-// transferTemplates defines the four-leg transfer pattern:
+// transferTemplates defines the transfer pattern: two journals of two
+// entries each:
 //
-//	DR main_wallet (sender)    CR settlement (system/sender)   — sender leg out
-//	DR settlement (system/receiver) CR main_wallet (receiver)  — receiver leg in
+//	DR main_wallet (sender)    CR settlement (system/sender)   — transfer_out journal
+//	DR settlement (system/receiver) CR main_wallet (receiver)  — transfer_in journal
 //
 // Note: In the ledger template model, HolderRoleUser resolves to the HolderID
-// supplied at execution time. Both sender and receiver legs must therefore be
-// executed as two separate template calls, one per user, with amount_key
-// "amount" on each side. ATOMICITY: those two calls MUST share one
+// supplied at execution time. Both the sender and receiver journals must
+// therefore be executed as two separate template calls, one per user, with
+// amount_key "amount" on each side. ATOMICITY: those two calls MUST share one
 // transaction — ExecuteTemplateBatch, or two ExecuteTemplate calls inside
 // one RunInTx (docs/COOKBOOK.md) — or a failure between them leaves the
 // sender debited with nothing credited to the receiver.
 //
 // Alternatively, callers may use PostJournal directly with all four entries
-// when they need to express both legs atomically in a single journal. The
-// template here covers the simpler two-leg call (one holder at a time).
+// when they need to express both sides atomically in a single journal. The
+// template here covers the simpler two-journal recipe (one holder at a time).
 //
 // Direction follows the polarity main_wallet is declared with
 // (NormalSideDebit, templates.go): DR increases the holder's balance, CR
 // decreases it. deposit_confirm debits it because a deposit adds money. A
 // transfer is the same rule applied twice, in opposite directions: the
-// sender's leg credits, the receiver's leg debits.
+// transfer_out journal credits, the transfer_in journal debits.
 //
 // (This paragraph used to cite checkout_settlement as the "holder is paying"
 // example. That was one of the three contradictory readings of that template
@@ -56,9 +57,9 @@ var transferJournalTypes = []JournalTypePreset{
 //
 //	CR settlement (system derived from receiver)  DR main_wallet (user=receiver)
 //
-// settlement is the transit account and nets to zero once both legs land —
+// settlement is the transit account and nets to zero once both journals land —
 // zero when AGGREGATED BY CLASSIFICATION, not per system holder: HolderRoleSystem
-// resolves to SystemAccountHolder(sender) on one leg and
+// resolves to SystemAccountHolder(sender) on one journal and
 // SystemAccountHolder(receiver) on the other (core/template.go), two distinct
 // account_holders. -sender keeps a standing debit balance and -receiver a
 // standing credit; only the classification-level sum

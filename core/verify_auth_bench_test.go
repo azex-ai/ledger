@@ -88,7 +88,7 @@ func runVerifyJournalAuthBench(b *testing.B, numEntries int) {
 // debit/credit posting (deposit/withdrawal/transfer shape).
 func BenchmarkVerifyJournalAuth_2Entries(b *testing.B) { runVerifyJournalAuthBench(b, 2) }
 
-// BenchmarkVerifyJournalAuth_10Entries stands in for a multi-leg journal
+// BenchmarkVerifyJournalAuth_10Entries stands in for a multi-entry journal
 // (e.g. a fee split or multi-party settlement template).
 func BenchmarkVerifyJournalAuth_10Entries(b *testing.B) { runVerifyJournalAuthBench(b, 10) }
 

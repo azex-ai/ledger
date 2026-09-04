@@ -801,7 +801,7 @@ func validateReversalOfInput(ctx context.Context, q *sqlcgen.Queries, original s
 
 	// Aggregate this journal's entries onto the ORIGINAL's dimension grain
 	// (each entry's side flipped back), keeping first-appearance order so the
-	// error a caller gets names the first offending leg deterministically.
+	// error a caller gets names the first offending entry deterministically.
 	newByDim := make(map[entryDimKey]decimal.Decimal, len(resolved))
 	order := make([]entryDimKey, 0, len(resolved))
 	for _, e := range resolved {

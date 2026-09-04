@@ -3220,8 +3220,8 @@ silently re-derived").
 
 **Pinned by**:
 - `postgres.TestVerifiedBalance_RefusesTamperedEntryAmount` — the headline
-  pin, and the case the gate exists for: a journal is attested, both legs of
-  an entry are then doubled directly via SQL so the journal still balances,
+  pin, and the case the gate exists for: a journal is attested, both entries
+  are then doubled directly via SQL so the journal still balances,
   and the cached verdict is asserted to still read `Authorized` (or the test
   is not exercising the gap at all). `VerifiedBalance` must refuse. Refusal
   rather than a corrected number, because a corrected number is still
@@ -3744,7 +3744,7 @@ renamed; update this doc.
    handlers were already correct; only the documentation the completeness
    gate exists to keep honest was wrong.
 2. `POST /journals/template` refuses (403), no matter what scope the
-   caller's API key holds, any `template_code` whose template has a leg on a
+   caller's API key holds, any `template_code` whose template has a line on a
    classification flagged `is_system` -- derived from the template's own rows
    at request time, so it holds for a template this library ships and for one
    a deployment defined itself, and a template that cannot be resolved fails
@@ -3906,13 +3906,13 @@ and `service.Onchain.Run`.
   this library ships (including `DevCreditBundle`, the one
   `InstallExtendedPresets` deliberately excludes) into in-memory config
   stores, enumerates the resulting template table, and requires a 403 on
-  every template with an `is_system` leg. The verdict comes from the
+  every template with an `is_system` line. The verdict comes from the
   installed rows, never from the guard's own idea of what is dangerous —
   which is why the earlier pin could not notice `dev_credit` was missing
-  (D-m9). Verified red 2026-09-02: 15 of the 19 system-leg templates
+  (D-m9). Verified red 2026-09-02: 15 of the 19 system-line templates
   answered 201 with `ExecuteTemplate` reached.
 - `server.TestPostTemplate_AllowsInstalledTemplatesWithoutASystemLeg` — the
-  control for the above: installed templates whose legs are all holder-side
+  control for the above: installed templates whose lines are all holder-side
   (`lock_funds`, `unlock_funds`) still execute, so the rule is not a blanket
   deny of the endpoint.
 - `server.TestPostTemplate_HardcodedListStandsWithoutTheTemplateTable` — a
@@ -5611,7 +5611,7 @@ index that serves a lookup which must not mention `status`.
   (while the ungated path honors it immediately — the divergence is
   asserted, not tolerated), a legitimate `Settle` of 400 leaves the whole
   1000 held even though the balance is now 600, and only the passage of
-  `expires_at` gives the funds back. The last leg polls rather than sleeps,
+  `expires_at` gives the funds back. The last step polls rather than sleeps,
   so a slow or clock-skewed container cannot make it flaky.
 - `postgres.TestReserverStore_Settle_RefusesExpiredReservation` — the paired
   settle-side rule, with a live reservation settling normally as the
@@ -5661,7 +5661,7 @@ The same failure mode, in a different expression: `balance_role NOT IN ('',
 "what money can the holder see". Four copies existed. The 2026-08-26 M-4 fix
 updated one. Retagging `fee_expense` to `'memo'` then pulled it *into* the
 three unfixed aggregates (`'memo' <> ''` is true), where `withdraw_fee`'s two
-holder-side legs netted to exactly zero and the row was dropped as empty: a
+holder-side entries netted to exactly zero and the row was dropped as empty: a
 holder's balance fell by 5 with no line anywhere in their statement to
 account for it.
 
@@ -5781,7 +5781,7 @@ less than everything and return `nil`:
 
 ```
 post 100                                   balance = 100
-PostJournal{reversal_of: J, four net-zero legs}   balance = 100   err = <nil>
+PostJournal{reversal_of: J, four net-zero entries}   balance = 100   err = <nil>
 ReverseJournalFraction(J, 1, 1)                                   err = <nil>
   -> reversal journal posted: debit 50 / credit 50
 after "fully reversed"                     balance = 50   <= expected 0
@@ -5791,7 +5791,7 @@ ReconcileAccount         balanced=true gap=0
 
 Every defense in the ledger stays green there, because nothing about double
 entry is broken: the middle journal is per-currency balanced, moves no money,
-and its legs are all on dimensions `J` genuinely touches — only the
+and its entries are all on dimensions `J` genuinely touches — only the
 *directions* make it not a reversal. What is broken is the reversal chain, and
 I-2's cumulative rule cannot see it: the total reversed is exactly 100, the
 upper bound is respected, and 50 stays on the books. The caller is told the
@@ -5845,7 +5845,7 @@ A journal carrying `event_uid = E` must be about what `E` happened to:
    `(account_holder, currency)` must appear among this journal's entries, and
    `events.journal_id` must not already be set (`ErrInvalidInput` /
    `ErrConflict` respectively). Amounts and classifications are deliberately
-   *not* constrained — fees, spreads and multi-leg settlements legitimately
+   *not* constrained — fees, spreads and multi-entry settlements legitimately
    post more than the booking's own amount.
 
 Same failure shape, wider reach: `event_uid` is a field on `POST /journals`,
@@ -5865,7 +5865,7 @@ holding write scope, holder and currency are already known. So a journal
 about the right holder and the wrong everything-else (measured: 0.01 on an
 unrelated classification) can still take the link, and the wedge above
 follows exactly as before. Tightening rule 4 to relate the amount to the
-booking's would break legitimate multi-leg settlement, so the residue is
+booking's would break legitimate multi-entry settlement, so the residue is
 accepted — with a way out, because until migration 027 there was none at all:
 `journals` are append-only so the claimant cannot be deleted, both
 `journal_id` columns are set-once, and the library shipped no unlink of any
@@ -7227,7 +7227,7 @@ structural property an appended row cannot, and a forensic row in
 `config_table_changes` where it does not. Concretely, and enforced by the
 database rather than by the application:
 
-- **`entry_template_lines`** — a template's legs may only be written by
+- **`entry_template_lines`** — a template's lines may only be written by
   the transaction that created the template row. This is a property of the
   only writer there is: `postgres.TemplateStore.CreateTemplate` writes the
   template and every one of its lines in a single transaction (pool mode
@@ -7236,7 +7236,7 @@ database rather than by the application:
   legitimate mutation either. It is also why
   `presets.InstallTemplatePresets` **validates an existing template and
   refuses to update it** rather than reconciling its lines — the guard and
-  the installer agree that an installed template's legs are final. An
+  the installer agree that an installed template's lines are final. An
   owner-run repair (migration 016's shape) opens
   `ledger_template_line_repair_is_authorized` explicitly.
 - **`bookings`** — `status` must be the classification lifecycle's
@@ -7535,7 +7535,7 @@ The costs were measured, not guessed — on the real schema through the real
 | unconditional aggregate (031, shipped) | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
 
 Both attempts at O(N) bought a bypass. The shipped form is migration 004's
-original O(N²) — free at the 2–6 legs the presets post, 5.7x at 2000, and
+original O(N²) — free at the 2–6 entries the presets post, 5.7x at 2000, and
 `core` sets no cap on entries per journal, so a deliberately huge journal is a
 real cost lever. It is a lever that costs the attacker O(N) to pull and yields
 no wrong balance, which is the trade that was accepted.
@@ -7600,13 +7600,13 @@ third, because that journal genuinely balanced at the moment the check ran.
 - `postgres.TestBalanceGuard_ImmediateModeRefusesHonestMultiStatementPosting`
   and `postgres.TestBalanceGuard_DeferredModeStillPostsHonestJournals` — the
   cost of an unconditional aggregate, stated as assertions so it is not
-  later mistaken for a bug: under IMMEDIATE an honest journal's first leg is
+  later mistaken for a bug: under IMMEDIATE an honest journal's first entry is
   refused too (fail-closed, and nothing in this library issues `SET
   CONSTRAINTS`), while the default mode is untouched.
 - `postgres.TestLedgerApp_CannotCreateTemporaryRelations` — clause 3, plus
   the datacl assertion that PUBLIC no longer holds TEMPORARY.
 - `postgres.TestBalanceGuard_LegitimateJournalsStillPost` — the control: a
-  40-leg balanced journal still posts, so none of the above is achieved by
+  40-entry balanced journal still posts, so none of the above is achieved by
   refusing everything.
 - `postgres.TestFunctionExecuteACL_IsExactlyTheDocumentedWhitelist` — the
   whitelist migration 030 grew by one and 031 shrank back. A trigger

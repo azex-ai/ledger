@@ -99,7 +99,7 @@ func (f vbFixture) journalInput(userID int64, idemKey string, amount decimal.Dec
 // inserts a journal + two perfectly balanced entries directly via SQL, with
 // empty auth_digest/auth_signature/auth_key_id. Mirrors
 // TestForgedDirectSQLJournalIsUnauthorized's technique exactly, including
-// doing both legs in one transaction (migration 044's deferred per-journal
+// doing both entries in one transaction (migration 044's deferred per-journal
 // balance trigger requires it) and leaving event_id NULL (migration 045
 // made it a real nullable FK; a literal 0 would trip journals_event_id_fkey).
 func insertForgedBalancedJournal(t testing.TB, pool *pgxpool.Pool, ctx context.Context, f vbFixture, holder int64, amount string, idemKey string) string {

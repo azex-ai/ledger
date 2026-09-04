@@ -495,7 +495,7 @@ func TestFullReconciliation_RoleLessLiability_DetectsMistaggedClassification(t *
 	// tag it" shape.
 	mistaggedUID := postgrestest.SeedClassification(t, pgpool, "loyalty_points_m4", "Loyalty Points M4", "credit", false)
 	// Its balancing system-side counterpart -- debit-normal, is_system=true,
-	// arbitrary for this test's purposes (only the mistagged leg's exclusion
+	// arbitrary for this test's purposes (only the mistagged entry's exclusion
 	// from Liability is under test).
 	counterpartUID := postgrestest.SeedClassification(t, pgpool, "unbacked_m4", "Unbacked M4", "debit", true)
 

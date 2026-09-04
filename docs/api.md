@@ -533,7 +533,7 @@ Auth: required. Idempotency: required.
 
 Post a journal by rendering a stored entry template.
 
-**This endpoint refuses any template with a leg on an `is_system`
+**This endpoint refuses any template with a line on an `is_system`
 classification** (403, structurally derived from the template's own lines --
 not a name list), plus the codes in `PROTECTED_TEMPLATE_CODES`. That covers
 every deposit/capital/settlement/fee/fx template the presets install: those
@@ -567,7 +567,7 @@ Request:
 Response: same shape as `POST /journals`.
 
 Status codes: `201`, `400`, `401`, `403` (protected template code, or a
-template with an `is_system` leg), `422`, `429`, `503`.
+template with an `is_system` line), `422`, `429`, `503`.
 
 ### POST /journals/deposit-tolerance
 

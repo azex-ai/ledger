@@ -92,7 +92,7 @@ func TestFullReconciliation_Check1DetectsRealGlobalImbalance(t *testing.T) {
 	check1 := findCheck(t, report, "global_dr_cr_equality")
 	assert.True(t, check1.Passed, "a genuinely balanced journal must pass check #1")
 
-	// Craft a REAL global imbalance: an extra, unmatched debit leg with no
+	// Craft a REAL global imbalance: an extra, unmatched debit entry with no
 	// offsetting credit anywhere. Unlike the per-journal fleet scan's own
 	// test fixture (two journals whose drifts cancel), this one does NOT
 	// cancel -- it is exactly the disaster class check #1 exists to catch

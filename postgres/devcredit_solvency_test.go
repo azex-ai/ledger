@@ -154,5 +154,5 @@ func TestDevCredit_InstallIsIdempotent(t *testing.T) {
 
 	tmpl, err := tmplStore.GetTemplate(ctx, presets.DevCreditTemplateCode)
 	require.NoError(t, err)
-	assert.Len(t, tmpl.Lines, 2, "template must keep exactly its two legs")
+	assert.Len(t, tmpl.Lines, 2, "template must keep exactly its two lines")
 }

@@ -111,7 +111,7 @@ proof of the count):
 | `snapshot_integrity` | `balance_snapshots` for the most recent `snapshot_date` vs. a fresh recompute from entries (I-23) |
 | `unauthorized_journals` | samples journals claiming a P5 signature and re-verifies it (I-32). Without a `core.AuthVerifier` (wired via `SetAuthCheck`, or `ledger-cli reconcile --full --pubkey-hex/--key-id`) this check **does not appear in `checks[]` at all** -- it is named in `skipped_checks` and `full_coverage` goes false. Never-signed journals are a coverage gap, not tamper evidence, so they are skipped rather than flagged |
 | `period_close_violations` | journals whose `effective_at` is behind the active close line AND that were written after that line was committed (I-15/I-59) |
-| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): a leg on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§19](#19-corrupt-reversal-chain) |
+| `reversal_chain_integrity` | journals carrying `reversal_of = O` that are not reversals of `O` (I-51): an entry on a dimension `O` never posted (`unmatched_dimension`), or more reversed on one dimension than `O` posted there (`over_reversed`). This is the only place a forged link surfaces without somebody attempting a reversal first — see [§19](#19-corrupt-reversal-chain) |
 
 Match the failing check's `name` to the entries in `checks[].findings`. Then:
 
@@ -130,7 +130,7 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   journal; do not touch `journal_entries` directly. If this fires at all on a
   journal newer than migration `044`, treat it as a security incident: the
   DB-layer trigger should have rejected the insert outright.
-- **`settlement_netting`** — usually a stuck FX or transfer leg
+- **`settlement_netting`** — usually a stuck FX or transfer journal
   (one side posted, the other didn't). Check `journals` table for orphan
   half-pair on the `settlement` classification.
 - **`non_negative_balances`** — a user got debited beyond their balance.
@@ -329,7 +329,7 @@ A real solvency failure does **not** mean money was stolen — the ledger sees
 its own books only. Three plausible causes:
 
 1. **Withdrawal posted but custodial not debited** — the withdraw journal is
-   unbalanced or skipped a leg. Check recent `withdraw_confirm` journals.
+   unbalanced or skipped an entry. Check recent `withdraw_confirm` journals.
 2. **Deposit credited but custodial not credited** — symmetric: a deposit
    confirmed without crediting custodial. Check recent `deposit_confirm`.
 3. **External custody loss not yet reflected** — funds physically moved out
@@ -2163,7 +2163,7 @@ sits in its lifecycle indefinitely.
 **How it happens**: `event_uid` is a caller-supplied link and I-51 rule 4 only
 requires the claiming journal to touch the booking's
 `(account_holder, currency)` — deliberately weak, because amounts and
-classifications legitimately vary across fees, spreads and multi-leg
+classifications legitimately vary across fees, spreads and multi-entry
 settlements. A buggy caller (or a credential with write scope) can therefore
 take the link with any journal at all, and both `events.journal_id` and
 `bookings.journal_id` are set-once. Journals are append-only, so the claimant
@@ -2187,7 +2187,7 @@ LEFT JOIN bookings b ON b.id = e.booking_id
 WHERE e.uid = '<event-uid>';
 ```
 
-A claim is wrong when that journal's legs are not this booking's settlement —
+A claim is wrong when that journal's entries are not this booking's settlement —
 typically a much smaller amount, an unrelated classification, or a source
 belonging to a different flow. **If it moved money, it is still a real
 journal**: fix that separately with a reversal (I-51). Do not treat the
@@ -2367,8 +2367,8 @@ ORDER BY r.id, e.id;
 
 Compare against the original's own entries (§8, "Find every journal that
 touched an account dimension"). A legitimate reversal inverts the original
-leg for leg: same `(account_holder, currency_id, classification_id)`,
-opposite `entry_type`. The offending row is usually obvious — it has legs on
+entry for entry: same `(account_holder, currency_id, classification_id)`,
+opposite `entry_type`. The offending row is usually obvious — it has entries on
 BOTH sides of the same dimension (net zero, moves no money), or a `source`
 belonging to no flow you run, or `signed = false` in a deployment where
 every journal is signed.

@@ -284,7 +284,7 @@ var auditTriggerFunctions = []string{
 // it could only ever ask "can this row be changed without a trace". A row can
 // also be ADDED without a trace, and for entry_template_lines, bookings,
 // chain_cursors and account_policies that was the more valuable attack of the
-// two -- appending a template leg multiplied every future deposit, and
+// two -- appending a template line multiplied every future deposit, and
 // appending an account_policies tier undid a freeze, both with
 // config_table_changes at zero rows. DELETE joins them for completeness:
 // exactly one table grants it, and that fact should be derived rather than

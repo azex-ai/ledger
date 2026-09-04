@@ -450,7 +450,7 @@ func TestSignAuthorityGate_GoHasNoUnclassifiedNormalSideBranch(t *testing.T) {
 //
 // The consequence of the three that were missed: retagging fee_expense to
 // 'memo' pulled it INTO the holder aggregate ('memo' <> ” is true), where
-// withdraw_fee's +5 memo leg and -5 locked leg netted to zero and the row was
+// withdraw_fee's +5 memo entry and -5 locked entry netted to zero and the row was
 // dropped as empty. A user's balance fell by 5 with no line item anywhere to
 // account for it.
 //
@@ -530,7 +530,7 @@ var holderVisiblePredicateExemptions = map[string]string{
 // entirely. The reviewer added a holder-keyed SUM over journal_entries with
 // no balance_role filter at all and every gate stayed green, which is
 // A-M3 in its original form (a holder aggregate that silently includes memo
-// legs, so a fee both moves the balance and cancels itself out of the
+// entries, so a fee both moves the balance and cancels itself out of the
 // statement).
 //
 // So: any query in a holder-facing file that reads journal_entries must
@@ -563,7 +563,7 @@ func TestSignAuthorityGate_HolderVisibleQueriesApplyThePredicate(t *testing.T) {
 		}
 		t.Errorf("%s (query %s, near line %d) aggregates journal_entries in a holder-facing file without %q.\n\n"+
 			"Every query that answers \"what money can the holder see\" or \"what does the platform owe\" must apply that predicate: "+
-			"without it, memo legs join the aggregate, and a fee whose memo and locked legs net to zero disappears from the statement "+
+			"without it, memo entries join the aggregate, and a fee whose memo and locked entries net to zero disappears from the statement "+
 			"while still moving the balance (audit A-M3). If this query genuinely reports across all balance roles, add %q to "+
 			"holderVisiblePredicateExemptions with the reason.",
 			block.file, block.query, block.line, canonicalLower, block.key())

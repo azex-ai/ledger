@@ -26,7 +26,7 @@
 -- would stop counting it as a liability, and updated the liability predicate
 -- in platform_balances.sql — but not the three copies here, which still read
 -- `<> ''`. 'memo' is not '', so fee_expense joined this aggregate, withdraw_fee's
--- two holder-side legs (+5 memo, -5 locked) netted to exactly zero, and
+-- two holder-side entries (+5 memo, -5 locked) netted to exactly zero, and
 -- holder_store.go's `net.IsZero()` filter dropped the whole row: the user's
 -- balance fell by 5 with no line in their statement to explain it
 -- (2026-09-02 audit A-M3).

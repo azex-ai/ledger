@@ -70,11 +70,11 @@ func TestSettlementBundle_GrossTemplate_Balance(t *testing.T) {
 	//
 	//	assert.Equal(t, core.EntryTypeCredit, journal.Entries[1].EntryType) // merchant
 	//
-	// with a `// merchant` comment naming the very leg that was taking money
+	// with a `// merchant` comment naming the very entry that was taking money
 	// OFF the merchant: the journal type declares HolderTxKindDeposit and the
 	// wire showed direction=out on a 97-unit "Payment". A merchant being
 	// settled RECEIVES; main_wallet is debit-normal; therefore the merchant
-	// leg debits.
+	// entry debits.
 	assertJournalEffect(t, cs, params.HolderID, journal.Entries, map[string]string{
 		"main_wallet/user": gross.String(),
 		"custodial/system": gross.String(),
@@ -110,8 +110,8 @@ func TestSettlementBundle_NetTemplate_Balance(t *testing.T) {
 
 	tmpl, err := ts.GetTemplate(ctx, "checkout_settlement_net")
 	require.NoError(t, err)
-	// Four legs, not three: crediting revenue to credit-normal `fees` needs a
-	// matching debit, and no three-leg arrangement of these classifications
+	// Four lines, not three: crediting revenue to credit-normal `fees` needs a
+	// matching debit, and no three-line arrangement of these classifications
 	// can raise the merchant, the custody pool and the revenue account at
 	// once (presets/settlement.go explains the arithmetic).
 	require.Len(t, tmpl.Lines, 4)
@@ -129,7 +129,7 @@ func TestSettlementBundle_NetTemplate_Balance(t *testing.T) {
 		"custodial/system": net.String(),
 		"fees/system":      fee.String(),
 	})
-	// gross is not a leg; it is net + fee, and the ledger's balance rule is
+	// gross is not an entry; it is net + fee, and the ledger's balance rule is
 	// what enforces the relationship now.
 	require.True(t, gross.Equal(net.Add(fee)))
 }

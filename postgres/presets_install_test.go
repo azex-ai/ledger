@@ -68,7 +68,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	fees, err := classStore.GetByCode(ctx, "fees")
 	require.NoError(t, err)
 
-	// --- FX: fund a user in currency A, then run the fx_sell / fx_buy legs
+	// --- FX: fund a user in currency A, then run the fx_sell / fx_buy journals
 	// for real against Postgres -- this is the exact composition FXBundle's
 	// doc comment describes as the caller workflow for a CCY-A -> CCY-B swap.
 	curA := postgrestest.SeedCurrency(t, pool, postgrestest.UniqueKey("FXA"), "FX Currency A")
@@ -95,7 +95,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 
 	walletA, err := ledgerStore.GetBalance(ctx, fxUser, curA, mainWallet.UID)
 	require.NoError(t, err)
-	assert.True(t, walletA.Equal(decimal.NewFromInt(400)), "user's CCY-A wallet must reflect the fx_sell leg, want 400 got %s", walletA)
+	assert.True(t, walletA.Equal(decimal.NewFromInt(400)), "user's CCY-A wallet must reflect the fx_sell journal, want 400 got %s", walletA)
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
 		HolderID:       fxUser,
@@ -108,11 +108,11 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 
 	walletB, err := ledgerStore.GetBalance(ctx, fxUser, curB, mainWallet.UID)
 	require.NoError(t, err)
-	assert.True(t, walletB.Equal(decimal.NewFromInt(250)), "user's CCY-B wallet must reflect the fx_buy leg, want 250 got %s", walletB)
+	assert.True(t, walletB.Equal(decimal.NewFromInt(250)), "user's CCY-B wallet must reflect the fx_buy journal, want 250 got %s", walletB)
 
 	settlementB, err := ledgerStore.GetBalance(ctx, -fxUser, curB, settlement.UID)
 	require.NoError(t, err)
-	assert.True(t, settlementB.Equal(decimal.NewFromInt(250)), "settlement's CCY-B leg must move with the fx_buy posting, want 250 got %s", settlementB)
+	assert.True(t, settlementB.Equal(decimal.NewFromInt(250)), "settlement's CCY-B journal must move with the fx_buy posting, want 250 got %s", settlementB)
 
 	// --- Capital: injection then withdrawal, real store, own currency so
 	// equity/custodial start clean.
@@ -132,7 +132,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, equityBal.Equal(decimal.NewFromInt(1000)), "equity after injection, want 1000 got %s", equityBal)
 
-	// The other leg of capital_injection must land on custodial specifically
+	// The other entry of capital_injection must land on custodial specifically
 	// (not, say, settlement or fees) -- a template line pointed at the wrong
 	// classification code still renders and posts a perfectly balanced
 	// journal (Render only checks debit==credit per currency, not which
@@ -162,7 +162,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, equityBal.Equal(decimal.NewFromInt(700)), "equity after a 300 withdrawal from 1000, want 700 got %s", equityBal)
 
-	// --- Settlement: gross (no fee) and net (with fee) legs, real store.
+	// --- Settlement: gross (no fee) and net (with fee) journals, real store.
 	merchant := int64(910003)
 
 	_, err = ledgerStore.ExecuteTemplate(ctx, "checkout_settlement_gross", core.TemplateParams{
@@ -174,7 +174,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// "must move" was all this asserted, so it stayed green while the leg
+	// "must move" was all this asserted, so it stayed green while the entry
 	// moved custody the wrong way (audit A-M2). A merchant settlement brings
 	// money IN: custody rises by gross.
 	custodialAfterGross, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
@@ -200,7 +200,7 @@ func TestInstallExtendedPresets_PostsAgainstRealPostgres(t *testing.T) {
 
 	feesBal, err := ledgerStore.GetBalance(ctx, -merchant, curC, fees.UID)
 	require.NoError(t, err)
-	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount leg, want 5 got %s", feesBal)
+	assert.True(t, feesBal.Equal(decimal.NewFromInt(5)), "fees classification must record the fee_amount entry, want 5 got %s", feesBal)
 
 	custodialAfterNet, err := ledgerStore.GetBalance(ctx, -merchant, curC, custodial.UID)
 	require.NoError(t, err)

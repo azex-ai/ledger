@@ -189,7 +189,7 @@ func TestReverseJournalFraction_MultiCurrencyBalancesPerCurrency(t *testing.T) {
 
 	// The DB's deferred per-currency balance trigger would have aborted the
 	// insert if either currency skewed; reaching here with equal totals means
-	// both legs balanced. JPY (exponent 0) third of 1501 must be whole.
+	// both currencies balanced. JPY (exponent 0) third of 1501 must be whole.
 	assert.True(t, rev.TotalDebit.Equal(rev.TotalCredit))
 }
 
@@ -385,8 +385,8 @@ func TestReverseJournalFraction_RepeatedDimensionFractionalSteps(t *testing.T) {
 // TestPostJournal_ReversalOfUID_RejectsNonReversingEntries is the audit's
 // minimal repro, asserted at the balance rather than at any internal shape.
 // A perfectly legal, per-currency-balanced, NET-ZERO journal tagged
-// `reversal_of = J` moves no money at all, yet its four legs register as 50
-// already reversed on two of J's dimensions (the credit legs invert back to
+// `reversal_of = J` moves no money at all, yet its four entries register as 50
+// already reversed on two of J's dimensions (the credit entries invert back to
 // the debit key and vice versa). `ReverseJournalFraction(J, 1, 1)` -- "reverse
 // everything remaining" -- then reverses 100 - 50 = 50, returns nil, and
 // leaves 50 on the books while telling the caller the journal is fully
@@ -426,9 +426,9 @@ func TestPostJournal_ReversalOfUID_RejectsNonReversingEntries(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, balance().Equal(d("100")), "fixture must start at 100, got %s", balance())
 
-	// Net zero on every dimension, balanced per currency, and every leg is a
+	// Net zero on every dimension, balanced per currency, and every entry is a
 	// dimension J really touches -- only the DIRECTIONS make it not a
-	// reversal. Two of the four legs (the ones matching J's own direction)
+	// reversal. Two of the four entries (the ones matching J's own direction)
 	// have no counterpart in J once inverted, which is what makes this a
 	// non-subset rather than a small over-reversal.
 	_, err = writer.PostJournal(ctx, core.JournalInput{
@@ -490,7 +490,7 @@ func TestPostJournal_ReversalOfUID_RejectsReversalOfAReversal(t *testing.T) {
 	rev, err := writer.ReverseJournal(ctx, j.UID, "mistake")
 	require.NoError(t, err)
 
-	// Re-reversing the reversal by hand: the legs are a perfectly shaped
+	// Re-reversing the reversal by hand: the entries are a perfectly shaped
 	// inversion of `rev`, so only the "the target is itself a reversal" rule
 	// can catch it.
 	_, err = writer.PostJournal(ctx, core.JournalInput{

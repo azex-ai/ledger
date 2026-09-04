@@ -93,7 +93,7 @@ written because it was true when `[0.6.0]` shipped.
   may:
 
   - `entry_template_lines`: a line may only be inserted by the transaction
-    that created its `entry_templates` row. Appending a leg to an installed
+    that created its `entry_templates` row. Appending a line to an installed
     template is refused. An owner-run repair (migration 016's shape) must
     open the door explicitly with
     `set_config('ledger.repair_template_lines', 'on', true)` in the same
@@ -273,7 +273,7 @@ written because it was true when `[0.6.0]` shipped.
 
 - **`capital_injection` / `capital_withdraw` sign correction** (A-C1,
   migration 016): `equity` changed from credit-normal to debit-normal, and
-  both templates' legs reversed (injecting capital is now CR custodial + DR
+  both templates' lines reversed (injecting capital is now CR custodial + DR
   equity). Migration 016 runs as owner, disables the mutation guard for the
   one statement, and forces a full rollup/snapshot recompute for `equity`.
   **If your deployment has posted through these two templates before
@@ -286,16 +286,16 @@ written because it was true when `[0.6.0]` shipped.
   optional — w3-review/money-path.md m-5.) Amount keys are unchanged. Deployments that never used these
   two templates need no action.
 - **`checkout_settlement_gross` / `_net` sign correction** (A-M2):
-  `checkout_settlement_gross` legs reversed (merchant `main_wallet` is now
+  `checkout_settlement_gross` lines reversed (merchant `main_wallet` is now
   DR +gross / `custodial` CR +gross). `checkout_settlement_net` grew from 3
-  legs to 4 and **no longer accepts `gross_amount`** — it now takes only
+  lines to 4 and **no longer accepts `gross_amount`** — it now takes only
   `net_amount` + `fee_amount` (gross is the derived sum), and posts a new
-  `fee_expense` (memo) leg plus a `fees` leg. `SettlementBundle()` now also
+  `fee_expense` (memo) line plus a `fees` line. `SettlementBundle()` now also
   installs the `fee_expense` classification. A caller passing only
   `gross_amount` now gets `missing amount key`; one already passing
   `net_amount`/`fee_amount` is unaffected by the signature (only by the
   polarity fix).
-- **`fee_charge` sign correction** (A-M4): grew from 2 legs to 4
+- **`fee_charge` sign correction** (A-M4): grew from 2 lines to 4
   (`fee_expense` DR / `custodial` DR / `main_wallet` CR / `fees` CR).
   `FeeBundle()` now also installs `fee_expense`. Amount key (`amount`)
   unchanged. Deployments that already posted through `fee_charge`: the
@@ -340,7 +340,7 @@ written because it was true when `[0.6.0]` shipped.
   constructing well-formed-but-semantically-wrong values now gets an error
   instead of a silently accepted mislinked or partial reversal.
 - **Protected-template gate is now structural** (D-C1): `POST
-  /journals/template` refuses any template with a leg on an `is_system`
+  /journals/template` refuses any template with a line on an `is_system`
   classification (403), not just a fixed four-code list. Newly caught:
   `dev_credit`, `capital_injection`, `capital_withdraw`, `fee_charge`,
   `checkout_settlement_gross`, `checkout_settlement_net`, `fx_buy`,
@@ -620,11 +620,11 @@ plan [`docs/plans/2026-09-03-wave5-contract.md`](docs/plans/2026-09-03-wave5-con
   | `030` | 3.35 | 3.71 | 6.13 | 20.81 | 96.78 | 363.61 |
   | `031` | 2.92 | 3.47 | 6.43 | 26.09 | 211.81 | 2268.63 |
 
-  Free at the 2--6 legs the presets post, 5.7x at 2000, O(N²) in entries per
+  Free at the 2--6 entries the presets post, 5.7x at 2000, O(N²) in entries per
   journal with no cap in `core`. **Consumers need no code change**, and the
   default (deferred) behaviour is unchanged; a caller who issues `SET
   CONSTRAINTS ... IMMEDIATE` will now find that an honest journal composed
-  across statements is refused after its first leg, which is fail-closed and
+  across statements is refused after its first entry, which is fail-closed and
   is stated as an assertion in
   `postgres.TestBalanceGuard_ImmediateModeRefusesHonestMultiStatementPosting`.
 
@@ -1059,14 +1059,14 @@ reconciliation → human review) and a full wallet-side frontend.
 Two of these move real money and are worth reading before upgrading.
 
 - **Transfers and fees ran in the wrong direction.** `transfer_out`,
-  `transfer_in` and `fee_charge` had their holder leg inverted against
+  `transfer_in` and `fee_charge` had their holder entry inverted against
   `main_wallet`'s declared polarity, so a peer-to-peer transfer of 100 left
   the sender 100 richer and the receiver 100 in debt, and charging a fee paid
   the payer. `deposit_confirm` and `checkout_settlement` were always correct;
   these three disagreed with them. **If you have posted through these
   templates, the resulting journals are wrong and need reversing.**
 
-  The preset tests passed throughout: both legs draw on the same amount key,
+  The preset tests passed throughout: both entries draw on the same amount key,
   so "total debits equal total credits" holds whichever side each
   classification lands on.
 
@@ -1614,7 +1614,7 @@ library — single-step breaking migration, no compatibility shims, no backfill.
   through the interface instead of querying the `reservations` table directly.
 
 ### Documentation
-- `docs/COOKBOOK.md` — business recipes: buy credits at a fixed rate (FX two-leg),
+- `docs/COOKBOOK.md` — business recipes: buy credits at a fixed rate (two-journal FX),
   discounts (price / bonus / promo), adding currencies, reserve→settle spend,
   cash-out, and expiry/insufficient-funds edges.
 - `examples/credits-topup` — runnable end-to-end program for the above.

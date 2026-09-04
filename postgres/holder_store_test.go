@@ -107,7 +107,7 @@ func TestHolderTransactionsProjection(t *testing.T) {
 	// (2) Fee charge: wallet -5, memo-tagged fee_expense +5 — the role filter
 	// must keep this visible as out/5 (not net it to zero). This is the case
 	// that broke: 'memo' passed the old `balance_role <> ''` filter, the two
-	// holder-side legs netted to exactly zero, and holder_store.go's
+	// holder-side entries netted to exactly zero, and holder_store.go's
 	// net.IsZero() guard dropped the row entirely.
 	f.post(t, ctx, f.jtPlain, "ht-fee", []core.EntryInput{
 		{AccountHolder: f.holder, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(5)},

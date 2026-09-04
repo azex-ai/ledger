@@ -333,7 +333,7 @@ func TestBalanceGuard_DedupSetCannotBePreSeeded(t *testing.T) {
 // (restore 030's skip, watch it succeed) alongside it.
 
 // TestBalanceGuard_LegitimateJournalsStillPost is the control: none of the
-// above is achieved by refusing everything. A many-legged, multi-statement
+// above is achieved by refusing everything. A many-entry, multi-statement
 // journal still posts through the real write path, and the journals-level
 // trigger accepts a journal whose entries arrive after it.
 func TestBalanceGuard_LegitimateJournalsStillPost(t *testing.T) {
@@ -354,7 +354,7 @@ func TestBalanceGuard_LegitimateJournalsStillPost(t *testing.T) {
 		Source:         "searchpath-control",
 		Entries:        entries,
 	})
-	require.NoError(t, err, "a 40-leg balanced journal must still post")
+	require.NoError(t, err, "a 40-entry balanced journal must still post")
 
 	journalID := postgrestest.InternalID(t, pool, "journals", j.UID)
 	var count int

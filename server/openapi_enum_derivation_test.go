@@ -48,7 +48,7 @@ import (
 var publishedGoVocabularies = map[string]string{
 	"core.EntryType":                  "debit / credit on a journal entry",
 	"core.NormalSide":                 "a classification's polarity",
-	"core.HolderRole":                 "user / system side of a template leg",
+	"core.HolderRole":                 "user / system side of a template line",
 	"core.BalanceRole":                "which liquidity bucket a classification's balance counts in (I-11 / I-37)",
 	"core.AccountPolicyStatus":        "an account policy's lifecycle state",
 	"core.ReservationStatus":          "a reservation's lifecycle state",
