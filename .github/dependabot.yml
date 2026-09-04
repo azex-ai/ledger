@@ -23,6 +23,23 @@ updates:
     groups:
       web-deps:
         patterns: ["*"]
+    ignore:
+      # TypeScript 7 (the Go-native compiler) is a deliberate, separate
+      # decision: typescript-eslint has no TS 7 support planned before 7.1
+      # and `next build`'s type check needs an experimental flag. Until that
+      # is taken, keep proposing 5.x/6.x only.
+      - dependency-name: typescript
+        versions: [">=7.0.0"]
+      # eslint 10: eslint-config-next only requires >=9; move the lint
+      # runtime on its own, not inside the weekly group.
+      - dependency-name: eslint
+        versions: [">=10.0.0"]
+      # next pins postcss exactly; any range above that pin in
+      # @azex/ledger-react installs a second, nested postcss whose types no
+      # longer unify with the root copy and breaks `typecheck`
+      # (scripts/build-css.ts). The package's range stays ^8 and follows
+      # next's pin; do not propose a narrower one.
+      - dependency-name: postcss
 
   - package-ecosystem: github-actions
     directory: /
