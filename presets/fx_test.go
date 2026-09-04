@@ -45,8 +45,8 @@ func TestFXBundle_JournalTypes(t *testing.T) {
 	}
 }
 
-// Each leg balances independently (per-currency invariant). FX is by
-// definition multi-currency, so each leg must be self-contained.
+// Each journal balances independently (per-currency invariant). FX is by
+// definition multi-currency, so each journal must be self-contained.
 func TestFXBundle_Templates_Balance(t *testing.T) {
 	ctx := context.Background()
 	cs := newFakeClassificationStore()

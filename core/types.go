@@ -259,7 +259,7 @@ const (
 	// settlement landing in the holder's spendable balance).
 	HolderTxKindDeposit HolderTxKind = "deposit"
 	// HolderTxKindWithdrawal marks funds leaving the platform to the
-	// holder's own external destination, including the lock/unlock legs of
+	// holder's own external destination, including the lock/unlock journals of
 	// that lifecycle.
 	HolderTxKindWithdrawal HolderTxKind = "withdrawal"
 	// HolderTxKindTransfer marks a movement between two holders on the same
@@ -275,7 +275,7 @@ const (
 	// HolderTxKindOther is the explicit "genuinely does not fit any bucket
 	// above" declaration -- for a journal type whose author considered the
 	// vocabulary and chose this on purpose (capital injection/withdrawal,
-	// FX conversion legs), as opposed to HolderTxKindNone's "nobody has
+	// FX conversion journals), as opposed to HolderTxKindNone's "nobody has
 	// looked at this yet". See this type's doc comment.
 	HolderTxKindOther HolderTxKind = "other"
 )

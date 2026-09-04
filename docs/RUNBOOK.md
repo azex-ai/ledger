@@ -130,7 +130,7 @@ Match the failing check's `name` to the entries in `checks[].findings`. Then:
   journal; do not touch `journal_entries` directly. If this fires at all on a
   journal newer than migration `044`, treat it as a security incident: the
   DB-layer trigger should have rejected the insert outright.
-- **`settlement_netting`** — usually a stuck FX or transfer leg
+- **`settlement_netting`** — usually a stuck FX or transfer journal
   (one side posted, the other didn't). Check `journals` table for orphan
   half-pair on the `settlement` classification.
 - **`non_negative_balances`** — a user got debited beyond their balance.

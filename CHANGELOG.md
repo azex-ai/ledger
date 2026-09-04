@@ -1614,7 +1614,7 @@ library — single-step breaking migration, no compatibility shims, no backfill.
   through the interface instead of querying the `reservations` table directly.
 
 ### Documentation
-- `docs/COOKBOOK.md` — business recipes: buy credits at a fixed rate (FX two-leg),
+- `docs/COOKBOOK.md` — business recipes: buy credits at a fixed rate (two-journal FX),
   discounts (price / bonus / promo), adding currencies, reserve→settle spend,
   cash-out, and expiry/insufficient-funds edges.
 - `examples/credits-topup` — runnable end-to-end program for the above.

@@ -43,7 +43,7 @@ func TestSettlementNettingViolations_ReportsTheSameSignAsGetBalance(t *testing.T
 	const holder = int64(9501)
 	sys := core.SystemAccountHolder(holder)
 
-	// A transfer_in-shaped leg with no matching transfer_out: settlement is
+	// A transfer_in-shaped journal with no matching transfer_out: settlement is
 	// left holding a real, non-zero position -- credit-normal, credited, so
 	// GetBalance reads it POSITIVE.
 	_, err := ledgerStore.PostJournal(ctx, core.JournalInput{

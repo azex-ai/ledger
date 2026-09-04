@@ -1,10 +1,10 @@
 // Example: buying, bonusing, spending, and cashing out credits.
 //
 // Walks the Ledger Cookbook (docs/COOKBOOK.md) end-to-end:
-//   - Recipe 1  buy credits at 1 USDT : 100 credits (FX two-leg, atomic batch)
+//   - Recipe 1  buy credits at 1 USDT : 100 credits (two-journal FX, atomic batch)
 //   - Recipe 2b top-up with bonus (runtime-registered template, equity-funded)
 //   - Recipe 4  spend credits via Reserve → Settle → actual-debit journal
-//   - Recipe 5  cash credits back to USDT (reverse FX two-leg)
+//   - Recipe 5  cash credits back to USDT (reverse two-journal FX)
 //
 // Demonstrates that credits are "just another currency": the same main_wallet /
 // settlement / equity classifications and fx_sell / fx_buy templates work across
@@ -123,7 +123,7 @@ func run() error {
 	printBalances(usdtBal, creditsBal, "after seeding 10 USDT")
 
 	// -----------------------------------------------------------------------
-	// Recipe 1: buy 100 credits for 1 USDT (FX two-leg, posted atomically).
+	// Recipe 1: buy 100 credits for 1 USDT (two-journal FX, posted atomically).
 	// -----------------------------------------------------------------------
 	buyKey := ledger.NewIdempotencyKey("buy-credits")
 	buyMeta := map[string]string{"quote_id": "q-1", "fx_rate": "100"}
@@ -151,7 +151,7 @@ func run() error {
 	}
 	bonusKey := ledger.NewIdempotencyKey("bonus-topup")
 	if _, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
-		{TemplateCode: "fx_sell", Params: core.TemplateParams{ // the paid leg: 1 USDT
+		{TemplateCode: "fx_sell", Params: core.TemplateParams{ // the paid journal: 1 USDT
 			HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: bonusKey + "-pay",
 			Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("1")},
 		}},
@@ -235,7 +235,7 @@ func run() error {
 	printBalances(usdtBal, creditsBal, "after spending 32 credits (settled from 50 budget)")
 
 	// -----------------------------------------------------------------------
-	// Recipe 5: cash 88 credits back to USDT at 100:1 (reverse FX two-leg).
+	// Recipe 5: cash 88 credits back to USDT at 100:1 (reverse two-journal FX).
 	// -----------------------------------------------------------------------
 	cashKey := ledger.NewIdempotencyKey("cash-out")
 	cashMeta := map[string]string{"quote_id": "q-2", "fx_rate": "100"}

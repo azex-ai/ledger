@@ -272,7 +272,7 @@ func TestPresetSolvency_EveryShippedTemplate(t *testing.T) {
 		},
 		{
 			name: "transfer_out + transfer_in",
-			why:  "settlement is the transit asset: the sender's leg removes asset and liability together, the receiver's leg adds them back",
+			why:  "settlement is the transit asset: the sender's journal removes asset and liability together, the receiver's journal adds them back",
 			steps: []solvencyStep{
 				{"deposit_confirm", user, map[string]string{"amount": "1000"}},
 				{"transfer_out", user, map[string]string{"amount": "40"}},

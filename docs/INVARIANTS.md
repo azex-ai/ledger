@@ -5611,7 +5611,7 @@ index that serves a lookup which must not mention `status`.
   (while the ungated path honors it immediately — the divergence is
   asserted, not tolerated), a legitimate `Settle` of 400 leaves the whole
   1000 held even though the balance is now 600, and only the passage of
-  `expires_at` gives the funds back. The last leg polls rather than sleeps,
+  `expires_at` gives the funds back. The last step polls rather than sleeps,
   so a slow or clock-skewed container cannot make it flaky.
 - `postgres.TestReserverStore_Settle_RefusesExpiredReservation` — the paired
   settle-side rule, with a live reservation settling normally as the

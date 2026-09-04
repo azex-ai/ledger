@@ -391,12 +391,12 @@ end-to-end.
 |--------|---------------------------|---------------|-----------|---------|
 | `DepositBundle()` | `pending`, `main_wallet`, `suspense`, `custodial` | `deposit_pending`, `deposit_confirm`, `deposit_confirm_pending`, `deposit_release_pending`, `deposit_record_overage`, `deposit_resolve_overage`, `deposit_release_overage` | matching templates, one per journal type | Two-phase deposit (pending → confirmed) with tolerance & overage handling |
 | `WithdrawalBundle()` | `locked`, `fee_expense`, `fee_revenue` | `lock_funds`, `unlock_funds`, `withdraw_confirm`, `withdraw_fee` | `lock_funds`, `unlock_funds`, `withdraw_confirm`, `withdraw_fee` | Lock → reserve → confirm; fee templates |
-| `TransferBundle()` | `settlement` (system) | `transfer` | `transfer_out`, `transfer_in` | User-to-user via shared settlement pool (sender leg + receiver leg) |
+| `TransferBundle()` | `settlement` (system) | `transfer` | `transfer_out`, `transfer_in` | User-to-user via shared settlement pool (sender journal + receiver journal) |
 | `FeeBundle()` | `fees` (system) | `fee` | `fee_charge` | Generic platform fee: DR user main_wallet, CR system fees |
 | `CapitalBundle()` | `equity` (system) | `capital_injection`, `capital_withdraw` | matching | Platform equity movements |
 | `SettlementBundle()` | `settlement` (system), `fees` (system) | `checkout_settlement` | `checkout_settlement_gross`, `checkout_settlement_net` | Checkout settlement (gross or net-of-fee) into user wallet |
 | `SpreadBundle()` | `spread` (system) | (none) | (none) | Registers the `spread` classification only — caller posts via `PostJournal` |
-| `FXBundle()` | (shared only) | `fx_sell`, `fx_buy` | matching | Per-currency FX leg pair sharing the settlement pool |
+| `FXBundle()` | (shared only) | `fx_sell`, `fx_buy` | matching | Per-currency FX journal pair sharing the settlement pool |
 
 Two convenience installers:
 
@@ -1022,7 +1022,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 102 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
-- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (FX two-leg), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
+- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (two-journal FX), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
 
 ## Examples
 
