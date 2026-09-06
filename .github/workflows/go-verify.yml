@@ -125,7 +125,7 @@ jobs:
         run: go test ./core/ -run '^$' -fuzz='^FuzzAllocate$' -fuzztime=30s
       - name: Upload new fuzz corpus (if any)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-corpus
           path: core/testdata/fuzz/
