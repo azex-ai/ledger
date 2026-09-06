@@ -109,3 +109,24 @@ pricing, usage reconciliation and refund policy are tracked in
 Memory: recorded the observed workspace/tarball consumer-boundary failures in
 Hive `learnings/26-09-07-ledger-consumer-boundary.md`; `hive doctor --strict`
 passed. No Hive rule promotion or role change was made.
+
+## Push-time CI follow-up
+
+The first pushed commit `838476f` exposed two additional integration failures:
+
+- React typecheck imported the host navigation, whose package self-import needed
+  generated `dist` declarations. The package TypeScript config now resolves its
+  own import to source; typecheck passes with `dist` temporarily absent. The host
+  build still consumes the package exports. Package build, all 241 tests and the
+  root web ESLint check pass after this correction.
+- Root vulnerability scanning now reaches the PostgreSQL fixture's testcontainers
+  SSH dependency. `GO-2026-6354` and `GO-2026-6355` identify `x/crypto v0.54.0`
+  as affected and `v0.56.0` as fixed. All four module manifests now select
+  `v0.56.0`; root `x/text` also moves to the required `v0.41.0`.
+
+These are follow-up fixes prompted by actual Linux CI evidence; the earlier local
+results did not establish that the clean CI checkout would pass.
+
+After the dependency update, local `govulncheck` passes for root, EVM and R2 using
+the same Go 1.26.8 toolchain as CI; core and credits tests and the external consumer
+build also pass. Remote CI status is recorded in the gpv session summary.

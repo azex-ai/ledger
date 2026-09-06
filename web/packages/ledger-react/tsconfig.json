@@ -4,6 +4,9 @@
     "lib": ["dom", "dom.iterable", "esnext"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "@azex/ledger-react": ["./src/index.ts"]
+    },
     "jsx": "react-jsx",
     "strict": true,
     "declaration": true,
