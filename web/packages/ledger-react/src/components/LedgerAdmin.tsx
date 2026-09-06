@@ -4,7 +4,7 @@ import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
 import { Toaster } from "sonner";
 import { useLedgerAppearance } from "../provider/context";
 import { Sidebar } from "./sidebar";
-import { type LinkComponent } from "./nav";
+import { LEDGER_NAV_ITEMS, type LedgerNavItem, type LinkComponent } from "./nav";
 import { ListPageSkeleton } from "./loading-skeleton";
 import { JournalsPage } from "./pages/JournalsPage";
 import { JournalDetailPage } from "./pages/JournalDetailPage";
@@ -86,9 +86,17 @@ function renderSection(pathname: string, link: LinkComponent): ReactNode {
   }
 }
 
-export function LedgerAdmin() {
+export interface LedgerAdminProps {
+  /** Select/reorder built-in sections. UI configuration, not API authorization. */
+  navItems?: readonly LedgerNavItem[];
+}
+
+export function LedgerAdmin({ navItems = LEDGER_NAV_ITEMS }: LedgerAdminProps) {
   const [pathname, setPathname] = useState("/");
   const appearance = useLedgerAppearance();
+  const sections = navItems.flatMap((item) => item.type === "separator" ? [] : [item.href]);
+  const section = JOURNAL_DETAIL_RE.test(pathname) ? "/journals" : pathname;
+  const activePathname = sections.includes(section) ? pathname : sections[0];
 
   // Internal router: clicking a nav/page link sets the active section instead
   // of navigating. Stable identity via useMemo so child memoization holds.
@@ -119,10 +127,10 @@ export function LedgerAdmin() {
   // detail path (/journals/123) still highlights the Journals nav item.
   return (
     <div className="ledger-admin flex min-h-screen">
-      <Sidebar pathname={pathname} linkComponent={linkComponent} />
+      <Sidebar pathname={activePathname ?? ""} linkComponent={linkComponent} navItems={navItems} />
       <main className="flex-1 overflow-y-auto p-6 pt-16 lg:pt-6">
         <Suspense fallback={<ListPageSkeleton hasActions rows={6} />}>
-          {renderSection(pathname, linkComponent)}
+          {activePathname ? renderSection(activePathname, linkComponent) : <p>No sections configured.</p>}
         </Suspense>
       </main>
       <Toaster

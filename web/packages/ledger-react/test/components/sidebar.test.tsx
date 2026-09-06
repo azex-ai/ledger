@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 import type { ReactNode } from "react";
 import { Sidebar } from "../../src/components/sidebar";
@@ -9,6 +9,14 @@ const linkItems = LEDGER_NAV_ITEMS.filter(
 );
 
 describe("Sidebar", () => {
+  test("uses the host selection on desktop and in the mobile drawer", () => {
+    const navItems = LEDGER_NAV_ITEMS.filter((item) => item.type === "separator" || item.href !== "/withdrawals");
+    render(<Sidebar pathname="/deposits" navItems={navItems} />);
+    expect(screen.queryByRole("link", { name: "Withdrawals" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    expect(screen.queryByRole("link", { name: "Withdrawals" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Deposits" })).toHaveLength(2);
+  });
   test("renders every nav item label", () => {
     render(<Sidebar pathname="/" />);
     for (const item of linkItems) {

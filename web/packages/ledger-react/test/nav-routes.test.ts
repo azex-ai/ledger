@@ -2,11 +2,11 @@ import { readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { LEDGER_NAV_ITEMS } from "../src/components/nav";
+import { APP_NAV_ITEMS } from "../../../src/lib/navigation";
 
 /*
- * C1 gate: the package ships LEDGER_NAV_ITEMS (the sidebar contract), and the
- * dogfood Next app in web/src/app must have a route for every non-separator
+ * C1 gate: the dogfood app selects APP_NAV_ITEMS from the library catalogue,
+ * and web/src/app must have a route for every selected non-separator
  * href. Two hrefs (/deposit-reviews, /sweeps) once pointed at pages that were
  * never created here, so the sidebar 404'd on the human-review queue.
  *
@@ -60,9 +60,14 @@ const EXPECTED_UNLISTED = new Set([
 
 describe("sidebar nav contract vs. dogfood app routes", () => {
   const appRoutes = new Set(collectAppRoutes(appRoot));
-  const navHrefs = LEDGER_NAV_ITEMS.filter(
+  const navHrefs = APP_NAV_ITEMS.filter(
     (i): i is Extract<typeof i, { href: string }> => i.type === undefined,
   ).map((i) => i.href);
+
+  it("the deposit-only host exposes no withdrawal page or navigation", () => {
+    expect(navHrefs).not.toContain("/withdrawals");
+    expect(appRoutes.has("/withdrawals")).toBe(false);
+  });
 
   it("every nav href has a page.tsx in web/src/app", () => {
     const missing = navHrefs.filter((h) => !appRoutes.has(h));

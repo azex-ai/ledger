@@ -9,11 +9,11 @@ import { LoadMoreBar } from "../../components/pagination-bar";
 import { cn, formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
+import { ExactAmount } from "./exact-amount";
 
 /*
  * Wallet transaction list (shadcn skin). Rows speak user language: a label,
  * a signed colored amount, a time, an optional memo, a refund marker.
- * Mirrored in the HeroUI skin — keep page logic in sync.
  */
 
 export interface TransactionListProps {
@@ -94,11 +94,16 @@ function DefaultRow({
             : "text-emerald-600 dark:text-emerald-400",
         )}
       >
-        {isNegative ? "" : "+"}
-        {text}{" "}
-        <span className="text-muted-foreground font-normal">
-          {tx.currency_code}
-        </span>
+        <ExactAmount
+          value={isNegative ? `-${tx.amount}` : tx.amount}
+          currencyCode={tx.currency_code}
+        >
+          {isNegative ? "" : "+"}
+          {text}{" "}
+          <span className="ml-1 text-muted-foreground font-normal">
+            {tx.currency_code}
+          </span>
+        </ExactAmount>
       </p>
     </li>
   );

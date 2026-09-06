@@ -3,7 +3,7 @@
  *
  * End-user wallet components on the self-contained shadcn-style skin (import
  * `@azex/ledger-react/styles.css` once, wrap in <WalletProvider>). Read-only
- * by design: top-up / cash-out actions come from the host via the `actions`
+ * by design: top-up actions come from the host via the `actions`
  * slot. The HeroUI variant lives at ./wallet/heroui; the UI-free core at
  * ./wallet/headless.
  */
@@ -12,6 +12,7 @@ export * from "./wallet-headless";
 
 export { WalletBalanceCard, WalletBalances } from "./wallet/components/balance-card";
 export type {
+  WalletBalanceActions,
   WalletBalanceCardProps,
   WalletBalancesProps,
 } from "./wallet/components/balance-card";

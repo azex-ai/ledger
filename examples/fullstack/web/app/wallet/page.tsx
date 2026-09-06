@@ -10,10 +10,14 @@
  * needed here. The ledger API key never reaches the browser.
  */
 
-import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
+import { DepositAddressCard, WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
 
 const baseUrl =
   process.env.NEXT_PUBLIC_LEDGER_API_URL ?? "http://localhost:8090";
+
+// Set only after wiring the backend's real DepositAddressProvider and USDC
+// allowlist. Never guess a network or send funds to a fixture address.
+const depositNetwork = process.env.NEXT_PUBLIC_LEDGER_DEPOSIT_NETWORK;
 
 async function fetchWalletToken(): Promise<string> {
   const res = await fetch(`${baseUrl}/api/session/wallet-token`, {
@@ -29,20 +33,21 @@ export default function WalletPage() {
     <WalletProvider
       config={{ baseUrl: `${baseUrl}/api/v1`, getToken: fetchWalletToken }}
     >
-      <main className="mx-auto max-w-3xl p-6">
-        <h1 className="mb-6 text-xl font-semibold">My wallet</h1>
+      <main className="example-wallet">
+        <h1>My wallet</h1>
         <WalletPanel
           kindLabels={{ deposit: "Top up" }}
-          actions={
-            <button
-              type="button"
-              className="rounded-md border border-border px-3 py-1 text-xs"
-              onClick={() => alert("Top-up flow lives in the host product")}
-            >
-              Top up
-            </button>
-          }
+          actions={(balance) => depositNetwork && (!balance || balance.currency_code === "USDC") ? (
+            <a href="#deposit" className="example-deposit-link">Add USDC</a>
+          ) : null}
         />
+        <section id="deposit" aria-label="Add funds">
+          {depositNetwork ? (
+            <DepositAddressCard network={depositNetwork} assets={["USDC"]} />
+          ) : (
+            <p className="example-wallet-note">Deposits are currently unavailable.</p>
+          )}
+        </section>
       </main>
     </WalletProvider>
   );

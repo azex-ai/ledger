@@ -8,7 +8,7 @@
 //
 // Demonstrates:
 //   - ledger.New(pool)                — single facade construction
-//   - svc.InstallDefaultPresets       — deposit/withdrawal bundles ready to use
+//   - presets.DepositBundle           — deposit-only accounting
 //   - server.NewFromDeps(cfg, deps)   — the full ledger HTTP API as an http.Handler,
 //     returning an error instead of panicking on an invalid config, and naming
 //     each dependency by field instead of by position (see server.Deps)
@@ -52,6 +52,7 @@ import (
 	"github.com/azex-ai/ledger/core"
 	"github.com/azex-ai/ledger/pkg/slogadapter"
 	"github.com/azex-ai/ledger/postgres"
+	"github.com/azex-ai/ledger/presets"
 	"github.com/azex-ai/ledger/server"
 	"github.com/azex-ai/ledger/service"
 	"github.com/azex-ai/ledger/service/delivery"
@@ -114,9 +115,9 @@ func run() error {
 		return fmt.Errorf("ledger.New: %w", err)
 	}
 
-	// Deposit + withdrawal classifications, journal types, and templates.
+	// Deposit classifications, journal types, and templates.
 	// Idempotent — safe on every startup.
-	if err := svc.InstallDefaultPresets(rootCtx); err != nil {
+	if err := presets.InstallTemplateBundle(rootCtx, svc.Classifications(), svc.JournalTypes(), svc.Templates(), presets.DepositBundle()); err != nil {
 		return fmt.Errorf("install presets: %w", err)
 	}
 
@@ -294,7 +295,7 @@ var walletTokenSecret = []byte("fullstack-demo-wallet-secret-0123456789")
 // dashboard renders real balances. Idempotent: fixed keys + identical payloads
 // resolve to the original journals on re-run.
 func seed(ctx context.Context, svc *ledger.Service) error {
-	currencyUID, err := ensureCurrency(ctx, svc, "USDT", "Tether USD")
+	currencyUID, err := ensureCurrency(ctx, svc, "USDC", "USD Coin")
 	if err != nil {
 		return err
 	}
@@ -311,7 +312,7 @@ func seed(ctx context.Context, svc *ledger.Service) error {
 		_, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 			HolderID:       d.holder,
 			CurrencyUID:    currencyUID,
-			IdempotencyKey: fmt.Sprintf("fullstack-seed-deposit-%d", d.holder),
+			IdempotencyKey: fmt.Sprintf("fullstack-seed-usdc-deposit-%d", d.holder),
 			Amounts:        map[string]decimal.Decimal{"amount": decimal.RequireFromString(d.amount)},
 			Source:         "fullstack-example-seed",
 		})

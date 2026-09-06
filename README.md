@@ -3,6 +3,14 @@
 Production-grade classification-driven double-entry ledger engine for Go.
 Dual-mode: importable library or standalone HTTP service.
 
+For the current **deposit-only AI credits** integration, start with
+[`examples/credits-topup`](examples/credits-topup): confirmed 1 USDC → 1,000 credits,
+fixed/metered/incremental usage charges, transactional settlement and replay tests.
+The [shadcn fullstack example](examples/fullstack) shows library UI integration;
+wallet hooks and slots support host-owned presentation. Unresolved product policies
+are recorded in [deposit/credits gaps](docs/gaps/deposit-credits.md). The catalogue
+below also contains optional capabilities outside that integration.
+
 ## Features
 
 Five-dimensional banking coverage:
@@ -42,9 +50,9 @@ Core engine capabilities:
 ## Local Development with go.work
 
 To consume the local copy of `azex-ai/ledger` from a sibling Go module, drop a
-workspace file at the parent directory that supersedes the one this repo
-ships (which only sees its own five modules — root, `chains/evm`,
-`anchors/r2`, `anchors/r2/internal/miniotest`, `internal/postgrestest`):
+workspace file at the parent directory. The workspace this repo ships only
+sees its own four modules — root, `chains/evm`,
+`anchors/r2`, `anchors/r2/internal/miniotest`:
 
 ```bash
 cd /path/to/parent          # e.g. /Users/aaron/azex
@@ -56,7 +64,6 @@ use (
     ./ledger/chains/evm
     ./ledger/anchors/r2
     ./ledger/anchors/r2/internal/miniotest
-    ./ledger/internal/postgrestest
     ./your-consumer-module
 )
 EOF
@@ -66,17 +73,22 @@ EOF
 [`ledger/go.mod`](go.mod) (currently `1.26.6`) — an older toolchain version
 here fails immediately with `requires go >= 1.26.6`. There is no need to
 remove `ledger/go.work` — both `go.work` and `go.work.sum` are tracked in
-this repo (not git-ignored), and an outer workspace file always supersedes an
-inner one, so the two coexist without conflict.
+this repo. Go discovers the nearest workspace by walking upward from the current
+directory: the sibling consumer finds the parent file, while commands inside
+`ledger/` still use this repo's file. Set `GOWORK` to the absolute parent file
+when you want commands inside `ledger/` to use that shared workspace too.
 
-A plain `replace github.com/azex-ai/ledger => ../ledger` in your consumer's
-`go.mod` does **not** work as a substitute for the workspace file above: the
-root module's own `internal/postgrestest` requirement uses a relative
-`replace`, which is not transitive to your module, so `go mod tidy` fails
-with `invalid version: unknown revision 000000000000`. This only affects
-local development against an unpublished checkout — `go get
-github.com/azex-ai/ledger@<tag>` in a fresh module works normally and needs
-no workspace file at all.
+For the root ledger library alone, a normal local replacement also works:
+
+```gomod
+replace github.com/azex-ai/ledger => ../ledger
+```
+
+Run `go mod tidy` and build in the consuming module, without `go.work` if desired.
+The PostgreSQL test fixture is an internal package of the root module, not a
+separately versioned dependency. Its testcontainers dependencies can appear in
+module metadata/checksums, but do not enter a production import of `ledger`.
+The optional EVM/R2 modules keep their own dependency boundaries.
 
 ## Quick Start -- As a Library
 

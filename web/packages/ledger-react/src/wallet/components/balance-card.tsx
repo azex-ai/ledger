@@ -9,13 +9,13 @@ import { ErrorState } from "../../components/error-state";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import type { WalletBalance, WalletHold } from "../client";
 import { useWalletBalance, useWalletHolds } from "../hooks";
+import { ExactAmount } from "./exact-amount";
 
 type HoldsQuery = ReturnType<typeof useWalletHolds>;
 
 /*
  * Wallet balance surfaces (shadcn skin). User language only: balance,
- * available, pending, locked — never ledger internals. Mirrored in the
- * HeroUI skin (src/wallet/heroui) — keep page logic in sync.
+ * available, pending, locked — never ledger internals.
  */
 
 function BalanceCardSkeleton() {
@@ -81,7 +81,9 @@ function HoldsDetail({
             <time dateTime={h.expires_at}>{formatUTC(h.expires_at)}</time>
           </span>
           <span className="tabular-nums">
-            {formatAmount(h.amount)} {h.currency_code}
+            <ExactAmount value={h.amount} currencyCode={h.currency_code}>
+              {formatAmount(h.amount)} {h.currency_code}
+            </ExactAmount>
           </span>
         </li>
       ))}
@@ -97,7 +99,7 @@ function BalanceCardView({
 }: {
   balance: WalletBalance;
   holds: HoldsQuery;
-  actions?: ReactNode;
+  actions?: WalletBalanceActions;
 }) {
   const [showHolds, setShowHolds] = useState(false);
   const currencyHolds = (holds.data ?? []).filter(
@@ -114,20 +116,26 @@ function BalanceCardView({
         <CardTitle className="text-sm font-medium text-muted-foreground">
           {balance.currency_code} balance
         </CardTitle>
-        {actions}
+        {typeof actions === "function" ? actions(balance) : actions}
       </CardHeader>
       <CardContent>
         <p className="text-3xl font-bold tabular-nums">
-          {formatAmount(balance.total)}
-          <span className="ml-2 text-base font-normal text-muted-foreground">
-            {balance.currency_code}
-          </span>
+          <ExactAmount value={balance.total} currencyCode={balance.currency_code}>
+            {formatAmount(balance.total)}
+            <span className="ml-2 text-base font-normal text-muted-foreground">
+              {balance.currency_code}
+            </span>
+          </ExactAmount>
         </p>
         <dl className="mt-4 space-y-2 text-sm">
           {rows.map((r) => (
             <div key={r.label} className="flex items-center justify-between">
               <dt className="text-muted-foreground">{r.label}</dt>
-              <dd className="tabular-nums">{formatAmount(r.value)}</dd>
+              <dd className="tabular-nums">
+                <ExactAmount value={r.value} currencyCode={balance.currency_code}>
+                  {formatAmount(r.value)}
+                </ExactAmount>
+              </dd>
             </div>
           ))}
           <div className="flex items-center justify-between">
@@ -147,7 +155,11 @@ function BalanceCardView({
                 )}
               </Button>
             </dt>
-            <dd className="tabular-nums">{formatAmount(balance.locked)}</dd>
+            <dd className="tabular-nums">
+              <ExactAmount value={balance.locked} currencyCode={balance.currency_code}>
+                {formatAmount(balance.locked)}
+              </ExactAmount>
+            </dd>
           </div>
           {showHolds && (
             <HoldsDetail
@@ -163,11 +175,30 @@ function BalanceCardView({
   );
 }
 
+/** A shared action, or a currency-aware renderer; null means no balance yet. */
+export type WalletBalanceActions =
+  | ReactNode
+  | ((balance: WalletBalance | null) => ReactNode);
+
+function NoBalance({ actions }: { actions?: WalletBalanceActions }) {
+  const action = typeof actions === "function" ? actions(null) : actions;
+  return (
+    <div className="space-y-3">
+      <EmptyState
+        icon={Wallet}
+        title="No balance yet"
+        description="Your balance will appear here after your first transaction."
+      />
+      {action != null && <div className="flex justify-center">{action}</div>}
+    </div>
+  );
+}
+
 export interface WalletBalanceCardProps {
   /** Currency to show. Omit only when the holder has exactly one currency. */
   currencyUid?: string;
-  /** Host-provided actions (top-up / cash-out buttons — writes are the product's flow). */
-  actions?: ReactNode;
+  /** Host top-up actions; the renderer receives null before the first balance. */
+  actions?: WalletBalanceActions;
 }
 
 /** One currency's balance card: total + available / pending / on-hold rows. */
@@ -179,13 +210,7 @@ export function WalletBalanceCard({ currencyUid, actions }: WalletBalanceCardPro
   if (isError) return <ErrorState message="Couldn't load your balance. Please try again." onRetry={refetch} />;
   const balance = data?.[0];
   if (!balance) {
-    return (
-      <EmptyState
-        icon={Wallet}
-        title="No balance yet"
-        description="Your balance will appear here after your first transaction."
-      />
-    );
+    return <NoBalance actions={actions} />;
   }
   return (
     <BalanceCardView balance={balance} holds={holds} actions={actions} />
@@ -193,8 +218,8 @@ export function WalletBalanceCard({ currencyUid, actions }: WalletBalanceCardPro
 }
 
 export interface WalletBalancesProps {
-  /** Host-provided actions, rendered on every card. */
-  actions?: ReactNode;
+  /** Per-currency host actions; the renderer receives null when there are no balances. */
+  actions?: WalletBalanceActions;
 }
 
 /** All of the holder's currencies, one balance card each. */
@@ -212,16 +237,10 @@ export function WalletBalances({ actions }: WalletBalancesProps) {
   }
   if (isError) return <ErrorState message="Couldn't load your balances. Please try again." onRetry={refetch} />;
   if (!data || data.length === 0) {
-    return (
-      <EmptyState
-        icon={Wallet}
-        title="No balance yet"
-        description="Your balance will appear here after your first transaction."
-      />
-    );
+    return <NoBalance actions={actions} />;
   }
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div className={data.length === 1 ? "grid grid-cols-1 gap-4" : "grid grid-cols-1 gap-4 sm:grid-cols-2"}>
       {data.map((b) => (
         <BalanceCardView
           key={b.currency_uid}

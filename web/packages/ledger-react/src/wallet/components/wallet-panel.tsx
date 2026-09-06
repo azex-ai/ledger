@@ -1,29 +1,38 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { WalletBalances } from "./balance-card";
-import { TransactionList } from "./transaction-list";
+import { WalletBalances, type WalletBalancesProps } from "./balance-card";
+import { TransactionList, type TransactionListProps } from "./transaction-list";
 
-export interface WalletPanelProps {
-  /** Host-provided actions (top-up / cash-out), rendered on each balance card. */
-  actions?: ReactNode;
-  /** Label overrides by stable `kind` code, forwarded to the transaction list. */
-  kindLabels?: Record<string, string>;
+export interface WalletPanelProps extends WalletBalancesProps, TransactionListProps {
+  /** Replace a complete region. Omit for the default; null hides the region. */
+  slots?: {
+    balances?: ReactNode;
+    transactions?: ReactNode;
+  };
 }
 
 /**
  * Zero-assembly wallet: balances on top, transaction history below — the
  * wallet-surface counterpart of the admin's <LedgerAdmin/>. Compose the
- * pieces yourself when you need a different layout.
+ * pieces yourself for a different layout, or replace regions through slots.
  */
-export function WalletPanel({ actions, kindLabels }: WalletPanelProps = {}) {
+export function WalletPanel({
+  actions,
+  kindLabels,
+  renderItem,
+  limit,
+  slots,
+}: WalletPanelProps = {}) {
   return (
     <div className="space-y-6">
-      <WalletBalances actions={actions} />
-      <section aria-label="Transaction history" className="space-y-3">
-        <h2 className="text-sm font-medium text-muted-foreground">Activity</h2>
-        <TransactionList kindLabels={kindLabels} />
-      </section>
+      {slots?.balances !== undefined ? slots.balances : <WalletBalances actions={actions} />}
+      {slots?.transactions !== undefined ? slots.transactions : (
+        <section aria-label="Transaction history" className="space-y-3">
+          <h2 className="text-sm font-medium text-muted-foreground">Activity</h2>
+          <TransactionList kindLabels={kindLabels} renderItem={renderItem} limit={limit} />
+        </section>
+      )}
     </div>
   );
 }

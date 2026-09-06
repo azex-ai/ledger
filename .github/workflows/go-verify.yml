@@ -30,17 +30,8 @@ jobs:
         working-directory: chains/evm
       - run: go vet ./...
         working-directory: anchors/r2
-      # F-m8 (2026-09-02 audit): internal/postgrestest and
-      # anchors/r2/internal/miniotest are separate workspace modules (kept
-      # out of the root module's go.sum on purpose -- see CLAUDE.md's
-      # Gotchas) but had zero go vet / golangci-lint / go build coverage of
-      # their own. Neither has a _test.go file, so there is no test loss --
-      # but they are the fixture layer every DB/MinIO integration test in
-      # this repo depends on, and a break here surfaces as "everything else
-      # mysteriously fails or skips", which is the wrong place to start
-      # debugging.
-      - run: go vet ./...
-        working-directory: internal/postgrestest
+      # The MinIO fixture is a separate module. The PostgreSQL fixture is
+      # internal to the root module and covered by the root commands above.
       - run: go vet ./...
         working-directory: anchors/r2/internal/miniotest
       # F-M5 (2026-09-02 audit): chains/evm/e2e_test.go and e2e_artifacts.go
@@ -62,10 +53,6 @@ jobs:
         with:
           version: v2.12.2
           working-directory: anchors/r2
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.12.2
-          working-directory: internal/postgrestest
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
@@ -209,13 +196,12 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
       - run: go build ./...
+      - run: make test-consumer
       - run: go build ./...
         working-directory: chains/evm
       - run: go build ./...
         working-directory: anchors/r2
-      # F-m8: see the lint job's note -- same two fixture modules.
-      - run: go build ./...
-        working-directory: internal/postgrestest
+      # Build the separate MinIO fixture; root already covers postgrestest.
       - run: go build ./...
         working-directory: anchors/r2/internal/miniotest
       # F-M5: prove the e2e-tagged files at least compile even where anvil

@@ -1,9 +1,18 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
 import { LedgerAdmin } from "../../src/components/LedgerAdmin";
+import { LEDGER_NAV_ITEMS } from "../../src/components/nav";
 import { renderPage, server, getOk } from "./render-page";
 
 describe("LedgerAdmin", () => {
+  test("renders the first host-selected section and never exposes omitted sections", async () => {
+    server.use(getOk("/api/v1/reservations", { list: [], next_cursor: "" }));
+    const navItems = LEDGER_NAV_ITEMS.filter((item) => item.type !== "separator" && item.href === "/reservations");
+    renderPage(<LedgerAdmin navItems={navItems} />);
+    expect(await screen.findByRole("heading", { name: "Reservations" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Withdrawals" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Dashboard" })).not.toBeInTheDocument();
+  });
   test("mounts the dashboard section by default and switches to Reservations via the sidebar", async () => {
     server.use(
       getOk("/api/v1/system/health", {

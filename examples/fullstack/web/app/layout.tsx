@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "@azex/ledger-react/styles.css";
+import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Ledger Fullstack Example",

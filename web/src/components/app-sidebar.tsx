@@ -5,6 +5,7 @@ import { useState } from "react";
 import { LogOut } from "lucide-react";
 import { Sidebar } from "@azex/ledger-react";
 import { NextLink } from "./next-link";
+import { APP_NAV_ITEMS } from "../lib/navigation";
 
 /**
  * Client wrapper that feeds the Next router's current pathname + a
@@ -35,6 +36,7 @@ export function AppSidebar() {
     <Sidebar
       pathname={pathname}
       linkComponent={NextLink}
+      navItems={APP_NAV_ITEMS}
       footer={
         <button
           onClick={signOut}

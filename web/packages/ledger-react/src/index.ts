@@ -46,6 +46,7 @@ export { SweepMonitorPage } from "./components/pages/SweepMonitorPage";
 // All-in-one admin shell (convenience fallback for hosts that don't wire
 // routes). It lazy-loads the chart pages so recharts stays out of index.js.
 export { LedgerAdmin } from "./components/LedgerAdmin";
+export type { LedgerAdminProps } from "./components/LedgerAdmin";
 
 // Toast surface — hosts wiring individual pages mount <Toaster/> once at their
 // app root; <LedgerAdmin/> mounts its own. Re-exported so consumers don't need

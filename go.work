@@ -5,5 +5,4 @@ use (
 	./anchors/r2
 	./anchors/r2/internal/miniotest
 	./chains/evm
-	./internal/postgrestest
 )

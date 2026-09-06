@@ -192,8 +192,9 @@ Full reference: [`docs/frontend.md`](../../../docs/frontend.md#display-and-decim
 
 The holder-scoped wallet surface for YOUR users (not operators): balances
 (available / pending / on hold), translated transaction history, refund
-markers. Read-only by design — top-up / cash-out flows stay in the host
-product and slot in via `actions`.
+markers. Fund-changing flows stay in the host product and slot in via
+`actions`. `DepositAddressCard` can issue the holder's deposit address; the
+wallet does not initiate withdrawals.
 
 ```tsx
 import { WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
@@ -209,6 +210,39 @@ lazily and once more after a 401. Omit it behind a same-origin BFF.
 Components: `WalletPanel`, `WalletBalances`, `WalletBalanceCard`,
 `TransactionList`, `DepositAddressCard`. HeroUI variant at `@azex/ledger-react/wallet/heroui`,
 UI-free core (client + hooks) at `@azex/ledger-react/wallet/headless`.
+
+The default shadcn wallet supports gradual UI replacement. `WalletPanel`,
+`WalletBalances`, and `WalletBalanceCard` accept either a React node in
+`actions` or a renderer receiving the current `WalletBalance`. When there
+are no balances yet, that renderer receives `null`, and the resulting action
+remains visible beside the empty state so a new user can make a first deposit.
+For example, in a client component:
+
+```tsx
+<WalletPanel
+  actions={(balance) =>
+    balance?.currency_code === "CREDITS" ? <BuyCreditsButton /> : <TopUpButton />
+  }
+  kindLabels={{ deposit: "Top up" }}
+  renderItem={(transaction) => <UsageRow transaction={transaction} />}
+  limit={10}
+/>
+```
+
+`renderItem` replaces each transaction row's content while the package keeps
+loading, errors, empty states, and cursor pagination. To replace a complete
+region, use `slots={{ balances: <CreditsSummary /> }}` or
+`slots={{ transactions: <MyActivity /> }}` on `WalletPanel`. Omitted slots
+keep the defaults; `null` hides the whole region. Replaced regions do not
+mount their default queries. Custom components can use the exported wallet
+hooks under the same `WalletProvider`.
+
+The shadcn balance, transaction, and hold amounts retain the standard display
+bands. Focus, hover, or click an amount to inspect its full decimal string
+with its currency; the exact value is also the control's accessible label.
+This preserves fractional USDC and credits without converting them to a
+JavaScript number. These customization props are specific to the shadcn
+wallet; the HeroUI wallet retains its existing API.
 
 ## Theming
 

@@ -6,7 +6,11 @@ recipe shows the T-accounts (double-entry) and a Go code skeleton against the
 `ledger` facade.
 
 A runnable end-to-end program lives in [`examples/credits-topup`](../examples/credits-topup);
-this document explains the *why* behind it and covers the variants it doesn't run.
+the current example is deposit-only: **1 USDC buys 1,000 AI credits**. It covers
+fixed-price, metered and incremental charges, plus zero-cost/failure release.
+See its [integration notes](../examples/credits-topup/README.md) for exact outcomes,
+retry rules and host responsibilities. Other recipes below describe optional
+modeling choices, not modules installed by this example.
 
 ---
 
@@ -14,21 +18,22 @@ this document explains the *why* behind it and covers the variants it doesn't ru
 
 Four ideas make every recipe below fall out mechanically:
 
-1. **A currency is a modeling dimension, not just "money".** `USDT`, `credits`,
+1. **A currency is a modeling dimension, not just "money".** `USDC`, `credits`,
    `points`, a coupon balance, each fiat — all are just rows in `currencies`.
    "Support credits" = "add one currency". Nothing about credits is special.
 
-2. **Every journal is single-currency.** The template renderer applies one
+2. **Every template execution is single-currency.** The template renderer applies one
    `currency_uid` to all lines (`core/template.go`). So anything cross-currency
-   (buying credits with USDT, cashing credits back out) is modeled as **two
+   (buying credits with USDC) is modeled as **two
    single-currency journals**, each balancing on its own. Post them atomically
    (`ExecuteTemplateBatch`, or two `ExecuteTemplate` calls inside `RunInTx`) so a
-   bad rate quote can never leave one journal without the other.
+   failed write cannot leave one journal without the other. This does not validate
+   the rate: the host must derive and validate the quoted amounts.
 
 3. **Classifications are shared across currencies.** The same `main_wallet`,
    `settlement`, `equity` classifications work for every currency. A user's
-   credits balance is `main_wallet` in currency `credits`; their USDT balance is
-   `main_wallet` in currency `USDT`. Balances are keyed by
+   credits balance is `main_wallet` in currency `credits`; their USDC balance is
+   `main_wallet` in currency `USDC`. Balances are keyed by
    `(holder, currency_uid, classification_uid)`.
 
 4. **Holder sign encodes user vs system.** Positive holder = a user account;
@@ -40,7 +45,7 @@ Four ideas make every recipe below fall out mechanically:
 | Classification | Normal side | Meaning |
 |---|---|---|
 | `main_wallet` | debit (user) | a user's spendable balance in a given currency |
-| `custodial` | credit (system) | assets the platform actually holds (real USDT in custody) |
+| `custodial` | credit (system) | assets the platform actually holds (real USDC in custody) |
 | `settlement` | credit (system) | per-currency net exposure absorber for FX journals |
 | `equity` | credit (system) | platform equity — the funding source for giveaways/bonuses |
 | `spread` | credit (system) | price-differential revenue (markup earned on conversion) |
@@ -51,8 +56,9 @@ Install them once: `svc.InstallExtendedPresets(ctx)` (idempotent).
 ### Invariants the ledger enforces for you
 
 - **Per-currency balance**: each journal must balance *within its currency*
-  (DB trigger + Go validator). A mis-quoted FX rate makes one journal unbalanced and
-  is rejected — it can never silently pass.
+  (DB trigger + Go validator). Two journals can each balance at an incorrect
+  exchange rate. The host owns quote validation and amount derivation; see
+  `postgres.TestFX_LedgerDoesNotCheckTheRate`.
 - **Append-only**: journals are never mutated. Corrections are new **reversal**
   journals (`ReverseJournal`). Refunds below use this.
 - **Idempotency**: every mutation needs an `idempotency_key`; same key + same
@@ -61,74 +67,57 @@ Install them once: `svc.InstallExtendedPresets(ctx)` (idempotent).
 
 ---
 
-## Recipe 1 — Top up and buy credits at 1 USDT : 100 credits
+## Recipe 1 — Top up and buy credits at 1 USDC : 1,000 credits
 
-**Scenario:** a user pays 1 USDT and receives 100 credits.
+**Scenario:** after a confirmed 1 USDC deposit, the user purchases 1,000 credits.
+Pending deposits are not spendable. The crypto adapter's confirmed event records
+`DR user.main_wallet(USDC) 1 / CR custodial(USDC) 1`; a browser-supplied amount is
+not evidence of a deposit.
 
-Two currencies (`USDT`, `credits`), one cross-currency conversion → two-journal FX.
-Assuming the user already holds USDT in `main_wallet` (from a prior deposit),
-the purchase is:
+In one `RunInTx`, reserve and settle 1 USDC, then execute both templates:
 
 ```
-fx_sell  (currency = USDT,    amount = 1)
-    CR user.main_wallet(USDT)   1        ← user gives up 1 USDT
-    DR settlement(USDT)         1
+fx_sell  (USDC, amount = 1)
+    CR user.main_wallet(USDC)       1
+    DR system.settlement(USDC)     1
 
-fx_buy   (currency = credits, amount = 100)
-    DR user.main_wallet(credits) 100     ← user receives 100 credits
-    CR settlement(credits)       100
+fx_buy   (CREDITS, amount = 1000)
+    DR user.main_wallet(CREDITS) 1000
+    CR system.settlement(CREDITS) 1000
 ```
 
-- Each journal balances **inside its own currency**. Rate `100` (and a shared
-  `quote_id`) go in both journals' metadata so audit can stitch them back together.
-- Post both journals **atomically** — one bad amount and the whole purchase rolls back.
-- **`settlement(credits)` credit balance = total credits the platform has
-  issued**, and is your reconciliation anchor for outstanding credit liability.
-  `settlement(USDT)` debit balance = USDT taken in against those credits (sweep
-  it into `custodial` to reflect real custody).
+The host computes `usdcAmount.Mul(decimal.NewFromInt(1000))`, supplies the shared
+purchase ID and pricing version as metadata, and derives stable `:reserve`,
+`:settle`, `:pay` and `:issue` keys from the persisted purchase ID. The
+[example's `purchaseCredits`](../examples/credits-topup/main.go) is the executable
+composition. Both journals, the reservation and settlement roll back together.
+All competing purchases must use reservations too; a raw journal can bypass a
+hold. Configure a zero balance floor as an additional overdraft control.
 
-```go
-// user already has USDT in main_wallet (e.g. via deposit_confirm).
-// buy 100 credits for 1 USDT, atomically:
-key := ledger.NewIdempotencyKey("buy-credits")
-meta := map[string]string{"quote_id": "q-123", "fx_rate": "100"}
-
-_, err := svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
-    {TemplateCode: "fx_sell", Params: core.TemplateParams{
-        HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: key + "-sell",
-        Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("1")},
-        Metadata: meta,
-    }},
-    {TemplateCode: "fx_buy", Params: core.TemplateParams{
-        HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: key + "-buy",
-        Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")},
-        Metadata: meta,
-    }},
-})
-```
-
-> **Direct purchase (no USDT balance first):** if the user pays externally and
-> you never hold their USDT as a spendable balance, skip the `fx_sell` journal and
-> issue credits with a single journal `DR user.main_wallet(credits) / CR
-> settlement(credits)` for 100. The external USDT receipt is recorded separately
-> against `custodial`.
+Each currency balances independently. After purchase, the user has **0 USDC and
+1,000 credits**. Custodial USDC remains 1: conversion has not sent it anywhere.
+`settlement(USDC)` is -1 and `settlement(CREDITS)` is +1000 (credit-normal).
+Consumption debits the credits settlement account and reduces the user's credits.
+These are operational ledger positions, not an automatic fiat revenue-recognition
+or provider-cost system. Do not sum USDC and credits or call credits custodial
+onchain assets.
 
 ---
 
 ## Recipe 2 — Discounts (three shapes, pick per business need)
 
-### (a) Price discount — "20% off: 0.8 USDT buys 100 credits"
+### (a) Price discount — "20% off: 0.8 USDC buys 100 credits"
 
-Nothing structural changes. The discount **is** the rate: charge less USDT for
+Nothing structural changes. The discount **is** the rate: charge less USDC for
 the same credits. Record the promo in metadata for reporting.
 
 ```
-fx_sell  (USDT,    amount = 0.8)     CR user.main_wallet(USDT) 0.8  / DR settlement(USDT) 0.8
+fx_sell  (USDC,    amount = 0.8)     CR user.main_wallet(USDC) 0.8  / DR settlement(USDC) 0.8
 fx_buy   (credits, amount = 100)     DR user.main_wallet(credits) 100 / CR settlement(credits) 100
-metadata: {promo_code: "SAVE20", list_price_usdt: "1.0", charged_usdt: "0.8"}
+metadata: {promo_code: "SAVE20", list_price_usdc: "1.0", charged_usdc: "0.8"}
 ```
 
-The platform simply realizes less USDT per issued credit. No extra accounts.
+The platform simply realizes less USDC per issued credit. No extra accounts.
 
 ### (b) Bonus credits — "top up 100, get 20 free" (platform-funded)
 
@@ -163,7 +152,7 @@ _, _ = svc.Templates().CreateTemplate(ctx, core.TemplateInput{
     },
 })
 
-// per top-up (the paid USDT journal is a separate fx_sell as in Recipe 1):
+// per top-up (the paid USDC journal is a separate fx_sell as in Recipe 1):
 _, err := svc.JournalWriter().ExecuteTemplate(ctx, "credits_topup", core.TemplateParams{
     HolderID: userID, CurrencyUID: creditsUID, IdempotencyKey: ledger.NewIdempotencyKey("topup"),
     Amounts: map[string]decimal.Decimal{
@@ -212,7 +201,7 @@ amount.
   two-journal FX with `spread` capturing your markup.
 
 Each currency balances on its own — a bug in POINTS accounting can never
-corrupt USDT. This isolation is why "just add a currency" is safe.
+corrupt USDC. This isolation is why "just add a currency" is safe.
 
 ---
 
@@ -222,7 +211,7 @@ corrupt USDT. This isolation is why "just add a currency" is safe.
 then capture the actual cost and release the remainder. This is the safe pattern
 for metered consumption (an AI generation run, an API call quota, etc.).
 
-`available = balance − SUM(active reservations)`. `Reserve` takes a per-(holder,
+`available = balance − remaining holds of active/settling reservations`. `Reserve` takes a per-(holder,
 currency) advisory lock and checks availability (TOCTOU-safe). `Settle` closes
 the hold at the actual amount and **auto-releases the unused remainder back
 into `available`** — both of those are reservation bookkeeping, atomic within
@@ -246,16 +235,19 @@ rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
 // Settle and the journal run in one RunInTx: a crash between them would
 // otherwise release the hold without the charge landing, and the ledger
 // would report success because from its side nothing failed.
+// Create these once per logical usage event and persist/reuse on retries.
+settleKey := ledger.NewIdempotencyKey("run-settle")
+spendKey := ledger.NewIdempotencyKey("run-spend")
 err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
     if err := tx.Reserver().Settle(ctx, core.SettleInput{
         ReservationUID: rsv.UID, Amount: decimal.RequireFromString("32"),
-        IdempotencyKey: ledger.NewIdempotencyKey("run-settle"),
+        IdempotencyKey: settleKey,
     }); err != nil {
         return err
     }
     _, err := tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
         HolderID: userID, CurrencyUID: creditsUID,
-        IdempotencyKey: ledger.NewIdempotencyKey("run-spend"),
+        IdempotencyKey: spendKey,
         Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("32")},
     })
     return err
@@ -264,7 +256,8 @@ err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
 
 - Reserve does **not** move the balance — it's a soft lock reducing *available*.
   `Settle` does not move it either. Post the actual debit journal (credits
-  leaving `main_wallet` to a `fee_revenue` or consumption account) in the same
+  leaving debit-normal `main_wallet` via a credit entry, with a matching debit
+  to `settlement`, as the example's `credits_spend` template defines) in the same
   `RunInTx` as the `Settle` call — see `examples/credits-topup` for the
   runnable version of the block above.
 - `ExecuteTemplate` called directly inside `RunInTx` (as above) always posts
@@ -287,69 +280,11 @@ err = svc.RunInTx(ctx, func(tx *ledger.Service) error {
 
 ---
 
-## Recipe 5 — Refunds and cashing credits back to USDT
+## Recipe 5 — Correcting a credits charge
 
-### Cashing out (credits → USDT), the reverse two-journal FX
-
-```
-fx_sell  (credits, amount = 100)   CR user.main_wallet(credits) 100 / DR settlement(credits) 100
-fx_buy   (USDT,    amount = 1)     DR user.main_wallet(USDT)     1  / CR settlement(USDT)     1
-```
-
-Same atomic two-journal FX as Recipe 1, currencies swapped. The user's credits balance
-drops by 100, USDT rises by 1. `settlement(credits)` debit reduces outstanding
-credit liability. (Real USDT payout to an external wallet is a separate
-withdrawal against `custodial`.)
-
-**The withdrawal path itself should do two things a "just move some USDT"
-recipe wouldn't need:**
-
-1. Check the balance via `svc.CheckpointIntegrity().RecomputeBalance(...)`,
-   not `BalanceReader.GetBalance` — the latter may consult
-   `balance_checkpoints`, an untrusted cache a DB-write credential can
-   corrupt; the former is the entries-only, always-trustworthy read.
-2. If this service was constructed `ledger.WithAttestor(...)`, reserve with
-   `ReserveInput.RequireVerifiedBalance: true` — the reservation ceiling is
-   then computed only from signed/authorized journals, so a forged or
-   unsigned credit on this dimension cannot fund the payout even if it's
-   balanced and passes every other check.
-
-See [`examples/tamper-evident`](../examples/tamper-evident/) for a complete,
-runnable demonstration of what (2) refuses and why.
-
-**This interacts with [Recipe 4](#recipe-4--spending-credits-reserve--settle)
-in a way that is easy to miss.** Recipe 4's `Settle` runs inside `RunInTx`,
-which means the journal it posts alongside `Settle` is always
-`auth_status=unsigned_tx_mode` (Recipe 4's own note above) — signing is an
-external call, and `financial.md` forbids those inside an open transaction.
-A *discharge claim* (the record that says "this reservation settled/released
-for real, stop holding its amount") is signed the same way a journal is, for
-the same reason: it is a claim about money, made against a database row an
-attacker with `DATABASE_URL` could otherwise forge. `Settle`'d **inside
-`RunInTx`**, that claim cannot be signed either, so the gated view
-`RequireVerifiedBalance` computes falls back to `core.ReserveInput`'s
-documented conservative rule: the reservation continues to hold its **full
-original amount** until `ExpiresAt`, regardless of what `Settle` actually
-released. `GetBalanceBreakdown` and `HeldAmount` show the ordinary,
-ungated view — spendable, `0` outstanding — the whole time; there is
-currently no accessor that reads the amount a `RequireVerifiedBalance`-gated
-`Reserve` would see, so the two views can disagree with no error, no log,
-and nothing to diff against.
-
-**What this means operationally:** a reservation `Settle`'d via Recipe 4's
-`RunInTx` pattern still counts as fully held, for the withdrawal gate in (2)
-above, until it expires — by default (`ReserveInput.ExpiresIn`), 15 minutes.
-A user who just spent 32 of a 50-credit reservation and now tries to cash
-out sees a normal `available` balance, but a `RequireVerifiedBalance: true`
-withdrawal reservation against the same dimension can still be constrained
-by the un-discharged 50, not the 18 that is actually free. Two ways to avoid
-surprising a support queue with this: shorten `ExpiresIn` on
-metered-spend reservations so the conservative hold self-clears quickly, or
-route `Settle`/`Release` for reservations a caller expects to withdraw
-against soon through the **top-level** `Service` (outside `RunInTx`) instead
-of Recipe 4's composed pattern — the discharge claim signs normally there,
-and the gated view frees the reservation immediately instead of waiting for
-`ExpiresAt`.
+Credits in the current integration are consumed for services. Cash-out and
+onchain withdrawals are outside this example. Existing generic FX/withdrawal
+library capabilities are not enabled by this recipe.
 
 ### Refunding a specific charge — use a reversal, never a hand-written "undo"
 
@@ -361,7 +296,13 @@ If you need to void a prior journal (bad charge, disputed purchase), post a
 rev, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalUID, "customer refund #4821")
 ```
 
-This is the *only* correct correction mechanism — do not `UPDATE`/`DELETE`
+For a fully voided consumption charge, a reversal restores the original credits
+and leaves USDC unchanged. A partially refunded charge needs an explicit host
+policy and cumulative refund limit; do not reverse the full journal to return
+only part. Refunding a purchase is also different: previously consumed credits
+and any bonus must be accounted for before undoing its paired journals.
+
+This is the correction mechanism — do not `UPDATE`/`DELETE`
 journal rows, and do not synthesize an inverse by hand (you'll drift from the
 original's amounts/rounding).
 
@@ -371,8 +312,10 @@ original's amounts/rounding).
 
 ### Insufficient balance is an error, not a silent zero
 
-`Reserve` (and any debit that would overdraw) returns
-`core.ErrInsufficientBalance`. Handle it explicitly — surface it to the caller;
+`Reserve` returns `core.ErrInsufficientBalance` when available funds do not
+cover the budget. Direct journal debits only have an overdraft floor when an
+account policy with `EnforceMinBalance` is configured; they do not respect
+reservation holds. Route all competing consumption through Reserve → Settle. Handle it explicitly — surface it to the caller;
 never swallow it into a default/zero.
 
 ```go
@@ -429,7 +372,7 @@ go func() {
 ### The rule: the ledger rejects, it never rounds
 
 `currencies.exponent` bounds how many decimal places an entry may carry
-(JPY=0, USD=2, USDT=6, wei=18 — see `docs/INVARIANTS.md` I-16). Every write
+(JPY=0, USD=2, USDC=6, wei=18 — see `docs/INVARIANTS.md` I-16). Every write
 path (`PostJournal`, `ExecuteTemplate`, `Reserve`, `AddPending`, ...) checks
 every amount against its currency's exponent and returns
 `core.ErrPrecisionExceeded` if it's over-precise. **It never silently rounds
@@ -443,8 +386,8 @@ round explicitly, before you call the ledger, using `core/money.go`.
 |---|---|---|
 | Displaying a price, computing a one-off fee, most user-facing totals | `RoundHalfUp` | Conventional "5 rounds up" behavior users expect. |
 | Aggregating many small roundings over time (e.g. per-transaction fee accrual) | `RoundHalfEven` | Ties resolve toward even digits, so repeated rounding doesn't drift the sum in one direction. |
-| The platform must not round in the user's favor (fee floors, minimum charges) | `RoundDown` | Truncating toward zero guarantees the platform never under-charges from a rounding tie. |
-| Under-crediting the user is the unacceptable direction (gas estimates, minimum payout unit) | `RoundUp` | Rounding away from zero guarantees the user never receives less than earned. |
+| Positive debit must not exceed the computed charge | `RoundDown` | Truncating toward zero reduces the charged amount; it can under-charge. |
+| Positive credit must not be smaller than the computed entitlement | `RoundUp` | Rounding away from zero increases the credited amount. For a positive fee it instead increases the charge. |
 
 ```go
 fee, err := core.Round(rawFee, feeCurrency.Exponent, core.RoundHalfEven)
@@ -460,22 +403,29 @@ the `fx_sell`/`fx_buy` template pair (`presets/fx.go`) does **not** convert
 for you, it just posts whatever amount you give it on each journal:
 
 ```go
-// Converting 100 USDT -> CNY at a quoted rate, rounding to CNY's own exponent.
+// Converting 100 USDC -> CNY at a quoted rate, rounding to CNY's own exponent.
 cnyAmount, err := core.ConvertAt(decimal.RequireFromString("100"), rate, cnyCurrency.Exponent, core.RoundHalfUp)
 if err != nil {
     return err // amount or rate is outside what NUMERIC(30,18) can hold (I-70)
 }
 
 key := ledger.NewIdempotencyKey("fx-convert")
-_, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_sell", core.TemplateParams{
-    HolderID: userID, CurrencyUID: usdtUID, IdempotencyKey: key + "-sell",
-    Amounts:  map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")},
+_, err = svc.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
+    {TemplateCode: "fx_sell", Params: core.TemplateParams{
+        HolderID: userID, CurrencyUID: usdcUID, IdempotencyKey: key + "-sell",
+        Amounts: map[string]decimal.Decimal{"amount": decimal.RequireFromString("100")},
+    }},
+    {TemplateCode: "fx_buy", Params: core.TemplateParams{
+        HolderID: userID, CurrencyUID: cnyUID, IdempotencyKey: key + "-buy",
+        Amounts: map[string]decimal.Decimal{"amount": cnyAmount},
+    }},
 })
-_, _ = svc.JournalWriter().ExecuteTemplate(ctx, "fx_buy", core.TemplateParams{
-    HolderID: userID, CurrencyUID: cnyUID, IdempotencyKey: key + "-buy",
-    Amounts:  map[string]decimal.Decimal{"amount": cnyAmount},
-})
+if err != nil { return err }
 ```
+
+This fragment demonstrates rounding and atomic posting. For spendable user
+funds, compose the USDC Reserve/Settle with this batch in one `RunInTx`, as
+Recipe 1 does, and retain the operation keys across retries.
 
 Any residue between the "ideal" rate-implied amount and what the two journals
 actually post is the platform's, by construction: `settlement` absorbs the
@@ -578,7 +528,7 @@ if !report.Balanced {
 
 ## Recipe 9 — Crypto deposit + sweep (CREATE2 shared-address custody)
 
-**Scenario:** users deposit USDT/USDC on an EVM chain to a per-holder
+**Scenario:** users deposit USDC on an EVM chain to a per-holder
 custody address you control, without asking them to pick a memo/tag; you
 periodically sweep collected funds to a treasury address. Full design:
 `docs/plans/2026-07-11-crypto-deposit-sweep-design.md`.
@@ -624,11 +574,10 @@ chainSet := core.ChainSet{
         ScanStartBlock: 19_000_000, // DepositFactory deployment block
         Factory: "0x...", InitHash: "0x...", // your azex-contracts DepositFactory deployment
         CreditTokens: map[string]core.TokenConfig{
-            "0xusdt...": {TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6},
             "0xusdc...": {TokenAddress: "0xusdc...", CurrencyCode: "USDC", Decimals: 6},
         },
         SweepTokens: map[string]core.TokenConfig{
-            "0xusdt...":         {TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6},
+            "0xusdc...":         {TokenAddress: "0xusdc...", CurrencyCode: "USDC", Decimals: 6},
             core.SweepNativeToken: {TokenAddress: core.SweepNativeToken, CurrencyCode: "ETH", Decimals: 18},
         },
     },
@@ -705,9 +654,9 @@ instead of auto-confirmed, no matter how many confirmations it has:
 
 ```go
 CreditTokens: map[string]core.TokenConfig{
-    "0xusdt...": {
-        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
-        AutoCreditCeiling: decimal.NewFromInt(10_000), // > 10k USDT -> review
+    "0xusdc...": {
+        TokenAddress: "0xusdc...", CurrencyCode: "USDC", Decimals: 6,
+        AutoCreditCeiling: decimal.NewFromInt(10_000), // > 10k USDC -> review
     },
 },
 ```
@@ -733,9 +682,9 @@ onchain := service.NewOnchain(deps, chainSet,
 
 ```go
 CreditTokens: map[string]core.TokenConfig{
-    "0xusdt...": {
-        TokenAddress: "0xusdt...", CurrencyCode: "USDT", Decimals: 6,
-        ReconcileCeiling:      decimal.NewFromInt(1_000), // > 1k USDT -> double-check
+    "0xusdc...": {
+        TokenAddress: "0xusdc...", CurrencyCode: "USDC", Decimals: 6,
+        ReconcileCeiling:      decimal.NewFromInt(1_000), // > 1k USDC -> double-check
         ReconcileFailureLimit: 3,                         // 3 consecutive second-source errors -> review
     },
 },

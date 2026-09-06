@@ -40,7 +40,7 @@ function seedWalletAPI() {
           list: [
             {
               uid: "j-1",
-              kind: "deposit_confirm",
+              kind: "deposit",
               kind_label: "Deposit",
               direction: "in",
               amount: "100",
@@ -52,7 +52,7 @@ function seedWalletAPI() {
             },
             {
               uid: "j-2",
-              kind: "deposit_confirm",
+              kind: "deposit",
               kind_label: "Deposit",
               direction: "out",
               amount: "100",
@@ -115,8 +115,8 @@ const INTERNAL_VOCABULARY = [
 ];
 
 describe.each([
-  ["shadcn", () => <WalletPanel kindLabels={{ deposit_confirm: "Top up" }} />],
-  ["heroui", () => <HerouiWalletPanel kindLabels={{ deposit_confirm: "Top up" }} />],
+  ["shadcn", () => <WalletPanel kindLabels={{ deposit: "Top up" }} />],
+  ["heroui", () => <HerouiWalletPanel kindLabels={{ deposit: "Top up" }} />],
 ])("WalletPanel (%s)", (_skin, Panel) => {
   test("renders user language and leaks no internal vocabulary", async () => {
     seedWalletAPI();

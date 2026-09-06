@@ -6,6 +6,7 @@ import { cn } from "../lib/utils/cn";
 import {
   LEDGER_NAV_ITEMS,
   DefaultLink,
+  type LedgerNavItem,
   type LinkComponent,
 } from "./nav";
 
@@ -17,6 +18,8 @@ export interface SidebarProps {
    * the sidebar works without a host router.
    */
   linkComponent?: LinkComponent;
+  /** Host-selected navigation. Defaults to the complete admin catalogue. */
+  navItems?: readonly LedgerNavItem[];
   /** Optional slot rendered at the bottom of the sidebar (e.g. sign-out). */
   footer?: ReactNode;
 }
@@ -24,11 +27,12 @@ export interface SidebarProps {
 function NavContent({
   pathname,
   linkComponent: Link = DefaultLink,
+  navItems = LEDGER_NAV_ITEMS,
   onNavigate,
 }: SidebarProps & { onNavigate?: () => void }) {
   return (
     <nav className="flex-1 overflow-y-auto p-2 space-y-0.5">
-      {LEDGER_NAV_ITEMS.map((item, i) => {
+      {navItems.map((item, i) => {
         if (item.type === "separator") {
           return (
             <div key={`sep-${i}`} className="pt-4 pb-1 px-3">
@@ -62,7 +66,7 @@ function NavContent({
   );
 }
 
-export function Sidebar({ pathname, linkComponent, footer }: SidebarProps) {
+export function Sidebar({ pathname, linkComponent, navItems, footer }: SidebarProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   return (
@@ -113,6 +117,7 @@ export function Sidebar({ pathname, linkComponent, footer }: SidebarProps) {
             <NavContent
               pathname={pathname}
               linkComponent={linkComponent}
+              navItems={navItems}
               onNavigate={() => setMobileOpen(false)}
             />
             <div className="border-t border-border p-3 space-y-2">
@@ -138,7 +143,7 @@ export function Sidebar({ pathname, linkComponent, footer }: SidebarProps) {
             </div>
           </div>
         </div>
-        <NavContent pathname={pathname} linkComponent={linkComponent} />
+        <NavContent pathname={pathname} linkComponent={linkComponent} navItems={navItems} />
         <div className="border-t border-border p-3 space-y-2">
           {footer}
           <p className="text-[10px] text-muted-foreground/50 text-center">

@@ -1,7 +1,10 @@
-.PHONY: build test test-short test-submodules test-e2e vet lint sqlc sqlc-diff db openapi-check
+.PHONY: build test test-short test-submodules test-e2e test-consumer vet lint sqlc sqlc-diff db openapi-check
 
 build:
 	go build ./...
+
+test-consumer:
+	bash scripts/test-consumer.sh
 
 # -count=1 disables the test result cache (F-m5, 2026-09-02 audit): without
 # it, `go test` can print a fully green run without touching Postgres at

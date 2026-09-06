@@ -133,9 +133,8 @@ func SetupRawDB(t testing.TB) string {
 }
 
 // SetupDB starts a PostgreSQL container, runs ledger migrations, and returns
-// a *pgxpool.Pool. The test is skipped (not failed) when the Docker daemon
-// isn't available so contributors can still run unit tests on machines
-// without Docker.
+// a *pgxpool.Pool. Without Docker or DATABASE_URL the fixture fails. Only
+// explicit -short skips integration tests.
 //
 // Accepts testing.TB so it can be reused from benchmarks as well as tests.
 func SetupDB(t testing.TB) *pgxpool.Pool {

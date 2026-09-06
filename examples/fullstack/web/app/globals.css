@@ -1,0 +1,38 @@
+/* Host layout is plain CSS: this scaffold does not require Tailwind. */
+body {
+  margin: 0;
+}
+
+body > .ledger-root {
+  min-height: 100svh;
+}
+
+.example-wallet {
+  box-sizing: border-box;
+  width: min(100%, 56rem);
+  margin-inline: auto;
+  padding: clamp(1rem, 4vw, 2rem);
+}
+
+.example-wallet > * + * {
+  margin-top: 1.5rem;
+}
+
+.example-wallet h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.example-wallet-note {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+
+.example-deposit-link {
+  color: var(--foreground);
+  font-size: 0.875rem;
+  text-decoration: underline;
+  text-underline-offset: 0.25rem;
+}

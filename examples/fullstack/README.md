@@ -37,7 +37,7 @@ What a fresh chi scaffold plus the ledger amounts to (see
 
 ```go
 svc, _ := ledger.New(pool)                     // the library facade
-_ = svc.InstallDefaultPresets(ctx)             // deposit/withdrawal bundles
+_ = presets.InstallTemplateBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates(), presets.DepositBundle())
 
 r := chi.NewRouter()                           // your scaffold's router
 r.Get("/", yourOwnHandler)                     // your routes stay yours
@@ -51,8 +51,8 @@ export DATABASE_URL="postgres://user:pass@localhost:5432/ledger_example?sslmode=
 go run ./examples/fullstack/backend
 ```
 
-On boot it migrates the schema, installs the deposit/withdrawal presets, seeds
-three demo deposits (idempotent — restart-safe), starts the background worker
+On boot it migrates the schema, installs only the deposit presets, seeds
+three demo USDC deposits (idempotent — restart-safe), starts the background worker
 (rollups, snapshots, reconciliation), and listens on **:8090**.
 
 Smoke-check:
@@ -74,7 +74,11 @@ The whole integration is one page ([`web/app/page.tsx`](web/app/page.tsx)):
 ```tsx
 "use client";
 
-import { LedgerAdmin, LedgerProvider } from "@azex/ledger-react";
+import { LEDGER_NAV_ITEMS, LedgerAdmin, LedgerProvider } from "@azex/ledger-react";
+
+const navItems = LEDGER_NAV_ITEMS.filter(
+  (item) => item.type === "separator" || item.href !== "/withdrawals",
+);
 
 const baseUrl =
   process.env.NEXT_PUBLIC_LEDGER_API_URL ?? "http://localhost:8090";
@@ -82,15 +86,16 @@ const baseUrl =
 export default function Home() {
   return (
     <LedgerProvider config={{ baseUrl }}>
-      <LedgerAdmin />
+      <LedgerAdmin navItems={navItems} />
     </LedgerProvider>
   );
 }
 ```
 
-plus one stylesheet import in `app/layout.tsx`
-(`import "@azex/ledger-react/styles.css"`). No Tailwind setup required — the
-package ships compiled CSS.
+plus the package stylesheet import in `app/layout.tsx`
+(`import "@azex/ledger-react/styles.css"`). The scaffold's `app/globals.css`
+sets the host page height, margins and wallet width using plain CSS. No Tailwind
+setup is required — the package ships compiled component CSS.
 
 Run it:
 
@@ -112,7 +117,7 @@ workspace package, then install the tarball:
 
 ```bash
 (cd ../../../web/packages/ledger-react && npm install && npm run build && npm pack)
-npm install --no-save ../../../web/packages/ledger-react/azex-ledger-react-*.tgz
+npm install --no-save --package-lock=false ../../../web/packages/ledger-react/azex-ledger-react-*.tgz
 ```
 
 ## 2b. Frontend, HeroUI flavor — `web-heroui/`
@@ -147,6 +152,33 @@ automatically (401 → one `getToken` retry).
 A host that doesn't want the admin API in its process would mount
 `server.HolderHandler(...)` instead — the same three read endpoints, zero
 admin routes.
+
+## Deposit-only scope and credits
+
+The shadcn demo omits Withdrawals from its configurable navigation. The backend
+installs `DepositBundle` only. The admin API is still privileged bookkeeping
+infrastructure: navigation filtering is not an authorization control. Expose the
+holder surface and authenticated host routes to customers, keeping admin keys
+server-side. The HeroUI example has not been polished in this work.
+
+`/wallet` renders the real `DepositAddressCard` when
+`NEXT_PUBLIC_LEDGER_DEPOSIT_NETWORK` is set. Before enabling it, wire the backend's
+`SetDepositAddressProvider(onchain)` using the chain configuration demonstrated in
+`examples/crypto-deposit`, and configure that provider to accept USDC on exactly
+the network displayed. This scaffold does not guess a network or deploy a deposit
+factory. Without configuration it displays an honest unavailable state.
+
+For **1 USDC → 1,000 credits**, fixed/metered/streamed charging, zero-cost release,
+and replay-safe ledger composition, run [credits-topup](../credits-topup/README.md).
+The UI is currency-agnostic: a host that posts USDC and CREDITS journals will see
+them as separate balances. `WalletPanel.actions(balance)` can offer USDC funding
+without presenting CREDITS as an onchain deposit asset; `renderItem` and `slots`
+allow local UI replacement while retaining the wallet hooks.
+
+When testing unreleased UI changes, install the packed local package using
+`npm install --no-save --package-lock=false <tarball>` before `npm run build`.
+A registry install of the same version does not include unpublished checkout
+changes.
 
 ## What this example deliberately skips
 
