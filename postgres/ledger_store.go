@@ -707,9 +707,18 @@ func (s *LedgerStore) ExecuteTemplateBatch(ctx context.Context, requests []core.
 // so it was noise rather than corruption — but one canonical order costs
 // nothing. Keys are sorted so two batches sharing keys agree with each other
 // too.
-func (s *LedgerStore) preacquireBatchLocks(ctx context.Context, q *sqlcgen.Queries, inputs []core.JournalInput) error {
+func (s *LedgerStore) preacquireBatchLocks(ctx context.Context, q *sqlcgen.Queries, inputs []core.JournalInput, additionalIdempotencyKeys ...string) error {
 	idemKeys := make([]string, 0, len(inputs))
 	seenIdemKeys := make(map[string]struct{}, len(inputs))
+	for _, key := range additionalIdempotencyKeys {
+		if key == "" {
+			return fmt.Errorf("postgres: lock templates: empty idempotency key: %w", core.ErrInvalidInput)
+		}
+		if _, ok := seenIdemKeys[key]; !ok {
+			seenIdemKeys[key] = struct{}{}
+			idemKeys = append(idemKeys, key)
+		}
+	}
 	for _, input := range inputs {
 		if _, ok := seenIdemKeys[input.IdempotencyKey]; ok {
 			continue
@@ -736,6 +745,29 @@ func (s *LedgerStore) preacquireBatchLocks(ctx context.Context, q *sqlcgen.Queri
 		return fmt.Errorf("postgres: execute template batch: %w", err)
 	}
 	return nil
+}
+
+// LockForTemplates pre-acquires a composed transaction's template balance locks
+// and idempotency keys without posting journals. Additional keys cover Reserve
+// calls on the same holder/currency pairs. Call this before any operation that
+// acquires locks; every pair touched later must appear in these templates.
+// The store must be bound to the caller's transaction via WithDB.
+func (s *LedgerStore) LockForTemplates(ctx context.Context, requests []core.TemplateExecutionRequest, additionalIdempotencyKeys ...string) error {
+	if s.pool != nil {
+		return fmt.Errorf("postgres: lock templates: requires a caller-owned transaction: %w", core.ErrInvalidInput)
+	}
+	if len(requests) == 0 {
+		return fmt.Errorf("postgres: lock templates: no templates: %w", core.ErrInvalidInput)
+	}
+	inputs := make([]core.JournalInput, len(requests))
+	for i, req := range requests {
+		input, err := s.renderTemplate(ctx, s.q, req.TemplateCode, req.Params)
+		if err != nil {
+			return fmt.Errorf("postgres: lock templates[%d]: %w", i, err)
+		}
+		inputs[i] = *input
+	}
+	return s.preacquireBatchLocks(ctx, s.q, inputs, additionalIdempotencyKeys...)
 }
 
 // executeTemplateBatchWithQueries is the tx-mode-only path: q is always the

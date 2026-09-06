@@ -55,7 +55,11 @@ func baseConnection(t testing.TB) string {
 			sharedServer.err = fmt.Errorf("lock container startup: lock not acquired")
 			return
 		}
-		defer func() { _ = startupLock.Unlock() }()
+		defer func() {
+			if err := startupLock.Unlock(); err != nil {
+				t.Errorf("release PostgreSQL container startup lock: %v", err)
+			}
+		}()
 		container, err := tcpostgres.Run(ctx, "postgres:17",
 			tcpostgres.WithDatabase("postgres"),
 			tcpostgres.WithUsername("test"),
@@ -113,20 +117,25 @@ func isolatedConnection(t testing.TB) string {
 	u.Path = "/" + name
 	connStr := u.String()
 	t.Cleanup(func() {
-		admin, err := pgxpool.New(ctx, base)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		admin, err := pgxpool.New(cleanupCtx, base)
 		if err != nil {
+			t.Errorf("connect for database cleanup: %v", err)
 			return
 		}
 		defer admin.Close()
-		_, _ = admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
+		if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+			t.Errorf("drop test database %s: %v", name, err)
+		}
 	})
 	return connStr
 }
 
-// SetupRawDB starts a PostgreSQL container WITHOUT running migrations and
-// returns its connection string. For tests that drive golang-migrate manually
-// (e.g. migrate to an intermediate version, seed, continue). The test is
-// skipped when Docker isn't available.
+// SetupRawDB creates an isolated PostgreSQL database WITHOUT running migrations
+// and returns its connection string. For tests that drive golang-migrate
+// manually (e.g. migrate to an intermediate version, seed, continue). Without
+// Docker or DATABASE_URL the fixture fails; only explicit -short skips it.
 func SetupRawDB(t testing.TB) string {
 	t.Helper()
 	return isolatedConnection(t)

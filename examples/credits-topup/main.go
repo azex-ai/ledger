@@ -174,7 +174,24 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits str
 	if key == "" || usdc == credits {
 		return core.ErrInvalidInput
 	}
+	meta := map[string]string{"purchase_id": key, "pricing_version": "demo-v1", "credits_per_usdc": "1000"}
+	requests := []core.TemplateExecutionRequest{
+		{TemplateCode: "fx_sell", Params: core.TemplateParams{
+			HolderID: userID, CurrencyUID: usdc, IdempotencyKey: key + ":pay",
+			Amounts: map[string]decimal.Decimal{"amount": amount}, Metadata: meta,
+		}},
+		{TemplateCode: "fx_buy", Params: core.TemplateParams{
+			HolderID: userID, CurrencyUID: credits, IdempotencyKey: key + ":issue",
+			Amounts: map[string]decimal.Decimal{"amount": amount.Mul(decimal.NewFromInt(1000))}, Metadata: meta,
+		}},
+	}
 	return svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		// Reserve alone locks the user's USDC first; the FX batch also needs
+		// system and credits pairs. Acquire their union before either operation
+		// so a concurrent deposit/purchase follows the same ordering.
+		if err := tx.LockForTemplates(ctx, requests, key+":reserve"); err != nil {
+			return err
+		}
 		rsv, err := tx.Reserver().Reserve(ctx, core.ReserveInput{
 			AccountHolder: userID, CurrencyUID: usdc, Amount: amount,
 			ExpiresIn: time.Minute, IdempotencyKey: key + ":reserve",
@@ -187,17 +204,7 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits str
 		}); err != nil {
 			return err
 		}
-		meta := map[string]string{"purchase_id": key, "pricing_version": "demo-v1", "credits_per_usdc": "1000"}
-		_, err = tx.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, []core.TemplateExecutionRequest{
-			{TemplateCode: "fx_sell", Params: core.TemplateParams{
-				HolderID: userID, CurrencyUID: usdc, IdempotencyKey: key + ":pay",
-				Amounts: map[string]decimal.Decimal{"amount": amount}, Metadata: meta,
-			}},
-			{TemplateCode: "fx_buy", Params: core.TemplateParams{
-				HolderID: userID, CurrencyUID: credits, IdempotencyKey: key + ":issue",
-				Amounts: map[string]decimal.Decimal{"amount": amount.Mul(decimal.NewFromInt(1000))}, Metadata: meta,
-			}},
-		})
+		_, err = tx.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, requests)
 		return err
 	})
 }
@@ -205,6 +212,9 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits str
 // captureCredits takes the trusted reservation returned by Reserve, never a
 // browser-supplied holder/currency. All usage goes through this reservation flow;
 // raw journals can bypass holds even with a min-balance policy.
+// The host must persist an immutable event payload (amount and operation kind)
+// before calling this helper. Ledger keys deduplicate individual operations,
+// not a provider event changed from a charged delta into a zero-cost release.
 // For services using WithAttestor, AuthorizeTemplate before RunInTx and then
 // PostAuthorized inside it; see examples/tamper-evident for the signed variant.
 func captureCredits(ctx context.Context, svc *ledger.Service, rsv *core.Reservation, amount decimal.Decimal, key string, partial bool) error {

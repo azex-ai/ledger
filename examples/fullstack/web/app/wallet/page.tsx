@@ -11,6 +11,7 @@
  */
 
 import { DepositAddressCard, WalletPanel, WalletProvider } from "@azex/ledger-react/wallet";
+import { Toaster } from "@azex/ledger-react";
 
 const baseUrl =
   process.env.NEXT_PUBLIC_LEDGER_API_URL ?? "http://localhost:8090";
@@ -49,6 +50,7 @@ export default function WalletPage() {
           )}
         </section>
       </main>
+      <Toaster theme="system" position="bottom-right" />
     </WalletProvider>
   );
 }

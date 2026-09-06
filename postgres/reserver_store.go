@@ -582,7 +582,11 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		return nil, fmt.Errorf("postgres: reserve: available %s < requested %s: %w", available.String(), input.Amount.String(), core.ErrInsufficientBalance)
 	}
 
-	expiresAt := time.Now().Add(resolveReservationExpiresIn(input.ExpiresIn))
+	// PostgreSQL now() is the transaction start, which may precede this call
+	// by seconds of ordinary work or lock waiting. Persist one clock reading
+	// for both timestamps so replay can recover the requested TTL exactly.
+	createdAt := time.Now()
+	expiresAt := createdAt.Add(resolveReservationExpiresIn(input.ExpiresIn))
 
 	row, err := qtx.InsertReservation(ctx, sqlcgen.InsertReservationParams{
 		AccountHolder:  input.AccountHolder,
@@ -591,6 +595,7 @@ func (s *ReserverStore) reserveWithQueries(ctx context.Context, qtx *sqlcgen.Que
 		IdempotencyKey: input.IdempotencyKey,
 		ExpiresAt:      expiresAt,
 		Uid:            newUID(),
+		CreatedAt:      createdAt,
 	})
 	if err != nil {
 		existing, lookupErr := qtx.GetReservationByIdempotencyKey(ctx, input.IdempotencyKey)

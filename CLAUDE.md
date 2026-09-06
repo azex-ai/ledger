@@ -20,7 +20,7 @@ Hexagonal: `core/` (pure domain) -> `postgres/` (adapter) -> `service/` (orchest
   - **Library mode** — root package `ledger` (`ledger.go`) is the facade. `ledger.New(pool *pgxpool.Pool)` returns a `*ledger.Service`; pull interfaces via `svc.Booker()`, `svc.BalanceReader()`, `svc.JournalWriter()`, etc. Consumers depend only on `core/*` interfaces, never on the `postgres` adapter directly.
   - **HTTP layer** — `server.NewFromDeps(cfg, server.Deps{...})` returns the same pieces behind chi handlers as an `http.Handler` (prefer it over the positional `server.New` / `server.NewWithConfig`, which take twenty-one same-shaped interfaces and panic on an invalid config). This repository ships no binary; the consumer mounts it in theirs. `examples/fullstack` is a complete assembly.
   - `svc.RunInTx(ctx, func(tx *ledger.Service) error {...})` composes ledger writes with the caller's own DB writes in one atomic pgx transaction. The `*Service` passed in is a short-lived clone — do not retain it past the callback.
-- `core/` — zero external dependencies. No net/http, pgx, slog, chi imports allowed.
+- `core/` — pure domain with value-type dependencies such as shopspring/decimal. No infrastructure imports: net/http, pgx, slog, chi.
 - `pkg/` — boundary adapters kept out of `core/`: `bizcode` (error-code taxonomy), `httpx` (HTTP response envelope), `otel` (tracing), `slogadapter` (logging). Error-code mapping happens at the handler boundary, not in the domain.
 - Interfaces defined in `core/interfaces.go`, consumer-side, -er suffix.
 - Account dimensions: `(AccountHolder int64, CurrencyID int64, ClassificationID int64)`. Positive holder = user, negative = system counterpart.
@@ -147,7 +147,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `service/delivery/` | Event delivery: callback (library) + webhook (service) |
 | `service/worker.go` | Background job runner |
 | `cmd/ledger-cli/` | Investigation CLI (balance, balances, journals, journal, trace, reconcile, solvency, trial-balance, health, verify, currencies, classifications, rollup, dead-letters, reorgs, config-history), read-only except `reconcile --full`'s resume cursor, `rollup reset-claim` and `reorgs resolve` (see the package doc) |
-| `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (buy/bonus/spend/cash-out), `crypto-deposit` (end-to-end EVM deposit), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `tamper-evident` (signing + attestation + the withdrawal gate, forges a row to show what it stops), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
+| `examples/` | Runnable library-mode examples: `embed` (minimum-viable), `billing` (reserve→metered deduction→release), `credits-topup` (deposit-only: 1 USDC→1,000 credits, fixed/metered/incremental usage charges and replay), `crypto-deposit` (EVM deposit orchestration with simulated sightings; the host supplies real reader/scanner/sweeper dependencies), `event-subscribe` (Worker.Subscribe), `tx-compose` (caller write + journal in one tx), `tamper-evident` (signing + attestation + the withdrawal gate, forges a row to show what it stops), `fullstack` (chi scaffold serving the ledger HTTP API + Next.js scaffold rendering `@azex/ledger-react`) |
 | `web/packages/ledger-react/` | `@azex/ledger-react` npm package (published via `ledger-react-v*` release tag). Nine JS entry points in `package.json`'s `exports` (two skins × operator/wallet surface, each with a recharts-isolating `/charts` split where it has chart pages, plus `./headless` and a server-only `./server`) — the package README and `docs/frontend.md` carry the full table; do not re-list them here. Two skins: root = shadcn-style (self-contained scoped preflight + tokens in `dist/styles.css`), `./heroui` = HeroUI v3 (optional peer `@heroui/react`, host owns theme, layout classes in `dist/heroui.css`). Both share one headless core (`./headless`); page logic must stay mirrored (a11y annotation *style* may differ per skin -- `<Label htmlFor>` vs `aria-label` -- the skin-parity gate compares behaviour and a hardening census, not markup) |
 | `docs/INVARIANTS.md` | The invariants the ledger guarantees (canonical contract; numbered gaplessly from I-1, count is gated by `core.TestInvariantsDocIsOrderedAndGapless`, not maintained by hand) |
 | `docs/RUNBOOK.md` | Operational guide for on-call engineers |
@@ -160,7 +160,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `docs/audits/2026-09-03-independent-review/` | Five zero-context agents re-auditing the remediated tree (round 3), plus `recheck/`. Its headline finding — nothing guarded the INSERT path — is what migrations 029-032 answer |
 | `docs/api.md` | Long-form HTTP API reference (envelope, error codes, per-endpoint request/response examples) |
 | `docs/BREAKING.md` | Per-symbol / per-endpoint breaking-change log; `TestAPISurface_BreakingChangesAreDocumented` fails when a changed exported symbol is missing here |
-| `docs/COOKBOOK.md` | Business recipes: buy credits (FX rate), discounts, multi-currency, reserve→settle, cash-out, expiry/insufficient edges |
+| `docs/COOKBOOK.md` | Business recipes: buy credits (FX rate), reserve→settle, full/partial charge refunds, expiry/insufficient edges; optional modeling recipes include discounts and multi-currency, outside the current deposit-only credits example |
 
 ## HTTP API Quick Reference
 
@@ -204,7 +204,7 @@ POST   /api/v1/holder-tokens, GET|POST /api/v1/holder/*   — holder-token walle
 - Migrations use `golang-migrate/migrate/v4` with embedded FS.
 - `web/` is a separate Next.js project with its own `CLAUDE.md`; `@azex/ledger-react` lives in `web/packages/ledger-react/`.
 - Releases: Go module via `go-release.yml` on version tags; `@azex/ledger-react` published to npm by `ledger-react-publish.yml` on `ledger-react-v*` tags (version taken from `package.json`).
-- To consume the local checkout from a sibling module, use a parent-directory `go.work` (see README "Local Development with go.work") — no `replace` directives.
+- To consume the root library from a sibling module, a local `replace github.com/azex-ai/ledger => ../ledger` works with `GOWORK=off`. A parent-directory `go.work` is another option for developing across the optional modules (see README "Local Development with go.work"). Remote consumers should pin the module to a specific tag or commit SHA.
 - Lifecycle is optional on Classification — nil means label-only (no bookings).
 - `failed` is NOT terminal in withdrawal preset (has retry path to `reserved`).
 - `chains/evm`'s e2e tests are tagged `//go:build e2e` — `make test-e2e` or an explicit `-tags e2e` is required to compile/run them; plain `make test` / `go test ./...` never touches them.

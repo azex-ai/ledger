@@ -263,8 +263,8 @@ func (q *Queries) GetSettlementLegByIdempotencyKey(ctx context.Context, idempote
 }
 
 const insertReservation = `-- name: InsertReservation :one
-INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
 RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid
 `
 
@@ -275,6 +275,7 @@ type InsertReservationParams struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	ExpiresAt      time.Time      `json:"expires_at"`
 	Uid            pgtype.UUID    `json:"uid"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationParams) (Reservation, error) {
@@ -285,6 +286,7 @@ func (q *Queries) InsertReservation(ctx context.Context, arg InsertReservationPa
 		arg.IdempotencyKey,
 		arg.ExpiresAt,
 		arg.Uid,
+		arg.CreatedAt,
 	)
 	var i Reservation
 	err := row.Scan(

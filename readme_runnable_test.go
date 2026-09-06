@@ -82,17 +82,14 @@ func stripLeadingImport(block string) string {
 	return re.ReplaceAllString(block, "")
 }
 
-// runGoProgram writes src to a throwaway package-main file inside the module
-// (so `go run` resolves github.com/azex-ai/ledger and go.work normally),
+// runGoProgram writes src to a temporary package-main file outside the source
+// tree so concurrent source-index tests cannot race its creation/removal.
+// The command still runs from the module root to resolve imports via go.work,
 // runs it with DATABASE_URL set to dbURL, and fails the test on a non-zero
 // exit or any stderr/stdout the program's own panic/print didn't expect.
 func runGoProgram(t *testing.T, dbURL, src string) {
 	t.Helper()
-	dir, err := os.MkdirTemp(".", "readmecheck-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
+	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(mainPath, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -867,17 +864,13 @@ func compileSyntheticProgram(block string) string {
 	return b.String()
 }
 
-// runGoBuild compiles src (a throwaway package-main file, written inside the
-// module so `go build` resolves github.com/azex-ai/ledger and go.work
-// normally) and fails the test with the generated source and compiler
+// runGoBuild compiles a temporary package-main file outside the source tree,
+// running go build from the module root to resolve imports normally. It fails
+// the test with the generated source and compiler
 // output on any error. Compile-only: no database, no execution.
 func runGoBuild(t *testing.T, src string) {
 	t.Helper()
-	dir, err := os.MkdirTemp(".", "readmecompile-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
+	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(mainPath, []byte(src), 0o644); err != nil {
 		t.Fatal(err)

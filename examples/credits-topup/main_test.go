@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,88 @@ import (
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/presets"
 )
+
+func TestPurchaseConcurrentDepositLockOrder(t *testing.T) {
+	svc, admin, usdc, credits := fixture(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	deposit(t, svc, usdc)
+	var currencyID int64
+	require.NoError(t, admin.QueryRow(ctx, "SELECT id FROM currencies WHERE uid=$1", usdc).Scan(&currencyID))
+	purchased := make(chan error, 1)
+	depositErr := svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		// Hold the first balance lock of an ordinary deposit. Before the fix,
+		// purchase took the user's USDC lock and then waited for this system
+		// lock, creating a cycle when deposit proceeded to its user lock.
+		_, err := tx.DBTX().Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended('bal:' || $1::text, 0))",
+			fmt.Sprintf("balance:%d:%d", core.SystemAccountHolder(userID), currencyID))
+		if err != nil {
+			return err
+		}
+		go func() {
+			purchased <- purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), "concurrent-purchase")
+		}()
+		require.Eventually(t, func() bool {
+			var blocked bool
+			err := admin.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()))").Scan(&blocked)
+			return err == nil && blocked
+		}, 3*time.Second, 10*time.Millisecond)
+		_, err = tx.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+			HolderID: userID, CurrencyUID: usdc, IdempotencyKey: "concurrent-deposit",
+			Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+		})
+		return err
+	})
+	require.NoError(t, depositErr)
+	require.NoError(t, <-purchased)
+	balance(t, svc, usdc, "1", "0")
+	balance(t, svc, credits, "1000", "0")
+}
+
+func TestReserveReplayAfterTransactionDelay(t *testing.T) {
+	svc, _, usdc, credits := fixture(t)
+	ctx := t.Context()
+	deposit(t, svc, usdc)
+	require.NoError(t, purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), "purchase"))
+	input := core.ReserveInput{AccountHolder: userID, CurrencyUID: credits,
+		Amount: decimal.NewFromInt(10), ExpiresIn: time.Hour, IdempotencyKey: "delayed-reserve"}
+	var original *core.Reservation
+	require.NoError(t, svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		if _, err := tx.DBTX().Exec(ctx, "SELECT pg_sleep(1.2)"); err != nil {
+			return err
+		}
+		var err error
+		original, err = tx.Reserver().Reserve(ctx, input)
+		return err
+	}))
+	require.Equal(t, time.Hour, original.ExpiresAt.Sub(original.CreatedAt))
+	replayed, err := svc.Reserver().Reserve(ctx, input)
+	require.NoError(t, err)
+	require.Equal(t, original.UID, replayed.UID)
+	input.ExpiresIn = 2 * time.Hour
+	_, err = svc.Reserver().Reserve(ctx, input)
+	require.ErrorIs(t, err, core.ErrConflict)
+	balance(t, svc, credits, "1000", "10")
+}
+
+func TestTemplateLocksRequireTransactionAndDoNotPost(t *testing.T) {
+	svc, admin, usdc, _ := fixture(t)
+	ctx := t.Context()
+	requests := []core.TemplateExecutionRequest{{TemplateCode: "deposit_confirm", Params: core.TemplateParams{
+		HolderID: userID, CurrencyUID: usdc, IdempotencyKey: "lock-only",
+		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+	}}}
+	require.ErrorIs(t, svc.LockForTemplates(ctx, requests), core.ErrInvalidInput)
+	require.NoError(t, svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		require.ErrorIs(t, tx.LockForTemplates(ctx, nil), core.ErrInvalidInput)
+		require.ErrorIs(t, tx.LockForTemplates(ctx, requests, ""), core.ErrInvalidInput)
+		return tx.LockForTemplates(ctx, requests, "reserve-only", "reserve-only")
+	}))
+	var journals, reservations int
+	require.NoError(t, admin.QueryRow(ctx, "SELECT (SELECT count(*) FROM journals), (SELECT count(*) FROM reservations)").Scan(&journals, &reservations))
+	require.Zero(t, journals)
+	require.Zero(t, reservations)
+}
 
 // Exercise the public Go facade as ledger_app, with real migrations/triggers.
 func fixture(t *testing.T) (*ledger.Service, *pgxpool.Pool, string, string) {

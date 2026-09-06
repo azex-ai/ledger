@@ -80,7 +80,9 @@ func (s *ReserverStore) ensureReservationMatchesInput(ctx context.Context, q *sq
 	// ExpiresIn is stored as ExpiresAt, computed from CreatedAt at insert time.
 	// Comparing the stored duration against the resolved input duration enforces
 	// the "same key + different payload = ErrConflict" contract for expiry too,
-	// while a 1s tolerance absorbs db timestamp precision (microseconds in PG).
+	// retaining the legacy 1s tolerance for rows written with separate clocks.
+	// New inserts derive both timestamps from one clock reading. Historical
+	// rows with greater drift cannot recover their original TTL from this pair.
 	storedExpiresIn := existing.ExpiresAt.Sub(existing.CreatedAt)
 	expiresInDrift := storedExpiresIn - resolveReservationExpiresIn(input.ExpiresIn)
 	if expiresInDrift < -time.Second || expiresInDrift > time.Second {

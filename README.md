@@ -644,6 +644,15 @@ err := svc.RunInTx(ctx, func(tx *ledger.Service) error {
 Use `tx.DBTX()` (not `Pool()`) inside the callback — `Pool` ignores the
 surrounding transaction and would commit out-of-band.
 
+For Reserve followed by template writes, call `tx.LockForTemplates(ctx, requests,
+reserveKeys...)` first. Supply all templates the transaction will post and every
+Reserve key; each reserved holder/currency pair must appear in those templates.
+This acquires the full lock set in canonical order before Reserve takes its
+single balance lock, avoiding an inversion with concurrent deposits or FX batches.
+See [credits-topup](examples/credits-topup/) for the complete composition. Other
+host row locks still need consistent ordering; retry `core.ErrTransient` by
+replaying the whole transaction with unchanged keys and payloads.
+
 If you've configured `WithAttestor` (per-journal authorization signing),
 note that `JournalWriter` calls made *inside* this callback never sign —
 there is no point inside an already-open transaction where calling out to
@@ -862,6 +871,7 @@ still want the pending API.
 |-------------------|-------------|
 | `svc.RunInTx(ctx, fn)` | Combine ledger writes + your writes in one PostgreSQL transaction |
 | `svc.RunInTxWithOptions(ctx, opts, fn)` | `RunInTx` with explicit `pgx.TxOptions` (e.g. `pgx.Serializable`) |
+| `svc.LockForTemplates(ctx, requests, reserveKeys...)` | Call on the `RunInTx` callback's Service to acquire the complete template balance locks and idempotency keys before Reserve + template writes; posts no journals |
 | `svc.Authorize(ctx, input)` | Compute a journal's canonical digest and sign it **outside** any transaction, so a `RunInTx` write can still land signed (KMS signing is an external call; `financial.md` forbids those inside a transaction) |
 | `svc.AuthorizeTemplate(ctx, req)` | `Authorize` for a template execution |
 | `svc.DBTX()` | The active `pgx` executor — the pool, or the transaction when called on a `RunInTx` clone |
@@ -923,7 +933,7 @@ Hexagonal: `core/` (pure domain) → `postgres/` (adapter) → `service/` (orche
 
 ```
 ledger/
-  core/                Pure domain layer (zero external dependencies)
+  core/                Pure domain layer (no infrastructure dependencies; decimal value types)
     types.go             Currency, Classification + Lifecycle, JournalType, Balance, Status
     booking.go           Booking, CreateBookingInput, TransitionInput
     event.go             Event (+ ActorID, Source fields), EventFilter
@@ -1040,9 +1050,9 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 
 - [**fullstack**](examples/fullstack/) -- Full-stack quickstart: a chi scaffold serving the complete ledger HTTP API next to its own routes, plus Next.js scaffolds rendering the `@azex/ledger-react` admin dashboard against it in both flavors (default shadcn-style skin and the `/heroui` skin).
 - [**embed**](examples/embed/) -- Minimum-viable library embed: PostJournal + GetBalance with no templates, no presets, no HTTP layer.
-- [**crypto-deposit**](examples/crypto-deposit/) -- Full EVM CREATE2 deposit lifecycle: classification install, booking creation, channel-adapter webhook, template-based journaling, reserve/settle, balance queries, and reconciliation.
+- [**crypto-deposit**](examples/crypto-deposit/) -- CREATE2 deposit-address registration and deposit ingestion with simulated sightings, including confirmation and review handling. The host supplies real reader/scanner/sweeper dependencies for live chain processing.
 - [**billing**](examples/billing/) -- SaaS-style metered billing: top-up wallet, reserve budget, deduct actual cost, release remainder.
-- [**credits-topup**](examples/credits-topup/) -- Buy / bonus / spend / cash-out credits as a second currency; runs Cookbook recipes 1, 2b, 4, 5 end-to-end.
+- [**credits-topup**](examples/credits-topup/) -- Deposit-only: 1 USDC buys 1,000 credits; fixed, metered and incremental usage charges with transactional settlement and replay.
 - [**event-subscribe**](examples/event-subscribe/) -- In-process event subscription: Worker.Subscribe, graceful shutdown.
 - [**tamper-evident**](examples/tamper-evident/) -- Per-journal signing, batch attestation to an external anchor, and the
   `RequireVerifiedBalance` withdrawal gate. Forges a balanced journal by direct SQL -- the way a stolen `DATABASE_URL`
@@ -1132,7 +1142,7 @@ The current release series is **v0.x**. No API stability guarantees are made bet
 
 **Deprecation policy (post v1.0)**: deprecated items will carry a `// Deprecated:` godoc comment for at least one minor version before removal. Breaking changes are only made in major version bumps.
 
-**Before v1.0**: callers should pin to a specific `vX.Y.Z` tag or commit SHA. The `go get ./...@latest` convenience works for greenfield projects that can track HEAD.
+**Before v1.0**: callers should pin to a specific `vX.Y.Z` tag or commit SHA using the module path: `go get github.com/azex-ai/ledger@<tag-or-commit-sha>`. `@latest` selects the latest available version, which may be a release tag rather than HEAD.
 
 ## Configuration
 

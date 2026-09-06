@@ -28,7 +28,7 @@ export function ExactAmount({
         render={
           <Button
             variant="ghost"
-            className="h-auto gap-0 rounded-sm border-0 p-0 hover:bg-transparent"
+            className="h-auto max-w-full flex-wrap justify-start gap-0 whitespace-normal rounded-sm border-0 p-0 hover:bg-transparent"
             style={{ font: "inherit", color: "inherit" }}
           />
         }

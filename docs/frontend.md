@@ -596,7 +596,7 @@ components that fetch their own data through the hooks — mount inside
 
 | Export | Props | Details |
 |--------|-------|---------|
-| `LedgerAdmin` | none | All-in-one shell: Sidebar + content area, section switching via internal state (no URL; an internal `linkComponent` intercepts nav clicks, `/journals/{uid}` links open `JournalDetailPage`). Self-mounts `<Toaster/>`. Lazy-loads `DashboardPage`/`BalancesPage` so recharts ships as an async chunk |
+| `LedgerAdmin` | `navItems?: readonly LedgerNavItem[]` | All-in-one shell: Sidebar + content area, section switching via internal state (no URL; an internal `linkComponent` intercepts nav clicks, `/journals/{uid}` links open `JournalDetailPage`). Select/reorder built-in sections with `navItems`; this configures UI, not API authorization. Self-mounts `<Toaster/>`. Lazy-loads `DashboardPage`/`BalancesPage` so recharts ships as an async chunk |
 
 ### `Toaster`
 
@@ -662,14 +662,23 @@ key, so holder A's cached balances can never be served to holder B.
 
 | Component | Props | Purpose |
 |---|---|---|
-| `<WalletPanel/>` | `actions?`, `kindLabels?` | zero-assembly: balances + activity list |
+| `<WalletPanel/>` | `actions?`, `kindLabels?`, `renderItem?`, `limit?`, `slots?` | zero-assembly: balances + activity list; shadcn supports replacing either complete region |
 | `<WalletBalances/>` | `actions?` | per-currency grid of balance cards |
 | `<WalletBalanceCard/>` | `currencyUid?`, `actions?` | one currency: total + available/pending/on-hold rows, expandable holds detail |
 | `<TransactionList/>` | `kindLabels?`, `renderItem?`, `limit?` | activity list: labels, refund markers, signed colored amounts, Load More |
-| `<DepositAddressCard/>` | none | shows the holder's crypto deposit address (QR + copy-to-clipboard) or a "Generate address" CTA on first use — the only write in this otherwise read-only wallet surface |
+| `<DepositAddressCard/>` | `network: string`, `assets: [string, ...string[]]` | shows the holder's crypto deposit address (QR + copy-to-clipboard) or a "Generate address" CTA on first use — the only write in this otherwise read-only wallet surface; the host must supply the real network and a non-empty list of accepted assets |
 
-- `actions` is the slot for YOUR top-up / cash-out buttons — the wallet
-  surface is read-only by design; write flows belong to the host product.
+- `actions` is the slot for host-owned top-up actions. The shadcn wallet accepts
+  a `ReactNode` or `(balance: WalletBalance | null) => ReactNode`: the renderer
+  receives each card's complete currency balance, or `null` before any balance
+  exists. Funding and other business writes belong to the host product.
+- In the shadcn wallet, `WalletPanel.slots.balances` and `.transactions` replace
+  complete regions. Omit a slot to use the default; pass `null` to hide it.
+  Replaced regions do not mount their default queries. `renderItem` and `limit`
+  are forwarded to `TransactionList` for custom rows and cursor page size.
+- Mount `Toaster` once in a wallet host that uses `DepositAddressCard`, so
+  address-generation and clipboard errors are visible. `WalletProvider` and
+  `WalletPanel` do not mount it automatically.
 - `kindLabels` overrides display labels by `kind`, a small, deployment-stable
   vocabulary (`"deposit" | "withdrawal" | "transfer" | "fee" | "adjustment" |
   "other"` — `core.HolderTxKind`, docs/INVARIANTS.md I-44)

@@ -130,3 +130,51 @@ results did not establish that the clean CI checkout would pass.
 After the dependency update, local `govulncheck` passes for root, EVM and R2 using
 the same Go 1.26.8 toolchain as CI; core and credits tests and the external consumer
 build also pass. Remote CI status is recorded in the gpv session summary.
+
+## Independent review and individual acceptance — 2026-09-07
+
+The user requested three independent agents, an explicit plan, then individual
+acceptance. Review started at `55829d9`; the lead accepted money, external Go
+consumption, then shadcn UI after each required fix was reproduced and reviewed.
+Bus tasks: consumer #16, UI #17, money #19; lead acceptance #18. Detailed local
+reports and browser captures are in `.team/reviews/credits-20260907-*`.
+
+| Item | Finding / change | Acceptance evidence |
+|---|---|---|
+| Money: reservation replay | Transaction `now()` and Go current time produced different creation/expiry bases, so a 1.2s transaction delay caused unchanged TTL to conflict. Insert now persists both timestamps from one clock reading | `TestReserveReplayAfterTransactionDelay`: same UID on unchanged retry, changed TTL conflicts, hold remains exactly 10; independent reviewer reran with race detection |
+| Money: composed lock order | Reserve acquired user/USDC before the FX batch's system pair, deadlocking with ordinary deposit. `LockForTemplates` reuses the existing sorted idempotency/balance lock mechanism before Reserve | `TestPurchaseConcurrentDepositLockOrder`: deterministic barrier with real purchase/deposit calls succeeds; balances 1 USDC / 1000 credits, no holds. Tx-only/no-write guard test also passes |
+| Money: existing refund capability | Document `ReverseJournalFraction`, cumulative per-entry caps, concurrent/replay protection and 1/1 remainder completion | Existing conservation/remainder, overshoot, replay and concurrency tests passed in independent review; host eligibility/approval remains a policy decision |
+| Go consumer | Root and paired EVM baseline SHA download and compile outside all local workspaces/replaces; current local source also passes fresh consumer check | Official proxy root and root+EVM go get/tidy/build passed; `make test-consumer` passes and excludes Docker/testcontainers from production imports |
+| Go docs and fixture | Correct outdated cash-out, module/import and simulated-deposit claims; bounded cleanup reports errors. README generated programs now use system temp directories to avoid races with source scanners | Fixture CRUD race test and static gates passed; final root/core run together passes, including README runtime/compile and API snapshot checks |
+| shadcn large amounts | Use card container width for total font size, constrain amount button and allow currency wrapping | Real 320px browser: amount right 288 < card right 304, button scrollWidth=clientWidth=256; 640px dual-column and exact tooltip also pass |
+| shadcn deposit errors | Fullstack wallet mounts Toaster; update component props/host requirements | Actual wallet route GET 404 → generate POST 500 displays a visible error notification in the packed standalone host |
+
+- [x] Each lane delivered its report; its required fixes were reviewed again.
+- [x] Final `make test`: entire root module passes `-race -count=1`, including
+  PostgreSQL (178.304s), service (48.420s), root (37.784s), core and all 11 credits
+  scenario tests. Log: `/tmp/ledger-gpv-go-final-20260907.log`.
+- [x] `go vet ./...`, affected-package golangci-lint (zero issues), sqlc generation
+  and current external consumer build pass.
+- [x] React typecheck, package build and 42 files / 241 tests pass. The rebuilt
+  tarball (`e12c77646c0b83cd04206c6fbe0ef2dc9af8dd78`) installs/builds in the
+  independent Next.js 16.3.4 host; browser evidence verifies the corrected state.
+- [x] HeroUI source and package versions remain untouched; no release tag or npm
+  publication was requested. Push-time CI is recorded in the gpv session summary.
+
+The timestamp correction applies to newly created reservations. Old rows already
+containing more than one second of clock drift cannot reveal the original TTL;
+this change neither guesses it nor widens conflict tolerance. Host events must
+bind their ID to an immutable amount and operation kind before calling the
+example: separate charge/release receipt keys do not deduplicate a changed
+provider event. Both limits were explicitly accepted as documented boundaries.
+
+Generic delivery-gate results remain qualified: the genuine fixture cleanup issue
+is fixed; FNV writes cannot return an error, terminal HTTP response writes cannot
+undo committed bookkeeping, and `LoadConfig`, example entrypoints and test
+fixtures are valid environment-reading boundaries. Directory/string scans do not
+replace the executed domain tests. Optional pagination error presentation is not
+a required fix in this scope.
+
+Memory: added a learning seed for transaction-wide lock order and timestamp
+composition; updated the stale project lock-key memory. `hive doctor --strict`
+passes. Session: `~/.claude/session-summaries/2026-09-07-02-00.md`.

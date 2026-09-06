@@ -351,6 +351,24 @@ func (s *Service) AuthorizeTemplate(ctx context.Context, templateCode string, pa
 // TemplateBatchExecutor executes multiple templates atomically.
 func (s *Service) TemplateBatchExecutor() core.TemplateBatchExecutor { return s.ledgerStore }
 
+// LockForTemplates fixes the lock order for Reserve + template writes composed
+// inside RunInTx. Call it first on the callback's Service, with every template
+// the transaction will post and the additional Reserve idempotency keys. Every
+// reserved holder/currency pair must also be touched by one of those templates.
+// It sorts all idempotency keys before all balance pairs, using the same locks
+// as standalone writes. It neither reserves funds nor posts journals.
+//
+// This coordinates template/reservation balance locks, not arbitrary host row
+// locks. Keep other lock ordering consistent and retry ErrTransient by replaying
+// the whole transaction with unchanged keys and payloads. Do not call external
+// providers in the callback. Calling this outside RunInTx returns ErrInvalidInput.
+func (s *Service) LockForTemplates(ctx context.Context, requests []core.TemplateExecutionRequest, additionalIdempotencyKeys ...string) error {
+	if s.tx == nil {
+		return fmt.Errorf("ledger: lock templates: call inside RunInTx: %w", core.ErrInvalidInput)
+	}
+	return s.ledgerStore.LockForTemplates(ctx, requests, additionalIdempotencyKeys...)
+}
+
 // BalanceReader reads balances.
 func (s *Service) BalanceReader() core.BalanceReader { return s.ledgerStore }
 
@@ -568,6 +586,8 @@ func (s *Service) FullReconciler(cfg service.FullReconciliationConfig) core.Full
 //     transaction's isolation level (READ COMMITTED by default) applies.
 //   - Advisory locks acquired inside fn are held until commit/rollback — this
 //     is correct behaviour for the balance-locking invariant.
+//     For Reserve followed by template writes, call LockForTemplates first:
+//     sorting locks within each operation does not sort their combined set.
 //   - Nesting is not supported: calling RunInTx (or RunInTxWithOptions) again
 //     on the *Service handed to fn returns an error rather than silently
 //     opening a second, independent transaction on a fresh pool connection

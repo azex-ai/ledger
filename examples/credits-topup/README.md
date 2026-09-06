@@ -40,9 +40,10 @@ USDC stays at zero in the user's wallet after purchase. The system still holds
 the deposited USDC. Consuming credits does not send tokens or record provider
 payments. USDC and CREDITS are different accounting units, never summed together.
 
-The executable seeds a confirmed deposit as a local fixture. In a product, use
-the existing [crypto-deposit example](../crypto-deposit) to wire a real chain
-reader/scanner and confirmation policy. Only confirmed, accepted deposits may
+The executable seeds a confirmed deposit as a local fixture. The existing
+[crypto-deposit example](../crypto-deposit) demonstrates deposit orchestration
+with simulated sightings; a product must supply real chain reader/scanner
+dependencies and a confirmation policy. Only confirmed, accepted deposits may
 fund purchases; pending/failed/review-held deposits must not issue usable credits.
 
 ## Host composition
@@ -51,6 +52,18 @@ fund purchases; pending/failed/review-held deposits must not issue usable credit
 FX journals. Rate derivation is host policy: per-currency balancing cannot detect
 a wrong exchange rate. Persist the purchase ID, quote/pricing version and quoted
 amount before processing it. A callback retry reuses every operation key.
+
+The purchase calls `tx.LockForTemplates` before Reserve, with both FX requests
+and the reservation key. This locks the complete set of user/system currency
+pairs in the same order as concurrent deposits and purchases. The helper is only
+valid inside `RunInTx` and writes no journals or holds. For other composed flows,
+enumerate all affected templates before acquiring locks; retry `ErrTransient` by
+replaying the entire transaction with the same keys and payloads.
+
+Persist each usage event's amount and operation kind before delivery. A retry
+must not switch the same provider event from a charged increment to a zero-cost
+release: those are different ledger operations with separate receipts. The host's
+durable event record owns cross-operation deduplication; these helpers assume it.
 
 `captureCredits` atomically pairs Settle/SettlePartial with a `credits_spend`
 journal. Settle alone does not debit the wallet. The reservation passed to this

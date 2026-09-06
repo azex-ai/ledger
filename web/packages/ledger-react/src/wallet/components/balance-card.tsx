@@ -111,7 +111,7 @@ function BalanceCardView({
   ];
 
   return (
-    <Card>
+    <Card className="@container/wallet-balance">
       <CardHeader className="flex flex-row items-center justify-between pb-2">
         <CardTitle className="text-sm font-medium text-muted-foreground">
           {balance.currency_code} balance
@@ -119,7 +119,7 @@ function BalanceCardView({
         {typeof actions === "function" ? actions(balance) : actions}
       </CardHeader>
       <CardContent>
-        <p className="text-3xl font-bold tabular-nums">
+        <p className="text-2xl font-bold tabular-nums @[22rem]/wallet-balance:text-3xl">
           <ExactAmount value={balance.total} currencyCode={balance.currency_code}>
             {formatAmount(balance.total)}
             <span className="ml-2 text-base font-normal text-muted-foreground">

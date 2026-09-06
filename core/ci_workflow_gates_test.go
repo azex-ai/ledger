@@ -277,9 +277,9 @@ func TestGoVerifyRunsRealCommandsForEveryModule(t *testing.T) {
 		// from this matrix, so `govulncheck ./...` running in the root and
 		// nowhere else was invisible -- anchors/r2 (aws-sdk-go-v2) and
 		// chains/evm (go-ethereum) shipped unscanned. Required only for
-		// modules a consumer can import: the two `internal/` fixture
-		// modules exist to keep testcontainers out of consumer builds
-		// (CLAUDE.md Gotchas), and scanning them would report CVEs on code
+		// modules a consumer can import: the remaining `internal/` MinIO
+		// fixture module is test-only (the PostgreSQL fixture now lives in
+		// the root module), and scanning it would report CVEs on code
 		// no production path can reach -- the precise thing govulncheck's
 		// reachability analysis is for.
 		if consumerReachableModule(module) {
@@ -556,11 +556,10 @@ func TestCustomBuildTagsAppearInCIOrMakefile(t *testing.T) {
 }
 
 // consumerReachableModule reports whether a workspace module can end up in
-// somebody else's build. Go's `internal/` rule makes that a structural
-// property, not a judgement call: no module outside this repository can
-// import a package under an `internal/` path segment, so the fixture
-// modules (internal/postgrestest, anchors/r2/internal/miniotest) are
-// unreachable from any consumer by construction.
+// an ordinary external consumer's build. Go's `internal/` import restriction
+// prevents those consumers from importing these test helpers, so the
+// anchors/r2/internal/miniotest module is excluded from the production matrix.
+// internal/postgrestest is a package in the root module, not a workspace module.
 func consumerReachableModule(module string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(module), "/") {
 		if seg == "internal" {

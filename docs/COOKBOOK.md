@@ -297,10 +297,20 @@ rev, err := svc.JournalWriter().ReverseJournal(ctx, originalJournalUID, "custome
 ```
 
 For a fully voided consumption charge, a reversal restores the original credits
-and leaves USDC unchanged. A partially refunded charge needs an explicit host
-policy and cumulative refund limit; do not reverse the full journal to return
-only part. Refunding a purchase is also different: previously consumed credits
-and any bonus must be accounted for before undoing its paired journals.
+and leaves USDC unchanged. For part of a charge, use the existing fractional API:
+
+```go
+rev, err := svc.JournalWriter().ReverseJournalFraction(ctx, originalJournalUID,
+    1, 4, "quarter refund #4821", "refund:4821")
+```
+
+Each fraction applies to the original journal. The ledger serializes concurrent
+reversals, enforces cumulative per-entry caps and detects changed-payload replays.
+Use `1, 1` to reverse exactly the remaining amount after earlier partial refunds,
+including rounding residue; `ReverseJournal` rejects a journal with prior refunds.
+The host still decides eligibility, approval and business refund limits.
+Refunding a purchase is different: previously consumed credits and any bonus must
+be accounted for before undoing its paired journals.
 
 This is the correction mechanism — do not `UPDATE`/`DELETE`
 journal rows, and do not synthesize an inverse by hand (you'll drift from the

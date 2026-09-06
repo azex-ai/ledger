@@ -1,6 +1,6 @@
 -- name: InsertReservation :one
-INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO reservations (account_holder, currency_id, reserved_amount, idempotency_key, expires_at, uid, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
 RETURNING id, account_holder, currency_id, reserved_amount, settled_amount, status, journal_id, idempotency_key, expires_at, created_at, updated_at, uid;
 
 -- name: GetReservation :one
