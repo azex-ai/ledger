@@ -180,13 +180,37 @@ func TestPurchase_RequiresFundsAndRollsBackBothCurrencies(t *testing.T) {
 	require.Zero(t, journalCount(t, admin))
 	deposit(t, svc, usdc)
 
-	// A failure resolving the second currency must undo the debit, reservation
-	// creation and settlement, not leave an orphaned paid purchase.
+	// Lock planning rejects an unknown second currency before any money moves.
 	err = purchaseCredits(ctx, svc, usdc, "00000000-0000-0000-0000-000000000001", decimal.NewFromInt(1), "purchase")
 	require.Error(t, err)
 	balance(t, svc, usdc, "1", "0")
 	balance(t, svc, credits, "0", "0")
 	require.Equal(t, 1, journalCount(t, admin))
+
+	// A closed CREDITS wallet renders and locks successfully, but rejects
+	// fx_buy after fx_sell has posted. The outer transaction must also undo
+	// that first journal and its completed reservation/settlement receipt.
+	wallet, err := svc.Classifications().GetByCode(ctx, "main_wallet")
+	require.NoError(t, err)
+	policy := core.AccountPolicyInput{AccountHolder: userID, CurrencyUID: credits,
+		ClassificationUID: wallet.UID, Status: core.AccountPolicyStatusClosed, EnforceMinBalance: true}
+	_, err = svc.AccountPolicies().SetPolicy(ctx, policy)
+	require.NoError(t, err)
+	err = purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), "purchase")
+	require.ErrorIs(t, err, core.ErrAccountClosed)
+	require.ErrorContains(t, err, "execute template batch[1]")
+	balance(t, svc, usdc, "1", "0")
+	balance(t, svc, credits, "0", "0")
+	require.Equal(t, 1, journalCount(t, admin))
+	var reservations, receipts int
+	require.NoError(t, admin.QueryRow(ctx,
+		"SELECT (SELECT count(*) FROM reservations), (SELECT count(*) FROM reservation_operation_receipts)",
+	).Scan(&reservations, &receipts))
+	require.Zero(t, reservations)
+	require.Zero(t, receipts)
+	policy.Status = core.AccountPolicyStatusActive
+	_, err = svc.AccountPolicies().SetPolicy(ctx, policy)
+	require.NoError(t, err)
 
 	require.NoError(t, purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), "purchase"))
 	balance(t, svc, usdc, "0", "0")

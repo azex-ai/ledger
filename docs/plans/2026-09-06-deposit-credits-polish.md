@@ -178,3 +178,35 @@ a required fix in this scope.
 Memory: added a learning seed for transaction-wide lock order and timestamp
 composition; updated the stale project lock-key memory. `hive doctor --strict`
 passes. Session: `~/.claude/session-summaries/2026-09-07-02-00.md`.
+
+## Completion recheck — 2026-09-07 afternoon
+
+Revalidated the clean `1d6269a` tree, current Go/React CI, actual test assertions,
+the packed UI artifact and all three review handoffs against the original scope.
+The checks revealed two follow-ups; neither changes the runtime money or UI APIs:
+
+- After `LockForTemplates` was introduced, an unknown second currency fails
+  before Reserve. That case remains a useful preflight check, but no longer
+  proves rollback after the first FX journal. The purchase test now additionally
+  closes the CREDITS wallet and requires `ErrAccountClosed` at batch index 1,
+  after the USDC journal. It checks balances, holds, journal count, reservation
+  and operation-receipt counts, then restores the policy and succeeds with the
+  same key. The financial reviewer approved the actual diff and passing test.
+- The scheduled Dependabot job still pointed to the deleted PostgreSQL fixture
+  module. Run `34083708621` failed with `No go.mod files found` in
+  `/internal/postgrestest`. Removed that obsolete update block; fixture dependencies
+  remain part of the root module's update group. YAML parses and every remaining
+  configured manifest directory exists. The historical failed run is not relabeled
+  as successful.
+
+Validation: all 11 credits tests pass with `-race -count=1` (9.849s). A fresh
+external host independently fetched remote `1d6269a` without workspace/replace,
+then tidied and compiled `LockForTemplates`, `RunInTx`, `Reserver` and
+`TemplateBatchExecutor`; its 281 production package dependencies exclude
+Docker/testcontainers. The shadcn source is unchanged and its validated tarball
+still hashes to `e12c77646c0b83cd04206c6fbe0ef2dc9af8dd78`; the recorded 241 tests,
+standalone Next build and rendered evidence apply to that same artifact.
+
+Reports: `.team/reviews/credits-20260907-completion-recheck-{money,consumer}.md`.
+Push/CI follow-up: `~/.claude/session-summaries/2026-09-07-18-07.md`. Production
+network wiring and business-policy decisions remain in the existing gaps document.

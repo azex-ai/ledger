@@ -8,14 +8,6 @@ updates:
       go-deps:
         patterns: ["*"]
 
-  - package-ecosystem: gomod
-    directory: /internal/postgrestest
-    schedule:
-      interval: weekly
-    groups:
-      go-test-deps:
-        patterns: ["*"]
-
   - package-ecosystem: npm
     directory: /web
     schedule:
