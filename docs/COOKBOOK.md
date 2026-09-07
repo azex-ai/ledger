@@ -86,10 +86,11 @@ fx_buy   (CREDITS, amount = 1000)
     CR system.settlement(CREDITS) 1000
 ```
 
-The host computes `usdcAmount.Mul(decimal.NewFromInt(1000))`, supplies the shared
-purchase ID and pricing version as metadata, and derives stable `:reserve`,
+The host configures `core.FixedRate` for USDC → CREDITS, converts the source
+amount with the stored currencies' precision, supplies the complete quote snapshot
+as metadata, and derives stable `:reserve`,
 `:settle`, `:pay` and `:issue` keys from the persisted purchase ID. The
-[example's `purchaseCredits`](../examples/credits-topup/main.go) is the executable
+[example's `exchangeCurrency`](../examples/credits-topup/main.go) is the executable
 composition. Both journals, the reservation and settlement roll back together.
 All competing purchases must use reservations too; a raw journal can bypass a
 hold. Configure a zero balance floor as an additional overdraft control.
@@ -101,6 +102,49 @@ Consumption debits the credits settlement account and reduces the user's credits
 These are operational ledger positions, not an automatic fiat revenue-recognition
 or provider-cost system. Do not sum USDC and credits or call credits custodial
 onchain assets.
+
+### Configure fixed rates for currencies, token usage and gifts
+
+`Currency` describes a unit and its precision. `FixedRate` describes a directed
+relation between two units: `target = source × rate`, rounded at the target
+exponent. It is a Go configuration value; it needs no price-feed service or new
+ledger subsystem. Keep rates off individual currencies, because a rate needs a
+counter-currency and direction.
+
+```go
+inputToken := core.Currency{Code: "INPUT_TOKEN", Exponent: 0}
+credits := core.Currency{Code: "CREDITS", Exponent: 6}
+rate := core.FixedRate{
+    SourceCode: inputToken.Code, TargetCode: credits.Code,
+    Rate: decimal.RequireFromString("0.002"),
+    Version: "price-v1", Rounding: core.RoundHalfUp,
+}
+cost, err := rate.Convert(decimal.NewFromInt(10000), inputToken, credits)
+if err != nil {
+    return err
+}
+// cost = 20 CREDITS; reserve/capture using the existing consumption flow.
+```
+
+The same API handles `USDC → CREDITS` at `1000` or `ROSE → CREDITS` at `10`.
+Define input/output/cache units separately when they have different prices. Pure
+usage valuation only needs unit snapshots (`Code` and `Exponent`); an actual
+exchange between wallet balances resolves stored currencies and posts both FX
+legs. Reverse direction requires its own explicit configuration.
+
+The [example configuration](../examples/credits-topup/rates.json) supplies the
+rates, unit precision and rounding as data. It prices fixed, metered and streaming
+usage through this common path. Rates must be positive; zero measured quantity is
+valid, and a zero result needs release/no-journal handling. The wrapper rejects
+source overprecision, wrong pairs, invalid modes and out-of-storage-range amounts.
+
+Save source/target units and precision, original quantity, rate, version, rounding
+and result with each operation. Reuse that quote on retry after rates change;
+the example saves it on both FX legs and positive consumption journals, where
+metadata participates in idempotency comparison even if rounded amounts match.
+Zero-cost release has no journal metadata, so the host's durable event record
+must preserve its quote and operation kind. Configuration/version selection and
+provider event delivery remain host responsibilities.
 
 ---
 

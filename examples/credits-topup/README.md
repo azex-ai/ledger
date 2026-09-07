@@ -1,7 +1,7 @@
 # USDC deposits and AI credits
 
 This example imports the Go ledger and composes its existing deposit, FX,
-reservation and journal APIs. **1 USDC buys 1,000 CREDITS.** It installs only
+reservation and journal APIs. **By default, 1 USDC buys 1,000 CREDITS.** It installs only
 `DepositBundle`, `FXBundle`, a `credits_spend` template and zero-balance floors.
 It provides no withdrawal or credits cash-out operation.
 
@@ -15,11 +15,39 @@ go run ./examples/credits-topup
 go test ./examples/credits-topup -race -count=1
 ```
 
+The embedded [rates.json](rates.json) configures currencies/units, directed rates,
+versions and rounding. To use your own file, set `CREDITS_RATES_FILE=/path/to/rates.json`
+before running. Amounts and rates are decimal strings; rounding accepts `half_up`,
+`half_even`, `down` or `up`. Duplicate units/pairs, missing references and invalid
+rates are rejected. Currency precision is set when the wallet currency is created;
+an existing currency with different precision is rejected.
+
+| Source → target | Configured target units per source unit |
+|---|---:|
+| USDC → CREDITS | 1000 |
+| INPUT_TOKEN → CREDITS | 0.002 |
+| OUTPUT_TOKEN → CREDITS | 0.005 |
+| IMAGE → CREDITS | 25 |
+| STREAM_TOKEN → CREDITS | 0.01 |
+| ROSE → CREDITS | 10 |
+| CREDITS → ROSE | 0.1 |
+
+Rates are directed; reverse conversion is configured separately. Token and gift
+quantities use exponent zero. Measured units need no database row or wallet:
+10,000 input tokens + 2,425 output tokens price to `20 + 12.125 = 32.125` credits.
+For an actual gift balance, create the ROSE currency and use `exchangeCurrency`:
+the tested 20 CREDITS purchase creates two ROSE through paired FX journals. The
+same fixed-rate primitive values usage and prices wallet exchanges.
+
 Tests create isolated PostgreSQL databases via Docker and exercise the public
 facade as `ledger_app`. The executable uses stable fixture event IDs, so running
 it again after completion does not create another deposit, purchase or charge. It asserts the
 final balances rather than just printing an expected result. Use a separate
-database from the previous USDT/bonus/cash-out version of this example.
+database from earlier versions of this example, including versions without quote
+metadata. Configuration changes apply to new operations. Completed fixture IDs
+retain their original quotes: rerunning them with a different rate/version returns
+`ErrConflict`, even when rounding produces the same amount. For this demo, retain
+the original configuration when replaying the fixed fixture IDs.
 
 If the process stops after reserving and the hold expires before its result is
 captured, replay rejects that new settlement. Completed events remain replayable;
@@ -31,7 +59,7 @@ not a fresh reservation or an unguarded debit hidden inside a retry.
 | Confirmed 1 USDC deposit and purchase | 0 | 1000 | 0 |
 | Fixed-price image, budget 25 | 25 | 975 | 0 |
 | Token-metered completion, budget 50 | 32.125 | 942.875 | 0 |
-| Failure before billable work / free result, budget 40 | 0 | 942.875 | 0 |
+| Failure before billable work / free result, budget 50 | 0 | 942.875 | 0 |
 | Streaming event 1, budget 100 | 10 | 932.875 | 90 |
 | Streaming event 2 | 20 | 912.875 | 70 |
 | Finalize stream | 0 | 912.875 | 0 |
@@ -48,10 +76,17 @@ fund purchases; pending/failed/review-held deposits must not issue usable credit
 
 ## Host composition
 
-`purchaseCredits` reserves USDC and atomically settles the reservation plus both
-FX journals. Rate derivation is host policy: per-currency balancing cannot detect
-a wrong exchange rate. Persist the purchase ID, quote/pricing version and quoted
-amount before processing it. A callback retry reuses every operation key.
+`exchangeCurrency` resolves the two stored currencies, derives the amount with
+`core.FixedRate`, then atomically reserves and settles the source plus both FX
+journals. `FixedRate.Convert` validates the directed pair, source quantity precision,
+positive rate and target rounding, reusing `core.ConvertAt`. Configuration selects
+the rate; per-currency balancing alone cannot detect a wrong quote.
+
+Both FX journals and each positive usage journal store `conversion_quotes`:
+source/target code and exponent, original quantity, rate, version, rounding and
+converted amount. Persist this snapshot with the host event before processing it;
+a retry reuses the snapshot and every operation key. The host can load archived
+configuration versions or retain the resolved `FixedRate` value per event.
 
 The purchase calls `tx.LockForTemplates` before Reserve, with both FX requests
 and the reservation key. This locks the complete set of user/system currency
@@ -65,7 +100,7 @@ must not switch the same provider event from a charged increment to a zero-cost
 release: those are different ledger operations with separate receipts. The host's
 durable event record owns cross-operation deduplication; these helpers assume it.
 
-`captureCredits` atomically pairs Settle/SettlePartial with a `credits_spend`
+`captureUsage` atomically pairs Settle/SettlePartial with a `credits_spend`
 journal. Settle alone does not debit the wallet. The reservation passed to this
 helper is the trusted result of Reserve; a production handler resolves ownership
 from its authenticated job record rather than accepting holder/currency fields
@@ -75,7 +110,7 @@ can bypass a hold even when a zero balance floor is configured.
 | Business shape | Existing mechanism | Host decision |
 |---|---|---|
 | Fixed-price image/tool call | Reserve exact price; capture on billable completion | What counts as completion |
-| Token/time metering | Reserve budget; capture actual amount; unused budget releases | Input/output/cached token rates, precision, rounding |
+| Token/time metering | FixedRate maps quantities to credits; reserve budget and capture actual amount | Configure input/output/cache units, rates, precision and rounding |
 | Stream or multi-step agent | SettlePartial + journal per stable usage-event ID; Finalize at end | Persist deltas, ordering and deduplication of provider events |
 | Cancel after partial work | Release/Finalize remaining hold; prior charge journals stay | Whether completed work remains billable |
 | Zero-cost/cache hit/failure before usage | Release only; do not post zero-amount journals | Free vs discounted cache policy |
@@ -90,12 +125,19 @@ result durably; the host can compose its own DB writes with the ledger using
 release a hold: use `context.WithTimeout(context.WithoutCancel(ctx), ...)` for
 bounded cleanup and retain a durable retry when cleanup fails.
 
-Both currencies use exponent 6 here, permitting fractional credits. Provider
-pricing and rounding happen server-side using decimal arithmetic. Do not round
-each streaming increment independently without defining how it reconciles to
-the final aggregate. The library validates precision; it does not select a
-rounding rule. No fiat revenue, subscription, promo-lot or provider-billing module
-is introduced; unresolved policies are tracked in
+Default wallet currencies use exponent 6, permitting fractional credits. Conversion
+happens server-side with decimal arithmetic and configured rounding. This demo
+rounds each priced usage line/delta separately, then sums the results. Its stream
+must have positive rounded increments; zero-rounded purchase amounts, budgets or
+stream increments fail before any deposit/reservation/journal. A host using
+cumulative pricing must persist the difference between rounded cumulative totals
+instead of treating independently rounded deltas as equivalent.
+
+Zero-cost final usage only releases its reservation; it writes no zero journal.
+Consequently journal metadata cannot compare quotes for zero-cost release events:
+their immutable payload and cross-operation deduplication remain host duties.
+No fiat revenue, subscription, promo-lot or provider-billing module is introduced;
+unresolved policies are tracked in
 [deposit-credits gaps](../../docs/gaps/deposit-credits.md).
 
 When using `WithAttestor`, authorize journals before opening a transaction and

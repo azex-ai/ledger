@@ -110,7 +110,7 @@ func fixture(t *testing.T) (*ledger.Service, *pgxpool.Pool, string, string) {
 	t.Cleanup(pool.Close)
 	svc, err := ledger.New(pool)
 	require.NoError(t, err)
-	usdc, credits, err := setup(t.Context(), svc)
+	usdc, credits, err := setup(t.Context(), svc, testPricing(t))
 	require.NoError(t, err)
 	return svc, admin, usdc, credits
 }
@@ -156,14 +156,14 @@ func journalCount(t *testing.T, admin *pgxpool.Pool) int {
 func TestCreditsScenario_RestartIsNoOp(t *testing.T) {
 	svc, admin, usdc, credits := fixture(t)
 	ctx := t.Context()
-	require.NoError(t, scenario(ctx, svc, usdc, credits))
+	require.NoError(t, scenario(ctx, svc, usdc, credits, testPricing(t)))
 	balance(t, svc, credits, "912.875", "0")
 	balance(t, svc, usdc, "0", "0")
 	count := journalCount(t, admin)
 	require.Equal(t, 7, count) // deposit + purchase pair + fixed + metered + two stream events
-	require.NoError(t, scenario(ctx, svc, usdc, credits))
+	require.NoError(t, scenario(ctx, svc, usdc, credits, testPricing(t)))
 	require.Equal(t, count, journalCount(t, admin))
-	require.NoError(t, checkFinalBalances(ctx, svc, usdc, credits))
+	require.NoError(t, checkFinalBalances(ctx, svc, usdc, credits, decimal.RequireFromString("912.875")))
 
 	reconciled, err := svc.Reconciler().CheckAccountingEquation(ctx)
 	require.NoError(t, err)

@@ -1,6 +1,6 @@
 // Example: deposit 1 USDC, buy 1,000 AI credits, and charge usage.
 //
-// Uses existing ledger primitives; pricing and usage policy belong to the host.
+// Uses configured fixed rates and existing ledger primitives; usage events belong to the host.
 // This example has no withdrawal or credit cash-out path. Run against a dedicated
 // example database; fixed operation keys replay completed operations without
 // duplicate accounting. Interrupted jobs whose holds expire need reconciliation.
@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"time"
 
@@ -36,6 +37,18 @@ func main() {
 
 func run() error {
 	ctx := context.Background()
+	data := defaultRates
+	if path := os.Getenv("CREDITS_RATES_FILE"); path != "" {
+		var err error
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read rates configuration: %w", err)
+		}
+	}
+	prices, err := parsePricing(data)
+	if err != nil {
+		return err
+	}
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
@@ -59,31 +72,35 @@ func run() error {
 	if err := svc.AssertRuntimeRole(ctx); err != nil {
 		return err
 	}
-	usdc, credits, err := setup(ctx, svc)
+	usdc, credits, err := setup(ctx, svc, prices)
 	if err != nil {
 		return err
 	}
-	if err := scenario(ctx, svc, usdc, credits); err != nil {
+	if err := scenario(ctx, svc, usdc, credits, prices); err != nil {
 		return err
 	}
-	fmt.Println("1 USDC → 1,000 credits; fixed 25 + metered 32.125 + streamed 30 = 87.125 credits spent")
-	fmt.Println("Remaining: 912.875 credits; 0 USDC; no outstanding holds. Re-running is a no-op.")
+	fmt.Println("Configured USDC → CREDITS purchase and usage completed; balances verified, no outstanding holds.")
+	fmt.Println("Replaying the same events with their original rate configuration is a no-op.")
 	return nil
 }
 
-func setup(ctx context.Context, svc *ledger.Service) (string, string, error) {
+func setup(ctx context.Context, svc *ledger.Service, prices pricing) (string, string, error) {
+	source, sourceOK := prices.units["USDC"]
+	target, targetOK := prices.units["CREDITS"]
+	if !sourceOK || !targetOK {
+		return "", "", fmt.Errorf("example requires USDC and CREDITS units: %w", core.ErrInvalidInput)
+	}
 	for _, bundle := range []presets.TemplateBundle{presets.DepositBundle(), presets.FXBundle()} {
 		if err := presets.InstallTemplateBundle(ctx, svc.Classifications(), svc.JournalTypes(), svc.Templates(), bundle); err != nil {
 			return "", "", err
 		}
 	}
-	usdc, err := ensureCurrency(ctx, svc, "USDC", "USD Coin", 6)
+	usdc, err := ensureCurrency(ctx, svc, source.Code, source.Name, source.Exponent)
 	if err != nil {
 		return "", "", err
 	}
-	// Six fractional credit places are an explicit example policy, allowing
-	// token-metered prices. Hosts choose their own precision and rounding policy.
-	credits, err := ensureCurrency(ctx, svc, "CREDITS", "AI Credits", 6)
+	// Wallet precision is configured once when the currency is created.
+	credits, err := ensureCurrency(ctx, svc, target.Code, target.Name, target.Exponent)
 	if err != nil {
 		return "", "", err
 	}
@@ -108,53 +125,123 @@ func setup(ctx context.Context, svc *ledger.Service) (string, string, error) {
 
 // scenario represents already-confirmed deposit and usage events. Production
 // hosts persist their event/request IDs and reuse them on delivery retries.
-func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string) error {
+func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, prices pricing) error {
 	const root = "credits-demo-v2"
-	// Local fixture only: in production the crypto-deposit adapter confirms the
-	// actual onchain receipt before this balance can fund a purchase. Never call
-	// deposit_confirm based on an amount asserted by a browser.
+	target, err := svc.Currencies().GetCurrency(ctx, credits)
+	if err != nil {
+		return err
+	}
+	// Price measured quantities before any bookkeeping. Each source unit uses
+	// its configured directed rate and the wallet's actual target precision.
+	quote := func(unit string, quantity int64) (pricedAmount, error) {
+		return prices.price(*target, usageQuantity{unit, decimal.NewFromInt(quantity)})
+	}
+	purchase, err := quote("USDC", 1)
+	if err != nil {
+		return err
+	}
+	purchaseRate, err := prices.rate("USDC", "CREDITS")
+	if err != nil {
+		return err
+	}
+	image, err := quote("IMAGE", 1)
+	if err != nil {
+		return err
+	}
+	metered, err := prices.price(*target,
+		usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(10000)},
+		usageQuantity{"OUTPUT_TOKEN", decimal.NewFromInt(2425)})
+	if err != nil {
+		return err
+	}
+	meterBudget, err := prices.price(*target,
+		usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(15000)},
+		usageQuantity{"OUTPUT_TOKEN", decimal.NewFromInt(4000)})
+	if err != nil {
+		return err
+	}
+	free, err := quote("IMAGE", 0)
+	if err != nil {
+		return err
+	}
+	freeBudget, err := quote("IMAGE", 2)
+	if err != nil {
+		return err
+	}
+	streamBudget, err := quote("STREAM_TOKEN", 10000)
+	if err != nil {
+		return err
+	}
+	first, err := quote("STREAM_TOKEN", 1000)
+	if err != nil {
+		return err
+	}
+	second, err := quote("STREAM_TOKEN", 2000)
+	if err != nil {
+		return err
+	}
+	// The demo requires a positive purchase, each budget and each stream delta.
+	// Reject a zero-rounded configuration before even the deposit fixture writes.
+	for _, amount := range []decimal.Decimal{purchase.amount, image.amount, meterBudget.amount, freeBudget.amount, streamBudget.amount, first.amount, second.amount} {
+		if !amount.IsPositive() {
+			return fmt.Errorf("example purchase, budget or stream delta rounds to zero: %w", core.ErrInvalidInput)
+		}
+	}
+
+	// This is a local confirmed-deposit fixture. Production hosts accept a
+	// trusted chain confirmation, never an amount asserted by a browser.
 	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID: userID, CurrencyUID: usdc, IdempotencyKey: root + ":deposit",
 		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)}, Source: "credits-topup-example",
 	}); err != nil {
 		return err
 	}
-	if err := purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), root+":purchase"); err != nil {
+	if err := exchangeCurrency(ctx, svc, usdc, credits, decimal.NewFromInt(1), root+":purchase", purchaseRate); err != nil {
 		return err
 	}
 
-	// External provider calls belong BETWEEN Reserve and capture, outside DB
-	// transactions. These completed events stand in for durable provider results.
-	for _, job := range []struct{ key, budget, actual string }{
-		{"image", "25", "25"},      // fixed price per completed image
-		{"tokens", "50", "32.125"}, // input/output/cached-token usage priced by the host
-		{"failed", "40", "0"},      // failure before billable work, or free/cache hit
+	// Provider work happens between Reserve and capture, outside transactions.
+	// These quantity snapshots stand in for durable, immutable provider results.
+	for _, job := range []struct {
+		key    string
+		budget decimal.Decimal
+		actual pricedAmount
+	}{
+		{"image", image.amount, image},
+		{"tokens", meterBudget.amount, metered},
+		{"failed", freeBudget.amount, free},
 	} {
 		rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
-			AccountHolder: userID, CurrencyUID: credits,
-			Amount: decimal.RequireFromString(job.budget), ExpiresIn: time.Hour,
-			IdempotencyKey: root + ":" + job.key + ":reserve",
+			AccountHolder: userID, CurrencyUID: credits, Amount: job.budget,
+			ExpiresIn: time.Hour, IdempotencyKey: root + ":" + job.key + ":reserve",
 		})
 		if err != nil {
 			return err
 		}
-		if err := captureCredits(ctx, svc, rsv, decimal.RequireFromString(job.actual), root+":"+job.key+":result", false); err != nil {
+		metadata, err := job.actual.metadata()
+		if err != nil {
+			return err
+		}
+		if err := captureUsage(ctx, svc, rsv, job.actual.amount, root+":"+job.key+":result", false, metadata); err != nil {
 			return err
 		}
 	}
 
-	// Streaming/multi-step agent: charge INCREMENTS with stable event IDs. A
-	// repeated provider event is a no-op; a cumulative counter must first be
-	// converted to a delta by the host's durable usage processor.
+	// A stream prices durable deltas. This example rounds each delta at the
+	// configured precision; cumulative provider counters must first be normalized.
 	rsv, err := svc.Reserver().Reserve(ctx, core.ReserveInput{
-		AccountHolder: userID, CurrencyUID: credits, Amount: decimal.NewFromInt(100),
+		AccountHolder: userID, CurrencyUID: credits, Amount: streamBudget.amount,
 		ExpiresIn: time.Hour, IdempotencyKey: root + ":stream:reserve",
 	})
 	if err != nil {
 		return err
 	}
-	for i, amount := range []int64{10, 20} {
-		if err := captureCredits(ctx, svc, rsv, decimal.NewFromInt(amount), fmt.Sprintf("%s:stream:event-%d", root, i), true); err != nil {
+	for i, usage := range []pricedAmount{first, second} {
+		metadata, err := usage.metadata()
+		if err != nil {
+			return err
+		}
+		if err := captureUsage(ctx, svc, rsv, usage.amount, fmt.Sprintf("%s:stream:event-%d", root, i), true, metadata); err != nil {
 			return err
 		}
 	}
@@ -163,37 +250,55 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string) er
 	}); err != nil {
 		return err
 	}
-	return checkFinalBalances(ctx, svc, usdc, credits)
+	expected := purchase.amount.Sub(image.amount).Sub(metered.amount).Sub(first.amount).Sub(second.amount)
+	return checkFinalBalances(ctx, svc, usdc, credits, expected)
 }
 
-// purchaseCredits is host composition, not a new library billing subsystem.
-// The host fixes the quote at 1 USDC : 1,000 credits. A reservation keeps other
-// compliant purchases from consuming the same USDC. The hold and both currency
-// journals share a transaction, including when a later leg fails.
-func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits string, amount decimal.Decimal, key string) error {
-	if key == "" || usdc == credits {
+// exchangeCurrency applies a configured quote to two stored wallet balances.
+// Reservation, settlement and both FX journals commit or roll back together.
+func exchangeCurrency(ctx context.Context, svc *ledger.Service, sourceUID, targetUID string, amount decimal.Decimal, key string, rate core.FixedRate) error {
+	if key == "" || sourceUID == targetUID || !amount.IsPositive() {
 		return core.ErrInvalidInput
 	}
-	meta := map[string]string{"purchase_id": key, "pricing_version": "demo-v1", "credits_per_usdc": "1000"}
+	source, err := svc.Currencies().GetCurrency(ctx, sourceUID)
+	if err != nil {
+		return err
+	}
+	target, err := svc.Currencies().GetCurrency(ctx, targetUID)
+	if err != nil {
+		return err
+	}
+	quote, err := quoteRate(rate, amount, *source, *target)
+	if err != nil {
+		return err
+	}
+	if !quote.amount.IsPositive() {
+		return fmt.Errorf("exchange: output rounds to zero: %w", core.ErrInvalidInput)
+	}
+	meta, err := quote.metadata()
+	if err != nil {
+		return err
+	}
+	meta["purchase_id"] = key
 	requests := []core.TemplateExecutionRequest{
 		{TemplateCode: "fx_sell", Params: core.TemplateParams{
-			HolderID: userID, CurrencyUID: usdc, IdempotencyKey: key + ":pay",
+			HolderID: userID, CurrencyUID: sourceUID, IdempotencyKey: key + ":pay",
 			Amounts: map[string]decimal.Decimal{"amount": amount}, Metadata: meta,
 		}},
 		{TemplateCode: "fx_buy", Params: core.TemplateParams{
-			HolderID: userID, CurrencyUID: credits, IdempotencyKey: key + ":issue",
-			Amounts: map[string]decimal.Decimal{"amount": amount.Mul(decimal.NewFromInt(1000))}, Metadata: meta,
+			HolderID: userID, CurrencyUID: targetUID, IdempotencyKey: key + ":issue",
+			Amounts: map[string]decimal.Decimal{"amount": quote.amount}, Metadata: meta,
 		}},
 	}
 	return svc.RunInTx(ctx, func(tx *ledger.Service) error {
-		// Reserve alone locks the user's USDC first; the FX batch also needs
-		// system and credits pairs. Acquire their union before either operation
+		// Reserve alone locks the source wallet first; FX also needs
+		// system and target pairs. Acquire their union before either operation
 		// so a concurrent deposit/purchase follows the same ordering.
 		if err := tx.LockForTemplates(ctx, requests, key+":reserve"); err != nil {
 			return err
 		}
 		rsv, err := tx.Reserver().Reserve(ctx, core.ReserveInput{
-			AccountHolder: userID, CurrencyUID: usdc, Amount: amount,
+			AccountHolder: userID, CurrencyUID: sourceUID, Amount: amount,
 			ExpiresIn: time.Minute, IdempotencyKey: key + ":reserve",
 		})
 		if err != nil {
@@ -209,7 +314,7 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits str
 	})
 }
 
-// captureCredits takes the trusted reservation returned by Reserve, never a
+// captureUsage takes the trusted reservation returned by Reserve, never a
 // browser-supplied holder/currency. All usage goes through this reservation flow;
 // raw journals can bypass holds even with a min-balance policy.
 // The host must persist an immutable event payload (amount and operation kind)
@@ -217,7 +322,7 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, usdc, credits str
 // not a provider event changed from a charged delta into a zero-cost release.
 // For services using WithAttestor, AuthorizeTemplate before RunInTx and then
 // PostAuthorized inside it; see examples/tamper-evident for the signed variant.
-func captureCredits(ctx context.Context, svc *ledger.Service, rsv *core.Reservation, amount decimal.Decimal, key string, partial bool) error {
+func captureUsage(ctx context.Context, svc *ledger.Service, rsv *core.Reservation, amount decimal.Decimal, key string, partial bool, quoteMetadata map[string]string) error {
 	if rsv == nil || key == "" || amount.IsNegative() {
 		return core.ErrInvalidInput
 	}
@@ -227,6 +332,12 @@ func captureCredits(ctx context.Context, svc *ledger.Service, rsv *core.Reservat
 		} // final zero-use event releases, not a stream increment
 		return svc.Reserver().Release(ctx, core.ReleaseInput{ReservationUID: rsv.UID, IdempotencyKey: key + ":release"})
 	}
+	metadata := maps.Clone(quoteMetadata)
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	metadata["usage_event_id"] = key
+	metadata["reservation_uid"] = rsv.UID
 	return svc.RunInTx(ctx, func(tx *ledger.Service) error {
 		var err error
 		if partial {
@@ -240,19 +351,19 @@ func captureCredits(ctx context.Context, svc *ledger.Service, rsv *core.Reservat
 		_, err = tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
 			HolderID: rsv.AccountHolder, CurrencyUID: rsv.CurrencyUID, IdempotencyKey: key + ":charge",
 			Amounts:  map[string]decimal.Decimal{"amount": amount},
-			Metadata: map[string]string{"usage_event_id": key, "reservation_uid": rsv.UID, "pricing_version": "demo-v1"},
+			Metadata: metadata,
 			Source:   "credits-topup-example",
 		})
 		return err
 	})
 }
 
-func checkFinalBalances(ctx context.Context, svc *ledger.Service, usdc, credits string) error {
+func checkFinalBalances(ctx context.Context, svc *ledger.Service, usdc, credits string, expected decimal.Decimal) error {
 	wallet, err := svc.Classifications().GetByCode(ctx, "main_wallet")
 	if err != nil {
 		return err
 	}
-	for _, want := range []struct{ currency, balance string }{{usdc, "0"}, {credits, "912.875"}} {
+	for _, want := range []struct{ currency, balance string }{{usdc, "0"}, {credits, expected.String()}} {
 		got, err := svc.BalanceReader().GetBalance(ctx, userID, want.currency, wallet.UID)
 		if err != nil {
 			return err

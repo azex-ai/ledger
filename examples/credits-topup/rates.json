@@ -1,0 +1,20 @@
+{
+  "units": [
+    {"code": "USDC", "name": "USD Coin", "exponent": 6},
+    {"code": "CREDITS", "name": "Credits", "exponent": 6},
+    {"code": "INPUT_TOKEN", "name": "Input token", "exponent": 0},
+    {"code": "OUTPUT_TOKEN", "name": "Output token", "exponent": 0},
+    {"code": "IMAGE", "name": "Completed image", "exponent": 0},
+    {"code": "STREAM_TOKEN", "name": "Stream token", "exponent": 0},
+    {"code": "ROSE", "name": "Rose", "exponent": 0}
+  ],
+  "rates": [
+    {"source_code": "USDC", "target_code": "CREDITS", "rate": "1000", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "INPUT_TOKEN", "target_code": "CREDITS", "rate": "0.002", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "OUTPUT_TOKEN", "target_code": "CREDITS", "rate": "0.005", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "IMAGE", "target_code": "CREDITS", "rate": "25", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "STREAM_TOKEN", "target_code": "CREDITS", "rate": "0.01", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "ROSE", "target_code": "CREDITS", "rate": "10", "version": "demo-v1", "rounding": "half_up"},
+    {"source_code": "CREDITS", "target_code": "ROSE", "rate": "0.1", "version": "demo-v1", "rounding": "down"}
+  ]
+}

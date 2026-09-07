@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -135,8 +137,7 @@ func TestFreeformFieldLimits_EveryInputWithThoseFieldsChecksThem(t *testing.T) {
 							if field.Tag == nil {
 								continue
 							}
-							tag := field.Tag.Value
-							if strings.Contains(tag, `json:"metadata`) || strings.Contains(tag, `json:"source`) {
+							if isFreeformJSONTag(field.Tag.Value) {
 								freeform[ts.Name.Name] = true
 							}
 						}
@@ -178,6 +179,27 @@ func TestFreeformFieldLimits_EveryInputWithThoseFieldsChecksThem(t *testing.T) {
 	assert.Empty(t, missing,
 		"input type(s) declare a metadata/source field and have a Validate method that does not call validateFreeformFields -- "+
 			"an unbounded free-form field on any write path is the whole finding, not just JournalInput's")
+}
+
+// SourceCode identifies a conversion unit; it is not the journal's free-form
+// Source label. Parse the actual JSON name so suffixes cannot change the gate's
+// scope, while preserving tags with options or additional codecs.
+func isFreeformJSONTag(literal string) bool {
+	tag, err := strconv.Unquote(literal)
+	if err != nil {
+		return false
+	}
+	name := strings.SplitN(reflect.StructTag(tag).Get("json"), ",", 2)[0]
+	return name == "metadata" || name == "source"
+}
+
+func TestFreeformJSONTag_UsesExactFieldName(t *testing.T) {
+	for _, tag := range []string{`json:"source"`, `json:"metadata"`, `json:"source,omitempty"`, `db:"meta" json:"metadata,omitempty"`} {
+		require.True(t, isFreeformJSONTag(strconv.Quote(tag)), tag)
+	}
+	for _, tag := range []string{`json:"source_code"`, `json:"metadata_version"`, `db:"source" json:"code"`, `json:"-"`} {
+		require.False(t, isFreeformJSONTag(strconv.Quote(tag)), tag)
+	}
 }
 
 func recvTypeName(e ast.Expr) string {

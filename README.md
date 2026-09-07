@@ -1044,7 +1044,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 102 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
-- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: buy credits at a 1:100 rate (two-journal FX), discounts (price / bonus / promo), adding currencies, spending via reserve→settle, cashing out, and expiry/insufficient-funds edges.
+- [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: configurable `core.FixedRate` conversions for currencies, token usage and gifts (default 1 USDC → 1,000 credits), atomic FX purchases, reservation-based consumption, refunds and expiry/insufficient-funds edges.
 
 ## Examples
 
