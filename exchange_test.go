@@ -189,6 +189,13 @@ func TestExchange_RefusesBeforeWritingAnything(t *testing.T) {
 	_, err = f.svc.Exchange(ctx, wrongPair)
 	require.ErrorIs(t, err, core.ErrInvalidInput)
 
+	// A version that is not valid UTF-8: encoding/json would collapse it to
+	// U+FFFD, so a retry that changed it would replay instead of conflict.
+	badVersion := f.input("bad-version")
+	badVersion.Rate.Version = "price-" + string([]byte{0xff})
+	_, err = f.svc.Exchange(ctx, badVersion)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
 	// Host metadata may not squat on the ledger's keys.
 	squat := f.input("squat")
 	squat.Metadata[core.ConversionQuotesMetadataKey] = "[]"

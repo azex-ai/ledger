@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/shopspring/decimal"
 )
@@ -24,18 +23,27 @@ type FixedRate struct {
 }
 
 // Validate checks the configured pair, version, rate, rounding and precision.
+// SourceCode and TargetCode follow the currency-code rule (1-64 characters
+// from [A-Za-z0-9_-]); Version must be non-blank, valid UTF-8 -- see
+// validateQuoteVersion for why the encoding matters.
 // Source and target may describe measured units: their UID, Name and IsActive
 // fields are not required. Wallet operations must independently resolve and
 // authorize the actual stored currencies; this is only a pure conversion value.
 func (r FixedRate) Validate(source, target Currency) error {
-	if strings.TrimSpace(r.SourceCode) == "" || strings.TrimSpace(r.TargetCode) == "" || r.SourceCode == r.TargetCode {
-		return fmt.Errorf("core: fixed rate: source_code and target_code must be non-empty and distinct: %w", ErrInvalidInput)
+	if err := validateCurrencyCode("core: fixed rate", "source_code", r.SourceCode); err != nil {
+		return err
+	}
+	if err := validateCurrencyCode("core: fixed rate", "target_code", r.TargetCode); err != nil {
+		return err
+	}
+	if r.SourceCode == r.TargetCode {
+		return fmt.Errorf("core: fixed rate: source_code and target_code must be distinct: %w", ErrInvalidInput)
 	}
 	if source.Code != r.SourceCode || target.Code != r.TargetCode {
 		return fmt.Errorf("core: fixed rate: currency metadata does not match the directed pair: %w", ErrInvalidInput)
 	}
-	if strings.TrimSpace(r.Version) == "" {
-		return fmt.Errorf("core: fixed rate: version required: %w", ErrInvalidInput)
+	if err := validateQuoteVersion("core: fixed rate", r.Version); err != nil {
+		return err
 	}
 	if source.Exponent < 0 || source.Exponent > MaxAmountFractionalDigits ||
 		target.Exponent < 0 || target.Exponent > MaxAmountFractionalDigits {

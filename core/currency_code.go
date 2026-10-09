@@ -1,6 +1,10 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
 
 // maxCurrencyCodeLen bounds a currency code. The longest code anywhere in this
 // repository's fixtures, presets and examples is under 32 characters; 64 is a
@@ -36,6 +40,26 @@ func validateCurrencyCode(scope, field, code string) error {
 		default:
 			return fmt.Errorf("%s: %s must use only A-Z, a-z, 0-9, '_' and '-': %w", scope, field, ErrInvalidInput)
 		}
+	}
+	return nil
+}
+
+// validateQuoteVersion requires a non-blank, valid UTF-8 rate version.
+//
+// The encoding check is an idempotency guard, not cosmetics: encoding/json
+// replaces every invalid byte with U+FFFD, so "v\xff" and "v\xfe" encode to
+// the same conversion_quotes value. Metadata is part of the compared
+// idempotency payload, so a retry that changed the version between two
+// invalid spellings would replay as a no-op instead of raising ErrConflict
+// (I-3). Refusing invalid UTF-8 makes the encoding injective again. The
+// currency codes need no separate check: their ASCII allowlist already
+// excludes every non-ASCII byte.
+func validateQuoteVersion(scope, version string) error {
+	if strings.TrimSpace(version) == "" {
+		return fmt.Errorf("%s: version required: %w", scope, ErrInvalidInput)
+	}
+	if !utf8.ValidString(version) {
+		return fmt.Errorf("%s: version must be valid UTF-8: %w", scope, ErrInvalidInput)
 	}
 	return nil
 }

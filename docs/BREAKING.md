@@ -39,7 +39,11 @@ whitespace, a `.`, control characters or Unicode format characters (a
 right-to-left override U+202E, a zero-width joiner U+200D) was accepted and
 then rendered verbatim on holder statements and conversion quotes, where it
 can reverse or disguise what the line says. The same rule now applies to
-`core.ConversionQuote.Validate`'s `SourceCode` / `TargetCode`, so
+`core.FixedRate.Validate` (hence `Convert` / `Quote` / `Exchange`) and
+`core.ConversionQuote.Validate`'s `SourceCode` / `TargetCode`, and both now
+also require `Version` to be valid UTF-8 (encoding/json turns every invalid
+byte into U+FFFD, so two different invalid versions encoded to one payload and
+a changed-version retry replayed instead of raising `core.ErrConflict`), so
 `EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
 carrying `metadata["conversion_quotes"]` refuse such a code with
 `core.ErrInvalidInput` (`400` / `10001`).

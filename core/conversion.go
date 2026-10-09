@@ -69,7 +69,8 @@ type ConversionQuote struct {
 // currencies may since have been retired.
 //
 // SourceCode and TargetCode follow the currency-code rule CurrencyInput
-// enforces -- 1-64 characters from [A-Za-z0-9_-] -- and must differ. The
+// enforces -- 1-64 characters from [A-Za-z0-9_-] -- and must differ; Version
+// must be non-blank, valid UTF-8 (validateQuoteVersion). The
 // holder statement renders them verbatim, so a code carrying whitespace,
 // control or Unicode format characters (a right-to-left override, a
 // zero-width joiner) is refused rather than shown.
@@ -83,8 +84,8 @@ func (q ConversionQuote) Validate() error {
 	if q.SourceCode == q.TargetCode {
 		return fmt.Errorf("core: conversion quote: source_code and target_code must be distinct: %w", ErrInvalidInput)
 	}
-	if strings.TrimSpace(q.Version) == "" {
-		return fmt.Errorf("core: conversion quote: version required: %w", ErrInvalidInput)
+	if err := validateQuoteVersion("core: conversion quote", q.Version); err != nil {
+		return err
 	}
 	if q.SourceExponent < 0 || q.SourceExponent > MaxAmountFractionalDigits ||
 		q.TargetExponent < 0 || q.TargetExponent > MaxAmountFractionalDigits {
