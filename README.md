@@ -872,6 +872,7 @@ still want the pending API.
 | `svc.RunInTx(ctx, fn)` | Combine ledger writes + your writes in one PostgreSQL transaction |
 | `svc.RunInTxWithOptions(ctx, opts, fn)` | `RunInTx` with explicit `pgx.TxOptions` (e.g. `pgx.Serializable`) |
 | `svc.LockForTemplates(ctx, requests, reserveKeys...)` | Call on the `RunInTx` callback's Service to acquire the complete template balance locks and idempotency keys before Reserve + template writes; posts no journals |
+| `svc.Exchange(ctx, input)` | Convert one holder's balance into another currency at a resolved `core.FixedRate`: reserve + settle the source, post both FX legs, record the quote (and the funding deposit's uid) on each — one transaction, deposit-compatible lock order. Joins the caller's `RunInTx` when called on its clone. Rates come from the host's `core.RateQuoter`; the ledger stores none |
 | `svc.Authorize(ctx, input)` | Compute a journal's canonical digest and sign it **outside** any transaction, so a `RunInTx` write can still land signed (KMS signing is an external call; `financial.md` forbids those inside a transaction) |
 | `svc.AuthorizeTemplate(ctx, req)` | `Authorize` for a template execution |
 | `svc.DBTX()` | The active `pgx` executor — the pool, or the transaction when called on a `RunInTx` clone |
@@ -1041,7 +1042,7 @@ See [docs/api.md](docs/api.md) for the complete reference with request/response 
 - [**RUNBOOK.md**](docs/RUNBOOK.md) -- Operational guide for on-call: reconciliation failure, solvency alert, rollup backlog, webhook backlog, idempotency collision, emergency stop.
 - [**DR.md**](docs/DR.md) -- Backup & disaster recovery: PITR strategy, RPO/RTO targets, restore procedure, and invariant-based backup verification (quarterly drill).
 - [**CAPACITY.md**](docs/CAPACITY.md) -- Benchmark baseline, sizing guide (pool/replicas/DB), suggested SLOs, and scaling signals.
-- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 102 schemas).
+- [**openapi.yaml**](docs/openapi.yaml) -- OpenAPI 3.1 contract (61 paths, 103 schemas).
 - [**api.md**](docs/api.md) -- Long-form HTTP API reference with examples.
 - [**frontend.md**](docs/frontend.md) -- React UI + data-layer (`@azex/ledger-react`): hooks, page components, RSC prefetch, theming, full API reference.
 - [**COOKBOOK.md**](docs/COOKBOOK.md) -- Business recipes: configurable `core.FixedRate` conversions for currencies, token usage and gifts (default 1 USDC → 1,000 credits), atomic FX purchases, reservation-based consumption, refunds and expiry/insufficient-funds edges.

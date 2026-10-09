@@ -147,6 +147,9 @@ func (j *JournalInput) Validate() error {
 	if err := validateFreeformFields("journal", j.Source, j.Metadata); err != nil {
 		return err
 	}
+	if err := validateConversionQuotesMetadata("journal", j.Metadata); err != nil {
+		return err
+	}
 	if len(j.Entries) == 0 {
 		return fmt.Errorf("core: journal: entries must not be empty: %w", ErrInvalidInput)
 	}

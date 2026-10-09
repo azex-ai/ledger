@@ -7,12 +7,14 @@ import { EmptyState, ErrorState } from "../../heroui/shared";
 import { formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
+import { describeQuotes, type UnitLabels } from "../quote";
 
 /*
  * Wallet transaction list (HeroUI skin). Page logic mirrors the shadcn skin
  * (src/wallet/components/transaction-list.tsx) — keep in sync. The list is a
  * card of rows (not a Table), so the load-more control is a plain centered
- * Button rather than the table-coupled LoadMoreBar.
+ * Button rather than the table-coupled LoadMoreBar. Converted rows carry the
+ * same quote line, worded by the shared describeQuotes presenter.
  */
 
 export interface TransactionListProps {
@@ -30,6 +32,12 @@ export interface TransactionListProps {
    * migration note.
    */
   kindLabels?: Record<string, string>;
+  /**
+   * Label overrides keyed by unit code for the quote line under a converted
+   * row (`{ INPUT_TOKEN: "input tokens" }`) — the wording anchor for
+   * measured units, as `kindLabels` is for `kind`. Falls back to the code.
+   */
+  unitLabels?: UnitLabels;
   /** Full-row custom renderer (escape hatch); the default row otherwise. */
   renderItem?: (tx: WalletTransaction) => ReactNode;
   /** Page size for the cursor pagination. */
@@ -51,7 +59,15 @@ function ListSkeleton() {
   );
 }
 
-function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
+function DefaultRow({
+  tx,
+  label,
+  unitLabels,
+}: {
+  tx: WalletTransaction;
+  label: string;
+  unitLabels?: UnitLabels;
+}) {
   // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
   // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
   // at the call site — display.ts's contract is that callers never re-derive
@@ -76,6 +92,17 @@ function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
           <time dateTime={tx.occurred_at}>{formatUTC(tx.occurred_at)}</time>
           {tx.memo !== "" && <> · {tx.memo}</>}
         </p>
+        {/* `?.`: a server from before `quotes` existed omits the key; the
+            statement still renders during that deployment window
+            (api-contract.md §8), it just has nothing to explain. */}
+        {(tx.quotes?.length ?? 0) > 0 && (
+          <p
+            className="text-muted whitespace-normal break-words text-xs tabular-nums"
+            title={describeQuotes(tx.quotes, unitLabels)}
+          >
+            {describeQuotes(tx.quotes, unitLabels)}
+          </p>
+        )}
       </div>
       <p
         className={cn(
@@ -94,6 +121,7 @@ function DefaultRow({ tx, label }: { tx: WalletTransaction; label: string }) {
 /** The holder's transaction history, newest first, with Load More paging. */
 export function TransactionList({
   kindLabels,
+  unitLabels,
   renderItem,
   limit = 20,
 }: TransactionListProps = {}) {
@@ -128,6 +156,7 @@ export function TransactionList({
                   key={`${tx.uid}-${tx.currency_uid}`}
                   tx={tx}
                   label={kindLabels?.[tx.kind] ?? tx.kind_label}
+                  unitLabels={unitLabels}
                 />
               ),
             )}

@@ -1659,6 +1659,15 @@ vocabulary. Cursor-paginated at journal granularity; see
 [Pagination](#pagination) above for the newest-first cursor direction this
 endpoint uses.
 
+Each row carries `quotes`: the conversions its amount came from (an
+exchange's rate, or each priced line of a metered charge), decoded from the
+journal's `conversion_quotes` metadata. Always an array, empty when the
+journal recorded none. Each quote is `{source_code, source_quantity, rate,
+target_code, target_amount}` — facts a statement can print ("10,000
+INPUT_TOKEN × 0.002 = 20 CREDITS"). The configuration version, rounding mode
+and unit exponents are audit detail and stay on the admin journal surface
+(`GET /journals/{uid}` metadata).
+
 Query params: `cursor`, `limit` (max 100).
 
 Status codes: `200`, `401`.

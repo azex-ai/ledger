@@ -134,13 +134,15 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 	// Price measured quantities before any bookkeeping. Each source unit uses
 	// its configured directed rate and the wallet's actual target precision.
 	quote := func(unit string, quantity int64) (pricedAmount, error) {
-		return prices.price(*target, usageQuantity{unit, decimal.NewFromInt(quantity)})
+		return prices.price(ctx, *target, usageQuantity{unit, decimal.NewFromInt(quantity)})
 	}
 	purchase, err := quote("USDC", 1)
 	if err != nil {
 		return err
 	}
-	purchaseRate, err := prices.rate("USDC", "CREDITS")
+	// The purchase rate is resolved here, through the RateQuoter port, before
+	// any transaction opens. Exchange receives the value, never the port.
+	purchaseRate, err := prices.QuoteRate(ctx, "USDC", "CREDITS")
 	if err != nil {
 		return err
 	}
@@ -148,13 +150,13 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 	if err != nil {
 		return err
 	}
-	metered, err := prices.price(*target,
+	metered, err := prices.price(ctx, *target,
 		usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(10000)},
 		usageQuantity{"OUTPUT_TOKEN", decimal.NewFromInt(2425)})
 	if err != nil {
 		return err
 	}
-	meterBudget, err := prices.price(*target,
+	meterBudget, err := prices.price(ctx, *target,
 		usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(15000)},
 		usageQuantity{"OUTPUT_TOKEN", decimal.NewFromInt(4000)})
 	if err != nil {
@@ -190,13 +192,27 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 
 	// This is a local confirmed-deposit fixture. Production hosts accept a
 	// trusted chain confirmation, never an amount asserted by a browser.
-	if _, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+	depositJournal, err := svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
 		HolderID: userID, CurrencyUID: usdc, IdempotencyKey: root + ":deposit",
 		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)}, Source: "credits-topup-example",
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	if err := exchangeCurrency(ctx, svc, usdc, credits, decimal.NewFromInt(1), root+":purchase", purchaseRate); err != nil {
+	// The library's Exchange reserves and settles the USDC, posts both FX
+	// legs, and records the quote on each -- all in one transaction, with the
+	// lock order a concurrent deposit also follows. FundingUID links the
+	// purchase to the deposit that paid for it: a host reconciliation joins
+	// confirmed deposits against exchanges carrying their uid to find one
+	// that was confirmed and never converted. A production host passes its
+	// deposit booking's uid here.
+	if _, err := svc.Exchange(ctx, ledger.ExchangeInput{
+		HolderID: userID, SourceCurrencyUID: usdc, TargetCurrencyUID: credits,
+		Quantity: decimal.NewFromInt(1), Rate: purchaseRate,
+		IdempotencyKey: root + ":purchase", FundingUID: depositJournal.UID,
+		Metadata: map[string]string{"purchase_id": root + ":purchase"},
+		Source:   "credits-topup-example",
+	}); err != nil {
 		return err
 	}
 
@@ -252,66 +268,6 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 	}
 	expected := purchase.amount.Sub(image.amount).Sub(metered.amount).Sub(first.amount).Sub(second.amount)
 	return checkFinalBalances(ctx, svc, usdc, credits, expected)
-}
-
-// exchangeCurrency applies a configured quote to two stored wallet balances.
-// Reservation, settlement and both FX journals commit or roll back together.
-func exchangeCurrency(ctx context.Context, svc *ledger.Service, sourceUID, targetUID string, amount decimal.Decimal, key string, rate core.FixedRate) error {
-	if key == "" || sourceUID == targetUID || !amount.IsPositive() {
-		return core.ErrInvalidInput
-	}
-	source, err := svc.Currencies().GetCurrency(ctx, sourceUID)
-	if err != nil {
-		return err
-	}
-	target, err := svc.Currencies().GetCurrency(ctx, targetUID)
-	if err != nil {
-		return err
-	}
-	quote, err := quoteRate(rate, amount, *source, *target)
-	if err != nil {
-		return err
-	}
-	if !quote.amount.IsPositive() {
-		return fmt.Errorf("exchange: output rounds to zero: %w", core.ErrInvalidInput)
-	}
-	meta, err := quote.metadata()
-	if err != nil {
-		return err
-	}
-	meta["purchase_id"] = key
-	requests := []core.TemplateExecutionRequest{
-		{TemplateCode: "fx_sell", Params: core.TemplateParams{
-			HolderID: userID, CurrencyUID: sourceUID, IdempotencyKey: key + ":pay",
-			Amounts: map[string]decimal.Decimal{"amount": amount}, Metadata: meta,
-		}},
-		{TemplateCode: "fx_buy", Params: core.TemplateParams{
-			HolderID: userID, CurrencyUID: targetUID, IdempotencyKey: key + ":issue",
-			Amounts: map[string]decimal.Decimal{"amount": quote.amount}, Metadata: meta,
-		}},
-	}
-	return svc.RunInTx(ctx, func(tx *ledger.Service) error {
-		// Reserve alone locks the source wallet first; FX also needs
-		// system and target pairs. Acquire their union before either operation
-		// so a concurrent deposit/purchase follows the same ordering.
-		if err := tx.LockForTemplates(ctx, requests, key+":reserve"); err != nil {
-			return err
-		}
-		rsv, err := tx.Reserver().Reserve(ctx, core.ReserveInput{
-			AccountHolder: userID, CurrencyUID: sourceUID, Amount: amount,
-			ExpiresIn: time.Minute, IdempotencyKey: key + ":reserve",
-		})
-		if err != nil {
-			return err
-		}
-		if err := tx.Reserver().Settle(ctx, core.SettleInput{
-			ReservationUID: rsv.UID, Amount: amount, IdempotencyKey: key + ":settle",
-		}); err != nil {
-			return err
-		}
-		_, err = tx.TemplateBatchExecutor().ExecuteTemplateBatch(ctx, requests)
-		return err
-	})
 }
 
 // captureUsage takes the trusted reservation returned by Reserve, never a

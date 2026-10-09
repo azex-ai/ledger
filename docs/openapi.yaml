@@ -2097,7 +2097,7 @@ components:
 
     HolderTransaction:
       type: object
-      required: [uid, kind, kind_label, direction, amount, currency_uid, currency_code, occurred_at, reversal_of_uid, memo]
+      required: [uid, kind, kind_label, direction, amount, currency_uid, currency_code, occurred_at, reversal_of_uid, memo, quotes]
       properties:
         uid: { type: string, format: uuid, description: "Journal uid — trace anchor, safe to display." }
         kind: { type: string, enum: [deposit, withdrawal, transfer, fee, adjustment, other], example: "deposit", description: "Small, deployment-stable product vocabulary (core.HolderTxKind, M-7 fix, docs/INVARIANTS.md I-44) a host app can hardcode a label-override map against. Never the ledger's internal journal-type code or uid (see kind_label for the display text)." }
@@ -2109,6 +2109,24 @@ components:
         occurred_at: { $ref: "#/components/schemas/Timestamp" }
         reversal_of_uid: { type: string, description: "Non-empty when this row is a reversal of that journal." }
         memo: { type: string, description: "journal.metadata[\"memo\"] — host-written user-readable copy; empty when absent." }
+        quotes:
+          type: array
+          description: >-
+            The conversions this row's amount came from (journal.metadata["conversion_quotes"], decoded):
+            an exchange's rate, or each priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20 CREDITS").
+            Always an array; empty when the journal recorded none. Only user-explainable facts travel here —
+            the configuration version, rounding mode and unit exponents are audit detail on the admin
+            journal surface, not on the holder statement.
+          items: { $ref: "#/components/schemas/HolderTransactionQuote" }
+    HolderTransactionQuote:
+      type: object
+      required: [source_code, source_quantity, rate, target_code, target_amount]
+      properties:
+        source_code: { type: string, example: "INPUT_TOKEN", description: "Unit that was priced or sold. A currency code, or a measured unit that has no wallet." }
+        source_quantity: { $ref: "#/components/schemas/Decimal", description: "How much of source_code went in." }
+        rate: { $ref: "#/components/schemas/Decimal", description: "target_code units per one source_code unit." }
+        target_code: { type: string, example: "CREDITS" }
+        target_amount: { $ref: "#/components/schemas/Decimal", description: "What came out, at the target currency's precision." }
     HolderTransactionListEnvelope:
       allOf:
         - $ref: "#/components/schemas/Envelope"

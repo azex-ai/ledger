@@ -137,6 +137,21 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 		if net.IsNegative() {
 			direction = core.HolderTransactionOut
 		}
+		// Absent is the empty string (COALESCE in holder.sql). Present but
+		// undecodable cannot happen through this library's write path
+		// (JournalInput.Validate), so it is reported, not tolerated: a
+		// statement that silently dropped a charge's explanation would be
+		// the working-agreements §3 failure this whole surface exists to
+		// avoid.
+		var quotes []core.ConversionQuote
+		if r.ConversionQuotes != "" {
+			quotes, err = core.DecodeConversionQuotes(r.ConversionQuotes)
+			if err != nil {
+				err = fmt.Errorf("postgres: list holder transactions: journal %d: %w", r.JournalID, err)
+				ledgerotel.RecordError(span, err)
+				return nil, "", err
+			}
+		}
 		items = append(items, core.HolderTransaction{
 			UID:           pgToUID(r.JournalUid),
 			Kind:          r.Kind,
@@ -148,6 +163,7 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 			OccurredAt:    r.EffectiveAt,
 			ReversalOfUID: r.ReversalOfUid,
 			Memo:          r.Memo,
+			Quotes:        quotes,
 		})
 	}
 

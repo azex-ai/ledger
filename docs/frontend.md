@@ -662,10 +662,10 @@ key, so holder A's cached balances can never be served to holder B.
 
 | Component | Props | Purpose |
 |---|---|---|
-| `<WalletPanel/>` | `actions?`, `kindLabels?`, `renderItem?`, `limit?`, `slots?` | zero-assembly: balances + activity list; shadcn supports replacing either complete region |
+| `<WalletPanel/>` | `actions?`, `kindLabels?`, `unitLabels?`, `renderItem?`, `limit?`, `slots?` | zero-assembly: balances + activity list; shadcn supports replacing either complete region |
 | `<WalletBalances/>` | `actions?` | per-currency grid of balance cards |
 | `<WalletBalanceCard/>` | `currencyUid?`, `actions?` | one currency: total + available/pending/on-hold rows, expandable holds detail |
-| `<TransactionList/>` | `kindLabels?`, `renderItem?`, `limit?` | activity list: labels, refund markers, signed colored amounts, Load More |
+| `<TransactionList/>` | `kindLabels?`, `unitLabels?`, `renderItem?`, `limit?` | activity list: labels, refund markers, signed colored amounts, the quote line under a converted row, Load More |
 | `<DepositAddressCard/>` | `network: string`, `assets: [string, ...string[]]` | shows the holder's crypto deposit address (QR + copy-to-clipboard) or a "Generate address" CTA on first use — the only write in this otherwise read-only wallet surface; the host must supply the real network and a non-empty list of accepted assets |
 
 - `actions` is the slot for host-owned top-up actions. The shadcn wallet accepts
@@ -684,6 +684,19 @@ key, so holder A's cached balances can never be served to holder B.
   "other"` — `core.HolderTxKind`, docs/INVARIANTS.md I-44)
   (`{ deposit: "Top up" }`) — the product-side i18n anchor. Not the ledger's
   internal journal-type code or uid.
+- A row whose amount came from a conversion carries `quotes` (see
+  `WalletTransactionQuote`: `source_code`, `source_quantity`, `rate`,
+  `target_code`, `target_amount`). Both skins render them under the row as
+  "10000 input tokens × 0.002 → 20 credits; 2425 output tokens × 0.005 → 12.125 credits"
+  through the shared `describeQuotes` presenter. `unitLabels`
+  (`{ INPUT_TOKEN: "input tokens", CREDITS: "credits" }`) names both source
+  and target units, falling back to each code. Numbers are rendered verbatim;
+  the result is the recorded `target_amount`, never a frontend multiplication
+  or rounding. An exchange's source-currency row therefore also explains its
+  destination, e.g. "1 USDC × 1000.5 → 1000 credits" when the target was rounded
+  to whole credits. Complete quotes are separated by semicolons and wrap on
+  narrow screens. A host drawing its own rows imports `describeQuote` /
+  `describeQuotes` from the headless entry to say it the same way.
 - Every component ships loading skeletons, sanitized error states, and empty
   states; raw upstream errors go to `onError`, never the DOM.
 
