@@ -20,6 +20,18 @@ import (
 	tcminio "github.com/testcontainers/testcontainers-go/modules/minio"
 )
 
+// minioImage is the server the fixture runs. MinIO removed minio/minio from
+// Docker Hub in September 2026 (and Quay stopped serving anonymous pulls
+// shortly after), so the upstream tag this fixture pinned since its creation
+// became "pull access denied" on every CI run. pgsty/minio is a community
+// build of the archived MinIO source with the same image layout as upstream
+// (docker-entrypoint.sh, `server /data`, root user), which is what the
+// testcontainers minio module drives; the Chainguard build runs as uid 65532
+// and only ships a floating tag, and the Bitnami legacy image has its own
+// entrypoint. Pinned to a dated release tag, never `latest`, so the next
+// registry change breaks here deliberately rather than silently.
+const minioImage = "pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
+
 // Fixture starts a real MinIO container and returns its S3 endpoint plus the
 // access key / secret to reach it. It skips (not fails) in -short mode or when
 // no Docker daemon is reachable, and terminates the container via t.Cleanup.
@@ -30,7 +42,7 @@ func Fixture(t *testing.T) (endpoint, accessKey, secret string) {
 	}
 
 	ctx := context.Background()
-	container, err := tcminio.Run(ctx, "minio/minio:RELEASE.2024-01-16T16-07-38Z")
+	container, err := tcminio.Run(ctx, minioImage)
 	if err != nil {
 		if strings.Contains(err.Error(), "Cannot connect to the Docker daemon") {
 			t.Skip("Docker daemon not running, skipping integration test")
