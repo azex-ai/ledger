@@ -271,3 +271,39 @@ func TestExchange_MissingTemplateIsAnErrorNotAPartialWrite(t *testing.T) {
 	require.True(t, f.held(t, ctx, f.usdc).IsZero())
 	require.Equal(t, 1, f.journalCount(t, ctx))
 }
+
+// TestExchange_PreLocksEveryIdempotencyKeyItUses pins m-1 (2026-10-09
+// security review): the LockForTemplates union must name every idempotency
+// key the transaction later uses -- the two template keys and Reserve's AND
+// Settle's. Settle takes no advisory idempotency lock of its own today, so
+// only the pre-acquisition can put `:settle` in the lock set; this reads
+// pg_locks from inside the joined transaction to prove it did.
+func TestExchange_PreLocksEveryIdempotencyKeyItUses(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+	key := postgrestest.UniqueKey("exchange-lockset")
+
+	require.NoError(t, f.svc.RunInTx(ctx, func(tx *ledger.Service) error {
+		if _, err := tx.Exchange(ctx, f.input(key)); err != nil {
+			return err
+		}
+		for _, suffix := range []string{":pay", ":issue", ":reserve", ":settle"} {
+			var held bool
+			// A 64-bit advisory key is split into classid (high 32 bits)
+			// and objid (low 32 bits) with objsubid = 1.
+			err := tx.DBTX().QueryRow(ctx, `
+				SELECT EXISTS (
+				  SELECT 1 FROM pg_locks
+				  WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND objsubid = 1
+				    AND ((classid::bigint << 32) | objid::bigint) = hashtextextended('idem:' || $1::text, 0))`,
+				key+suffix).Scan(&held)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return fmt.Errorf("idempotency key %q is not in the transaction's advisory lock set", key+suffix)
+			}
+		}
+		return nil
+	}))
+}
