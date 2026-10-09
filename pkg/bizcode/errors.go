@@ -177,6 +177,17 @@ var (
 	TransientFailure = New(18105, "temporary failure, please retry")
 )
 
+// --- Stored-data integrity (19000-19099, 500, not retryable) ---
+
+var (
+	// CorruptData maps core.ErrCorruptData: a value already stored violates
+	// a contract the library's own write path enforces (only direct SQL or
+	// a bug can put it there). 500 because the server, not the request, is
+	// at fault; not retryable because re-reading the same row fails the same
+	// way until an operator repairs it.
+	CorruptData = New(19001, "stored data integrity violation")
+)
+
 // --- Display messages ---
 
 // displayMessagesMu guards displayMessages: RegisterDisplayMessage can be
@@ -216,6 +227,7 @@ var displayMessages = map[int]string{
 	18103: "This request is temporarily unavailable, please try again shortly",
 	18104: "This request could not be completed right now, please try again shortly",
 	18105: "A temporary error occurred, please try again",
+	19001: "An unexpected error occurred. Please contact support",
 	19999: "An unexpected error occurred",
 }
 
@@ -247,6 +259,9 @@ func DisplayMessage(code int) string {
 //   - 14000-14999 (ledger domain-invariant violation: insufficient balance,
 //     unbalanced journal, invalid transition, ...) is a business-rule
 //     outcome, not a transient failure. Not retryable.
+//   - 19000-19099 (stored-data integrity violation, HTTP 500) is a
+//     server-side defect in data already at rest -- the same read fails the
+//     same way until an operator repairs the row. Not retryable.
 //   - Anything else (internal error, or a code outside every known range)
 //     defaults to retryable: unclassified failures most often indicate a
 //     transient dependency hiccup (DB blip, network reset) rather than a
@@ -263,6 +278,8 @@ func Retryable(code int) bool {
 		return false // state conflict
 	case code >= 14000 && code <= 14999:
 		return false // ledger domain invariant violation
+	case code >= 19000 && code <= 19099:
+		return false // stored-data integrity violation: re-reading fails the same way
 	default:
 		return true // unclassified / internal error — assume transient
 	}

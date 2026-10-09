@@ -115,6 +115,12 @@ func (in ExchangeInput) validate() error {
 // way the Rate must already be resolved: nothing here calls a RateQuoter, and
 // nothing may (financial.md: no external call inside a transaction).
 //
+// When it joins a caller's transaction there is no savepoint: a failed
+// Exchange does not undo what it already wrote inside that transaction (the
+// reservation, the sell leg, ...). The host must return Exchange's error from
+// the RunInTx callback so the whole transaction rolls back; a callback that
+// swallows the error and returns nil commits the partial write.
+//
 // A quote whose output rounds to zero is refused before any write. Journals
 // posted through the transaction path are unsigned (core.AuthStatusUnsignedTxMode,
 // see RunInTx); a WithAttestor deployment that needs verifiable FX legs
@@ -185,7 +191,14 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 	body := func(tx *Service) error {
 		// The union of every lock this transaction will take, in the one
 		// canonical order -- before Reserve takes the source pair on its own.
-		if err := tx.LockForTemplates(ctx, requests, key+":reserve"); err != nil {
+		// Every idempotency key the transaction later uses is named here:
+		// the two template keys ride in `requests`, Reserve's and Settle's
+		// are the extras. Settle does not take an advisory idempotency lock
+		// today (its replay guard is the reservation row lock), but leaving
+		// its key out of the set would make the pre-acquired order silently
+		// incomplete the day it does -- the ABBA shape LockForTemplates
+		// exists to rule out.
+		if err := tx.LockForTemplates(ctx, requests, key+":reserve", key+":settle"); err != nil {
 			return fmt.Errorf("ledger: exchange: %w", err)
 		}
 		rsv, err := tx.Reserver().Reserve(ctx, core.ReserveInput{

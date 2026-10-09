@@ -112,6 +112,19 @@ func TestResolveError_UnauthorizedJournal(t *testing.T) {
 	assert.False(t, bizcode.Retryable(ae.Code), "an unauthorized journal is a permanent rejection, not a transient one")
 }
 
+// TestResolveError_CorruptData pins that a stored row the library's own
+// write path would have refused is a server-side 500 that is NOT retryable
+// -- not the caller's 10001 (the request was fine) and not the default 19999
+// (whose band tells clients to retry a read that fails the same way every
+// time).
+func TestResolveError_CorruptData(t *testing.T) {
+	ae := resolveError(fmt.Errorf("postgres: list holder transactions: journal x: %w: bad quote", core.ErrCorruptData))
+	require.NotNil(t, ae)
+	assert.Equal(t, 19001, ae.Code)
+	assert.Equal(t, http.StatusInternalServerError, ae.HTTPStatus())
+	assert.False(t, bizcode.Retryable(ae.Code))
+}
+
 func TestResolveError_UnauthorizedJournal_Wrapped(t *testing.T) {
 	wrapped := fmt.Errorf("core: verify journal auth: journal has no stored digest: %w", core.ErrUnauthorizedJournal)
 	ae := resolveError(wrapped)
@@ -145,6 +158,7 @@ var coreSentinels = map[string]error{
 	"ErrRollupPending":       core.ErrRollupPending,
 	"ErrTransient":           core.ErrTransient,
 	"ErrNoLifecycle":         core.ErrNoLifecycle,
+	"ErrCorruptData":         core.ErrCorruptData,
 }
 
 // declaredCoreSentinels parses core/errors.go and returns every top-level

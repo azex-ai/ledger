@@ -67,12 +67,26 @@ type ConversionQuote struct {
 // Validate checks the quote's own consistency. It does not recompute the
 // conversion: a stored quote is evidence of what was applied, and the pair's
 // currencies may since have been retired.
+//
+// SourceCode and TargetCode follow the currency-code rule CurrencyInput
+// enforces -- 1-64 characters from [A-Za-z0-9_.-] -- and must differ; Version
+// must be non-blank, valid UTF-8 with no control characters
+// (validateQuoteVersion). The
+// holder statement renders them verbatim, so a code carrying whitespace,
+// control or Unicode format characters (a right-to-left override, a
+// zero-width joiner) is refused rather than shown.
 func (q ConversionQuote) Validate() error {
-	if strings.TrimSpace(q.SourceCode) == "" || strings.TrimSpace(q.TargetCode) == "" || q.SourceCode == q.TargetCode {
-		return fmt.Errorf("core: conversion quote: source_code and target_code must be non-empty and distinct: %w", ErrInvalidInput)
+	if err := validateCurrencyCode("core: conversion quote", "source_code", q.SourceCode); err != nil {
+		return err
 	}
-	if strings.TrimSpace(q.Version) == "" {
-		return fmt.Errorf("core: conversion quote: version required: %w", ErrInvalidInput)
+	if err := validateCurrencyCode("core: conversion quote", "target_code", q.TargetCode); err != nil {
+		return err
+	}
+	if q.SourceCode == q.TargetCode {
+		return fmt.Errorf("core: conversion quote: source_code and target_code must be distinct: %w", ErrInvalidInput)
+	}
+	if err := validateQuoteVersion("core: conversion quote", q.Version); err != nil {
+		return err
 	}
 	if q.SourceExponent < 0 || q.SourceExponent > MaxAmountFractionalDigits ||
 		q.TargetExponent < 0 || q.TargetExponent > MaxAmountFractionalDigits {
@@ -140,7 +154,9 @@ func EncodeConversionQuotes(quotes []ConversionQuote) (string, error) {
 // DecodeConversionQuotes parses what EncodeConversionQuotes produced and
 // validates every quote. Unknown fields are an error: a snapshot with extra
 // fields is a different contract, and tolerating it here would let two
-// encodings coexist under one key.
+// encodings coexist under one key. For the same reason the decimal fields
+// (source_quantity, rate, target_amount) must be JSON strings: a bare number,
+// null or an absent field is refused even where it would parse.
 func DecodeConversionQuotes(encoded string) ([]ConversionQuote, error) {
 	if strings.TrimSpace(encoded) == "" {
 		return nil, fmt.Errorf("core: decode conversion quotes: empty value: %w", ErrInvalidInput)
@@ -159,12 +175,43 @@ func DecodeConversionQuotes(encoded string) ([]ConversionQuote, error) {
 	if len(quotes) == 0 {
 		return nil, fmt.Errorf("core: decode conversion quotes: empty list: %w", ErrInvalidInput)
 	}
+	if err := requireStringDecimals(encoded); err != nil {
+		return nil, err
+	}
 	for i, q := range quotes {
 		if err := q.Validate(); err != nil {
 			return nil, fmt.Errorf("core: decode conversion quotes[%d]: %w", i, err)
 		}
 	}
 	return quotes, nil
+}
+
+// conversionQuoteDecimalFields are the ConversionQuote fields that are
+// decimals on the wire.
+var conversionQuoteDecimalFields = [...]string{"source_quantity", "rate", "target_amount"}
+
+// requireStringDecimals refuses any spelling of a decimal field other than
+// the JSON string EncodeConversionQuotes writes. shopspring/decimal would
+// also accept a bare JSON number ({"rate":1000}) or null, and since metadata
+// takes part in the idempotency payload comparison, two spellings of one
+// quote would compare unequal -- a retry that re-encoded the same quote
+// would conflict with its own original. One key, one encoding: a number,
+// null or an absent field is refused. Called only after the strict decode
+// has succeeded, so the shape is already known to be an array of objects.
+func requireStringDecimals(encoded string) error {
+	var raw []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(encoded), &raw); err != nil {
+		return fmt.Errorf("core: decode conversion quotes: %v: %w", err, ErrInvalidInput)
+	}
+	for i, q := range raw {
+		for _, field := range conversionQuoteDecimalFields {
+			v := bytes.TrimSpace(q[field])
+			if len(v) == 0 || v[0] != '"' {
+				return fmt.Errorf("core: decode conversion quotes[%d]: %s must be a decimal string: %w", i, field, ErrInvalidInput)
+			}
+		}
+	}
+	return nil
 }
 
 // validateConversionQuotesMetadata is JournalInput.Validate's hook: the one

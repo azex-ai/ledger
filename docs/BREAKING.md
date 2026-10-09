@@ -31,6 +31,62 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `core.CurrencyInput.Validate` / `POST /currencies`: currency-code charset
+
+**Landed (2026-10-09 security review m-2).** A currency code is now 1-64
+characters from `[A-Za-z0-9_.-]`. It used to be "non-empty", so a code with
+whitespace, control characters or Unicode format characters (a
+right-to-left override U+202E, a zero-width joiner U+200D) was accepted and
+then rendered verbatim on holder statements and conversion quotes, where it
+can reverse or disguise what the line says. The same rule now applies to
+`core.FixedRate.Validate` (hence `Convert` / `Quote` / `Exchange`) and
+`core.ConversionQuote.Validate`'s `SourceCode` / `TargetCode`, and both now
+also require `Version` to be valid UTF-8 without control characters (encoding/json turns every invalid
+byte into U+FFFD, so two different invalid versions encoded to one payload and
+a changed-version retry replayed instead of raising `core.ErrConflict`), so
+`EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
+carrying `metadata["conversion_quotes"]` refuse such a code with
+`core.ErrInvalidInput` (`400` / `10001`).
+
+**What a consumer must do.** Nothing, if your codes look like `USDT`,
+`INPUT_TOKEN`, `USDT-late` or `USDC.e` -- every code in this repository's
+presets, examples and fixtures already does. A code with whitespace or any
+non-ASCII character must be renamed before it is created;
+existing `currencies` rows are not re-validated, but a stored code that
+breaks the rule can no longer be quoted or exchanged (`FixedRate.Validate`
+rejects it), so rename such a row before relying on `Exchange` for it.
+
+### `core.DecodeConversionQuotes`: decimal fields must be JSON strings
+
+**Landed (2026-10-09 security review I-a).** `source_quantity`, `rate` and
+`target_amount` are accepted only as JSON strings -- the spelling
+`EncodeConversionQuotes` writes. A bare number (`"rate":1000`), `null`, or an
+absent field used to parse (and an absent quantity read as zero); it is now
+`core.ErrInvalidInput`. Since metadata participates in the idempotency
+payload comparison, two spellings of one quote compared unequal.
+
+**What a consumer must do.** Build the metadata value with
+`core.EncodeConversionQuotes` instead of hand-written JSON. No released
+version ever stored a number spelling.
+
+### `GET /holder/transactions` / `ListHolderTransactions`: undecodable stored quotes are `core.ErrCorruptData` (`500` / `19001`)
+
+**Landed (2026-10-09 security review M-1).** A journal whose stored
+`metadata["conversion_quotes"]` fails `core.DecodeConversionQuotes` -- which
+only direct SQL or a bug can produce, the write path runs the same decoder --
+still fails the whole page (a statement silently missing a charge's
+explanation is the failure that surface exists to prevent), but it is now
+classified as the new sentinel `core.ErrCorruptData`, mapped to the new
+bizcode `bizcode.CorruptData` = `19001`, HTTP `500`, **not** retryable (new
+band `19000`-`19099`). It used to surface as `core.ErrInvalidInput` /
+`400` / `10001`, which blamed the caller's request for a stored row. The
+error text names the journal by uid, not by its internal id.
+
+**What a consumer must do.** A client that treated `10001` from this endpoint
+as "my request was malformed" should expect `19001` instead and route it to
+an operator: the named journal's metadata needs repair. Library-mode callers
+match `errors.Is(err, core.ErrCorruptData)`; `core.IsRetryable` reports false.
+
 ### `core.Round` and `core.ConvertAt` return `(decimal.Decimal, error)`
 
 **Landed (Wave 5 recheck R-4; invariant I-70).**

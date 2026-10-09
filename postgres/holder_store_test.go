@@ -441,3 +441,45 @@ func TestHolderCurrencies_IgnoresMemoOnlyCurrencies(t *testing.T) {
 	assert.Equal(t, []string{"USD"}, codes,
 		"a currency the holder only ever paid a memo-tracked cost in is not a currency they hold")
 }
+
+// TestHolderTransactions_UndecodableStoredQuotesIsCorruptData pins the
+// classification of a stored metadata["conversion_quotes"] the decoder
+// rejects. The library's own write path cannot produce one
+// (JournalInput.Validate runs the same decoder), so the row is planted with
+// direct SQL -- the only way it can exist. The page must fail as a whole
+// (fail-closed: a statement silently missing a charge's explanation is the
+// working-agreements §3 failure) and the failure must be core.ErrCorruptData,
+// which maps to a non-retryable 500 -- never core.ErrInvalidInput, which
+// maps to 10001 and would blame the holder's request for the server's row.
+func TestHolderTransactions_UndecodableStoredQuotesIsCorruptData(t *testing.T) {
+	f, ctx := seedHolderFixture(t)
+	j := f.deposit(t, ctx, "ht-corrupt-quotes", 100)
+
+	// Sanity: the clean row reads fine, so the failure below is the plant's.
+	_, _, err := f.ledger.ListHolderTransactions(ctx, f.holder, "", 50)
+	require.NoError(t, err)
+
+	_, err = f.pool.Exec(ctx, "ALTER TABLE journals DISABLE TRIGGER journals_no_arbitrary_update")
+	require.NoError(t, err)
+	// The pre-release a5a4734 encoding: integer-string rounding mode, which
+	// the current decoder refuses ("unknown rounding mode").
+	_, err = f.pool.Exec(ctx,
+		`UPDATE journals SET metadata = jsonb_set(metadata, '{conversion_quotes}', to_jsonb($2::text)) WHERE uid = $1`,
+		j.UID,
+		`[{"source_code":"USDC","source_quantity":"1","source_exponent":"6","rate":"1000","rate_version":"v1","target_code":"CREDITS","target_amount":"1000","target_exponent":0,"rounding":"0"}]`)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(ctx, "ALTER TABLE journals ENABLE TRIGGER journals_no_arbitrary_update")
+	require.NoError(t, err)
+
+	items, next, err := f.ledger.ListHolderTransactions(ctx, f.holder, "", 50)
+	require.Error(t, err, "an undecodable stored quote must fail the page, not drop the explanation")
+	assert.Nil(t, items)
+	assert.Empty(t, next)
+	assert.ErrorIs(t, err, core.ErrCorruptData)
+	assert.NotErrorIs(t, err, core.ErrInvalidInput, "stored-data corruption must not be classified as the caller's invalid input")
+	assert.False(t, core.IsRetryable(err), "re-reading the same row fails the same way")
+	assert.Contains(t, err.Error(), j.UID, "the error names the journal by uid")
+	var internalID int64
+	require.NoError(t, f.pool.QueryRow(ctx, "SELECT id FROM journals WHERE uid = $1", j.UID).Scan(&internalID))
+	assert.NotContains(t, err.Error(), fmt.Sprintf("journal %d:", internalID), "the internal BIGSERIAL id stays out of the error")
+}
