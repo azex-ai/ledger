@@ -52,7 +52,9 @@ carrying `metadata["conversion_quotes"]` refuse such a code with
 `INPUT_TOKEN`, `USDT-late` or `USDC.e` -- every code in this repository's
 presets, examples and fixtures already does. A code with whitespace or any
 non-ASCII character must be renamed before it is created;
-existing `currencies` rows are not re-validated.
+existing `currencies` rows are not re-validated, but a stored code that
+breaks the rule can no longer be quoted or exchanged (`FixedRate.Validate`
+rejects it), so rename such a row before relying on `Exchange` for it.
 
 ### `core.DecodeConversionQuotes`: decimal fields must be JSON strings
 
