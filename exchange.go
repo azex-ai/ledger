@@ -115,6 +115,12 @@ func (in ExchangeInput) validate() error {
 // way the Rate must already be resolved: nothing here calls a RateQuoter, and
 // nothing may (financial.md: no external call inside a transaction).
 //
+// When it joins a caller's transaction there is no savepoint: a failed
+// Exchange does not undo what it already wrote inside that transaction (the
+// reservation, the sell leg, ...). The host must return Exchange's error from
+// the RunInTx callback so the whole transaction rolls back; a callback that
+// swallows the error and returns nil commits the partial write.
+//
 // A quote whose output rounds to zero is refused before any write. Journals
 // posted through the transaction path are unsigned (core.AuthStatusUnsignedTxMode,
 // see RunInTx); a WithAttestor deployment that needs verifiable FX legs
