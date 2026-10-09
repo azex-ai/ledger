@@ -112,6 +112,7 @@ Error (4xx/5xx):
 | `10900`-`10999` | 409 | State conflict | No |
 | `14000`-`14999` | 422 | Ledger / domain invariant violation | No |
 | `18100`-`18199` | 503 | Service unavailable / starting | **Yes** |
+| `19000`-`19099` | 500 | Stored data violates a ledger contract (operator must repair the row) | No |
 | anything else | 500 | Internal error | **Yes** (default) |
 
 Common business codes you may see:
@@ -136,13 +137,15 @@ Common business codes you may see:
 | `18103` | Rollup queue item pending for this dimension | Yes |
 | `18104` | Authorization signer temporarily unavailable | Yes |
 | `18105` | Temporary failure (adapter-classified transient error) | Yes |
+| `19001` | Stored data integrity violation (e.g. a journal's `conversion_quotes` metadata that the ledger's own decoder rejects) | No |
 | `19999` | Internal error | Yes |
 
 **Retry semantics.** Retryability is derived from the business code, not from an additional wire field:
 
 - `429` (rate limited) and `503` (service unavailable / starting) are transient by nature — back off (honor `Retry-After` when present) and retry.
 - `400`/`401`/`403`/`404`/`409` and `422` describe either a defect in the request or a business-rule outcome — replaying the identical payload reproduces the identical result, so these are **not** retryable without changing the request.
-- `500` and any code outside the known ranges default to retryable: an unclassified failure is assumed to be a transient dependency hiccup (DB blip, network reset) rather than a permanent defect.
+- `19000`-`19099` is a `500` that is **not** retryable: the server read a stored row its own write path would have refused, and every re-read fails the same way until an operator repairs it.
+- Any other `500` and any code outside the known ranges default to retryable: an unclassified failure is assumed to be a transient dependency hiccup (DB blip, network reset) rather than a permanent defect.
 
 **Retrying is only safe with the same `idempotency_key`.** For mutating endpoints, a retry must reuse the exact `idempotency_key` from the original attempt — that is what turns a retry into a no-op replay instead of a duplicate side effect (see "Idempotency" below). Retrying a `429`/`503`/`500` with a *new* idempotency key on a request that actually landed can create a duplicate booking/journal.
 
@@ -990,7 +993,7 @@ Response `200 OK`:
 
 #### POST /currencies
 
-`{"code": "USDT", "name": "Tether USD", "exponent": 6}` -> 201. `exponent` is **required** (`0`-`18`; e.g. JPY=0, USD=2, wei=18) — I-16's business decimal precision. There is no silent default: omitting it is a `400`, precisely because `0` is itself a legal exponent (JPY) and can't double as "not set."
+`{"code": "USDT", "name": "Tether USD", "exponent": 6}` -> 201. `code` is 1-64 characters from `[A-Za-z0-9_-]` (ASCII letters of either case, digits, `_`, `-`); anything else -- whitespace, `.`, control characters, Unicode format characters such as a right-to-left override or zero-width joiner -- is a `400`. The same rule applies to `source_code` / `target_code` inside a journal's `conversion_quotes` metadata. `exponent` is **required** (`0`-`18`; e.g. JPY=0, USD=2, wei=18) — I-16's business decimal precision. There is no silent default: omitting it is a `400`, precisely because `0` is itself a legal exponent (JPY) and can't double as "not set."
 
 #### POST /currencies/{uid}/deactivate
 

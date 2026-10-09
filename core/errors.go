@@ -73,6 +73,17 @@ var (
 	// text (2026-09-03 consumer audit F-M1) -- a one-word wording change in
 	// the store would have silently regressed the HTTP layer back to 500.
 	ErrNoLifecycle = errors.New("classification has no lifecycle")
+	// ErrCorruptData is returned (wrapped) when a value already STORED in
+	// the database violates a contract this library's own write path
+	// enforces -- e.g. a journal's metadata["conversion_quotes"] that
+	// DecodeConversionQuotes rejects. The library never writes such a row
+	// (JournalInput.Validate runs the same decoder), so one can only exist
+	// through direct SQL or a bug; either way the request that tripped over
+	// it is not at fault. It must therefore never share ErrInvalidInput's
+	// 4xx band (that would tell the caller to fix a request that was fine),
+	// and it is not retryable: re-reading the same row fails the same way
+	// until an operator repairs it.
+	ErrCorruptData = errors.New("stored data violates a ledger contract")
 )
 
 // IsRetryable reports whether err represents a condition a caller may
@@ -124,7 +135,8 @@ func IsRetryable(err error) bool {
 		errors.Is(err, ErrPeriodClosed),
 		errors.Is(err, ErrUnauthorizedJournal),
 		errors.Is(err, ErrUnknownAuthKey),
-		errors.Is(err, ErrNoLifecycle):
+		errors.Is(err, ErrNoLifecycle),
+		errors.Is(err, ErrCorruptData):
 		return false
 	default:
 		return true

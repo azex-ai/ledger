@@ -29,6 +29,11 @@
 //     added 2026-08-26 to mirror core.IsRetryable, see
 //     pkg/httpx/response_test.go TestResolveError_AgreesWithCoreIsRetryable)
 //     or a permanent-but-looks-transient-to-the-caller state (FeatureNotEnabled).
+//   - 19000-19099: HTTP 500, NOT retryable -- stored data violates a
+//     contract the library's own write path enforces (CorruptData,
+//     core.ErrCorruptData, allocated 2026-10-09). The server is at fault,
+//     not the request, but unlike 19999 a retry cannot help: the same row
+//     fails the same way until an operator repairs it.
 //   - everything else (default, including 19999 Internal): unclassified,
 //     retryable by default -- an error that cannot be matched to a known
 //     core sentinel is assumed to be a transient dependency hiccup rather

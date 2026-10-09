@@ -447,6 +447,10 @@ type CurrencyStore interface {
 }
 
 type CurrencyInput struct {
+	// Code is 1-64 characters from [A-Za-z0-9_-] (ASCII letters of either
+	// case, digits, '_' and '-'). Whitespace, control characters and Unicode
+	// format characters are refused: the code is rendered verbatim on holder
+	// statements and conversion quotes.
 	Code string
 	Name string
 	// Exponent is the maximum number of decimal places entries in this
@@ -457,8 +461,8 @@ type CurrencyInput struct {
 }
 
 func (i CurrencyInput) Validate() error {
-	if i.Code == "" {
-		return fmt.Errorf("core: currency: code required: %w", ErrInvalidInput)
+	if err := validateCurrencyCode("core: currency", "code", i.Code); err != nil {
+		return err
 	}
 	if i.Name == "" {
 		return fmt.Errorf("core: currency: name required: %w", ErrInvalidInput)
