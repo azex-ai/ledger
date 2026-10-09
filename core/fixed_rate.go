@@ -24,7 +24,7 @@ type FixedRate struct {
 
 // Validate checks the configured pair, version, rate, rounding and precision.
 // SourceCode and TargetCode follow the currency-code rule (1-64 characters
-// from [A-Za-z0-9_-]); Version must be non-blank, valid UTF-8 -- see
+// from [A-Za-z0-9_.-]); Version must be non-blank, valid UTF-8 with no control characters -- see
 // validateQuoteVersion for why the encoding matters.
 // Source and target may describe measured units: their UID, Name and IsActive
 // fields are not required. Wallet operations must independently resolve and

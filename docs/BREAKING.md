@@ -34,14 +34,14 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 ### `core.CurrencyInput.Validate` / `POST /currencies`: currency-code charset
 
 **Landed (2026-10-09 security review m-2).** A currency code is now 1-64
-characters from `[A-Za-z0-9_-]`. It used to be "non-empty", so a code with
-whitespace, a `.`, control characters or Unicode format characters (a
+characters from `[A-Za-z0-9_.-]`. It used to be "non-empty", so a code with
+whitespace, control characters or Unicode format characters (a
 right-to-left override U+202E, a zero-width joiner U+200D) was accepted and
 then rendered verbatim on holder statements and conversion quotes, where it
 can reverse or disguise what the line says. The same rule now applies to
 `core.FixedRate.Validate` (hence `Convert` / `Quote` / `Exchange`) and
 `core.ConversionQuote.Validate`'s `SourceCode` / `TargetCode`, and both now
-also require `Version` to be valid UTF-8 (encoding/json turns every invalid
+also require `Version` to be valid UTF-8 without control characters (encoding/json turns every invalid
 byte into U+FFFD, so two different invalid versions encoded to one payload and
 a changed-version retry replayed instead of raising `core.ErrConflict`), so
 `EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
@@ -49,9 +49,9 @@ carrying `metadata["conversion_quotes"]` refuse such a code with
 `core.ErrInvalidInput` (`400` / `10001`).
 
 **What a consumer must do.** Nothing, if your codes look like `USDT`,
-`INPUT_TOKEN` or `USDT-late` -- every code in this repository's presets,
-examples and fixtures already does. A code spelled with a `.` (`USDC.e`) or
-any non-ASCII character must be renamed (`USDC_E`) before it is created;
+`INPUT_TOKEN`, `USDT-late` or `USDC.e` -- every code in this repository's
+presets, examples and fixtures already does. A code with whitespace or any
+non-ASCII character must be renamed before it is created;
 existing `currencies` rows are not re-validated.
 
 ### `core.DecodeConversionQuotes`: decimal fields must be JSON strings

@@ -69,8 +69,9 @@ type ConversionQuote struct {
 // currencies may since have been retired.
 //
 // SourceCode and TargetCode follow the currency-code rule CurrencyInput
-// enforces -- 1-64 characters from [A-Za-z0-9_-] -- and must differ; Version
-// must be non-blank, valid UTF-8 (validateQuoteVersion). The
+// enforces -- 1-64 characters from [A-Za-z0-9_.-] -- and must differ; Version
+// must be non-blank, valid UTF-8 with no control characters
+// (validateQuoteVersion). The
 // holder statement renders them verbatim, so a code carrying whitespace,
 // control or Unicode format characters (a right-to-left override, a
 // zero-width joiner) is refused rather than shown.

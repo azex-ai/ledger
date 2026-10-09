@@ -50,8 +50,42 @@ func TestQuoteVersion_RejectsInvalidUTF8(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidInput, "EncodeConversionQuotes")
 	}
 
+	// The collision itself is gone: the two invalid spellings no longer reach
+	// an encoding at all, so they cannot share one payload.
+	quote, err := rate.Quote(decimal.NewFromInt(1), usdc, credits)
+	require.NoError(t, err)
+	payloads := map[string]bool{}
+	for _, version := range []string{ff, fe} {
+		q := quote
+		q.Version = version
+		encoded, err := EncodeConversionQuotes([]ConversionQuote{q})
+		require.ErrorIs(t, err, ErrInvalidInput)
+		require.Empty(t, encoded)
+		if encoded != "" {
+			payloads[encoded] = true
+		}
+	}
+	require.Empty(t, payloads, "no invalid-UTF-8 version produced a payload")
+
+	// Control characters are refused too (C0, DEL, C1).
+	for name, version := range map[string]string{
+		"nul":     "v1" + string(rune(0x00)),
+		"newline": "v1" + string(rune(0x0a)),
+		"del":     "v1" + string(rune(0x7f)),
+		"c1 nel":  "v1" + string(rune(0x85)),
+	} {
+		t.Run("control/"+name, func(t *testing.T) {
+			bad := rate
+			bad.Version = version
+			require.ErrorIs(t, bad.Validate(usdc, credits), ErrInvalidInput)
+			q := quote
+			q.Version = version
+			require.ErrorIs(t, q.Validate(), ErrInvalidInput)
+		})
+	}
+
 	// A valid non-ASCII version is still a version: only broken encodings
-	// are refused, not Unicode.
+	// and control characters are refused, not Unicode.
 	ok := rate
 	ok.Version = "pre" + string(rune(0xe7)) + "o-v1"
 	require.NoError(t, ok.Validate(usdc, credits))

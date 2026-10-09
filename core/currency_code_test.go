@@ -26,6 +26,8 @@ var currencyCodeCases = []struct {
 	{"mixed case", "USDT-late", true},
 	{"digits", "USDC-6", true},
 	{"unique key shape", "SWEEP-RETRY-USDT-42", true},
+	{"bridged-token dot", "USDC.e", true},
+	{"dot mid", "BTC.b-2", true},
 	{"max length", strings.Repeat("A", maxCurrencyCodeLen), true},
 
 	{"empty", "", false},
@@ -42,7 +44,6 @@ var currencyCodeCases = []struct {
 	{"nul", "USDC" + r(0x00), false},
 	{"del", "USDC" + r(0x7f), false},
 	{"markup", "USDC<img>", false},
-	{"dot", "USDC.e", false},
 	{"non-ascii letter", "USD" + r(0x00c7), false},
 	{"fullwidth", r(0xff35) + r(0xff33) + r(0xff24) + r(0xff23), false},
 }

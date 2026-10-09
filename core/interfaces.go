@@ -447,8 +447,8 @@ type CurrencyStore interface {
 }
 
 type CurrencyInput struct {
-	// Code is 1-64 characters from [A-Za-z0-9_-] (ASCII letters of either
-	// case, digits, '_' and '-'). Whitespace, control characters and Unicode
+	// Code is 1-64 characters from [A-Za-z0-9_.-] (ASCII letters of either
+	// case, digits, '_', '-' and '.'). Whitespace, control characters and Unicode
 	// format characters are refused: the code is rendered verbatim on holder
 	// statements and conversion quotes.
 	Code string

@@ -993,7 +993,7 @@ Response `200 OK`:
 
 #### POST /currencies
 
-`{"code": "USDT", "name": "Tether USD", "exponent": 6}` -> 201. `code` is 1-64 characters from `[A-Za-z0-9_-]` (ASCII letters of either case, digits, `_`, `-`); anything else -- whitespace, `.`, control characters, Unicode format characters such as a right-to-left override or zero-width joiner -- is a `400`. The same rule applies to `source_code` / `target_code` inside a journal's `conversion_quotes` metadata. `exponent` is **required** (`0`-`18`; e.g. JPY=0, USD=2, wei=18) — I-16's business decimal precision. There is no silent default: omitting it is a `400`, precisely because `0` is itself a legal exponent (JPY) and can't double as "not set."
+`{"code": "USDT", "name": "Tether USD", "exponent": 6}` -> 201. `code` is 1-64 characters from `[A-Za-z0-9_.-]` (ASCII letters of either case, digits, `_`, `-`, `.` -- so `USDC.e` is fine); anything else -- whitespace, control characters, Unicode format characters such as a right-to-left override or zero-width joiner -- is a `400`. The same rule applies to `source_code` / `target_code` inside a journal's `conversion_quotes` metadata. `exponent` is **required** (`0`-`18`; e.g. JPY=0, USD=2, wei=18) — I-16's business decimal precision. There is no silent default: omitting it is a `400`, precisely because `0` is itself a legal exponent (JPY) and can't double as "not set."
 
 #### POST /currencies/{uid}/deactivate
 
