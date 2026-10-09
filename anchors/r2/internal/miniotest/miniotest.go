@@ -30,7 +30,19 @@ import (
 // and only ships a floating tag, and the Bitnami legacy image has its own
 // entrypoint. Pinned to a dated release tag, never `latest`, so the next
 // registry change breaks here deliberately rather than silently.
-const minioImage = "pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
+//
+// The tag is also pinned by digest: a tag is mutable and the image comes
+// from a community organization, so the digest is what fixes the bytes CI
+// runs. It is the multi-arch OCI *index* digest (one value valid on amd64
+// and arm64), not a per-platform manifest digest. To re-derive it when
+// moving to a new release tag:
+//
+//	docker buildx imagetools inspect pgsty/minio:<tag>
+//
+// and copy the top-level "Digest:" line (MediaType
+// application/vnd.oci.image.index.v1+json), never one of the per-platform
+// entries listed under "Manifests:".
+const minioImage = "pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372"
 
 // Fixture starts a real MinIO container and returns its S3 endpoint plus the
 // access key / secret to reach it. It skips (not fails) in -short mode or when
