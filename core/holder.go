@@ -51,6 +51,12 @@ type HolderTransaction struct {
 	// Memo is journal.metadata["memo"] — the well-known key hosts write
 	// user-readable copy into at post time. Empty when absent.
 	Memo string `json:"memo"`
+	// Quotes is journal.metadata[ConversionQuotesMetadataKey], decoded: the
+	// conversions this journal applied (an exchange's rate, a metered
+	// charge's "10,000 input tokens at 0.002"). Empty when the journal
+	// recorded none. The presenter renders these; the ledger only carries
+	// what was applied.
+	Quotes []ConversionQuote `json:"quotes"`
 }
 
 // HolderMemoMetadataKey is the journal metadata key the holder transaction

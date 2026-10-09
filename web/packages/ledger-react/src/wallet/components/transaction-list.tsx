@@ -9,11 +9,13 @@ import { LoadMoreBar } from "../../components/pagination-bar";
 import { cn, formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
+import { describeQuotes, type UnitLabels } from "../quote";
 import { ExactAmount } from "./exact-amount";
 
 /*
  * Wallet transaction list (shadcn skin). Rows speak user language: a label,
- * a signed colored amount, a time, an optional memo, a refund marker.
+ * a signed colored amount, a time, an optional memo, a refund marker, and —
+ * when the amount came from a conversion — the priced lines behind it.
  */
 
 export interface TransactionListProps {
@@ -31,6 +33,12 @@ export interface TransactionListProps {
    * migration note.
    */
   kindLabels?: Record<string, string>;
+  /**
+   * Label overrides keyed by unit code for the quote line under a converted
+   * row (`{ INPUT_TOKEN: "input tokens" }`) — the wording anchor for
+   * measured units, as `kindLabels` is for `kind`. Falls back to the code.
+   */
+  unitLabels?: UnitLabels;
   /** Full-row custom renderer (escape hatch); the default row otherwise. */
   renderItem?: (tx: WalletTransaction) => ReactNode;
   /** Page size for the cursor pagination. */
@@ -55,9 +63,11 @@ function ListSkeleton() {
 function DefaultRow({
   tx,
   label,
+  unitLabels,
 }: {
   tx: WalletTransaction;
   label: string;
+  unitLabels?: UnitLabels;
 }) {
   // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
   // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
@@ -85,6 +95,17 @@ function DefaultRow({
           <time dateTime={tx.occurred_at}>{formatUTC(tx.occurred_at)}</time>
           {tx.memo !== "" && <> · {tx.memo}</>}
         </p>
+        {/* `?.`: a server from before `quotes` existed omits the key; the
+            statement still renders during that deployment window
+            (api-contract.md §8), it just has nothing to explain. */}
+        {(tx.quotes?.length ?? 0) > 0 && (
+          <p
+            className="whitespace-normal break-words text-xs text-muted-foreground tabular-nums"
+            title={describeQuotes(tx.quotes, unitLabels)}
+          >
+            {describeQuotes(tx.quotes, unitLabels)}
+          </p>
+        )}
       </div>
       <p
         className={cn(
@@ -112,6 +133,7 @@ function DefaultRow({
 /** The holder's transaction history, newest first, with Load More paging. */
 export function TransactionList({
   kindLabels,
+  unitLabels,
   renderItem,
   limit = 20,
 }: TransactionListProps = {}) {
@@ -146,6 +168,7 @@ export function TransactionList({
                   key={`${tx.uid}-${tx.currency_uid}`}
                   tx={tx}
                   label={kindLabels?.[tx.kind] ?? tx.kind_label}
+                  unitLabels={unitLabels}
                 />
               ),
             )}

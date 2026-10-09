@@ -2,11 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/shopspring/decimal"
 
@@ -16,12 +16,19 @@ import (
 //go:embed rates.json
 var defaultRates []byte
 
-// Configuration belongs to this host. Only FixedRate and Currency are library
-// contracts; files, configuration storage and active-version selection are not.
+// pricing is this host's core.RateQuoter adapter: a JSON file of units and
+// directed rates. The file, its storage and which version is active are host
+// decisions; the ledger only sees FixedRate values through QuoteRate.
+//
+// A second host might back the same port with a database table carrying
+// effective dates, or an oracle for real currency pairs. Nothing in the
+// ledger changes for either.
 type pricing struct {
 	units map[string]core.Currency
 	rates map[[2]string]core.FixedRate
 }
+
+var _ core.RateQuoter = pricing{}
 
 func parsePricing(data []byte) (pricing, error) {
 	var input struct {
@@ -57,9 +64,9 @@ func parsePricing(data []byte) (pricing, error) {
 		if err != nil {
 			return pricing{}, fmt.Errorf("pricing: rate: %w", err)
 		}
-		mode, ok := roundingModes[configured.Rounding]
-		if !ok {
-			return pricing{}, fmt.Errorf("pricing: unknown rounding %q: %w", configured.Rounding, core.ErrInvalidInput)
+		mode, err := core.ParseRoundingMode(configured.Rounding)
+		if err != nil {
+			return pricing{}, fmt.Errorf("pricing: %w", err)
 		}
 		fixed := core.FixedRate{SourceCode: configured.SourceCode, TargetCode: configured.TargetCode,
 			Rate: rate, Version: configured.Version, Rounding: mode}
@@ -78,15 +85,11 @@ func parsePricing(data []byte) (pricing, error) {
 	return p, nil
 }
 
-var roundingModes = map[string]core.RoundingMode{
-	"half_up": core.RoundHalfUp, "half_even": core.RoundHalfEven,
-	"down": core.RoundDown, "up": core.RoundUp,
-}
-
-func (p pricing) rate(source, target string) (core.FixedRate, error) {
-	rate, ok := p.rates[[2]string{source, target}]
+// QuoteRate implements core.RateQuoter over the configured directed pairs.
+func (p pricing) QuoteRate(_ context.Context, sourceCode, targetCode string) (core.FixedRate, error) {
+	rate, ok := p.rates[[2]string{sourceCode, targetCode}]
 	if !ok {
-		return core.FixedRate{}, fmt.Errorf("pricing: no rate for %s → %s: %w", source, target, core.ErrNotFound)
+		return core.FixedRate{}, fmt.Errorf("pricing: no rate for %s → %s: %w", sourceCode, targetCode, core.ErrNotFound)
 	}
 	return rate, nil
 }
@@ -96,54 +99,47 @@ type usageQuantity struct {
 	quantity   decimal.Decimal
 }
 
+// pricedAmount is a valuation: the credits a set of measured quantities cost,
+// plus the quote applied to each line. Metered units need no wallet; only the
+// resulting credits debit touches a balance.
 type pricedAmount struct {
-	amount    decimal.Decimal
-	snapshots []map[string]string
+	amount decimal.Decimal
+	quotes []core.ConversionQuote
 }
 
-func (p pricing) price(target core.Currency, usage ...usageQuantity) (pricedAmount, error) {
+func (p pricing) price(ctx context.Context, target core.Currency, usage ...usageQuantity) (pricedAmount, error) {
 	configured, ok := p.units[target.Code]
 	if !ok || configured.Exponent != target.Exponent || len(usage) == 0 {
 		return pricedAmount{}, fmt.Errorf("pricing: target precision or usage does not match configuration: %w", core.ErrInvalidInput)
 	}
 	result := pricedAmount{amount: decimal.Zero}
 	for _, item := range usage {
-		rate, err := p.rate(item.sourceCode, target.Code)
+		rate, err := p.QuoteRate(ctx, item.sourceCode, target.Code)
 		if err != nil {
 			return pricedAmount{}, err
 		}
-		quote, err := quoteRate(rate, item.quantity, p.units[item.sourceCode], target)
+		// Each line is rounded on its own at the target precision, then
+		// summed. A cumulative-pricing host persists cumulative totals instead.
+		quote, err := rate.Quote(item.quantity, p.units[item.sourceCode], target)
 		if err != nil {
 			return pricedAmount{}, err
 		}
-		result.amount = result.amount.Add(quote.amount)
+		result.amount = result.amount.Add(quote.TargetAmount)
 		if err := core.ValidateAmountMagnitude("pricing", "total", result.amount); err != nil {
 			return pricedAmount{}, err
 		}
-		result.snapshots = append(result.snapshots, quote.snapshots...)
+		result.quotes = append(result.quotes, quote)
 	}
 	return result, nil
 }
 
-// Capture the quote used for this operation. Journal idempotency compares this
-// metadata even if two different quantities/rates round to the same debit.
-func quoteRate(rate core.FixedRate, quantity decimal.Decimal, source, target core.Currency) (pricedAmount, error) {
-	amount, err := rate.Convert(quantity, source, target)
-	if err != nil {
-		return pricedAmount{}, err
-	}
-	return pricedAmount{amount: amount, snapshots: []map[string]string{{
-		"source_code": source.Code, "target_code": target.Code,
-		"source_quantity": quantity.String(), "target_amount": amount.String(),
-		"source_exponent": strconv.Itoa(int(source.Exponent)), "target_exponent": strconv.Itoa(int(target.Exponent)),
-		"rate": rate.Rate.String(), "version": rate.Version, "rounding": strconv.Itoa(int(rate.Rounding)),
-	}}}, nil
-}
-
+// metadata renders the quotes as the journal metadata the ledger recognises.
+// Journal idempotency compares this even when two different quantities or
+// rates round to the same debit.
 func (q pricedAmount) metadata() (map[string]string, error) {
-	encoded, err := json.Marshal(q.snapshots)
+	encoded, err := core.EncodeConversionQuotes(q.quotes)
 	if err != nil {
 		return nil, fmt.Errorf("pricing: encode quote: %w", err)
 	}
-	return map[string]string{"conversion_quotes": string(encoded)}, nil
+	return map[string]string{core.ConversionQuotesMetadataKey: encoded}, nil
 }

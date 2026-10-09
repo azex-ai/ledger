@@ -34,6 +34,7 @@ const transaction: WalletTransaction = {
   occurred_at: "2026-09-06T00:00:00Z",
   reversal_of_uid: "",
   memo: "Credits purchase",
+  quotes: [],
 };
 
 function ok<T>(data: T) {

@@ -18,10 +18,17 @@ export type {
   WalletClientConfig,
   WalletBalance,
   WalletTransaction,
+  WalletTransactionQuote,
   WalletTransactionsPage,
   WalletHold,
   WalletDepositAddress,
 } from "./wallet/client";
+
+// The quote presenter: the single place a WalletTransactionQuote becomes a
+// sentence. Exported so a host rendering its own rows says it the same way
+// both skins do, with its own `unitLabels`.
+export { describeQuote, describeQuotes } from "./wallet/quote";
+export type { UnitLabels } from "./wallet/quote";
 
 export { WalletProvider } from "./wallet/provider";
 export type { WalletProviderConfig } from "./wallet/provider";

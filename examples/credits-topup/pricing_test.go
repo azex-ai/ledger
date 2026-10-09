@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -31,20 +30,21 @@ func TestConfiguredPrices_UnitsAndOverrides(t *testing.T) {
 		{"ROSE", "3", "30"},
 	} {
 		t.Run(tc.unit, func(t *testing.T) {
-			got, err := p.price(credits, usageQuantity{tc.unit, decimal.RequireFromString(tc.quantity)})
+			got, err := p.price(t.Context(), credits, usageQuantity{tc.unit, decimal.RequireFromString(tc.quantity)})
 			require.NoError(t, err)
 			require.True(t, got.amount.Equal(decimal.RequireFromString(tc.want)))
 		})
 	}
-	got, err := p.price(credits,
+	got, err := p.price(t.Context(), credits,
 		usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(10000)},
 		usageQuantity{"OUTPUT_TOKEN", decimal.NewFromInt(2425)})
 	require.NoError(t, err)
 	require.Equal(t, "32.125", got.amount.String())
+	require.Len(t, got.quotes, 2, "one quote per priced line")
 
 	changed, err := parsePricing([]byte(strings.Replace(string(defaultRates), `"rate": "1000"`, `"rate": "2000"`, 1)))
 	require.NoError(t, err)
-	got, err = changed.price(credits, usageQuantity{"USDC", decimal.NewFromInt(1)})
+	got, err = changed.price(t.Context(), credits, usageQuantity{"USDC", decimal.NewFromInt(1)})
 	require.NoError(t, err)
 	require.Equal(t, "2000", got.amount.String())
 }
@@ -79,7 +79,7 @@ func TestConfiguredConsumption_QuoteChangesConflictEvenAtSameCharge(t *testing.T
 	rate := p.rates[key]
 	rate.Rate = decimal.RequireFromString("0.0000006")
 	p.rates[key] = rate
-	original, err := p.price(*credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(1)})
+	original, err := p.price(ctx, *credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(1)})
 	require.NoError(t, err)
 	require.Equal(t, "0.000001", original.amount.String())
 	metadata, err := original.metadata()
@@ -94,7 +94,7 @@ func TestConfiguredConsumption_QuoteChangesConflictEvenAtSameCharge(t *testing.T
 		changed := rate
 		mutate(&changed)
 		p.rates[key] = changed
-		quote, err := p.price(*credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(1)})
+		quote, err := p.price(ctx, *credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(1)})
 		require.NoError(t, err)
 		require.True(t, quote.amount.Equal(original.amount))
 		metadata, err := quote.metadata()
@@ -102,7 +102,7 @@ func TestConfiguredConsumption_QuoteChangesConflictEvenAtSameCharge(t *testing.T
 		require.ErrorIs(t, captureUsage(ctx, svc, rsv, quote.amount, "quoted-event", false, metadata), core.ErrConflict)
 	}
 	p.rates[key] = rate
-	quote, err := p.price(*credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(2)})
+	quote, err := p.price(ctx, *credits, usageQuantity{"INPUT_TOKEN", decimal.NewFromInt(2)})
 	require.NoError(t, err)
 	require.True(t, quote.amount.Equal(original.amount))
 	changedMetadata, err := quote.metadata()
@@ -118,11 +118,11 @@ func TestConfiguredExchange_GiftCurrencyAndZeroOutput(t *testing.T) {
 	ctx := t.Context()
 	deposit(t, svc, usdc)
 	p := testPricing(t)
-	rate, err := p.rate("USDC", "CREDITS")
+	rate, err := p.QuoteRate(ctx, "USDC", "CREDITS")
 	require.NoError(t, err)
 	rate.Rate = decimal.RequireFromString("0.0000001")
 	rate.Rounding = core.RoundDown
-	require.ErrorIs(t, exchangeCurrency(ctx, svc, usdc, credits, decimal.NewFromInt(1), "tiny", rate), core.ErrInvalidInput)
+	require.ErrorIs(t, exchange(ctx, svc, usdc, credits, decimal.NewFromInt(1), "tiny", rate), core.ErrInvalidInput)
 	balance(t, svc, usdc, "1", "0")
 	require.Equal(t, 1, journalCount(t, admin))
 	var holds int
@@ -132,13 +132,13 @@ func TestConfiguredExchange_GiftCurrencyAndZeroOutput(t *testing.T) {
 	require.NoError(t, purchaseCredits(ctx, svc, usdc, credits, decimal.NewFromInt(1), "purchase"))
 	roses, err := ensureCurrency(ctx, svc, "ROSE", "Rose", 0)
 	require.NoError(t, err)
-	rate, err = p.rate("CREDITS", "ROSE")
+	rate, err = p.QuoteRate(ctx, "CREDITS", "ROSE")
 	require.NoError(t, err)
-	require.NoError(t, exchangeCurrency(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", rate))
-	require.NoError(t, exchangeCurrency(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", rate))
+	require.NoError(t, exchange(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", rate))
+	require.NoError(t, exchange(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", rate))
 	changed := rate
 	changed.Rate = decimal.RequireFromString("0.12") // still two whole roses after rounding
-	require.ErrorIs(t, exchangeCurrency(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", changed), core.ErrConflict)
+	require.ErrorIs(t, exchange(ctx, svc, credits, roses, decimal.NewFromInt(20), "gift-purchase", changed), core.ErrConflict)
 	balance(t, svc, credits, "980", "0")
 	balance(t, svc, roses, "2", "0")
 	require.Equal(t, 5, journalCount(t, admin))
@@ -148,12 +148,19 @@ func TestConfiguredExchange_GiftCurrencyAndZeroOutput(t *testing.T) {
 	require.NoError(t, admin.QueryRow(ctx,
 		"SELECT metadata->>'conversion_quotes' FROM journals WHERE idempotency_key=$1", "gift-purchase:issue").Scan(&issueSnapshot))
 	require.Equal(t, paySnapshot, issueSnapshot)
-	var snapshots []map[string]string
-	require.NoError(t, json.Unmarshal([]byte(paySnapshot), &snapshots))
-	require.Equal(t, []map[string]string{{
-		"source_code": "CREDITS", "target_code": "ROSE", "source_quantity": "20", "target_amount": "2",
-		"source_exponent": "6", "target_exponent": "0", "rate": "0.1", "version": "demo-v1", "rounding": "2",
-	}}, snapshots)
+	snapshots, err := core.DecodeConversionQuotes(paySnapshot)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	require.Equal(t, "CREDITS", snapshots[0].SourceCode)
+	require.Equal(t, "ROSE", snapshots[0].TargetCode)
+	require.Equal(t, int32(6), snapshots[0].SourceExponent)
+	require.Equal(t, int32(0), snapshots[0].TargetExponent)
+	require.True(t, snapshots[0].SourceQuantity.Equal(decimal.NewFromInt(20)))
+	require.True(t, snapshots[0].TargetAmount.Equal(decimal.NewFromInt(2)))
+	require.True(t, snapshots[0].Rate.Equal(decimal.RequireFromString("0.1")))
+	require.Equal(t, "demo-v1", snapshots[0].Version)
+	require.Equal(t, core.RoundDown, snapshots[0].Rounding)
+	require.Contains(t, paySnapshot, `"rounding":"down"`, "the mode travels by name")
 	reconciled, err := svc.Reconciler().CheckAccountingEquation(ctx)
 	require.NoError(t, err)
 	require.True(t, reconciled.Balanced)
@@ -214,11 +221,20 @@ func purchaseCredits(ctx context.Context, svc *ledger.Service, source, target st
 	if err != nil {
 		return err
 	}
-	rate, err := p.rate("USDC", "CREDITS")
+	rate, err := p.QuoteRate(ctx, "USDC", "CREDITS")
 	if err != nil {
 		return err
 	}
-	return exchangeCurrency(ctx, svc, source, target, amount, key, rate)
+	return exchange(ctx, svc, source, target, amount, key, rate)
+}
+
+// exchange is the library primitive with this example's holder filled in.
+func exchange(ctx context.Context, svc *ledger.Service, source, target string, amount decimal.Decimal, key string, rate core.FixedRate) error {
+	_, err := svc.Exchange(ctx, ledger.ExchangeInput{
+		HolderID: userID, SourceCurrencyUID: source, TargetCurrencyUID: target,
+		Quantity: amount, Rate: rate, IdempotencyKey: key, Source: "credits-topup-example",
+	})
+	return err
 }
 
 func captureCredits(ctx context.Context, svc *ledger.Service, rsv *core.Reservation, amount decimal.Decimal, key string, partial bool) error {

@@ -94,7 +94,11 @@ SELECT
     SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount))::NUMERIC(30,18) AS net_amount,
     j.effective_at,
     (COALESCE(rj.uid::text, ''))::text AS reversal_of_uid,
-    (COALESCE(j.metadata->>'memo', ''))::text AS memo
+    (COALESCE(j.metadata->>'memo', ''))::text AS memo,
+    -- Encoded core.ConversionQuote list (core.ConversionQuotesMetadataKey);
+    -- decoded by the store. JournalInput.Validate rejected anything under
+    -- this key that does not decode, so a decode failure here is an error.
+    (COALESCE(j.metadata->>'conversion_quotes', ''))::text AS conversion_quotes
 FROM journal_entries je
 JOIN page_journals pj ON pj.id = je.journal_id
 JOIN journals j        ON j.id = je.journal_id

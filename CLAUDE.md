@@ -111,6 +111,7 @@ go test ./postgres/ -run TestName -race -count=1
 |------|---------|
 | `ledger.go` (root pkg) | Library facade: `ledger.New(pool)` -> `Service` + accessors + `RunInTx` |
 | `idempotency.go` (root pkg) | Idempotency key helpers for library consumers |
+| `exchange.go` (root pkg) | `(*Service).Exchange`: reserve → settle → paired FX legs at a resolved `core.FixedRate`, quote + funding uid on both journals, deposit-compatible lock order; joins the caller's `RunInTx` on the clone |
 | `pkg/bizcode/` | Error-code taxonomy (mapped to HTTP at handler boundary) |
 | `pkg/httpx/` | HTTP response envelope |
 | `pkg/otel/`, `pkg/slogadapter/` | Tracing + logging adapters |
@@ -119,6 +120,7 @@ go test ./postgres/ -run TestName -race -count=1
 | `core/event.go` | Event, EventFilter |
 | `core/journal.go` | Journal, Entry, JournalInput + validation |
 | `core/template.go` | EntryTemplate, Render() |
+| `core/fixed_rate.go`, `core/conversion.go` | `FixedRate` (directed, versioned rate value), `RateQuoter` (the one port rates enter through — the ledger stores none), `ConversionQuote` + its `conversion_quotes` metadata encoding, `RoundingMode` text names |
 | `core/reserve.go` | Reservation state machine |
 | `core/checkpoint.go` | BalanceCheckpoint, RollupQueueItem, BalanceSnapshot |
 | `core/interfaces.go` | Booker, EventReader, JournalWriter, BalanceReader, etc. |

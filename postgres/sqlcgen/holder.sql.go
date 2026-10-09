@@ -194,7 +194,11 @@ SELECT
     SUM(ledger_signed_amount(c.normal_side, je.entry_type, je.amount))::NUMERIC(30,18) AS net_amount,
     j.effective_at,
     (COALESCE(rj.uid::text, ''))::text AS reversal_of_uid,
-    (COALESCE(j.metadata->>'memo', ''))::text AS memo
+    (COALESCE(j.metadata->>'memo', ''))::text AS memo,
+    -- Encoded core.ConversionQuote list (core.ConversionQuotesMetadataKey);
+    -- decoded by the store. JournalInput.Validate rejected anything under
+    -- this key that does not decode, so a decode failure here is an error.
+    (COALESCE(j.metadata->>'conversion_quotes', ''))::text AS conversion_quotes
 FROM journal_entries je
 JOIN page_journals pj ON pj.id = je.journal_id
 JOIN journals j        ON j.id = je.journal_id
@@ -215,16 +219,17 @@ type ListHolderTransactionRowsParams struct {
 }
 
 type ListHolderTransactionRowsRow struct {
-	JournalID     int64          `json:"journal_id"`
-	JournalUid    pgtype.UUID    `json:"journal_uid"`
-	Kind          string         `json:"kind"`
-	KindLabel     string         `json:"kind_label"`
-	CurrencyUid   pgtype.UUID    `json:"currency_uid"`
-	CurrencyCode  string         `json:"currency_code"`
-	NetAmount     pgtype.Numeric `json:"net_amount"`
-	EffectiveAt   time.Time      `json:"effective_at"`
-	ReversalOfUid string         `json:"reversal_of_uid"`
-	Memo          string         `json:"memo"`
+	JournalID        int64          `json:"journal_id"`
+	JournalUid       pgtype.UUID    `json:"journal_uid"`
+	Kind             string         `json:"kind"`
+	KindLabel        string         `json:"kind_label"`
+	CurrencyUid      pgtype.UUID    `json:"currency_uid"`
+	CurrencyCode     string         `json:"currency_code"`
+	NetAmount        pgtype.Numeric `json:"net_amount"`
+	EffectiveAt      time.Time      `json:"effective_at"`
+	ReversalOfUid    string         `json:"reversal_of_uid"`
+	Memo             string         `json:"memo"`
+	ConversionQuotes string         `json:"conversion_quotes"`
 }
 
 // Holder-scoped wallet read surface projections
@@ -289,6 +294,7 @@ func (q *Queries) ListHolderTransactionRows(ctx context.Context, arg ListHolderT
 			&i.EffectiveAt,
 			&i.ReversalOfUid,
 			&i.Memo,
+			&i.ConversionQuotes,
 		); err != nil {
 			return nil, err
 		}

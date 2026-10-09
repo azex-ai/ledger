@@ -3145,6 +3145,23 @@ export interface components {
             reversal_of_uid: string;
             /** @description journal.metadata["memo"] — host-written user-readable copy; empty when absent. */
             memo: string;
+            /** @description The conversions this row's amount came from (journal.metadata["conversion_quotes"], decoded): an exchange's rate, or each priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20 CREDITS"). Always an array; empty when the journal recorded none. Only user-explainable facts travel here — the configuration version, rounding mode and unit exponents are audit detail on the admin journal surface, not on the holder statement. */
+            quotes: components["schemas"]["HolderTransactionQuote"][];
+        };
+        HolderTransactionQuote: {
+            /**
+             * @description Unit that was priced or sold. A currency code, or a measured unit that has no wallet.
+             * @example INPUT_TOKEN
+             */
+            source_code: string;
+            /** @description How much of source_code went in. */
+            source_quantity: components["schemas"]["Decimal"];
+            /** @description target_code units per one source_code unit. */
+            rate: components["schemas"]["Decimal"];
+            /** @example CREDITS */
+            target_code: string;
+            /** @description What came out, at the target currency's precision. */
+            target_amount: components["schemas"]["Decimal"];
         };
         HolderTransactionListEnvelope: components["schemas"]["Envelope"] & {
             data?: {

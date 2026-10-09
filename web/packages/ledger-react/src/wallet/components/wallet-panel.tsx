@@ -20,6 +20,7 @@ export interface WalletPanelProps extends WalletBalancesProps, TransactionListPr
 export function WalletPanel({
   actions,
   kindLabels,
+  unitLabels,
   renderItem,
   limit,
   slots,
@@ -30,7 +31,12 @@ export function WalletPanel({
       {slots?.transactions !== undefined ? slots.transactions : (
         <section aria-label="Transaction history" className="space-y-3">
           <h2 className="text-sm font-medium text-muted-foreground">Activity</h2>
-          <TransactionList kindLabels={kindLabels} renderItem={renderItem} limit={limit} />
+          <TransactionList
+            kindLabels={kindLabels}
+            unitLabels={unitLabels}
+            renderItem={renderItem}
+            limit={limit}
+          />
         </section>
       )}
     </div>

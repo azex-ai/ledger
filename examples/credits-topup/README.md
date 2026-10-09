@@ -35,9 +35,9 @@ an existing currency with different precision is rejected.
 Rates are directed; reverse conversion is configured separately. Token and gift
 quantities use exponent zero. Measured units need no database row or wallet:
 10,000 input tokens + 2,425 output tokens price to `20 + 12.125 = 32.125` credits.
-For an actual gift balance, create the ROSE currency and use `exchangeCurrency`:
-the tested 20 CREDITS purchase creates two ROSE through paired FX journals. The
-same fixed-rate primitive values usage and prices wallet exchanges.
+For an actual gift balance, create the ROSE currency and call the library's
+`svc.Exchange`: the tested 20 CREDITS purchase creates two ROSE through paired FX
+journals. The same fixed-rate primitive values usage and prices wallet exchanges.
 
 Tests create isolated PostgreSQL databases via Docker and exercise the public
 facade as `ledger_app`. The executable uses stable fixture event IDs, so running
@@ -76,24 +76,36 @@ fund purchases; pending/failed/review-held deposits must not issue usable credit
 
 ## Host composition
 
-`exchangeCurrency` resolves the two stored currencies, derives the amount with
-`core.FixedRate`, then atomically reserves and settles the source plus both FX
-journals. `FixedRate.Convert` validates the directed pair, source quantity precision,
-positive rate and target rounding, reusing `core.ConvertAt`. Configuration selects
-the rate; per-currency balancing alone cannot detect a wrong quote.
+Rates enter through one port. `pricing` in [pricing.go](pricing.go) is this
+host's `core.RateQuoter`: a JSON file of units and directed rates. A second host
+backs the same single method with a database table or a price oracle; the
+ledger stores no rates and does not distinguish configured from sourced ones.
+The rate is resolved **before** any transaction opens and handed to the ledger
+as a value.
 
-Both FX journals and each positive usage journal store `conversion_quotes`:
-source/target code and exponent, original quantity, rate, version, rounding and
-converted amount. Persist this snapshot with the host event before processing it;
-a retry reuses the snapshot and every operation key. The host can load archived
-configuration versions or retain the resolved `FixedRate` value per event.
+The purchase itself is the library's `svc.Exchange`: it resolves the two stored
+currencies, quotes the amount with `core.FixedRate.Quote`, then atomically
+reserves and settles the source and posts both FX journals, taking the union of
+every lock up front so a concurrent deposit follows the same order. Both
+journals carry the applied `core.ConversionQuote` under `conversion_quotes`,
+and the deposit journal's uid under `funding_uid` — the link a host's business
+reconciliation joins on to find a deposit that was confirmed and never
+converted. A production host passes its deposit booking's uid there. Called on
+the `*Service` inside a `RunInTx` callback, `Exchange` joins that transaction, so
+the host's own "deposit converted" write commits with the purchase.
 
-The purchase calls `tx.LockForTemplates` before Reserve, with both FX requests
-and the reservation key. This locks the complete set of user/system currency
-pairs in the same order as concurrent deposits and purchases. The helper is only
-valid inside `RunInTx` and writes no journals or holds. For other composed flows,
-enumerate all affected templates before acquiring locks; retry `ErrTransient` by
-replaying the entire transaction with the same keys and payloads.
+Each positive usage journal stores the same `conversion_quotes` shape for its
+priced lines: source/target unit and exponent, original quantity, rate, version,
+rounding and converted amount. Persist this snapshot with the host event before
+processing it; a retry reuses the snapshot and every operation key. The holder
+statement (`GET /holder/transactions`, `@azex/ledger-react`'s wallet) renders
+the quotes as "10,000 input tokens × 0.002 + 2,425 output tokens × 0.005";
+version, rounding and exponents stay on the admin journal surface.
+
+For other composed flows, call `tx.LockForTemplates` before Reserve with every
+template the transaction will post and the reservation key; retry
+`ErrTransient` by replaying the entire transaction with the same keys and
+payloads.
 
 Persist each usage event's amount and operation kind before delivery. A retry
 must not switch the same provider event from a charged increment to a zero-cost

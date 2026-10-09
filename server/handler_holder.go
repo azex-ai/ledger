@@ -145,6 +145,23 @@ type holderTransactionResponse struct {
 	OccurredAt    string `json:"occurred_at"`
 	ReversalOfUID string `json:"reversal_of_uid"`
 	Memo          string `json:"memo"`
+	// Quotes explains the row's amount when a conversion produced it: "10,000
+	// INPUT_TOKEN at 0.002 = 20 CREDITS". Always present, empty when the
+	// journal recorded none.
+	Quotes []holderQuoteResponse `json:"quotes"`
+}
+
+// holderQuoteResponse is the user-explainable part of a core.ConversionQuote:
+// what went in, at what rate, what came out. The configuration version,
+// rounding mode and unit exponents are audit detail for the admin surface
+// (GET /journals exposes the full metadata) and stay off the holder wire
+// (~/.claude/rules/user-facing-surfaces.md).
+type holderQuoteResponse struct {
+	SourceCode     string `json:"source_code"`
+	SourceQuantity string `json:"source_quantity"`
+	Rate           string `json:"rate"`
+	TargetCode     string `json:"target_code"`
+	TargetAmount   string `json:"target_amount"`
 }
 
 type holderTransactionsPage struct {
@@ -280,6 +297,17 @@ func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http
 	}
 	out := make([]holderTransactionResponse, len(items))
 	for i, it := range items {
+		// Non-nil even when empty: the wire promises an array, never null.
+		quotes := make([]holderQuoteResponse, 0, len(it.Quotes))
+		for _, q := range it.Quotes {
+			quotes = append(quotes, holderQuoteResponse{
+				SourceCode:     q.SourceCode,
+				SourceQuantity: q.SourceQuantity.String(),
+				Rate:           q.Rate.String(),
+				TargetCode:     q.TargetCode,
+				TargetAmount:   q.TargetAmount.String(),
+			})
+		}
 		out[i] = holderTransactionResponse{
 			UID:           it.UID,
 			Kind:          it.Kind,
@@ -291,6 +319,7 @@ func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http
 			OccurredAt:    it.OccurredAt.UTC().Format(time.RFC3339),
 			ReversalOfUID: it.ReversalOfUID,
 			Memo:          it.Memo,
+			Quotes:        quotes,
 		}
 	}
 	httpx.OK(w, holderTransactionsPage{List: out, NextCursor: cursorPtr(next)})

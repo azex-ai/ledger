@@ -86,12 +86,29 @@ fx_buy   (CREDITS, amount = 1000)
     CR system.settlement(CREDITS) 1000
 ```
 
-The host configures `core.FixedRate` for USDC → CREDITS, converts the source
-amount with the stored currencies' precision, supplies the complete quote snapshot
-as metadata, and derives stable `:reserve`,
-`:settle`, `:pay` and `:issue` keys from the persisted purchase ID. The
-[example's `exchangeCurrency`](../examples/credits-topup/main.go) is the executable
-composition. Both journals, the reservation and settlement roll back together.
+This composition is the library's `svc.Exchange`:
+
+```go
+rate, err := quoter.QuoteRate(ctx, "USDC", "CREDITS") // host's core.RateQuoter, outside any tx
+if err != nil {
+    return err
+}
+res, err := svc.Exchange(ctx, ledger.ExchangeInput{
+    HolderID: holder, SourceCurrencyUID: usdc, TargetCurrencyUID: credits,
+    Quantity: decimal.NewFromInt(1), Rate: rate,
+    IdempotencyKey: "purchase:" + depositBooking.UID, // one logical purchase per deposit
+    FundingUID:     depositBooking.UID,               // what paid for it
+})
+```
+
+It resolves both stored currencies, quotes with `FixedRate.Quote`, reserves and
+settles the source (so account policies and balance floors apply exactly as to
+any spend), posts both legs, and derives the `:reserve` / `:settle` / `:pay` /
+`:issue` keys from the one key you give it. Both journals carry the applied
+`core.ConversionQuote` and the funding uid; everything commits or rolls back
+together. Call it on the `*Service` a `RunInTx` callback receives to commit your
+own "deposit converted" row in the same transaction. The
+[credits example](../examples/credits-topup/main.go) is the executable version.
 All competing purchases must use reservations too; a raw journal can bypass a
 hold. Configure a zero balance floor as an additional overdraft control.
 
@@ -107,9 +124,23 @@ onchain assets.
 
 `Currency` describes a unit and its precision. `FixedRate` describes a directed
 relation between two units: `target = source × rate`, rounded at the target
-exponent. It is a Go configuration value; it needs no price-feed service or new
-ledger subsystem. Keep rates off individual currencies, because a rate needs a
+exponent. It is a Go value; it needs no price-feed service or new ledger
+subsystem. Keep rates off individual currencies, because a rate needs a
 counter-currency and direction.
+
+**Where rates live is the host's decision, behind one port.** The ledger stores
+no rates. Implement `core.RateQuoter` — one method, `QuoteRate(ctx, source,
+target) (FixedRate, error)` — over whatever holds them: a JSON file (the
+credits example), a host table with effective dates, a price oracle for real
+currency pairs. `FixedRate.Version` carries whatever identifies the quote in
+that world (a configuration version, a feed id plus timestamp); the ledger does
+not distinguish configured from sourced rates. Resolve the quote outside any
+transaction and pass the value to `Exchange` or to your metered charge — nothing
+in the ledger calls the port, and nothing may (financial.md: no external call
+inside a transaction).
+
+"Complete a task, receive N tokens" is not a rate. It has no source unit; it is
+a grant template from the system counterpart with a host reason code.
 
 ```go
 inputToken := core.Currency{Code: "INPUT_TOKEN", Exponent: 0}
@@ -138,13 +169,19 @@ usage through this common path. Rates must be positive; zero measured quantity i
 valid, and a zero result needs release/no-journal handling. The wrapper rejects
 source overprecision, wrong pairs, invalid modes and out-of-storage-range amounts.
 
-Save source/target units and precision, original quantity, rate, version, rounding
-and result with each operation. Reuse that quote on retry after rates change;
-the example saves it on both FX legs and positive consumption journals, where
-metadata participates in idempotency comparison even if rounded amounts match.
-Zero-cost release has no journal metadata, so the host's durable event record
-must preserve its quote and operation kind. Configuration/version selection and
-provider event delivery remain host responsibilities.
+Save the applied quote with each operation: `FixedRate.Quote` returns a
+`core.ConversionQuote` (units and precision, original quantity, rate, version,
+rounding, result) and `core.EncodeConversionQuotes` renders a list of them for
+the `conversion_quotes` metadata key. `Exchange` does this for both FX legs;
+a metered charge does it for each priced line. Reuse that quote on retry after
+rates change — metadata participates in idempotency comparison even when the
+rounded amounts match. `JournalInput.Validate` rejects a value under that key
+that does not decode, and the holder statement (`GET /holder/transactions`)
+returns the decoded quotes as `quotes` so the wallet can show "10,000 input
+tokens × 0.002". Zero-cost release has no journal metadata, so the host's
+durable event record must preserve its quote and operation kind. Which
+configuration version is active and provider event delivery remain host
+responsibilities.
 
 ---
 

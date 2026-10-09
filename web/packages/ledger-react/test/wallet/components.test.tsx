@@ -6,6 +6,8 @@ import { describe, expect, test } from "vitest";
 import { WalletProvider } from "../../src/wallet/provider";
 import { WalletPanel } from "../../src/wallet/components/wallet-panel";
 import { WalletPanel as HerouiWalletPanel } from "../../src/wallet/heroui/wallet-panel";
+import { TransactionList } from "../../src/wallet/components/transaction-list";
+import { TransactionList as HerouiTransactionList } from "../../src/wallet/heroui/transaction-list";
 import { server } from "../setup";
 
 const BASE = "http://wallet.test/api/v1";
@@ -49,6 +51,7 @@ function seedWalletAPI() {
               occurred_at: "2026-07-08T02:00:00Z",
               reversal_of_uid: "",
               memo: "monthly top up",
+              quotes: [],
             },
             {
               uid: "j-2",
@@ -61,6 +64,37 @@ function seedWalletAPI() {
               occurred_at: "2026-07-08T03:00:00Z",
               reversal_of_uid: "j-1",
               memo: "",
+              quotes: [],
+            },
+            {
+              // A metered AI charge: the amount is explained by its priced
+              // lines, worded through `unitLabels`.
+              uid: "j-3",
+              kind: "fee",
+              kind_label: "AI usage",
+              direction: "out",
+              amount: "32.125",
+              currency_uid: "cur-1",
+              currency_code: "CREDITS",
+              occurred_at: "2026-07-08T04:00:00Z",
+              reversal_of_uid: "",
+              memo: "",
+              quotes: [
+                {
+                  source_code: "INPUT_TOKEN",
+                  source_quantity: "10000",
+                  rate: "0.002",
+                  target_code: "CREDITS",
+                  target_amount: "20",
+                },
+                {
+                  source_code: "OUTPUT_TOKEN",
+                  source_quantity: "2425",
+                  rate: "0.005",
+                  target_code: "CREDITS",
+                  target_amount: "12.125",
+                },
+              ],
             },
           ],
           next_cursor: "",
@@ -114,9 +148,11 @@ const INTERNAL_VOCABULARY = [
   /holder/i,
 ];
 
+const UNIT_LABELS = { INPUT_TOKEN: "input tokens", OUTPUT_TOKEN: "output tokens", CREDITS: "credits" };
+
 describe.each([
-  ["shadcn", () => <WalletPanel kindLabels={{ deposit: "Top up" }} />],
-  ["heroui", () => <HerouiWalletPanel kindLabels={{ deposit: "Top up" }} />],
+  ["shadcn", () => <WalletPanel kindLabels={{ deposit: "Top up" }} unitLabels={UNIT_LABELS} />],
+  ["heroui", () => <HerouiWalletPanel kindLabels={{ deposit: "Top up" }} unitLabels={UNIT_LABELS} />],
 ])("WalletPanel (%s)", (_skin, Panel) => {
   test("renders user language and leaks no internal vocabulary", async () => {
     seedWalletAPI();
@@ -138,7 +174,15 @@ describe.each([
     expect(screen.getByText("Refund")).toBeInTheDocument();
     expect(screen.getByText("monthly top up", { exact: false })).toBeInTheDocument();
 
+    // A converted row explains its amount as the bill's lines, in the
+    // host's words for each unit; rows without a conversion draw no line.
+    expect(
+      screen.getByText("10000 input tokens × 0.002 → 20 credits; 2425 output tokens × 0.005 → 12.125 credits"),
+    ).toBeInTheDocument();
     const text = container.textContent ?? "";
+    expect(text).not.toContain("INPUT_TOKEN");
+    expect((text.match(/×/g) ?? []).length).toBe(2);
+
     for (const word of INTERNAL_VOCABULARY) {
       expect(text).not.toMatch(word);
     }
@@ -263,6 +307,7 @@ describe.each([
                 occurred_at: "2026-07-08T02:00:00Z",
                 reversal_of_uid: "",
                 memo: "",
+                quotes: [],
               },
             ],
             next_cursor: "",
@@ -280,4 +325,52 @@ describe.each([
     expect(container.textContent).toContain("+0.00");
     expect(container.textContent).not.toContain("-0.00");
   });
+});
+
+describe.each([
+  ["shadcn", TransactionList],
+  ["heroui", HerouiTransactionList],
+])("TransactionList exchange quotes (%s)", (_skin, List) => {
+  test.each(["1000", "1000.5"])(
+    "explains an isolated source-currency row using the recorded output at rate %s",
+    async (rate) => {
+      // The sell and buy journals may land on different pages. For 1000.5,
+      // this snapshot records rounding down to a whole-credit target unit.
+      server.use(http.get(`${BASE}/holder/transactions`, () => HttpResponse.json({
+        code: 200,
+        message: null,
+        data: {
+          list: [{
+            uid: "fx-sell",
+            kind: "transfer",
+            kind_label: "Transfer",
+            direction: "out",
+            amount: "1",
+            currency_uid: "usdc",
+            currency_code: "USDC",
+            occurred_at: "2026-09-07T12:00:00Z",
+            reversal_of_uid: "",
+            memo: "",
+            quotes: [{
+              source_code: "USDC",
+              source_quantity: "1",
+              rate,
+              target_code: "CREDITS",
+              target_amount: "1000",
+            }],
+          }],
+          next_cursor: "next-page",
+        },
+      })));
+      render(wrap(<List limit={1} unitLabels={{ CREDITS: "credits" }} />));
+
+      const quote = await screen.findByText(`1 USDC × ${rate} → 1000 credits`);
+      expect(quote).toHaveAttribute("title", `1 USDC × ${rate} → 1000 credits`);
+      expect(screen.getAllByRole("listitem")).toHaveLength(1);
+      expect(screen.getByRole("listitem")).toHaveTextContent(/-1[.0]*\s+USDC/);
+      // The destination must remain readable without a hover-only title.
+      expect(quote).not.toHaveClass("truncate");
+      expect(quote).toHaveClass("whitespace-normal", "break-words");
+    },
+  );
 });
