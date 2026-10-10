@@ -1,0 +1,16 @@
+$ node /Users/aaron/projects/_worktrees/ledger/codex/review-library-261010-r1/docs/audits/2026-10-10-architecture-review/library-probes/probe.mjs
+{"probe":"cross-instance-cache","callsA":1,"callsB":0,"dataForB":[{"balance":"100","source":"A"}]}
+{"probe":"reservation-client-wire","wire":{"account_holder":42,"currency_uid":"018fffd9-0000-7000-8000-000000000001","amount":"10","idempotency_key":"library-review-expiry","expires_in":"1h"}}
+{"probe":"holder-id-roundtrip","intended":"9007199254740993","actual":"9007199254740992","wire":{"template_code":"transfer","holder_id":9007199254740992,"currency_uid":"018fffd9-0000-7000-8000-000000000001","idempotency_key":"holder-precision-probe","amounts":{"amount":"10"}}}
+
+exit=0
+$ go run /Users/aaron/projects/_worktrees/ledger/codex/review-library-261010-r1/.hive-tmp/library-review-4vy0aek9/probe.go
+core accepts holder=9007199254740993
+status=201 ReserveInput.ExpiresIn=0s
+status=201 ReserveInput.ExpiresIn=1h0m0s
+2026/10/10 15:35:56 WARN server: API key authentication is DISABLED — every endpoint is open to any caller that can reach this port (set Config.APIKeys to require a bearer key)
+2026/10/10 15:35:56 WARN server: CORS is wide open (Access-Control-Allow-Origin: *) — set Config.CORSAllowOrigin to a specific origin in production
+2026/10/10 15:35:56 INFO http request method=POST path=/api/v1/reservations status=201 bytes=249 duration_ms=0 remote=192.0.2.1 request_id=192.168.1.204/vkL0iXSdGU-000001
+2026/10/10 15:35:56 INFO http request method=POST path=/api/v1/reservations status=201 bytes=249 duration_ms=0 remote=192.0.2.1 request_id=192.168.1.204/vkL0iXSdGU-000002
+
+exit=0
