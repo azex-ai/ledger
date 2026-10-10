@@ -53,3 +53,9 @@ Task4 域评审收尾：04-review.md 独立静态 PASS，无未决点。沿用�
 完整audit仍20个开发依赖包条目（含critical），逐项列依赖来源；没有把“dev”当成无风险或完整供应链无漏洞，也没误称baseline静态扫描全绿。该补丁按已冻结Task18生产范围通过，开发工具链后续工作和最终集成基线验证仍应明确保留。
 
 Task12 scoped 文档闭环：独立域席位代码 PASS，提出 1 条 Minor 术语校正。作者 `241905e` 仅改报告两行；主控核对 diff 与余额公式后确认：available 分类账面余额与 GetBalanceBreakdown.available（减 held）明确区分，settlement 复核的是预留额度。无源码变更，未重复测试，T2 通过。
+
+## Task 11 — Codex 第二意见：PASS
+
+范围 `f13d0ae..6e62cef`。主控完整读取75行生产diff、两个新增测试文件和11.md。available 净额按原 SignedAmount/NormalSide 求和，其他用户分类独立净额检查，无法用pending/locked或不同pending分类抵消；同维度真实净零正例保留。holder/currency 已固定后按classification建map足以识别完整维度。系统对手方限制与当前Render一致，classificationRoles签名保留，可与Capture直接组合。
+
+既有预锁、Reserve、Settle、双journal执行和replay路径没有变化，只加强提交前实际entries检查。12个PG错误模板各自仍双分录平衡，旧版全部错误接受；新断言要求完整回滚且同key后续可完成正确兑换，不把仅“journal平衡”认证为经济结果正确。两种normal_side、多个available分类、净零重放均有对照。实现PG race13.195s/vet PASS，域席位进行中；无需重复同套PG。

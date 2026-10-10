@@ -14,8 +14,8 @@
 | 8 | 管理端缓存按实例与身份隔离 | 实施中 | BASE 4df363d / codex/ledger20-t08 | 待验收 |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
-| 11 | Exchange 严格消费可用余额 | 实施中 | BASE f13d0ae / codex/ledger20-t11 | 待验收 |
-| 12 | 原子 Capture 门面 | 评审通过，待集成 | d22e40d +241905e / codex/ledger20-t12 | PG/API/vet通过；独立域/root PASS；Minor文档已修 |
+| 11 | Exchange 严格消费可用余额 | 独立评审中 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet通过；root PASS |
+| 12 | 原子 Capture 门面 | 评审通过，集成中 | d22e40d +241905e / codex/ledger20-t12 | PG/API/vet通过；独立域/root PASS；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
