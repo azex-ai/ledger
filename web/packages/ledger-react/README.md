@@ -14,18 +14,24 @@ no registry config or auth token required:
 npm install @azex/ledger-react @tanstack/react-query
 ```
 
+The repository guide follows the source checkout. Match your installed release
+to the APIs you need; changes listed under
+[Unreleased](https://github.com/azex-ai/ledger/blob/main/docs/BREAKING.md#unreleased)
+may require a local checkout build until released.
+
 Peer deps: `react@^19`, `react-dom@^19`, `@tanstack/react-query@^5`, plus
 `@heroui/react@^3` — optional, and only for the HeroUI skin below.
 
 ## Setup
 
-1. **Wrap your app in `<LedgerProvider>`** with the ledger API base URL (and
-   optional API key). It owns a TanStack QueryClient unless you pass your own.
+1. **Wrap your app in `<LedgerProvider>`** with your authenticated same-origin
+   BFF. Keep the ledger API key on the server. The provider owns a TanStack
+   QueryClient unless you pass your own.
 
    ```tsx
    import { LedgerProvider } from "@azex/ledger-react";
 
-   <LedgerProvider config={{ baseUrl: "https://ledger.example.com", apiKey }}>
+   <LedgerProvider config={{ baseUrl: "" }}>
      {children}
    </LedgerProvider>
    ```
@@ -62,7 +68,7 @@ import "@azex/ledger-react/styles.css";
 
 export default function Admin() {
   return (
-    <LedgerProvider config={{ baseUrl: "https://ledger.example.com" }}>
+    <LedgerProvider config={{ baseUrl: "" }}>
       <LedgerAdmin />
     </LedgerProvider>
   );
@@ -246,6 +252,39 @@ subtree even when the root layout remains mounted. Cookie access makes pages
 under the root layout dynamic. The host still uses TanStack Query's default
 stale time, so hydrated data appears immediately and may revalidate in the
 background. Authentication continues to be enforced by the proxy and BFF.
+
+### Holder IDs and mutation compatibility
+
+Numeric admin holders must be integers within ±`9007199254740991`; both requests
+and successful holder-bearing responses are checked. Failure is a `RangeError`
+with code `LEDGER_UNSAFE_HOLDER` and a `location` (the error constructor is not a
+public export). Go int64 and HTTP numeric wire contracts are unchanged. Map new
+external string identities to safe ledger holders in your backend; never truncate
+IDs or silently remap existing accounts. A response validation error can follow
+a committed write, so preserve the original operation key when reconciling it.
+
+Mutation inputs follow generated operation schemas. Booking metadata values are
+strings; use `Parameters<LedgerClient["createBooking"]>[0]` and
+`Parameters<LedgerClient["transitionBooking"]>[1]` for host input types. Legacy
+exported `CreateBookingBody` / `TransitionBookingBody` remain wider and are no
+longer the client method input source. Transition's third idempotency-key argument
+remains required. Other mutation keys keep their existing required arguments and
+header/body placement.
+
+`client.previewTemplate(code, { holder_id, currency_uid, amounts: { gross: "100",
+fee: "2.5" } })` is the multi-amount form. The single-string `amount` shorthand
+is retained and serialized into `amounts: { amount }`. Custom flattened fields
+are unsupported. Both forms together, or neither, reject asynchronously with
+`TypeError` before fetch. Amounts remain strings. The
+[full request guide](https://github.com/azex-ai/ledger/blob/main/docs/frontend.md#mutation-bodies-and-preview-amounts)
+and [migration notes](https://github.com/azex-ai/ledger/blob/main/docs/BREAKING.md)
+describe the exact changes; these types are not a universal runtime validator.
+
+Settlement methods only change a reservation. Atomic consumption is the Go-only
+`Service.Capture` facade, with no Capture REST endpoint or SDK method. Your host
+must expose an authorized business operation when needed; do not split its
+settlement and journal into independent browser requests. Displaying a balance
+or USD valuation grants no redemption or withdrawal right.
 
 ## HeroUI skin — `@azex/ledger-react/heroui`
 

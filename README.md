@@ -1,7 +1,8 @@
 # azex-ai/ledger
 
 Production-grade classification-driven double-entry ledger engine for Go.
-Dual-mode: importable library or standalone HTTP service.
+Import it into a Go host; optionally mount its HTTP handler in that host.
+The repository does not ship a standalone ledger server binary.
 
 For the current **deposit-only AI credits** integration, start with
 [`examples/credits-topup`](examples/credits-topup): confirmed 1 USDC → 1,000 credits,
@@ -10,6 +11,29 @@ The [shadcn fullstack example](examples/fullstack) shows library UI integration;
 wallet hooks and slots support host-owned presentation. Unresolved product policies
 are recorded in [deposit/credits gaps](docs/gaps/deposit-credits.md). The catalogue
 below also contains optional capabilities outside that integration.
+
+For a Go + Next.js application, keep database credentials, authoritative holder
+mapping and financial commands in the Go host. Mount `server.NewFromDeps` for
+the existing HTTP surface and route browser requests through your authenticated
+Next.js BFF. The React package supplies clients, hooks and UI; it does not grant
+financial authorization. `Service.Capture` is a **Go-only** facade: expose an
+authorized host use case if your product needs it over HTTP, rather than assuming
+the ledger provides a Capture endpoint or SDK method.
+
+| Integration need | Runnable reference |
+|---|---|
+| Reuse classifications for deposits, fee revenue, points and gifts | [configured-ledger](examples/configured-ledger) — verifies concrete economic effects as well as per-currency balance |
+| Buy credits and capture fixed, metered or streaming usage | [credits-topup](examples/credits-topup) — ordinary atomic Capture, stable event replay; v3 requires a fresh demo database |
+| Sign a charge before composing it with settlement | [signed-capture](examples/signed-capture) — signed journal, unsigned discharge and the conservative verified-hold boundary |
+| Display fiat, crypto, credits and gifts in USD | [valuation](examples/valuation) — a host read model preserving original quantities and missing-price status |
+| Mount HTTP and consume it from Next.js | [fullstack](examples/fullstack) and the [frontend guide](docs/frontend.md) |
+
+Each currency retains its own quantities and balances independently. USD
+valuation does not rewrite those quantities; a catalog rate or displayed USD
+value does not create redemption or withdrawal rights. `Exchange` records an
+internal fixed-rate conversion, not a venue trade. See the
+[market execution ADR](docs/adr/2026-10-10-market-execution.md) for the separate
+quote, external receipt, posting and reconciliation boundaries.
 
 ## Features
 
@@ -31,7 +55,7 @@ Core engine capabilities:
 - **Atomic event-journal model** -- booking transitions and journal posts can share one transaction via `RunInTx`; pass `EventID` when posting the journal to backfill `events.journal_id` and `bookings.journal_id`
 - **Entry templates** -- reusable debit/credit recipes; `ExecuteTemplate` for single posts, `ExecuteTemplateBatch` for atomic multi-step plans
 - **Checkpoint + delta balances** -- materialised checkpoints plus incremental rollup; balance reads run inside `REPEATABLE READ` for snapshot consistency
-- **Reserve / Settle / Release** -- per-(holder, currency) advisory-lock serialisation with in-lock balance check (TOCTOU-safe)
+- **Reserve / Settle / Release** -- Reserve checks availability under per-(holder, currency) locks; settlement changes the hold, not the book balance. `Capture` atomically settles and posts the charge
 - **Pending two-phase deposits** -- `AddPending` → `ConfirmPending` / `CancelPending` for in-flight deposit tracking (install separately: `presets.InstallPendingBundle`, not part of `InstallDefaultPresets`/`InstallExtendedPresets`)
 - **Channel adapters** -- pluggable inbound webhook handlers (HMAC-verified) for external systems such as on-chain deposit indexers
 - **Webhook delivery** -- outbound event delivery with per-attempt exponential backoff and dead-letter handling
@@ -90,11 +114,18 @@ separately versioned dependency. Its testcontainers dependencies can appear in
 module metadata/checksums, but do not enter a production import of `ledger`.
 The optional EVM/R2 modules keep their own dependency boundaries.
 
+Run `make test-consumer` to check the checkout from three independent host
+modules with `GOWORK=off`. Every candidate-source replacement is explicit,
+including R2's tidy-only fixture dependency; production imports exclude test
+fixtures. This does not establish that placeholder versions or remote tags are
+downloadable. See [Consuming the Go modules](docs/CONSUMING.md) for the exact
+root/EVM/R2 replacements and separate remote-release verification.
+
 ## Quick Start -- As a Library
 
-**Prerequisite**: two connections, not one -- every `examples/*/main.go`
-reads `MIGRATE_DATABASE_URL` and `DATABASE_URL` as two separate environment
-variables, and the Quick Start below does the same:
+**Prerequisite for database-backed hosts**: separate migration and runtime
+connections. The Quick Start below reads `MIGRATE_DATABASE_URL` and
+`DATABASE_URL` separately; the pure valuation example needs neither:
 
 - **`MIGRATE_DATABASE_URL`** (passed to `ledger.Migrate`) must be able to
   `CREATE ROLE` (superuser, or a role with the `CREATEROLE` attribute) the
@@ -330,13 +361,17 @@ registry config or auth token needed:
 npm install @azex/ledger-react @tanstack/react-query
 ```
 
+This guide follows the source checkout. Select a package release containing the
+APIs you use; changes under [Unreleased](docs/BREAKING.md#unreleased) may require
+a local checkout build until released.
+
 ```tsx
 import { LedgerProvider, LedgerAdmin } from "@azex/ledger-react";
 import "@azex/ledger-react/styles.css";
 
 export default function Admin() {
   return (
-    <LedgerProvider config={{ baseUrl: "https://ledger.example.com" }}>
+    <LedgerProvider config={{ baseUrl: "" }}>
       <LedgerAdmin />
     </LedgerProvider>
   );
@@ -348,6 +383,15 @@ components wired to your router, headless hooks, RSC server prefetch, theming,
 and the complete API reference. The [`web/`](web/) app is the working
 reference integration.
 
+The empty browser `baseUrl` uses the host's same-origin `/api/v1` BFF; keep API
+keys on the server. SSR prefetch and browser hydration must share an explicit,
+non-secret `cacheScope: { backend, identity }`, even when their URLs differ.
+Change that scope when authentication or permissions change, including hidden
+BFF cookies. The bundled `web/` host requires `LEDGER_CACHE_BACKEND_ID` in
+production. See [cache and SSR integration](docs/frontend.md#server-prefetch-rsc).
+Numeric SDK holders must be safe JavaScript integers; keep external string IDs
+in an authoritative host mapping rather than truncating existing int64 holders.
+
 ## Core Concepts
 
 The ledger is built on five primitives. Knowing them is enough to model any
@@ -355,7 +399,7 @@ banking flow.
 
 | Primitive | What it is | Where it lives |
 |-----------|-----------|----------------|
-| **Currency** | Unit of value (USD, USDT, EUR, …). Has a precision. | `core.Currency` / `currencies` table |
+| **Currency** | Measurable unit (USD, USDC, points, credits, gifts, …). Has a precision; quantity is separate from valuation or redemption policy. | `core.Currency` / `currencies` table |
 | **Classification** | Account type — "main_wallet", "pending", "fees", "equity", … Has `NormalSide` (debit-normal vs credit-normal), a `BalanceRole` (see below), and an optional `Lifecycle` state machine. Positive holder = user-side, negative = system counterpart. | `core.Classification` / `classifications` table |
 | **Journal Type** | Categorises journals by intent — "deposit_confirm", "fee", "transfer". Required metadata before any post; think of it as the journal-entry kind in a chart of accounts. | `core.JournalType` / `journal_types` table |
 | **Entry Template** | Reusable recipe for a balanced journal: a list of `(classification, debit/credit, holder_role, amount_key)` lines. Render with `TemplateParams` to produce a `JournalInput`. | `core.EntryTemplate` / `entry_templates` table |
@@ -374,8 +418,9 @@ balance breakdown, and `Reserve`, do with the money in that bucket:
 | `core.BalanceRoleMemo` | Deliberately excluded from the holder's spendable-money view and not a liability the platform owes back (e.g. `fee_expense`: money already paid, tracked per-holder for reporting only). |
 
 Picking `memo` when you meant `available` makes that money invisible to
-`Reserve` forever; picking `available` for a reporting-only account makes it
-withdrawable. See [`docs/INVARIANTS.md`](docs/INVARIANTS.md) I-25 / I-37 for
+`Reserve` forever; picking `available` for a reporting-only account lets
+reservations consume it. Withdrawal eligibility still belongs to the host.
+See [`docs/INVARIANTS.md`](docs/INVARIANTS.md) I-25 / I-37 for
 the full contract.
 
 When a journal is posted:
@@ -665,6 +710,14 @@ instead of `PostJournal`/`ExecuteTemplate` inside the callback. Every
 journal's `auth_status` column records which of the two paths was taken
 (`signed`, or `unsigned_tx_mode` if you skip this step), so this is
 observable after the fact rather than a silent gap.
+
+`Capture` and `Exchange` join this transaction without a savepoint: return their
+errors so all writes roll back. Their ordinary journals and transaction-mode
+reservation discharge claims are unsigned even with `WithAttestor`. Signing a
+journal does not sign its discharge: a verified reserve still counts the
+original unsigned-discharge hold until expiry. The
+[signed-capture example](examples/signed-capture) demonstrates the exact boundary
+and its conservative history verification for signed receipt replay.
 
 Calling `RunInTx` again on the `*Service` your callback receives is
 rejected (an error, not a second independent transaction). `AttestationService`,
@@ -1098,7 +1151,7 @@ the attacker can also rewrite makes the rest decorative.
 | Package | Use |
 |---|---|
 | `anchordev` | Local file. **Dev and tests only** -- same machine, same user as the database it is supposed to be independent of. |
-| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK never enters your dependency graph. Deployment steps -- separate account, bucket configuration, and the two credential scopes -- are in `docs/RUNBOOK.md`. **Consuming it as a nested module is proxy-dependent today** (2026-09-04 consumer re-check): `go get github.com/azex-ai/ledger/anchors/r2@latest` resolves and `go build` against it works when the module proxy synthesizes a pseudo-version for the nested path (`proxy.golang.org` does), but a mirror that answers `@latest` with the root tag `v0.6.0` -- `goproxy.cn` measured -- fails with `does not contain package .../anchors/r2`, whether or not the root is already required. `go mod tidy` fails everywhere, for **two** reasons: the tagged root does not yet contain `anchortest` (a test-only import of `anchors/r2`), and `anchors/r2`'s own `replace` of `internal/miniotest` points at a relative path that has no published version. Until the release CI pushes a submodule-scoped tag and keeps the two in sync, consume it from a local checkout via the parent-directory `go.work` (above), which sidesteps all of this for in-repo development. |
+| `anchors/r2` | Cloudflare R2 with Object Lock, in a separate module so its S3 SDK stays out of root production imports. Deployment and credential scopes are in `docs/RUNBOOK.md`. The checked-in candidate needs explicit root/R2/fixture replacements for an independent host; see [Consuming the Go modules](docs/CONSUMING.md). Passing that gate does not establish remote tag availability. Validate published revisions with `GOWORK=off` and no local replacements before claiming remote consumption. |
 
 **Writing your own.** Object storage with a compliance-mode retention lock, a
 public chain, an RFC 3161 timestamp authority and an append-only database in a

@@ -31,6 +31,91 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `ledgerKeys` / `LedgerClientConfig.cacheScope`: scope-first cache keys
+
+All admin query keys and invalidation prefixes now require the resolved client
+scope, for example `ledgerKeys.balances(client.cacheScope, holder)` and
+`ledgerKeys.all(client.cacheScope)`. Old unscoped factory calls no longer compile.
+The optional public input is `cacheScope: { backend: string; identity: string }`;
+`client.cacheScope` is the resolved `LedgerQueryScope`, not that input object.
+
+**What a consumer must do.** Update direct cache reads/seeding/invalidation and
+share the same non-secret logical scope between SSR and browser clients.
+Default scopes are isolated per client and cannot hydrate a different client.
+Change explicit identity on login/logout, tenant/account switches and permission
+changes, including hidden BFF cookie changes. Different URLs may name the same
+backend; identical URLs may serve different identities. Never use a token,
+cookie, API key or private URL as a scope. A new API key does not override an
+unchanged explicit identity. Retained host QueryClients can retain old entries;
+scope isolation does not promise to erase them. See the
+[frontend guide](frontend.md#server-prefetch-rsc).
+
+### `LEDGER_CACHE_BACKEND_ID`: required for the bundled production dashboard
+
+The `web/` host resolves a public logical backend ID at request time. Production
+must set `LEDGER_CACHE_BACKEND_ID`; development defaults to `local-ledger`.
+Change it when changing the actual backend. Root layout cookie access makes
+pages dynamic, and login/logout `router.refresh()` updates the provider scope.
+Builds do not require deployment credentials or this setting.
+
+**What a consumer must do.** Add this non-secret value to production runtime
+configuration. It is a host setting, not an environment variable read by the
+framework-independent React package. Keep API/auth secrets server-side.
+
+### `LedgerClient.createBooking` / `transitionBooking`: generated input bodies
+
+Mutation JSON inputs now derive from the generated OpenAPI operation bodies.
+Booking metadata is `Record<string, string>`, matching the Go input; nested
+objects and arbitrary values were never valid server booking metadata.
+The exported legacy `CreateBookingBody` / `TransitionBookingBody` types remain
+available but are no longer the source of these client parameter types.
+
+**What a consumer must do.** Type new inputs with
+`Parameters<LedgerClient["createBooking"]>[0]` and
+`Parameters<LedgerClient["transitionBooking"]>[1]`, and explicitly choose string
+metadata labels. Transition's third `idempotencyKey` argument remains required;
+its header carries the key omitted from the second argument. Retain the same key
+on delivery retry. Other generated inputs now accept their actual optional wire
+fields, including journal event/actor/effective time, template metadata,
+classification lifecycle, journal-type holder kind and transition source.
+This change does not add a general runtime DTO validator or new endpoints.
+
+### `LedgerClient.previewTemplate`: custom amounts belong in `amounts`
+
+Use `{ holder_id, currency_uid, amounts: { gross: "100", fee: "2.5" } }`.
+The single-string shorthand `{ holder_id, currency_uid, amount: "100" }` remains
+and is serialized as `amounts: { amount: "100" }`. Arbitrary flattened amount
+keys and numeric amounts are not supported inputs. Supplying both `amount` and
+`amounts`, or neither, rejects the Promise with `TypeError` before fetch, even
+when both forms would contain the same value. TypeScript's union alone does not
+exclude every mixed structural assignment; handle the asynchronous failure.
+
+**What a consumer must do.** Move custom fields into `amounts`, keep decimal
+strings, and select exactly one input form. No server wire contract changed.
+
+### `Service.Capture` / `examples/credits-topup`: additive facade, explicit demo boundary
+
+`CaptureInput`, `CaptureResult`, `Service.Capture` and the separate
+`core.ReservationReader` are additive Go APIs. Existing `Reserver` and
+`QueryProvider` implementations gain no required methods. There is no new
+Capture HTTP route or SDK method. Capture accepts only available user entries;
+memo-bearing fee templates require explicit host composition.
+
+The credits demo's v3 namespace is for a **fresh dedicated demo database**.
+Its prior `:settle` / `:charge` suffixes remain, but Capture adds reserved
+`capture_mode` and `capture_template_code` metadata alongside `reservation_uid`.
+Those payloads differ from old submitted events.
+
+**What a consumer must do.** Do not re-key, rewrite or automatically replay old
+events through Capture to bypass conflicts. Preserve their original handler or
+use an explicit reconciliation/migration policy. The demo rejects legacy demo
+journals/reservations before configuration/accounting writes; schema bootstrap
+can still run first. Same v3 event IDs/payloads replay normally. Changing
+full/partial mode may return `ErrInvalidTransition` before the journal conflict
+check. Propagate transaction errors; this facade has no nested savepoint.
+Unsigned transaction journals and the verified-hold restrictions are documented
+in [Recipe 4](COOKBOOK.md#recipe-4--spending-credits-reserve--capture).
+
 ### `@azex/ledger-react` / `createLedgerClient`: holder IDs must be safe integers
 
 The numeric admin SDK now rejects holder IDs outside JavaScript's safe integer
@@ -90,10 +175,13 @@ literal (test fixtures, mocks) must add `quotes_omitted`.
 
 **Landed (2026-10-10 fix wave 2, second opinion Major 1 + security review m-5).**
 `Exchange` now verifies, inside its transaction, what the two rendered FX
-journals did: the sell journal must move the holder's source currency by
-exactly `-Quantity`, the buy journal the target currency by exactly
-`+Quote.TargetAmount` (holder-statement net: role-bearing classifications,
-signed by normal side), and neither may touch the other currency. A template
+journals did. The strengthened available-balance contract requires the sell
+journal's available net to equal `-Quantity` and the buy journal's available net
+to equal `+Quote.TargetAmount`, signed by each classification's normal side.
+Every other user classification must independently have zero net change;
+pending/locked/memo cannot offset one another or an incorrect available amount.
+Each leg is restricted to its currency and the holder/system-counterpart pair.
+A template
 override that does anything else -- e.g. `"fx_buy"` on both legs, which used to
 credit the holder twice -- is `core.ErrInvalidInput` and everything rolls back.
 `FundingUID` must be the uid of a journal with an entry for `HolderID` in the
@@ -103,7 +191,10 @@ another currency is `core.ErrInvalidInput`, refused before any write.
 **What a consumer must do.** Pass the deposit *journal* uid as `FundingUID` --
 for a booking-modelled deposit, the confirmed booking's `JournalUID`, not the
 booking uid (`docs/COOKBOOK.md` used to show the booking uid). Custom
-templates must move money in the documented direction. A retry of an exchange
+templates must satisfy the available and non-available rules above; former
+role-bearing-total overrides may now be refused, including on replay. Do not
+change an already committed event's key or rewrite its entries to evade this
+check; retain a compatible historical handler or reconcile explicitly. A retry of an exchange
 that originally committed with a funding reference the new check refuses
 fails with `core.ErrInvalidInput` instead of replaying.
 
