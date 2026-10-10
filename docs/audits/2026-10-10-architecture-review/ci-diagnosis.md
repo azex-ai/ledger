@@ -16,3 +16,11 @@
 - 静态证据：示例 `main.go` 使用原始 `time.Now().UTC()`，`capture.go` 将 RecordedAt 原样作为 explicit EffectiveAt；`postgres/idempotency_match.go:28` 用原始 `time.Equal` 比较落库时间。现有 `core.canonicalTimestamp` 与 I-46 已记录 pgx/TIMESTAMPTZ 的微秒 floor 语义，签名规范化没有覆盖这处重放比较。固定纳秒输入的反事实验证与修复归 Task20；此处尚不宣称修复已通过。
 
 后两项原始日志为本任务 `.local/ledger20/ci-38042226697.log` / `ci-38042627464.log`；日志中的 healthcheck `role root does not exist` 不等同 test assertion 失败，以上只提实际失败测试。
+
+## 时间精度的确定性 PostgreSQL 实证
+
+独立诊断在 `3978a9cb` 上仅用 ignored Go overlay，固定 `2026-10-10T00:00:00.123456789Z`，不修改跟踪源码。原版 race exit1（3.191s），示例 TestRun 复现上述 CI key/message；仅将 matching expression 的 explicit input 改为 `Truncate(time.Microsecond)` 后，同套 race exit0（4.370s）。安装的 pgx v5.10.0 binary encoder以nanoseconds/1000截断；落库读取为同一UTC `.123456` 时刻。CI没有记录原始timestamp，本诊断证明对应机制，不编造该run的具体纳秒值。
+
+覆盖普通 PostJournal pool（有/无attestor）、caller-tx，以及 Authorize→PostAuthorized pool/caller-tx五条公共journal路径，另外检查signed Capture。exact ns、同微秒不同ns、stored precision及同瞬间不同时区均应返回原UID；前后跨微秒与金额20→21仍为ErrConflict。`.123456789` 与 `.123456289` 跨最近舍入边界却等价，证实floor而非round。保留zero-as-default既有例外。每次重放和拒绝后journal/entry/queue/hold/receipt行数及余额保持不变。
+
+问题位于共享idempotency比较，不在签名算法、reservation或示例专有路径；已有aligned `.123456000` fixture不能暴露它。Task20正式测试须保留固定unaligned输入及这些正反对照，不靠macOS/Linux时钟差异或重复概率。此次overlay探针只用于诊断，不冒充最终正式suite/gate已完成；详细临时证据归档于本任务 `.local/ledger20/ci-timestamp-probe`，后续正式测试与最终报告提供持久回归依据。
