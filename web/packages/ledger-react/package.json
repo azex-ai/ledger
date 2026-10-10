@@ -56,7 +56,7 @@
     "codegen:check": "npm run codegen && git diff --exit-code src/client/schema.ts"
   },
   "peerDependencies": {
-    "@heroui/react": "^3.2.4",
+    "@heroui/react": "^3.2.6",
     "@tanstack/react-query": "^5",
     "react": "^19",
     "react-dom": "^19"
@@ -70,27 +70,27 @@
     "@base-ui/react": "^1.7.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.34.0",
+    "lucide-react": "^1.52.0",
     "qrcode.react": "^4.2.0",
     "recharts": "^3.10.1",
     "sonner": "^2.0.8",
-    "tailwind-merge": "^3.6.0",
-    "viem": "^2.56.0"
+    "tailwind-merge": "^3.7.0",
+    "viem": "^2.57.3"
   },
   "devDependencies": {
-    "@heroui/react": "^3.2.4",
+    "@heroui/react": "^3.2.6",
     "@heroui/styles": "^3.2.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^7",
     "@testing-library/react": "^16.3.3",
-    "jsdom": "^30",
-    "msw": "^2.15.0",
+    "jsdom": "^30.1.2",
+    "msw": "^3.0.2",
     "openapi-typescript": "^7",
     "postcss": "^8",
     "tailwindcss": "^4",
     "tsup": "^8",
-    "typescript": "5.9.3",
-    "vitest": "^4.1.11"
+    "typescript": "6.0.3",
+    "vitest": "^5.0.3"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org",
