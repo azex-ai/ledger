@@ -1,0 +1,19 @@
+package main
+import (
+ "fmt"
+ "os"
+ "strconv"
+ "github.com/azex-ai/ledger/core"
+ "github.com/shopspring/decimal"
+)
+func main() {
+ n, err := strconv.ParseInt(os.Args[2],10,32); if err != nil { panic(err) }
+ a := decimal.NewFromInt(1)
+ switch os.Args[1] {
+ case "round": _,err=core.Round(a,int32(n),core.RoundHalfUp)
+ case "convert": _,err=core.ConvertAt(a,a,int32(n),core.RoundHalfUp)
+ case "allocate": _,err=core.Allocate(a,[]decimal.Decimal{a,a},int32(n))
+ default: panic("unknown probe")
+ }
+ fmt.Printf("returned err=%v\n",err)
+}
