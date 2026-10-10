@@ -76,3 +76,11 @@ v3 fixture namespace 只用于新例库，setup/scenario 首行只读 guard 拒�
 已核对 Authorize/attestJournal/PostAuthorized 原实现及示例全部生产源码、测试、README。签名和验证均在 RunInTx 前，内部先取模板/settlement 全锁再入账和结算；所有错误传播且仅提交成功返回 receipt。真实 pg_stat_activity 检查远端边界，settlement 超额测试让可入账 charge 与 receipt 全回滚。稳定 EffectiveAt 与双 key 重放不重新签名、不增加账务行。
 
 signed replay 三项 auth 材料全空时按已裁决方式验证相关余额历史；部分缺损或新坏签名仍拒绝。VerifiedBalance 不冒充当前状态检查或精确单笔验签；其他 unsigned/坏签名历史导致保守拒绝的用例与文档齐全。模板、reservation 关联和跨操作不可变 event 由宿主负责，未把 private helper 冒充任意输入 API。unsigned discharge 原 hold 至 expiry 的门槛 80−60=20 有真实 PG 断言；无 distributed atomicity 或草稿恢复承诺。作者目标 race 6.183s；本席未重复相同测试。PASS，独立域席待安排。
+
+## Task 8 · root Codex 第二意见（68452c9 / 1f02131 scoped）
+
+核对全部生产变更与新增真实 QueryClient/provider/hydration 测试。client 配置被快照化，默认 UUID scope 随实例稳定；显式 backend/identity 冻结且拒绝已知 API key 误填。query、prefetch、mutation keys、失效及乐观回滚均包含同一 scope，旧 pending 完成的原回调隔离有实际异步测试及去掉 mutationKey 的反事实失败证据。provider 以 scope 重挂子树，从而重置 preview 与本地 mutation 状态；显式 scope 的真实性及隐藏 cookie 变化由宿主负责。
+
+宿主 server-only helper 验证 session 后仅序列化公开 expiry，backend 是非秘密部署标识。layout 与两动态页的 prefetch 使用同一规则；provider prop 更新与 JSON hydrate 测试覆核。auth 格式未改，同 token 视为同会话；生产新增 LEDGER_CACHE_BACKEND_ID 是须记录的配置迁移。构建无 env 通过不等同生产 request 已配置，文档如实区分。
+
+原变更新增 web/test 未接入 CI 的 Minor 已由 1f02131 修复：直接 Vitest 命令继承 web cwd，位于 SDK build 后，无忽略失败；同一次修订纠正静态 gate 全量 10 个基线文件的报告。主控核小 diff PASS，功能源码未变，不重复全套。独立域席另执行 build、21 SDK 与 8 host 范围测试；额外静态 gate FAIL2 仍如实保留。PASS，待独立席最终报告归档。
