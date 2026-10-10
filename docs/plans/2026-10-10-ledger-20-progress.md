@@ -5,9 +5,9 @@
 | 轮次 | 交付 | 状态 | BASE / 分支 / commit | 验证与评审 |
 |---|---|---|---|---|
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
-| 2 | 冻结策略按币种净额判断 | 评审通过，集成中 | ae0c1b7 / codex/ledger20-t02 | 独立域评审 PASS；root Codex PASS；全套 gate 运行中 |
-| 3 | 金额 helper 目标精度边界 | 实施中 | BASE ab3a5d1 / codex/ledger20-t03 | 精度范围裁决完成 |
-| 4 | 输入校验早于 tracing 展开 | 待实施 | — | — |
+| 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
+| 3 | 金额 helper 目标精度边界 | 独立评审中 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz 通过；root 第二意见 PASS |
+| 4 | 输入校验早于 tracing 展开 | 实施中 | BASE de583aa / codex/ledger20-t04 | 待验收 |
 | 5 | 预留请求对齐生成契约 | 评审通过，待集成 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
 | 6 | SDK holder 安全整数边界 | 实施中 | BASE ab3a5d1 / codex/ledger20-t06 | 待验收 |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
@@ -18,7 +18,7 @@
 | 12 | 原子 Capture 门面 | 待实施 | — | — |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
-| 15 | USD 估值读模型示例 | 实施中 | BASE ab3a5d1 / codex/ledger20-t15 | 待验收 |
+| 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 待实施 | — | — |
 | 18 | web 生产依赖 advisory 修复 | 待实施 | — | — |
@@ -31,3 +31,5 @@
 - 使用本次专用临时 PG17 实例，fixture 每测试独立数据库。
 - bus #30..49 对应轮次 1..20。缺少独立 OS PID 的会话内 worker 在 submitted/reviewed 时保守保留 writer lease；整合使用冻结 commit 的独立 delivery worktree，通过 wt integrate 后才标 bus integrated，再删除原任务 worktree。不会提前把未合并任务记为 integrated，也不修改 lease 或关闭 guard。
 - 所有实现者只提交各自任务分支，主控负责评审、串行整合与最终推送。
+
+- 第二轮整合 `7a0f5961759afdf829bddcc6959dc00605c75ea4` 已推送；全 root race 通过（root 133.449s、postgres 287.375s、service 136.863s）。
