@@ -15,12 +15,12 @@
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 评审通过，待集成 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet；独立域/root PASS |
-| 12 | 原子 Capture 门面 | 评审通过，集成中 | d22e40d +241905e / codex/ledger20-t12 | PG/API/vet通过；独立域/root PASS；Minor文档已修 |
-| 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
-| 14 | credits 消费接入原子 Capture | 待实施 | — | — |
+| 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
+| 13 | 签名资金流程可运行组合示例 | 实施中 | BASE 09d270f / codex/ledger20-t13 | 待验收 |
+| 14 | credits 消费接入原子 Capture | 实施中 | BASE c5d0f1e / codex/ledger20-t14 | 待验收 |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
-| 17 | 可选 Go modules 独立消费验证 | 实施中 | BASE 9b09eb5 / codex/ledger20-t17 | 待验收 |
+| 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |
 | 18 | web 生产依赖 advisory 修复 | 评审通过，待集成 | 158135e / codex/ledger20-t18 | T1 PASS；prod audit0，SDK/Next build/typecheck/257 tests |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
@@ -37,3 +37,5 @@
 - 第五轮整合 `1b01b974` 已推送；完整 root race PASS（root 133.825s、postgres 288.004s、service 183.686s）。本轮 SDK 的 build/typecheck/client/codegen 证据单独记录，root Go gate 不替代 frontend 验证。
 
 - 第六轮整合 `4df363d8` 已推送；完整 root race PASS（root 112.806s、postgres 283.516s、service 133.680s）。Task5/6 的client.ts自动合并无冲突；最终frontend回归仍会覆盖组合基线。
+
+- 第十二轮整合 `21f5ba58` 已推送；完整 root race PASS（root 140.544s、postgres 290.942s、service 145.674s），覆盖Capture和ReservationReader。

@@ -59,3 +59,9 @@ Task12 scoped 文档闭环：独立域席位代码 PASS，提出 1 条 Minor 术
 范围 `f13d0ae..6e62cef`。主控完整读取75行生产diff、两个新增测试文件和11.md。available 净额按原 SignedAmount/NormalSide 求和，其他用户分类独立净额检查，无法用pending/locked或不同pending分类抵消；同维度真实净零正例保留。holder/currency 已固定后按classification建map足以识别完整维度。系统对手方限制与当前Render一致，classificationRoles签名保留，可与Capture直接组合。
 
 既有预锁、Reserve、Settle、双journal执行和replay路径没有变化，只加强提交前实际entries检查。12个PG错误模板各自仍双分录平衡，旧版全部错误接受；新断言要求完整回滚且同key后续可完成正确兑换，不把仅“journal平衡”认证为经济结果正确。两种normal_side、多个available分类、净零重放均有对照。实现PG race13.195s/vet PASS，域席位进行中；无需重复同套PG。
+
+## Task 17 — T1：PASS
+
+范围 `9b09eb5..ed37bc4`。主控完整阅读脚本、三个实际consumer源码、Makefile/CI diff、CONSUMING与17.md。每个host仓外新go.mod且GOWORK=off，显式candidate replacements，不借依赖模块replace；readonly build/run和生产import图检查真实执行。root不吸入可选SDK，所有host生产imports排除testfixtures/Docker。trap只清本次mktemp目录，带空格路径、失败码42传播、拒绝仓内TMPDIR有一次性验证证据。
+
+EVM/R2函数用于编译接口接线，未声称已连接RPC/对象存储。R2 miniotest显式replace仅使tidy解析现有测试依赖，生产imports与go.mod/go.sum元数据区别准确；尚未发布的零伪版本不会被本gate掩饰成远程可用。保留原root三种换算检查，CI仍复用既有make目标。无新增依赖和业务API。
