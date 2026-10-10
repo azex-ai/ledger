@@ -21,7 +21,7 @@
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |
-| 18 | web 生产依赖 advisory 修复 | 评审通过，待集成 | 158135e / codex/ledger20-t18 | T1 PASS；prod audit0，SDK/Next build/typecheck/257 tests |
+| 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
 
@@ -45,3 +45,5 @@
 - 第四轮整合 `0c9417e3` 已推送；完整 root race PASS（root 115.155s、postgres 286.666s、service 189.708s）。
 
 - 第十一轮整合 `c3536221` 已推送；完整 root race PASS（root 124.382s、postgres 303.172s、service 126.353s），Exchange 与 Capture 在同一基线通过。
+
+- 第十八轮整合 `50b52c66` 已推送；完整 root race PASS（root151.064s、postgres296.455s、service149.060s）。生产依赖 audit0，开发工具链残留仍见 dependencies.md。
