@@ -6,7 +6,7 @@
 |---|---|---|---|---|
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
-| 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
+| 3 | 金额 helper 目标精度边界 | 已集成 | 2239814 → 83060d6 | core race/vet/fuzz；独立域及root PASS；完整root race |
 | 4 | 输入校验早于 tracing 展开 | 评审通过，待集成 | cf03361 / codex/ledger20-t04 | PG race/vet；独立域/root PASS |
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
@@ -39,3 +39,5 @@
 - 第六轮整合 `4df363d8` 已推送；完整 root race PASS（root 112.806s、postgres 283.516s、service 133.680s）。Task5/6 的client.ts自动合并无冲突；最终frontend回归仍会覆盖组合基线。
 
 - 第十二轮整合 `21f5ba58` 已推送；完整 root race PASS（root 140.544s、postgres 290.942s、service 145.674s），覆盖Capture和ReservationReader。
+
+- 第三轮整合 `83060d62` 已推送；完整 root race PASS（root 134.777s、postgres 300.078s、service 147.368s），目标 exponent 回归与 Capture 已在同一基线运行。
