@@ -13,7 +13,7 @@
 | 7 | 两种 skin 的 holder 输入校验 | 已集成 | 0c3138d → 8f889dbe |T1 PASS；381 tests/build/types/codegen；完整root race |
 | 8 | 管理端缓存按实例与身份隔离 | 已集成 | 1f02131 → 43b5ff4 | SDK/host tests；独立域/root PASS；完整root race |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 已集成 | a9a1298 → 30372f03 | T1 PASS；388 tests/build/types/codegen；完整root race |
-| 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
+| 10 | 科目配置经济效果验收样例 | 已集成 | 46ac7b6 → 2ff8ceeb | PG race/vet；独立域/root PASS；完整root race |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 已集成 | 1a585d0 → 06ea1fa0 | PG race 12场景/vet；独立域/root PASS；完整root race |
@@ -63,3 +63,5 @@
 - 第 9 轮整合 `30372f03` 已推送；完整 root race PASS（root128.174s、postgres299.292s、service152.435s）。Task19硬依赖已解除并开始文档汇合。
 
 - 第 13 轮整合 `06ea1fa0` 已推送；完整 root race PASS（root131.990s、postgres303.096s、service162.721s）。签名示例与既有Capture、Exchange在同一基线验证。
+
+- 第 10 轮整合 `2ff8ceeb` 已推送；完整 root race PASS（root178.427s、postgres311.475s、service149.930s）；配置示例与签名示例同时通过。
