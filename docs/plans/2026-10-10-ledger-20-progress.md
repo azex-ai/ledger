@@ -16,13 +16,13 @@
 | 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
-| 13 | 签名资金流程可运行组合示例 | 评审通过，待集成 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet；独立域/root PASS |
+| 13 | 签名资金流程可运行组合示例 | 已集成 | 1a585d0 → 06ea1fa0 | PG race 12场景/vet；独立域/root PASS；完整root race |
 | 14 | credits 消费接入原子 Capture | 已集成 | a29d202 → 4eed87c5 |PG race/vet；独立域/root PASS；完整root race |
 | 15 | USD 估值读模型示例 | 已集成 | 3d69a74 → 98d21ee8 |T1 PASS；race/vet/run，覆盖率 94.8%；完整root race |
 | 16 | 市场报价与执行扩展 ADR | 已集成 | 8f4c9e5 → c8db20f8 | T1 PASS；文档/来源核实；完整root race |
 | 17 | 可选 Go modules 独立消费验证 | 已集成 | ed37bc4 → 46bc9ccc | T1 PASS；三host及失败传播/CI检查通过；完整root race |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
-| 19 | 库接入与兼容迁移文档 | 实施中 | BASE 30372f03 / codex/ledger20-t19 | 待验收 |
+| 19 | 库接入与兼容迁移文档 | 评审通过，待集成 | 7dab106 / codex/ledger20-t19 | T1 PASS；Go/TS文档片段编译、API/codegen/link检查 |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
 
 ## 执行记录
@@ -61,3 +61,5 @@
 - 第 17 轮整合 `46bc9ccc` 已推送；完整 root race PASS（root 149.900s、postgres 297.472s、service 165.747s）。
 
 - 第 9 轮整合 `30372f03` 已推送；完整 root race PASS（root128.174s、postgres299.292s、service152.435s）。Task19硬依赖已解除并开始文档汇合。
+
+- 第 13 轮整合 `06ea1fa0` 已推送；完整 root race PASS（root131.990s、postgres303.096s、service162.721s）。签名示例与既有Capture、Exchange在同一基线验证。

@@ -102,3 +102,9 @@ signed replay 三项 auth 材料全空时按已裁决方式验证相关余额历
 完整阅读client diff、19项运行时测试、23项编译反例和09.md；对照生成paths/components、实际preview handler和idempotency middleware。operation body提取直接复用生成契约，scalar adapters保留header/body协议，Classification保留现有必填策略。Booking metadata收紧为真实string map，新增optional字段可用，旧DTO迁移明确记录。
 
 preview canonical amounts 原样发送，单amount便捷输入只转换这一键；混合或缺失形式在async方法内fetch前拒绝，不改变原对象。编译测试使用真实生成类型及fresh literals，避免宽对象赋值漏测字段；原holder测试只修不合法fixture，没有移除危险holder断言。作者build/types/codegen/client143项、全包388项PASS。额外静态2类基线失败已计入Task20；最终合并Task7后的组件回归另验收。无blocker。
+
+## Task 19 · root T1：PASS（7dab106）
+
+逐份核对 README、COOKBOOK、BREAKING、frontend、SDK README 与 ADR，结合 Capture/Exchange、provider/client/keys 和预取 hooks 的实际导出与行为。原币双分录、估值、内部兑换与外部成交分工准确；Capture Go-only、无 savepoint、unsigned discharge 与 signed replay 的保守限制没有被接入文档扩大。SDK scope-first keys、hidden cookie 身份责任、safe holder 与 response-after-write 风险、generated booking/preview 迁移均与实现一致。
+
+作者已实际编译 README、Capture 片段和 SSR/DTO/scoped-key TypeScript 片段，API/codegen/link 核对通过。本席没有重复相同测试；缺席于作者 BASE 的两个示例已读取冻结提交，主控合并后再核路径和综合 gate。草稿两处 Minor（booking 预取说明链接、纯 valuation 被误归入双数据库凭证前提）已在提交前修正。无 blocker，可串行集成。
