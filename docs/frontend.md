@@ -178,8 +178,8 @@ function MyBookingButton() {
 ## Server Prefetch (RSC)
 
 For React Server Components / Route Handlers, prefetch ledger data on the
-server and hydrate the client hooks with no client-side waterfall. The
-`/server` entry has **no `"use client"` directive** and is server-only.
+server and hydrate the client hooks with no client-side waterfall. The `/server`
+entry has **no `"use client"` directive** and is server-only:
 
 > **Never import `@azex/ledger-react/server` from a client component.**
 > `createServerLedgerClient` takes the server API key — keeping this entry off
@@ -187,48 +187,141 @@ server and hydrate the client hooks with no client-side waterfall. The
 
 ```tsx
 // app/journals/page.tsx (server component)
-import { QueryClient, HydrationBoundary, dehydrate } from "@tanstack/react-query";
-import { JournalsPage } from "@azex/ledger-react";
+import { QueryClient, dehydrate } from "@tanstack/react-query";
 import {
   createServerLedgerClient,
   prefetchJournals,
 } from "@azex/ledger-react/server";
-
-export const dynamic = "force-dynamic";
+import { requireAdminSession } from "@/lib/auth"; // host authentication
+import { serverLedgerConfig } from "@/lib/server-ledger-config";
+import { LedgerSession } from "./ledger-session";
 
 export default async function Page() {
-  const queryClient = new QueryClient();
-  // Resolve config OUTSIDE any try/catch — a misconfig must fail loudly, not
-  // be swallowed as a "best-effort prefetch" failure.
-  const client = createServerLedgerClient({ baseUrl, apiKey }); // server-side key
-
-  try {
-    await prefetchJournals(queryClient, client, 20);
-  } catch (err) {
-    console.warn("[ledger] server prefetch failed, falling back to client fetch:", err);
-  }
+  const session = await requireAdminSession();
+  const cacheScope = {
+    backend: "production-ledger-tenant-east",
+    identity: session.cacheIdentity, // non-secret principal/session/permission revision
+  };
+  const queryClient = new QueryClient(); // request-local; never a module singleton
+  const client = createServerLedgerClient({ ...serverLedgerConfig, cacheScope });
+  await prefetchJournals(queryClient, client, 20);
 
   return (
-    <HydrationBoundary state={dehydrate(queryClient)}>
-      <JournalsPage linkComponent={NextLink} />
-    </HydrationBoundary>
+    <LedgerSession
+      key={JSON.stringify(cacheScope)}
+      cacheScope={cacheScope}
+      state={dehydrate(queryClient)}
+    />
   );
 }
 ```
 
-Each `prefetch*` helper seeds the cache under the **same `ledgerKeys` key and
-with the same client method** its matching hook uses, so hydration hits with
-zero refetch. The infinite-query helpers (`prefetchJournals`,
-`prefetchEntries`) mirror the hook's `initialPageParam`/`getNextPageParam` so
-the hydrated shape matches `useInfiniteQuery`.
+```tsx
+// app/journals/ledger-session.tsx (client component)
+"use client";
 
-**Intentional omission — no `prefetchBookings`/`prefetchDeposits`/`prefetchWithdrawals`.**
-The `useDeposits`/`useWithdrawals` hooks key on a numeric `classificationId`
-resolved at runtime from a separate `classifications(true)` query. Prefetching
-bookings is therefore a two-step server flow (prefetch classifications →
-resolve the id → list bookings under that id) that the caller must
-orchestrate — it is left to the host rather than hidden behind a single helper
-that would mask the dependency.
+import { useState } from "react";
+import Link from "next/link";
+import { HydrationBoundary, QueryClient, type DehydratedState } from "@tanstack/react-query";
+import { JournalsPage, LedgerProvider, type LedgerCacheScope } from "@azex/ledger-react";
+
+export function LedgerSession({ cacheScope, state }: {
+  cacheScope: LedgerCacheScope;
+  state: DehydratedState;
+}) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: { queries: { staleTime: 60_000 } },
+  }));
+  return (
+    <LedgerProvider config={{ baseUrl: "", cacheScope, queryClient }}>
+      <HydrationBoundary state={state}>
+        <JournalsPage linkComponent={Link} />
+      </HydrationBoundary>
+    </LedgerProvider>
+  );
+}
+```
+
+The browser's empty `baseUrl` addresses the host's `/api/v1` BFF. The server
+may use an internal URL and private API key. Their **logical** `cacheScope`
+must match even when their URLs differ; credentials stay server-side.
+The example's `requireAdminSession`, `session.cacheIdentity`, and
+`serverLedgerConfig` belong to the host, not this SDK. A nonzero `staleTime`
+avoids the normal background revalidation of freshly hydrated data.
+
+Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
+`prefetchBalances`, `prefetchSystemHealth`, `prefetchSystemBalances`,
+`prefetchReservations`, `prefetchClassifications`, `prefetchCurrencies`,
+`prefetchJournalTypes`, `prefetchTemplates`, `prefetchSnapshots`. The shared
+`ledgerKeys` query-key factory is also exported for advanced cache seeding.
+It now requires the resolved scope as its first argument, for example
+`ledgerKeys.balances(client.cacheScope, 42)` or `ledgerKeys.all(client.cacheScope)`.
+Unscoped keys from earlier versions no longer match hooks or prefetch helpers.
+
+### Admin cache ownership and identity changes
+
+`LedgerClientConfig` / `LedgerProviderConfig` accept an optional
+`cacheScope: { backend: string; identity: string }`. Both IDs must be non-empty
+and non-secret: never use API keys, access tokens, cookie values, or credentials
+embedded in URLs. Query keys and dehydrated state are observable by the host.
+The SDK rejects a known `apiKey` copied into scope, but cannot recognize every
+secret a host might supply. Scope is cache partitioning, not authorization.
+
+- **Default:** every constructed client gets a stable, opaque instance scope.
+  A provider retains its client while `baseUrl`, `apiKey`, and the `fetch`
+  reference are unchanged. Observable configuration changes create a new
+  client/scope; separately mounted providers do not share data even if their
+  configuration is equal. Keep custom `fetch` references stable. Construct a
+  new client instead of mutating its original configuration object.
+- **Explicit scope:** equal logical backend + identity IDs intentionally share
+  data, including between server and browser clients. The host asserts that
+  these IDs represent the same backend, principal and permission revision.
+  If an API key changes while the explicit identity stays the same, the SDK
+  continues sharing that cache; it cannot infer the real principal from a key.
+- **Hidden BFF cookies:** changing a cookie behind an unchanged URL/config is
+  not observable by the SDK. On login, logout, account/tenant switch or permission
+  changes, the host must change the non-secret scope or remount the provider
+  with a new QueryClient. Rerendering the same configuration is insufficient.
+- **Identity boundaries:** provider scope changes reset local child/mutation
+  state. In-flight old requests can finish, but their cache writes, optimistic
+  rollback and invalidation stay in the original scope. An injected QueryClient
+  can retain old entries; hosts that need to discard them on logout should
+  remove them or replace that QueryClient. A scope does not purge memory.
+
+Server prefetch helpers take their scope from the supplied client automatically.
+SSR hydration across separate clients requires an explicit matching scope;
+default instance scopes intentionally do not match. Create server QueryClients
+per request and dehydrate only data authorized for the response's identity.
+
+### Bundled Next.js dashboard deployment
+
+The repository's `web/` host now requires **`LEDGER_CACHE_BACKEND_ID` in
+production**, in addition to its existing backend/auth configuration. Set a
+stable, public logical ID such as `production-ledger-east`; change it when
+switching the actual backend. Never put an internal URL or credential in this
+value. Development falls back to `local-ledger`. This setting is resolved at
+request time, so `next build` does not require deployment secrets or this ID.
+
+The host's server-only `getDashboardCacheScope()` verifies the session cookie
+before deriving `operator-session:<expiresAtMs>` from its public expiry.
+Missing, invalid, or expired sessions use `anonymous`; auth-off development
+uses `development-open`. The existing signed token format has no session nonce:
+minting at the same millisecond produces the same token and cache identity.
+This identifies the existing session boundary, not every individual login event.
+Token/signature/key values and private backend URLs are never included in scope.
+
+The async root layout reads request cookies and passes the scope to the client
+provider; both prefetched pages resolve the same scope. The existing login and
+logout `router.refresh()` updates that prop and resets the provider's scoped
+subtree even when the root layout remains mounted. Cookie access makes pages
+under the root layout dynamic. The host still uses TanStack Query's default
+stale time, so hydrated data appears immediately and may revalidate in the
+background. Authentication continues to be enforced by the proxy and BFF.
+
+There is no `prefetchBookings` / `prefetchDeposits` / `prefetchWithdrawals` helper.
+These hooks first resolve a classification UID from `listClassifications(true)`,
+then key the booking request with that UID. A host prefetching them must perform
+those two steps and seed the matching scoped key explicitly.
 
 ## Theming
 
@@ -333,6 +426,7 @@ key is configured — the backend enforces auth on reads too.
 |-------|------|-------|
 | `baseUrl` | `string` | Ledger API origin, e.g. `https://ledger.example.com` |
 | `apiKey?` | `string` | Sent as Bearer token on every request. Server-side use only — never hand it to a browser `LedgerProvider`; route browser traffic through a same-origin BFF proxy instead |
+| `cacheScope?` | `LedgerCacheScope` | Non-secret `{ backend, identity }` shared explicitly for SSR hydration; omitted means an isolated client-instance scope. Update identity at authentication/permission boundaries |
 | `fetch?` | `typeof fetch` | Override for server use / tests. **Must be a stable reference** (module-level or `useCallback`'d) — `LedgerProvider` keys its client memo on this field, so an inline arrow rebuilds the client every render |
 
 ### `ApiRequestError`
@@ -355,8 +449,8 @@ dedicated hook (call these via `useLedgerClient()`):
 | Journals | `listJournals({cursor?, limit?})`, `getJournal(id)`, `postJournal(body)`, `postTemplateJournal(body)`, `reverseJournal(id, reason)` |
 | Entries | `listEntries({holder?, currency_uid?, cursor?, limit?})` |
 | Balances | `getBalances(holder)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyUid)` |
-| Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount)`, `settlePartialReservation(id, amount, idempotencyKey)`, `finalizeReservationSettlement(id)`, `releaseReservation(id)` |
-| Bookings | `createBooking(CreateBookingBody)`, `transitionBooking(id, TransitionBookingBody)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
+| Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount, idempotencyKey)`, `settlePartialReservation(id, amount, idempotencyKey)`, `finalizeReservationSettlement(id, idempotencyKey)`, `releaseReservation(id, idempotencyKey)` |
+| Bookings | `createBooking(body)`, `transitionBooking(id, body, idempotencyKey)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
 | Deposit address (admin) | `getDepositAddress(holder)`, `ensureDepositAddress(holder)` |
 | Deposit reviews | `listDepositReviews({cursor?, limit?})`, `approveDepositReview(uid)`, `rejectDepositReview(uid, reason)` |
 | Events | `getEvent(id)`, `listEvents({classification_code?, booking_uid?, to_status?, cursor?, limit?})` |
@@ -367,13 +461,74 @@ dedicated hook (call these via `useLedgerClient()`):
 | Reconciliation | `reconcileGlobal()`, `reconcileAccount(holder, currencyUid)` |
 | Snapshots | `listSnapshots({holder?, currency_uid?, start?, end?})` |
 
+`settleReservation` changes a hold; it does not post a charge. The Go facade
+`Service.Capture` has no REST or SDK equivalent. Products expose their own
+authorized server use case when they need atomic consumption; never split
+settlement and the charge into independent browser requests.
+
+### Numeric holders and host identity mapping
+
+The numeric admin SDK supports exactly representable integers from
+`-9007199254740991` to `9007199254740991`. Request holders are checked before
+fetch, and successful holder-bearing responses before they are returned.
+`createServerLedgerClient` uses the same checks. Failure is a `RangeError` with
+`name: "UnsafeHolderError"`, `code: "LEDGER_UNSAFE_HOLDER"` and a `location`;
+there is no exported error constructor to import. A rejected response can follow
+a committed mutation: retain its original idempotency key for reconciliation.
+
+Go/HTTP holders remain int64/numeric; the SDK does not promise the entire int64
+range. Map new external string identities to stable safe holder IDs in an
+authoritative host store. Never truncate, hash or coerce a large ID to make it
+fit, or remap existing ledger accounts silently. Existing large holders require
+an int64-capable host backend or a separately versioned string-wire integration.
+Negative system holders and zero sentinels retain endpoint-specific rules.
+Amounts stay decimal strings; actor IDs and arbitrary metadata are not covered
+by the holder boundary.
+
+### Mutation bodies and preview amounts
+
+Mutation JSON inputs derive from generated OpenAPI operation bodies. Derive host
+parameter types from the public methods rather than copying DTOs:
+
+```ts
+import type { LedgerClient } from "@azex/ledger-react/headless";
+
+type BookingCreate = Parameters<LedgerClient["createBooking"]>[0];
+type BookingTransition = Parameters<LedgerClient["transitionBooking"]>[1];
+type TemplatePreview = Parameters<LedgerClient["previewTemplate"]>[1];
+
+const preview: TemplatePreview = {
+  holder_id: 42,
+  currency_uid: "currency-uid",
+  amounts: { gross: "100.00", fee: "2.50" },
+};
+```
+
+Booking metadata values must be strings. Legacy exported `CreateBookingBody`
+and `TransitionBookingBody` remain available, but their wider metadata types
+are not the client input contract. `transitionBooking` still requires its third
+key argument, carried by `Idempotency-Key`; the body omits that duplicate key.
+Reservation settlement/release/finalization keys likewise remain required.
+`createReservation` uses the generated `ReserveInput`: `expires_in_sec` is numeric
+seconds and `amount` is a decimal string, not a JavaScript amount calculation.
+
+Preview custom amounts belong inside `amounts`. A single string `amount`
+shorthand is normalized into `amounts: { amount }`; arbitrary flattened custom
+fields are unsupported. Both forms together, or neither, reject asynchronously
+with `TypeError` before fetch. The union type does not catch all mixed structural
+assignments. These types are not a general runtime validator for JavaScript
+callers; the server continues to validate the wire input. See the
+[migration notes](BREAKING.md#ledgerclientpreviewtemplate-custom-amounts-belong-in-amounts).
+
 ## Provider
 
 ### `<LedgerProvider config={LedgerProviderConfig}>`
 
-Builds the client (memoized on `baseUrl`/`apiKey`/`fetch`), provides it via
+Builds the client (memoized on request configuration and explicit scope), provides it via
 context, mounts a `QueryClientProvider`, and renders the `.ledger-root`
-theming wrapper.
+theming wrapper. A scope change remounts its context subtree to reset local
+form/preview/mutation state; retained host QueryClient entries remain isolated
+under their old scopes.
 
 ### `LedgerProviderConfig` (extends `LedgerClientConfig`)
 
@@ -407,7 +562,7 @@ hooks gate on `holder !== 0`, never `holder > 0`.
 
 The exported wrapper itself, for building custom mutations with the same
 invalidation behavior. `invalidateKeys` are bare namespace segments (e.g.
-`["journals"]`), auto-prefixed under `["ledger", ...]`:
+`["journals"]`), auto-prefixed under `["ledger", client.cacheScope, ...]`:
 
 ```ts
 const mutation = useLedgerMutation((body) => client.postJournal(body), ["journals"]);
@@ -520,7 +675,7 @@ invalidates its own namespace only (metadata changes don't move balances).
 | `useTemplates` | `(activeOnly?)` | `GET /api/v1/templates` |
 | `useCreateTemplate` | `()` — body `{code, name, journal_type_uid, lines[]}` | `POST /api/v1/templates` |
 | `useDeactivateTemplate` | `()` — variables `id` | `POST /api/v1/templates/{uid}/deactivate` |
-| `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_uid, ...amounts}` | `POST /api/v1/templates/{code}/preview` (returns `PreviewResult`, no invalidation — read-only preview) |
+| `usePreviewTemplate` | `()` — variables `{code, holder_id, currency_uid, amount}` (single decimal string) | `POST /api/v1/templates/{code}/preview`; client sends canonical `amounts: { amount }`. For custom multi-amount previews call `client.previewTemplate` directly; no invalidation — read-only preview |
 | `useCurrencies` | `(activeOnly?)` | `GET /api/v1/currencies` |
 | `useCreateCurrency` | `()` — body `{code, name, exponent}` | `POST /api/v1/currencies` |
 | `useDeactivateCurrency` | `()` — variables `id` | `POST /api/v1/currencies/{uid}/deactivate` |
@@ -744,23 +899,25 @@ for query keys — hooks and prefetch helpers both build keys here, so they can
 never drift (drift = silent hydration miss + client refetch).
 
 ```ts
-ledgerKeys.health()                              // ["ledger","health"]
-ledgerKeys.systemBalances()                      // ["ledger","system-balances"]
-ledgerKeys.journals(limit)                       // ["ledger","journals",limit]
-ledgerKeys.journal(id)                           // ["ledger","journal",id]
-ledgerKeys.entries(params)                       // ["ledger","entries",params]
-ledgerKeys.balances(holder)                      // ["ledger","balances",holder]
-ledgerKeys.balanceBreakdown(holder, currency)    // ["ledger","balances",holder,currency,"breakdown"]
-ledgerKeys.balancesByCurrency(holder, currency)  // ["ledger","balances",holder,currency]
-ledgerKeys.reservations(params)                  // ["ledger","reservations",params]
-ledgerKeys.snapshots(params)                     // ["ledger","snapshots",params]
-ledgerKeys.classifications(activeOnly)           // ["ledger","classifications",activeOnly]
-ledgerKeys.journalTypes(activeOnly)              // ["ledger","journal-types",activeOnly]
-ledgerKeys.templates(activeOnly)                 // ["ledger","templates",activeOnly]
-ledgerKeys.currencies(activeOnly)                // ["ledger","currencies",activeOnly]
-ledgerKeys.bookings(code, params)                // ["ledger","bookings",code,params] -- also used by useSweeps (code="sweep")
-ledgerKeys.depositAddress(holder)                // ["ledger","deposit-address",holder]
-ledgerKeys.depositReviews(limit)                 // ["ledger","deposit-reviews",limit]
+const scope = client.cacheScope; // resolved LedgerQueryScope
+ledgerKeys.all(scope)                                       // ["ledger",scope]
+ledgerKeys.health(scope)                                    // ["ledger",scope,"health"]
+ledgerKeys.systemBalances(scope)                            // ["ledger",scope,"system-balances"]
+ledgerKeys.journals(scope, limit)                           // ["ledger",scope,"journals",limit]
+ledgerKeys.journal(scope, id)                               // ["ledger",scope,"journal",id]
+ledgerKeys.entries(scope, params)                           // ["ledger",scope,"entries",params]
+ledgerKeys.balances(scope, holder)                          // ["ledger",scope,"balances",holder]
+ledgerKeys.balanceBreakdown(scope, holder, currency)        // ["ledger",scope,"balances",holder,currency,"breakdown"]
+ledgerKeys.balancesByCurrency(scope, holder, currency)      // ["ledger",scope,"balances",holder,currency]
+ledgerKeys.reservations(scope, params)                      // ["ledger",scope,"reservations",params]
+ledgerKeys.snapshots(scope, params)                         // ["ledger",scope,"snapshots",params]
+ledgerKeys.classifications(scope, activeOnly)               // ["ledger",scope,"classifications",activeOnly]
+ledgerKeys.journalTypes(scope, activeOnly)                  // ["ledger",scope,"journal-types",activeOnly]
+ledgerKeys.templates(scope, activeOnly)                     // ["ledger",scope,"templates",activeOnly]
+ledgerKeys.currencies(scope, activeOnly)                    // ["ledger",scope,"currencies",activeOnly]
+ledgerKeys.bookings(scope, code, params)                    // ["ledger",scope,"bookings",code,params] -- also used by useSweeps (code="sweep")
+ledgerKeys.depositAddress(scope, holder)                    // ["ledger",scope,"deposit-address",holder]
+ledgerKeys.depositReviews(scope, limit)                     // ["ledger",scope,"deposit-reviews",limit]
 ```
 
 ## Domain types

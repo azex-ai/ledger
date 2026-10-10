@@ -4,6 +4,8 @@
 
 审阅基线：`97e33362abd436c072114ab863079ac65a78fad1`。输入为 [架构审查](../audits/2026-10-10-architecture-review/README.md)、[库消费审查](../audits/2026-10-10-architecture-review/library.md) 及既有 [RateQuoter 决策](../plans/2026-09-07-rate-quoter-and-exchange.md)。输出是宿主集成边界与验收场景；实现交接给宿主 backend，账本维护者审查入账契约；本 ADR 的核验记录见 [第 16 轮报告](../plans/iteration-reports/16.md)。未出现新的全局规则需求，Memory 为 no-op。
 
+26-10-10 接入文档同步：保留上述审阅基线，以下当前保证已同步 Ledger20 的 available Exchange 校验、Capture 与估值示例；外部市场执行仍为待实施设计。
+
 ## 决策与当前保证
 
 继续用 Currency 表示可互换、可计量单位，用 Classification 表示权属与余额用途。每种 Currency 保留原始数量并独立借贷平衡。兑换连接两种货币的账务腿，USD 只作为可选估值基准，不要求 A→B 实际经过 USD。TigerBeetle 的官方兑换示例同样使用各自币种内的账户转移，并把两腿原子关联；这是对建模边界的参照，不是更换本项目引擎的建议。[官方兑换建模](https://docs.tigerbeetle.com/coding/recipes/currency-exchange/)
@@ -15,11 +17,11 @@
 | 内部兑换 | `Service.Exchange` 消费已解析的 FixedRate；同事务完成 reserve、settle 和两条 journal；同 key 改 quote 冲突 | 继续服务内部钱包固定兑换；不把它改名或包装为已经完成外部成交 |
 | 市场报价 | 当前没有数量相关报价接口 | 先在宿主消费方定义契约，再接官方 adapter；出现第二个真实消费者后再判断是否抽成可选模块 |
 | 外部执行 | 当前 Exchange 不调用 venue、不广播链上交易 | 宿主负责提交、回执、最终性、已提交操作恢复；数据库事务之外执行 |
-| USD valuation | 固定换算工具可计算数值，但不构成完整持仓估值服务 | 宿主读模型返回估值时点、价格来源、有效性和覆盖范围；不能据此授予兑换或提现权 |
+| USD valuation | [valuation 示例](../../examples/valuation) 展示保留原币数量的宿主读模型；不是 core 估值 API | 返回估值时点、价格来源、有效性和覆盖范围；不能据此授予兑换或提现权 |
 
-当前源码依据为 [fixed_rate.go](../../core/fixed_rate.go)、[conversion.go](../../core/conversion.go)、[exchange.go](../../exchange.go)。单个 `ConversionQuote.Validate` 不校验 journal 真正移动了哪些金额；Exchange 另行检查两腿 holder 净变化。基线检查范围是全部 role-bearing 分类，不应解释成对任意模板都保证只扣 available。`FundingUID` 核验引用 journal 存在、包含同 holder 的 source currency entry，但不证明一笔充值只被兑换一次、金额尚未被使用或该 entry 必然增加余额；这些业务约束由宿主维护。
+当前源码依据为 [fixed_rate.go](../../core/fixed_rate.go)、[conversion.go](../../core/conversion.go)、[exchange.go](../../exchange.go)。单个 `ConversionQuote.Validate` 不校验 journal 真正移动了哪些金额；Exchange 检查 source / target 腿的 available 净变化分别为 `-Quantity` / `+Quote.TargetAmount`，其他用户分类各自净变化必须为零，不能用 pending、locked、memo 抵消错误的 available 数量或互相搬移。每腿仅能触及该币种及 holder / 系统对手方。`FundingUID` 核验引用 journal 存在、包含同 holder 的 source currency entry，但不证明一笔充值只被兑换一次、金额尚未被使用或该 entry 必然增加余额；这些业务约束由宿主维护。
 
-`Settle` 只解除 reservation，不生成扣账分录。宿主需要原子组合时使用 `RunInTx`，错误必须向 callback 外传播；没有隐式 savepoint。当前 Exchange 的普通事务入账为 `AuthStatusUnsignedTxMode`。需要可验签余额的宿主必须另外设计交易外授权与交易内 `PostAuthorized` 的组合；本 ADR 不把该能力记为 Exchange 已支持。
+`Settle` 只处理 reservation，不生成扣账分录。现有 Go-only `Service.Capture` 原子组合 settlement 与扣账，拒绝任何用户非 available 分录；用法见 [credits-topup](../../examples/credits-topup)。Capture / Exchange 加入调用者 `RunInTx` 时，错误必须向 callback 外传播；没有隐式 savepoint。普通事务入账为 `AuthStatusUnsignedTxMode`。需要 signed journal 时，沿用 [signed-capture](../../examples/signed-capture) 的交易外授权/验证与交易内 `PostAuthorized` 组合；unsigned discharge 仍让 verified reserve 保守保留原 hold 至到期，不能解释为完整 signed 资金生命周期或 Exchange 已支持 signed 组合。
 
 ## 五个职责与交接数据
 
