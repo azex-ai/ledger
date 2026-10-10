@@ -11,7 +11,7 @@
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
 | 7 | 两种 skin 的 holder 输入校验 | 评审通过，待集成 | 0c3138d / codex/ledger20-t07 | T1 PASS；381 tests/build/types/codegen |
-| 8 | 管理端缓存按实例与身份隔离 | 评审通过，待集成 | 1f02131 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types；独立域/root PASS；CI已接线 |
+| 8 | 管理端缓存按实例与身份隔离 | 已集成 | 1f02131 → 43b5ff4 | SDK/host tests；独立域/root PASS；完整root race |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 实施中 | BASE 1f02131 / codex/ledger20-t09 | 待验收 |
 | 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
@@ -47,3 +47,5 @@
 - 第十一轮整合 `c3536221` 已推送；完整 root race PASS（root 124.382s、postgres 303.172s、service 126.353s），Exchange 与 Capture 在同一基线通过。
 
 - 第十八轮整合 `50b52c66` 已推送；完整 root race PASS（root151.064s、postgres296.455s、service149.060s）。生产依赖 audit0，开发工具链残留仍见 dependencies.md。
+
+- 第八轮整合 `43b5ff4a` 已推送；完整 root race PASS（root141.844s、postgres303.981s、service157.987s），cache host tests 已接入 frontend CI。
