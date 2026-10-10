@@ -52,6 +52,27 @@ WITH page_journals AS (
       AND (sqlc.arg(cursor_id)::bigint = 0 OR j.id < sqlc.arg(cursor_id)::bigint)
     ORDER BY j.id DESC
     LIMIT sqlc.arg(page_limit)::bigint
+),
+-- How many distinct user-side holders (account_holder > 0, any
+-- classification) each page journal has entries for. conversion_quotes is
+-- journal-level metadata with no holder attribution, while the rows below
+-- are filtered to holder $1: on a journal that charges several users (a
+-- batch fee journal), every quote in it belongs to SOME holder and nothing
+-- says which. The store shows quotes only when this is 1 -- the journal is
+-- this holder's alone -- and otherwise sets quotes_omitted (2026-10-09
+-- second opinion, Major 2: each holder used to see everyone's quotes).
+--
+-- A correlated subquery per page journal, not a join + GROUP BY: it pins the
+-- plan to one idx_entries_journal lookup per journal on the page. The join
+-- form let the planner hash-join the whole of journal_entries, which made
+-- page one's cost track the table instead of the page
+-- (TestListHolderTransactions_PageCostDoesNotGrowWithTheTable).
+page_user_holders AS (
+    SELECT pj.id AS journal_id,
+           (SELECT COUNT(DISTINCT je.account_holder)
+              FROM journal_entries je
+             WHERE je.journal_id = pj.id AND je.account_holder > 0) AS user_holders
+    FROM page_journals pj
 )
 SELECT
     j.id   AS journal_id,
@@ -98,9 +119,14 @@ SELECT
     -- Encoded core.ConversionQuote list (core.ConversionQuotesMetadataKey);
     -- decoded by the store. JournalInput.Validate rejected anything under
     -- this key that does not decode, so a decode failure here is an error.
-    (COALESCE(j.metadata->>'conversion_quotes', ''))::text AS conversion_quotes
+    (COALESCE(j.metadata->>'conversion_quotes', ''))::text AS conversion_quotes,
+    -- LEFT JOIN + COALESCE: a journal with no user-side entry at all (only
+    -- reachable for a non-positive holder) counts 0, which the store treats
+    -- like "more than one": not this holder's alone, so no quotes.
+    (COALESCE(puh.user_holders, 0))::bigint AS user_holders
 FROM journal_entries je
 JOIN page_journals pj ON pj.id = je.journal_id
+LEFT JOIN page_user_holders puh ON puh.journal_id = je.journal_id
 JOIN journals j        ON j.id = je.journal_id
 LEFT JOIN journals rj  ON rj.id = j.reversal_of
 JOIN journal_types jt  ON jt.id = j.journal_type_id
@@ -108,7 +134,7 @@ JOIN classifications c ON c.id = je.classification_id
 JOIN currencies cur    ON cur.id = je.currency_id
 WHERE je.account_holder = $1
   AND c.balance_role NOT IN ('', 'memo')
-GROUP BY j.id, j.uid, jt.id, cur.id, rj.uid
+GROUP BY j.id, j.uid, jt.id, cur.id, rj.uid, puh.user_holders
 ORDER BY j.id DESC, cur.code;
 
 -- name: ListHolderHolds :many

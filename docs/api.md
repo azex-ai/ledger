@@ -1671,6 +1671,15 @@ INPUT_TOKEN × 0.002 = 20 CREDITS"). The configuration version, rounding mode
 and unit exponents are audit detail and stay on the admin journal surface
 (`GET /journals/{uid}` metadata).
 
+Quotes are journal-level metadata and name no holder, while each row is one
+holder's slice of the journal. They are therefore returned only when every
+user-side entry of the journal (`account_holder > 0`) belongs to the
+token's holder. On a journal shared with other holders (a batch charge),
+`quotes` is `[]` and `quotes_omitted` is `true`: a breakdown exists but is
+withheld, which a client shows as "breakdown unavailable" rather than as a
+row with no conversion. `quotes_omitted` is always present and `false`
+otherwise.
+
 Query params: `cursor`, `limit` (max 100).
 
 Status codes: `200`, `401`.

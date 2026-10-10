@@ -33,3 +33,23 @@ export function describeQuote(quote: WalletTransactionQuote, unitLabels?: UnitLa
 export function describeQuotes(quotes: readonly WalletTransactionQuote[], unitLabels?: UnitLabels): string {
   return quotes.map((q) => describeQuote(q, unitLabels)).join("; ");
 }
+
+/** Default wording for a row whose quotes the server withheld (`quotes_omitted`). */
+export const DEFAULT_QUOTES_OMITTED_LABEL = "Breakdown unavailable";
+
+/**
+ * The secondary line under a statement row, shared by both skins: the quotes
+ * when there are any; `quotesOmittedLabel` when the server withheld them
+ * because the journal is shared with other holders (`quotes_omitted`); null
+ * when the row involved no conversion. `?.` / `=== true` tolerate a server
+ * from before either field existed (api-contract.md §8).
+ */
+export function describeQuoteLine(
+  tx: { quotes?: readonly WalletTransactionQuote[]; quotes_omitted?: boolean },
+  unitLabels?: UnitLabels,
+  quotesOmittedLabel: string = DEFAULT_QUOTES_OMITTED_LABEL,
+): string | null {
+  if ((tx.quotes?.length ?? 0) > 0) return describeQuotes(tx.quotes ?? [], unitLabels);
+  if (tx.quotes_omitted === true) return quotesOmittedLabel;
+  return null;
+}

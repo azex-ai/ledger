@@ -56,7 +56,18 @@ type HolderTransaction struct {
 	// charge's "10,000 input tokens at 0.002"). Empty when the journal
 	// recorded none. The presenter renders these; the ledger only carries
 	// what was applied.
+	//
+	// Quotes are journal-level metadata with no holder attribution, so they
+	// are shown only when every user-side entry of the journal belongs to
+	// this holder. On a journal that moves several users' money (a batch fee
+	// journal) Quotes is empty and QuotesOmitted is true.
 	Quotes []ConversionQuote `json:"quotes"`
+	// QuotesOmitted reports that the journal DID record conversion quotes
+	// but they are withheld from this holder because the journal also
+	// carries other holders' entries and a quote does not say whose line it
+	// explains. It distinguishes "breakdown unavailable" from "no conversion
+	// happened" (empty Quotes, QuotesOmitted false).
+	QuotesOmitted bool `json:"quotes_omitted"`
 }
 
 // HolderMemoMetadataKey is the journal metadata key the holder transaction

@@ -149,6 +149,11 @@ type holderTransactionResponse struct {
 	// INPUT_TOKEN at 0.002 = 20 CREDITS". Always present, empty when the
 	// journal recorded none.
 	Quotes []holderQuoteResponse `json:"quotes"`
+	// QuotesOmitted is true when the journal recorded quotes that are
+	// withheld because it also carries other holders' entries; quotes is
+	// then empty. A client shows "breakdown unavailable" instead of
+	// implying the row involved no conversion. Always present.
+	QuotesOmitted bool `json:"quotes_omitted"`
 }
 
 // holderQuoteResponse is the user-explainable part of a core.ConversionQuote:
@@ -320,6 +325,7 @@ func (hs *holderSurface) handleHolderTransactions(w http.ResponseWriter, r *http
 			ReversalOfUID: it.ReversalOfUID,
 			Memo:          it.Memo,
 			Quotes:        quotes,
+			QuotesOmitted: it.QuotesOmitted,
 		}
 	}
 	httpx.OK(w, holderTransactionsPage{List: out, NextCursor: cursorPtr(next)})

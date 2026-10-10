@@ -21,6 +21,7 @@ export function WalletPanel({
   actions,
   kindLabels,
   unitLabels,
+  quotesOmittedLabel,
   renderItem,
   limit,
   slots,
@@ -34,6 +35,7 @@ export function WalletPanel({
           <TransactionList
             kindLabels={kindLabels}
             unitLabels={unitLabels}
+            quotesOmittedLabel={quotesOmittedLabel}
             renderItem={renderItem}
             limit={limit}
           />

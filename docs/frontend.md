@@ -697,6 +697,13 @@ key, so holder A's cached balances can never be served to holder B.
   to whole credits. Complete quotes are separated by semicolons and wrap on
   narrow screens. A host drawing its own rows imports `describeQuote` /
   `describeQuotes` from the headless entry to say it the same way.
+- A row whose journal is shared with other holders carries `quotes: []` and
+  `quotes_omitted: true`: the server withholds quotes it cannot attribute to
+  this holder. Both skins then show `quotesOmittedLabel` (default
+  `"Breakdown unavailable"`, a `TransactionList` / `WalletPanel` prop) on the
+  quote line, and nothing on a row that simply had no conversion.
+  `describeQuoteLine(tx, unitLabels, quotesOmittedLabel)` from the headless
+  entry returns that same line (quotes, the label, or `null`) for custom rows.
 - Every component ships loading skeletons, sanitized error states, and empty
   states; raw upstream errors go to `onError`, never the DOM.
 

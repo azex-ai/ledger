@@ -149,8 +149,21 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 		// deliberately NOT kept in the chain (%v, not %w): it would map the
 		// failure to 10001 and tell the holder to fix a request that was
 		// fine.
+		//
+		// Quotes are journal-level and carry no holder, while this row is
+		// one holder's slice of the journal. Only a journal whose user-side
+		// entries all belong to this holder (UserHolders == 1) can show
+		// them without showing another holder's usage and prices. Any
+		// other journal that recorded quotes gets QuotesOmitted instead of
+		// an empty list that would read as "no conversion happened"
+		// (working-agreements §3: a degradation must leave a trace). Its
+		// quotes are not decoded at all -- they are not this holder's to
+		// read, and a corrupt one must not fail a page that cannot show it.
 		var quotes []core.ConversionQuote
-		if r.ConversionQuotes != "" {
+		quotesOmitted := false
+		if r.ConversionQuotes != "" && r.UserHolders != 1 {
+			quotesOmitted = true
+		} else if r.ConversionQuotes != "" {
 			quotes, err = core.DecodeConversionQuotes(r.ConversionQuotes)
 			if err != nil {
 				err = fmt.Errorf("postgres: list holder transactions: journal %s: %w: %v",
@@ -171,6 +184,7 @@ func (s *LedgerStore) ListHolderTransactions(ctx context.Context, holder int64, 
 			ReversalOfUID: r.ReversalOfUid,
 			Memo:          r.Memo,
 			Quotes:        quotes,
+			QuotesOmitted: quotesOmitted,
 		})
 	}
 

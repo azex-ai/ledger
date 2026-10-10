@@ -84,6 +84,14 @@ export interface WalletTransaction {
    * and the `unitLabels` presenter map.
    */
   quotes: WalletTransactionQuote[];
+  /**
+   * True when the journal recorded quotes that are withheld from this holder:
+   * it also carries other holders' entries, and a quote does not say whose
+   * line it explains. `quotes` is then empty. `TransactionList` shows the
+   * neutral `quotesOmittedLabel` ("Breakdown unavailable") instead of
+   * implying no conversion happened.
+   */
+  quotes_omitted: boolean;
 }
 
 /** One applied conversion on a `WalletTransaction`. All numbers are decimal strings. */

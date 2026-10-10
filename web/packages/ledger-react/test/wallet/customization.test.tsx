@@ -35,6 +35,7 @@ const transaction: WalletTransaction = {
   reversal_of_uid: "",
   memo: "Credits purchase",
   quotes: [],
+  quotes_omitted: false,
 };
 
 function ok<T>(data: T) {

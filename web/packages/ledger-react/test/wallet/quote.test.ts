@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { describeQuote, describeQuotes } from "../../src/wallet/quote";
+import { describeQuote, describeQuoteLine, describeQuotes } from "../../src/wallet/quote";
 import type { WalletTransactionQuote } from "../../src/wallet/client";
 
 const inputTokens: WalletTransactionQuote = {
@@ -60,5 +60,23 @@ describe("describeQuote", () => {
       }),
     ).toBe("10000 input tokens × 0.002 → 20 credits; 2425 output tokens × 0.005 → 12.125 credits");
     expect(describeQuotes([])).toBe("");
+  });
+});
+
+describe("describeQuoteLine", () => {
+  test("quotes win when present", () => {
+    expect(describeQuoteLine({ quotes: [inputTokens], quotes_omitted: false })).toBe(
+      "10000 INPUT_TOKEN × 0.002 → 20 CREDITS",
+    );
+  });
+
+  test("a withheld breakdown gets the neutral label, overridable by the host", () => {
+    expect(describeQuoteLine({ quotes: [], quotes_omitted: true })).toBe("Breakdown unavailable");
+    expect(describeQuoteLine({ quotes: [], quotes_omitted: true }, undefined, "No details")).toBe("No details");
+  });
+
+  test("no conversion is no line, including from a server that predates both fields", () => {
+    expect(describeQuoteLine({ quotes: [], quotes_omitted: false })).toBeNull();
+    expect(describeQuoteLine({})).toBeNull();
   });
 });

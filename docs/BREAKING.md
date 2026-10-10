@@ -31,6 +31,49 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `GET /holder/transactions` / `core.HolderTransaction.QuotesOmitted`: quotes only on a single-holder journal
+
+**Landed (2026-10-10 fix wave 2, second opinion Major 2).** A statement row's
+`quotes` used to be the journal's whole `conversion_quotes` metadata, while
+the row itself is filtered to one holder -- so on a journal with user-side
+entries for several holders (a batch charge) each holder saw every holder's
+usage, rates and amounts. `quotes` is now returned only when every user-side
+entry of the journal belongs to the requesting holder; otherwise it is `[]`
+and the new field `quotes_omitted` (`core.HolderTransaction.QuotesOmitted`,
+always on the wire, `false` by default) is `true`. Such a journal's quotes are
+not decoded at all, so a corrupt quote on a shared journal no longer fails the
+page with `core.ErrCorruptData`. `@azex/ledger-react`'s `WalletTransaction`
+gains a required `quotes_omitted: boolean`, both skins render it through the
+new `quotesOmittedLabel` prop (default "Breakdown unavailable"), and the
+headless entry exports `describeQuoteLine` and `DEFAULT_QUOTES_OMITTED_LABEL`.
+
+**What a consumer must do.** A host that posts one journal for several users
+and wants each to see their own breakdown must post one journal per holder.
+A client that rendered "no quotes" as "no conversion" should check
+`quotes_omitted`. TypeScript code that constructs a `WalletTransaction`
+literal (test fixtures, mocks) must add `quotes_omitted`.
+
+### `ledger.ExchangeInput.FundingUID` / `SellTemplateCode` / `BuyTemplateCode`: checked, not trusted
+
+**Landed (2026-10-10 fix wave 2, second opinion Major 1 + security review m-5).**
+`Exchange` now verifies, inside its transaction, what the two rendered FX
+journals did: the sell journal must move the holder's source currency by
+exactly `-Quantity`, the buy journal the target currency by exactly
+`+Quote.TargetAmount` (holder-statement net: role-bearing classifications,
+signed by normal side), and neither may touch the other currency. A template
+override that does anything else -- e.g. `"fx_buy"` on both legs, which used to
+credit the holder twice -- is `core.ErrInvalidInput` and everything rolls back.
+`FundingUID` must be the uid of a journal with an entry for `HolderID` in the
+source currency; a uid that does not exist, belongs to another holder or is in
+another currency is `core.ErrInvalidInput`, refused before any write.
+
+**What a consumer must do.** Pass the deposit *journal* uid as `FundingUID` --
+for a booking-modelled deposit, the confirmed booking's `JournalUID`, not the
+booking uid (`docs/COOKBOOK.md` used to show the booking uid). Custom
+templates must move money in the documented direction. A retry of an exchange
+that originally committed with a funding reference the new check refuses
+fails with `core.ErrInvalidInput` instead of replaying.
+
 ### `core.ConversionQuote.Validate`: `target_amount` must follow from the quote's own rate
 
 **Landed (2026-10-10 fix wave 2, security review m-5).** `Validate` -- and so
