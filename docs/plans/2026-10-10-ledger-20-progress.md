@@ -10,15 +10,15 @@
 | 4 | 输入校验早于 tracing 展开 | 已集成 | cf03361 → 0c9417e | PG race/vet；独立域/root PASS；完整root race |
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
-| 7 | 两种 skin 的 holder 输入校验 | 评审通过，待集成 | 0c3138d / codex/ledger20-t07 | T1 PASS；381 tests/build/types/codegen |
+| 7 | 两种 skin 的 holder 输入校验 | 已集成 | 0c3138d → 8f889dbe |T1 PASS；381 tests/build/types/codegen；完整root race |
 | 8 | 管理端缓存按实例与身份隔离 | 已集成 | 1f02131 → 43b5ff4 | SDK/host tests；独立域/root PASS；完整root race |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 评审通过，待集成 | a9a1298 / codex/ledger20-t09 | T1 PASS；388 tests/build/types/codegen |
 | 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 评审通过，待集成 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet；独立域/root PASS |
-| 14 | credits 消费接入原子 Capture | 评审通过，待集成 | a29d202 / codex/ledger20-t14 | PG race/vet；独立域/root PASS |
-| 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
+| 14 | credits 消费接入原子 Capture | 已集成 | a29d202 → 4eed87c5 |PG race/vet；独立域/root PASS；完整root race |
+| 15 | USD 估值读模型示例 | 已集成 | 3d69a74 → 98d21ee8 |T1 PASS；race/vet/run，覆盖率 94.8%；完整root race |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
@@ -49,3 +49,9 @@
 - 第十八轮整合 `50b52c66` 已推送；完整 root race PASS（root151.064s、postgres296.455s、service149.060s）。生产依赖 audit0，开发工具链残留仍见 dependencies.md。
 
 - 第八轮整合 `43b5ff4a` 已推送；完整 root race PASS（root141.844s、postgres303.981s、service157.987s），cache host tests 已接入 frontend CI。
+
+- 第 7 轮整合 `8f889dbe` 已推送；完整 root race PASS（root 173.277s、postgres 296.913s、service 146.017s）。
+
+- 第 14 轮整合 `4eed87c5` 已推送；完整 root race PASS（root 167.400s、postgres 302.620s、service 159.064s）。
+
+- 第 15 轮整合 `98d21ee8` 已推送；完整 root race PASS（root 139.199s、postgres 298.847s、service 182.947s）。
