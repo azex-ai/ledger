@@ -9,18 +9,18 @@
 | 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
 | 4 | 输入校验早于 tracing 展开 | 评审通过，待集成 | cf03361 / codex/ledger20-t04 | PG race/vet；独立域/root PASS |
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
-| 6 | SDK holder 安全整数边界 | 评审通过，待集成 | 8f52e08 / codex/ledger20-t06 | build/typecheck/346 tests；独立域及root PASS |
+| 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
-| 8 | 管理端缓存按实例与身份隔离 | 待实施 | — | — |
+| 8 | 管理端缓存按实例与身份隔离 | 实施中 | BASE 4df363d / codex/ledger20-t08 | 待验收 |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 实施中 | BASE f13d0ae / codex/ledger20-t11 | 待验收 |
-| 12 | 原子 Capture 门面 | 独立评审中 | d22e40d / codex/ledger20-t12 | Capture/Reader PG race、vet、API/README gates PASS |
+| 12 | 原子 Capture 门面 | 评审通过，待集成 | d22e40d +241905e / codex/ledger20-t12 | PG/API/vet通过；独立域/root PASS；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
-| 17 | 可选 Go modules 独立消费验证 | 待实施 | — | — |
+| 17 | 可选 Go modules 独立消费验证 | 实施中 | BASE 9b09eb5 / codex/ledger20-t17 | 待验收 |
 | 18 | web 生产依赖 advisory 修复 | 评审通过，待集成 | 158135e / codex/ledger20-t18 | T1 PASS；prod audit0，SDK/Next build/typecheck/257 tests |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
@@ -35,3 +35,5 @@
 - 第二轮整合 `7a0f5961759afdf829bddcc6959dc00605c75ea4` 已推送；全 root race 通过（root 133.449s、postgres 287.375s、service 136.863s）。
 
 - 第五轮整合 `1b01b974` 已推送；完整 root race PASS（root 133.825s、postgres 288.004s、service 183.686s）。本轮 SDK 的 build/typecheck/client/codegen 证据单独记录，root Go gate 不替代 frontend 验证。
+
+- 第六轮整合 `4df363d8` 已推送；完整 root race PASS（root 112.806s、postgres 283.516s、service 133.680s）。Task5/6 的client.ts自动合并无冲突；最终frontend回归仍会覆盖组合基线。

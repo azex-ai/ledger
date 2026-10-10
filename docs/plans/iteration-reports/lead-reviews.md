@@ -51,3 +51,5 @@ Task4 域评审收尾：04-review.md 独立静态 PASS，无未决点。沿用�
 范围 `4316088..158135e`。读取全部 manifest diff、解析 lockfile 比较每个版本变更，并读完整 dependencies.md /18.md。40 个版本变化限定在 Next /对应 ESLint、sharp平台与libvips、source-map-js；不存在无关 major 或 force/override。选择官方16.3.8安全补丁，有维护者 release/advisory 和 registry 兼容性证据。干净安装后 production audit0、SDK/Next build/typecheck/257 tests 和良性原生sharp smoke实际通过。
 
 完整audit仍20个开发依赖包条目（含critical），逐项列依赖来源；没有把“dev”当成无风险或完整供应链无漏洞，也没误称baseline静态扫描全绿。该补丁按已冻结Task18生产范围通过，开发工具链后续工作和最终集成基线验证仍应明确保留。
+
+Task12 scoped 文档闭环：独立域席位代码 PASS，提出 1 条 Minor 术语校正。作者 `241905e` 仅改报告两行；主控核对 diff 与余额公式后确认：available 分类账面余额与 GetBalanceBreakdown.available（减 held）明确区分，settlement 复核的是预留额度。无源码变更，未重复测试，T2 通过。
