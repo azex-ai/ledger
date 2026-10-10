@@ -22,8 +22,8 @@
 | 16 | 市场报价与执行扩展 ADR | 已集成 | 8f4c9e5 → c8db20f8 | T1 PASS；文档/来源核实；完整root race |
 | 17 | 可选 Go modules 独立消费验证 | 已集成 | ed37bc4 → 46bc9ccc | T1 PASS；三host及失败传播/CI检查通过；完整root race |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
-| 19 | 库接入与兼容迁移文档 | 评审通过，待集成 | 7dab106 / codex/ledger20-t19 | T1 PASS；Go/TS文档片段编译、API/codegen/link检查 |
-| 20 | 最终集成验收与交付 | 待实施 | — | — |
+| 19 | 库接入与兼容迁移文档 | 已集成 | 7dab106 → 33196e01 | T1 PASS；Go/TS片段编译、API/codegen/link；完整root race |
+| 20 | 最终集成验收与交付 | 实施中 | codex/ledger20-t20 | fixture隔离/时间精度/前端gate修复，全验收与Final待完成 |
 
 ## 执行记录
 
@@ -65,3 +65,5 @@
 - 第 13 轮整合 `06ea1fa0` 已推送；完整 root race PASS（root131.990s、postgres303.096s、service162.721s）。签名示例与既有Capture、Exchange在同一基线验证。
 
 - 第 10 轮整合 `2ff8ceeb` 已推送；完整 root race PASS（root178.427s、postgres311.475s、service149.930s）；配置示例与签名示例同时通过。
+
+- 第 19 轮整合 `33196e01` 已推送；完整 root race PASS（root170.000s、postgres302.578s、service139.334s），文档所引用的两个新示例已在组合基线实际验证。前19轮已集成，Task20进入最后修复/验收。
