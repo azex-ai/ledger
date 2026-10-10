@@ -23,7 +23,7 @@
 | 17 | 可选 Go modules 独立消费验证 | 已集成 | ed37bc4 → 46bc9ccc | T1 PASS；三host及失败传播/CI检查通过；完整root race |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
 | 19 | 库接入与兼容迁移文档 | 已集成 | 7dab106 → 33196e01 | T1 PASS；Go/TS片段编译、API/codegen/link；完整root race |
-| 20 | 最终集成验收与交付 | 本地候选验收完成，待 Final / 集成 | BASE 412d501 / codex/ledger20-t20 | 四 Go modules build/vet/race/lint；SDK 423 + host 8；两 gate 0/0；Go/npm 外部消费；独立 Final 与最终 Linux CI 待完成 |
+| 20 | 最终集成验收与交付 | 已集成 | e3870ff → d9b40a83 | 独立 whole-branch Final / root PASS；四 module 与 frontend/consumers 综合验收；最终集成完整 root race |
 
 ## 执行记录
 
@@ -69,3 +69,5 @@
 - 第 19 轮整合 `33196e01` 已推送；完整 root race PASS（root170.000s、postgres302.578s、service139.334s），文档所引用的两个新示例已在组合基线实际验证。前19轮已集成，Task20进入最后修复/验收。
 
 - 第 20 轮候选在 `412d5019ab63e65e6c268dc9027eb1882eb232aa` 上完成三项收尾：destructive roundtrip 独立 PG cluster、公共 journal 幂等时间按落库微秒比较、前端注释与稳定 key。四 Go modules 的 build/vet/race/lint 通过；完整 root race 墙钟 355.25s（root 142.763s、postgres 348.676s、service 118.244s），EVM 1.383s、R2 4.108s，miniotest 无自身 test files。SDK 50 文件 423 tests、宿主 8 tests、build/types、适用两 gate 0/0、Go 三个仓外 host 和 npm 六个非 Hero 入口消费均通过。生产 audit 0，开发残留 20。详见 [本轮报告](iteration-reports/20.md) 与 [最终候选报告](../audits/2026-10-10-architecture-review/final.md)；提交后的 codegen 漂移检查及冻结 HEAD 由 bus #49 报告记录，独立 Final、集成、Linux CI 和主线推送尚不在本条计数中。
+
+- 第 20 轮整合 `d9b40a83fbdb74d7a741e5ecf95239c06ec2b7c5` 已推送；完整 root race PASS（root 198.110s、postgres 370.515s、service 193.160s），无合并冲突。独立 [Final](iteration-reports/20-review.md) 与 root 第二意见均 PASS，无需 fix wave；冻结提交后的 codegen:check PASS。bus #30–49 均在实际合并后标记 integrated，20 轮全部完成。后续 main 推送的最终 Linux CI 以该提交的 GitHub checks 为准，不用中间分支结果替代。

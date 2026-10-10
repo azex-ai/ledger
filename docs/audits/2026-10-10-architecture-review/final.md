@@ -1,6 +1,6 @@
-# 通用 Ledger：20 轮交付候选验收
+# 通用 Ledger：20 轮交付验收
 
-原始审查基线为 `d00fdebef4199d331787057127cc29a0ecb7cd87`。本报告对应 `codex/ledger20-t20` 的提交候选，Task 20 基线为 `412d5019ab63e65e6c268dc9027eb1882eb232aa`，已包含前 19 轮集成。这里记录实现与本地验证；独立 Final、Task 20 集成、最终 Linux CI 与主线推送由主控另行确认，不以本报告提前宣告完成。
+原始审查基线为 `d00fdebef4199d331787057127cc29a0ecb7cd87`。20 轮改动已全部集成，最后一轮冻结提交为 `e3870ff11b96c42b2bc11e023b9e68558245399f`，集成提交为 `d9b40a83fbdb74d7a741e5ecf95239c06ec2b7c5`。独立 [whole-branch Final](../../plans/iteration-reports/20-review.md) 与主控第二意见均 PASS，无需追加修复波次。这里保留已实际观察的实现、本地验收与集成门禁证据；最终 main 提交的 Linux CI 状态以 GitHub checks 为准。
 
 ## 架构结论
 
@@ -22,7 +22,7 @@
 
 原始 R1–R6 分别由 Task 2、6/7、8、4、5、3 修复；修复前探针保持历史原样，不把其“成功复现缺陷”当作修复通过。具体兼容变化见 [BREAKING](../../BREAKING.md)，各轮完成状态见 [进度](../../plans/2026-10-10-ledger-20-progress.md)。
 
-## 最终候选验证
+## 最终验证
 
 四个 Go module（root、chains/evm、anchors/r2、anchors/r2/internal/miniotest）分别完成 build、vet、uncached race 和 golangci-lint。root `make test` 总耗时 355.25s，其中 postgres 348.676s；EVM 1.383s、R2 4.108s，miniotest 实际执行命令但模块没有独立 test files，R2 suite 实际启动 MinIO。三个仓外 Go consumer 的 tidy/build/run 与 import 边界检查、sqlc-diff、API/文档/workflow 合约检查通过。测试专用 PG 独立 cluster 与微秒幂等回归都有确定性反事实 RED 和修复后 GREEN。详见 [第 20 轮完整命令和结果](../../plans/iteration-reports/20.md)。
 
@@ -41,3 +41,5 @@
 - 本地验证不替代最终 Linux CI 的三条 30 秒 fuzz、真实 anvil E2E 和远程流水线。未执行或未观察完成的项目不标 PASS。
 
 后续优先用真实宿主接入验证已有 Capture / Exchange / signed composition，再根据实际市场执行需求实现 ADR 中的窄接口。无需为“通用”继续扩大核心账本对业务或行情存储的依赖。
+
+第 20 轮实际集成再次执行 uncached root race：root 198.110s、postgres 370.515s、service 193.160s，全部通过。20 轮完整进度与提交可追溯到 [进度表](../../plans/2026-10-10-ledger-20-progress.md)。
