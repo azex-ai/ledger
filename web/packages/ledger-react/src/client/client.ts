@@ -1,4 +1,4 @@
-import type { components } from "./schema";
+import type { components, paths } from "./schema";
 import type {
   ApiError,
   Balance,
@@ -6,7 +6,6 @@ import type {
   BalanceByCurrency,
   Booking,
   Classification,
-  CreateBookingBody,
   Currency,
   DepositAddress,
   Entry,
@@ -26,9 +25,32 @@ import type {
   Reservation,
   Snapshot,
   SystemBalance,
-  TransitionBookingBody,
 } from "./types";
 import { validateRequestHolders, validateResponseHolders } from "./holder-boundary";
+
+// Use each operation's generated JSON body, including inline OpenAPI schemas.
+// If a required wire field is added, scalar adapters below must account for it.
+type JsonPostBody<Path extends keyof paths> = paths[Path] extends {
+  post: { requestBody: { content: { "application/json": infer Body } } };
+} ? Body : never;
+
+// Preserve the existing explicit classification policy: the schema makes these
+// optional for system classifications, but non-system accounts require a role.
+type ClassificationBody = JsonPostBody<"/classifications"> & Required<
+  Pick<JsonPostBody<"/classifications">, "is_system" | "balance_role">
+>;
+
+// The existing scalar key argument is carried in the Idempotency-Key header.
+// It stays required; only its duplicate JSON representation is omitted.
+type TransitionBookingRequest = Omit<JsonPostBody<"/bookings/{uid}/transition">, "idempotency_key">;
+
+// The UI's single-amount convenience input is adapted to the canonical amounts
+// map. It never goes over HTTP as a flattened field.
+type PreviewRequest = JsonPostBody<"/templates/{code}/preview">;
+type SingleAmountPreview = Pick<PreviewRequest, "holder_id" | "currency_uid"> & {
+  amount: PreviewRequest["amounts"][string];
+};
+type PreviewInput = PreviewRequest | SingleAmountPreview;
 
 export class ApiRequestError extends Error {
   constructor(
@@ -204,32 +226,13 @@ export function createLedgerClient(config: LedgerClientConfig) {
     getJournal: (id: string) =>
       request<JournalWithEntries>(`/api/v1/journals/${id}`),
 
-    postJournal: (body: {
-      journal_type_uid: string;
-      idempotency_key: string;
-      entries: Array<{
-        account_holder: number;
-        currency_uid: string;
-        classification_uid: string;
-        entry_type: "debit" | "credit";
-        amount: string;
-      }>;
-      source?: string;
-      metadata?: Record<string, string>;
-    }) =>
+    postJournal: (body: JsonPostBody<"/journals">) =>
       request<Journal>("/api/v1/journals", {
         method: "POST",
         body: JSON.stringify(body),
       }),
 
-    postTemplateJournal: (body: {
-      template_code: string;
-      holder_id: number;
-      currency_uid: string;
-      idempotency_key: string;
-      amounts: Record<string, string>;
-      source?: string;
-    }) =>
+    postTemplateJournal: (body: JsonPostBody<"/journals/template">) =>
       request<Journal>("/api/v1/journals/template", {
         method: "POST",
         body: JSON.stringify(body),
@@ -243,10 +246,10 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // exposes POST /journals/{uid}/reverse-partial, which DOES take an
     // explicit idempotency_key for num=den=1 full reversals — not wired up
     // to this client, out of this fix's scope.)
-    reverseJournal: (id: string, reason: string) =>
+    reverseJournal: (id: string, reason: JsonPostBody<"/journals/{uid}/reverse">["reason"]) =>
       request<Journal>(`/api/v1/journals/${id}/reverse`, {
         method: "POST",
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason } satisfies Omit<JsonPostBody<"/journals/{uid}/reverse">, "idempotency_key">),
         skipIdempotencyKey: true,
       }),
 
@@ -274,13 +277,16 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/balances/${holder}/${currency}/breakdown`,
       ),
 
-    batchBalances: (holderIds: number[], currencyUid: string) =>
+    batchBalances: (
+      holderIds: JsonPostBody<"/balances/batch">["holder_ids"],
+      currencyUid: JsonPostBody<"/balances/batch">["currency_uid"],
+    ) =>
       request<PaginatedResponse<HolderBalances>>("/api/v1/balances/batch", {
         method: "POST",
         body: JSON.stringify({
           holder_ids: holderIds,
           currency_uid: currencyUid,
-        }),
+        } satisfies JsonPostBody<"/balances/batch">),
       }).then((d) => d.list),
 
     // Reservations
@@ -302,45 +308,53 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // idempotencyKey: caller-supplied, stable across retries of the same
     // attempt sequence (api-contract.md §9 — see useLedgerMutation).
-    settleReservation: (id: string, actualAmount: string, idempotencyKey: string) =>
+    settleReservation: (
+      id: string,
+      actualAmount: JsonPostBody<"/reservations/{uid}/settle">["actual_amount"],
+      idempotencyKey: JsonPostBody<"/reservations/{uid}/settle">["idempotency_key"],
+    ) =>
       request<void>(`/api/v1/reservations/${id}/settle`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ actual_amount: actualAmount }),
+        body: JSON.stringify({ actual_amount: actualAmount } satisfies Omit<JsonPostBody<"/reservations/{uid}/settle">, "idempotency_key">),
       }),
 
     // Partial settlement accumulates; idempotency_key is REQUIRED (I-3) — a
     // retried request with the same key replays without double-applying.
     settlePartialReservation: (
       id: string,
-      amount: string,
-      idempotencyKey: string,
+      amount: JsonPostBody<"/reservations/{uid}/settle-partial">["amount"],
+      idempotencyKey: JsonPostBody<"/reservations/{uid}/settle-partial">["idempotency_key"],
     ) =>
       request<void>(`/api/v1/reservations/${id}/settle-partial`, {
         method: "POST",
-        body: JSON.stringify({ amount, idempotency_key: idempotencyKey }),
+        body: JSON.stringify({ amount, idempotency_key: idempotencyKey } satisfies JsonPostBody<"/reservations/{uid}/settle-partial">),
       }),
 
-    finalizeReservationSettlement: (id: string, idempotencyKey: string) =>
+    finalizeReservationSettlement: (id: string, idempotencyKey: JsonPostBody<"/reservations/{uid}/finalize">["idempotency_key"]) =>
       request<void>(`/api/v1/reservations/${id}/finalize`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
       }),
 
-    releaseReservation: (id: string, idempotencyKey: string) =>
+    releaseReservation: (id: string, idempotencyKey: JsonPostBody<"/reservations/{uid}/release">["idempotency_key"]) =>
       request<void>(`/api/v1/reservations/${id}/release`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
       }),
 
     // Bookings (unified — replaces v1 deposits + withdrawals)
-    createBooking: (body: CreateBookingBody) =>
+    createBooking: (body: JsonPostBody<"/bookings">) =>
       request<Booking>("/api/v1/bookings", {
         method: "POST",
         body: JSON.stringify(body),
       }),
 
-    transitionBooking: (id: string, body: TransitionBookingBody, idempotencyKey: string) =>
+    transitionBooking: (
+      id: string,
+      body: TransitionBookingRequest,
+      idempotencyKey: JsonPostBody<"/bookings/{uid}/transition">["idempotency_key"],
+    ) =>
       request<Event>(`/api/v1/bookings/${id}/transition`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
@@ -380,11 +394,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
 
     // Idempotent: no-op returning the current booking if already failed.
     // No journal is ever posted.
-    rejectDepositReview: (uid: string, reason: string, idempotencyKey: string) =>
+    rejectDepositReview: (uid: string, reason: JsonPostBody<"/deposits/{uid}/review/reject">["reason"], idempotencyKey: string) =>
       request<Booking>(`/api/v1/deposits/${uid}/review/reject`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason } satisfies JsonPostBody<"/deposits/{uid}/review/reject">),
       }),
 
     // Events (outbound)
@@ -405,16 +419,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
       ).then((d) => d.list),
 
     createClassification: (
-      body: {
-        code: string;
-        name: string;
-        normal_side: "debit" | "credit";
-        is_system: boolean;
-        // Required on the wire for every non-system classification
-        // (ClassificationInput.Validate) -- without it the server answers
-        // 400 / 12003, so the type does not let a caller forget it.
-        balance_role: Classification["balance_role"];
-      },
+      body: ClassificationBody,
       idempotencyKey?: string,
     ) =>
       request<Classification>("/api/v1/classifications", {
@@ -435,7 +440,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/journal-types${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createJournalType: (body: { code: string; name: string }, idempotencyKey?: string) =>
+    createJournalType: (body: JsonPostBody<"/journal-types">, idempotencyKey?: string) =>
       request<JournalType>("/api/v1/journal-types", {
         method: "POST",
         body: JSON.stringify(body),
@@ -454,18 +459,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/templates${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createTemplate: (body: {
-      code: string;
-      name: string;
-      journal_type_uid: string;
-      lines: Array<{
-        classification_uid: string;
-        entry_type: "debit" | "credit";
-        holder_role: "user" | "system";
-        amount_key: string;
-        sort_order: number;
-      }>;
-    }, idempotencyKey?: string) =>
+    createTemplate: (body: JsonPostBody<"/templates">, idempotencyKey?: string) =>
       request<EntryTemplate>("/api/v1/templates", {
         method: "POST",
         body: JSON.stringify(body),
@@ -478,17 +472,30 @@ export function createLedgerClient(config: LedgerClientConfig) {
         headers: { "Idempotency-Key": idempotencyKey },
       }),
 
-    previewTemplate: (
+    previewTemplate: async (
       code: string,
-      params: { holder_id: number; currency_uid: string } & Record<
-        string,
-        string | number
-      >,
-    ) =>
-      request<PreviewResult>(`/api/v1/templates/${code}/preview`, {
+      params: PreviewInput,
+    ) => {
+      if ("amounts" in params && "amount" in params) {
+        throw new TypeError("Template preview requires either amounts or amount, not both");
+      }
+      let body: PreviewRequest;
+      if ("amounts" in params) {
+        body = params;
+      } else if ("amount" in params) {
+        body = {
+          holder_id: params.holder_id,
+          currency_uid: params.currency_uid,
+          amounts: { amount: params.amount },
+        };
+      } else {
+        throw new TypeError("Template preview requires amounts or a single amount");
+      }
+      return request<PreviewResult>(`/api/v1/templates/${code}/preview`, {
         method: "POST",
-        body: JSON.stringify(params),
-      }),
+        body: JSON.stringify(body),
+      });
+    },
 
     // Currencies
     listCurrencies: (activeOnly?: boolean) =>
@@ -496,7 +503,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/currencies${qs({ active_only: activeOnly })}`,
       ).then((d) => d.list),
 
-    createCurrency: (body: { code: string; name: string; exponent: number }, idempotencyKey?: string) =>
+    createCurrency: (body: JsonPostBody<"/currencies">, idempotencyKey?: string) =>
       request<Currency>("/api/v1/currencies", {
         method: "POST",
         body: JSON.stringify(body),
@@ -516,10 +523,13 @@ export function createLedgerClient(config: LedgerClientConfig) {
         headers: { "Idempotency-Key": idempotencyKey },
       }),
 
-    reconcileAccount: (holder: number, currencyUid: string) =>
+    reconcileAccount: (
+      holder: JsonPostBody<"/reconcile/account">["holder"],
+      currencyUid: JsonPostBody<"/reconcile/account">["currency_uid"],
+    ) =>
       request<ReconcileResult>("/api/v1/reconcile/account", {
         method: "POST",
-        body: JSON.stringify({ holder, currency_uid: currencyUid }),
+        body: JSON.stringify({ holder, currency_uid: currencyUid } satisfies JsonPostBody<"/reconcile/account">),
       }),
 
     // Snapshots

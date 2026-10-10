@@ -341,7 +341,7 @@ describe("templates", () => {
     const p = intercept("post", "/api/v1/templates/dep/preview", {
       entries: [],
     });
-    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1" });
+    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1", amounts: { amount: "1" } });
     expect(p.captured()?.url).toBe(`${BASE}/api/v1/templates/dep/preview`);
     expect(p.captured()?.body).toMatchObject({ holder_id: 1 });
   });

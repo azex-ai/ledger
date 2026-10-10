@@ -116,7 +116,7 @@ const responses: Array<[string, ResponseCall, unknown]> = [
   ["reject deposit", (c) => c.rejectDepositReview("booking", "reason", "key"), row],
   ["event", (c) => c.getEvent("event"), row],
   ["events list", (c) => c.listEvents({}), rows],
-  ["template preview", (c) => c.previewTemplate("template", { holder_id: 1, currency_uid: "currency" }), { entries: [row] }],
+  ["template preview", (c) => c.previewTemplate("template", { holder_id: 1, currency_uid: "currency", amounts: { amount: "1" } }), { entries: [row] }],
   ["global reconciliation", (c) => c.reconcileGlobal("key"), { details: [row] }],
   ["account reconciliation", (c) => c.reconcileAccount(1, "currency"), { details: [row] }],
   ["snapshots list", (c) => c.listSnapshots({}), rows],
@@ -175,15 +175,16 @@ describe("holder response boundary", () => {
     const data = { account_holder: 1, metadata, actor_id: Number("9007199254740993") };
     const { client } = clientWithData(data);
     await expect(client.createBooking({ ...required, account_holder: 1,
-      classification_code: "deposit", channel_name: "test", metadata,
+      classification_code: "deposit", channel_name: "test",
+      metadata: { account_holder: "9007199254740993", holder_id: "external-id" },
     })).resolves.toEqual(data);
   });
 
   test("template amount keys are not interpreted as identities", async () => {
     const { client } = clientWithData({ entries: [] });
     await expect(client.previewTemplate("template", {
-      holder_id: 1, currency_uid: "currency", account_holder: "9007199254740993",
-      holder: "large-amount-key",
+      holder_id: 1, currency_uid: "currency",
+      amounts: { account_holder: "9007199254740993", holder: "9007199254740993" },
     })).resolves.toEqual({ entries: [] });
   });
 });
