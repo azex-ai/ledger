@@ -84,3 +84,15 @@ signed replay 三项 auth 材料全空时按已裁决方式验证相关余额历
 宿主 server-only helper 验证 session 后仅序列化公开 expiry，backend 是非秘密部署标识。layout 与两动态页的 prefetch 使用同一规则；provider prop 更新与 JSON hydrate 测试覆核。auth 格式未改，同 token 视为同会话；生产新增 LEDGER_CACHE_BACKEND_ID 是须记录的配置迁移。构建无 env 通过不等同生产 request 已配置，文档如实区分。
 
 原变更新增 web/test 未接入 CI 的 Minor 已由 1f02131 修复：直接 Vitest 命令继承 web cwd，位于 SDK build 后，无忽略失败；同一次修订纠正静态 gate 全量 10 个基线文件的报告。主控核小 diff PASS，功能源码未变，不重复全套。独立域席另执行 build、21 SDK 与 8 host 范围测试；额外静态 gate FAIL2 仍如实保留。PASS，待独立席最终报告归档。
+
+## Task 7 · root T1：PASS（0c3138d）
+
+完整核对 parser、两套 skin 的十个页面与 unit/MSW 组件测试。ASCII 十进制整数字符串经 safe integer 检查后才形成请求，reject 小数、指数、尾随文本和越界值；负 system holder 在查询保留，模板执行只接受正用户，空可选筛选与零 sentinel 保持既有含义。合法最小负值和最大正值有实际请求参数断言，不只测 parser。bad input 不发 fetch 或 mutation；加载和错误分支未产生新 hook 条件调用。
+
+作者 build/types/codegen/ESLint 与 46 files / 381 tests 通过，39 项目标/parity 检查通过。主控逐行静态复核无 blocker；完整组合回归在最终 frontend gate 运行。基线 index key 告警留 Task20 明确修复，不冒充本轮全静态通过。
+
+## Task 10 · root Codex 第二意见：PASS（46ac7b6）
+
+完整阅读 main、三个真实 PG 测试、README 与报告，核对已安装 preset/自定义 POINTS 配置的 NormalSide、BalanceRole 及字面量最终余额。逐币 journal 平衡与独立经济 oracle 分别验收；fee 四行全部反向仍平衡但增大用户余额，错误 gift rate 仍平衡但产出10而非2，两种负例都由外层事务传播 oracle 错误而完整回滚。正常幂等 UID/行数不变与改变汇率冲突有实证。
+
+示例复用现有配置类型和 bundle，没有增加 DSL。普通 executable 是提交后审计，不声称自动回滚已提交业务；fee journal 不自动保护 hold 的宿主责任明确。独立域报告 10-review.md PASS；作者 PG race 三个测试2.970s、vet通过，本席不重复相同 suite。可串行集成。

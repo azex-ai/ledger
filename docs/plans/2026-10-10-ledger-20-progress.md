@@ -10,10 +10,10 @@
 | 4 | 输入校验早于 tracing 展开 | 已集成 | cf03361 → 0c9417e | PG race/vet；独立域/root PASS；完整root race |
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
-| 7 | 两种 skin 的 holder 输入校验 | 实施中 | BASE 6d131ca / codex/ledger20-t07 | 待验收 |
+| 7 | 两种 skin 的 holder 输入校验 | 评审通过，待集成 | 0c3138d / codex/ledger20-t07 | T1 PASS；381 tests/build/types/codegen |
 | 8 | 管理端缓存按实例与身份隔离 | 评审通过，待集成 | 1f02131 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types；独立域/root PASS；CI已接线 |
-| 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
-| 10 | 科目配置经济效果验收样例 | 实施中 | BASE c93481e / codex/ledger20-t10 | 待验收 |
+| 9 | 其余 SDK mutation 请求契约消漂移 | 实施中 | BASE 1f02131 / codex/ledger20-t09 | 待验收 |
+| 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 评审通过，待集成 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet；独立域/root PASS |
