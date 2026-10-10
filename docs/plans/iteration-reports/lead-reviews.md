@@ -25,3 +25,9 @@
 ## Task 15 — T1：PASS
 
 范围 `ab3a5d1..3d69a74`。阅读全文、代码和测试，检查 Currency UID 身份、持仓精度、价格时效和 exact decimal 乘积。量价均先 magnitude 校验，合法乘积保持 36 位后求和；中间值与合计继续受 core 上限约束。缺价/过期/未来价格均不混入 subtotal，只有完整覆盖输出 total；JSON 不把未知值编码成零。README 明示非负持仓、重复 UID 拒绝、fixture 价格、无兑换权。已有 race/vet/go run 证据满足 T1，未重复同一测试。
+
+## Task 6 — Codex 第二意见：PASS
+
+范围 `ab3a5d1..8f52e08`。主控完整读取新增校验器、client 调用处、89 项新增测试、全部公开 client 方法及手写 DTO holder 字段。16 类请求在 async request 内 fetch 前拒绝；24 类响应在成功 envelope 解码后、方法拆 list 前拒绝，unsafe later-row 使整个响应失败。raw JSON 两个相邻 int64 值的测试避免先由 JS stringify 合并证据。保留负 system/0 的服务端规则，metadata/actor/amount-map 不误识别为 holder。当前公开 DTO holder 位置均有 selector；未来新 DTO 需同步扩充，限制已写入报告。
+
+Numeric wire 不变，不声称完整 int64。响应拒绝可能发生在服务端写入之后，BREAKING 提醒保留幂等键，不宣称自动回滚。所有 unsafe numeric 参数测试直接使用 Promise rejects，未出现同步 throw。Preview fixture 补合法 holder 的授权修改不弱化 totals 断言。独立域席位仍在执行，取得结论后才整合。
