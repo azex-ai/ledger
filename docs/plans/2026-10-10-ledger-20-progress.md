@@ -15,13 +15,13 @@
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 实施中 | BASE f13d0ae / codex/ledger20-t11 | 待验收 |
-| 12 | 原子 Capture 门面 | 实施中 | BASE 767e208 / codex/ledger20-t12 | 待验收 |
+| 12 | 原子 Capture 门面 | 独立评审中 | d22e40d / codex/ledger20-t12 | Capture/Reader PG race、vet、API/README gates PASS |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 待实施 | — | — |
-| 18 | web 生产依赖 advisory 修复 | 实施中 | BASE 4316088 / codex/ledger20-t18 | 官方来源核验中 |
+| 18 | web 生产依赖 advisory 修复 | 评审通过，待集成 | 158135e / codex/ledger20-t18 | T1 PASS；prod audit0，SDK/Next build/typecheck/257 tests |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
 

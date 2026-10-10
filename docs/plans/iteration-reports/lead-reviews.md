@@ -39,3 +39,15 @@ Numeric wire 不变，不声称完整 int64。响应拒绝可能发生在服务�
 测试对 Full/Minimal 与 Reserve/Booking 组合验证有限非法数值、七类持久行数不变、无持仓占用以及合法金额回归；没有用旧版巨大指数施压。原边界后续转换都位于校验之后，无迁移/签名/事务变更。实现者真实 PG race 39.781s 与 vet PASS；独立席位静态检查已无 blocker，窄 PG 验证在排队，完成后集成。
 
 Task4 域评审收尾：04-review.md 独立静态 PASS，无未决点。沿用已有真实 PG 证据，取消无新增问题的重复窄测试；本席未声称运行 PG。最终集成门禁会覆盖新回归。
+
+## Task 12 — Codex 第二意见：PASS
+
+范围 `767e208..d22e40d`。主控完整阅读 Capture / Reader、新增全部回归、导出变更和12.md，并查验 LockForTemplates、Settle/SettlePartial 既有实现。无锁读取绑定 holder/currency；模板锁及两枚幂等键先于 settlement 行锁；行锁内复验 live 状态/期限/金额。settlement 只改变 hold，实际 journal 随后在同事务内生成并检查目标 available 净减。顶层失败统一 rollback；clone 无 savepoint 的传播责任明确。
+
+幂等 metadata 复制并绑定 reservation/mode/template，重放相同增量及最终已完成后的重放有真实 PG 证据；改变 mode 的安全错误区别已冻结。普通路径 unsigned、未修改 reservation.JournalUID、复杂 memo 模板须显式组合均有说明。Reader 不扩张现有接口，复用 WithDB 后的查询与 converter。并发同 key + deposit、六次0.2仅五次成功、过期/释放/坏方向/超额及外层 rollback 的测试断言最终余额和持久化效果。未发现 blocker；独立域席位进行中。
+
+## Task 18 — T1：PASS
+
+范围 `4316088..158135e`。读取全部 manifest diff、解析 lockfile 比较每个版本变更，并读完整 dependencies.md /18.md。40 个版本变化限定在 Next /对应 ESLint、sharp平台与libvips、source-map-js；不存在无关 major 或 force/override。选择官方16.3.8安全补丁，有维护者 release/advisory 和 registry 兼容性证据。干净安装后 production audit0、SDK/Next build/typecheck/257 tests 和良性原生sharp smoke实际通过。
+
+完整audit仍20个开发依赖包条目（含critical），逐项列依赖来源；没有把“dev”当成无风险或完整供应链无漏洞，也没误称baseline静态扫描全绿。该补丁按已冻结Task18生产范围通过，开发工具链后续工作和最终集成基线验证仍应明确保留。
