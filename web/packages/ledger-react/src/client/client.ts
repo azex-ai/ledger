@@ -1,3 +1,4 @@
+import type { components } from "./schema";
 import type {
   ApiError,
   Balance,
@@ -255,13 +256,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         `/api/v1/reservations${qs(params)}`,
       ),
 
-    createReservation: (body: {
-      account_holder: number;
-      currency_uid: string;
-      amount: string;
-      idempotency_key: string;
-      expires_in?: string;
-    }) =>
+    createReservation: (body: components["schemas"]["ReserveInput"]) =>
       request<Reservation>("/api/v1/reservations", {
         method: "POST",
         body: JSON.stringify(body),
