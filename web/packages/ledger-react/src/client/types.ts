@@ -7,6 +7,19 @@
 // stable surface the hooks/components consume; keep them aligned with schema.ts
 // when the backend contract changes.
 
+/** Public, non-secret cache identity shared by server and browser clients. */
+export interface LedgerCacheScope {
+  /** Logical backend/tenant, independent of internal and BFF request URLs. */
+  readonly backend: string;
+  /** Principal/session/permission revision. Never a token, cookie or API key. */
+  readonly identity: string;
+}
+
+/** Resolved cache namespace. Obtain it from client.cacheScope. */
+export type LedgerQueryScope =
+  | readonly ["instance", string]
+  | readonly ["shared", string, string];
+
 export interface ApiError {
   code: number;
   message: string;

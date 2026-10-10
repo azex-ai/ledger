@@ -67,7 +67,7 @@ describe("server prefetch round-trip", () => {
     await prefetchJournals(qc, client, 20);
 
     // Cache is populated under the SHARED key, in useInfiniteQuery shape.
-    const cached = qc.getQueryData(ledgerKeys.journals(20)) as
+    const cached = qc.getQueryData(ledgerKeys.journals(client.cacheScope, 20)) as
       | { pages: Array<{ list: Array<{ id: number }> }> }
       | undefined;
     expect(cached?.pages[0].list).toEqual([{ id: 1 }, { id: 2 }]);
@@ -103,7 +103,7 @@ describe("server prefetch round-trip", () => {
 
     await prefetchBalances(qc, client, 42);
 
-    expect(qc.getQueryData(ledgerKeys.balances(42))).toEqual([
+    expect(qc.getQueryData(ledgerKeys.balances(client.cacheScope, 42))).toEqual([
       { currency_uid: 1, balance: "100" },
     ]);
     expect(calls).toBe(1);
@@ -136,7 +136,7 @@ describe("server prefetch round-trip", () => {
 
     await prefetchSystemHealth(qc, client);
 
-    expect(qc.getQueryData(ledgerKeys.health())).toEqual({ status: "healthy" });
+    expect(qc.getQueryData(ledgerKeys.health(client.cacheScope))).toEqual({ status: "healthy" });
     expect(calls).toBe(1);
 
     const { result } = renderHook(() => useHealth(), {

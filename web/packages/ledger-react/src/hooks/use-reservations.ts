@@ -14,7 +14,7 @@ export function useReservations(params: {
 }) {
   const client = useLedgerClient();
   return useInfiniteQuery({
-    queryKey: ledgerKeys.reservations(params),
+    queryKey: ledgerKeys.reservations(client.cacheScope, params),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listReservations({ ...params, cursor: pageParam }),
     initialPageParam: undefined as string | undefined,
