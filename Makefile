@@ -3,6 +3,8 @@
 build:
 	go build ./...
 
+# Three fresh external hosts: root, chains/evm, anchors/r2. Candidate-source
+# replacements are explicit; see docs/CONSUMING.md for the release boundary.
 test-consumer:
 	bash scripts/test-consumer.sh
 
