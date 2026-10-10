@@ -1,3 +1,5 @@
+import { skeletonSlots } from "../lib/skeleton-slots";
+
 // Reusable skeleton building blocks for loading states.
 // Skeleton structure MUST match the corresponding page structure to prevent layout shift.
 
@@ -17,12 +19,12 @@ export function TableSkeleton({ rows = 5, cols = 6 }: { rows?: number; cols?: nu
   return (
     <div className="space-y-2">
       <div className="flex gap-4 px-4 py-2">
-        {Array.from({ length: cols }).map((_, i) => (
-          <div key={i} className="h-4 flex-1 animate-shimmer rounded" />
+        {skeletonSlots(cols, "header-cell").map((slot) => (
+          <div key={slot.id} className="h-4 flex-1 animate-shimmer rounded" />
         ))}
       </div>
-      {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="h-12 animate-shimmer rounded" />
+      {skeletonSlots(rows).map((slot) => (
+        <div key={slot.id} className="h-12 animate-shimmer rounded" />
       ))}
     </div>
   );

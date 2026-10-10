@@ -270,7 +270,7 @@ paths:
       tags: [Journals]
       summary: Post the full reversal of an existing journal.
       description: >-
-        Rejected (409) once the journal has any reversal history, full or
+        Rejected (409) once the journal already has reversal history, full or
         partial — use reverse-partial to continue a partially-reversed journal.
 
 

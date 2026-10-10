@@ -353,3 +353,39 @@ func TestCaptureReplayRejectsUnverifiableHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestCaptureSignedReplayStoredTimePrecision(t *testing.T) {
+	f := newFixture(t)
+	r, err := f.reserve(t, 60, "ci-precision-budget")
+	require.NoError(t, err)
+	event := submittedEvent(false)
+	event.RecordedAt = event.RecordedAt.Add(789 * time.Nanosecond)
+	original, err := capture(t.Context(), f.svc, r, event)
+	require.NoError(t, err)
+	before := f.counts(t)
+	for _, tc := range []struct {
+		name     string
+		offset   time.Duration
+		conflict bool
+	}{
+		{"same_nanoseconds", 0, false}, {"same_microsecond", -500 * time.Nanosecond, false},
+		{"stored_precision", -789 * time.Nanosecond, false}, {"next_microsecond", time.Microsecond, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replay := event
+			replay.RecordedAt = replay.RecordedAt.Add(tc.offset)
+			got, err := capture(t.Context(), f.svc, r, replay)
+			if tc.conflict {
+				require.ErrorIs(t, err, core.ErrConflict)
+			} else if err != nil {
+				t.Errorf("same stored signed event must replay: %v", err)
+			} else {
+				require.Equal(t, original.UID, got.UID)
+			}
+			require.Equal(t, before, f.counts(t))
+			f.assertBalance(t, 80, 0)
+			f.assertReservation(t, r.UID, "settled", 20)
+			t.Logf("conflict=%t counts=%+v verified=80 held=0 settled=20", errors.Is(err, core.ErrConflict), before)
+		})
+	}
+}

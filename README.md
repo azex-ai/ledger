@@ -1242,6 +1242,11 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 ## Testing
 
 Integration tests use `testcontainers-go` against real PostgreSQL -- no mocked DB.
+See [Testing the checkout](docs/TESTING.md) for all four Go modules, consumers and
+web checks. Without Docker, the complete PostgreSQL suite requires both
+`DATABASE_URL` and `LEDGER_TEST_ISOLATED_DATABASE_URL` on **different clusters**:
+the full migration rollback drops cluster-wide roles. A second database on the
+same server is not sufficient; only `-short` intentionally skips those tests.
 
 ```bash
 # Full suite (requires Docker)

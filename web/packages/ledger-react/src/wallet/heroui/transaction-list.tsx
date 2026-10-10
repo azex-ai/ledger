@@ -1,5 +1,7 @@
 "use client";
 
+import { fiveSkeletonRows } from "../../lib/skeleton-slots";
+
 import type { ReactNode } from "react";
 import { Button, Card, Chip, Skeleton, cn } from "@heroui/react";
 import { ReceiptText } from "lucide-react";
@@ -54,8 +56,8 @@ function ListSkeleton() {
   return (
     <Card>
       <Card.Content className="flex flex-col gap-3 py-4">
-        {Array.from({ length: 5 }, (_, i) => (
-          <div key={i} className="flex items-center justify-between gap-4">
+        {fiveSkeletonRows.map((slot) => (
+          <div key={slot.id} className="flex items-center justify-between gap-4">
             <Skeleton className="h-4 w-40 rounded" />
             <Skeleton className="h-4 w-24 rounded" />
           </div>
