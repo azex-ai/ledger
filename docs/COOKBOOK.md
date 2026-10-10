@@ -97,7 +97,7 @@ res, err := svc.Exchange(ctx, ledger.ExchangeInput{
     HolderID: holder, SourceCurrencyUID: usdc, TargetCurrencyUID: credits,
     Quantity: decimal.NewFromInt(1), Rate: rate,
     IdempotencyKey: "purchase:" + depositBooking.UID, // one logical purchase per deposit
-    FundingUID:     depositBooking.UID,               // what paid for it
+    FundingUID:     depositBooking.JournalUID,        // the deposit journal that paid for it
 })
 ```
 
@@ -106,7 +106,13 @@ settles the source (so account policies and balance floors apply exactly as to
 any spend), posts both legs, and derives the `:reserve` / `:settle` / `:pay` /
 `:issue` keys from the one key you give it. Both journals carry the applied
 `core.ConversionQuote` and the funding uid; everything commits or rolls back
-together. Call it on the `*Service` a `RunInTx` callback receives to commit your
+together. `FundingUID` is a *journal* uid -- the booking's `JournalUID`, not the
+booking uid -- and `Exchange` refuses (`core.ErrInvalidInput`) one that does
+not exist or has no entry for this holder in the source currency. It also
+checks what the two legs actually did: the sell leg must move the holder's
+source currency by exactly `-Quantity`, the buy leg the target currency by
+exactly the quoted amount, so a misconfigured `SellTemplateCode` /
+`BuyTemplateCode` override is refused and rolled back instead of committed. Call it on the `*Service` a `RunInTx` callback receives to commit your
 own "deposit converted" row in the same transaction. The
 [credits example](../examples/credits-topup/main.go) is the executable version.
 All competing purchases must use reservations too; a raw journal can bypass a

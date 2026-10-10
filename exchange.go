@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"time"
@@ -36,12 +37,19 @@ type ExchangeInput struct {
 	// ":issue"); replay with the same key and the same Rate/Quantity is a
 	// no-op, the same key with a different quote is core.ErrConflict.
 	IdempotencyKey string
-	// FundingUID, when set, is recorded on both journals under
-	// core.FundingUIDMetadataKey: the uid of the confirmed deposit booking
-	// (or deposit journal) this exchange spends. Optional to the ledger,
-	// but a host that converts deposits into credits should always set it --
-	// it is what its reconciliation joins on to find a deposit that was
-	// confirmed and never converted.
+	// FundingUID, when set, is the uid of the JOURNAL that funded this
+	// exchange: one that carries a user-side entry for HolderID in the
+	// source currency -- typically the deposit journal. A host that models
+	// deposits as bookings passes the confirmed booking's JournalUID, not
+	// the booking uid. Exchange looks it up inside its transaction and
+	// refuses (core.ErrInvalidInput) a uid that does not exist or that
+	// belongs to another holder or another currency, so the reference a
+	// reconciliation later joins on is known to point at real money of the
+	// same holder. It is then recorded on both journals under
+	// core.FundingUIDMetadataKey. Optional to the ledger, but a host that
+	// converts deposits into credits should always set it -- it is what its
+	// reconciliation joins on to find a deposit that was confirmed and never
+	// converted.
 	FundingUID string
 	// Metadata is copied onto both journals. It must not use the keys the
 	// ledger writes itself (core.ConversionQuotesMetadataKey,
@@ -53,7 +61,16 @@ type ExchangeInput struct {
 	// SellTemplateCode / BuyTemplateCode override the FX preset templates
 	// (presets.FXBundle's "fx_sell" / "fx_buy"). Each must take one "amount"
 	// and move the user's main wallet against a system counterpart in the
-	// currency it is executed with.
+	// currency it is executed with. Exchange checks what the rendered
+	// journals actually did before it commits: the sell journal must move
+	// the holder's source currency by exactly -Quantity, the buy journal the
+	// target currency by exactly +Quote.TargetAmount, and neither may touch
+	// the holder's other currency. "Move" is the holder statement's signed
+	// net -- role-bearing classifications only, each entry signed by its
+	// classification's normal side (core.SignedAmount). An override that
+	// does anything else is core.ErrInvalidInput and the transaction rolls
+	// back: per-journal balance checks (I-1, I-12) cannot see a template
+	// that credits the holder on both legs, because each leg still balances.
 	SellTemplateCode string
 	BuyTemplateCode  string
 }
@@ -189,6 +206,14 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 
 	result := &ExchangeResult{Quote: quote}
 	body := func(tx *Service) error {
+		// Read-only, and before any lock or write: a funding reference that
+		// does not point at this holder's source-currency money is refused
+		// with nothing to roll back.
+		if in.FundingUID != "" {
+			if err := checkFundingJournal(ctx, tx, in); err != nil {
+				return err
+			}
+		}
 		// The union of every lock this transaction will take, in the one
 		// canonical order -- before Reserve takes the source pair on its own.
 		// Every idempotency key the transaction later uses is named here:
@@ -223,6 +248,40 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 			// request; failing loudly beats indexing into a shorter slice.
 			return fmt.Errorf("ledger: exchange: fx legs: expected 2 journals, got %d", len(journals))
 		}
+		// The two legs balance on their own; nothing so far has checked that
+		// they move the holder's money in the direction and by the amount
+		// this exchange promised. A template override can get that wrong
+		// (both legs crediting the holder still balances), so verify the
+		// rendered entries before the transaction may commit.
+		roles, err := classificationRoles(ctx, tx)
+		if err != nil {
+			return err
+		}
+		legs := []struct {
+			name, template, uid, moved, other string
+			want                              decimal.Decimal
+		}{
+			{"sell", sellTemplate, journals[0].UID, in.SourceCurrencyUID, in.TargetCurrencyUID, in.Quantity.Neg()},
+			{"buy", buyTemplate, journals[1].UID, in.TargetCurrencyUID, in.SourceCurrencyUID, quote.TargetAmount},
+		}
+		for _, leg := range legs {
+			_, entries, err := tx.Queries().GetJournal(ctx, leg.uid)
+			if err != nil {
+				return fmt.Errorf("ledger: exchange: read %s leg: %w", leg.name, err)
+			}
+			moved, touchedOther, err := holderLegNet(entries, in.HolderID, leg.moved, leg.other, roles)
+			if err != nil {
+				return fmt.Errorf("ledger: exchange: %s leg: %w", leg.name, err)
+			}
+			if touchedOther || !moved.Equal(leg.want) {
+				code := source.Code
+				if leg.moved == in.TargetCurrencyUID {
+					code = target.Code
+				}
+				return fmt.Errorf("ledger: exchange: %s template %q does not move the holder's %s by %s: %w",
+					leg.name, leg.template, code, leg.want.String(), core.ErrInvalidInput)
+			}
+		}
 		result.SellJournalUID, result.BuyJournalUID = journals[0].UID, journals[1].UID
 		return nil
 	}
@@ -238,4 +297,80 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 		return nil, err
 	}
 	return result, nil
+}
+
+// checkFundingJournal resolves in.FundingUID through the transaction's own
+// reader and requires it to carry a user-side entry for in.HolderID in the
+// source currency. Not found, another holder's journal and another
+// currency's journal are all core.ErrInvalidInput: each is a caller error in
+// the reference it passed, not a missing ledger resource it asked to read.
+func checkFundingJournal(ctx context.Context, tx *Service, in ExchangeInput) error {
+	_, entries, err := tx.Queries().GetJournal(ctx, in.FundingUID)
+	if errors.Is(err, core.ErrNotFound) {
+		return fmt.Errorf("ledger: exchange: funding journal %q not found: %w", in.FundingUID, core.ErrInvalidInput)
+	}
+	if err != nil {
+		return fmt.Errorf("ledger: exchange: funding journal: %w", err)
+	}
+	for _, e := range entries {
+		if e.AccountHolder == in.HolderID && e.CurrencyUID == in.SourceCurrencyUID {
+			return nil
+		}
+	}
+	return fmt.Errorf("ledger: exchange: funding journal %q has no entry for holder %d in the source currency: %w",
+		in.FundingUID, in.HolderID, core.ErrInvalidInput)
+}
+
+// classificationRoles maps every classification uid to the two attributes the
+// holder-net computation needs. Read on the transaction clone so it sees the
+// same catalogue the templates rendered against.
+func classificationRoles(ctx context.Context, tx *Service) (map[string]core.Classification, error) {
+	all, err := tx.Classifications().ListClassifications(ctx, false)
+	if err != nil {
+		return nil, fmt.Errorf("ledger: exchange: list classifications: %w", err)
+	}
+	out := make(map[string]core.Classification, len(all))
+	for _, c := range all {
+		out[c.UID] = c
+	}
+	return out, nil
+}
+
+// holderLegNet is the holder statement's per-(journal, currency) net
+// (postgres/sql/queries/holder.sql, ListHolderTransactionRows) computed over
+// one journal's entries: only the holder's entries in role-bearing
+// classifications (every role except none and memo -- the same predicate the
+// statement and the solvency liability scope use) count, each signed by its
+// classification's normal side through core.SignedAmount, the one Go
+// implementation of ledger_signed_amount. It also reports whether the journal
+// carries ANY entry for the holder in `other`, role-bearing or not: an FX leg
+// has no business there at all.
+func holderLegNet(entries []core.Entry, holder int64, currency, other string, classes map[string]core.Classification) (decimal.Decimal, bool, error) {
+	net := decimal.Zero
+	touchedOther := false
+	for _, e := range entries {
+		if e.AccountHolder != holder {
+			continue
+		}
+		if e.CurrencyUID == other {
+			touchedOther = true
+			continue
+		}
+		if e.CurrencyUID != currency {
+			continue
+		}
+		c, ok := classes[e.ClassificationUID]
+		if !ok {
+			return decimal.Decimal{}, false, fmt.Errorf("classification %q of a rendered entry is unknown: %w", e.ClassificationUID, core.ErrNotFound)
+		}
+		if c.BalanceRole == core.BalanceRoleNone || c.BalanceRole == core.BalanceRoleMemo {
+			continue
+		}
+		signed, err := core.SignedAmount(c.NormalSide, e.EntryType, e.Amount)
+		if err != nil {
+			return decimal.Decimal{}, false, err
+		}
+		net = net.Add(signed)
+	}
+	return net, touchedOther, nil
 }
