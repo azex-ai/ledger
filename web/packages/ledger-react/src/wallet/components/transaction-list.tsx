@@ -9,7 +9,7 @@ import { LoadMoreBar } from "../../components/pagination-bar";
 import { cn, formatSignedAmount, formatUTC } from "../../lib/utils";
 import type { WalletTransaction } from "../client";
 import { useWalletTransactions } from "../hooks";
-import { describeQuotes, type UnitLabels } from "../quote";
+import { describeQuoteLine, type UnitLabels } from "../quote";
 import { ExactAmount } from "./exact-amount";
 
 /*
@@ -39,6 +39,12 @@ export interface TransactionListProps {
    * measured units, as `kindLabels` is for `kind`. Falls back to the code.
    */
   unitLabels?: UnitLabels;
+  /**
+   * Shown under a row whose quotes the server withheld because the journal
+   * also carries other holders' entries (`quotes_omitted`). Defaults to
+   * "Breakdown unavailable".
+   */
+  quotesOmittedLabel?: string;
   /** Full-row custom renderer (escape hatch); the default row otherwise. */
   renderItem?: (tx: WalletTransaction) => ReactNode;
   /** Page size for the cursor pagination. */
@@ -64,11 +70,14 @@ function DefaultRow({
   tx,
   label,
   unitLabels,
+  quotesOmittedLabel,
 }: {
   tx: WalletTransaction;
   label: string;
   unitLabels?: UnitLabels;
+  quotesOmittedLabel?: string;
 }) {
+  const quoteLine = describeQuoteLine(tx, unitLabels, quotesOmittedLabel);
   // J-21 (2026-09-02 web audit): fold `direction` into a signed string and
   // let formatSignedAmount own the sign/color, instead of hardcoding "+"/"-"
   // at the call site — display.ts's contract is that callers never re-derive
@@ -95,15 +104,14 @@ function DefaultRow({
           <time dateTime={tx.occurred_at}>{formatUTC(tx.occurred_at)}</time>
           {tx.memo !== "" && <> · {tx.memo}</>}
         </p>
-        {/* `?.`: a server from before `quotes` existed omits the key; the
-            statement still renders during that deployment window
-            (api-contract.md §8), it just has nothing to explain. */}
-        {(tx.quotes?.length ?? 0) > 0 && (
+        {/* The quotes, "Breakdown unavailable" when the server withheld
+            them (quotes_omitted), or nothing -- see describeQuoteLine. */}
+        {quoteLine !== null && (
           <p
             className="whitespace-normal break-words text-xs text-muted-foreground tabular-nums"
-            title={describeQuotes(tx.quotes, unitLabels)}
+            title={quoteLine}
           >
-            {describeQuotes(tx.quotes, unitLabels)}
+            {quoteLine}
           </p>
         )}
       </div>
@@ -134,6 +142,7 @@ function DefaultRow({
 export function TransactionList({
   kindLabels,
   unitLabels,
+  quotesOmittedLabel,
   renderItem,
   limit = 20,
 }: TransactionListProps = {}) {
@@ -169,6 +178,7 @@ export function TransactionList({
                   tx={tx}
                   label={kindLabels?.[tx.kind] ?? tx.kind_label}
                   unitLabels={unitLabels}
+                  quotesOmittedLabel={quotesOmittedLabel}
                 />
               ),
             )}

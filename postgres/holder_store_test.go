@@ -483,3 +483,90 @@ func TestHolderTransactions_UndecodableStoredQuotesIsCorruptData(t *testing.T) {
 	require.NoError(t, f.pool.QueryRow(ctx, "SELECT id FROM journals WHERE uid = $1", j.UID).Scan(&internalID))
 	assert.NotContains(t, err.Error(), fmt.Sprintf("journal %d:", internalID), "the internal BIGSERIAL id stays out of the error")
 }
+
+// TestHolderTransactions_QuotesOnlyOnASingleHolderJournal pins Major 2 of the
+// 2026-10-09 second opinion: conversion_quotes is journal-level metadata
+// while statement rows are per holder, so a journal charging two holders
+// used to show each of them both holders' quotes -- the other user's usage,
+// rate and amount. Such a journal now shows no quotes to either holder and
+// says so (quotes_omitted), while a journal that is one holder's alone keeps
+// its quotes.
+func TestHolderTransactions_QuotesOnlyOnASingleHolderJournal(t *testing.T) {
+	f, ctx := seedHolderFixture(t)
+	holderA, holderB := f.holder, f.holder+1
+
+	quoteA := core.ConversionQuote{SourceCode: "INPUT_TOKEN", TargetCode: "USD", TargetExponent: 6,
+		SourceQuantity: decimal.NewFromInt(10000), TargetAmount: decimal.NewFromInt(20),
+		Rate: decimal.RequireFromString("0.002"), Version: "price-v1", Rounding: core.RoundHalfUp}
+	quoteB := core.ConversionQuote{SourceCode: "OUTPUT_TOKEN", TargetCode: "USD", TargetExponent: 6,
+		SourceQuantity: decimal.NewFromInt(20000), TargetAmount: decimal.NewFromInt(200),
+		Rate: decimal.RequireFromString("0.01"), Version: "price-v1", Rounding: core.RoundHalfUp}
+	both, err := core.EncodeConversionQuotes([]core.ConversionQuote{quoteA, quoteB})
+	require.NoError(t, err)
+	onlyA, err := core.EncodeConversionQuotes([]core.ConversionQuote{quoteA})
+	require.NoError(t, err)
+
+	// Both holders need a balance to be charged from.
+	for _, h := range []int64{holderA, holderB} {
+		f.post(t, ctx, f.jtUID, fmt.Sprintf("multi-fund-%d", h), []core.EntryInput{
+			{AccountHolder: h, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(1000)},
+			{AccountHolder: -h, CurrencyUID: f.usdUID, ClassificationUID: f.system, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(1000)},
+		})
+	}
+
+	// One balanced batch charge: A pays 20, B pays 200, both quotes recorded.
+	batch, err := f.ledger.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: f.jtPlain, IdempotencyKey: postgrestest.UniqueKey("multi-holder-charge"), Source: "test",
+		Metadata: map[string]string{core.ConversionQuotesMetadataKey: both},
+		Entries: []core.EntryInput{
+			{AccountHolder: holderA, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(20)},
+			{AccountHolder: holderB, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(200)},
+			{AccountHolder: -1, CurrencyUID: f.usdUID, ClassificationUID: f.system, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(220)},
+		},
+	})
+	require.NoError(t, err)
+
+	// A charge that is A's alone (A + a system counterpart) keeps its quote.
+	solo, err := f.ledger.PostJournal(ctx, core.JournalInput{
+		JournalTypeUID: f.jtPlain, IdempotencyKey: postgrestest.UniqueKey("single-holder-charge"), Source: "test",
+		Metadata: map[string]string{core.ConversionQuotesMetadataKey: onlyA},
+		Entries: []core.EntryInput{
+			{AccountHolder: holderA, CurrencyUID: f.usdUID, ClassificationUID: f.wallet, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(20)},
+			{AccountHolder: -holderA, CurrencyUID: f.usdUID, ClassificationUID: f.system, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(20)},
+		},
+	})
+	require.NoError(t, err)
+
+	find := func(holder int64, uid string) core.HolderTransaction {
+		t.Helper()
+		items, _, err := f.ledger.ListHolderTransactions(ctx, holder, "", 50)
+		require.NoError(t, err)
+		for _, it := range items {
+			if it.UID == uid {
+				return it
+			}
+		}
+		t.Fatalf("holder %d has no row for journal %s", holder, uid)
+		return core.HolderTransaction{}
+	}
+
+	for _, h := range []int64{holderA, holderB} {
+		row := find(h, batch.UID)
+		assert.Empty(t, row.Quotes, "holder %d must not see quotes of a journal it shares with another holder", h)
+		assert.True(t, row.QuotesOmitted, "holder %d: the withheld breakdown must leave a trace", h)
+	}
+	// The amounts themselves are still each holder's own.
+	assert.True(t, find(holderA, batch.UID).Amount.Equal(decimal.NewFromInt(20)))
+	assert.True(t, find(holderB, batch.UID).Amount.Equal(decimal.NewFromInt(200)))
+
+	row := find(holderA, solo.UID)
+	require.Len(t, row.Quotes, 1)
+	assert.Equal(t, "INPUT_TOKEN", row.Quotes[0].SourceCode)
+	assert.False(t, row.QuotesOmitted)
+
+	// A journal with no quotes at all is "no conversion", not "omitted".
+	funding := f.deposit(t, ctx, "no-quotes", 1)
+	noQuotes := find(f.holder, funding.UID)
+	assert.Empty(t, noQuotes.Quotes)
+	assert.False(t, noQuotes.QuotesOmitted)
+}

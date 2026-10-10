@@ -374,3 +374,48 @@ describe.each([
     },
   );
 });
+
+describe.each([
+  ["shadcn", TransactionList],
+  ["heroui", HerouiTransactionList],
+])("TransactionList withheld quotes (%s)", (_skin, List) => {
+  // A journal shared with another holder: the server withholds its quotes
+  // (quotes: [], quotes_omitted: true). The row says a breakdown exists but
+  // is unavailable, instead of reading like a row with no conversion.
+  const row = (uid: string, quotesOmitted: boolean) => ({
+    uid,
+    kind: "fee",
+    kind_label: "AI usage",
+    direction: "out",
+    amount: "20",
+    currency_uid: "cur-1",
+    currency_code: "CREDITS",
+    occurred_at: "2026-10-09T12:00:00Z",
+    reversal_of_uid: "",
+    memo: "",
+    quotes: [],
+    quotes_omitted: quotesOmitted,
+  });
+  const serve = (list: unknown[]) =>
+    server.use(http.get(`${BASE}/holder/transactions`, () => HttpResponse.json({
+      code: 200,
+      message: null,
+      data: { list, next_cursor: null },
+    })));
+
+  test("shows the default neutral label only on the withheld row", async () => {
+    serve([row("shared", true), row("plain", false)]);
+    render(wrap(<List />));
+    const label = await screen.findByText("Breakdown unavailable");
+    expect(label).toHaveAttribute("title", "Breakdown unavailable");
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByText("Breakdown unavailable")).toHaveLength(1);
+  });
+
+  test("takes the host's wording through quotesOmittedLabel", async () => {
+    serve([row("shared", true)]);
+    render(wrap(<List quotesOmittedLabel="Details not available" />));
+    expect(await screen.findByText("Details not available")).toBeInTheDocument();
+    expect(screen.queryByText("Breakdown unavailable")).toBeNull();
+  });
+});

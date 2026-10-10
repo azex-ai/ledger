@@ -226,3 +226,69 @@ func TestRateQuoter_PortIsOneMethodOverFixedRate(t *testing.T) {
 	_, err = quoter.QuoteRate(context.Background(), "CREDITS", "USDC")
 	require.ErrorIs(t, err, ErrNotFound, "direction is explicit; the reverse pair is its own configuration")
 }
+
+// TestConversionQuote_Validate_TargetAmountFollowsTheRate pins m-5's second
+// half (2026-10-09 security review): a quote's target_amount must be what its
+// own quantity, rate, rounding and target exponent produce. The review's
+// "lying-amount" probe (1 x 1000 -> 999999) used to decode and validate, so a
+// holder statement would have explained a charge with numbers that do not
+// follow from its rate.
+func TestConversionQuote_Validate_TargetAmountFollowsTheRate(t *testing.T) {
+	good := ConversionQuote{SourceCode: "USDC", TargetCode: "CREDITS", SourceExponent: 6, TargetExponent: 6,
+		SourceQuantity: decimal.NewFromInt(1), TargetAmount: decimal.NewFromInt(1000),
+		Rate: decimal.NewFromInt(1000), Version: "v1", Rounding: RoundHalfUp}
+	require.NoError(t, good.Validate())
+
+	// A quote FixedRate.Quote produced is consistent by construction, including
+	// one where rounding actually happened.
+	rate := FixedRate{SourceCode: "OUTPUT_TOKEN", TargetCode: "CREDITS",
+		Rate: decimal.RequireFromString("0.0000005"), Version: "v1", Rounding: RoundUp}
+	rounded, err := rate.Quote(decimal.NewFromInt(3), Currency{Code: "OUTPUT_TOKEN"}, Currency{Code: "CREDITS", Exponent: 6})
+	require.NoError(t, err)
+	require.Equal(t, "0.000002", rounded.TargetAmount.String())
+	require.NoError(t, rounded.Validate())
+
+	lying := good
+	lying.TargetAmount = decimal.NewFromInt(999999)
+	err = lying.Validate()
+	require.ErrorIs(t, err, ErrInvalidInput)
+	require.ErrorContains(t, err, "target_amount 999999")
+
+	// The probe at journal write time: JournalInput.Validate runs the same
+	// check through validateConversionQuotesMetadata.
+	journal := JournalInput{
+		IdempotencyKey: "k", JournalTypeUID: "jt",
+		Entries: []EntryInput{
+			{AccountHolder: 1, CurrencyUID: "c", ClassificationUID: "a", EntryType: EntryTypeDebit, Amount: decimal.NewFromInt(1)},
+			{AccountHolder: -1, CurrencyUID: "c", ClassificationUID: "b", EntryType: EntryTypeCredit, Amount: decimal.NewFromInt(1)},
+		},
+		Metadata: map[string]string{ConversionQuotesMetadataKey: `[{"source_code":"USDC","target_code":"CREDITS",` +
+			`"source_exponent":6,"target_exponent":6,"source_quantity":"1","target_amount":"999999",` +
+			`"rate":"1000","version":"v1","rounding":"half_up"}]`},
+	}
+	require.ErrorIs(t, journal.Validate(), ErrInvalidInput)
+
+	// The amount is right for exponent 6 but the quote claims exponent 2:
+	// 0.0021 x 1 rounds to 0.00 there, not 0.0021.
+	exponent := ConversionQuote{SourceCode: "A", TargetCode: "B", TargetExponent: 2,
+		SourceQuantity: decimal.NewFromInt(1), TargetAmount: decimal.RequireFromString("0.0021"),
+		Rate: decimal.RequireFromString("0.0021"), Version: "v1", Rounding: RoundHalfUp}
+	require.ErrorIs(t, exponent.Validate(), ErrInvalidInput)
+	exponent.TargetExponent = 6
+	require.NoError(t, exponent.Validate())
+
+	// A different rounding mode than the one that produced the amount.
+	mode := rounded
+	mode.Rounding = RoundDown
+	require.ErrorIs(t, mode.Validate(), ErrInvalidInput)
+
+	// A source quantity finer than its declared exponent is not a quantity
+	// FixedRate.Convert would have accepted.
+	fine := good
+	fine.SourceExponent = 0
+	fine.SourceQuantity = decimal.RequireFromString("1.5")
+	fine.TargetAmount = decimal.NewFromInt(1500)
+	err = fine.Validate()
+	require.ErrorIs(t, err, ErrInvalidInput)
+	require.ErrorIs(t, err, ErrPrecisionExceeded)
+}

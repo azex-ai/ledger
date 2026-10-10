@@ -90,7 +90,10 @@ every lock up front so a concurrent deposit follows the same order. Both
 journals carry the applied `core.ConversionQuote` under `conversion_quotes`,
 and the deposit journal's uid under `funding_uid` — the link a host's business
 reconciliation joins on to find a deposit that was confirmed and never
-converted. A production host passes its deposit booking's uid there. Called on
+converted. `Exchange` refuses a `FundingUID` that is not a journal with an
+entry for this holder in the source currency, so the link always points at the
+holder's own deposit. A production host that models deposits as bookings passes
+the confirmed booking's `JournalUID` there (a journal uid, not the booking uid). Called on
 the `*Service` inside a `RunInTx` callback, `Exchange` joins that transaction, so
 the host's own "deposit converted" write commits with the purchase.
 

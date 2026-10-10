@@ -204,8 +204,9 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 	// lock order a concurrent deposit also follows. FundingUID links the
 	// purchase to the deposit that paid for it: a host reconciliation joins
 	// confirmed deposits against exchanges carrying their uid to find one
-	// that was confirmed and never converted. A production host passes its
-	// deposit booking's uid here.
+	// that was confirmed and never converted. It must be a journal uid with
+	// an entry for this holder in USDC -- Exchange refuses anything else. A
+	// production host passes its confirmed deposit booking's JournalUID here.
 	if _, err := svc.Exchange(ctx, ledger.ExchangeInput{
 		HolderID: userID, SourceCurrencyUID: usdc, TargetCurrencyUID: credits,
 		Quantity: decimal.NewFromInt(1), Rate: purchaseRate,

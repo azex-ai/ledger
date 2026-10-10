@@ -3145,8 +3145,10 @@ export interface components {
             reversal_of_uid: string;
             /** @description journal.metadata["memo"] — host-written user-readable copy; empty when absent. */
             memo: string;
-            /** @description The conversions this row's amount came from (journal.metadata["conversion_quotes"], decoded): an exchange's rate, or each priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20 CREDITS"). Always an array; empty when the journal recorded none. Only user-explainable facts travel here — the configuration version, rounding mode and unit exponents are audit detail on the admin journal surface, not on the holder statement. */
+            /** @description The conversions this row's amount came from (journal.metadata["conversion_quotes"], decoded): an exchange's rate, or each priced line of a metered charge ("10,000 INPUT_TOKEN at 0.002 = 20 CREDITS"). Always an array; empty when the journal recorded none. Only user-explainable facts travel here — the configuration version, rounding mode and unit exponents are audit detail on the admin journal surface, not on the holder statement. Quotes are journal-level and name no holder, so they are shown only when every user-side entry of the journal belongs to this holder; on a journal shared with other holders this is empty and quotes_omitted is true. */
             quotes: components["schemas"]["HolderTransactionQuote"][];
+            /** @description True when the journal recorded conversion quotes that are withheld because it also carries other holders' entries (a quote does not say whose line it explains); quotes is then empty. Show a neutral "breakdown unavailable" note rather than implying no conversion happened. False otherwise, including when the journal recorded no quotes. */
+            quotes_omitted: boolean;
         };
         HolderTransactionQuote: {
             /**

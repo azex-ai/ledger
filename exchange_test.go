@@ -161,14 +161,29 @@ func TestExchange_ReplayIsNoOpAndChangedQuoteConflicts(t *testing.T) {
 	_, err = f.svc.Exchange(ctx, changed)
 	require.ErrorIs(t, err, core.ErrConflict)
 
-	// Same key, different funding reference: also a different payload.
+	// Same key, different (but real, same-holder) funding reference: also a
+	// different payload. It has to be a real deposit journal now -- an
+	// arbitrary string is refused before the replay comparison is reached.
+	second, err := f.svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+		HolderID: f.holder, CurrencyUID: f.usdc, IdempotencyKey: postgrestest.UniqueKey("exchange-deposit-2"),
+		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+	})
+	require.NoError(t, err)
+	before = f.journalCount(t, ctx)
 	refunded := f.input("purchase-2")
-	refunded.FundingUID = "some-other-deposit"
+	refunded.FundingUID = second.UID
 	_, err = f.svc.Exchange(ctx, refunded)
 	require.ErrorIs(t, err, core.ErrConflict)
 
 	require.Equal(t, before, f.journalCount(t, ctx))
 	require.True(t, f.balance(t, ctx, f.credits).Equal(decimal.NewFromInt(1000)))
+
+	// And the original call replayed once more is still a no-op: the funding
+	// lookup re-runs on replay and the metadata it compares is unchanged.
+	again, err = f.svc.Exchange(ctx, f.input("purchase-2"))
+	require.NoError(t, err)
+	require.Equal(t, first, again)
+	require.Equal(t, before, f.journalCount(t, ctx))
 }
 
 func TestExchange_RefusesBeforeWritingAnything(t *testing.T) {
@@ -313,4 +328,151 @@ func TestExchange_PreLocksEveryIdempotencyKeyItUses(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// requireNothingWritten asserts a refused exchange left the fixture exactly
+// as seeded: only the deposit journal, the deposited USDC, no hold and no
+// reservation row (the writes before the refusal were rolled back).
+func (f exchangeFixture) requireNothingWritten(t *testing.T, ctx context.Context) {
+	t.Helper()
+	require.Equal(t, 1, f.journalCount(t, ctx), "only the deposit remains")
+	require.True(t, f.balance(t, ctx, f.usdc).Equal(decimal.NewFromInt(1)))
+	require.True(t, f.balance(t, ctx, f.credits).IsZero())
+	require.True(t, f.held(t, ctx, f.usdc).IsZero())
+	var holds int
+	require.NoError(t, f.pool.QueryRow(ctx, "SELECT count(*) FROM reservations").Scan(&holds))
+	require.Zero(t, holds, "the reservation written before the refusal was rolled back")
+}
+
+// installTemplate registers a template through the public template store, so
+// the test exercises exactly the path a host's misconfiguration would take.
+func (f exchangeFixture) installTemplate(t *testing.T, ctx context.Context, code, journalTypeCode string, walletSide core.EntryType) {
+	t.Helper()
+	jt, err := f.svc.JournalTypes().GetJournalTypeByCode(ctx, journalTypeCode)
+	require.NoError(t, err)
+	settlement, err := f.svc.Classifications().GetByCode(ctx, "settlement")
+	require.NoError(t, err)
+	counter := core.EntryTypeDebit
+	if walletSide == core.EntryTypeDebit {
+		counter = core.EntryTypeCredit
+	}
+	_, err = f.svc.Templates().CreateTemplate(ctx, core.TemplateInput{
+		Code: code, Name: code, JournalTypeUID: jt.UID,
+		Lines: []core.TemplateLineInput{
+			{ClassificationUID: f.walletClass, EntryType: walletSide, HolderRole: core.HolderRoleUser, AmountKey: "amount", SortOrder: 1},
+			{ClassificationUID: settlement.UID, EntryType: counter, HolderRole: core.HolderRoleSystem, AmountKey: "amount", SortOrder: 2},
+		},
+	})
+	require.NoError(t, err)
+}
+
+// TestExchange_RefusesATemplateThatMovesMoneyTheWrongWay pins Major 1 of the
+// 2026-10-09 second opinion: a sell override that CREDITS the holder still
+// balances, so only the post-render direction check can stop it. The refusal
+// happens after the reservation, settlement and both legs were written, so
+// this is also the rollback test: nothing may persist.
+func TestExchange_RefusesATemplateThatMovesMoneyTheWrongWay(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+	// main_wallet is debit-normal: a DR on it increases the holder's balance.
+	f.installTemplate(t, ctx, "fx_sell_backwards", "fx_sell", core.EntryTypeDebit)
+
+	in := f.input("backwards")
+	in.SellTemplateCode = "fx_sell_backwards"
+	_, err := f.svc.Exchange(ctx, in)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+	require.ErrorContains(t, err, `sell template "fx_sell_backwards" does not move the holder's`)
+	f.requireNothingWritten(t, ctx)
+}
+
+// TestExchange_RefusesFxBuyOnBothLegs is the exact probe from the second
+// opinion: "fx_buy" for both legs would have taken the holder from
+// 1 USDC / 0 CREDITS to 2 USDC / 1000 CREDITS.
+func TestExchange_RefusesFxBuyOnBothLegs(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+	in := f.input("double-credit")
+	in.SellTemplateCode, in.BuyTemplateCode = "fx_buy", "fx_buy"
+	_, err := f.svc.Exchange(ctx, in)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+	require.ErrorContains(t, err, `sell template "fx_buy"`)
+	f.requireNothingWritten(t, ctx)
+}
+
+// TestExchange_RefusesABuyTemplateThatDebitsTheHolder covers the other leg:
+// a buy override that takes the target currency away instead of issuing it.
+func TestExchange_RefusesABuyTemplateThatDebitsTheHolder(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+	f.installTemplate(t, ctx, "fx_buy_backwards", "fx_buy", core.EntryTypeCredit)
+	in := f.input("buy-backwards")
+	in.BuyTemplateCode = "fx_buy_backwards"
+	_, err := f.svc.Exchange(ctx, in)
+	// The holder has no CREDITS, so the debit may also trip a balance floor
+	// first; either way it must be refused and nothing may persist.
+	require.Error(t, err)
+	f.requireNothingWritten(t, ctx)
+}
+
+// TestExchange_ExplicitDefaultTemplatesStillPass: naming the preset templates
+// explicitly takes the same verified path as leaving the fields empty.
+func TestExchange_ExplicitDefaultTemplatesStillPass(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+	in := f.input("explicit-defaults")
+	in.SellTemplateCode, in.BuyTemplateCode = "fx_sell", "fx_buy"
+	_, err := f.svc.Exchange(ctx, in)
+	require.NoError(t, err)
+	require.True(t, f.balance(t, ctx, f.usdc).IsZero())
+	require.True(t, f.balance(t, ctx, f.credits).Equal(decimal.NewFromInt(1000)))
+}
+
+// TestExchange_FundingUIDMustBeTheHoldersSourceDeposit pins m-5's first half
+// (2026-10-09 security review): FundingUID is checked, not just stored.
+func TestExchange_FundingUIDMustBeTheHoldersSourceDeposit(t *testing.T) {
+	ctx := context.Background()
+	f := seedExchangeFixture(t, ctx)
+
+	unknown := f.input("funding-unknown")
+	unknown.FundingUID = "00000000-0000-7000-8000-000000000000"
+	_, err := f.svc.Exchange(ctx, unknown)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+	require.ErrorContains(t, err, "funding journal")
+	require.NotErrorIs(t, err, core.ErrNotFound, "a bad reference is the caller's input error, not a missing resource")
+
+	garbage := f.input("funding-garbage")
+	garbage.FundingUID = "not-a-uid"
+	_, err = f.svc.Exchange(ctx, garbage)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// Another holder's deposit in the right currency.
+	other, err := f.svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+		HolderID: f.holder + 1, CurrencyUID: f.usdc, IdempotencyKey: postgrestest.UniqueKey("other-holder-deposit"),
+		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+	})
+	require.NoError(t, err)
+	stolen := f.input("funding-other-holder")
+	stolen.FundingUID = other.UID
+	_, err = f.svc.Exchange(ctx, stolen)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	// The same holder's deposit, but in the target currency.
+	wrongCcy, err := f.svc.JournalWriter().ExecuteTemplate(ctx, "deposit_confirm", core.TemplateParams{
+		HolderID: f.holder, CurrencyUID: f.credits, IdempotencyKey: postgrestest.UniqueKey("credits-deposit"),
+		Amounts: map[string]decimal.Decimal{"amount": decimal.NewFromInt(1)},
+	})
+	require.NoError(t, err)
+	wrong := f.input("funding-wrong-currency")
+	wrong.FundingUID = wrongCcy.UID
+	_, err = f.svc.Exchange(ctx, wrong)
+	require.ErrorIs(t, err, core.ErrInvalidInput)
+
+	require.Equal(t, 3, f.journalCount(t, ctx), "only the three seeded deposits")
+	var holds int
+	require.NoError(t, f.pool.QueryRow(ctx, "SELECT count(*) FROM reservations").Scan(&holds))
+	require.Zero(t, holds, "refused before any write")
+
+	// The holder's own source-currency deposit is accepted.
+	_, err = f.svc.Exchange(ctx, f.input("funding-ok"))
+	require.NoError(t, err)
 }
