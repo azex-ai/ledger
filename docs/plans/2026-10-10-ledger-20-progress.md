@@ -16,8 +16,8 @@
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 评审通过，待集成 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet；独立域/root PASS |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
-| 13 | 签名资金流程可运行组合示例 | 实施中 | BASE 09d270f / codex/ledger20-t13 | 待验收 |
-| 14 | credits 消费接入原子 Capture | 实施中 | BASE c5d0f1e / codex/ledger20-t14 | 待验收 |
+| 13 | 签名资金流程可运行组合示例 | 已提交，待评审 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet PASS；待T2 |
+| 14 | credits 消费接入原子 Capture | 独立评审中 | a29d202 / codex/ledger20-t14 | PG race/vet PASS；root已核对 |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |

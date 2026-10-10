@@ -65,3 +65,14 @@ Task12 scoped 文档闭环：独立域席位代码 PASS，提出 1 条 Minor 术
 范围 `9b09eb5..ed37bc4`。主控完整阅读脚本、三个实际consumer源码、Makefile/CI diff、CONSUMING与17.md。每个host仓外新go.mod且GOWORK=off，显式candidate replacements，不借依赖模块replace；readonly build/run和生产import图检查真实执行。root不吸入可选SDK，所有host生产imports排除testfixtures/Docker。trap只清本次mktemp目录，带空格路径、失败码42传播、拒绝仓内TMPDIR有一次性验证证据。
 
 EVM/R2函数用于编译接口接线，未声称已连接RPC/对象存储。R2 miniotest显式replace仅使tidy解析现有测试依赖，生产imports与go.mod/go.sum元数据区别准确；尚未发布的零伪版本不会被本gate掩饰成远程可用。保留原root三种换算检查，CI仍复用既有make目标。无新增依赖和业务API。
+## Task 14 · root Codex 第二意见（a29d202）
+
+已核对 BASE c5d0f1e 到 a29d202 的全部示例 diff、新回归和报告。正数消费委托 Capture；零金额 final Release 与 partial 拒绝保持；stream Finalize 没有变成第二次扣款。业务 quote map 克隆后传递，保留字段由 Capture 添加，原 settle/charge suffix 不变。调用者事务须传播错误、原始 journal 可绕过 hold、unsigned discharge 的限制在 README 明确。
+
+v3 fixture namespace 只用于新例库，setup/scenario 首行只读 guard 拒绝任一旧 demo journal/reservation；既有 v3 重跑允许。测试核对拒绝后六表、双币余额与 hold 不变，没有将重命名旧业务事件描述为迁移。schema bootstrap 仍先执行及禁止并发两版本的范围明确。账面 available classification 与扣 hold 后 spendable 数值已逐项核对。作者 PG race 12.979s；本席未重复相同测试。根本行为与冻结契约一致，PASS，独立域席仍需结论。
+
+## Task 13 · root Codex 第二意见（1a585d0）
+
+已核对 Authorize/attestJournal/PostAuthorized 原实现及示例全部生产源码、测试、README。签名和验证均在 RunInTx 前，内部先取模板/settlement 全锁再入账和结算；所有错误传播且仅提交成功返回 receipt。真实 pg_stat_activity 检查远端边界，settlement 超额测试让可入账 charge 与 receipt 全回滚。稳定 EffectiveAt 与双 key 重放不重新签名、不增加账务行。
+
+signed replay 三项 auth 材料全空时按已裁决方式验证相关余额历史；部分缺损或新坏签名仍拒绝。VerifiedBalance 不冒充当前状态检查或精确单笔验签；其他 unsigned/坏签名历史导致保守拒绝的用例与文档齐全。模板、reservation 关联和跨操作不可变 event 由宿主负责，未把 private helper 冒充任意输入 API。unsigned discharge 原 hold 至 expiry 的门槛 80−60=20 有真实 PG 断言；无 distributed atomicity 或草稿恢复承诺。作者目标 race 6.183s；本席未重复相同测试。PASS，独立域席待安排。
