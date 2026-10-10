@@ -182,7 +182,9 @@ the `conversion_quotes` metadata key. `Exchange` does this for both FX legs;
 a metered charge does it for each priced line. Reuse that quote on retry after
 rates change — metadata participates in idempotency comparison even when the
 rounded amounts match. `JournalInput.Validate` rejects a value under that key
-that does not decode, and the holder statement (`GET /holder/transactions`)
+that does not decode, or whose `target_amount` is not its own quantity × rate
+rounded at its target exponent (build quotes with `FixedRate.Quote`, one per
+priced line, and this always holds), and the holder statement (`GET /holder/transactions`)
 returns the decoded quotes as `quotes` so the wallet can show "10,000 input
 tokens × 0.002". Zero-cost release has no journal metadata, so the host's
 durable event record must preserve its quote and operation kind. Which

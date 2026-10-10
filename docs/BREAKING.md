@@ -31,6 +31,31 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `core.ConversionQuote.Validate`: `target_amount` must follow from the quote's own rate
+
+**Landed (2026-10-10 fix wave 2, security review m-5).** `Validate` -- and so
+`EncodeConversionQuotes`, `DecodeConversionQuotes` and every journal write
+carrying `metadata["conversion_quotes"]` (`JournalInput.Validate`) -- now
+recomputes the conversion through `core.FixedRate.Convert` on the quote's own
+fields and requires `target_amount` to equal `source_quantity x rate` rounded
+with `rounding` at `target_exponent`, and `source_quantity` to fit
+`source_exponent`. A quote that breaks either (`1 x 1000 -> 999999`, an amount
+carrying more places than `target_exponent`, a rounding mode that did not
+produce the amount) is `core.ErrInvalidInput` (`400` / `10001`); a quantity
+finer than `source_exponent` also keeps `core.ErrPrecisionExceeded` in the
+chain. Before, `Validate` did not recompute, so the holder statement could
+explain a charge with numbers that do not follow from its rate.
+
+**What a consumer must do.** Nothing, if every quote comes from
+`core.FixedRate.Quote` (as `Exchange` and `examples/credits-topup` do): those
+are consistent by construction. A host that builds `ConversionQuote` values
+by hand -- or prices a line by summing sub-amounts under one quote -- must make
+each quote's `target_amount` the rounded product of its own quantity and rate,
+or write one quote per priced line. Stored journals are not re-validated on
+write, but the holder statement decodes with the same rule: a pre-existing
+row whose quote does not satisfy it fails `GET /holder/transactions` with
+`core.ErrCorruptData` (`500` / `19001`), as any undecodable quote does.
+
 ### `core.CurrencyInput.Validate` / `POST /currencies`: currency-code charset
 
 **Landed (2026-10-09 security review m-2).** A currency code is now 1-64

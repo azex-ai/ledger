@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -64,9 +65,17 @@ type ConversionQuote struct {
 	Rounding       RoundingMode    `json:"rounding"`
 }
 
-// Validate checks the quote's own consistency. It does not recompute the
-// conversion: a stored quote is evidence of what was applied, and the pair's
-// currencies may since have been retired.
+// Validate checks the quote's own consistency, including its arithmetic:
+// TargetAmount must equal SourceQuantity x Rate rounded with Rounding at
+// TargetExponent, and SourceQuantity must fit SourceExponent -- exactly what
+// FixedRate.Convert computes, which Validate re-runs on the quote's own
+// fields (it needs no stored currency, so a quote whose currencies have since
+// been retired still validates). A quote is the explanation the holder
+// statement shows next to a charge; one whose numbers do not follow from its
+// own rate ("1 x 1000 -> 999999") is refused at journal write time
+// (JournalInput.Validate) rather than shown. It does not check that the
+// journal's entries move TargetAmount: the quote explains, the entries are
+// the money.
 //
 // SourceCode and TargetCode follow the currency-code rule CurrencyInput
 // enforces -- 1-64 characters from [A-Za-z0-9_.-] -- and must differ; Version
@@ -105,6 +114,30 @@ func (q ConversionQuote) Validate() error {
 		if err := validateAmountIsRescalable("conversion quote", name, v); err != nil {
 			return err
 		}
+	}
+	return q.validateArithmetic()
+}
+
+// validateArithmetic recomputes the conversion through FixedRate.Convert --
+// the one implementation of quantity precision, multiplication and target
+// rounding -- and requires TargetAmount to be its result. Every failure is
+// ErrInvalidInput (a source quantity finer than SourceExponent keeps
+// ErrPrecisionExceeded in the chain as well): the quote is malformed input,
+// whatever arithmetic rule it broke.
+func (q ConversionQuote) validateArithmetic() error {
+	rate := FixedRate{SourceCode: q.SourceCode, TargetCode: q.TargetCode, Rate: q.Rate, Version: q.Version, Rounding: q.Rounding}
+	want, err := rate.Convert(q.SourceQuantity,
+		Currency{Code: q.SourceCode, Exponent: q.SourceExponent},
+		Currency{Code: q.TargetCode, Exponent: q.TargetExponent})
+	if err != nil {
+		if errors.Is(err, ErrInvalidInput) {
+			return fmt.Errorf("core: conversion quote: %w", err)
+		}
+		return fmt.Errorf("core: conversion quote: %w: %w", ErrInvalidInput, err)
+	}
+	if !q.TargetAmount.Equal(want) {
+		return fmt.Errorf("core: conversion quote: target_amount %s is not %s x %s rounded %s at %d places (%s): %w",
+			q.TargetAmount, q.SourceQuantity, q.Rate, q.Rounding, q.TargetExponent, want, ErrInvalidInput)
 	}
 	return nil
 }
