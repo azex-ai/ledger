@@ -1,0 +1,11 @@
+package main
+
+import (
+	"github.com/azex-ai/ledger/anchors/r2"
+	"github.com/azex-ai/ledger/core"
+)
+
+// Compile the host's port wiring without credentials or object-storage calls.
+func anchor(cfg r2.Config) (core.Anchor, error) { return r2.New(cfg) }
+
+func main() {}

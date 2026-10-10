@@ -1,5 +1,7 @@
 "use client";
 
+import { skeletonSlots } from "../lib/skeleton-slots";
+
 /*
  * Shared presentational pieces for the HeroUI skin. Small on purpose: pages
  * compose HeroUI components directly; only cross-page primitives live here.
@@ -107,8 +109,8 @@ export function StatusChip({ status }: { status: string }) {
 export function TableSkeleton({ rows = 6 }: { rows?: number }) {
   return (
     <div className="space-y-2" aria-hidden>
-      {Array.from({ length: rows }, (_, i) => (
-        <Skeleton key={i} className="h-10 w-full rounded-lg" />
+      {skeletonSlots(rows).map((slot) => (
+        <Skeleton key={slot.id} className="h-10 w-full rounded-lg" />
       ))}
     </div>
   );

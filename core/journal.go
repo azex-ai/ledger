@@ -98,6 +98,9 @@ type JournalInput struct {
 	// EffectiveAt is the business date to attribute this journal to. Zero
 	// value means "now" — the store layer defaults it at insert time. Must
 	// not be more than effectiveAtFutureTolerance ahead of the current time.
+	// PostgreSQL storage and signatures floor it to microsecond precision.
+	// Explicit idempotent retries compare at that precision; sub-microsecond
+	// differences within the same stored instant do not distinguish events.
 	EffectiveAt time.Time `json:"effective_at"`
 }
 

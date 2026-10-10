@@ -1,0 +1,43 @@
+package postgres_test
+
+import (
+	"context"
+	"github.com/azex-ai/ledger/core"
+	"github.com/azex-ai/ledger/internal/postgrestest"
+	"github.com/azex-ai/ledger/postgres"
+	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/require"
+	"testing"
+)
+
+// Audit probe: success documents existing incorrect behavior, not the desired contract.
+func TestArchitectureReviewProbe_FrozenCrossCurrencyNetting(t *testing.T) {
+	p := postgrestest.SetupDB(t)
+	ctx := context.Background()
+	ls := postgres.NewLedgerStore(p)
+	usd := postgrestest.SeedCurrencyWithExponent(t, p, "USD", "Dollar", 2)
+	pts := postgrestest.SeedCurrencyWithExponent(t, p, "PTS", "Points", 0)
+	wallet := postgrestest.SeedClassificationWithRole(t, p, "probe_wallet", "Wallet", "debit", false, "available")
+	counter := postgrestest.SeedClassification(t, p, "probe_counter", "Counter", "credit", true)
+	jt := postgrestest.SeedJournalType(t, p, "probe", "Probe")
+	entry := func(holder int64, currency, class string, side core.EntryType, amount int64) core.EntryInput {
+		return core.EntryInput{AccountHolder: holder, CurrencyUID: currency, ClassificationUID: class, EntryType: side, Amount: decimal.NewFromInt(amount)}
+	}
+	_, err := ls.PostJournal(ctx, core.JournalInput{JournalTypeUID: jt, IdempotencyKey: "seed", Entries: []core.EntryInput{
+		entry(42, usd, wallet, core.EntryTypeDebit, 100), entry(-42, usd, counter, core.EntryTypeCredit, 100),
+	}})
+	require.NoError(t, err)
+	_, err = postgres.NewAccountPolicyStore(p).SetPolicy(ctx, core.AccountPolicyInput{AccountHolder: 42, Status: core.AccountPolicyStatusFrozen})
+	require.NoError(t, err)
+	usdSpend := []core.EntryInput{entry(42, usd, wallet, core.EntryTypeCredit, 100), entry(-42, usd, counter, core.EntryTypeDebit, 100)}
+	_, err = ls.PostJournal(ctx, core.JournalInput{JournalTypeUID: jt, IdempotencyKey: "usd-only", Entries: usdSpend})
+	require.ErrorIs(t, err, core.ErrAccountFrozen, "negative control: frozen rejects spending USD alone")
+	_, err = ls.PostJournal(ctx, core.JournalInput{JournalTypeUID: jt, IdempotencyKey: "cross-currency", Entries: append(usdSpend,
+		entry(42, pts, wallet, core.EntryTypeDebit, 100), entry(-42, pts, counter, core.EntryTypeCredit, 100),
+	)})
+	require.NoError(t, err, "BUG: different currencies must not offset a frozen policy")
+	balance, err := ls.GetBalance(ctx, 42, usd, wallet)
+	require.NoError(t, err)
+	require.True(t, balance.IsZero(), "frozen USD was consumed")
+	t.Log("PROBE REPRODUCED: frozen holder USD 100 -> 0, compensated by +100 PTS; USD-only control refused")
+}

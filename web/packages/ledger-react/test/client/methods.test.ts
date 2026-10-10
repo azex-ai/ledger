@@ -2,6 +2,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, test } from "vitest";
 import { server } from "../setup";
 import { createLedgerClient } from "../../src/client/client";
+import type { components } from "../../src/client/schema";
 
 const BASE = "http://ledger.test";
 const API_KEY = "secret-key";
@@ -157,7 +158,7 @@ describe("reservations", () => {
     );
   });
 
-  test("createReservation", async () => {
+  test("createReservation omits optional fields when absent", async () => {
     const i = intercept("post", "/api/v1/reservations", {});
     await client.createReservation({
       account_holder: 1,
@@ -166,7 +167,36 @@ describe("reservations", () => {
       idempotency_key: "k",
     });
     expect(i.captured()?.auth).toBe(`Bearer ${API_KEY}`);
-    expect(i.captured()?.body).toMatchObject({ amount: "5" });
+    expect(i.captured()?.body).toEqual({
+      account_holder: 1,
+      currency_uid: "uid-1",
+      amount: "5",
+      idempotency_key: "k",
+    });
+  });
+
+  test.each([
+    { expires_in_sec: 3600, require_verified_balance: true },
+    { expires_in_sec: 0, require_verified_balance: false },
+  ])("createReservation serializes generated options %j", async (options) => {
+    const i = intercept("post", "/api/v1/reservations", {});
+    const body = {
+      account_holder: 1,
+      currency_uid: "uid-1",
+      amount: "5.000000000000000001",
+      idempotency_key: "reserve-key",
+      ...options,
+    } satisfies components["schemas"]["ReserveInput"];
+
+    await client.createReservation(body);
+
+    expect(i.captured()).toEqual({
+      url: `${BASE}/api/v1/reservations`,
+      method: "POST",
+      auth: `Bearer ${API_KEY}`,
+      idempotencyKey: "reserve-key",
+      body,
+    });
   });
 
   test("settleReservation + releaseReservation (204)", async () => {
@@ -311,7 +341,7 @@ describe("templates", () => {
     const p = intercept("post", "/api/v1/templates/dep/preview", {
       entries: [],
     });
-    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1" });
+    await client.previewTemplate("dep", { holder_id: 1, currency_uid: "cur-1", amounts: { amount: "1" } });
     expect(p.captured()?.url).toBe(`${BASE}/api/v1/templates/dep/preview`);
     expect(p.captured()?.body).toMatchObject({ holder_id: 1 });
   });

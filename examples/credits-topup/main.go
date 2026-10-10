@@ -1,9 +1,10 @@
 // Example: deposit 1 USDC, buy 1,000 AI credits, and charge usage.
 //
 // Uses configured fixed rates and existing ledger primitives; usage events belong to the host.
-// This example has no withdrawal or credit cash-out path. Run against a dedicated
-// example database; fixed operation keys replay completed operations without
-// duplicate accounting. Interrupted jobs whose holds expire need reconciliation.
+// This example has no withdrawal or credit cash-out path. Run against a fresh
+// dedicated example database; v3-capture operation keys replay completed operations
+// without duplicate accounting. Older demo events are refused, never renamed.
+// Interrupted jobs whose holds expire need reconciliation.
 //
 // Run with DATABASE_URL (runtime) and MIGRATE_DATABASE_URL (migration credential):
 //
@@ -27,7 +28,10 @@ import (
 	"github.com/azex-ai/ledger/presets"
 )
 
-const userID int64 = 2001
+const (
+	userID        int64 = 2001
+	demoNamespace       = "credits-demo-v3-capture"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -85,6 +89,9 @@ func run() error {
 }
 
 func setup(ctx context.Context, svc *ledger.Service, prices pricing) (string, string, error) {
+	if err := rejectLegacyDemo(ctx, svc); err != nil {
+		return "", "", err
+	}
 	source, sourceOK := prices.units["USDC"]
 	target, targetOK := prices.units["CREDITS"]
 	if !sourceOK || !targetOK {
@@ -126,7 +133,10 @@ func setup(ctx context.Context, svc *ledger.Service, prices pricing) (string, st
 // scenario represents already-confirmed deposit and usage events. Production
 // hosts persist their event/request IDs and reuse them on delivery retries.
 func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, prices pricing) error {
-	const root = "credits-demo-v2"
+	if err := rejectLegacyDemo(ctx, svc); err != nil {
+		return err
+	}
+	const root = demoNamespace
 	target, err := svc.Currencies().GetCurrency(ctx, credits)
 	if err != nil {
 		return err
@@ -271,14 +281,37 @@ func scenario(ctx context.Context, svc *ledger.Service, usdc, credits string, pr
 	return checkFinalBalances(ctx, svc, usdc, credits, expected)
 }
 
+// rejectLegacyDemo is a demo-version guard, not a business-event migration.
+// Capture adds reserved metadata to old settle/charge payloads. Use a fresh
+// database for these new fixture events instead of rekeying already billed work.
+func rejectLegacyDemo(ctx context.Context, svc *ledger.Service) error {
+	var legacy bool
+	if err := svc.DBTX().QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM journals WHERE idempotency_key LIKE 'credits-demo%' AND idempotency_key NOT LIKE $1
+		UNION ALL
+		SELECT 1 FROM reservations WHERE idempotency_key LIKE 'credits-demo%' AND idempotency_key NOT LIKE $1
+	)`, demoNamespace+":%").Scan(&legacy); err != nil {
+		return fmt.Errorf("check legacy demo events: %w", err)
+	}
+	if legacy {
+		return fmt.Errorf("legacy credits demo events found; use a fresh dedicated example database without renaming submitted events: %w", core.ErrConflict)
+	}
+	return nil
+}
+
 // captureUsage takes the trusted reservation returned by Reserve, never a
 // browser-supplied holder/currency. All usage goes through this reservation flow;
 // raw journals can bypass holds even with a min-balance policy.
 // The host must persist an immutable event payload (amount and operation kind)
 // before calling this helper. Ledger keys deduplicate individual operations,
 // not a provider event changed from a charged delta into a zero-cost release.
-// For services using WithAttestor, AuthorizeTemplate before RunInTx and then
-// PostAuthorized inside it; see examples/tamper-evident for the signed variant.
+// Positive usage delegates to Capture with the original event key; Capture
+// derives :settle/:charge and owns reservation_uid, capture_mode and
+// capture_template_code metadata.
+// A RunInTx caller must propagate errors, as Capture joins without a savepoint.
+// Capture uses the unsigned transaction path. For services using WithAttestor,
+// authorize before RunInTx and PostAuthorized inside it; the tamper-evident
+// example demonstrates journal authorization, not signed hold discharge.
 func captureUsage(ctx context.Context, svc *ledger.Service, rsv *core.Reservation, amount decimal.Decimal, key string, partial bool, quoteMetadata map[string]string) error {
 	if rsv == nil || key == "" || amount.IsNegative() {
 		return core.ErrInvalidInput
@@ -294,25 +327,12 @@ func captureUsage(ctx context.Context, svc *ledger.Service, rsv *core.Reservatio
 		metadata = make(map[string]string)
 	}
 	metadata["usage_event_id"] = key
-	metadata["reservation_uid"] = rsv.UID
-	return svc.RunInTx(ctx, func(tx *ledger.Service) error {
-		var err error
-		if partial {
-			err = tx.Reserver().SettlePartial(ctx, core.SettlePartialInput{ReservationUID: rsv.UID, Amount: amount, IdempotencyKey: key + ":settle"})
-		} else {
-			err = tx.Reserver().Settle(ctx, core.SettleInput{ReservationUID: rsv.UID, Amount: amount, IdempotencyKey: key + ":settle"})
-		}
-		if err != nil {
-			return err
-		}
-		_, err = tx.JournalWriter().ExecuteTemplate(ctx, "credits_spend", core.TemplateParams{
-			HolderID: rsv.AccountHolder, CurrencyUID: rsv.CurrencyUID, IdempotencyKey: key + ":charge",
-			Amounts:  map[string]decimal.Decimal{"amount": amount},
-			Metadata: metadata,
-			Source:   "credits-topup-example",
-		})
-		return err
+	_, err := svc.Capture(ctx, ledger.CaptureInput{
+		ReservationUID: rsv.UID, Amount: amount, IdempotencyKey: key,
+		TemplateCode: "credits_spend", Partial: partial,
+		Metadata: metadata, Source: "credits-topup-example",
 	})
+	return err
 }
 
 func checkFinalBalances(ctx context.Context, svc *ledger.Service, usdc, credits string, expected decimal.Decimal) error {

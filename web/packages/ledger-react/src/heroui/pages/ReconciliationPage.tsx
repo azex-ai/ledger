@@ -1,5 +1,6 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
 import { Button, Card, Input, Label, Table, TextField, toast } from "@heroui/react";
 import { useReconcileAccount, useReconcileGlobal } from "../../hooks/use-system";
@@ -40,10 +41,10 @@ export function ReconciliationPage() {
   }
 
   function runAccountCheck() {
-    const h = parseInt(holder, 10);
+    const h = parseHolderInput(holder, "account");
     const c = currencyId.trim();
-    if (isNaN(h) || c === "") {
-      toast.danger("Enter both a holder and a currency to run the check.");
+    if (typeof h !== "number" || c === "") {
+      toast.danger(typeof h !== "number" ? h ?? "Holder is required" : "Currency is required");
       return;
     }
     accountMutation.mutate(

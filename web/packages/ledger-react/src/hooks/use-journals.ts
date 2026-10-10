@@ -7,7 +7,7 @@ import { ledgerKeys, ledgerKeyPrefix } from "./keys";
 export function useJournals(limit = 20) {
   const client = useLedgerClient();
   return useInfiniteQuery({
-    queryKey: ledgerKeys.journals(limit),
+    queryKey: ledgerKeys.journals(client.cacheScope, limit),
     queryFn: ({ pageParam }) =>
       client.listJournals({ cursor: pageParam, limit }),
     initialPageParam: "",
@@ -29,7 +29,7 @@ export function useJournal(id: string) {
     // Detail uses singular ["journal", id] so invalidation of the list
     // namespace ["ledger","journals"] (e.g. on reverse) doesn't force every
     // detail page to refetch.
-    queryKey: ledgerKeys.journal(id),
+    queryKey: ledgerKeys.journal(client.cacheScope, id),
     queryFn: () => client.getJournal(id),
     enabled: !isDisabled,
   });
@@ -68,12 +68,13 @@ export function useReverseJournal() {
   const client = useLedgerClient();
   const qc = useQueryClient();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       client.reverseJournal(id, reason),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journals });
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances });
-      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.journals(client.cacheScope) });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.balances(client.cacheScope) });
+      qc.invalidateQueries({ queryKey: ledgerKeyPrefix.systemBalances(client.cacheScope) });
     },
   });
 }
@@ -94,7 +95,7 @@ export function useEntries(
   // disable holder 0 only — but be explicit so a negative holder runs too.
   const isDisabled = params.holder === undefined || params.holder === 0;
   const query = useInfiniteQuery({
-    queryKey: ledgerKeys.entries(params),
+    queryKey: ledgerKeys.entries(client.cacheScope, params),
     queryFn: ({ pageParam }) =>
       client.listEntries({ ...params, cursor: pageParam, limit }),
     initialPageParam: "",

@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -14,7 +15,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -35,7 +36,7 @@ describe("use-reservations", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.pages.flatMap((p) => p.list)).toHaveLength(1);
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "reservations", params] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "reservations", params] }),
     ).toBeDefined();
   });
 
@@ -53,6 +54,6 @@ describe("use-reservations", () => {
     result.current.mutate("uid-1");
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
-    expect(keys).toContainEqual(["ledger", "reservations"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "reservations"]);
   });
 });

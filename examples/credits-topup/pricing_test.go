@@ -181,7 +181,7 @@ func TestConfiguredScenario_CustomRatesAndReplay(t *testing.T) {
 	var snapshot string
 	require.NoError(t, admin.QueryRow(t.Context(),
 		"SELECT metadata->>'conversion_quotes' FROM journals WHERE idempotency_key=$1",
-		"credits-demo-v2:tokens:result:charge").Scan(&snapshot))
+		demoNamespace+":tokens:result:charge").Scan(&snapshot))
 	require.Contains(t, snapshot, `"source_quantity":"10000"`)
 	require.Contains(t, snapshot, `"rate":"0.003"`)
 	require.Contains(t, snapshot, `"target_amount":"30"`)

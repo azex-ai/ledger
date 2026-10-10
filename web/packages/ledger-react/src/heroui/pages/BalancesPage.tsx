@@ -1,7 +1,8 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useMemo, useState } from "react";
-import { Button, Card, Input, Table, TextField } from "@heroui/react";
+import { Button, Card, Input, Table, TextField, toast } from "@heroui/react";
 import {
   CartesianGrid,
   Line,
@@ -35,7 +36,14 @@ export function BalancesPage() {
   const { data, isLoading, isError, refetch } = useBalances(holder);
   const balances = data ?? [];
 
-  const submitHolder = () => setHolder(parseInt(holderInput, 10) || 0);
+  function submitHolder() {
+    const parsed = parseHolderInput(holderInput);
+    if (typeof parsed === "string") {
+      toast.danger(parsed);
+      return;
+    }
+    setHolder(parsed ?? 0);
+  }
 
   // Memo so the dates are stable across re-renders. Without this, useSnapshots
   // sees a new `start`/`end` every render and refetches forever.

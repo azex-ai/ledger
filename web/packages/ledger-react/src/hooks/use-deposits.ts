@@ -28,7 +28,7 @@ export function useDeposits(
   const classification = useClassificationIdByCode(DEPOSIT_CODE);
   const classificationUid = classification.uid;
   const query = useInfiniteQuery({
-    queryKey: ledgerKeys.bookings(DEPOSIT_CODE, { ...params, classificationUid, limit }),
+    queryKey: ledgerKeys.bookings(client.cacheScope, DEPOSIT_CODE, { ...params, classificationUid, limit }),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listBookings({
         holder: params.holder,

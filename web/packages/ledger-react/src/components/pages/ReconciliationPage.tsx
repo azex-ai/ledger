@@ -1,5 +1,6 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
 import { formatAmount, formatSignedAmount, formatUTC, cn } from "../../lib/utils";
 import { useReconcileGlobal, useReconcileAccount } from "../../hooks/use-system";
@@ -89,10 +90,10 @@ export function ReconciliationPage() {
               <div className="flex items-end">
                 <Button
                   onClick={() => {
-                    const h = parseInt(holder, 10);
+                    const h = parseHolderInput(holder, "account");
                     const c = currencyId.trim();
-                    if (isNaN(h) || c === "") {
-                      toast.error("Enter both a holder and a currency to run the check.");
+                    if (typeof h !== "number" || c === "") {
+                      toast.error(typeof h !== "number" ? h ?? "Holder is required" : "Currency is required");
                       return;
                     }
                     // mutation-feedback-allow: inline isError below, not onSuccess/onError options (J-20)

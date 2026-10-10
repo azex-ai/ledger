@@ -6,6 +6,7 @@ import {
 } from "@azex/ledger-react/server";
 import { NextLink } from "@/components/next-link";
 import { serverLedgerConfig } from "@/lib/ledger-env";
+import { getDashboardCacheScope } from "@/lib/ledger-cache-scope";
 
 export const dynamic = "force-dynamic";
 
@@ -13,7 +14,8 @@ export default async function Page() {
   const queryClient = new QueryClient();
   // Resolve config outside the try/catch — a misconfig must fail loudly, not be
   // swallowed as a "best-effort prefetch" failure.
-  const client = createServerLedgerClient(serverLedgerConfig());
+  const cacheScope = await getDashboardCacheScope();
+  const client = createServerLedgerClient({ ...serverLedgerConfig(), cacheScope });
 
   try {
     await prefetchJournals(queryClient, client, 20);

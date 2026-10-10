@@ -16,23 +16,29 @@ import (
 // TestMigrations_FullDownChainAndReapply drives the whole migration set up,
 // all the way back down, and up again.
 //
-// deployment.md requires every migration to carry a down script and every
-// release to be rollback-capable, and each migration in the 2026-08-21
-// integrity wave was reviewed individually against that rule -- but nothing
-// had ever executed the down chain end to end. Individual down scripts passing
-// review is not evidence that they compose: 049 hands table ownership to
-// ledger_owner and 042's down drops that role, 045 converts journals.event_id
-// between a sentinel and a nullable FK, 048 and 051 add columns under an
-// append-only guard that has to be disabled and re-enabled. Any of those can
-// be correct alone and wrong in sequence.
+// The baseline transfers table ownership to ledger_owner and its down script
+// drops cluster-wide roles. Later migrations also disable and restore guards
+// while changing protected tables. Testing each migration in isolation cannot
+// establish that the complete down chain composes. docs/TESTING.md describes
+// why this destructive test needs a dedicated cluster, not just a database.
 //
 // Reapplying afterwards matters as much as the teardown: a down chain that
 // leaves a stray role, sequence, or trigger behind will not fail here, it will
 // fail the next time someone migrates up.
 func TestMigrations_FullDownChainAndReapply(t *testing.T) {
-	connStr := postgrestest.SetupRawDB(t)
-	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
+	// Keep a normal fixture alive throughout the destructive roundtrip. Its
+	// ledger_owner dependency makes a regression to SetupRawDB fail at DROP
+	// ROLE deterministically, even when no other package happens to run.
+	ordinary := postgrestest.SetupDB(t)
+	canaryUID := postgrestest.SeedCurrency(t, ordinary, "CANARY", "Unaffected ordinary database")
 	ctx := context.Background()
+	var ownerBefore, tableOwnerBefore uint32
+	require.NoError(t, ordinary.QueryRow(ctx, `SELECT oid FROM pg_roles WHERE rolname = 'ledger_owner'`).Scan(&ownerBefore))
+	require.NoError(t, ordinary.QueryRow(ctx, `SELECT relowner FROM pg_class WHERE oid = 'public.currencies'::regclass`).Scan(&tableOwnerBefore))
+	require.Equal(t, ownerBefore, tableOwnerBefore)
+
+	connStr := postgrestest.SetupIsolatedRawDB(t)
+	migrateURL := strings.Replace(connStr, "postgres://", "pgx5://", 1)
 
 	newMigrator := func() *migrate.Migrate {
 		src, err := postgres.NewMigrationSource()
@@ -88,4 +94,13 @@ func TestMigrations_FullDownChainAndReapply(t *testing.T) {
 	srcErr, dbErr = reup.Close()
 	require.NoError(t, srcErr)
 	require.NoError(t, dbErr)
+
+	var ownerAfter, tableOwnerAfter uint32
+	var canaryName string
+	require.NoError(t, ordinary.QueryRow(ctx, `SELECT oid FROM pg_roles WHERE rolname = 'ledger_owner'`).Scan(&ownerAfter))
+	require.NoError(t, ordinary.QueryRow(ctx, `SELECT relowner FROM pg_class WHERE oid = 'public.currencies'::regclass`).Scan(&tableOwnerAfter))
+	require.NoError(t, ordinary.QueryRow(ctx, `SELECT name FROM currencies WHERE uid = $1::uuid`, canaryUID).Scan(&canaryName))
+	require.Equal(t, ownerBefore, ownerAfter, "roundtrip must not replace the ordinary cluster's role")
+	require.Equal(t, tableOwnerBefore, tableOwnerAfter, "ordinary table ownership must remain intact")
+	require.Equal(t, "Unaffected ordinary database", canaryName)
 }

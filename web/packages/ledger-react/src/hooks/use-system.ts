@@ -1,12 +1,12 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRef } from "react";
 import { useLedgerClient } from "../provider/context";
-import { ledgerKeys } from "./keys";
+import { ledgerKeys, ledgerKeyPrefix } from "./keys";
 
 export function useHealth() {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.health(),
+    queryKey: ledgerKeys.health(client.cacheScope),
     queryFn: () => client.getHealth(),
     refetchInterval: 10_000,
   });
@@ -15,7 +15,7 @@ export function useHealth() {
 export function useSystemBalances() {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.systemBalances(),
+    queryKey: ledgerKeys.systemBalances(client.cacheScope),
     queryFn: () => client.getSystemBalances(),
   });
 }
@@ -27,6 +27,7 @@ export function useReconcileGlobal() {
   // of a stale result (api-contract.md §9).
   const idempotencyKeyRef = useRef<string | null>(null);
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: () => {
       if (!idempotencyKeyRef.current) idempotencyKeyRef.current = crypto.randomUUID();
       return client.reconcileGlobal(idempotencyKeyRef.current);
@@ -40,6 +41,7 @@ export function useReconcileGlobal() {
 export function useReconcileAccount() {
   const client = useLedgerClient();
   return useMutation({
+    mutationKey: ledgerKeyPrefix.all(client.cacheScope),
     mutationFn: ({ holder, currencyUid }: { holder: number; currencyUid: string }) =>
       client.reconcileAccount(holder, currencyUid),
   });
@@ -72,7 +74,7 @@ export function useSnapshots(params: {
     !params.start ||
     !params.end;
   const query = useQuery({
-    queryKey: ledgerKeys.snapshots(params),
+    queryKey: ledgerKeys.snapshots(client.cacheScope, params),
     queryFn: () => client.listSnapshots(params),
     enabled: !isDisabled,
   });

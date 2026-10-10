@@ -31,7 +31,7 @@ export function prefetchJournals(
   limit = 20,
 ): Promise<void> {
   return queryClient.prefetchInfiniteQuery({
-    queryKey: ledgerKeys.journals(limit),
+    queryKey: ledgerKeys.journals(client.cacheScope, limit),
     queryFn: ({ pageParam }: { pageParam: string }) =>
       client.listJournals({ cursor: pageParam, limit }),
     initialPageParam: "",
@@ -48,7 +48,7 @@ export function prefetchEntries(
   limit = 50,
 ): Promise<void> {
   return queryClient.prefetchInfiniteQuery({
-    queryKey: ledgerKeys.entries(params),
+    queryKey: ledgerKeys.entries(client.cacheScope, params),
     queryFn: ({ pageParam }: { pageParam: string }) =>
       client.listEntries({ ...params, cursor: pageParam, limit }),
     initialPageParam: "",
@@ -64,7 +64,7 @@ export function prefetchBalances(
   holder: number,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.balances(holder),
+    queryKey: ledgerKeys.balances(client.cacheScope, holder),
     queryFn: () => client.getBalances(holder),
   });
 }
@@ -75,7 +75,7 @@ export function prefetchSystemHealth(
   client: LedgerClient,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.health(),
+    queryKey: ledgerKeys.health(client.cacheScope),
     queryFn: () => client.getHealth(),
   });
 }
@@ -86,7 +86,7 @@ export function prefetchSystemBalances(
   client: LedgerClient,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.systemBalances(),
+    queryKey: ledgerKeys.systemBalances(client.cacheScope),
     queryFn: () => client.getSystemBalances(),
   });
 }
@@ -98,7 +98,7 @@ export function prefetchReservations(
   params: { holder?: number; status?: string; limit?: number },
 ): Promise<void> {
   return queryClient.prefetchInfiniteQuery({
-    queryKey: ledgerKeys.reservations(params),
+    queryKey: ledgerKeys.reservations(client.cacheScope, params),
     queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
       client.listReservations({ ...params, cursor: pageParam }),
     initialPageParam: undefined as string | undefined,
@@ -114,7 +114,7 @@ export function prefetchClassifications(
   activeOnly?: boolean,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.classifications(activeOnly),
+    queryKey: ledgerKeys.classifications(client.cacheScope, activeOnly),
     queryFn: () => client.listClassifications(activeOnly),
   });
 }
@@ -126,7 +126,7 @@ export function prefetchCurrencies(
   activeOnly?: boolean,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.currencies(activeOnly),
+    queryKey: ledgerKeys.currencies(client.cacheScope, activeOnly),
     queryFn: () => client.listCurrencies(activeOnly),
   });
 }
@@ -138,7 +138,7 @@ export function prefetchJournalTypes(
   activeOnly?: boolean,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.journalTypes(activeOnly),
+    queryKey: ledgerKeys.journalTypes(client.cacheScope, activeOnly),
     queryFn: () => client.listJournalTypes(activeOnly),
   });
 }
@@ -150,7 +150,7 @@ export function prefetchTemplates(
   activeOnly?: boolean,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.templates(activeOnly),
+    queryKey: ledgerKeys.templates(client.cacheScope, activeOnly),
     queryFn: () => client.listTemplates(activeOnly),
   });
 }
@@ -167,7 +167,7 @@ export function prefetchSnapshots(
   },
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.snapshots(params),
+    queryKey: ledgerKeys.snapshots(client.cacheScope, params),
     queryFn: () => client.listSnapshots(params),
   });
 }
