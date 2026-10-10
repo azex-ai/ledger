@@ -108,3 +108,13 @@ preview canonical amounts 原样发送，单amount便捷输入只转换这一键
 逐份核对 README、COOKBOOK、BREAKING、frontend、SDK README 与 ADR，结合 Capture/Exchange、provider/client/keys 和预取 hooks 的实际导出与行为。原币双分录、估值、内部兑换与外部成交分工准确；Capture Go-only、无 savepoint、unsigned discharge 与 signed replay 的保守限制没有被接入文档扩大。SDK scope-first keys、hidden cookie 身份责任、safe holder 与 response-after-write 风险、generated booking/preview 迁移均与实现一致。
 
 作者已实际编译 README、Capture 片段和 SSR/DTO/scoped-key TypeScript 片段，API/codegen/link 核对通过。本席没有重复相同测试；缺席于作者 BASE 的两个示例已读取冻结提交，主控合并后再核路径和综合 gate。草稿两处 Minor（booking 预取说明链接、纯 valuation 被误归入双数据库凭证前提）已在提交前修正。无 blocker，可串行集成。
+
+## Task 20 · root Codex 第二意见：PASS（e3870ff）
+
+已完整核对冻结提交 `e3870ff11b96c42b2bc11e023b9e68558245399f` 的 30 文件 diff、作者报告、提交后 codegen 证据及原始日志。测试破坏性操作独立到实际不同 system identifier 的 PG cluster，配置失败关闭，保留普通 canary / role OID / owner 证明；容器启动、身份查询、建库和清理有界，Cleanup 逆序正确，没有修改生产迁移或借全局串行掩盖竞态。
+
+公共幂等比较只将显式时间 floor 到持久化微秒，zero/default 语义保留。五种实际 PG 路径覆盖同微秒成功、跨微秒与金额变化拒绝，签名验证、原 UID、行数及余额均有断言；signed Capture 验证重试不重复扣款和结算。与独立诊断的 RED/GREEN 一致，未将 macOS 时钟偶然低精度作为正确性证明。
+
+两种 skin 的 preview 保留合法重复，按完整 wire 内容及同内容序号构建私有 key；真实重排组件测试证明 DOM 身份而非只断言 helper。静态 skeleton 的布局槽不冒充业务身份。生成注释从 OpenAPI 源更新，未弱化 gate。文档的 safe holder、cache scope、Capture、外部成交、开发 advisory 和未发布 tag 边界准确。
+
+作者四 module build/vet/race/lint、Go consumer、SDK 423 / host 8、Next build、tarball 六入口、两项前端 gate 和提交后 codegen 均通过；本席未重复同一套完整检查，50 份原始证据已复制并逐字节核对。独立 whole-branch Final 另由 reviewer 给出，实际串行集成和 main Linux CI 尚未发生，不提前记为通过。
