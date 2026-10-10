@@ -7,17 +7,17 @@
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
 | 3 | 金额 helper 目标精度边界 | 已集成 | 2239814 → 83060d6 | core race/vet/fuzz；独立域及root PASS；完整root race |
-| 4 | 输入校验早于 tracing 展开 | 评审通过，待集成 | cf03361 / codex/ledger20-t04 | PG race/vet；独立域/root PASS |
+| 4 | 输入校验早于 tracing 展开 | 已集成 | cf03361 → 0c9417e | PG race/vet；独立域/root PASS；完整root race |
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
-| 8 | 管理端缓存按实例与身份隔离 | 实施中 | BASE 4df363d / codex/ledger20-t08 | 待验收 |
+| 8 | 管理端缓存按实例与身份隔离 | 独立评审中 | 68452c9 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types PASS；补CI接线 |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 评审通过，待集成 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet；独立域/root PASS |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 已提交，待评审 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet PASS；待T2 |
-| 14 | credits 消费接入原子 Capture | 独立评审中 | a29d202 / codex/ledger20-t14 | PG race/vet PASS；root已核对 |
+| 14 | credits 消费接入原子 Capture | 评审通过，待集成 | a29d202 / codex/ledger20-t14 | PG race/vet；独立域/root PASS |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |
@@ -41,3 +41,5 @@
 - 第十二轮整合 `21f5ba58` 已推送；完整 root race PASS（root 140.544s、postgres 290.942s、service 145.674s），覆盖Capture和ReservationReader。
 
 - 第三轮整合 `83060d62` 已推送；完整 root race PASS（root 134.777s、postgres 300.078s、service 147.368s），目标 exponent 回归与 Capture 已在同一基线运行。
+
+- 第四轮整合 `0c9417e3` 已推送；完整 root race PASS（root 115.155s、postgres 286.666s、service 189.708s）。
