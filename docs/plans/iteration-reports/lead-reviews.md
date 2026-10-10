@@ -37,3 +37,5 @@ Numeric wire 不变，不声称完整 int64。响应拒绝可能发生在服务�
 范围 `de583aa..cf03361`。主控完整读取两入口 diff、新 PG/exporter 回归、04.md，并核对 ReserveInput/CreateBookingInput.Validate 第一项即为 magnitude 校验，错误本身不展开金额。合法属性仍经 StartSpan 唯一过滤入口，避免直接 SetAttributes 绕过 PolicyMinimal。失败也创建并结束 span，记录错误；只将校验耗时移到 span 之前。
 
 测试对 Full/Minimal 与 Reserve/Booking 组合验证有限非法数值、七类持久行数不变、无持仓占用以及合法金额回归；没有用旧版巨大指数施压。原边界后续转换都位于校验之后，无迁移/签名/事务变更。实现者真实 PG race 39.781s 与 vet PASS；独立席位静态检查已无 blocker，窄 PG 验证在排队，完成后集成。
+
+Task4 域评审收尾：04-review.md 独立静态 PASS，无未决点。沿用已有真实 PG 证据，取消无新增问题的重复窄测试；本席未声称运行 PG。最终集成门禁会覆盖新回归。

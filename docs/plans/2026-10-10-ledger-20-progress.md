@@ -7,7 +7,7 @@
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
 | 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
-| 4 | 输入校验早于 tracing 展开 | 独立评审中 | cf03361 / codex/ledger20-t04 | PG race/vet通过；隐私策略保留 |
+| 4 | 输入校验早于 tracing 展开 | 评审通过，待集成 | cf03361 / codex/ledger20-t04 | PG race/vet；独立域/root PASS |
 | 5 | 预留请求对齐生成契约 | 评审通过，集成中 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
 | 6 | SDK holder 安全整数边界 | 评审通过，待集成 | 8f52e08 / codex/ledger20-t06 | build/typecheck/346 tests；独立域及root PASS |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
