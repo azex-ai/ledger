@@ -9,17 +9,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/gofrs/flock"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	ledgerpg "github.com/azex-ai/ledger/postgres"
 )
@@ -41,37 +38,8 @@ func baseConnection(t testing.TB) string {
 		return strings.Replace(configured, "pgx5://", "postgres://", 1)
 	}
 	sharedServer.once.Do(func() {
-		ctx := context.Background()
-		// Package test binaries run concurrently under `go test ./...`.
-		// Serialize only container startup because Docker Desktop can race
-		// testcontainers' shared Ryuk creation across processes.
-		startupLock := flock.New(filepath.Join(os.TempDir(), "ledger-postgrestest-container.lock"))
-		locked, lockErr := startupLock.TryLockContext(ctx, 100*time.Millisecond)
-		if lockErr != nil {
-			sharedServer.err = fmt.Errorf("lock container startup: %w", lockErr)
-			return
-		}
-		if !locked {
-			sharedServer.err = fmt.Errorf("lock container startup: lock not acquired")
-			return
-		}
-		defer func() {
-			if err := startupLock.Unlock(); err != nil {
-				t.Errorf("release PostgreSQL container startup lock: %v", err)
-			}
-		}()
-		container, err := tcpostgres.Run(ctx, "postgres:17",
-			tcpostgres.WithDatabase("postgres"),
-			tcpostgres.WithUsername("test"),
-			tcpostgres.WithPassword("test"),
-		)
-		if err != nil {
-			sharedServer.err = err
-			return
-		}
-		// testcontainers' Ryuk sidecar removes the process-scoped shared
-		// container after the test binary exits.
-		sharedServer.connStr, sharedServer.err = container.ConnectionString(ctx, "sslmode=disable")
+		// Ryuk removes this process-scoped ordinary container at exit.
+		_, sharedServer.connStr, sharedServer.err = startContainer(t)
 	})
 	// F-9 (2026-09-03 independent review): this used to t.Skip when the
 	// Docker daemon was unreachable, which made `make test` on a machine
@@ -88,14 +56,19 @@ func baseConnection(t testing.TB) string {
 		"could not start the PostgreSQL test container, so the integration tests below cannot run.\n\n"+
 			"This is a failure, not a skip: a suite that did not execute is not a suite that passed. Either start Docker, "+
 			"or say so explicitly -- `make test-short` (skips every integration test) or DATABASE_URL=... (runs them against "+
-			"a server you provide).")
+			"a server you provide; the full destructive suite also needs LEDGER_TEST_ISOLATED_DATABASE_URL).")
 	return sharedServer.connStr
 }
 
 func isolatedConnection(t testing.TB) string {
 	t.Helper()
-	ctx := context.Background()
-	base := baseConnection(t)
+	return createDatabase(t, baseConnection(t))
+}
+
+func createDatabase(t testing.TB, base string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	// The counter alone is process-scoped (resets to 1 in every test binary),
 	// which collides in shared-Postgres mode: `go test ./...` runs one binary
 	// per package, and CI's DATABASE_URL points every one of them at the same
@@ -107,10 +80,10 @@ func isolatedConnection(t testing.TB) string {
 	name := fmt.Sprintf("ledger_test_%d_%d", os.Getpid(), databaseCounter.Add(1))
 	admin, err := pgxpool.New(ctx, base)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool { return admin.Ping(ctx) == nil }, 15*time.Second, 250*time.Millisecond)
+	defer admin.Close()
+	require.NoError(t, admin.Ping(ctx))
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
 	require.NoError(t, err)
-	admin.Close()
 
 	u, err := url.Parse(base)
 	require.NoError(t, err)

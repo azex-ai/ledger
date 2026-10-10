@@ -373,7 +373,7 @@ export interface paths {
         put?: never;
         /**
          * Post the full reversal of an existing journal.
-         * @description Rejected (409) once the journal has any reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
+         * @description Rejected (409) once the journal already has reversal history, full or partial — use reverse-partial to continue a partially-reversed journal.
          *
          *     The idempotency key of a full reversal is derived server-side as `reversal:{uid}:{reason}`, so this endpoint takes none: supplying `idempotency_key` (in the body, or via the `Idempotency-Key` header, which the alias middleware folds into the body) is answered 400 rather than accepted and ignored, which is what an earlier revision of this spec advertised as `required` (H-M3). Callers that need to choose the key use reverse-partial with `num` == `den` == 1.
          */

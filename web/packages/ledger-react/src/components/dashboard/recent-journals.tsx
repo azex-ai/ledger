@@ -1,5 +1,7 @@
 "use client";
 
+import { fiveSkeletonRows } from "../../lib/skeleton-slots";
+
 import { useJournals } from "../../hooks/use-journals";
 import { formatAmount, formatUTC } from "../../lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -43,8 +45,8 @@ export function RecentJournals({
       <CardContent>
         {isLoading ? (
           <div className="space-y-2">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="h-8 animate-shimmer rounded" />
+            {fiveSkeletonRows.map((slot) => (
+              <div key={slot.id} className="h-8 animate-shimmer rounded" />
             ))}
           </div>
         ) : isError ? (

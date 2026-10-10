@@ -5138,6 +5138,16 @@ caller's raw in-memory `time.Time`, before that floor has ever been
 applied, is not reproducible by any verifier, on any platform whose clock
 actually has sub-microsecond resolution.
 
+The same precision applies to journal idempotency comparisons:
+`postgres.LedgerStore.ensureJournalMatchesInput` floors an explicitly supplied
+`JournalInput.EffectiveAt` to microseconds before comparing with the stored
+instant. Identical requests and different nanosecond values within that same
+microsecond replay the same journal; crossing a microsecond or changing another
+payload field remains a conflict. A zero timestamp retains its existing
+"default at insert time" meaning and is not compared on replay. This applies to
+ordinary and authorized posting, through both pool and caller-owned transactions;
+it does not change the signature domain or rewrite stored history.
+
 **Why**: macOS's `time.Now()` happens to already return microsecond-aligned
 values, so the bug was invisible in local dev. Linux (production) has
 genuine nanosecond clock resolution, so every journal signed there had its
@@ -5182,6 +5192,14 @@ stored digest/timestamp back through an actual `TIMESTAMPTZ` column via
 `AttestationStore.JournalAuthMaterial`, and requires `core.VerifyJournalAuth`
 to still pass -- a platform-independent DB round trip, not a clock-dependent
 one).
+
+`postgres.TestJournalIdempotencyStoredTimePrecision` pins five real PostgreSQL
+posting paths with explicit `.123456789` and `.123456289` timestamps, equivalent
+timezones, adjacent microseconds, changed amounts and zero/default retries. It
+checks replay identity, persisted row counts and balance stability.
+`examples/signed-capture.TestCaptureSignedReplayStoredTimePrecision` additionally
+checks verified balance, held amount, settlement status and receipt counts for
+a signed capture whose original event has a nanosecond remainder.
 
 ## I-47: `Migrate()` serializes against every other `Migrate()` call on the same Postgres cluster, not just against callers targeting the same database
 

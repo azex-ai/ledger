@@ -1,5 +1,7 @@
 "use client";
 
+import { fiveSkeletonRows } from "../../lib/skeleton-slots";
+
 import type { ReactNode } from "react";
 import { ReceiptText } from "lucide-react";
 import { Card, CardContent } from "../../components/ui/card";
@@ -55,8 +57,8 @@ function ListSkeleton() {
   return (
     <Card>
       <CardContent className="space-y-3 py-4">
-        {Array.from({ length: 5 }, (_, i) => (
-          <div key={i} className="flex items-center justify-between gap-4">
+        {fiveSkeletonRows.map((slot) => (
+          <div key={slot.id} className="flex items-center justify-between gap-4">
             <div className="h-4 w-40 animate-shimmer rounded" />
             <div className="h-4 w-24 animate-shimmer rounded" />
           </div>

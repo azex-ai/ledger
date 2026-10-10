@@ -1,5 +1,6 @@
 "use client";
 
+import { keyedPreviewEntries } from "../../lib/preview-entry-keys";
 import { parseHolderInput } from "../../lib/parse-holder-input";
 import { errorText } from "../../lib/error-message";
 import { addAmounts, formatAmount } from "../../lib/utils";
@@ -320,8 +321,8 @@ function PreviewSection({ code }: { code: string }) {
                 .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
             )}
           </p>
-          {preview.entries.map((e, i) => (
-            <p key={i}>
+          {keyedPreviewEntries(preview.entries).map(({ entry: e, key }) => (
+            <p key={key}>
               {e.entry_type.toUpperCase()} holder={e.account_holder} class={e.classification_uid} cur={e.currency_uid} amt={e.amount}
             </p>
           ))}
