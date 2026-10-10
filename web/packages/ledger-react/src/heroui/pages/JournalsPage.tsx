@@ -1,5 +1,6 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { errorText } from "../../lib/error-message";
 import { validateEntries } from "../../lib/validate-entries";
 import { useState } from "react";
@@ -178,10 +179,10 @@ function TemplateJournalDialog() {
   const { data: currencies } = useCurrencies(true);
 
   function handleSubmit() {
-    const holderId = parseInt(form.holder_id, 10);
+    const holderId = parseHolderInput(form.holder_id, "user");
     const currencyUid = form.currency_uid.trim();
-    if (isNaN(holderId)) {
-      toast.danger("Holder ID must be a number");
+    if (typeof holderId !== "number") {
+      toast.danger(holderId ?? "Holder is required");
       return;
     }
     if (currencyUid === "") {
