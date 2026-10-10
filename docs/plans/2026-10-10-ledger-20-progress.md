@@ -7,9 +7,9 @@
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
 | 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
-| 4 | 输入校验早于 tracing 展开 | 实施中 | BASE de583aa / codex/ledger20-t04 | 待验收 |
-| 5 | 预留请求对齐生成契约 | 评审通过，待集成 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
-| 6 | SDK holder 安全整数边界 | 独立评审中 | 8f52e08 / codex/ledger20-t06 | build/typecheck；346 tests PASS |
+| 4 | 输入校验早于 tracing 展开 | 独立评审中 | cf03361 / codex/ledger20-t04 | PG race/vet通过；隐私策略保留 |
+| 5 | 预留请求对齐生成契约 | 评审通过，集成中 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
+| 6 | SDK holder 安全整数边界 | 评审通过，待集成 | 8f52e08 / codex/ledger20-t06 | build/typecheck/346 tests；独立域及root PASS |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
 | 8 | 管理端缓存按实例与身份隔离 | 待实施 | — | — |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
@@ -21,7 +21,7 @@
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
 | 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
 | 17 | 可选 Go modules 独立消费验证 | 待实施 | — | — |
-| 18 | web 生产依赖 advisory 修复 | 待实施 | — | — |
+| 18 | web 生产依赖 advisory 修复 | 实施中 | BASE 4316088 / codex/ledger20-t18 | 官方来源核验中 |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
 
