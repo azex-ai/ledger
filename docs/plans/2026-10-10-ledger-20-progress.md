@@ -12,7 +12,7 @@
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
 | 7 | 两种 skin 的 holder 输入校验 | 已集成 | 0c3138d → 8f889dbe |T1 PASS；381 tests/build/types/codegen；完整root race |
 | 8 | 管理端缓存按实例与身份隔离 | 已集成 | 1f02131 → 43b5ff4 | SDK/host tests；独立域/root PASS；完整root race |
-| 9 | 其余 SDK mutation 请求契约消漂移 | 评审通过，待集成 | a9a1298 / codex/ledger20-t09 | T1 PASS；388 tests/build/types/codegen |
+| 9 | 其余 SDK mutation 请求契约消漂移 | 已集成 | a9a1298 → 30372f03 | T1 PASS；388 tests/build/types/codegen；完整root race |
 | 10 | 科目配置经济效果验收样例 | 评审通过，待集成 | 46ac7b6 / codex/ledger20-t10 | PG race/vet；独立域/root PASS |
 | 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
@@ -22,7 +22,7 @@
 | 16 | 市场报价与执行扩展 ADR | 已集成 | 8f4c9e5 → c8db20f8 | T1 PASS；文档/来源核实；完整root race |
 | 17 | 可选 Go modules 独立消费验证 | 已集成 | ed37bc4 → 46bc9ccc | T1 PASS；三host及失败传播/CI检查通过；完整root race |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
-| 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
+| 19 | 库接入与兼容迁移文档 | 实施中 | BASE 30372f03 / codex/ledger20-t19 | 待验收 |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
 
 ## 执行记录
@@ -59,3 +59,5 @@
 - 第 16 轮整合 `c8db20f8` 已推送；完整 root race PASS（root 135.754s、postgres 300.013s、service 131.866s）。
 
 - 第 17 轮整合 `46bc9ccc` 已推送；完整 root race PASS（root 149.900s、postgres 297.472s、service 165.747s）。
+
+- 第 9 轮整合 `30372f03` 已推送；完整 root race PASS（root128.174s、postgres299.292s、service152.435s）。Task19硬依赖已解除并开始文档汇合。
