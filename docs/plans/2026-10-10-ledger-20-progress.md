@@ -19,8 +19,8 @@
 | 13 | 签名资金流程可运行组合示例 | 评审通过，待集成 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet；独立域/root PASS |
 | 14 | credits 消费接入原子 Capture | 已集成 | a29d202 → 4eed87c5 |PG race/vet；独立域/root PASS；完整root race |
 | 15 | USD 估值读模型示例 | 已集成 | 3d69a74 → 98d21ee8 |T1 PASS；race/vet/run，覆盖率 94.8%；完整root race |
-| 16 | 市场报价与执行扩展 ADR | 评审通过，待集成 | 8f4c9e5 / codex/ledger20-t16 | T1 PASS；文档/来源核实 |
-| 17 | 可选 Go modules 独立消费验证 | 评审通过，待集成 | ed37bc4 / codex/ledger20-t17 | T1 PASS；三host及失败传播/CI检查通过 |
+| 16 | 市场报价与执行扩展 ADR | 已集成 | 8f4c9e5 → c8db20f8 | T1 PASS；文档/来源核实；完整root race |
+| 17 | 可选 Go modules 独立消费验证 | 已集成 | ed37bc4 → 46bc9ccc | T1 PASS；三host及失败传播/CI检查通过；完整root race |
 | 18 | web 生产依赖 advisory 修复 | 已集成 | 158135e → 50b52c6 | prod audit0；T1 PASS；完整root race |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
@@ -55,3 +55,7 @@
 - 第 14 轮整合 `4eed87c5` 已推送；完整 root race PASS（root 167.400s、postgres 302.620s、service 159.064s）。
 
 - 第 15 轮整合 `98d21ee8` 已推送；完整 root race PASS（root 139.199s、postgres 298.847s、service 182.947s）。
+
+- 第 16 轮整合 `c8db20f8` 已推送；完整 root race PASS（root 135.754s、postgres 300.013s、service 131.866s）。
+
+- 第 17 轮整合 `46bc9ccc` 已推送；完整 root race PASS（root 149.900s、postgres 297.472s、service 165.747s）。
