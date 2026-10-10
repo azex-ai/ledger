@@ -4,11 +4,11 @@
 
 | 轮次 | 交付 | 状态 | BASE / 分支 / commit | 验证与评审 |
 |---|---|---|---|---|
-| 1 | 审计基线与契约冻结 | 待实施 | — | — |
-| 2 | 冻结策略按币种净额判断 | 待实施 | — | — |
+| 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
+| 2 | 冻结策略按币种净额判断 | 实施中 | BASE 97e3336 / codex/ledger20-t02 | 待验收 |
 | 3 | 金额 helper 目标精度边界 | 待实施 | — | — |
 | 4 | 输入校验早于 tracing 展开 | 待实施 | — | — |
-| 5 | 预留请求对齐生成契约 | 待实施 | — | — |
+| 5 | 预留请求对齐生成契约 | 实施中 | BASE 97e3336 / codex/ledger20-t05 | 待验收 |
 | 6 | SDK holder 安全整数边界 | 待实施 | — | — |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
 | 8 | 管理端缓存按实例与身份隔离 | 待实施 | — | — |
@@ -19,8 +19,15 @@
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
 | 15 | USD 估值读模型示例 | 待实施 | — | — |
-| 16 | 市场报价与执行扩展 ADR | 待实施 | — | — |
+| 16 | 市场报价与执行扩展 ADR | 实施中 | BASE 97e3336 / codex/ledger20-t16 | 待验收 |
 | 17 | 可选 Go modules 独立消费验证 | 待实施 | — | — |
 | 18 | web 生产依赖 advisory 修复 | 待实施 | — | — |
 | 19 | 库接入与兼容迁移文档 | 待实施 | — | — |
 | 20 | 最终集成验收与交付 | 待实施 | — | — |
+
+## 执行记录
+
+- 第一轮整合 `97e33362abd436c072114ab863079ac65a78fad1` 已推送计划分支。`make test` 实际运行 `go test -race -timeout 15m -count=1 ./...` 全部通过；root 101.431s、postgres 277.257s、service 140.870s。独立 Go 子 modules 与 React 不在这次 root 命令覆盖内。
+- 使用本次专用临时 PG17 实例，fixture 每测试独立数据库。
+- bus #30..49 对应轮次 1..20。缺少独立 OS PID 的会话内 worker 在 submitted/reviewed 时保守保留 writer lease；整合使用冻结 commit 的独立 delivery worktree，通过 wt integrate 后才标 bus integrated，再删除原任务 worktree。不会提前把未合并任务记为 integrated，也不修改 lease 或关闭 guard。
+- 所有实现者只提交各自任务分支，主控负责评审、串行整合与最终推送。
