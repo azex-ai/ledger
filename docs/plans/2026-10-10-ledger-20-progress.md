@@ -11,7 +11,7 @@
 | 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 已集成 | 8f52e08 → 4df363d | frontend通过；独立域/root PASS；完整root race |
 | 7 | 两种 skin 的 holder 输入校验 | 实施中 | BASE 6d131ca / codex/ledger20-t07 | 待验收 |
-| 8 | 管理端缓存按实例与身份隔离 | 独立评审中 | 68452c9 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types PASS；补CI接线 |
+| 8 | 管理端缓存按实例与身份隔离 | 评审通过，待集成 | 1f02131 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types；独立域/root PASS；CI已接线 |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 实施中 | BASE c93481e / codex/ledger20-t10 | 待验收 |
 | 11 | Exchange 严格消费可用余额 | 评审通过，待集成 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet；独立域/root PASS |
