@@ -14,7 +14,7 @@
 | 8 | 管理端缓存按实例与身份隔离 | 评审通过，待集成 | 1f02131 / codex/ledger20-t08 | 369 SDK+8 host tests/build/types；独立域/root PASS；CI已接线 |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 实施中 | BASE c93481e / codex/ledger20-t10 | 待验收 |
-| 11 | Exchange 严格消费可用余额 | 评审通过，待集成 | 6e62cef / codex/ledger20-t11 | 12真实RED、Exchange race/vet；独立域/root PASS |
+| 11 | Exchange 严格消费可用余额 | 已集成 | 6e62cef → c353622 | PG race/vet；独立域/root PASS；完整root race |
 | 12 | 原子 Capture 门面 | 已集成 | 241905e → 21f5ba5 | 独立域/root PASS；完整root race；Minor文档已修 |
 | 13 | 签名资金流程可运行组合示例 | 评审通过，待集成 | 1a585d0 / codex/ledger20-t13 | PG race 12场景/vet；独立域/root PASS |
 | 14 | credits 消费接入原子 Capture | 评审通过，待集成 | a29d202 / codex/ledger20-t14 | PG race/vet；独立域/root PASS |
@@ -43,3 +43,5 @@
 - 第三轮整合 `83060d62` 已推送；完整 root race PASS（root 134.777s、postgres 300.078s、service 147.368s），目标 exponent 回归与 Capture 已在同一基线运行。
 
 - 第四轮整合 `0c9417e3` 已推送；完整 root race PASS（root 115.155s、postgres 286.666s、service 189.708s）。
+
+- 第十一轮整合 `c3536221` 已推送；完整 root race PASS（root 124.382s、postgres 303.172s、service 126.353s），Exchange 与 Capture 在同一基线通过。
