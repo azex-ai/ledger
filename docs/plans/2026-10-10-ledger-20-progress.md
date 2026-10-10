@@ -8,13 +8,13 @@
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
 | 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
 | 4 | 输入校验早于 tracing 展开 | 评审通过，待集成 | cf03361 / codex/ledger20-t04 | PG race/vet；独立域/root PASS |
-| 5 | 预留请求对齐生成契约 | 评审通过，集成中 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
+| 5 | 预留请求对齐生成契约 | 已集成 | d376f03 → 1b01b97 | T1 PASS；client/typecheck/build/codegen；完整root race |
 | 6 | SDK holder 安全整数边界 | 评审通过，待集成 | 8f52e08 / codex/ledger20-t06 | build/typecheck/346 tests；独立域及root PASS |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
 | 8 | 管理端缓存按实例与身份隔离 | 待实施 | — | — |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
-| 11 | Exchange 严格消费可用余额 | 待实施 | — | — |
+| 11 | Exchange 严格消费可用余额 | 实施中 | BASE f13d0ae / codex/ledger20-t11 | 待验收 |
 | 12 | 原子 Capture 门面 | 实施中 | BASE 767e208 / codex/ledger20-t12 | 待验收 |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
@@ -33,3 +33,5 @@
 - 所有实现者只提交各自任务分支，主控负责评审、串行整合与最终推送。
 
 - 第二轮整合 `7a0f5961759afdf829bddcc6959dc00605c75ea4` 已推送；全 root race 通过（root 133.449s、postgres 287.375s、service 136.863s）。
+
+- 第五轮整合 `1b01b974` 已推送；完整 root race PASS（root 133.825s、postgres 288.004s、service 183.686s）。本轮 SDK 的 build/typecheck/client/codegen 证据单独记录，root Go gate 不替代 frontend 验证。
