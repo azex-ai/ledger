@@ -13,7 +13,7 @@ import { ledgerKeys } from "./keys";
 export function useDepositAddress(holder: number) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.depositAddress(holder),
+    queryKey: ledgerKeys.depositAddress(client.cacheScope, holder),
     queryFn: () => client.getDepositAddress(holder),
     enabled: holder !== 0,
     retry: false,

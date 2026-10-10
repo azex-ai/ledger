@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -14,7 +15,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -38,7 +39,7 @@ describe("use-deposit-address", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.address).toBe("0xabc");
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "deposit-address", 7] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "deposit-address", 7] }),
     ).toBeDefined();
   });
 
@@ -79,6 +80,6 @@ describe("use-deposit-address", () => {
     result.current.mutate(7);
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
-    expect(keys).toContainEqual(["ledger", "deposit-address"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "deposit-address"]);
   });
 });

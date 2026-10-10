@@ -116,31 +116,136 @@ entry has **no `"use client"` directive** and is server-only:
 
 ```tsx
 // app/journals/page.tsx (server component)
-import { QueryClient, HydrationBoundary, dehydrate } from "@tanstack/react-query";
-import { JournalsPage } from "@azex/ledger-react";
+import { QueryClient, dehydrate } from "@tanstack/react-query";
 import {
   createServerLedgerClient,
   prefetchJournals,
 } from "@azex/ledger-react/server";
+import { requireAdminSession } from "@/lib/auth"; // host authentication
+import { serverLedgerConfig } from "@/lib/server-ledger-config";
+import { LedgerSession } from "./ledger-session";
 
 export default async function Page() {
-  const queryClient = new QueryClient();
-  const client = createServerLedgerClient({ baseUrl, apiKey }); // server-side key
+  const session = await requireAdminSession();
+  const cacheScope = {
+    backend: "production-ledger-tenant-east",
+    identity: session.cacheIdentity, // non-secret principal/session/permission revision
+  };
+  const queryClient = new QueryClient(); // request-local; never a module singleton
+  const client = createServerLedgerClient({ ...serverLedgerConfig, cacheScope });
   await prefetchJournals(queryClient, client, 20);
 
   return (
-    <HydrationBoundary state={dehydrate(queryClient)}>
-      <JournalsPage linkComponent={YourLink} />
-    </HydrationBoundary>
+    <LedgerSession
+      key={JSON.stringify(cacheScope)}
+      cacheScope={cacheScope}
+      state={dehydrate(queryClient)}
+    />
   );
 }
 ```
+
+```tsx
+// app/journals/ledger-session.tsx (client component)
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { HydrationBoundary, QueryClient, type DehydratedState } from "@tanstack/react-query";
+import { JournalsPage, LedgerProvider, type LedgerCacheScope } from "@azex/ledger-react";
+
+export function LedgerSession({ cacheScope, state }: {
+  cacheScope: LedgerCacheScope;
+  state: DehydratedState;
+}) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: { queries: { staleTime: 60_000 } },
+  }));
+  return (
+    <LedgerProvider config={{ baseUrl: "", cacheScope, queryClient }}>
+      <HydrationBoundary state={state}>
+        <JournalsPage linkComponent={Link} />
+      </HydrationBoundary>
+    </LedgerProvider>
+  );
+}
+```
+
+The browser's empty `baseUrl` addresses the host's `/api/v1` BFF. The server
+may use an internal URL and private API key. Their **logical** `cacheScope`
+must match even when their URLs differ; credentials stay server-side.
+The example's `requireAdminSession`, `session.cacheIdentity`, and
+`serverLedgerConfig` belong to the host, not this SDK. A nonzero `staleTime`
+avoids the normal background revalidation of freshly hydrated data.
 
 Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
 `prefetchBalances`, `prefetchSystemHealth`, `prefetchSystemBalances`,
 `prefetchReservations`, `prefetchClassifications`, `prefetchCurrencies`,
 `prefetchJournalTypes`, `prefetchTemplates`, `prefetchSnapshots`. The shared
 `ledgerKeys` query-key factory is also exported for advanced cache seeding.
+It now requires the resolved scope as its first argument, for example
+`ledgerKeys.balances(client.cacheScope, 42)` or `ledgerKeys.all(client.cacheScope)`.
+Unscoped keys from earlier versions no longer match hooks or prefetch helpers.
+
+### Admin cache ownership and identity changes
+
+`LedgerClientConfig` / `LedgerProviderConfig` accept an optional
+`cacheScope: { backend: string; identity: string }`. Both IDs must be non-empty
+and non-secret: never use API keys, access tokens, cookie values, or credentials
+embedded in URLs. Query keys and dehydrated state are observable by the host.
+The SDK rejects a known `apiKey` copied into scope, but cannot recognize every
+secret a host might supply. Scope is cache partitioning, not authorization.
+
+- **Default:** every constructed client gets a stable, opaque instance scope.
+  A provider retains its client while `baseUrl`, `apiKey`, and the `fetch`
+  reference are unchanged. Observable configuration changes create a new
+  client/scope; separately mounted providers do not share data even if their
+  configuration is equal. Keep custom `fetch` references stable. Construct a
+  new client instead of mutating its original configuration object.
+- **Explicit scope:** equal logical backend + identity IDs intentionally share
+  data, including between server and browser clients. The host asserts that
+  these IDs represent the same backend, principal and permission revision.
+  If an API key changes while the explicit identity stays the same, the SDK
+  continues sharing that cache; it cannot infer the real principal from a key.
+- **Hidden BFF cookies:** changing a cookie behind an unchanged URL/config is
+  not observable by the SDK. On login, logout, account/tenant switch or permission
+  changes, the host must change the non-secret scope or remount the provider
+  with a new QueryClient. Rerendering the same configuration is insufficient.
+- **Identity boundaries:** provider scope changes reset local child/mutation
+  state. In-flight old requests can finish, but their cache writes, optimistic
+  rollback and invalidation stay in the original scope. An injected QueryClient
+  can retain old entries; hosts that need to discard them on logout should
+  remove them or replace that QueryClient. A scope does not purge memory.
+
+Server prefetch helpers take their scope from the supplied client automatically.
+SSR hydration across separate clients requires an explicit matching scope;
+default instance scopes intentionally do not match. Create server QueryClients
+per request and dehydrate only data authorized for the response's identity.
+
+### Bundled Next.js dashboard deployment
+
+The repository's `web/` host now requires **`LEDGER_CACHE_BACKEND_ID` in
+production**, in addition to its existing backend/auth configuration. Set a
+stable, public logical ID such as `production-ledger-east`; change it when
+switching the actual backend. Never put an internal URL or credential in this
+value. Development falls back to `local-ledger`. This setting is resolved at
+request time, so `next build` does not require deployment secrets or this ID.
+
+The host's server-only `getDashboardCacheScope()` verifies the session cookie
+before deriving `operator-session:<expiresAtMs>` from its public expiry.
+Missing, invalid, or expired sessions use `anonymous`; auth-off development
+uses `development-open`. The existing signed token format has no session nonce:
+minting at the same millisecond produces the same token and cache identity.
+This identifies the existing session boundary, not every individual login event.
+Token/signature/key values and private backend URLs are never included in scope.
+
+The async root layout reads request cookies and passes the scope to the client
+provider; both prefetched pages resolve the same scope. The existing login and
+logout `router.refresh()` updates that prop and resets the provider's scoped
+subtree even when the root layout remains mounted. Cookie access makes pages
+under the root layout dynamic. The host still uses TanStack Query's default
+stale time, so hydrated data appears immediately and may revalidate in the
+background. Authentication continues to be enforced by the proxy and BFF.
 
 ## HeroUI skin — `@azex/ledger-react/heroui`
 

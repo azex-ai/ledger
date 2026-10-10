@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -16,7 +17,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc?: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -39,7 +40,7 @@ describe("use-journals", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.pages[0].list).toHaveLength(1);
-    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journals", 20] })).toBeDefined();
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "journals", 20] })).toBeDefined();
   });
 
   test("useJournal keys ['ledger','journal',id]", async () => {
@@ -57,7 +58,7 @@ describe("use-journals", () => {
       wrapper: wrapperWith(qc),
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(qc.getQueryCache().find({ queryKey: ["ledger", "journal", "uid-7"] })).toBeDefined();
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "journal", "uid-7"] })).toBeDefined();
   });
 
   test("useEntries keys ['ledger','entries',params]", async () => {
@@ -77,7 +78,7 @@ describe("use-journals", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "entries", params] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "entries", params] }),
     ).toBeDefined();
   });
 
@@ -99,8 +100,8 @@ describe("use-journals", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     const keys = spy.mock.calls.map((c) => c[0]?.queryKey);
-    expect(keys).toContainEqual(["ledger", "journals"]);
-    expect(keys).toContainEqual(["ledger", "balances"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "journals"]);
+    expect(keys).toContainEqual(["ledger", testQueryScope, "balances"]);
   });
 
   test("useJournals threads cursor through fetchNextPage and stops on empty next_cursor", async () => {

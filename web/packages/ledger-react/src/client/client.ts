@@ -17,6 +17,8 @@ import type {
   Journal,
   JournalType,
   JournalWithEntries,
+  LedgerCacheScope,
+  LedgerQueryScope,
   ListBookingsParams,
   PaginatedResponse,
   PreviewResult,
@@ -41,6 +43,13 @@ export class ApiRequestError extends Error {
 export interface LedgerClientConfig {
   baseUrl: string;
   apiKey?: string;
+  /**
+   * Non-secret logical backend + identity, shared explicitly for SSR hydration.
+   * Omitted: each client has an isolated cache namespace. With an explicit
+   * scope, the host must change identity when authentication/permissions change,
+   * including hidden BFF cookies. Credentials must never be used as scope IDs.
+   */
+  cacheScope?: LedgerCacheScope;
   /**
    * Optional fetch override (server use / tests). MUST be a STABLE reference
    * (module-level or `useCallback`'d). LedgerProvider keys its client `useMemo`
@@ -87,7 +96,30 @@ function qs(
   );
 }
 
+function resolveCacheScope(scope: LedgerCacheScope, apiKey?: string): LedgerQueryScope {
+  const { backend, identity } = scope;
+  if (
+    typeof backend !== "string" || !backend.trim() ||
+    typeof identity !== "string" || !identity.trim()
+  ) {
+    throw new Error("cacheScope requires non-empty backend and identity IDs");
+  }
+  // Catch a known credential accidentally copied into scope. Other credentials
+  // are opaque to this client; providing non-secret IDs remains a host contract.
+  if (apiKey && (backend.includes(apiKey) || identity.includes(apiKey))) {
+    throw new Error("cacheScope must not contain the API key");
+  }
+  return Object.freeze(["shared", backend, identity] as const);
+}
+
 export function createLedgerClient(config: LedgerClientConfig) {
+  // Snapshot request configuration: mutating the caller's object must not move
+  // an existing client's requests to a different identity under its old keys.
+  const { baseUrl, apiKey, fetch: configuredFetch } = config;
+  const cacheScope: LedgerQueryScope = config.cacheScope
+    ? resolveCacheScope(config.cacheScope, apiKey)
+    : Object.freeze(["instance", crypto.randomUUID()] as const);
+
   async function request<T>(
     path: string,
     init?: RequestInit & {
@@ -109,7 +141,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // Resolve the fetch implementation per call: an explicit override wins,
     // otherwise the ambient globalThis.fetch (read lazily so test doubles /
     // MSW installed after client construction are still picked up).
-    const fetchImpl = config.fetch ?? globalThis.fetch;
+    const fetchImpl = configuredFetch ?? globalThis.fetch;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(init?.headers as Record<string, string> | undefined),
@@ -117,8 +149,8 @@ export function createLedgerClient(config: LedgerClientConfig) {
     // Every endpoint requires the key when auth is configured — reads
     // included (server enforces bearer auth on the whole surface except the
     // k8s probes and the HMAC-verified webhook path).
-    if (config.apiKey) {
-      headers["Authorization"] = `Bearer ${config.apiKey}`;
+    if (apiKey) {
+      headers["Authorization"] = `Bearer ${apiKey}`;
     }
     const method = (init?.method ?? "GET").toUpperCase();
     if (
@@ -130,7 +162,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
     }
 
     const { skipIdempotencyKey: _skipIdempotencyKey, ...fetchInit } = init ?? {};
-    const res = await fetchImpl(`${config.baseUrl}${path}`, {
+    const res = await fetchImpl(`${baseUrl}${path}`, {
       ...fetchInit,
       headers,
       signal: init?.signal ?? AbortSignal.timeout(15_000),
@@ -155,6 +187,9 @@ export function createLedgerClient(config: LedgerClientConfig) {
   }
 
   return {
+    // Getter + frozen tuple keep the namespace stable for this client.
+    get cacheScope() { return cacheScope; },
+
     // System
     getHealth: () => request<HealthStatus>("/api/v1/system/health"),
     getSystemBalances: () =>

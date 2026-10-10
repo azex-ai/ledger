@@ -1,3 +1,4 @@
+import { testCacheScope, testQueryScope } from "../cache-scope";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw";
@@ -15,7 +16,7 @@ const BASE = "http://ledger.test";
 
 function wrapperWith(qc: QueryClient) {
   return ({ children }: { children: ReactNode }) => (
-    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc }}>
+    <LedgerProvider config={{ baseUrl: BASE, queryClient: qc, cacheScope: testCacheScope }}>
       {children}
     </LedgerProvider>
   );
@@ -34,7 +35,7 @@ describe("use-system", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.status).toBe("ok");
-    expect(qc.getQueryCache().find({ queryKey: ["ledger", "health"] })).toBeDefined();
+    expect(qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "health"] })).toBeDefined();
   });
 
   test("useSystemBalances keys ['ledger','system-balances']", async () => {
@@ -49,7 +50,7 @@ describe("use-system", () => {
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "system-balances"] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "system-balances"] }),
     ).toBeDefined();
   });
 
@@ -67,7 +68,7 @@ describe("use-system", () => {
     expect(result.current.isDisabled).toBe(false);
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(
-      qc.getQueryCache().find({ queryKey: ["ledger", "snapshots", params] }),
+      qc.getQueryCache().find({ queryKey: ["ledger", testQueryScope, "snapshots", params] }),
     ).toBeDefined();
   });
 

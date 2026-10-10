@@ -1,17 +1,20 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { LedgerProvider, Toaster } from "@azex/ledger-react";
+import { LedgerProvider, Toaster, type LedgerCacheScope } from "@azex/ledger-react";
 import { clientLedgerConfig } from "@/lib/ledger-env";
 
 /**
- * Client provider boundary. Resolves the client-side ledger config (which fails
- * loudly in a real prod browser session if NEXT_PUBLIC_API_URL is unset),
- * mounts the LedgerProvider context once, and renders the toast surface.
+ * The server supplies the same public scope used by RSC prefetch. A session
+ * change delivered by router.refresh updates this prop without requiring the
+ * root layout to remount; LedgerProvider resets its scoped state and cache.
  */
-export function LedgerProviders({ children }: { children: ReactNode }) {
+export function LedgerProviders({ children, cacheScope }: {
+  children: ReactNode;
+  cacheScope: LedgerCacheScope;
+}) {
   return (
-    <LedgerProvider config={{ ...clientLedgerConfig(), appearance: "dark" }}>
+    <LedgerProvider config={{ ...clientLedgerConfig(), cacheScope, appearance: "dark" }}>
       {children}
       <Toaster
         theme="dark"
