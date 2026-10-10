@@ -1,6 +1,8 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 import { formatAmount } from "../../lib/utils";
 import { useBalances } from "../../hooks/use-balances";
 import { useSnapshots } from "../../hooks/use-system";
@@ -22,6 +24,15 @@ export function BalancesPage() {
   const [holder, setHolder] = useState(0);
   const { data, isLoading, isError, refetch } = useBalances(holder);
   const balances = data ?? [];
+
+  function submitHolder() {
+    const parsed = parseHolderInput(holderInput);
+    if (typeof parsed === "string") {
+      toast.error(parsed);
+      return;
+    }
+    setHolder(parsed ?? 0);
+  }
 
   // Memo so the dates are stable across re-renders. Without this, useSnapshots
   // sees a new `start`/`end` every render and refetches forever.
@@ -95,10 +106,10 @@ export function BalancesPage() {
           placeholder="Account Holder ID"
           value={holderInput}
           onChange={(e) => setHolderInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && setHolder(parseInt(holderInput) || 0)}
+          onKeyDown={(e) => e.key === "Enter" && submitHolder()}
           className="max-w-xs"
         />
-        <Button onClick={() => setHolder(parseInt(holderInput) || 0)}>Search</Button>
+        <Button onClick={submitHolder}>Search</Button>
       </div>
 
       {/* Negative holders are the system-side counterpart accounts — equally queryable. */}

@@ -1,5 +1,6 @@
 "use client";
 
+import { parseHolderInput } from "../../lib/parse-holder-input";
 import { errorText } from "../../lib/error-message";
 import { addAmounts, formatAmount } from "../../lib/utils";
 import { useState } from "react";
@@ -375,6 +376,21 @@ function PreviewSection({ code }: { code: string }) {
   // query-consumption-allow: populates the currency <Select> below; a failed fetch empties the dropdown, a self-evident degradation the user can see and retry — not a false claim like J-1/J-2/J-3.
   const { data: currencies } = useCurrencies(true);
 
+  function handlePreview() {
+    const holderId = parseHolderInput(params.holder_id, "user");
+    if (typeof holderId !== "number") {
+      toast.danger(holderId ?? "Holder is required");
+      return;
+    }
+    // mutation-feedback-allow: inline isError rendered below (J-20)
+    previewMutation.mutate({
+      code,
+      holder_id: holderId,
+      currency_uid: params.currency_uid.trim(),
+      amount: params.amount,
+    });
+  }
+
   return (
     <div className="mt-2 flex flex-col gap-2">
       <div className="flex flex-wrap items-end gap-2">
@@ -420,15 +436,7 @@ function PreviewSection({ code }: { code: string }) {
           size="sm"
           variant="outline"
           isPending={previewMutation.isPending}
-          onPress={() =>
-            // mutation-feedback-allow: inline isError rendered below (J-20)
-            previewMutation.mutate({
-              code,
-              holder_id: parseInt(params.holder_id, 10),
-              currency_uid: params.currency_uid.trim(),
-              amount: params.amount,
-            })
-          }
+          onPress={handlePreview}
         >
           Preview
         </Button>
