@@ -31,3 +31,9 @@
 范围 `ab3a5d1..8f52e08`。主控完整读取新增校验器、client 调用处、89 项新增测试、全部公开 client 方法及手写 DTO holder 字段。16 类请求在 async request 内 fetch 前拒绝；24 类响应在成功 envelope 解码后、方法拆 list 前拒绝，unsafe later-row 使整个响应失败。raw JSON 两个相邻 int64 值的测试避免先由 JS stringify 合并证据。保留负 system/0 的服务端规则，metadata/actor/amount-map 不误识别为 holder。当前公开 DTO holder 位置均有 selector；未来新 DTO 需同步扩充，限制已写入报告。
 
 Numeric wire 不变，不声称完整 int64。响应拒绝可能发生在服务端写入之后，BREAKING 提醒保留幂等键，不宣称自动回滚。所有 unsafe numeric 参数测试直接使用 Promise rejects，未出现同步 throw。Preview fixture 补合法 holder 的授权修改不弱化 totals 断言。独立域席位仍在执行，取得结论后才整合。
+
+## Task 4 — Codex 第二意见：PASS
+
+范围 `de583aa..cf03361`。主控完整读取两入口 diff、新 PG/exporter 回归、04.md，并核对 ReserveInput/CreateBookingInput.Validate 第一项即为 magnitude 校验，错误本身不展开金额。合法属性仍经 StartSpan 唯一过滤入口，避免直接 SetAttributes 绕过 PolicyMinimal。失败也创建并结束 span，记录错误；只将校验耗时移到 span 之前。
+
+测试对 Full/Minimal 与 Reserve/Booking 组合验证有限非法数值、七类持久行数不变、无持仓占用以及合法金额回归；没有用旧版巨大指数施压。原边界后续转换都位于校验之后，无迁移/签名/事务变更。实现者真实 PG race 39.781s 与 vet PASS；独立席位静态检查已无 blocker，窄 PG 验证在排队，完成后集成。
