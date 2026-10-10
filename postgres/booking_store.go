@@ -79,18 +79,24 @@ func (s *BookingStore) WithDB(db DBTX) *BookingStore {
 // Idempotent: same key + same payload returns the existing booking; divergent
 // payload returns ErrConflict.
 func (s *BookingStore) CreateBooking(ctx context.Context, input core.CreateBookingInput) (*core.Booking, error) {
-	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.create_booking",
+	// Validate before String can expand a caller-supplied decimal exponent.
+	// Keep failed calls observable and retain StartSpan's attribute filtering.
+	validationErr := input.Validate()
+	attrs := []attribute.KeyValue{
 		attribute.String("classification_code", input.ClassificationCode),
 		attribute.Int64("account_holder", input.AccountHolder),
 		attribute.String("currency_uid", input.CurrencyUID),
 		attribute.String("idempotency_key", input.IdempotencyKey),
-		attribute.String("amount", input.Amount.String()),
-	)
+	}
+	if validationErr == nil {
+		attrs = append(attrs, attribute.String("amount", input.Amount.String()))
+	}
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.booking.create_booking", attrs...)
 	defer span.End()
 
-	if err := input.Validate(); err != nil {
-		ledgerotel.RecordError(span, err)
-		return nil, fmt.Errorf("postgres: create booking: %w", err)
+	if validationErr != nil {
+		ledgerotel.RecordError(span, validationErr)
+		return nil, fmt.Errorf("postgres: create booking: %w", validationErr)
 	}
 
 	// Check idempotency

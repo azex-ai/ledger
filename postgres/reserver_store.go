@@ -160,16 +160,23 @@ func (s *ReserverStore) WithDB(db DBTX, ledger *LedgerStore) *ReserverStore {
 // In tx mode (bound via withDB) the reservation is written into the caller's
 // transaction; commit/rollback is the caller's responsibility.
 func (s *ReserverStore) Reserve(ctx context.Context, input core.ReserveInput) (*core.Reservation, error) {
-	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.reserve",
+	// Validate before String can expand a caller-supplied decimal exponent.
+	// Invalid requests still emit a failure span; valid amount attributes go
+	// through StartSpan so the configured privacy policy remains effective.
+	validationErr := input.Validate()
+	attrs := []attribute.KeyValue{
 		attribute.Int64("account_holder", input.AccountHolder),
 		attribute.String("currency_uid", input.CurrencyUID),
 		attribute.String("idempotency_key", input.IdempotencyKey),
-		attribute.String("amount", input.Amount.String()),
-	)
+	}
+	if validationErr == nil {
+		attrs = append(attrs, attribute.String("amount", input.Amount.String()))
+	}
+	ctx, span := ledgerotel.StartSpan(ctx, "ledger.reserver.reserve", attrs...)
 	defer span.End()
 
-	if err := input.Validate(); err != nil {
-		err := fmt.Errorf("postgres: reserve: %w", err)
+	if validationErr != nil {
+		err := fmt.Errorf("postgres: reserve: %w", validationErr)
 		ledgerotel.RecordError(span, err)
 		return nil, err
 	}
