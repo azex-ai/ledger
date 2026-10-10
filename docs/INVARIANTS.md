@@ -1055,9 +1055,11 @@ the most specific match wins — `(holder,currency,classification)` >
 
 - `closed` rejects every entry touching that dimension, in either direction,
   with `ErrAccountClosed`. Checked per-entry, fail-fast — closed is absolute.
-- `frozen` rejects a **net decrease** under that policy with `ErrAccountFrozen`.
-  Net, not per-entry: a policy can be a currency- or holder-wide wildcard
-  spanning several classifications in one journal (e.g.
+- `frozen` rejects a **net decrease in any single currency** under that policy
+  with `ErrAccountFrozen`. Netting is keyed by `(policy_id, currency_id)`:
+  quantities in different currencies cannot offset each other, including
+  under a holder-wide wildcard. A policy can span several classifications
+  in one journal, whose same-currency deltas are combined (e.g.
   `PendingBalanceWriter.ConfirmPending` posts a decrease to the "pending"
   classification and an equal increase to "main_wallet" for the same holder),
   and deposits must still complete while frozen (design doc §4/§9-1: frozen
@@ -1126,8 +1128,12 @@ needs a floor to survive a compromised credential must use those, not this.
 **Pinned by**:
 - `postgres.TestLedgerStore_AccountPolicy_StatusMatrix` (active/frozen/closed
   × increase/decrease/Reserve)
+- `postgres.TestLedgerStore_Frozen_CrossCurrencyCannotOffsetDecrease`
+  (holder-wide freeze rejects mixed-currency netting, with no accounting
+  writes or balance changes)
 - `postgres.TestLedgerStore_ConfirmPending_SucceedsWhileFrozen` (explicit
-  pin: deposit finalization is not consumption)
+  pin: deposit finalization is not consumption, under currency- and
+  holder-wide policies)
 - `postgres.TestLedgerStore_AccountPolicy_MinBalance_*` (zero/negative/positive
   `min_balance`, and same-journal multi-entry netting)
 - `postgres.TestLedgerStore_AccountPolicy_MatchPriority`

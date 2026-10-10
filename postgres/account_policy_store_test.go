@@ -315,69 +315,90 @@ func TestLedgerStore_AccountPolicy_MatchPriority(t *testing.T) {
 // succeed. A genuine net decrease under the same freeze must still be
 // rejected.
 func TestLedgerStore_ConfirmPending_SucceedsWhileFrozen(t *testing.T) {
-	p := postgrestest.SetupDB(t)
-	ctx := context.Background()
+	for _, holderWide := range []bool{false, true} {
+		name := "currency_wide"
+		if holderWide {
+			name = "holder_wide"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := postgrestest.SetupDB(t)
+			ctx := context.Background()
 
-	cs := postgres.NewClassificationStore(p)
-	ls := postgres.NewLedgerStore(p)
-	ts := postgres.NewTemplateStore(p)
-	require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
+			cs := postgres.NewClassificationStore(p)
+			ls := postgres.NewLedgerStore(p)
+			ts := postgres.NewTemplateStore(p)
+			require.NoError(t, presets.InstallPendingBundle(ctx, cs, cs, ts))
 
-	curID := postgrestest.SeedCurrency(t, p, "USDT-FROZEN-CONFIRM", "Test USDT")
-	jtID := postgrestest.SeedJournalType(t, p, "jt_frozen_confirm", "Test JT")
-	pendingStore := postgres.NewPendingStore(p, ls, cs, nil)
-	policies := postgres.NewAccountPolicyStore(p)
+			curID := postgrestest.SeedCurrency(t, p, "USDT-FROZEN-CONFIRM", "Test USDT")
+			jtID := postgrestest.SeedJournalType(t, p, "jt_frozen_confirm", "Test JT")
+			pendingStore := postgres.NewPendingStore(p, ls, cs, nil)
+			policies := postgres.NewAccountPolicyStore(p)
 
-	userID := int64(4300)
-	amount := decimal.NewFromInt(300)
+			userID := int64(4300)
+			amount := decimal.NewFromInt(300)
 
-	_, err := pendingStore.AddPending(ctx, core.AddPendingInput{
-		AccountHolder:  userID,
-		CurrencyUID:    curID,
-		Amount:         amount,
-		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-add"),
-		Source:         "test",
-	})
-	require.NoError(t, err)
+			_, err := pendingStore.AddPending(ctx, core.AddPendingInput{
+				AccountHolder:  userID,
+				CurrencyUID:    curID,
+				Amount:         amount,
+				IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-add"),
+				Source:         "test",
+			})
+			require.NoError(t, err)
 
-	_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
-		AccountHolder: userID,
-		CurrencyUID:   curID,
-		Status:        core.AccountPolicyStatusFrozen,
-	})
-	require.NoError(t, err)
+			freezeCurrencyUID := curID
+			if holderWide {
+				freezeCurrencyUID = ""
+			}
 
-	j, err := pendingStore.ConfirmPending(ctx, core.ConfirmPendingInput{
-		AccountHolder:  userID,
-		CurrencyUID:    curID,
-		Amount:         amount,
-		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-confirm"),
-		Source:         "test",
-	})
-	require.NoError(t, err, "ConfirmPending must succeed while frozen — deposit finalization is not consumption")
-	require.NotNil(t, j)
+			_, err = policies.SetPolicy(ctx, core.AccountPolicyInput{
+				AccountHolder: userID,
+				CurrencyUID:   freezeCurrencyUID,
+				Status:        core.AccountPolicyStatusFrozen,
+			})
+			require.NoError(t, err)
 
-	mainWalletCls, err := cs.GetByCode(ctx, "main_wallet")
-	require.NoError(t, err)
-	bal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
-	require.NoError(t, err)
-	assert.True(t, bal.Equal(amount), "main_wallet balance should equal confirmed amount, got %s", bal)
+			j, err := pendingStore.ConfirmPending(ctx, core.ConfirmPendingInput{
+				AccountHolder:  userID,
+				CurrencyUID:    curID,
+				Amount:         amount,
+				IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-confirm"),
+				Source:         "test",
+			})
+			require.NoError(t, err, "ConfirmPending must succeed while frozen — deposit finalization is not consumption")
+			require.NotNil(t, j)
 
-	custodialCls, err := cs.GetByCode(ctx, "custodial")
-	require.NoError(t, err)
+			mainWalletCls, err := cs.GetByCode(ctx, "main_wallet")
+			require.NoError(t, err)
+			bal, err := ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
+			require.NoError(t, err)
+			assert.True(t, bal.Equal(amount), "main_wallet balance should equal confirmed amount, got %s", bal)
+			pendingCls, err := cs.GetByCode(ctx, "pending")
+			require.NoError(t, err)
+			pendingBalance, err := ls.GetBalance(ctx, userID, curID, pendingCls.UID)
+			require.NoError(t, err)
+			assert.True(t, pendingBalance.IsZero(), "confirmed pending balance must be discharged")
 
-	// A genuine net decrease under the same freeze must still be rejected.
-	_, err = ls.PostJournal(ctx, core.JournalInput{
-		JournalTypeUID: jtID,
-		IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-withdraw"),
-		Entries: []core.EntryInput{
-			{AccountHolder: userID, CurrencyUID: curID, ClassificationUID: mainWalletCls.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
-			{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: curID, ClassificationUID: custodialCls.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
-		},
-		Source: "test",
-	})
-	require.Error(t, err)
-	assert.ErrorIs(t, err, core.ErrAccountFrozen)
+			custodialCls, err := cs.GetByCode(ctx, "custodial")
+			require.NoError(t, err)
+
+			// A genuine net decrease under the same freeze must still be rejected.
+			_, err = ls.PostJournal(ctx, core.JournalInput{
+				JournalTypeUID: jtID,
+				IdempotencyKey: postgrestest.UniqueKey("frozen-confirm-withdraw"),
+				Entries: []core.EntryInput{
+					{AccountHolder: userID, CurrencyUID: curID, ClassificationUID: mainWalletCls.UID, EntryType: core.EntryTypeCredit, Amount: decimal.NewFromInt(50)},
+					{AccountHolder: core.SystemAccountHolder(userID), CurrencyUID: curID, ClassificationUID: custodialCls.UID, EntryType: core.EntryTypeDebit, Amount: decimal.NewFromInt(50)},
+				},
+				Source: "test",
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, core.ErrAccountFrozen)
+			bal, err = ls.GetBalance(ctx, userID, curID, mainWalletCls.UID)
+			require.NoError(t, err)
+			assert.True(t, bal.Equal(amount), "rejected withdrawal must leave confirmed balance unchanged")
+		})
+	}
 }
 
 // --- min_balance: zero / negative / positive, and same-journal netting ---
