@@ -791,6 +791,7 @@ All accessors return interfaces from `core/` so your application code depends on
 | `svc.TemplateBatchExecutor()` | `core.TemplateBatchExecutor` | Execute multiple templates atomically |
 | `svc.BalanceReader()` | `core.BalanceReader` | Get balance, batch balances |
 | `svc.Reserver()` | `core.Reserver` | Reserve / settle / release funds |
+| `svc.ReservationReader()` | `core.ReservationReader` | Read one reservation by UID through the pool or caller transaction; settlement rechecks state under lock |
 | `svc.EventReader()` | `core.EventReader` | Read / list events |
 | `svc.HolderReader()` | `core.HolderReader` | Holder-scoped wallet read surface (balances, translated transactions, holds) — feeds `server.HolderHandler` or consume directly |
 | `svc.AccountPolicies()` | `core.AccountPolicyStore` | Per-account freeze/close + balance-floor overrides |
@@ -873,6 +874,7 @@ still want the pending API.
 | `svc.RunInTxWithOptions(ctx, opts, fn)` | `RunInTx` with explicit `pgx.TxOptions` (e.g. `pgx.Serializable`) |
 | `svc.LockForTemplates(ctx, requests, reserveKeys...)` | Call on the `RunInTx` callback's Service to acquire the complete template balance locks and idempotency keys before Reserve + template writes; posts no journals |
 | `svc.Exchange(ctx, input)` | Convert one holder's balance into another currency at a resolved `core.FixedRate`: reserve + settle the source, post both FX legs, record the quote (and the funding deposit's uid) on each — one transaction, deposit-compatible lock order. Joins the caller's `RunInTx` when called on its clone. Rates come from the host's `core.RateQuoter`; the ledger stores none |
+| `svc.Capture(ctx, input)` | Atomically settle an existing reservation (one-shot or partial) and post a template that debits exactly its holder/currency's available balance. Other user roles, including memo, are refused. Reuses stable settlement/charge keys; joins caller transactions without savepoints, so propagate errors. Journals and discharge claims use the unsigned transaction path |
 | `svc.Authorize(ctx, input)` | Compute a journal's canonical digest and sign it **outside** any transaction, so a `RunInTx` write can still land signed (KMS signing is an external call; `financial.md` forbids those inside a transaction) |
 | `svc.AuthorizeTemplate(ctx, req)` | `Authorize` for a template execution |
 | `svc.DBTX()` | The active `pgx` executor — the pool, or the transaction when called on a `RunInTx` clone |
