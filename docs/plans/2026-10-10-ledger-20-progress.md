@@ -6,16 +6,16 @@
 |---|---|---|---|---|
 | 1 | 审计基线与契约冻结 | 已集成 | BASE d00fdeb / 8d187cc → 97e3336 | plan_check 0；T1 PASS（plan-review.md）；make test 全 root race 通过 |
 | 2 | 冻结策略按币种净额判断 | 已集成 | ae0c1b7 → 7a0f596 | 独立域/root Codex PASS；make test 全 root race 通过 |
-| 3 | 金额 helper 目标精度边界 | 独立评审中 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz 通过；root 第二意见 PASS |
+| 3 | 金额 helper 目标精度边界 | 评审通过，待集成 | 2239814 / codex/ledger20-t03 | core race/vet/fuzz；独立域及root PASS |
 | 4 | 输入校验早于 tracing 展开 | 实施中 | BASE de583aa / codex/ledger20-t04 | 待验收 |
 | 5 | 预留请求对齐生成契约 | 评审通过，待集成 | d376f03 / codex/ledger20-t05 | T1 PASS；35 client tests/typecheck/build/codegen |
-| 6 | SDK holder 安全整数边界 | 实施中 | BASE ab3a5d1 / codex/ledger20-t06 | 待验收 |
+| 6 | SDK holder 安全整数边界 | 独立评审中 | 8f52e08 / codex/ledger20-t06 | build/typecheck；346 tests PASS |
 | 7 | 两种 skin 的 holder 输入校验 | 待实施 | — | — |
 | 8 | 管理端缓存按实例与身份隔离 | 待实施 | — | — |
 | 9 | 其余 SDK mutation 请求契约消漂移 | 待实施 | — | — |
 | 10 | 科目配置经济效果验收样例 | 待实施 | — | — |
 | 11 | Exchange 严格消费可用余额 | 待实施 | — | — |
-| 12 | 原子 Capture 门面 | 待实施 | — | — |
+| 12 | 原子 Capture 门面 | 实施中 | BASE 767e208 / codex/ledger20-t12 | 待验收 |
 | 13 | 签名资金流程可运行组合示例 | 待实施 | — | — |
 | 14 | credits 消费接入原子 Capture | 待实施 | — | — |
 | 15 | USD 估值读模型示例 | 评审通过，待集成 | 3d69a74 / codex/ledger20-t15 | T1 PASS；race/vet/run，覆盖率 94.8% |
