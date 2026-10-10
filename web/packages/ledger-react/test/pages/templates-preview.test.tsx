@@ -61,6 +61,9 @@ describe.each([
     // PreviewSection that appears has its own "Preview" submit button.
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Collapse" })).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox", { name: "Holder ID" }), {
+      target: { value: "1001" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Preview" }));
 
     await waitFor(() =>

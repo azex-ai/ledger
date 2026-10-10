@@ -31,6 +31,39 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `@azex/ledger-react` / `createLedgerClient`: holder IDs must be safe integers
+
+The numeric admin SDK now rejects holder IDs outside JavaScript's safe integer
+range (`-9007199254740991` through `9007199254740991`), as well as fractional
+and non-finite values. Requests are checked before fetch across holder path,
+query and body fields, including batch holders and journal entries. Successful
+responses are checked before returning holder-bearing rows, nested entries,
+balances and reconciliation details; one unsafe holder rejects the entire
+response. `createServerLedgerClient` delegates to the same boundary.
+
+The error is a `RangeError` with `name: "UnsafeHolderError"`,
+`code: "LEDGER_UNSAFE_HOLDER"` and a `location` such as
+`request.body.holder_ids[1]` or `response.list[1].account_holder`. A response
+error does not undo a server-side mutation; retain the original idempotency
+key when reconciling or retrying that operation.
+
+**What a consumer must do.** Keep SDK holder IDs within that exact range and
+handle the error instead of continuing with a rounded ID. Both
+`9007199254740992` and `9007199254740993` are rejected even though ordinary
+JavaScript decoding collapses them to the same number. Never truncate, hash,
+take a modulus or call `Number`/`parseInt` on a large external identifier to
+make it fit. New host integrations may maintain an authoritative mapping from
+external string IDs to stable safe ledger holder IDs. Existing large int64
+ledger holders need a host backend that preserves int64 (for example the Go
+library), or a separately versioned string-wire integration; do not silently
+remap existing accounts.
+
+The Go int64 and HTTP numeric wire contracts are unchanged. This SDK does not
+claim full int64 support. Negative system holders and zero sentinels remain
+subject to each endpoint's existing server-side rules. Metadata, template
+amount maps and actor IDs are not holder fields and are not checked by this
+boundary. UI text parsing is a separate integration concern.
+
 ### `GET /holder/transactions` / `core.HolderTransaction.QuotesOmitted`: quotes only on a single-holder journal
 
 **Landed (2026-10-10 fix wave 2, second opinion Major 2).** A statement row's

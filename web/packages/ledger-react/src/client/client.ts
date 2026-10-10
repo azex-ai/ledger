@@ -25,6 +25,7 @@ import type {
   SystemBalance,
   TransitionBookingBody,
 } from "./types";
+import { validateRequestHolders, validateResponseHolders } from "./holder-boundary";
 
 export class ApiRequestError extends Error {
   constructor(
@@ -103,6 +104,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
       skipIdempotencyKey?: boolean;
     },
   ): Promise<T> {
+    validateRequestHolders(path, init?.body);
     // Resolve the fetch implementation per call: an explicit override wins,
     // otherwise the ambient globalThis.fetch (read lazily so test doubles /
     // MSW installed after client construction are still picked up).
@@ -147,6 +149,7 @@ export function createLedgerClient(config: LedgerClientConfig) {
         fields: message.fields,
       });
     }
+    validateResponseHolders(path, envelope.data);
     return envelope.data as T;
   }
 
