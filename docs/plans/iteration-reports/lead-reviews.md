@@ -96,3 +96,9 @@ signed replay 三项 auth 材料全空时按已裁决方式验证相关余额历
 完整阅读 main、三个真实 PG 测试、README 与报告，核对已安装 preset/自定义 POINTS 配置的 NormalSide、BalanceRole 及字面量最终余额。逐币 journal 平衡与独立经济 oracle 分别验收；fee 四行全部反向仍平衡但增大用户余额，错误 gift rate 仍平衡但产出10而非2，两种负例都由外层事务传播 oracle 错误而完整回滚。正常幂等 UID/行数不变与改变汇率冲突有实证。
 
 示例复用现有配置类型和 bundle，没有增加 DSL。普通 executable 是提交后审计，不声称自动回滚已提交业务；fee journal 不自动保护 hold 的宿主责任明确。独立域报告 10-review.md PASS；作者 PG race 三个测试2.970s、vet通过，本席不重复相同 suite。可串行集成。
+
+## Task 9 · root T1：PASS（a9a1298）
+
+完整阅读client diff、19项运行时测试、23项编译反例和09.md；对照生成paths/components、实际preview handler和idempotency middleware。operation body提取直接复用生成契约，scalar adapters保留header/body协议，Classification保留现有必填策略。Booking metadata收紧为真实string map，新增optional字段可用，旧DTO迁移明确记录。
+
+preview canonical amounts 原样发送，单amount便捷输入只转换这一键；混合或缺失形式在async方法内fetch前拒绝，不改变原对象。编译测试使用真实生成类型及fresh literals，避免宽对象赋值漏测字段；原holder测试只修不合法fixture，没有移除危险holder断言。作者build/types/codegen/client143项、全包388项PASS。额外静态2类基线失败已计入Task20；最终合并Task7后的组件回归另验收。无blocker。
