@@ -34,8 +34,12 @@ const (
 )
 
 // Round rounds d to exponent decimal places using mode. exponent is
-// typically a currency's Currency.Exponent. An unrecognized mode falls back
-// to RoundHalfUp.
+// typically a currency's Currency.Exponent, but may range from
+// -MaxAmountWorkingFractionalDigits to MaxAmountWorkingFractionalDigits.
+// Negative exponents round to multiples of ten; positive exponents above a
+// currency's precision support intermediate calculations. An unrecognized
+// mode falls back to RoundHalfUp. An exponent outside this computational
+// range returns ErrInvalidInput before rescaling.
 //
 // It returns core.ErrInvalidInput for an amount outside what this ledger
 // can store (I-70). Rounding is exactly the operation that cannot survive
@@ -45,6 +49,9 @@ const (
 // above used to say "Round never fails" -- it did not fail, it failed to
 // come back (R-4, 2026-09-04 recheck).
 func Round(d decimal.Decimal, exponent int32, mode RoundingMode) (decimal.Decimal, error) {
+	if err := validateMoneyExponent("round", exponent, -MaxAmountWorkingFractionalDigits); err != nil {
+		return decimal.Decimal{}, err
+	}
 	if err := validateAmountIsRescalable("round", "amount", d); err != nil {
 		return decimal.Decimal{}, err
 	}
@@ -52,7 +59,7 @@ func Round(d decimal.Decimal, exponent int32, mode RoundingMode) (decimal.Decima
 }
 
 // roundChecked is Round's arithmetic, for callers that have already
-// established the magnitude is in range.
+// established both the amount magnitude and target exponent are in range.
 func roundChecked(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.Decimal {
 	switch mode {
 	case RoundHalfEven:
@@ -68,12 +75,31 @@ func roundChecked(d decimal.Decimal, exponent int32, mode RoundingMode) decimal.
 	}
 }
 
+// validateMoneyExponent bounds the target, independently of the amount's
+// exponent. A small input can otherwise request a huge power of ten during
+// rescaling or allocation's Shift(...).BigInt(). Reuse the existing working
+// width (36 digits), not the currency/storage width (18), so guard digits
+// remain available. Integer comparisons precede all decimal arithmetic and
+// avoid negating the caller's exponent, which could overflow at MinInt32.
+func validateMoneyExponent(scope string, exponent, minExponent int32) error {
+	if exponent < minExponent || exponent > MaxAmountWorkingFractionalDigits {
+		return fmt.Errorf("core: %s: target exponent %d must be in [%d, %d]: %w",
+			scope, exponent, minExponent, MaxAmountWorkingFractionalDigits, ErrInvalidInput)
+	}
+	return nil
+}
+
 // ConvertAt converts amount to another currency at rate, rounding the result
 // to targetExponent decimal places using mode. Callers must post the
 // resulting entries themselves (e.g. via the fx_sell/fx_buy presets); the FX
 // residue introduced by rounding is expected to land on a settlement account
-// — see docs/COOKBOOK.md's rounding decision table.
+// — see docs/COOKBOOK.md's rounding decision table. targetExponent has the
+// same working range as Round; an out-of-range target returns ErrInvalidInput
+// before multiplication.
 func ConvertAt(amount, rate decimal.Decimal, targetExponent int32, mode RoundingMode) (decimal.Decimal, error) {
+	if err := validateMoneyExponent("convert at", targetExponent, -MaxAmountWorkingFractionalDigits); err != nil {
+		return decimal.Decimal{}, err
+	}
 	// Both operands, before the multiply: Mul adds the exponents, so a
 	// pathological rate is as good as a pathological amount, and the
 	// product's magnitude is the thing Round would then have to rescale.
@@ -106,13 +132,15 @@ func ConvertAt(amount, rate decimal.Decimal, targetExponent int32, mode Rounding
 // total must already be exactly representable at exponent decimal places
 // (Allocate never silently rounds its input — round total explicitly first
 // if needed). weights must be non-negative and not all zero. The returned
-// slice is in the same order as weights.
+// slice is in the same order as weights. exponent must be in
+// [0, MaxAmountWorkingFractionalDigits]; an out-of-range target returns
+// ErrInvalidInput before rescaling or allocation arithmetic.
 func Allocate(total decimal.Decimal, weights []decimal.Decimal, exponent int32) ([]decimal.Decimal, error) {
 	if len(weights) == 0 {
 		return nil, fmt.Errorf("core: allocate: weights must not be empty: %w", ErrInvalidInput)
 	}
-	if exponent < 0 {
-		return nil, fmt.Errorf("core: allocate: exponent must not be negative: %w", ErrInvalidInput)
+	if err := validateMoneyExponent("allocate", exponent, 0); err != nil {
+		return nil, err
 	}
 	if err := validateAmountIsRescalable("allocate", "total", total); err != nil {
 		return nil, err
