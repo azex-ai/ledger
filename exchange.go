@@ -60,14 +60,15 @@ type ExchangeInput struct {
 	Source  string
 	// SellTemplateCode / BuyTemplateCode override the FX preset templates
 	// (presets.FXBundle's "fx_sell" / "fx_buy"). Each must take one "amount"
-	// and move the user's main wallet against a system counterpart in the
+	// and move the user's available balance against a system counterpart in the
 	// currency it is executed with. Exchange checks what the rendered
-	// journals actually did before it commits: the sell journal must move
-	// the holder's source currency by exactly -Quantity, the buy journal the
-	// target currency by exactly +Quote.TargetAmount, and neither may touch
-	// the holder's other currency. "Move" is the holder statement's signed
-	// net -- role-bearing classifications only, each entry signed by its
-	// classification's normal side (core.SignedAmount). An override that
+	// journals actually did before it commits: available net must change by
+	// exactly -Quantity on the source leg and +Quote.TargetAmount on the target
+	// leg, using core.SignedAmount for each classification's normal side.
+	// Every other user classification must have zero net change; pending,
+	// locked or memo balances cannot offset an incorrect available amount or
+	// move between classifications. Each leg is restricted to its currency
+	// and the holder/system-counterpart pair. An override that
 	// does anything else is core.ErrInvalidInput and the transaction rolls
 	// back: per-journal balance checks (I-1, I-12) cannot see a template
 	// that credits the holder on both legs, because each leg still balances.
@@ -258,27 +259,27 @@ func (s *Service) Exchange(ctx context.Context, in ExchangeInput) (*ExchangeResu
 			return err
 		}
 		legs := []struct {
-			name, template, uid, moved, other string
-			want                              decimal.Decimal
+			name, template, uid, moved string
+			want                       decimal.Decimal
 		}{
-			{"sell", sellTemplate, journals[0].UID, in.SourceCurrencyUID, in.TargetCurrencyUID, in.Quantity.Neg()},
-			{"buy", buyTemplate, journals[1].UID, in.TargetCurrencyUID, in.SourceCurrencyUID, quote.TargetAmount},
+			{"sell", sellTemplate, journals[0].UID, in.SourceCurrencyUID, in.Quantity.Neg()},
+			{"buy", buyTemplate, journals[1].UID, in.TargetCurrencyUID, quote.TargetAmount},
 		}
 		for _, leg := range legs {
 			_, entries, err := tx.Queries().GetJournal(ctx, leg.uid)
 			if err != nil {
 				return fmt.Errorf("ledger: exchange: read %s leg: %w", leg.name, err)
 			}
-			moved, touchedOther, err := holderLegNet(entries, in.HolderID, leg.moved, leg.other, roles)
+			moved, unexpectedChange, err := holderLegNet(entries, in.HolderID, leg.moved, roles)
 			if err != nil {
 				return fmt.Errorf("ledger: exchange: %s leg: %w", leg.name, err)
 			}
-			if touchedOther || !moved.Equal(leg.want) {
+			if unexpectedChange || !moved.Equal(leg.want) {
 				code := source.Code
 				if leg.moved == in.TargetCurrencyUID {
 					code = target.Code
 				}
-				return fmt.Errorf("ledger: exchange: %s template %q does not move the holder's %s by %s: %w",
+				return fmt.Errorf("ledger: exchange: %s template %q does not move the holder's %s available balance by %s without changing other dimensions: %w",
 					leg.name, leg.template, code, leg.want.String(), core.ErrInvalidInput)
 			}
 		}
@@ -336,41 +337,41 @@ func classificationRoles(ctx context.Context, tx *Service) (map[string]core.Clas
 	return out, nil
 }
 
-// holderLegNet is the holder statement's per-(journal, currency) net
-// (postgres/sql/queries/holder.sql, ListHolderTransactionRows) computed over
-// one journal's entries: only the holder's entries in role-bearing
-// classifications (every role except none and memo -- the same predicate the
-// statement and the solvency liability scope use) count, each signed by its
-// classification's normal side through core.SignedAmount, the one Go
-// implementation of ledger_signed_amount. It also reports whether the journal
-// carries ANY entry for the holder in `other`, role-bearing or not: an FX leg
-// has no business there at all.
-func holderLegNet(entries []core.Entry, holder int64, currency, other string, classes map[string]core.Classification) (decimal.Decimal, bool, error) {
+// holderLegNet computes the holder's available net through core.SignedAmount.
+// The bool reports an unexpected effect: another currency/holder/counterpart,
+// or a nonzero net in any non-available user classification. Netting those
+// classifications separately prevents pending/locked/memo changes from hiding
+// behind each other while allowing exact cancellation within one dimension.
+func holderLegNet(entries []core.Entry, holder int64, currency string, classes map[string]core.Classification) (decimal.Decimal, bool, error) {
 	net := decimal.Zero
-	touchedOther := false
+	nonAvailable := make(map[string]decimal.Decimal)
 	for _, e := range entries {
+		if e.CurrencyUID != currency || (e.AccountHolder != holder && e.AccountHolder != core.SystemAccountHolder(holder)) {
+			return decimal.Decimal{}, true, nil
+		}
 		if e.AccountHolder != holder {
-			continue
-		}
-		if e.CurrencyUID == other {
-			touchedOther = true
-			continue
-		}
-		if e.CurrencyUID != currency {
 			continue
 		}
 		c, ok := classes[e.ClassificationUID]
 		if !ok {
 			return decimal.Decimal{}, false, fmt.Errorf("classification %q of a rendered entry is unknown: %w", e.ClassificationUID, core.ErrNotFound)
 		}
-		if c.BalanceRole == core.BalanceRoleNone || c.BalanceRole == core.BalanceRoleMemo {
-			continue
-		}
 		signed, err := core.SignedAmount(c.NormalSide, e.EntryType, e.Amount)
 		if err != nil {
 			return decimal.Decimal{}, false, err
 		}
-		net = net.Add(signed)
+		if c.BalanceRole == core.BalanceRoleAvailable {
+			net = net.Add(signed)
+		} else {
+			// Holder and currency have already been checked, so the remaining
+			// classification key identifies the complete balance dimension.
+			nonAvailable[e.ClassificationUID] = nonAvailable[e.ClassificationUID].Add(signed)
+		}
 	}
-	return net, touchedOther, nil
+	for _, delta := range nonAvailable {
+		if !delta.IsZero() {
+			return net, true, nil
+		}
+	}
+	return net, false, nil
 }
