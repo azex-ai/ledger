@@ -1,5 +1,7 @@
 "use client";
 
+import { useUidCodeLookups } from "../../hooks/use-metadata";
+
 import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
 import {
@@ -417,6 +419,7 @@ function RetryConfirm({ id }: { id: string }) {
 }
 
 export function WithdrawalsPage() {
+  const { currencyCode } = useUidCodeLookups();
   const [statusFilter, setStatusFilter] = useState<string>("");
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
@@ -475,6 +478,7 @@ export function WithdrawalsPage() {
               <Table.Header>
                 <Table.Column isRowHeader>ID</Table.Column>
                 <Table.Column>Holder</Table.Column>
+                <Table.Column>Currency</Table.Column>
                 <Table.Column>Channel</Table.Column>
                 <Table.Column className="text-end">Amount</Table.Column>
                 <Table.Column>Status</Table.Column>
@@ -487,6 +491,7 @@ export function WithdrawalsPage() {
                   <Table.Row id={w.uid}>
                     <Table.Cell className="max-w-32"><span className="block truncate" title={w.uid}>#{w.uid}</span></Table.Cell>
                     <Table.Cell>{w.account_holder}</Table.Cell>
+                    <Table.Cell><span title={w.currency_uid}>{currencyCode(w.currency_uid)}</span></Table.Cell>
                     <Table.Cell className="max-w-32"><span className="block truncate" title={w.channel_name}>{w.channel_name}</span></Table.Cell>
                     <Table.Cell className="text-end font-mono tabular-nums">
                       {formatAmount(w.amount)}

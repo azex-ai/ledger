@@ -2,10 +2,13 @@
 
 import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
-import { formatAmount, formatSignedAmount, formatUTC, cn } from "../../lib/utils";
+import { formatSignedAmount, formatUTC, cn } from "../../lib/utils";
 import { useReconcileGlobal, useReconcileAccount } from "../../hooks/use-system";
-import { useUidCodeLookups } from "../../hooks/use-metadata";
+import { useUidCodeLookups, useCurrencies } from "../../hooks/use-metadata";
 import { errorText } from "../../lib/error-message";
+import { ExactAmount } from "../exact-amount";
+import { ErrorState } from "../error-state";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -59,7 +62,7 @@ export function ReconciliationPage() {
                 <div className="flex items-center gap-2">
                   <StatusBadge status={globalResult.balanced ? "confirmed" : "failed"} />
                   <span className="text-sm">
-                    {globalResult.balanced ? "Balanced" : `Unbalanced (gap: ${formatAmount(globalResult.gap)})`}
+                    {globalResult.balanced ? "Balanced" : <>Unbalanced entry sums (not a currency value): <ExactAmount value={globalResult.gap} /></>}
                   </span>
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -78,15 +81,12 @@ export function ReconciliationPage() {
             <p className="text-xs text-muted-foreground">
               Verifies checkpoint balances match entry sums for a specific account.
             </p>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <div className="grid gap-1">
                 <Label htmlFor="recon-holder" className="text-xs">Holder</Label>
                 <Input id="recon-holder" value={holder} onChange={(e) => setHolder(e.target.value)} placeholder="1001" className="w-28" />
               </div>
-              <div className="grid gap-1">
-                <Label htmlFor="recon-currency" className="text-xs">Currency</Label>
-                <Input id="recon-currency" value={currencyId} onChange={(e) => setCurrencyId(e.target.value)} placeholder="1" className="w-28" />
-              </div>
+              <ReconciliationCurrencySelect value={currencyId} onChange={setCurrencyId} />
               <div className="flex items-end">
                 <Button
                   onClick={() => {
@@ -119,7 +119,7 @@ export function ReconciliationPage() {
                 <div className="flex items-center gap-2">
                   <StatusBadge status={accountResult.balanced ? "confirmed" : "failed"} />
                   <span className="text-sm">
-                    {accountResult.balanced ? "Balanced" : `Drift detected (gap: ${formatAmount(accountResult.gap)})`}
+                    {accountResult.balanced ? "Balanced" : <>Drift detected (gap): <ExactAmount value={accountResult.gap} currencyCode={currencyCode(accountMutation.variables?.currencyUid ?? "")} /></>}
                   </span>
                 </div>
                 {accountResult.details && accountResult.details.length > 0 && (
@@ -140,14 +140,14 @@ export function ReconciliationPage() {
                           <TableCell>{d.account_holder}</TableCell>
                           <TableCell title={d.currency_uid}>{currencyCode(d.currency_uid)}</TableCell>
                           <TableCell title={d.classification_uid}>{classCode(d.classification_uid)}</TableCell>
-                          <TableCell className="text-right tabular-nums">{formatAmount(d.expected)}</TableCell>
-                          <TableCell className="text-right tabular-nums">{formatAmount(d.actual)}</TableCell>
+                          <TableCell className="text-right tabular-nums"><ExactAmount value={d.expected} currencyCode={currencyCode(d.currency_uid)} /></TableCell>
+                          <TableCell className="text-right tabular-nums"><ExactAmount value={d.actual} currencyCode={currencyCode(d.currency_uid)} /></TableCell>
                           <TableCell className="text-right tabular-nums">
                             {(() => {
                               const drift = formatSignedAmount(d.drift);
                               return (
                                 <span className={cn(drift.isPositive && "text-emerald-400", drift.isNegative && "text-red-400")}>
-                                  {drift.isPositive ? "+" : ""}{drift.text}
+                                  <ExactAmount value={d.drift} currencyCode={currencyCode(d.currency_uid)}>{drift.isPositive ? "+" : ""}{drift.text}</ExactAmount>
                                 </span>
                               );
                             })()}
@@ -162,6 +162,28 @@ export function ReconciliationPage() {
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+}
+
+
+function ReconciliationCurrencySelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const { data: currencies, isLoading, isError, refetch } = useCurrencies();
+  return (
+    <div className="grid gap-1">
+      <Label htmlFor="recon-currency" className="text-xs">Currency</Label>
+      <Select value={value} onValueChange={(next) => onChange(next ?? "")} disabled={isLoading || isError || !currencies?.length}>
+        <SelectTrigger id="recon-currency">
+          <SelectValue placeholder={isLoading ? "Loading currencies..." : "Select currency"}>
+            {currencies?.find((currency) => currency.uid === value)?.code}
+          </SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {currencies?.map((currency) => <SelectItem key={currency.uid} value={currency.uid}>{currency.code}</SelectItem>)}
+        </SelectContent>
+      </Select>
+      {isError && <ErrorState message="Failed to load currencies" onRetry={refetch} />}
+      {!isLoading && !isError && !currencies?.length && <p className="text-xs text-muted-foreground">No currencies configured</p>}
     </div>
   );
 }

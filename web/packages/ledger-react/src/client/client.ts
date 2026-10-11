@@ -223,8 +223,11 @@ export function createLedgerClient(config: LedgerClientConfig) {
     listJournals: (params: { cursor?: string; limit?: number }) =>
       request<PaginatedResponse<Journal>>(`/api/v1/journals${qs(params)}`),
 
-    getJournal: (id: string) =>
-      request<JournalWithEntries>(`/api/v1/journals/${id}`),
+    // The API appends entries to the journal. Keep the established consumer
+    // shape while typing the wire response from OpenAPI at this boundary.
+    getJournal: (id: string): Promise<JournalWithEntries> =>
+      request<NonNullable<components["schemas"]["JournalWithEntriesEnvelope"]["data"]>>(`/api/v1/journals/${id}`)
+        .then(({ entries = [], ...journal }) => ({ journal, entries })),
 
     postJournal: (body: JsonPostBody<"/journals">) =>
       request<Journal>("/api/v1/journals", {
@@ -262,8 +265,8 @@ export function createLedgerClient(config: LedgerClientConfig) {
     }) => request<PaginatedResponse<Entry>>(`/api/v1/entries${qs(params)}`),
 
     // Balances
-    getBalances: (holder: number) =>
-      request<PaginatedResponse<Balance>>(`/api/v1/balances/${holder}`).then(
+    getBalances: (holder: number, currency: string) =>
+      request<PaginatedResponse<Balance>>(`/api/v1/balances/${holder}${qs({ currency_uid: currency })}`).then(
         (d) => d.list,
       ),
 

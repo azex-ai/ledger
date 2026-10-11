@@ -8,6 +8,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   SESSION_COOKIE,
+  dashboardRequestOriginAllowed,
   dashboardAuthEnabled,
   dashboardAuthMisconfigured,
   verifySession,
@@ -35,6 +36,13 @@ const SKIP_RESPONSE_HEADERS = new Set([
 ]);
 
 async function proxy(req: NextRequest) {
+  if (!dashboardRequestOriginAllowed(req)) {
+    return NextResponse.json(
+      { code: 10103, message: "same-origin request required", data: null },
+      { status: 403 },
+    );
+  }
+
   if (dashboardAuthMisconfigured()) {
     return NextResponse.json(
       { code: 10500, message: "dashboard auth is not configured", data: null },
