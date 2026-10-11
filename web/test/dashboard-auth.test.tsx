@@ -22,7 +22,7 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 function request(method: string, source: string | null, body?: unknown, path = "/api/v1/journals") {
-  const headers = new Headers({ cookie: `${SESSION_COOKIE}=${mintSession().token}` });
+  const headers = new Headers({ host: new URL(origin).host, cookie: `${SESSION_COOKIE}=${mintSession().token}` });
   if (source !== null) headers.set("origin", source);
   if (body !== undefined) headers.set("content-type", "application/json");
   return new NextRequest(origin + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -47,6 +47,32 @@ describe("dashboard browser mutation boundary", () => {
       expect(await res.text()).not.toContain("server-secret");
     });
   }
+  test.each(["127.0.0.1:43111", "[::1]:43111"])("uses real Host %s despite NextRequest loopback URL normalization", async (host) => {
+    const publicOrigin = `http://${host}`;
+    function aliasRequest(source: string, path = "/api/v1/journals") {
+      return new NextRequest(publicOrigin + path, { method: "POST", headers: {
+        host, origin: source, cookie: `${SESSION_COOKIE}=${mintSession().token}`,
+        "content-type": "application/json",
+      }, body: JSON.stringify({ password: "operator-password" }) });
+    }
+    const req = aliasRequest(publicOrigin);
+    expect(new URL(req.url).hostname).toBe("localhost");
+    expect((await POST(req)).status).toBe(200);
+    expect((await login(aliasRequest(publicOrigin, "/api/session"))).status).toBe(200);
+    upstreamFetch.mockClear();
+    for (const foreign of ["http://localhost:43111", publicOrigin.replace("43111", "43112"), publicOrigin.replace("http:", "https:")]) {
+      expect((await POST(aliasRequest(foreign))).status).toBe(403);
+      expect((await login(aliasRequest(foreign, "/api/session"))).status).toBe(403);
+    }
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+  test.each([null, "", "user@localhost:3100", "localhost:3100/path", "localhost:3100?x=1", "localhost:3100#x", "localhost:3100,attacker.test", "localhost:bad", "local host:3100", "%6cocalhost:3100", "localhost\\attacker.test"])("missing/malformed Host %s fails closed", async (host) => {
+    const req = request("POST", origin, {});
+    if (host === null) req.headers.delete("host");
+    else req.headers.set("host", host);
+    expect((await POST(req)).status).toBe(403);
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
   test("forged forwarded headers cannot approve a cross-port origin", async () => {
     const req = request("POST", "http://localhost:3101", {});
     req.headers.set("x-forwarded-host", "localhost:3101");

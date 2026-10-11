@@ -102,7 +102,7 @@ function PostJournalDialog() {
               onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, journal_type_uid: v }); }}
             >
               <SelectTrigger id="pj-type" className="w-full">
-                <SelectValue placeholder="Select a journal type" />
+                <SelectValue placeholder="Select a journal type">{journalTypes?.find((type) => type.uid === form.journal_type_uid)?.name}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {(journalTypes ?? []).map((t) => (
@@ -219,7 +219,7 @@ function TemplateJournalDialog() {
               onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, template_code: v }); }}
             >
               <SelectTrigger id="tj-tpl-code" className="w-full">
-                <SelectValue placeholder="Select a template" />
+                <SelectValue placeholder="Select a template">{templates?.find((template) => template.code === form.template_code)?.name}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {(templates ?? []).map((t) => (
@@ -240,7 +240,7 @@ function TemplateJournalDialog() {
                 onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, currency_uid: v }); }}
               >
                 <SelectTrigger id="tj-currency" className="w-full">
-                  <SelectValue placeholder="Select" />
+                  <SelectValue placeholder="Select">{currencies?.find((currency) => currency.uid === form.currency_uid)?.code}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {(currencies ?? []).map((c) => (

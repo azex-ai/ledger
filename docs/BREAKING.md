@@ -57,9 +57,12 @@ port on the same host. The session cookie alone does not authorize that origin.
 For scripted dashboard requests, send its exact origin. Behind a reverse proxy,
 set the server-only `DASHBOARD_PUBLIC_ORIGIN` to the canonical public HTTP(S)
 origin (scheme, hostname and optional port, no path/query/credentials). Otherwise
-the request URL supplies the origin. Client-supplied forwarding headers do not
-establish trust. This applies to the bundled host, not the standalone Go API or
-SDK host applications.
+the request Host authority plus framework URL scheme supply the origin;
+missing/malformed Host is rejected. This preserves loopback host aliases that
+Next.js normalizes in its URL. The check does not read forwarding headers;
+proxies that rewrite Host or terminate TLS should configure the public origin.
+This applies to the bundled host, not the standalone Go API or SDK host
+applications.
 
 ### `ledgerKeys` / `LedgerClientConfig.cacheScope`: scope-first cache keys
 

@@ -314,9 +314,12 @@ The BFF and `/api/session` login/logout routes also require an exact same-origin
 `Origin` header for non-GET/HEAD requests. Missing/opaque origins and different
 ports fail with HTTP 403, even with a valid session cookie. For a reverse proxy,
 set server-only `DASHBOARD_PUBLIC_ORIGIN` to the canonical public HTTP(S) origin
-with no path/query/credentials. Otherwise the request URL defines the origin;
-forwarding headers supplied by a client never establish origin trust. Scripted
-requests to this bundled host must send its origin explicitly.
+with no path/query/credentials. Otherwise the request Host authority and
+framework URL scheme define the origin; missing/malformed Host is rejected. Next.js may normalize loopback URL hostnames
+to localhost, so the Host is preserved for comparison. Forwarding headers are
+not read by this check; proxies that rewrite Host or terminate TLS should set
+the explicit public origin. Scripted requests to this bundled host must send
+its origin explicitly.
 
 The host's server-only `getDashboardCacheScope()` verifies the session cookie
 before deriving `operator-session:<expiresAtMs>` from its public expiry.

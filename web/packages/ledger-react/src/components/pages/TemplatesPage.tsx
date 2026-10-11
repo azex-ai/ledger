@@ -127,7 +127,7 @@ function CreateTemplateDialog() {
                 onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, journal_type_uid: v }); }}
               >
                 <SelectTrigger id="tpl-jtype" className="w-full">
-                  <SelectValue placeholder="Select" />
+                  <SelectValue placeholder="Select">{journalTypes?.find((type) => type.uid === form.journal_type_uid)?.name}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {(journalTypes ?? []).map((t) => (
@@ -273,7 +273,7 @@ function PreviewSection({ code }: { code: string }) {
         {/* J-12 (2026-09-02 web audit): unlabeled inputs — mirrors HeroUI's `aria-label`s on the same fields. */}
         <Input aria-label="Holder ID" placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
         <Select value={params.currency_uid === "" ? null : params.currency_uid} onValueChange={(v) => { if (typeof v === "string") setParams({ ...params, currency_uid: v }); }}>
-          <SelectTrigger className="w-28"><SelectValue placeholder="Currency" /></SelectTrigger>
+          <SelectTrigger aria-label="Currency" className="w-28"><SelectValue placeholder="Currency">{currencies?.find((currency) => currency.uid === params.currency_uid)?.code}</SelectValue></SelectTrigger>
           <SelectContent>
             {(currencies ?? []).map((c) => (
               <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>

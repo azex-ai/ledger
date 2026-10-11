@@ -81,7 +81,10 @@ export function verifySession(
 /** Browser mutations must come from this exact origin (including port).
  * Reverse proxies may set DASHBOARD_PUBLIC_ORIGIN to the externally visible
  * origin. Never infer trust from client-supplied Forwarded / X-Forwarded-*.
- * Missing, opaque and malformed Origin fail closed, including login/logout.
+ * NextRequest normalizes loopback URL hostnames to localhost. Use the browser
+ * request Host authority with the framework URL scheme when no public origin
+ * is configured; a proxy that rewrites either must configure the public origin.
+ * Missing/malformed Host or Origin fail closed, including login/logout.
  */
 export function dashboardRequestOriginAllowed(req: Pick<Request, "method" | "url" | "headers">): boolean {
   if (req.method === "GET" || req.method === "HEAD") return true;
@@ -90,9 +93,17 @@ export function dashboardRequestOriginAllowed(req: Pick<Request, "method" | "url
   try {
     const source = new URL(origin);
     const configured = process.env.DASHBOARD_PUBLIC_ORIGIN;
-    const target = new URL(configured ?? req.url);
+    let target: URL;
+    if (configured !== undefined) {
+      target = new URL(configured);
+    } else {
+      const host = req.headers.get("host");
+      // Host is an authority, never a URL, credentials or a forwarded list.
+      if (!host || /[\s/\\@?#%,]/.test(host)) return false;
+      target = new URL(`${new URL(req.url).protocol}//${host}`);
+    }
     if (!["http:", "https:"].includes(target.protocol)) return false;
-    if (configured && (target.username || target.password || target.pathname !== "/" || target.search || target.hash)) return false;
+    if (target.username || target.password || target.pathname !== "/" || target.search || target.hash) return false;
     return source.origin === origin && source.origin === target.origin;
   } catch {
     return false;
