@@ -88,7 +88,8 @@ describe("server prefetch round-trip", () => {
   test("prefetchBalances seeds cache; useBalances hits it with no extra fetch", async () => {
     let calls = 0;
     server.use(
-      http.get(`${BASE}/api/v1/balances/42`, () => {
+      http.get(`${BASE}/api/v1/balances/42`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get("currency_uid")).toBe("cur-1");
         calls += 1;
         return HttpResponse.json({
           code: 200,
@@ -101,14 +102,14 @@ describe("server prefetch round-trip", () => {
     const client = createServerLedgerClient({ baseUrl: BASE });
     const qc = freshClient();
 
-    await prefetchBalances(qc, client, 42);
+    await prefetchBalances(qc, client, 42, "cur-1");
 
-    expect(qc.getQueryData(ledgerKeys.balances(client.cacheScope, 42))).toEqual([
+    expect(qc.getQueryData(ledgerKeys.balances(client.cacheScope, 42, "cur-1"))).toEqual([
       { currency_uid: 1, balance: "100" },
     ]);
     expect(calls).toBe(1);
 
-    const { result } = renderHook(() => useBalances(42), {
+    const { result } = renderHook(() => useBalances(42, "cur-1"), {
       wrapper: wrapper(qc, client),
     });
     expect(result.current.isSuccess).toBe(true);

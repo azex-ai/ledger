@@ -17,7 +17,7 @@ export const ledgerKeys = {
     ["ledger", scope, "entries", params] as const,
 
   // Balances
-  balances: (scope: LedgerQueryScope, holder: number) => ["ledger", scope, "balances", holder] as const,
+  balances: (scope: LedgerQueryScope, holder: number, currency: string) => ["ledger", scope, "balances", holder, currency, "classifications"] as const,
   balanceBreakdown: (scope: LedgerQueryScope, holder: number, currency: string) =>
     ["ledger", scope, "balances", holder, currency, "breakdown"] as const,
   balancesByCurrency: (scope: LedgerQueryScope, holder: number, currency: string) =>

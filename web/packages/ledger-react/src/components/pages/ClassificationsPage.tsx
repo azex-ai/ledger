@@ -79,6 +79,14 @@ function CreateDialog() {
             {fieldErrors.name && <p className="text-xs text-destructive">{fieldErrors.name}</p>}
           </div>
           <div className="grid gap-2">
+            <Label htmlFor="cls-system">Account owner</Label>
+            <Select value={form.is_system ? "system" : "holder"} onValueChange={(value) => { if (value) setForm({ ...form, is_system: value === "system" }); }}>
+              <SelectTrigger id="cls-system"><SelectValue>{form.is_system ? "System" : "Holder"}</SelectValue></SelectTrigger>
+              <SelectContent><SelectItem value="holder">Account holder</SelectItem><SelectItem value="system">System</SelectItem></SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">System classifications use system holders (negative holder IDs).</p>
+          </div>
+          <div className="grid gap-2">
             <Label htmlFor="cls-normal-side">Normal Side</Label>
             <Select value={form.normal_side} onValueChange={(v) => { if (v) setForm({ ...form, normal_side: v as "debit" | "credit" }); }}>
               <SelectTrigger id="cls-normal-side"><SelectValue /></SelectTrigger>
