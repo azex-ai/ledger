@@ -35,10 +35,14 @@ func TestRun(t *testing.T) {
 	require.NoError(t, run())
 }
 
-// Observes real PostgreSQL transaction state at the signer/verifier boundary.
-// Each test owns its database, so any other open transaction is a violation.
+// These fixtures use a dedicated runtime pool without concurrent callers.
+// Require every runtime connection to be released at the auth boundary: a
+// pgxpool transaction retains its connection until Commit/Rollback. pgx only
+// returns an idle (TxStatus 'I') connection to the pool. This is stricter than
+// checking for a transaction, and deliberately excludes other pools/background
+// PostgreSQL processes in the same database.
 type observedAuth struct {
-	admin    *pgxpool.Pool
+	pool     *pgxpool.Pool
 	attestor core.Attestor
 	verifier core.AuthVerifier
 	fail     bool
@@ -48,22 +52,16 @@ type observedAuth struct {
 	verifies int
 }
 
-func (a *observedAuth) outsideTransaction(ctx context.Context) error {
-	var active int
-	err := a.admin.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
-		WHERE datname=current_database() AND pid<>pg_backend_pid() AND xact_start IS NOT NULL`).Scan(&active)
-	if err != nil {
-		return err
-	}
-	if active != 0 {
-		return fmt.Errorf("signer/verifier called with %d open transactions", active)
+func (a *observedAuth) outsideTransaction() error {
+	if acquired := a.pool.Stat().AcquiredConns(); acquired != 0 {
+		return fmt.Errorf("signer/verifier called with %d acquired runtime connections", acquired)
 	}
 	return nil
 }
 
 func (a *observedAuth) Sign(ctx context.Context, digest []byte) ([]byte, string, error) {
 	a.signs++
-	if err := a.outsideTransaction(ctx); err != nil {
+	if err := a.outsideTransaction(); err != nil {
 		return nil, "", err
 	}
 	if a.fail {
@@ -81,7 +79,7 @@ func (a *observedAuth) Sign(ctx context.Context, digest []byte) ([]byte, string,
 
 func (a *observedAuth) Verify(ctx context.Context, digest, signature []byte, key string) error {
 	a.verifies++
-	if err := a.outsideTransaction(ctx); err != nil {
+	if err := a.outsideTransaction(); err != nil {
 		return err
 	}
 	return a.verifier.Verify(ctx, digest, signature, key)
@@ -98,6 +96,8 @@ func newFixture(t *testing.T) fixture {
 	t.Helper()
 	admin := postgrestest.SetupDB(t)
 	cfg := admin.Config().Copy()
+	// Keep connection release synchronous for the boundary observation.
+	require.Nil(t, cfg.AfterRelease)
 	cfg.ConnConfig.RuntimeParams["role"] = "ledger_app"
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func newFixture(t *testing.T) fixture {
 	require.NoError(t, err)
 	a, v, err := authdev.NewLocalAttestor(seed, "signed-capture-test")
 	require.NoError(t, err)
-	auth := &observedAuth{admin: admin, attestor: a, verifier: v}
+	auth := &observedAuth{pool: pool, attestor: a, verifier: v}
 	svc, err := ledger.New(pool, ledger.WithAttestor(auth, auth))
 	require.NoError(t, err)
 	require.NoError(t, svc.AssertRuntimeRole(t.Context()))
@@ -115,6 +115,58 @@ func newFixture(t *testing.T) fixture {
 	require.NoError(t, err)
 	require.NoError(t, fund(t.Context(), svc, currency))
 	return fixture{svc: svc, admin: admin, auth: auth, currency: currency, wallet: wallet}
+}
+
+func TestObservedAuthIgnoresOtherPools(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	// A transaction on a different pool in the same database is not a
+	// transaction held by the service while it calls the signer/verifier.
+	tx, err := f.admin.Begin(ctx)
+	require.NoError(t, err)
+	defer tx.Rollback(ctx)
+	require.Equal(t, byte('T'), tx.Conn().PgConn().TxStatus())
+	require.Zero(t, f.svc.Pool().Stat().AcquiredConns())
+	digest := make([]byte, 32)
+	sig, key, err := f.auth.Sign(ctx, digest)
+	require.NoError(t, err)
+	require.NoError(t, f.auth.Verify(ctx, digest, sig, key))
+	require.NoError(t, tx.Rollback(ctx))
+}
+
+func TestObservedAuthRejectsRuntimeTransactions(t *testing.T) {
+	f := newFixture(t)
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failed=%t", failed), func(t *testing.T) {
+			ctx := t.Context()
+			digest := make([]byte, 32)
+			sig, key, err := f.auth.Sign(ctx, digest)
+			require.NoError(t, err)
+			require.NoError(t, f.auth.Verify(ctx, digest, sig, key))
+
+			tx, err := f.svc.Pool().Begin(ctx)
+			require.NoError(t, err)
+			defer tx.Rollback(ctx)
+			require.Equal(t, byte('T'), tx.Conn().PgConn().TxStatus())
+			if failed {
+				_, err = tx.Exec(ctx, "SELECT 1/0")
+				require.Error(t, err)
+				require.Equal(t, byte('E'), tx.Conn().PgConn().TxStatus())
+			}
+			require.EqualValues(t, 1, f.svc.Pool().Stat().AcquiredConns())
+			blockedSig, blockedKey, err := f.auth.Sign(ctx, digest)
+			require.ErrorContains(t, err, "signer/verifier called")
+			require.Nil(t, blockedSig)
+			require.Empty(t, blockedKey)
+			require.ErrorContains(t, f.auth.Verify(ctx, digest, sig, key), "signer/verifier called")
+
+			require.NoError(t, tx.Rollback(ctx))
+			require.Zero(t, f.svc.Pool().Stat().AcquiredConns())
+			sig, key, err = f.auth.Sign(ctx, digest)
+			require.NoError(t, err)
+			require.NoError(t, f.auth.Verify(ctx, digest, sig, key))
+		})
+	}
 }
 
 func (f fixture) reserve(t *testing.T, amount int64, key string) (*core.Reservation, error) {
