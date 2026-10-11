@@ -1,9 +1,10 @@
 "use client";
 
+import { ExactAmount } from "../exact-amount";
+
 import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useState } from "react";
 import { toast } from "sonner";
-import { formatAmount } from "../../lib/utils";
 import { useSnapshots } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { errorText } from "../../lib/error-message";
@@ -123,7 +124,7 @@ export function SnapshotsPage() {
                 <TableCell>{s.account_holder}</TableCell>
                 <TableCell title={s.currency_uid}>{currencyCode(s.currency_uid)}</TableCell>
                 <TableCell title={s.classification_uid}>{classCode(s.classification_uid)}</TableCell>
-                <TableCell className="text-right tabular-nums">{formatAmount(s.balance)}</TableCell>
+                <TableCell className="text-right tabular-nums"><ExactAmount value={s.balance} currencyCode={currencyCode(s.currency_uid)} /></TableCell>
               </TableRow>
             ))}
           </TableBody>

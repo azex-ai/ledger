@@ -31,10 +31,40 @@ lines; breaks in those are recorded here too, prefixed with the module path.
 
 ## [Unreleased]
 
+### `getBalances` / `useBalances` / `prefetchBalances`: currency is required
+
+The existing Go endpoint requires `currency_uid`; the SDK previously omitted
+it and real requests failed with HTTP 400. Pass the currency UID as the second
+argument to `client.getBalances` and `useBalances`, or the fourth argument to
+`prefetchBalances(queryClient, client, holder, currencyUid)`. Pass it as the third
+argument to `ledgerKeys.balances(scope, holder, currencyUid)` as well. The list
+key ends in `[holder, currencyUid, "classifications"]`, so it cannot collide with
+the existing aggregate-by-currency object key.
+
+**What a consumer must do.** Supply one explicitly selected currency and update
+any direct cache seeding. These balances are booked quantities, not balances
+after reservation holds. No HTTP contract or core accounting behavior changed.
+`getJournal` keeps its public `{ journal, entries }` result and now adapts the
+actual flat wire response correctly.
+
+### Bundled dashboard mutations require an exact same-origin `Origin`
+
+The dashboard BFF and login/logout routes reject absent, opaque, malformed and
+cross-origin `Origin` headers on non-GET/HEAD requests, including a different
+port on the same host. The session cookie alone does not authorize that origin.
+
+**What a consumer must do.** Browser requests from the dashboard work unchanged.
+For scripted dashboard requests, send its exact origin. Behind a reverse proxy,
+set the server-only `DASHBOARD_PUBLIC_ORIGIN` to the canonical public HTTP(S)
+origin (scheme, hostname and optional port, no path/query/credentials). Otherwise
+the request URL supplies the origin. Client-supplied forwarding headers do not
+establish trust. This applies to the bundled host, not the standalone Go API or
+SDK host applications.
+
 ### `ledgerKeys` / `LedgerClientConfig.cacheScope`: scope-first cache keys
 
 All admin query keys and invalidation prefixes now require the resolved client
-scope, for example `ledgerKeys.balances(client.cacheScope, holder)` and
+scope, for example `ledgerKeys.balances(client.cacheScope, holder, currencyUid)` and
 `ledgerKeys.all(client.cacheScope)`. Old unscoped factory calls no longer compile.
 The optional public input is `cacheScope: { backend: string; identity: string }`;
 `client.cacheScope` is the resolved `LedgerQueryScope`, not that input object.

@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { toast } from "sonner";
 import { BalancesPage } from "../../src/components/pages/BalancesPage";
 import { BalancesPage as HerouiBalancesPage } from "../../src/heroui/pages/BalancesPage";
@@ -9,6 +9,11 @@ import { SnapshotsPage as HerouiSnapshotsPage } from "../../src/heroui/pages/Sna
 import { ReconciliationPage } from "../../src/components/pages/ReconciliationPage";
 import { DashboardPage } from "../../src/components/pages/DashboardPage";
 import { renderPage, server, getOk, BASE } from "./render-page";
+
+beforeEach(() => server.use(
+  getOk("/api/v1/currencies", [{ uid: "cur-1", code: "USD", exponent: 2, is_active: true }]),
+  getOk("/api/v1/classifications", []),
+));
 
 const REQUIRED_SNAPSHOT_QUERY = ["holder", "currency_uid", "start", "end"];
 
@@ -79,7 +84,7 @@ describe.each([
     });
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await waitFor(() =>
-      expect(screen.getByText("Balance Trend (30 days)")).toBeInTheDocument(),
+      expect(screen.getByText(/Booked balance trend \(30 days\)/)).toBeInTheDocument(),
     );
     await waitFor(() =>
       expect(screen.getByText("trend unavailable")).toBeInTheDocument(),

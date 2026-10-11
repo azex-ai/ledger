@@ -4,7 +4,7 @@ import { parseHolderInput } from "../../lib/parse-holder-input";
 import { errorText } from "../../lib/error-message";
 import { validateEntries } from "../../lib/validate-entries";
 import { useState } from "react";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { useJournals, usePostJournal, usePostTemplateJournal } from "../../hooks/use-journals";
 import { useCurrencies, useJournalTypes, useTemplates } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
@@ -317,8 +317,6 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
                 <TableHead>Idempotency Key</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Source</TableHead>
-                <TableHead className="text-right">Debit</TableHead>
-                <TableHead className="text-right">Credit</TableHead>
                 <TableHead>Reversal</TableHead>
                 <TableHead className="text-right">Created</TableHead>
               </TableRow>
@@ -334,8 +332,6 @@ export function JournalsPage({ linkComponent: Link = DefaultLink }: JournalsPage
                   <TableCell className="font-mono text-xs max-w-[180px] truncate" title={j.idempotency_key}>{j.idempotency_key}</TableCell>
                   <TableCell>{typeName(j.journal_type_uid)}</TableCell>
                   <TableCell>{j.source}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_debit)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(j.total_credit)}</TableCell>
                   <TableCell>
                     {j.reversal_of_uid ? (
                       <StatusBadge status="reversed" />

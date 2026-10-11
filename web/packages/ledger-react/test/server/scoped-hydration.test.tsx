@@ -23,7 +23,7 @@ function freshClient() {
 
 function useAllPrefetched() {
   return [
-    useJournals(20), useEntries(entries, 50), useBalances(42), useHealth(),
+    useJournals(20), useEntries(entries, 50), useBalances(42, "cur-1"), useHealth(),
     useSystemBalances(), useReservations(reservations), useClassifications(true),
     useCurrencies(true), useJournalTypes(true), useTemplates(true), useSnapshots(snapshots),
   ];
@@ -45,7 +45,7 @@ describe("scoped server hydration", () => {
     await Promise.all([
       prefetch.prefetchJournals(serverQC, serverClient, 20),
       prefetch.prefetchEntries(serverQC, serverClient, entries, 50),
-      prefetch.prefetchBalances(serverQC, serverClient, 42),
+      prefetch.prefetchBalances(serverQC, serverClient, 42, "cur-1"),
       prefetch.prefetchSystemHealth(serverQC, serverClient),
       prefetch.prefetchSystemBalances(serverQC, serverClient),
       prefetch.prefetchReservations(serverQC, serverClient, reservations),

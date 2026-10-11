@@ -38,7 +38,7 @@ function clientFor(identity: string, fetcher: typeof fetch) {
 
 async function prefetchAffected(qc: QueryClient, client: LedgerClient) {
   await Promise.all([
-    prefetchBalances(qc, client, 42), prefetchSystemBalances(qc, client),
+    prefetchBalances(qc, client, 42, "cur-1"), prefetchSystemBalances(qc, client),
     prefetchJournals(qc, client), prefetchCurrencies(qc, client),
   ]);
 }

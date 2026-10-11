@@ -2,14 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useLedgerClient } from "../provider/context";
 import { ledgerKeys } from "./keys";
 
-export function useBalances(holder: number) {
+export function useBalances(holder: number, currency: string) {
   const client = useLedgerClient();
   return useQuery({
-    queryKey: ledgerKeys.balances(client.cacheScope, holder),
-    queryFn: () => client.getBalances(holder),
+    queryKey: ledgerKeys.balances(client.cacheScope, holder, currency),
+    queryFn: () => client.getBalances(holder, currency),
     // Holder 0 means "no account"; any non-zero holder is valid — system
     // counterparts are NEGATIVE holders, so don't gate on holder > 0.
-    enabled: holder !== 0,
+    enabled: holder !== 0 && currency !== "",
     refetchInterval: 15_000,
   });
 }

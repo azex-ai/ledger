@@ -1,5 +1,7 @@
 "use client";
 
+import { useUidCodeLookups } from "../../hooks/use-metadata";
+
 import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import { Button, Card, Chip, Input, Label, Modal, Skeleton, Table, TextField, toast } from "@heroui/react";
@@ -136,6 +138,7 @@ function ReverseDialog({ journalId }: { journalId: string }) {
 }
 
 export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: JournalDetailPageProps) {
+  const { currencyCode, classCode } = useUidCodeLookups();
   const { data, isLoading, isError, refetch } = useJournal(id);
   // query-consumption-allow: uid→name resolver, falls back to the raw uid via `??` below (incl. on fetch failure) — the fallback IS the degraded state, not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes();
@@ -258,8 +261,8 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
                     return (
                       <Table.Row key={rowId} id={rowId}>
                         <Table.Cell>{e.account_holder}</Table.Cell>
-                        <Table.Cell>{e.currency_uid}</Table.Cell>
-                        <Table.Cell>{e.classification_uid}</Table.Cell>
+                        <Table.Cell><span title={e.currency_uid}>{currencyCode(e.currency_uid)}</span></Table.Cell>
+                        <Table.Cell><span title={e.classification_uid}>{classCode(e.classification_uid)}</span></Table.Cell>
                         <Table.Cell>
                           <EntryTypeChip entryType={e.entry_type} />
                         </Table.Cell>

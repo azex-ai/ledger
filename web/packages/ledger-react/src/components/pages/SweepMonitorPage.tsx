@@ -1,7 +1,9 @@
 "use client";
 
+import { ExactAmount } from "../exact-amount";
+
 import { useMemo, useState } from "react";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { useSweeps } from "../../hooks/use-sweeps";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
@@ -96,7 +98,7 @@ export function SweepMonitorPage() {
                   <TableCell>{metaString(s.metadata, "chain_id")}</TableCell>
                   <TableCell>{metaString(s.metadata, "token")}</TableCell>
                   <TableCell className="text-right tabular-nums">{addressCount(s.metadata)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(s.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={s.amount} currencyCode={s.currency_uid} /></TableCell>
                   <TableCell><StatusBadge status={s.status} /></TableCell>
                   <TableCell className="font-mono text-xs max-w-[160px] truncate" title={s.channel_ref}>
                     {s.channel_ref || "—"}

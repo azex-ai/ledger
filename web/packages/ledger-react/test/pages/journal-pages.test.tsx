@@ -38,7 +38,7 @@ describe("JournalDetailPage", () => {
   test("takes id via props and renders the journal heading + entries", async () => {
     server.use(
       getOk("/api/v1/journals/jr-42", {
-        journal: journal({ uid: "jr-42" }),
+        ...journal({ uid: "jr-42" }),
         entries: [
           { journal_uid: "jr-42", account_holder: 1001, currency_uid: "cur-1", classification_uid: "cls-1", entry_type: "debit", amount: "100.00", created_at: "2026-01-01T00:00:00Z" },
           { journal_uid: "jr-42", account_holder: -1001, currency_uid: "cur-1", classification_uid: "cls-2", entry_type: "credit", amount: "100.00", created_at: "2026-01-01T00:00:00Z" },
@@ -49,6 +49,6 @@ describe("JournalDetailPage", () => {
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: "Journal #jr-42" })).toBeInTheDocument(),
     );
-    expect(screen.getByText("Fund Flow")).toBeInTheDocument();
+    expect(screen.getByText("Totals by currency")).toBeInTheDocument();
   });
 });

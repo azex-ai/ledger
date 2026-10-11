@@ -5,8 +5,12 @@ import { ledgerKeys } from "../../src/hooks/keys";
 
 const scope: LedgerCacheScope = { backend: "tenant-east", identity: "admin-session" };
 const client = createLedgerClient({ baseUrl: "", cacheScope: scope });
-ledgerKeys.balances(client.cacheScope, 42);
+ledgerKeys.balances(client.cacheScope, 42, "cur-1");
 ledgerKeys.all(client.cacheScope);
+// @ts-expect-error Currency is required by the real balance-list endpoint.
+client.getBalances(42);
+// @ts-expect-error Currency is part of the balance-list cache identity.
+ledgerKeys.balances(client.cacheScope, 42);
 // @ts-expect-error Unscoped manual cache keys must be migrated.
 ledgerKeys.balances(42);
 // @ts-expect-error Both backend and identity are required for explicit sharing.

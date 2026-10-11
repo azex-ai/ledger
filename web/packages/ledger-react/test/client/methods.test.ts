@@ -26,6 +26,9 @@ function intercept(
   let captured: Captured | undefined;
   server.use(
     http[method](`${BASE}${path}`, async ({ request }) => {
+      if (method === "get" && /^\/api\/v1\/balances\/[^/]+$/.test(path) && !new URL(request.url).searchParams.get("currency_uid")) {
+        return HttpResponse.json({ code: 12003, message: { text: "currency_uid is required" }, data: null }, { status: 400 });
+      }
       let body: unknown = undefined;
       const text = await request.text();
       if (text) body = JSON.parse(text);
@@ -64,8 +67,15 @@ describe("journals + entries", () => {
   });
 
   test("getJournal", async () => {
-    const i = intercept("get", "/api/v1/journals/uid-7", {});
-    await client.getJournal("uid-7");
+    const wire = {
+      uid: "uid-7", journal_type_uid: "jt", idempotency_key: "event", total_debit: "1.23", total_credit: "1.23",
+      actor_id: 0, source: "host", metadata: { reference: "invoice" }, effective_at: "2026-10-10T00:00:00Z", created_at: "2026-10-10T00:00:00Z",
+      entries: [{ journal_uid: "uid-7", account_holder: 9, currency_uid: "usd", classification_uid: "wallet", entry_type: "debit", amount: "1.23", effective_at: "2026-10-10T00:00:00Z", created_at: "2026-10-10T00:00:00Z" }],
+    } satisfies NonNullable<components["schemas"]["JournalWithEntriesEnvelope"]["data"]>;
+    const i = intercept("get", "/api/v1/journals/uid-7", wire);
+    const result = await client.getJournal("uid-7");
+    const { entries, ...journal } = wire;
+    expect(result).toEqual({ journal, entries });
     expect(i.captured()?.url).toBe(`${BASE}/api/v1/journals/uid-7`);
   });
 
@@ -132,8 +142,8 @@ describe("journals + entries", () => {
 describe("balances", () => {
   test("getBalances + getBalancesByCurrency", async () => {
     const a = intercept("get", "/api/v1/balances/9", []);
-    await client.getBalances(9);
-    expect(a.captured()?.url).toBe(`${BASE}/api/v1/balances/9`);
+    await client.getBalances(9, "cur-1");
+    expect(a.captured()?.url).toBe(`${BASE}/api/v1/balances/9?currency_uid=cur-1`);
 
     const b = intercept("get", "/api/v1/balances/9/cur-2", []);
     await client.getBalancesByCurrency(9, "cur-2");

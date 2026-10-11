@@ -53,6 +53,7 @@ describe.each([
   }
 
   test("balances reject bad text, preserve blank/zero sentinel and query exact signed safe boundaries", async () => {
+    metadata();
     const errors = errorSpy();
     const holders: string[] = [];
     const fetchSpy = vi.spyOn(globalThis, "fetch");
@@ -76,7 +77,7 @@ describe.each([
       change("Account Holder ID", input);
       fireEvent.click(screen.getByRole("button", { name: "Search" }));
     }
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/balances/"))).toBe(false);
     for (const input of [min, max, " -0012 "]) {
       change("Account Holder ID", input);
       fireEvent.click(screen.getByRole("button", { name: "Search" }));
@@ -122,7 +123,8 @@ describe.each([
       return ok({ balanced: true, gap: "0", checked_at: "2026-10-10T00:00:00Z", details: [] });
     }));
     renderPage(<Reconciliation />);
-    change("Currency", "cur-1");
+    await waitFor(() => expect(screen.getByLabelText("Currency")).not.toBeDisabled());
+    await select("Currency", "USD");
     for (const input of [...invalid, "0", " "]) {
       errors.mockClear();
       change("Holder", input);
