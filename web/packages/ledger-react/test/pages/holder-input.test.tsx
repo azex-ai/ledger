@@ -96,7 +96,7 @@ describe.each([
       return ok({ list: [] });
     }));
     renderPage(<Snapshots />);
-    change("Currency", "cur-1");
+    change(skin === "shadcn" ? "Currency UID" : "Currency", "cur-1");
     change("Start Date", "2026-10-01");
     change("End Date", "2026-10-10");
     for (const input of [...invalid, "0", " "]) {

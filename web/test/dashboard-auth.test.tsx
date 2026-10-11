@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { POST as login, DELETE as logout } from "../src/app/api/session/route";
 import { GET, POST, PUT, PATCH, DELETE } from "../src/app/api/v1/[...path]/route";
-import { dashboardRequestOriginAllowed, mintSession, SESSION_COOKIE, verifyPassword } from "../src/lib/dashboard-auth";
+import { dashboardRequestOriginAllowed, mintSession, SESSION_COOKIE, verifyPassword, verifySession } from "../src/lib/dashboard-auth";
 
 const origin = "http://localhost:3100";
 const upstreamFetch = vi.fn();
@@ -65,6 +65,16 @@ describe("dashboard browser mutation boundary", () => {
   test.each(["garbage", "null", "https://dashboard.example/path", "https://user:pass@dashboard.example", "https://dashboard.example?x=1"])("invalid public origin %s fails closed", async (configured) => {
     vi.stubEnv("DASHBOARD_PUBLIC_ORIGIN", configured);
     expect((await POST(request("POST", origin, {}))).status).toBe(403);
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+  test("a 64-character non-ASCII signature rejects without throwing or forwarding", async () => {
+    const expiresAt = mintSession().token.split(".")[0];
+    const token = `${expiresAt}.${"é".repeat(64)}`;
+    expect(() => verifySession(token)).not.toThrow();
+    expect(verifySession(token)).toBe(false);
+    const req = request("GET", null);
+    req.cookies.set(SESSION_COOKIE, token);
+    expect((await GET(req)).status).toBe(401);
     expect(upstreamFetch).not.toHaveBeenCalled();
   });
   test("GET needs no Origin but still requires a valid session; HEAD is origin-safe", async () => {

@@ -118,7 +118,7 @@ describe.each([
       }),
     );
     renderPage(<Page />);
-    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText(_skin === "shadcn" ? "Currency UID" : "Currency"), { target: { value: "1" } });
     fireEvent.change(screen.getByLabelText("Start Date"), {
       target: { value: "2026-01-01" },
     });
@@ -142,7 +142,7 @@ describe.each([
     );
     renderPage(<Page />);
     fireEvent.change(screen.getByLabelText("Holder"), { target: { value: "1001" } });
-    fireEvent.change(screen.getByLabelText("Currency"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText(_skin === "shadcn" ? "Currency UID" : "Currency"), { target: { value: "1" } });
     fireEvent.change(screen.getByLabelText("Start Date"), {
       target: { value: "2026-01-01" },
     });

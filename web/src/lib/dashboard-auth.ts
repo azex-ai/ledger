@@ -72,7 +72,9 @@ export function verifySession(
   const exp = Number(payload);
   if (!Number.isFinite(exp) || exp <= now) return false;
   const expected = hmac(payload);
-  if (sig.length !== expected.length) return false;
+  // Restrict to the ASCII hex encoding we mint before comparing UTF-8 bytes.
+  // Equal JS string lengths alone do not guarantee equal Buffer lengths.
+  if (sig.length !== expected.length || !/^[0-9a-f]{64}$/.test(sig)) return false;
   return timingSafeEqual(Buffer.from(sig, "utf8"), Buffer.from(expected, "utf8"));
 }
 

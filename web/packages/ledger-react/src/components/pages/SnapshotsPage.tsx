@@ -83,8 +83,8 @@ export function SnapshotsPage() {
           <Input id="snap-holder" value={form.holder} onChange={(e) => setForm({ ...form, holder: e.target.value })} placeholder="1001" className="w-28" />
         </div>
         <div className="grid gap-1">
-          <Label htmlFor="snap-currency" className="text-xs">Currency</Label>
-          <Input id="snap-currency" value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} placeholder="1" className="w-28" />
+          <Label htmlFor="snap-currency" className="text-xs">Currency UID</Label>
+          <Input id="snap-currency" value={form.currency_uid} onChange={(e) => setForm({ ...form, currency_uid: e.target.value })} className="w-28" />
         </div>
         <div className="grid gap-1">
           <Label htmlFor="snap-start" className="text-xs">Start Date</Label>
