@@ -4,6 +4,10 @@ import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { formatAmount } from "../../lib/utils";
+import { ExactAmount } from "../exact-amount";
+import { useUidCodeLookups, useCurrencies } from "../../hooks/use-metadata";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { Label } from "../ui/label";
 import { useBalances } from "../../hooks/use-balances";
 import { useSnapshots } from "../../hooks/use-system";
 import { errorText } from "../../lib/error-message";
@@ -22,8 +26,12 @@ import { ErrorState } from "../error-state";
 export function BalancesPage() {
   const [holderInput, setHolderInput] = useState("");
   const [holder, setHolder] = useState(0);
-  const { data, isLoading, isError, refetch } = useBalances(holder);
+  const { data: currencies, isLoading: currenciesLoading, isError: currenciesError, refetch: refetchCurrencies } = useCurrencies();
+  const [selectedCurrency, setSelectedCurrency] = useState("");
+  const trendCurrency = currencies?.some((currency) => currency.uid === selectedCurrency) ? selectedCurrency : currencies?.[0]?.uid ?? "";
+  const { data, isLoading, isError, refetch } = useBalances(holder, trendCurrency);
   const balances = data ?? [];
+  const { currencyCode, classCode } = useUidCodeLookups();
 
   function submitHolder() {
     const parsed = parseHolderInput(holderInput);
@@ -45,23 +53,17 @@ export function BalancesPage() {
         .slice(0, 10),
     };
   }, []);
-  // Snapshots require a single currency_uid (J-1, 2026-09-02 web audit): the
-  // server hard-requires it and there's no per-currency aggregate endpoint,
-  // so the trend charts the first currency the balance table returned. Until
-  // balances load there is no currency to chart, so the query stays disabled
-  // (useSnapshots' own isDisabled) rather than firing a guaranteed-400
-  // request with currency_uid missing.
-  const primaryCurrencyUid = balances[0]?.currency_uid;
+  // Only the selected currency is charted; quantities in different units are never combined.
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
   const snapParams = useMemo(
     () => ({
       holder: holder || undefined,
-      currency_uid: primaryCurrencyUid,
+      currency_uid: trendCurrency,
       start: thirtyDaysAgo,
       end: today,
     }),
-    [holder, primaryCurrencyUid, thirtyDaysAgo, today],
+    [holder, trendCurrency, thirtyDaysAgo, today],
   );
   const {
     data: snapData,
@@ -94,9 +96,9 @@ export function BalancesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Balances" description="Search balances by account holder" />
+      <PageHeader title="Balances" description="Booked balances by account holder; reservation holds are not deducted" />
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap items-end gap-2">
         {/* J-12 (2026-09-02 web audit): placeholder text is not a substitute
             for an accessible name (it disappears once a value is entered and
             isn't reliably announced by every screen reader) — mirrors the
@@ -109,11 +111,20 @@ export function BalancesPage() {
           onKeyDown={(e) => e.key === "Enter" && submitHolder()}
           className="max-w-xs"
         />
+        <div className="grid gap-2">
+          <Label htmlFor="balance-currency">Currency</Label>
+          <Select value={trendCurrency} onValueChange={(value) => { if (value) setSelectedCurrency(value); }} disabled={currenciesLoading || currenciesError || !currencies?.length}>
+            <SelectTrigger id="balance-currency"><SelectValue placeholder={currenciesLoading ? "Loading currencies..." : "Select currency"}>{trendCurrency ? currencyCode(trendCurrency) : undefined}</SelectValue></SelectTrigger>
+            <SelectContent>{currencies?.map((currency) => <SelectItem key={currency.uid} value={currency.uid}>{currency.code}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
         <Button onClick={submitHolder}>Search</Button>
       </div>
 
+      {currenciesError && <ErrorState message="Failed to load currencies" onRetry={refetchCurrencies} />}
+      {!currenciesLoading && !currenciesError && !currencies?.length && <p className="text-sm text-muted-foreground">No currencies configured</p>}
       {/* Negative holders are the system-side counterpart accounts — equally queryable. */}
-      {holder !== 0 && (
+      {holder !== 0 && trendCurrency !== "" && (
         <>
           {isLoading ? (
             <div className="h-40 animate-shimmer rounded" />
@@ -125,28 +136,28 @@ export function BalancesPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-sm font-medium">
-                  Balance Breakdown — Holder {holder}
+                  Booked balances — Holder {holder}
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <Table aria-label={`Balance breakdown for holder ${holder}`}>
+                <Table aria-label={`Booked balances for holder ${holder}`}>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Currency</TableHead>
                       <TableHead>Classification</TableHead>
-                      <TableHead className="text-right">Balance</TableHead>
+                      <TableHead className="text-right">Booked balance</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {balances.map((b) => (
                       <TableRow key={`${b.currency_uid}-${b.classification_uid}`}>
                         <TableCell className="max-w-40">
-                          <span className="block truncate font-mono text-xs" title={b.currency_uid}>{b.currency_uid}</span>
+                          <span className="block truncate font-mono text-xs" title={b.currency_uid}>{currencyCode(b.currency_uid)}</span>
                         </TableCell>
                         <TableCell className="max-w-40">
-                          <span className="block truncate font-mono text-xs" title={b.classification_uid}>{b.classification_uid}</span>
+                          <span className="block truncate font-mono text-xs" title={b.classification_uid}>{classCode(b.classification_uid)}</span>
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{formatAmount(b.balance)}</TableCell>
+                        <TableCell className="text-right tabular-nums"><ExactAmount value={b.balance} currencyCode={currencyCode(b.currency_uid)} /></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -158,7 +169,7 @@ export function BalancesPage() {
           {balances.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-sm font-medium">Balance Trend (30 days)</CardTitle>
+                <CardTitle className="text-sm font-medium">Booked balance trend (30 days) · {trendCurrency ? currencyCode(trendCurrency) : ""}</CardTitle>
               </CardHeader>
               <CardContent>
                 {snapLoading ? (
@@ -186,7 +197,7 @@ export function BalancesPage() {
                         formatter={(value, name, entry) => {
                           const payload = entry?.payload as Record<string, string | number> | undefined;
                           const raw = payload?.[`${entry?.dataKey}Raw`];
-                          return [formatAmount(typeof raw === "string" ? raw : String(value)), name];
+                          return [`${typeof raw === "string" ? raw : String(value)} ${trendCurrency ? currencyCode(trendCurrency) : ""}`, name];
                         }}
                       />
                       {classIds.map((cid, i) => (

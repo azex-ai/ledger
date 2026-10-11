@@ -5,7 +5,7 @@ const BASE = "http://ledger.test";
 const required = { currency_uid: "currency", amount: "1", idempotency_key: "key" };
 type HolderCall = (client: LedgerClient, holder: number) => Promise<unknown>;
 const requests: Array<[string, HolderCall]> = [
-  ["balance path", (c, h) => c.getBalances(h)],
+  ["balance path", (c, h) => c.getBalances(h, "cur-1")],
   ["currency balance path", (c, h) => c.getBalancesByCurrency(h, "currency")],
   ["breakdown path", (c, h) => c.getBalanceBreakdown(h, "currency")],
   ["deposit address path", (c, h) => c.getDepositAddress(h)],
@@ -77,11 +77,11 @@ describe("holder request boundary", () => {
       captured.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
       return Response.json({ code: 200, message: null, data: { list: [] } });
     } });
-    await client.getBalances(Number.MIN_SAFE_INTEGER);
+    await client.getBalances(Number.MIN_SAFE_INTEGER, "cur-1");
     await client.listEntries({ holder: 0 });
     await client.batchBalances([-1, Number.MAX_SAFE_INTEGER], "currency");
     expect(captured).toEqual([
-      { url: `${BASE}/api/v1/balances/-9007199254740991`, body: undefined },
+      { url: `${BASE}/api/v1/balances/-9007199254740991?currency_uid=cur-1`, body: undefined },
       { url: `${BASE}/api/v1/entries?holder=0`, body: undefined },
       { url: `${BASE}/api/v1/balances/batch`, body: {
         holder_ids: [-1, 9007199254740991], currency_uid: "currency",
@@ -95,9 +95,9 @@ const HOLDER = "__raw_holder__";
 const row = { account_holder: HOLDER };
 const rows = { list: [{ account_holder: 1 }, row] };
 const responses: Array<[string, ResponseCall, unknown]> = [
-  ["journal entries", (c) => c.getJournal("journal"), { journal: {}, entries: [row] }],
+  ["journal entries", (c) => c.getJournal("journal"), { uid: "journal", entries: [row] }],
   ["entries list", (c) => c.listEntries({}), rows],
-  ["balance list", (c) => c.getBalances(1), rows],
+  ["balance list", (c) => c.getBalances(1, "cur-1"), rows],
   ["currency classifications", (c) => c.getBalancesByCurrency(1, "currency"), { classifications: [row] }],
   ["balance breakdown", (c) => c.getBalanceBreakdown(1, "currency"), row],
   ["batch holder", (c) => c.batchBalances([1], "currency"), { list: [{ holder_id: HOLDER, balances: [] }] }],
@@ -147,8 +147,13 @@ describe("holder response boundary", () => {
         .replaceAll(JSON.stringify(HOLDER), literal));
       const returnsList = ["balance list", "batch holder", "batch nested balance", "snapshots list"].includes(name);
       const result = await call(rawResponseClient(data, literal));
-      expect(result).toEqual(returnsList && expected !== null &&
-        typeof expected === "object" && "list" in expected ? expected.list : expected);
+      if (name === "journal entries" && expected !== null && typeof expected === "object" && "entries" in expected) {
+        const { entries, ...journal } = expected;
+        expect(result).toEqual({ journal, entries });
+      } else {
+        expect(result).toEqual(returnsList && expected !== null &&
+          typeof expected === "object" && "list" in expected ? expected.list : expected);
+      }
     }
   });
 

@@ -57,15 +57,16 @@ export function prefetchEntries(
   });
 }
 
-/** Mirrors `useBalances(holder)`. */
+/** Mirrors `useBalances(holder, currency)`. */
 export function prefetchBalances(
   queryClient: QueryClient,
   client: LedgerClient,
   holder: number,
+  currency: string,
 ): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: ledgerKeys.balances(client.cacheScope, holder),
-    queryFn: () => client.getBalances(holder),
+    queryKey: ledgerKeys.balances(client.cacheScope, holder, currency),
+    queryFn: () => client.getBalances(holder, currency),
   });
 }
 

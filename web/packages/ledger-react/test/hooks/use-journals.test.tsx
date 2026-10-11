@@ -50,7 +50,7 @@ describe("use-journals", () => {
         HttpResponse.json({
           code: 200,
           message: null,
-          data: { journal: { uid: "uid-7" }, entries: [] },
+          data: { uid: "uid-7", entries: [] },
         }),
       ),
     );

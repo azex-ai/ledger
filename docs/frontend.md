@@ -156,6 +156,14 @@ file per page (see [`web/src/app/`](../web/src/app/)). `DepositReviewsPage`
 and `SweepMonitorPage` (added after the app was last wired) are not yet
 mounted there; wire them the same way if you need a reference route.
 
+`getBalances(holder, currencyUid)`, `useBalances(holder, currencyUid)` and
+`prefetchBalances(queryClient, client, holder, currencyUid)` require a currency.
+They return booked balances by classification in that currency; reservation holds
+are not deducted. The list cache key includes both currency and a `classifications`
+suffix so it cannot collide with `getBalancesByCurrency`'s object response.
+`getJournal(uid)` adapts the API's flat journal-with-entries response into the
+existing SDK shape `{ journal, entries }`.
+
 ### Mode 3 — headless (hooks only)
 
 Skip the shipped UI entirely and build your own on the hooks + client:
@@ -163,8 +171,8 @@ Skip the shipped UI entirely and build your own on the hooks + client:
 ```tsx
 import { useBalances, useJournals, useLedgerClient } from "@azex/ledger-react";
 
-function MyBalances({ holder }: { holder: number }) {
-  const { data, isLoading } = useBalances(holder); // polls every 15 s
+function MyBalances({ holder, currencyUid }: { holder: number; currencyUid: string }) {
+  const { data, isLoading } = useBalances(holder, currencyUid); // polls every 15 s
   // ...render your own UI
 }
 
@@ -255,7 +263,7 @@ Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
 `prefetchJournalTypes`, `prefetchTemplates`, `prefetchSnapshots`. The shared
 `ledgerKeys` query-key factory is also exported for advanced cache seeding.
 It now requires the resolved scope as its first argument, for example
-`ledgerKeys.balances(client.cacheScope, 42)` or `ledgerKeys.all(client.cacheScope)`.
+`ledgerKeys.balances(client.cacheScope, 42, currencyUid)` or `ledgerKeys.all(client.cacheScope)`.
 Unscoped keys from earlier versions no longer match hooks or prefetch helpers.
 
 ### Admin cache ownership and identity changes
@@ -301,6 +309,17 @@ stable, public logical ID such as `production-ledger-east`; change it when
 switching the actual backend. Never put an internal URL or credential in this
 value. Development falls back to `local-ledger`. This setting is resolved at
 request time, so `next build` does not require deployment secrets or this ID.
+
+The BFF and `/api/session` login/logout routes also require an exact same-origin
+`Origin` header for non-GET/HEAD requests. Missing/opaque origins and different
+ports fail with HTTP 403, even with a valid session cookie. For a reverse proxy,
+set server-only `DASHBOARD_PUBLIC_ORIGIN` to the canonical public HTTP(S) origin
+with no path/query/credentials. Otherwise the request Host authority and
+framework URL scheme define the origin; missing/malformed Host is rejected. Next.js may normalize loopback URL hostnames
+to localhost, so the Host is preserved for comparison. Forwarding headers are
+not read by this check; proxies that rewrite Host or terminate TLS should set
+the explicit public origin. Scripted requests to this bundled host must send
+its origin explicitly.
 
 The host's server-only `getDashboardCacheScope()` verifies the session cookie
 before deriving `operator-session:<expiresAtMs>` from its public expiry.
@@ -448,7 +467,7 @@ dedicated hook (call these via `useLedgerClient()`):
 | System | `getHealth()`, `getSystemBalances()` |
 | Journals | `listJournals({cursor?, limit?})`, `getJournal(id)`, `postJournal(body)`, `postTemplateJournal(body)`, `reverseJournal(id, reason)` |
 | Entries | `listEntries({holder?, currency_uid?, cursor?, limit?})` |
-| Balances | `getBalances(holder)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyUid)` |
+| Balances | `getBalances(holder, currencyUid)`, `getBalanceBreakdown(holder, currency)`, `getBalancesByCurrency(holder, currency)`, `batchBalances(holderIds, currencyUid)` |
 | Reservations | `listReservations({holder?, status?, limit?})`, `createReservation(body)`, `settleReservation(id, actualAmount, idempotencyKey)`, `settlePartialReservation(id, amount, idempotencyKey)`, `finalizeReservationSettlement(id, idempotencyKey)`, `releaseReservation(id, idempotencyKey)` |
 | Bookings | `createBooking(body)`, `transitionBooking(id, body, idempotencyKey)`, `getBooking(id)`, `listBookings(ListBookingsParams)` |
 | Deposit address (admin) | `getDepositAddress(holder)`, `ensureDepositAddress(holder)` |
@@ -880,7 +899,7 @@ method):
 |--------|-------------------------------|---------|
 | `prefetchJournals` | `limit = 20` | `useJournals(limit)` (infinite shape) |
 | `prefetchEntries` | `params: {holder?, currency_uid?}, limit = 50` | `useEntries(params, limit)` (infinite shape) |
-| `prefetchBalances` | `holder: number` | `useBalances(holder)` |
+| `prefetchBalances` | `holder: number, currencyUid: string` | `useBalances(holder, currencyUid)` |
 | `prefetchSystemHealth` | — | `useHealth()` |
 | `prefetchSystemBalances` | — | `useSystemBalances()` |
 | `prefetchReservations` | `params: {holder?, status?, limit?}` | `useReservations(params)` (infinite shape) |
@@ -906,7 +925,7 @@ ledgerKeys.systemBalances(scope)                            // ["ledger",scope,"
 ledgerKeys.journals(scope, limit)                           // ["ledger",scope,"journals",limit]
 ledgerKeys.journal(scope, id)                               // ["ledger",scope,"journal",id]
 ledgerKeys.entries(scope, params)                           // ["ledger",scope,"entries",params]
-ledgerKeys.balances(scope, holder)                          // ["ledger",scope,"balances",holder]
+ledgerKeys.balances(scope, holder, currencyUid)             // ["ledger",scope,"balances",holder,currencyUid,"classifications"]
 ledgerKeys.balanceBreakdown(scope, holder, currency)        // ["ledger",scope,"balances",holder,currency,"breakdown"]
 ledgerKeys.balancesByCurrency(scope, holder, currency)      // ["ledger",scope,"balances",holder,currency]
 ledgerKeys.reservations(scope, params)                      // ["ledger",scope,"reservations",params]

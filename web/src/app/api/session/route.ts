@@ -4,6 +4,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import {
   SESSION_COOKIE,
+  dashboardRequestOriginAllowed,
   dashboardAuthEnabled,
   dashboardAuthMisconfigured,
   mintSession,
@@ -11,6 +12,13 @@ import {
 } from "@/lib/dashboard-auth";
 
 export async function POST(req: NextRequest) {
+  if (!dashboardRequestOriginAllowed(req)) {
+    return NextResponse.json(
+      { code: 10103, message: "same-origin request required", data: null },
+      { status: 403 },
+    );
+  }
+
   if (dashboardAuthMisconfigured()) {
     return NextResponse.json(
       { code: 10500, message: "dashboard auth is not configured", data: null },
@@ -24,8 +32,10 @@ export async function POST(req: NextRequest) {
 
   let password = "";
   try {
-    const body = (await req.json()) as { password?: string };
-    password = body.password ?? "";
+    const body: unknown = await req.json();
+    if (body && typeof body === "object" && "password" in body && typeof body.password === "string") {
+      password = body.password;
+    }
   } catch {
     // fall through with empty password → rejected below
   }
@@ -49,7 +59,14 @@ export async function POST(req: NextRequest) {
   return res;
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  if (!dashboardRequestOriginAllowed(req)) {
+    return NextResponse.json(
+      { code: 10103, message: "same-origin request required", data: null },
+      { status: 403 },
+    );
+  }
+
   const res = NextResponse.json({ code: 200, message: "ok", data: null });
   res.cookies.set(SESSION_COOKIE, "", {
     httpOnly: true,

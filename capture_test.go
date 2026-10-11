@@ -208,9 +208,10 @@ func TestCapture_JoinsCallerTransactionAndUsesItsReservationReader(t *testing.T)
 }
 
 func TestCapture_ConcurrentSameKeyAndDeposit(t *testing.T) {
+	// Fixture provisioning must not consume the concurrent operation budget.
+	f := seedExchangeFixture(t, t.Context())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	f := seedExchangeFixture(t, ctx)
 	r := reserveForCapture(t, ctx, f)
 	in := captureInput(r, "concurrent", "0.5", false)
 	start := make(chan struct{})
@@ -329,9 +330,10 @@ func TestCapture_ReleasedAndExpiredReservationsCannotCharge(t *testing.T) {
 }
 
 func TestCapture_ConcurrentPartialCallsCannotExceedReservation(t *testing.T) {
+	// Fixture provisioning must not consume the concurrent operation budget.
+	f := seedExchangeFixture(t, t.Context())
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	f := seedExchangeFixture(t, ctx)
 	r := reserveForCapture(t, ctx, f)
 	start := make(chan struct{})
 	errs := make(chan error, 6)

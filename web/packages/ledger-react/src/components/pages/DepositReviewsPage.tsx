@@ -1,5 +1,7 @@
 "use client";
 
+import { ExactAmount } from "../exact-amount";
+
 import { errorText } from "../../lib/error-message";
 import { useState } from "react";
 import {
@@ -7,7 +9,7 @@ import {
   useApproveDepositReview,
   useRejectDepositReview,
 } from "../../hooks/use-deposit-reviews";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { shortenHash } from "../../lib/utils/address";
 import type { Booking } from "../../client/types";
 import { PageHeader } from "../page-header";
@@ -74,7 +76,7 @@ function ApproveConfirm({ booking }: { booking: Booking }) {
           <AlertDialogTitle>Approve deposit #{booking.uid}?</AlertDialogTitle>
           <AlertDialogDescription>
             This will approve holder {booking.account_holder}&apos;s deposit of{" "}
-            {formatAmount(booking.amount)} and post it to the ledger — the holder&apos;s
+            <ExactAmount value={booking.amount} currencyCode={booking.currency_uid} /> and post it to the ledger — the holder&apos;s
             balance increases immediately. This action cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -113,7 +115,7 @@ function RejectDialog({ booking }: { booking: Booking }) {
         <div className="grid gap-4 py-4">
           <p className="text-sm text-muted-foreground">
             This will reject holder {booking.account_holder}&apos;s deposit of{" "}
-            {formatAmount(booking.amount)}. No funds will be credited. This action cannot be
+            <ExactAmount value={booking.amount} currencyCode={booking.currency_uid} />. No funds will be credited. This action cannot be
             undone.
           </p>
           <div className="grid gap-2">
@@ -201,7 +203,7 @@ export function DepositReviewsPage() {
                   </TableCell>
                   <TableCell>{b.account_holder}</TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {formatAmount(b.amount)}
+                    <ExactAmount value={b.amount} currencyCode={b.currency_uid} />
                   </TableCell>
                   <TableCell className="text-xs">{reviewReasonLabel(b.metadata)}</TableCell>
                   <TableCell><OnchainCell metadata={b.metadata} /></TableCell>

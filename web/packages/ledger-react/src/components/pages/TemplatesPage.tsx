@@ -3,12 +3,13 @@
 import { keyedPreviewEntries } from "../../lib/preview-entry-keys";
 import { parseHolderInput } from "../../lib/parse-holder-input";
 import { errorText } from "../../lib/error-message";
-import { addAmounts, formatAmount } from "../../lib/utils";
+import { addAmounts } from "../../lib/utils";
 import { useState } from "react";
 import {
   useTemplates, useCreateTemplate, useDeactivateTemplate, usePreviewTemplate,
   useClassifications, useCurrencies, useJournalTypes, useUidCodeLookups,
 } from "../../hooks/use-metadata";
+import { ExactAmount } from "../exact-amount";
 import { PageHeader } from "../page-header";
 import { StatusBadge } from "../status-badge";
 import { Button } from "../ui/button";
@@ -110,7 +111,7 @@ function CreateTemplateDialog() {
           <DialogTitle>Create Entry Template</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4 py-4">
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="grid gap-2">
               <Label htmlFor="tpl-code">Code</Label>
               <Input id="tpl-code" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="deposit_confirm" />
@@ -126,7 +127,7 @@ function CreateTemplateDialog() {
                 onValueChange={(v) => { if (typeof v === "string") setForm({ ...form, journal_type_uid: v }); }}
               >
                 <SelectTrigger id="tpl-jtype" className="w-full">
-                  <SelectValue placeholder="Select" />
+                  <SelectValue placeholder="Select">{journalTypes?.find((type) => type.uid === form.journal_type_uid)?.name}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {(journalTypes ?? []).map((t) => (
@@ -143,14 +144,14 @@ function CreateTemplateDialog() {
               <Button size="sm" variant="outline" onClick={addLine}>+ Add Line</Button>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               <div>
                 <p className="text-xs font-medium text-green-400 mb-2">DEBIT SIDE</p>
                 {lines.map((l, idx) => l.entry_type !== "debit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-green-500/20 bg-green-500/5 p-3 space-y-2">
-                    <div className="flex gap-2">
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
                       <Select value={l.classification_uid === "" ? null : l.classification_uid} onValueChange={(v) => { if (typeof v === "string") updateLine(idx, { classification_uid: v }); }}>
-                        <SelectTrigger className="w-32"><SelectValue placeholder="Class" /></SelectTrigger>
+                        <SelectTrigger aria-label={`Debit classification ${idx + 1}`} className="col-span-2 w-full min-w-0"><SelectValue placeholder="Class">{classifications?.find((classification) => classification.uid === l.classification_uid)?.code}</SelectValue></SelectTrigger>
                         <SelectContent>
                           {(classifications ?? []).map((c) => (
                             <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
@@ -158,14 +159,13 @@ function CreateTemplateDialog() {
                         </SelectContent>
                       </Select>
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
-                        <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+                        <SelectTrigger aria-label={`Debit holder ${idx + 1}`} className="col-span-2 w-full min-w-0"><SelectValue>{l.holder_role === "user" ? "User" : "System"}</SelectValue></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="user">User</SelectItem>
                           <SelectItem value="system">System</SelectItem>
                         </SelectContent>
                       </Select>
-                      {/* J-12 (2026-09-02 web audit): unlabeled input — mirrors HeroUI's `aria-label="Amount key"`. */}
-                      <Input aria-label="Amount key" placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 flex-1" />
+                      <Input aria-label={`Debit amount key ${idx + 1}`} placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 w-full" />
                       <Button size="sm" variant="ghost" onClick={() => removeLine(idx)} aria-label="Remove line">&times;</Button>
                     </div>
                   </div>
@@ -175,9 +175,9 @@ function CreateTemplateDialog() {
                 <p className="text-xs font-medium text-red-400 mb-2">CREDIT SIDE</p>
                 {lines.map((l, idx) => l.entry_type !== "credit" ? null : (
                   <div key={l._id} className="mb-2 rounded border border-red-500/20 bg-red-500/5 p-3 space-y-2">
-                    <div className="flex gap-2">
+                    <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
                       <Select value={l.classification_uid === "" ? null : l.classification_uid} onValueChange={(v) => { if (typeof v === "string") updateLine(idx, { classification_uid: v }); }}>
-                        <SelectTrigger className="w-32"><SelectValue placeholder="Class" /></SelectTrigger>
+                        <SelectTrigger aria-label={`Credit classification ${idx + 1}`} className="col-span-2 w-full min-w-0"><SelectValue placeholder="Class">{classifications?.find((classification) => classification.uid === l.classification_uid)?.code}</SelectValue></SelectTrigger>
                         <SelectContent>
                           {(classifications ?? []).map((c) => (
                             <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
@@ -185,14 +185,13 @@ function CreateTemplateDialog() {
                         </SelectContent>
                       </Select>
                       <Select value={l.holder_role} onValueChange={(v) => { if (v) updateLine(idx, { holder_role: v as "user" | "system" }); }}>
-                        <SelectTrigger className="w-24"><SelectValue /></SelectTrigger>
+                        <SelectTrigger aria-label={`Credit holder ${idx + 1}`} className="col-span-2 w-full min-w-0"><SelectValue>{l.holder_role === "user" ? "User" : "System"}</SelectValue></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="user">User</SelectItem>
                           <SelectItem value="system">System</SelectItem>
                         </SelectContent>
                       </Select>
-                      {/* J-12 (2026-09-02 web audit): unlabeled input — mirrors HeroUI's `aria-label="Amount key"`. */}
-                      <Input aria-label="Amount key" placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 flex-1" />
+                      <Input aria-label={`Credit amount key ${idx + 1}`} placeholder="amount_key" value={l.amount_key} onChange={(e) => updateLine(idx, { amount_key: e.target.value })} className="min-w-0 w-full" />
                       <Button size="sm" variant="ghost" onClick={() => removeLine(idx)} aria-label="Remove line">&times;</Button>
                     </div>
                   </div>
@@ -270,11 +269,11 @@ function PreviewSection({ code }: { code: string }) {
 
   return (
     <div className="space-y-2 mt-2">
-      <div className="flex gap-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
         {/* J-12 (2026-09-02 web audit): unlabeled inputs — mirrors HeroUI's `aria-label`s on the same fields. */}
         <Input aria-label="Holder ID" placeholder="Holder ID" value={params.holder_id} onChange={(e) => setParams({ ...params, holder_id: e.target.value })} className="w-28" />
         <Select value={params.currency_uid === "" ? null : params.currency_uid} onValueChange={(v) => { if (typeof v === "string") setParams({ ...params, currency_uid: v }); }}>
-          <SelectTrigger className="w-28"><SelectValue placeholder="Currency" /></SelectTrigger>
+          <SelectTrigger aria-label="Currency" className="w-28"><SelectValue placeholder="Currency">{currencies?.find((currency) => currency.uid === params.currency_uid)?.code}</SelectValue></SelectTrigger>
           <SelectContent>
             {(currencies ?? []).map((c) => (
               <SelectItem key={c.uid} value={c.uid}>{c.code}</SelectItem>
@@ -310,16 +309,16 @@ function PreviewSection({ code }: { code: string }) {
            * preview. Summed client-side from entries instead.
            */}
           <p>
-            Total Debit: {formatAmount(
+            Total Debit: <ExactAmount currencyCode={currencies?.find((c) => c.uid === preview.entries[0]?.currency_uid)?.code ?? preview.entries[0]?.currency_uid} value={
               preview.entries
                 .filter((e) => e.entry_type === "debit")
-                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
-            )}{" "}
-            | Total Credit: {formatAmount(
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0")
+            } />{" "}
+            | Total Credit: <ExactAmount currencyCode={currencies?.find((c) => c.uid === preview.entries[0]?.currency_uid)?.code ?? preview.entries[0]?.currency_uid} value={
               preview.entries
                 .filter((e) => e.entry_type === "credit")
-                .reduce((sum, e) => addAmounts(sum, e.amount), "0"),
-            )}
+                .reduce((sum, e) => addAmounts(sum, e.amount), "0")
+            } />
           </p>
           {keyedPreviewEntries(preview.entries).map(({ entry: e, key }) => (
             <p key={key}>
@@ -381,7 +380,7 @@ export function TemplatesPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                   {/* J-12: min-w-0 on each grid column + truncate on the line
                       text — a long classification code/holder_role/amount_key
                       combination would otherwise overflow the column instead

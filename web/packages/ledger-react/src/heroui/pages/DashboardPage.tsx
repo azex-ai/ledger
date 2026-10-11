@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { Activity, Clock, Lock, Scale, TrendingUp, BookOpen, type LucideIcon } from "lucide-react";
 import {
   Bar,
@@ -10,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Card, Chip, Skeleton, Table } from "@heroui/react";
+import { Card, Chip, Skeleton, Table, Select, ListBox, Label } from "@heroui/react";
 import { useHealth, useSystemBalances } from "../../hooks/use-system";
 import { useUidCodeLookups } from "../../hooks/use-metadata";
 import { useJournals } from "../../hooks/use-journals";
@@ -149,7 +151,10 @@ function SystemBalancesCard() {
   const { data, isLoading, isError, refetch } = useSystemBalances();
   const { classCode, currencyCode } = useUidCodeLookups();
 
-  const chartData = (data ?? []).map((b) => ({
+  const [selectedCurrency, setSelectedCurrency] = useState("");
+  const currencyUids = [...new Set((data ?? []).map((balance) => balance.currency_uid))];
+  const trendCurrency = currencyUids.includes(selectedCurrency) ? selectedCurrency : currencyUids[0];
+  const chartData = (data ?? []).filter((balance) => balance.currency_uid === trendCurrency).map((b) => ({
     label: `${classCode(b.classification_uid)} · ${currencyCode(b.currency_uid)}`,
     balance: parseFloat(b.total_balance), // chart geometry only — intentional lossy conversion
     balanceRaw: b.total_balance, // tooltip/axis formatter reads this, never `balance` (J-5)
@@ -162,6 +167,11 @@ function SystemBalancesCard() {
         <TrendingUp aria-hidden className="size-4 text-muted" />
       </Card.Header>
       <Card.Content>
+        {currencyUids.length > 0 && <Select aria-label="Currency (booked quantities)" value={trendCurrency} onChange={(key) => setSelectedCurrency(String(key ?? ""))}>
+          <Label>Currency (booked quantities)</Label>
+          <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+          <Select.Popover><ListBox>{currencyUids.map((uid) => <ListBox.Item key={uid} id={uid} textValue={currencyCode(uid)}>{currencyCode(uid)}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+        </Select>}
         {isLoading ? (
           <Skeleton className="h-[300px] w-full rounded-lg" />
         ) : isError ? (
@@ -200,7 +210,7 @@ function SystemBalancesCard() {
                 }}
                 formatter={(value, name, entry) => {
                   const payload = entry?.payload as { balanceRaw?: string } | undefined;
-                  return [formatAmount(payload?.balanceRaw ?? String(value)), name];
+                  return [`${payload?.balanceRaw ?? String(value)} ${trendCurrency ? currencyCode(trendCurrency) : ""}`, name];
                 }}
               />
               <Bar dataKey="balance" fill="var(--accent)" radius={[6, 6, 0, 0]} />

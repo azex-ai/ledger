@@ -2,7 +2,7 @@
 
 import { parseHolderInput } from "../../lib/parse-holder-input";
 import { useMemo, useState } from "react";
-import { Button, Card, Input, Table, TextField, toast } from "@heroui/react";
+import { Button, Card, Input, Table, TextField, Select, ListBox, Label, toast } from "@heroui/react";
 import {
   CartesianGrid,
   Line,
@@ -12,6 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useCurrencies, useUidCodeLookups } from "../../hooks/use-metadata";
 import { useBalances } from "../../hooks/use-balances";
 import { useSnapshots } from "../../hooks/use-system";
 import { formatAmount } from "../../lib/utils";
@@ -33,8 +34,12 @@ const CHART_COLORS = [
 export function BalancesPage() {
   const [holderInput, setHolderInput] = useState("");
   const [holder, setHolder] = useState(0);
-  const { data, isLoading, isError, refetch } = useBalances(holder);
+  const { data: currencies, isLoading: currenciesLoading, isError: currenciesError, refetch: refetchCurrencies } = useCurrencies();
+  const [selectedCurrency, setSelectedCurrency] = useState("");
+  const currencyUid = currencies?.some((currency) => currency.uid === selectedCurrency) ? selectedCurrency : currencies?.[0]?.uid ?? "";
+  const { data, isLoading, isError, refetch } = useBalances(holder, currencyUid);
   const balances = data ?? [];
+  const { currencyCode, classCode } = useUidCodeLookups();
 
   function submitHolder() {
     const parsed = parseHolderInput(holderInput);
@@ -56,23 +61,16 @@ export function BalancesPage() {
         .slice(0, 10),
     };
   }, []);
-  // Snapshots require a single currency_uid (J-1, 2026-09-02 web audit): the
-  // server hard-requires it and there's no per-currency aggregate endpoint,
-  // so the trend charts the first currency the balance table returned. Until
-  // balances load there is no currency to chart, so the query stays disabled
-  // (useSnapshots' own isDisabled) rather than firing a guaranteed-400
-  // request with currency_uid missing.
-  const primaryCurrencyUid = balances[0]?.currency_uid;
   // Memo the params object so its identity is stable across renders — an inline
   // object would be a new reference every render → cache miss → refetch storm.
   const snapParams = useMemo(
     () => ({
       holder: holder || undefined,
-      currency_uid: primaryCurrencyUid,
+      currency_uid: currencyUid,
       start: thirtyDaysAgo,
       end: today,
     }),
-    [holder, primaryCurrencyUid, thirtyDaysAgo, today],
+    [holder, currencyUid, thirtyDaysAgo, today],
   );
   const {
     data: snapData,
@@ -103,9 +101,9 @@ export function BalancesPage() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Balances" description="Search balances by account holder" />
+      <PageHeader title="Balances" description="Booked balances by account holder; reservation holds are not deducted" />
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap items-end gap-2">
         <TextField
           aria-label="Account Holder ID"
           className="max-w-xs"
@@ -119,10 +117,17 @@ export function BalancesPage() {
             }}
           />
         </TextField>
+        <Select aria-label="Currency" value={currencyUid} onChange={(key) => setSelectedCurrency(String(key ?? ""))} isDisabled={currenciesLoading || currenciesError || !currencies?.length}>
+          <Label>Currency</Label>
+          <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+          <Select.Popover><ListBox>{currencies?.map((currency) => <ListBox.Item key={currency.uid} id={currency.uid} textValue={currency.code}>{currency.code}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+        </Select>
         <Button onPress={submitHolder}>Search</Button>
       </div>
 
-      {holder !== 0 && (
+      {currenciesError && <ErrorState message="Failed to load currencies" onRetry={refetchCurrencies} />}
+      {!currenciesLoading && !currenciesError && !currencies?.length && <p className="text-sm text-muted">No currencies configured</p>}
+      {holder !== 0 && currencyUid !== "" && (
         <>
           {isLoading ? (
             <TableSkeleton rows={4} />
@@ -136,13 +141,13 @@ export function BalancesPage() {
           ) : (
             <Card>
               <Card.Header>
-                <Card.Title>Balance Breakdown — Holder {holder}</Card.Title>
+                <Card.Title>Booked balances — Holder {holder}</Card.Title>
               </Card.Header>
               <Card.Content>
                 <Table>
                   <Table.ScrollContainer>
                     <Table.Content
-                      aria-label={`Balance breakdown for holder ${holder}`}
+                      aria-label={`Booked balances for holder ${holder}`}
                       className="min-w-[480px]"
                     >
                       <Table.Header>
@@ -153,8 +158,8 @@ export function BalancesPage() {
                       <Table.Body items={balances}>
                         {(b) => (
                           <Table.Row id={`${b.currency_uid}-${b.classification_uid}`}>
-                            <Table.Cell className="max-w-40"><span className="block truncate" title={b.currency_uid}>{b.currency_uid}</span></Table.Cell>
-                            <Table.Cell className="max-w-40"><span className="block truncate" title={b.classification_uid}>{b.classification_uid}</span></Table.Cell>
+                            <Table.Cell className="max-w-40"><span className="block truncate" title={b.currency_uid}>{currencyCode(b.currency_uid)}</span></Table.Cell>
+                            <Table.Cell className="max-w-40"><span className="block truncate" title={b.classification_uid}>{classCode(b.classification_uid)}</span></Table.Cell>
                             <Table.Cell className="text-end font-mono tabular-nums">
                               {formatAmount(b.balance)}
                             </Table.Cell>
@@ -171,7 +176,7 @@ export function BalancesPage() {
           {balances.length > 0 && (
             <Card>
               <Card.Header>
-                <Card.Title>Balance Trend (30 days)</Card.Title>
+                <Card.Title>Booked balance trend (30 days) · {currencies?.find((currency) => currency.uid === currencyUid)?.code ?? currencyUid}</Card.Title>
               </Card.Header>
               <Card.Content>
                 {snapLoading ? (
