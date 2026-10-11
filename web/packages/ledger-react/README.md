@@ -190,8 +190,16 @@ Available `prefetch*` helpers: `prefetchJournals`, `prefetchEntries`,
 `prefetchJournalTypes`, `prefetchTemplates`, `prefetchSnapshots`. The shared
 `ledgerKeys` query-key factory is also exported for advanced cache seeding.
 It now requires the resolved scope as its first argument, for example
-`ledgerKeys.balances(client.cacheScope, 42)` or `ledgerKeys.all(client.cacheScope)`.
+`ledgerKeys.balances(client.cacheScope, 42, currencyUid)` or `ledgerKeys.all(client.cacheScope)`.
 Unscoped keys from earlier versions no longer match hooks or prefetch helpers.
+
+Balance lists require one currency: `client.getBalances(holder, currencyUid)`,
+`useBalances(holder, currencyUid)` and
+`prefetchBalances(queryClient, client, holder, currencyUid)`. These are booked
+classification balances; reservation holds are not deducted. Their cache key
+ends in `[holder, currencyUid, "classifications"]`, distinct from the aggregate
+`getBalancesByCurrency` result. Journal detail still returns `{ journal, entries }`;
+the client adapts the server's flat journal-and-entries response.
 
 ### Admin cache ownership and identity changes
 

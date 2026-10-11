@@ -38,9 +38,9 @@ function hmac(payload: string): string {
 }
 
 /** Constant-time password check. */
-export function verifyPassword(candidate: string): boolean {
+export function verifyPassword(candidate: unknown): boolean {
   const expected = process.env.DASHBOARD_PASSWORD;
-  if (!expected) return false;
+  if (!expected || typeof candidate !== "string") return false;
   const a = createHash("sha256").update(candidate).digest();
   const b = createHash("sha256").update(expected).digest();
   return timingSafeEqual(a, b);
@@ -72,6 +72,40 @@ export function verifySession(
   const exp = Number(payload);
   if (!Number.isFinite(exp) || exp <= now) return false;
   const expected = hmac(payload);
-  if (sig.length !== expected.length) return false;
+  // Restrict to the ASCII hex encoding we mint before comparing UTF-8 bytes.
+  // Equal JS string lengths alone do not guarantee equal Buffer lengths.
+  if (sig.length !== expected.length || !/^[0-9a-f]{64}$/.test(sig)) return false;
   return timingSafeEqual(Buffer.from(sig, "utf8"), Buffer.from(expected, "utf8"));
+}
+
+/** Browser mutations must come from this exact origin (including port).
+ * Reverse proxies may set DASHBOARD_PUBLIC_ORIGIN to the externally visible
+ * origin. Never infer trust from client-supplied Forwarded / X-Forwarded-*.
+ * NextRequest normalizes loopback URL hostnames to localhost. Use the browser
+ * request Host authority with the framework URL scheme when no public origin
+ * is configured; a proxy that rewrites either must configure the public origin.
+ * Missing/malformed Host or Origin fail closed, including login/logout.
+ */
+export function dashboardRequestOriginAllowed(req: Pick<Request, "method" | "url" | "headers">): boolean {
+  if (req.method === "GET" || req.method === "HEAD") return true;
+  const origin = req.headers.get("origin");
+  if (!origin || origin === "null") return false;
+  try {
+    const source = new URL(origin);
+    const configured = process.env.DASHBOARD_PUBLIC_ORIGIN;
+    let target: URL;
+    if (configured !== undefined) {
+      target = new URL(configured);
+    } else {
+      const host = req.headers.get("host");
+      // Host is an authority, never a URL, credentials or a forwarded list.
+      if (!host || /[\s/\\@?#%,]/.test(host)) return false;
+      target = new URL(`${new URL(req.url).protocol}//${host}`);
+    }
+    if (!["http:", "https:"].includes(target.protocol)) return false;
+    if (target.username || target.password || target.pathname !== "/" || target.search || target.hash) return false;
+    return source.origin === origin && source.origin === target.origin;
+  } catch {
+    return false;
+  }
 }

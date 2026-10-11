@@ -1,8 +1,10 @@
 "use client";
 
+import { ExactAmount } from "../exact-amount";
+
 import { errorText } from "../../lib/error-message";
 import { useMemo, useState } from "react";
-import { formatAmount, validateAmount, formatUTC, isZeroAmount } from "../../lib/utils";
+import { validateAmount, formatUTC } from "../../lib/utils";
 import {
   useFinalizeReservationSettlement,
   useReservations,
@@ -20,7 +22,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "../ui/table";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger, DialogFooter,
 } from "../ui/dialog";
 import { Label } from "../ui/label";
 import {
@@ -54,6 +56,7 @@ function SettleDialog({ id }: { id: string }) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Settle Reservation #{id}</DialogTitle>
+          <DialogDescription>Records the settled amount and releases the entire hold. Booked balances do not change; this does not post a charge.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
@@ -108,6 +111,7 @@ function SettlePartialDialog({ id }: { id: string }) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Partially Settle Reservation #{id}</DialogTitle>
+          <DialogDescription>Records this settlement and reduces the hold by this amount. Booked balances do not change; this does not post a charge.</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
@@ -154,7 +158,7 @@ function FinalizeConfirmDialog({ id }: { id: string }) {
           <DialogTitle>Finalize Reservation #{id}</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground py-4">
-          This closes out the reservation after its partial settlements. This action cannot be undone.
+          Closes the reservation and releases any remaining hold after partial settlements. Booked balances do not change; this does not post a charge. This action cannot be undone.
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -188,7 +192,7 @@ function ReleaseConfirmDialog({ id }: { id: string }) {
           <DialogTitle>Release Reservation #{id}</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground py-4">
-          This will release the reserved funds back to the account. This action cannot be undone.
+          Releases the hold without changing booked balances. This action cannot be undone.
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
@@ -264,8 +268,8 @@ export function ReservationsPage() {
                 <TableHead className="w-[220px]">ID</TableHead>
                 <TableHead>Holder</TableHead>
                 <TableHead>Currency</TableHead>
-                <TableHead className="text-right">Reserved</TableHead>
-                <TableHead className="text-right">Settled</TableHead>
+                <TableHead className="text-right">Reserved amount</TableHead>
+                <TableHead className="text-right">Recorded settlement</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Expires</TableHead>
                 <TableHead>Actions</TableHead>
@@ -279,8 +283,8 @@ export function ReservationsPage() {
                   </TableCell>
                   <TableCell>{r.account_holder}</TableCell>
                   <TableCell title={r.currency_uid}>{currencyCode(r.currency_uid)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(r.reserved_amount)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.settled_amount && !isZeroAmount(r.settled_amount) ? formatAmount(r.settled_amount) : "-"}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={r.reserved_amount} currencyCode={currencyCode(r.currency_uid)} /></TableCell>
+                  <TableCell className="text-right tabular-nums">{r.settled_amount !== null && r.settled_amount !== undefined && r.settled_amount !== "" ? <ExactAmount value={r.settled_amount} currencyCode={currencyCode(r.currency_uid)} /> : "-"}</TableCell>
                   <TableCell><StatusBadge status={r.status} /></TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {formatUTC(r.expires_at)}

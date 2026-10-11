@@ -2,9 +2,9 @@
 
 import { errorText } from "../../lib/error-message";
 import { useState } from "react";
-import { formatAmount, formatUTC } from "../../lib/utils";
+import { formatUTC } from "../../lib/utils";
 import { useJournal, useReverseJournal } from "../../hooks/use-journals";
-import { useJournalTypes } from "../../hooks/use-metadata";
+import { useJournalTypes, useUidCodeLookups } from "../../hooks/use-metadata";
 import { PageHeader } from "../page-header";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
@@ -21,7 +21,8 @@ import { DefaultLink, type LinkComponent } from "../nav";
 import { toast } from "sonner";
 import { ErrorState } from "../error-state";
 import { PageHeaderSkeleton, TableSkeleton } from "../loading-skeleton";
-import type { Entry } from "../../client/types";
+import { ExactAmount } from "../exact-amount";
+import { journalTotalsByCurrency } from "../../lib/journal-totals";
 
 export interface JournalDetailPageProps {
   /** Journal id — the host extracts this from its route param and passes it. */
@@ -32,54 +33,6 @@ export interface JournalDetailPageProps {
    * `/journals/{id}`.
    */
   linkComponent?: LinkComponent;
-}
-
-function EntryFlow({ entries }: { entries: Entry[] }) {
-  const debits = entries.filter((e) => e.entry_type === "debit");
-  const credits = entries.filter((e) => e.entry_type === "credit");
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm font-medium">Fund Flow</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-start gap-8">
-          <div className="flex-1 space-y-2">
-            <p className="text-xs font-medium text-muted-foreground uppercase">Debit</p>
-            {debits.map((e) => (
-              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`} className="rounded border border-emerald-500/20 bg-emerald-500/5 p-3">
-                <div className="flex justify-between">
-                  <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="tabular-nums text-sm text-emerald-400">{formatAmount(e.amount)}</span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Class {e.classification_uid} / Currency {e.currency_uid}
-                </p>
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-col items-center justify-center pt-6" aria-hidden="true">
-            <div className="text-2xl text-muted-foreground">&rarr;</div>
-          </div>
-          <div className="flex-1 space-y-2">
-            <p className="text-xs font-medium text-muted-foreground uppercase">Credit</p>
-            {credits.map((e) => (
-              <div key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`} className="rounded border border-rose-500/20 bg-rose-500/5 p-3">
-                <div className="flex justify-between">
-                  <span className="text-sm">Holder {e.account_holder}</span>
-                  <span className="tabular-nums text-sm text-rose-400">{formatAmount(e.amount)}</span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Class {e.classification_uid} / Currency {e.currency_uid}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
 }
 
 function ReverseDialog({ journalId }: { journalId: string }) {
@@ -124,6 +77,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
   const { data, isLoading, isError, refetch } = useJournal(id);
   // query-consumption-allow: uid→name resolver, falls back to the raw uid via `??` below (incl. on fetch failure) — the fallback IS the degraded state, not a false claim like J-1/J-2/J-3.
   const { data: journalTypes } = useJournalTypes();
+  const { currencyCode, classCode } = useUidCodeLookups();
 
   if (isLoading) {
     return (
@@ -160,7 +114,7 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
         }
       />
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <Card>
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Type</p>
@@ -174,18 +128,6 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
           <CardContent className="pt-4">
             <p className="text-xs text-muted-foreground">Source</p>
             <p className="text-lg font-bold">{j.source}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4">
-            <p className="text-xs text-muted-foreground">Total Debit</p>
-            <p className="text-lg font-bold tabular-nums">{formatAmount(j.total_debit)}</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4">
-            <p className="text-xs text-muted-foreground">Total Credit</p>
-            <p className="text-lg font-bold tabular-nums">{formatAmount(j.total_credit)}</p>
           </CardContent>
         </Card>
       </div>
@@ -220,7 +162,23 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
         </CardContent>
       </Card>
 
-      <EntryFlow entries={entries} />
+      <Card>
+        <CardHeader><CardTitle className="text-sm font-medium">Totals by currency</CardTitle></CardHeader>
+        <CardContent>
+          <Table aria-label="Journal totals by currency">
+            <TableHeader><TableRow><TableHead>Currency</TableHead><TableHead className="text-right">Debit</TableHead><TableHead className="text-right">Credit</TableHead></TableRow></TableHeader>
+            <TableBody>
+              {journalTotalsByCurrency(entries).map((total) => (
+                <TableRow key={total.currencyUid}>
+                  <TableCell title={total.currencyUid}>{currencyCode(total.currencyUid)}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={total.debit} currencyCode={currencyCode(total.currencyUid)} /></TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={total.credit} currencyCode={currencyCode(total.currencyUid)} /></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -230,7 +188,6 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
           <Table aria-label="Journal entries" className="min-w-[720px]">
             <TableHeader>
               <TableRow>
-                <TableHead>ID</TableHead>
                 <TableHead>Holder</TableHead>
                 <TableHead>Currency</TableHead>
                 <TableHead>Classification</TableHead>
@@ -241,18 +198,17 @@ export function JournalDetailPage({ id, linkComponent: Link = DefaultLink }: Jou
             <TableBody>
               {entries.map((e) => (
                 <TableRow key={`${e.entry_type}-${e.account_holder}-${e.classification_uid}-${e.currency_uid}`}>
-                  <TableCell>{e.entry_type}</TableCell>
                   <TableCell>{e.account_holder}</TableCell>
                   <TableCell className="max-w-40">
-                    <span className="block truncate font-mono text-xs" title={e.currency_uid}>{e.currency_uid}</span>
+                    <span className="block truncate font-mono text-xs" title={e.currency_uid}>{currencyCode(e.currency_uid)}</span>
                   </TableCell>
                   <TableCell className="max-w-40">
-                    <span className="block truncate font-mono text-xs" title={e.classification_uid}>{e.classification_uid}</span>
+                    <span className="block truncate font-mono text-xs" title={e.classification_uid}>{classCode(e.classification_uid)}</span>
                   </TableCell>
                   <TableCell>
-                    <StatusBadge status={e.entry_type} />
+                    {e.entry_type === "debit" ? "Debit" : "Credit"}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{formatAmount(e.amount)}</TableCell>
+                  <TableCell className="text-right tabular-nums"><ExactAmount value={e.amount} currencyCode={currencyCode(e.currency_uid)} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
