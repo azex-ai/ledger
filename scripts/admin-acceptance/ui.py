@@ -144,11 +144,29 @@ def main():
 
         try:
             page.goto(base + '/login')
+            page.get_by_label('Account', exact=True).fill('reader')
+            page.get_by_label('Password', exact=True).fill(env['ADMIN_PASSWORD_READER'])
+            page.get_by_role('button', name='Sign in', exact=True).click()
+            expect(page.get_by_role('heading', name='Dashboard', exact=True)).to_be_visible()
+            dialog=metadata('Currencies',prefix+'_DENIED','Read-only role canary',
+                            lambda d:d.get_by_label('Decimal places (0-18)',exact=True).fill('2'))
+            submit(dialog,'Create','/api/v1/currencies',403)
+            expect(page.get_by_text(re.compile("You don't have permission")).first).to_be_visible()
+            expect(dialog).to_be_visible()
+            check('reader_denied_without_storage',not any(c['code']==prefix+'_DENIED' for c in rows('currencies?active_only=false')))
+            save('reader-create-forbidden')
+            page.keyboard.press('Escape')
+            expect(dialog).not_to_be_visible()
+            page.get_by_role('button',name='Sign out',exact=True).click()
+            page.wait_for_url(base+'/login')
+            check('logout_clears_session_cookie',not any(c['name']=='ledger_acceptance_session' for c in context.cookies()))
+            page.goto(base + '/login')
             page.get_by_label('Account', exact=True).fill('admin')
             page.get_by_label('Password', exact=True).fill(env['ADMIN_PASSWORD_ADMIN'])
             page.get_by_role('button', name='Sign in', exact=True).click()
             expect(page.get_by_role('heading', name='Dashboard', exact=True)).to_be_visible()
             check('real_admin_login', True)
+            check('identity_switch_clears_old_dialog_and_error',page.get_by_role('dialog').count()==0 and page.get_by_text(re.compile("You don't have permission")).count()==0)
             # Read all wired pages and assess responsive containment. Wide data tables may scroll inside their wrapper.
             names = ['Dashboard','Journals','Balances','Reservations','Deposits','Classifications',
                      'Journal Types','Templates','Currencies','Reconciliation','Snapshots']
