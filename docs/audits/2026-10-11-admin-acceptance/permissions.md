@@ -1,5 +1,7 @@
 # 管理端权限审计 — bus #51 / gen 1
 
+> 本报告保留基线复现与当时判断；其中旧 dashboard 的两项已确认问题已修复，并完成独立 auth 复核及最终真实栈复验。最终状态、候选 SHA、15项 session 边界与119项四角色结果见 [交付验收报告](../2026-10-11-shadcn-admin-acceptance/README.md)。
+
 owner：`admin-auth-audit`；风险 T2。基线 `99871921df986a738272ae4a7f33fb357f5f6e03`，独占 worktree `/Users/aaron/projects/_worktrees/ledger/codex/admin-auth-audit-261011`，分支 `codex/admin-auth-audit-261011`。
 
 当前结论：**既有 production dashboard 验收 FAIL：1 Major + 1 Minor，均已真实复现；新独立宿主的本席权限验收 PASS**。新宿主 119 项 HTTP 权限检查、真实浏览器 Origin 对照和 10 项 UI/身份切换检查通过，不能据此宣称旧 dashboard 已修。主控已另派旧 host 窄修复，尚待其冻结候选复核。只读生产代码，未改 SDK/server、未运行 PG/Docker 或 destructive migration、未提交推送。

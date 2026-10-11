@@ -62,7 +62,7 @@ Bundled dashboard 在代理重写 Host 或终止 TLS 时需配置 server-only `D
 
 基线 `99871921df986a738272ae4a7f33fb357f5f6e03`；host `bd1c990`，SDK/auth `7ffb3db`、`a60cd0d`，runtime修正 `f90db2c`。最终 runtime/build provenance 如上；宿主源码摘要为 `c2bd6e54149c1687c986848cb7163f1f2585327341bf931b02cf077992ce4da5`。原始证据保存在任务归档，包含失败与通过记录，私有配置、cookie、token及API key不进入报告。
 
-独立 money域155+7、auth域51及增量64回归通过。一次 whole-branch Final 在此报告冻结后执行，其结论将在交付前补齐；未将unit/MSW、基线复现或旧版本绿灯代替最终真实栈结果。react-doctor留下表头相似与大页面复杂度等维护性warning，没有为了评分扩大重构。
+独立 money域155+7、auth域51及增量64回归通过。一次 whole-branch Final 已 **PASS**，未发现 Blocker / Major / Minor，无需追加修复波次。评审冻结 `204eea5902ecb46886a1f5919a4d1a37b6f2a388`，与随后纯历史合并 `9455429bf413be0004063d9c32cd8e240836627d` 的 tree 完全一致；评审独立核验归档 hash、宿主源码摘要及运行源码与交付内容对应关系。完整结论见归档 `reports/shadcn26-final.md`。未将unit/MSW、基线复现或旧版本绿灯代替最终真实栈结果。react-doctor留下表头相似与大页面复杂度等维护性warning，没有为了评分扩大重构。
 
 
 ### 截图
