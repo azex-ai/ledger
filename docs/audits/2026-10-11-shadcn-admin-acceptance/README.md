@@ -29,7 +29,7 @@
 
 ## 验证范围与结果
 
-最终运行源码为 clean commit `2d33d0f89702367e32e756a378c52385eec6eeef`。报告与验收脚本的后续修改没有改变运行源码。实际打包 `@azex/ledger-react@0.6.0` tarball SHA-256：`a7bb7da477f517d1eae9c642c9a60b5c0638c4a02b4255068308c0f981cb07cb`。三个独立本地 PostgreSQL 17 集群分别用于 UI runtime 和两个测试实例，迁移测试没有使用 UI 数据库。
+最终运行源码为 clean commit `2d33d0f89702367e32e756a378c52385eec6eeef`。报告、验收脚本与测试探针的后续修改没有改变运行源码。实际打包 `@azex/ledger-react@0.6.0` tarball SHA-256：`a7bb7da477f517d1eae9c642c9a60b5c0638c4a02b4255068308c0f981cb07cb`。三个独立本地 PostgreSQL 17 集群分别用于 UI runtime 和两个测试实例，迁移测试没有使用 UI 数据库。
 
 | 检查 | 结果 | 可复核证据 |
 |---|---|---|
@@ -62,7 +62,7 @@ Bundled dashboard 在代理重写 Host 或终止 TLS 时需配置 server-only `D
 
 基线 `99871921df986a738272ae4a7f33fb357f5f6e03`；host `bd1c990`，SDK/auth `7ffb3db`、`a60cd0d`，runtime修正 `f90db2c`。最终 runtime/build provenance 如上；宿主源码摘要为 `c2bd6e54149c1687c986848cb7163f1f2585327341bf931b02cf077992ce4da5`。原始证据保存在任务归档，包含失败与通过记录，私有配置、cookie、token及API key不进入报告。
 
-独立 money域155+7、auth域51及增量64回归通过。一次 whole-branch Final 已 **PASS**，未发现 Blocker / Major / Minor，无需追加修复波次。评审冻结 `204eea5902ecb46886a1f5919a4d1a37b6f2a388`，与随后纯历史合并 `9455429bf413be0004063d9c32cd8e240836627d` 的 tree 完全一致；评审独立核验归档 hash、宿主源码摘要及运行源码与交付内容对应关系。完整结论见归档 `reports/shadcn26-final.md`。未将unit/MSW、基线复现或旧版本绿灯代替最终真实栈结果。react-doctor留下表头相似与大页面复杂度等维护性warning，没有为了评分扩大重构。
+独立 money域155+7、auth域51及增量64回归通过。一次 whole-branch Final 已 **PASS**，当时未发现 Blocker / Major / Minor；随后 main 门禁触发下述一次测试探针修复，增量独立复核通过。评审冻结 `204eea5902ecb46886a1f5919a4d1a37b6f2a388`，与随后纯历史合并 `9455429bf413be0004063d9c32cd8e240836627d` 的 tree 完全一致；评审独立核验归档 hash、宿主源码摘要及运行源码与交付内容对应关系。完整结论见归档 `reports/shadcn26-final.md`。未将unit/MSW、基线复现或旧版本绿灯代替最终真实栈结果。react-doctor留下表头相似与大页面复杂度等维护性warning，没有为了评分扩大重构。
 
 
 ### 截图
@@ -87,3 +87,12 @@ Bundled dashboard 在代理重写 Host 或终止 TLS 时需配置 server-only `D
 本轮消费端暴露了两个应固定的工程约束：MSW fixtures 必须对应 generated HTTP wire 与必需查询参数；真实框架 Request、浏览器会话和独立 SQL oracle 需要作为包接入验收保留。数据库 fixture provisioning 的等待不应占用并发操作自身的 deadline。
 
 下一步可以为另一个实际业务宿主复用这套接入验收，再按需要接入 swap/报价与可选服务。每个 currency 的双分录数量平衡继续留在账本核心；USD估值、价格有效期和兑换执行由独立业务层表达，不能在管理端用跨币种数量合计来代替。
+
+
+### 最终门禁发现的测试探针问题
+
+首次 main 集成门禁在 `TestCaptureReplayRejectsUnverifiableHistory/bad-signature` 的初始 Reserve 被测试探针拒绝，日志为 `integrate-main.log`。旧探针把同库所有连接的事务都视作 service 在签名时持有的事务，超出了它实际要守的 runtime pool 边界。原失败日志没有 PID，不能断言该次具体来自哪个进程，也没有将 PostgreSQL 累计统计延迟误当作 `pg_stat_activity` 的证据。
+
+本轮唯一 Final 修复波次为 `7575b64e143e65657d25a47624814d32c846aa01`，只改 `examples/signed-capture/capture_test.go`。串行 fixture 绑定实际 runtime pool，要求签名/验签时没有借出连接，并断言不存在异步 AfterRelease hook；此条件比无显式事务更严格，仅适用于这个没有并发使用者的测试。全部原经济、签名、replay 和 rollback 断言保持不变。
+
+对照先在旧实现确定性复现：runtime没有借出连接，独立 admin pool 保持真实 BEGIN，旧 SQL 仍拒绝签名。新实现完整目标包 race 通过（6.336s）；独立 reviewer 另跑两个新测试（1.960s）：其他 pool 不干扰、runtime 的 T/E 事务状态仍拒绝 Sign/Verify、rollback 后恢复。没有 sleep、重试或降低金额/签名断言。原始证据见归档 `producer55/` 与 `reports/55-g1.md`、`reports/55-money-review.md`；这属于第一次 Final 后的一次窄修复及增量复核，没有重启 whole-branch Final。
