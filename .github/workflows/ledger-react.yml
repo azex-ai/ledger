@@ -5,6 +5,7 @@ name: ledger-react
 # separate tag-driven workflow (ledger-react-publish.yml).
 on:
   push:
+    branches: [main]
     paths:
       - 'web/**'
       - 'docs/openapi.yaml'
