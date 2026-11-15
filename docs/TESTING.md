@@ -27,7 +27,12 @@ a full suite into a successful skip.
   them. Tests never change the shared roles' attributes (the hardening test
   uses private role names), and a test that logs in as `ledger_app` /
   `ledger_ro` sets only `postgrestest.SharedRolePassword`, so concurrent
-  processes cannot invalidate each other's credentials.
+  processes cannot invalidate each other's credentials. `make db`
+  (`scripts/dev-db.sh`, the local development database `ledger` on the same
+  server) sets that same password on the three roles, so it and a running
+  suite never break each other's logins. Until `ledger` is migrated nothing
+  depends on the roles, and the cleanup below may drop them; re-run
+  `make db` then.
 - **Destructive roundtrip.** `TestMigrations_FullDownChainAndReapply` runs
   Up → full Down → Up, and the baseline's down script drops its roles. It runs
   on the same server through `postgrestest.SetupRoleIsolatedRawDB` and
@@ -75,13 +80,24 @@ isolation.
 The root `./...` pattern does not cross Go module boundaries. Verify all four:
 
 ```sh
-for module in . chains/evm anchors/r2 anchors/r2/internal/miniotest; do
+for module in . chains/evm anchors/r2 anchors/r2/internal/s3test; do
   (cd "$module" && go build ./... && go vet ./... && go test -race -timeout 15m -count=1 ./...)
 done
 make test-consumer
 ```
 
-The R2 tests additionally start MinIO containers. EVM end-to-end tests need
+The R2 tests run against an in-process fake S3 server (`internal/s3test`,
+gofakes3) -- no container, nothing to start. The one R2 assertion the fake
+cannot serve, Object Lock refusing to delete a retained version, is behind
+`-tags s3worm` and run by `make test-r2-worm` against a real S3-compatible
+server: `LEDGER_TEST_S3_ENDPOINT`, `LEDGER_TEST_S3_ACCESS_KEY_ID` and
+`LEDGER_TEST_S3_SECRET_ACCESS_KEY`, by default a native MinIO on this machine
+(`http://127.0.0.1:9000`, `minioadmin` / `minioadmin`; CI starts one in a
+container). An unreachable server fails that target. It reuses one bucket,
+`ledger-test-worm`, with a random key prefix per run: the objects carry a
+one-day COMPLIANCE retention, so neither they nor a bucket holding them can be
+deleted before it expires -- a bucket per run would leave one behind every
+time. EVM end-to-end tests need
 Foundry's `anvil`; `make test-e2e` opts into their build tag. The Linux CI workflow
 also runs three bounded 30-second fuzz jobs. Local unit or package checks do not
 stand in for those jobs.

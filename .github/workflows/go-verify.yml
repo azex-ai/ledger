@@ -30,10 +30,14 @@ jobs:
         working-directory: chains/evm
       - run: go vet ./...
         working-directory: anchors/r2
-      # The MinIO fixture is a separate module. The PostgreSQL fixture is
+      # The fake-S3 fixture is a separate module. The PostgreSQL fixture is
       # internal to the root module and covered by the root commands above.
       - run: go vet ./...
-        working-directory: anchors/r2/internal/miniotest
+        working-directory: anchors/r2/internal/s3test
+      # The Object Lock test behind `s3worm` (run by the test job) must at
+      # least compile here, where no S3 server exists.
+      - run: go vet -tags s3worm ./...
+        working-directory: anchors/r2
       # F-M5 (2026-09-02 audit): chains/evm/e2e_test.go and e2e_artifacts.go
       # carry `//go:build e2e` and were not compiled by ANY step anywhere in
       # this repo (CI, Makefile, or docs) -- not "skipped", not covered at
@@ -56,7 +60,7 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
-          working-directory: anchors/r2/internal/miniotest
+          working-directory: anchors/r2/internal/s3test
 
   test:
     runs-on: ubuntu-latest
@@ -108,6 +112,29 @@ jobs:
         working-directory: chains/evm
       - name: Test anchors/r2
         run: go test -race -timeout 15m -count=1 ./...
+        working-directory: anchors/r2
+      # anchors/r2's Object Lock (WORM) assertion is behind `-tags s3worm`
+      # because it needs a real S3 server with Object Lock; every other r2 test
+      # runs against the in-process fake (internal/s3test). Locally it is
+      # `make test-r2-worm` against a native MinIO (docs/TESTING.md); here the
+      # server is a container. pgsty/minio is a community build of the archived
+      # MinIO source (minio/minio left Docker Hub in September 2026), pinned to
+      # a dated release tag AND its multi-arch OCI index digest so the bytes CI
+      # runs are fixed; re-derive the digest with
+      # `docker buildx imagetools inspect pgsty/minio:<tag>` (top-level Digest).
+      - name: Start MinIO for the anchors/r2 Object Lock test
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+      - name: Test anchors/r2 Object Lock (s3worm)
+        run: go test -tags s3worm -race -timeout 5m -count=1 -run TestAnchor_ObjectLock ./...
         working-directory: anchors/r2
       # F-m3 (2026-09-02 audit): docs/INVARIANTS.md's own "How to add a new
       # invariant" rule #5 says a fuzz-target pin gets run for a few seconds
@@ -202,9 +229,9 @@ jobs:
         working-directory: chains/evm
       - run: go build ./...
         working-directory: anchors/r2
-      # Build the separate MinIO fixture; root already covers postgrestest.
+      # Build the separate fake-S3 fixture; root already covers postgrestest.
       - run: go build ./...
-        working-directory: anchors/r2/internal/miniotest
+        working-directory: anchors/r2/internal/s3test
       # F-M5: prove the e2e-tagged files at least compile even where anvil
       # (and therefore the test job's e2e run) isn't available.
       - run: go build -tags e2e ./...

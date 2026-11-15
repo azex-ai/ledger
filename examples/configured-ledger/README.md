@@ -33,7 +33,7 @@ go run ./examples/configured-ledger
 Tests use the existing PostgreSQL fixture, creating and deleting an isolated
 database per test. Supply a separate **test administrator** connection able to
 create databases and run migrations; the tested application calls still use
-`ledger_app`. With `DATABASE_URL` unset, the fixture uses Docker instead.
+`ledger_app`. With `DATABASE_URL` unset, the fixture uses the shared local PostgreSQL (`postgres://dev:dev@127.0.0.1:5432/postgres`, docs/TESTING.md).
 
 ```sh
 DATABASE_URL='postgres://test_admin:password@localhost/postgres?sslmode=disable' \

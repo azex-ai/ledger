@@ -39,8 +39,8 @@ For an actual gift balance, create the ROSE currency and call the library's
 `svc.Exchange`: the tested 20 CREDITS purchase creates two ROSE through paired FX
 journals. The same fixed-rate primitive values usage and prices wallet exchanges.
 
-Tests create isolated PostgreSQL databases via Docker or the supplied
-`DATABASE_URL` and exercise the public facade as `ledger_app`. The executable uses
+Tests create isolated PostgreSQL databases on the supplied `DATABASE_URL`, or on
+the shared local PostgreSQL (`postgres://dev:dev@127.0.0.1:5432/postgres`, docs/TESTING.md), and exercise the public facade as `ledger_app`. The executable uses
 stable `credits-demo-v3-capture:*` fixture event IDs, so running
 it again after completion does not create another deposit, purchase or charge. It asserts the
 final balances rather than just printing an expected result. Use a separate

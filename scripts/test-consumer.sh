@@ -35,7 +35,7 @@ for consumer in root evm r2; do
       go mod edit "-require=$module/anchors/r2@v0.0.0" "-replace=$module/anchors/r2=$repo_dir/anchors/r2"
       # tidy loads dependency tests too. This is an explicit candidate-only
       # replacement, never a production import or a claim of publishability.
-      go mod edit "-replace=$module/anchors/r2/internal/miniotest=$repo_dir/anchors/r2/internal/miniotest"
+      go mod edit "-replace=$module/anchors/r2/internal/s3test=$repo_dir/anchors/r2/internal/s3test"
       ;;
   esac
   cp "$repo_dir/scripts/consumer-$consumer.go.txt" main.go
@@ -46,7 +46,7 @@ for consumer in root evm r2; do
   go list -mod=readonly -deps ./... > deps.txt
   while IFS= read -r dependency; do
     case "$dependency" in
-      */internal/miniotest|*/internal/miniotest/*|*/internal/postgrestest|*/internal/postgrestest/*|github.com/testcontainers/*|github.com/moby/*|github.com/docker/*)
+      */internal/s3test|*/internal/s3test/*|*/internal/postgrestest|*/internal/postgrestest/*|github.com/johannesboyne/gofakes3|github.com/johannesboyne/gofakes3/*|github.com/testcontainers/*|github.com/moby/*|github.com/docker/*)
         echo "Consumer $consumer: test-only dependency reached production imports: $dependency" >&2
         exit 1
         ;;

@@ -1,4 +1,4 @@
-.PHONY: build test test-clean-db test-short test-submodules test-e2e test-consumer vet lint sqlc sqlc-diff db openapi-check
+.PHONY: build test test-clean-db test-short test-submodules test-r2-worm test-e2e test-consumer vet lint sqlc sqlc-diff db db-docker openapi-check
 
 build:
 	go build ./...
@@ -50,6 +50,15 @@ test-submodules:
 	cd chains/evm && go test -race -timeout 15m -count=1 ./...
 	cd anchors/r2 && go test -race -timeout 15m -count=1 ./...
 
+# anchors/r2's Object Lock (WORM) assertion, behind `//go:build s3worm`: it
+# needs a REAL S3-compatible server with Object Lock (MinIO, or R2), which the
+# in-process fake every other r2 test uses does not implement.
+# LEDGER_TEST_S3_ENDPOINT / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY select the
+# server (default: MinIO on http://127.0.0.1:9000, minioadmin/minioadmin); an
+# unreachable server fails the run. docs/TESTING.md.
+test-r2-worm:
+	cd anchors/r2 && go test -tags s3worm -race -timeout 5m -count=1 -run TestAnchor_ObjectLock ./...
+
 # chains/evm/e2e_test.go and e2e_artifacts.go carry `//go:build e2e` and are
 # excluded from every other target above -- `go build`/`go vet`/`go test`
 # without `-tags e2e` do not even compile them (F-M5, 2026-09-02 audit: the
@@ -71,7 +80,17 @@ sqlc-diff:
 	cd postgres && sqlc diff
 
 # Local development database only -- this repository ships no server.
+# Creates (idempotently) the `ledger` database and the ledger_owner /
+# ledger_app / ledger_ro roles on the machine's shared PostgreSQL
+# (127.0.0.1:5432, or LEDGER_DEV_ADMIN_URL); no container. See
+# scripts/dev-db.sh.
 db:
+	bash scripts/dev-db.sh
+
+# The container alternative to `make db`: docker-compose.yml's PostgreSQL.
+# Explicit opt-in only; it listens on 5432 too, so stop the shared instance
+# first.
+db-docker:
 	docker compose up -d postgres
 
 # Local check for docs/openapi.yaml: catches YAML syntax errors and

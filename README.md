@@ -76,7 +76,7 @@ Core engine capabilities:
 To consume the local copy of `azex-ai/ledger` from a sibling Go module, drop a
 workspace file at the parent directory. The workspace this repo ships only
 sees its own four modules — root, `chains/evm`,
-`anchors/r2`, `anchors/r2/internal/miniotest`:
+`anchors/r2`, `anchors/r2/internal/s3test`:
 
 ```bash
 cd /path/to/parent          # e.g. /Users/aaron/azex
@@ -87,7 +87,7 @@ use (
     ./ledger
     ./ledger/chains/evm
     ./ledger/anchors/r2
-    ./ledger/anchors/r2/internal/miniotest
+    ./ledger/anchors/r2/internal/s3test
     ./your-consumer-module
 )
 EOF
@@ -346,9 +346,14 @@ Next.js frontend against it -- is in [`examples/fullstack`](examples/fullstack/)
 implements, and what [`@azex/ledger-react`](web/packages/ledger-react/)
 generates its types from.
 
-`docker-compose.yml` here starts only PostgreSQL, for local development
-(`make db`). Its `POSTGRES_USER` is the image's initial superuser, which
-already satisfies the `CREATE ROLE` prerequisite above.
+For local development, `make db` creates a `ledger` database and the
+`ledger_owner` / `ledger_app` / `ledger_ro` roles on the machine's shared
+PostgreSQL (`127.0.0.1:5432`, or `LEDGER_DEV_ADMIN_URL`) -- no container --
+and prints the two connection strings: `MIGRATE_DATABASE_URL` as the `dev`
+superuser, which satisfies the `CREATE ROLE` prerequisite above, and
+`DATABASE_URL` as `ledger_app` (`scripts/dev-db.sh`). `docker-compose.yml`
+(PostgreSQL only) remains as the explicit container alternative,
+`make db-docker`.
 
 ## Quick Start -- Frontend (React)
 
@@ -1260,7 +1265,7 @@ go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1
 go test ./core -run=^$ -fuzz=FuzzJournalValidate   -fuzztime=30s
 go test ./core -run=^$ -fuzz=FuzzLifecycleValidate -fuzztime=30s
 
-# Benchmarks (requires Docker)
+# Benchmarks (PostgreSQL at DATABASE_URL or 127.0.0.1:5432)
 go test ./postgres/ -bench=. -benchtime=3s -run=^$
 ```
 

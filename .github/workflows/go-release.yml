@@ -65,6 +65,29 @@ jobs:
         working-directory: anchors/r2
       - run: go test -race -timeout 5m -count=1 ./...
         working-directory: anchors/r2
+      # anchors/r2's Object Lock (WORM) assertion is behind `-tags s3worm`
+      # because it needs a real S3 server with Object Lock; every other r2 test
+      # runs against the in-process fake (internal/s3test). Locally it is
+      # `make test-r2-worm` against a native MinIO (docs/TESTING.md); here the
+      # server is a container. pgsty/minio is a community build of the archived
+      # MinIO source (minio/minio left Docker Hub in September 2026), pinned to
+      # a dated release tag AND its multi-arch OCI index digest so the bytes CI
+      # runs are fixed; re-derive the digest with
+      # `docker buildx imagetools inspect pgsty/minio:<tag>` (top-level Digest).
+      - name: Start MinIO for the anchors/r2 Object Lock test
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+      - name: Test anchors/r2 Object Lock (s3worm)
+        run: go test -tags s3worm -race -timeout 5m -count=1 -run TestAnchor_ObjectLock ./...
+        working-directory: anchors/r2
       # R-3 (2026-09-04 recheck): go-verify.yml's vulncheck job scans this
       # module, but go-verify.yml is root-module-shaped and these two jobs
       # are hand-written rather than callers of it -- so an
