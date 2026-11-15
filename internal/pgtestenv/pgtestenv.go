@@ -43,6 +43,147 @@ const ClusterMigrationLockKey int64 = 2573143714
 // Arbitrary fixed value; must not collide with ClusterMigrationLockKey.
 const RunLockKey int64 = 2573143715
 
+// RoleGraphTestLockKey is the advisory lock (on the cluster's `postgres`
+// database) that a test holds EXCLUSIVELY while it creates throwaway
+// migration-credential roles and asserts on the cluster-wide ledger_owner
+// membership graph (HoldRoleGraphTestLock). That graph is shared by every
+// test process on the server: without the lock, one process's runner role,
+// granted ledger_owner mid-run, shows up in another process's "membership
+// unchanged" assertion. Arbitrary fixed value; distinct from the keys above.
+const RoleGraphTestLockKey int64 = 2573143716
+
+// HoldRoleGraphTestLock takes RoleGraphTestLockKey exclusively on its own
+// connection, polling (try + wait) until ctx ends, and returns the function
+// that releases it. Try + poll, not the blocking form, for the same reason
+// as HoldRunLock.
+func HoldRoleGraphTestLock(ctx context.Context, base string) (release func(), err error) {
+	maint, err := MaintenanceURL(base)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := pgx.Connect(ctx, maint)
+	if err != nil {
+		return nil, fmt.Errorf("pgtestenv: connect for role-graph test lock: %w", err)
+	}
+	release = func() { _ = conn.Close(context.WithoutCancel(ctx)) }
+	for {
+		var got bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", RoleGraphTestLockKey).Scan(&got); err != nil {
+			release()
+			return nil, fmt.Errorf("pgtestenv: take role-graph test lock: %w", err)
+		}
+		if got {
+			return release, nil
+		}
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, fmt.Errorf("pgtestenv: role-graph test lock still held by another test: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// SharedRolePasswordLockKey is the transaction-scoped advisory lock, taken
+// on the cluster's `postgres` database (advisory locks are per database), held
+// around ALTER ROLE ... PASSWORD on the shared roles so concurrent test
+// processes never update the same pg_authid row at once
+// (postgrestest.SetSharedRolePassword, scripts/dev-db.sh).
+const SharedRolePasswordLockKey int64 = 2573143717
+
+// ProcessLockNamespace is the first key of the two-key advisory lock
+// (ProcessLockNamespace, pid) that every ledger test process holds
+// EXCLUSIVELY (on the cluster's `postgres` database) for as long as it runs
+// (HoldProcessLock). Holding it marks the process's own databases
+// ledger_test_<pid>_* as alive; a lock nobody holds means the process that
+// created ledger_test_<pid>_0 has exited, so ReclaimOrphanTemplates may drop
+// it. Two-key locks live in a different key space from the bigint locks
+// above, so this cannot collide with them. Arbitrary fixed value.
+const ProcessLockNamespace int32 = 25731437
+
+// TemplateDatabaseName is the migrated template database of test process
+// pid (n = 0, which DatabaseName's per-process counter never issues).
+func TemplateDatabaseName(pid int) string {
+	return DatabaseName(pid, 0)
+}
+
+// templateDatabaseName matches TemplateDatabaseName's output only.
+var templateDatabaseName = regexp.MustCompile(`^ledger_test_([0-9]+)_0$`)
+
+// HoldProcessLock takes (ProcessLockNamespace, pid) exclusively on conn, a
+// connection to the cluster's `postgres` database that the caller keeps open
+// for the rest of the process. It polls (try + wait) because a concurrent
+// ReclaimOrphanTemplates holds the lock for a moment while it checks pid; it
+// fails when ctx ends first, which means another LIVE test process on this
+// server has the same pid (another machine or container pointed at it) --
+// the template name would be shared, so the run must not continue.
+func HoldProcessLock(ctx context.Context, conn *pgx.Conn, pid int) error {
+	for {
+		var got bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1::int4, $2::int4)", ProcessLockNamespace, int32(pid)).Scan(&got); err != nil {
+			return fmt.Errorf("pgtestenv: take process lock: %w", err)
+		}
+		if got {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("pgtestenv: process lock for pid %d is held by another live test process on this server "+
+				"(same pid on another machine or container), so this process's database names would collide: %w", pid, ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// ReclaimOrphanTemplates drops the template databases (ledger_test_<pid>_0)
+// of test processes that have exited: those whose process lock it can take.
+// It never touches ownPID's template, nor any other name. Only templates are
+// reclaimed here: per-test databases are dropped by their own t.Cleanup, and
+// a ledger test process from before process locks existed holds none, so
+// reclaiming its per-test databases by this rule would drop live ones (it
+// never creates a template, so its databases never match).
+func ReclaimOrphanTemplates(ctx context.Context, base string, ownPID int) error {
+	maint, err := MaintenanceURL(base)
+	if err != nil {
+		return err
+	}
+	conn, err := pgx.Connect(ctx, maint)
+	if err != nil {
+		return fmt.Errorf("pgtestenv: connect for template reclaim: %w", err)
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+
+	dbs, err := names(ctx, conn, `SELECT datname FROM pg_database WHERE datname LIKE 'ledger\_test\_%\_0' ORDER BY 1`)
+	if err != nil {
+		return err
+	}
+	for _, db := range dbs {
+		m := templateDatabaseName.FindStringSubmatch(db)
+		if m == nil {
+			continue
+		}
+		var pid int64
+		if _, err := fmt.Sscan(m[1], &pid); err != nil || pid == int64(ownPID) || pid > int64(^uint32(0)>>1) {
+			continue
+		}
+		var got bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1::int4, $2::int4)", ProcessLockNamespace, int32(pid)).Scan(&got); err != nil {
+			return fmt.Errorf("pgtestenv: try process lock %d: %w", pid, err)
+		}
+		if !got {
+			continue // its process is alive
+		}
+		_, dropErr := conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{db}.Sanitize()+" WITH (FORCE)")
+		if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1::int4, $2::int4)", ProcessLockNamespace, int32(pid)); err != nil {
+			return fmt.Errorf("pgtestenv: release process lock %d: %w", pid, err)
+		}
+		if dropErr != nil {
+			return fmt.Errorf("pgtestenv: drop orphan template %s: %w", db, dropErr)
+		}
+	}
+	return nil
+}
+
 // DefaultRoleNames are the cluster-wide roles the production migrations
 // create. Ordinary tests share them (the migrations create them idempotently,
 // exactly as a second ledger database on a production cluster would).

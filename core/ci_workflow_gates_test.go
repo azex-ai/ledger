@@ -7,7 +7,7 @@ package core_test
 //     instead of sharing them, and fell behind (missing lint, sqlc-diff,
 //     govulncheck, both submodules) without anything noticing.
 //   - go.work lists five workspace modules; two (internal/postgrestest,
-//     anchors/r2/internal/miniotest) had zero go vet/lint/build coverage in
+//     anchors/r2/internal/miniotest -- now internal/s3test) had zero go vet/lint/build coverage in
 //     ci.yml, and nothing would have caught a sixth module added the same
 //     way.
 //   - chains/evm/e2e_test.go's `//go:build e2e` tag was never passed by any
@@ -157,7 +157,7 @@ func workspaceModules(t *testing.T) []string {
 // moduleHasTests reports whether a module directory contains any _test.go
 // file, so "must run go test" is derived from the tree rather than from a
 // list somebody keeps in sync. internal/postgrestest and
-// anchors/r2/internal/miniotest have none -- they are fixtures -- and are
+// anchors/r2/internal/s3test have none -- they are fixtures -- and are
 // correctly not required to have a test step.
 func moduleHasTests(t *testing.T, module string) bool {
 	t.Helper()
@@ -277,7 +277,7 @@ func TestGoVerifyRunsRealCommandsForEveryModule(t *testing.T) {
 		// from this matrix, so `govulncheck ./...` running in the root and
 		// nowhere else was invisible -- anchors/r2 (aws-sdk-go-v2) and
 		// chains/evm (go-ethereum) shipped unscanned. Required only for
-		// modules a consumer can import: the remaining `internal/` MinIO
+		// modules a consumer can import: the remaining `internal/` fake-S3
 		// fixture module is test-only (the PostgreSQL fixture now lives in
 		// the root module), and scanning it would report CVEs on code
 		// no production path can reach -- the precise thing govulncheck's
@@ -348,7 +348,7 @@ func TestGoVerifyFetchesHistoryWhereTheBreakingGatesRun(t *testing.T) {
 }
 
 // goWorkUseLine matches one module path inside go.work's `use (...)` block,
-// e.g. "	./anchors/r2/internal/miniotest".
+// e.g. "	./anchors/r2/internal/s3test".
 var goWorkUseLine = regexp.MustCompile(`(?m)^\s*\./(\S+)\s*$`)
 
 // TestGoWorkModulesAllCoveredByGoVerify pins F-m8's general shape: every
@@ -357,7 +357,7 @@ var goWorkUseLine = regexp.MustCompile(`(?m)^\s*\./(\S+)\s*$`)
 // itself, not a hand-copied list, so a sixth module added to the workspace
 // without a matching CI step goes red here instead of silently shipping
 // with zero vet/lint/build/test coverage the way
-// internal/postgrestest and anchors/r2/internal/miniotest did.
+// internal/postgrestest and anchors/r2/internal/miniotest (now internal/s3test) did.
 func TestGoWorkModulesAllCoveredByGoVerify(t *testing.T) {
 	raw, err := os.ReadFile("../go.work")
 	if err != nil {
@@ -558,7 +558,7 @@ func TestCustomBuildTagsAppearInCIOrMakefile(t *testing.T) {
 // consumerReachableModule reports whether a workspace module can end up in
 // an ordinary external consumer's build. Go's `internal/` import restriction
 // prevents those consumers from importing these test helpers, so the
-// anchors/r2/internal/miniotest module is excluded from the production matrix.
+// anchors/r2/internal/s3test module is excluded from the production matrix.
 // internal/postgrestest is a package in the root module, not a workspace module.
 func consumerReachableModule(module string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(module), "/") {

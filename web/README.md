@@ -43,8 +43,9 @@ server-held key.
 ## Getting Started
 
 This repository ships no server binary: bring your own host application, or
-run `examples/fullstack/backend` against a local PostgreSQL (`docker compose up
--d postgres` from the repo root starts the database and nothing else). Then:
+run `examples/fullstack/backend` against a local PostgreSQL (`make db` from the
+repo root creates its database on the machine's shared instance, no container).
+Then:
 
 ```bash
 npm install

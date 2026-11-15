@@ -28,7 +28,7 @@ Normal Go dependency and build caches remain available for reuse.
 | --- | --- | --- |
 | Root | `ledger`, `core`, `presets`; facade wiring and three fixed conversion checks | `github.com/azex-ai/ledger` → checkout root |
 | EVM | `chains/evm` constructors wired to `core.ChainReader`, `core.ChainScanner`, `core.Sweeper` | Root, plus `github.com/azex-ai/ledger/chains/evm` → `chains/evm` |
-| R2 | `anchors/r2.New` wired to `core.Anchor` | Root, plus `github.com/azex-ai/ledger/anchors/r2` → `anchors/r2`, and its test fixture module → `anchors/r2/internal/miniotest` |
+| R2 | `anchors/r2.New` wired to `core.Anchor` | Root, plus `github.com/azex-ai/ledger/anchors/r2` → `anchors/r2`, and its test fixture module → `anchors/r2/internal/s3test` |
 
 The script prints these host `go.mod` files before resolution. Its `v0.0.0`
 requirements are local placeholders paired with explicit replacements, not
@@ -36,10 +36,10 @@ published version claims. The source probes live in `scripts/consumer-*.go.txt`;
 each is copied to its host as `main.go`. Optional adapter wiring is compiled
 without invoking it. The root executable retains the USDC / INPUT_TOKEN / ROSE
 to CREDITS conversion checks. No PostgreSQL, RPC node, signer, R2 credentials,
-MinIO, or Docker daemon is needed, and no financial operation is submitted.
+S3 server, or Docker daemon is needed, and no financial operation is submitted.
 
-The production package graph must exclude `internal/miniotest`,
-`internal/postgrestest`, testcontainers, Docker, and moby. The root graph also
+The production package graph must exclude `internal/s3test`,
+`internal/postgrestest`, gofakes3, testcontainers, Docker, and moby. The root graph also
 excludes the EVM / R2 adapters and their Ethereum / AWS SDK packages. This is a
 package-import assertion: test-only modules may still appear in `go.mod`,
 `go.sum`, or downloaded cache entries after tidy.
@@ -53,7 +53,7 @@ the consumer gate checks an external host's dependency resolution and compilatio
 
 With `GOWORK=off`, the host's `go.mod` controls replacement resolution;
 replacements in dependency modules do not apply. `go mod tidy` also loads
-imports from dependency tests, so R2's test import of `internal/miniotest`
+imports from dependency tests, so R2's test import of `internal/s3test`
 must resolve even though it is absent from the production package graph.
 These are documented Go behaviors, not custom loader rules. See the official
 [replacement rules](https://go.dev/ref/mod#go-mod-file-replace),
@@ -61,7 +61,7 @@ These are documented Go behaviors, not custom loader rules. See the official
 [GOWORK setting](https://go.dev/ref/mod#environment-variables).
 
 The checked-in EVM and R2 modules currently require the root at a zero
-pseudo-version; R2 also requires its MinIO fixture at a zero pseudo-version.
+pseudo-version; R2 also requires its fake-S3 fixture at a zero pseudo-version.
 Their local replacements support repository development. This gate supplies
 the necessary replacements explicitly in each new host, including R2's fixture,
 so a workspace cannot conceal those requirements. It does not remove the

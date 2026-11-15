@@ -64,7 +64,7 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 
 	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", appPassword))
@@ -280,7 +280,7 @@ func TestLedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 
 	const appPassword = postgrestest.SharedRolePassword
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 
 	baseURL := roleURLFromPool(pool)
@@ -503,7 +503,7 @@ func newAppPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	password := postgrestest.SharedRolePassword
 	holdACLGuard(t, pool)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 	appPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_app", password))
 	require.NoError(t, err)
@@ -518,7 +518,7 @@ func newRoPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	password := postgrestest.SharedRolePassword
 	holdACLGuard(t, pool)
 	ctx := context.Background()
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_ro WITH PASSWORD '%s'", password))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_ro")
 	require.NoError(t, err)
 	roPool, err := pgxpool.New(ctx, withRole(t, roleURLFromPool(pool), "ledger_ro", password))
 	require.NoError(t, err)

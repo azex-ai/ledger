@@ -81,7 +81,7 @@ func newRootAppPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	password := postgrestest.SharedRolePassword
 	ctx := context.Background()
 
-	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
+	err := postgrestest.SetSharedRolePassword(ctx, pool, "ledger_app")
 	require.NoError(t, err)
 
 	cfg := pool.Config().ConnConfig

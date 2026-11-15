@@ -6394,11 +6394,16 @@ both documented in that package and in `docs/RUNBOOK.md`:
 - `anchortest.TestCheck_OutOfBandPhaseIsSkippedNotPassedWithoutTheHook` --
   the phase must report as skipped, not silently pass.
 - `anchors/r2.TestAnchor_Conformance` -- runs the full suite, out-of-band
-  hook supplied, against MinIO with Object Lock AND a COMPLIANCE default
-  retention (before this round the test bucket set no retention at all, so
-  it ran plain S3 semantics while the code discussed WORM).
-- `anchors/r2.TestAnchor_ObjectLockRefusesDeletingAPublishedVersion` --
-  the retention is real and observable.
+  hook supplied, against an in-process S3 server (`internal/s3test`), and
+  against a real MinIO with `-tags s3server` (`make test-r2-s3server`, CI).
+  The suite exercises the anchor's own logic, which does not depend on
+  Object Lock; the lock is asserted on its own, below.
+- `anchors/r2.TestAnchor_ObjectLockRefusesDeletingAPublishedVersion`
+  (`-tags s3server`, `make test-r2-s3server`, a real MinIO in CI) -- against a
+  bucket with Object Lock AND a COMPLIANCE default retention, the retention
+  is real and observable (before the 2026-09-02 round the test bucket set no
+  retention at all, so it ran plain S3 semantics while the code discussed
+  WORM).
 - `anchors/r2.TestAnchor_PublishIsCreateOnlyPerSeq` /
   `TestAnchor_HeadFailsClosedOnAForeignObject`.
 ## I-57: Every object in the schema belongs to `ledger_owner`, and a migration that creates one cannot forget to say so

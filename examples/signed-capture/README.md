@@ -9,7 +9,7 @@ issuance/redemption, not fiat revenue recognition or provider payment.
 ## Run
 
 From the repository root, the tests create and remove isolated PostgreSQL
-databases. They use PostgreSQL 17 through Docker when `DATABASE_URL` is unset:
+databases. When `DATABASE_URL` is unset they use the shared local PostgreSQL (`postgres://dev:dev@127.0.0.1:5432/postgres`, docs/TESTING.md):
 
 ```sh
 go test -race -timeout 5m ./examples/signed-capture/... -count=1

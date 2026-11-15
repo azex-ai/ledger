@@ -21,13 +21,36 @@ a full suite into a successful skip.
   `ledger_test_<pid>_<n>` and drops it in `t.Cleanup`. The pid keeps names
   unique across the package binaries of one `go test ./...` and across
   concurrent runs from different worktrees on the same server.
+- **Migrated template.** Migrations run once per test process, not per
+  test: the first `postgrestest.SetupDB` migrates `ledger_test_<pid>_0` with
+  `postgres.Migrate`, and every `SetupDB` copies it (`CREATE DATABASE ...
+  TEMPLATE`), then re-applies the state migrations set on the database object
+  itself, which a copy does not inherit (migration 030's `REVOKE TEMPORARY`;
+  pinned by `TestTemplateCopyMatchesTheTemplate`). Per-test `Migrate` made
+  every test queue on the cluster-wide migration lock behind every other test
+  process on the server. The template lives as long as its process; the
+  cleanup below removes it, so a direct `go test` leaves one per package
+  binary until `make test-clean-db`. `SetupRawDB` still hands out an empty,
+  unmigrated database.
 - **Shared roles.** The production migrations create the cluster-wide roles
   `ledger_owner` / `ledger_app` / `ledger_ro` idempotently, exactly as a
   second ledger database on a production cluster would. Ordinary tests share
   them. Tests never change the shared roles' attributes (the hardening test
   uses private role names), and a test that logs in as `ledger_app` /
   `ledger_ro` sets only `postgrestest.SharedRolePassword`, so concurrent
-  processes cannot invalidate each other's credentials.
+  processes cannot invalidate each other's credentials. It does so through
+  `postgrestest.SetSharedRolePassword`, under a transaction-scoped advisory
+  lock on the server's `postgres` database: two simultaneous `ALTER ROLE`s of
+  one role otherwise fail one side with `tuple concurrently updated`.
+- **Role graph.** Tests that create throwaway migration-credential roles and
+  assert the cluster-wide `ledger_owner` membership graph is unchanged hold
+  `pgtestenv.RoleGraphTestLockKey` exclusively for their duration, so another
+  process's runner role cannot appear in (or vanish from) their snapshot. `make db`
+  (`scripts/dev-db.sh`, the local development database `ledger` on the same
+  server) sets that same password on the three roles, so it and a running
+  suite never break each other's logins. Until `ledger` is migrated nothing
+  depends on the roles, and the cleanup below may drop them; re-run
+  `make db` then.
 - **Destructive roundtrip.** `TestMigrations_FullDownChainAndReapply` runs
   Up → full Down → Up, and the baseline's down script drops its roles. It runs
   on the same server through `postgrestest.SetupRoleIsolatedRawDB` and
@@ -75,13 +98,26 @@ isolation.
 The root `./...` pattern does not cross Go module boundaries. Verify all four:
 
 ```sh
-for module in . chains/evm anchors/r2 anchors/r2/internal/miniotest; do
+for module in . chains/evm anchors/r2 anchors/r2/internal/s3test; do
   (cd "$module" && go build ./... && go vet ./... && go test -race -timeout 15m -count=1 ./...)
 done
 make test-consumer
 ```
 
-The R2 tests additionally start MinIO containers. EVM end-to-end tests need
+The R2 tests run against an in-process fake S3 server (`internal/s3test`,
+gofakes3) -- no container, nothing to start. `make test-r2-s3server`
+(`-tags s3server`) runs the same tests against a real S3-compatible server
+that implements versioning and Object Lock (MinIO does), plus the one test
+the fake cannot serve: Object Lock refusing to delete a retained version. The
+server is `LEDGER_TEST_S3_ENDPOINT`, `LEDGER_TEST_S3_ACCESS_KEY_ID` and
+`LEDGER_TEST_S3_SECRET_ACCESS_KEY`, by default a native MinIO on this machine
+(`http://127.0.0.1:9000`, `minioadmin` / `minioadmin`; CI starts one in a
+container). An unreachable server fails that target. Each ordinary test gets
+its own `ledger-test-<random>` bucket, emptied and deleted afterwards. The
+Object Lock test reuses one bucket, `ledger-test-worm`, with a random key
+prefix per run: its objects carry a one-day COMPLIANCE retention, so neither
+they nor a bucket holding them can be deleted before it expires -- a bucket
+per run would leave one behind every time. EVM end-to-end tests need
 Foundry's `anvil`; `make test-e2e` opts into their build tag. The Linux CI workflow
 also runs three bounded 30-second fuzz jobs. Local unit or package checks do not
 stand in for those jobs.

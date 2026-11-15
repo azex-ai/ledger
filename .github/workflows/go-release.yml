@@ -61,9 +61,39 @@ jobs:
         with:
           version: v2.12.2
           working-directory: anchors/r2
+      # Again with -tags s3server: the real-S3-server fixture and the Object
+      # Lock test, which the plain run above never sees.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: anchors/r2
+          args: --build-tags=s3server
       - run: go build ./...
         working-directory: anchors/r2
       - run: go test -race -timeout 5m -count=1 ./...
+        working-directory: anchors/r2
+      # `-tags s3server` runs every anchors/r2 test against a real S3 server,
+      # plus the Object Lock (WORM) test that the in-process fake used by the
+      # plain run (internal/s3test) cannot serve. Locally it is
+      # `make test-r2-s3server` against a native MinIO (docs/TESTING.md); here the
+      # server is a container. pgsty/minio is a community build of the archived
+      # MinIO source (minio/minio left Docker Hub in September 2026), pinned to
+      # a dated release tag AND its multi-arch OCI index digest so the bytes CI
+      # runs are fixed; re-derive the digest with
+      # `docker buildx imagetools inspect pgsty/minio:<tag>` (top-level Digest).
+      - name: Start MinIO for the anchors/r2 real-server tests
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          docker logs minio
+          exit 1
+      - name: Test anchors/r2 against MinIO (s3server)
+        run: go test -tags s3server -race -timeout 5m -count=1 ./...
         working-directory: anchors/r2
       # R-3 (2026-09-04 recheck): go-verify.yml's vulncheck job scans this
       # module, but go-verify.yml is root-module-shaped and these two jobs

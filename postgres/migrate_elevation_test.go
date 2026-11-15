@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azex-ai/ledger/internal/pgtestenv"
 	"github.com/azex-ai/ledger/internal/postgrestest"
 	"github.com/azex-ai/ledger/postgres"
 )
@@ -174,9 +175,24 @@ func TestRevokeLedgerOwner_FailureIsReportedNotSwallowed(t *testing.T) {
 // postgres:17.10). Skipping that strip leaves the credential already able to
 // switch roles, which is a real deployment shape too -- but not the one every
 // first install takes.
+// holdRoleGraphTestLock serializes, across every test process on the server,
+// the tests that create throwaway migration-credential roles and assert on
+// the cluster-wide ledger_owner membership graph
+// (pgtestenv.RoleGraphTestLockKey). Call it before creating the role: the
+// release is registered first, so it runs after the role's own cleanup.
+func holdRoleGraphTestLock(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	release, err := pgtestenv.HoldRoleGraphTestLock(ctx, pgtestenv.BaseURL())
+	require.NoError(t, err)
+	t.Cleanup(release)
+}
+
 func newMigrationRunner(t *testing.T, admin *pgxpool.Pool, raw, prefix string) (name, runnerURL string) {
 	t.Helper()
 	ctx := context.Background()
+	holdRoleGraphTestLock(t)
 
 	var dbName string
 	require.NoError(t, admin.QueryRow(ctx, "SELECT current_database()").Scan(&dbName))

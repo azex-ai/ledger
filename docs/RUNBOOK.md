@@ -1437,13 +1437,14 @@ a consumer who uses a different carrier (or none at all). Only a consumer
 that explicitly imports `anchors/r2` compiles against it.
 
 It speaks the plain S3 API (`github.com/aws/aws-sdk-go-v2/service/s3`), so
-it is exercised in this repo's own test suite against a local MinIO
-container rather than real R2 — the carrier's actual reachability,
-credentials, and Object Lock configuration on the real bucket are verified
-by the deployer, per point 1 of the four carrier properties above (not
-something a black-box Go test run in CI can prove). The MinIO
-testcontainers dependency lives in a test-only sibling module,
-`anchors/r2/internal/miniotest`, so it is not a direct dependency of
+it is exercised in this repo's own test suite against an in-process fake
+S3 server (gofakes3) rather than real R2, and again, with its Object Lock
+assertion, against a real MinIO (`-tags s3server`, `make test-r2-s3server`) — the carrier's
+actual reachability, credentials, and Object Lock configuration on the real
+bucket are verified by the deployer, per point 1 of the four carrier
+properties above (not something a black-box Go test run in CI can prove).
+The fake server's dependency lives in a test-only sibling module,
+`anchors/r2/internal/s3test`, so it is not a direct dependency of
 `anchors/r2` itself and does not reach a consumer's dependency graph (MJ-6,
 2026-08-29 review; the same split `internal/postgrestest` uses for the root
 module — see the root CLAUDE.md "go.work" gotcha for the exact SBOM/lockfile
@@ -1462,7 +1463,7 @@ tag `v0.6.0` (`goproxy.cn` measured) fails with `does not contain package
 `go mod tidy` fails everywhere, for two independent reasons: the tagged root
 does not contain `anchortest` (a test-only import of `anchors/r2`, which
 `tidy` walks and `build`/`get` do not), and `anchors/r2`'s own `replace` of
-`internal/miniotest` names a relative path with no published version. Until
+`internal/s3test` names a relative path with no published version. Until
 the release CI pushes a submodule-scoped tag and keeps the root in sync,
 consume the submodules from a local checkout via a parent-directory `go.work`
 (see the README's "Local Development with go.work"), which sidesteps all of

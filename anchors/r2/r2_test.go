@@ -12,54 +12,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/azex-ai/ledger/anchors/r2"
-	"github.com/azex-ai/ledger/anchors/r2/internal/miniotest"
 	"github.com/azex-ai/ledger/anchortest"
 	"github.com/azex-ai/ledger/core"
 )
-
-// createLockedBucket creates bucket with Object Lock enabled AND a default
-// retention period -- the same bucket-level configuration docs/RUNBOOK.md
-// asks a production deployer to set up on the real R2 bucket.
-//
-// The retention is not decoration (2026-09-02 audit, F-m11): before this
-// change the test bucket enabled Object Lock and deliberately set NO default
-// retention, so every object was in fact freely deletable and the suite ran
-// against plain S3 semantics while the code's comments talked about WORM.
-// With a default retention in place, TestAnchor_ObjectLockRefusesDeletingA
-// PublishedVersion below can actually observe the guarantee.
-//
-// COMPLIANCE mode, 1 day: GOVERNANCE mode can be bypassed by a caller with
-// s3:BypassGovernanceRetention, which would make the assertion depend on the
-// test credential's policy rather than on the lock.
-func createLockedBucket(t *testing.T, endpoint, accessKey, secret, bucket string) {
-	t.Helper()
-	client := newRawClient(endpoint, accessKey, secret)
-	_, err := client.CreateBucket(context.Background(), &s3.CreateBucketInput{
-		Bucket:                     aws.String(bucket),
-		ObjectLockEnabledForBucket: aws.Bool(true),
-	})
-	if err != nil {
-		t.Fatalf("create locked bucket: %v", err)
-	}
-	_, err = client.PutObjectLockConfiguration(context.Background(), &s3.PutObjectLockConfigurationInput{
-		Bucket: aws.String(bucket),
-		ObjectLockConfiguration: &types.ObjectLockConfiguration{
-			ObjectLockEnabled: types.ObjectLockEnabledEnabled,
-			Rule: &types.ObjectLockRule{
-				DefaultRetention: &types.DefaultRetention{
-					Mode: types.ObjectLockRetentionModeCompliance,
-					Days: aws.Int32(1),
-				},
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("configure default object-lock retention: %v", err)
-	}
-}
 
 // newRawClient is the "attacker's" client: the same S3 API this package
 // speaks, used directly, without going through Publish. This is what makes
@@ -77,9 +34,7 @@ func newRawClient(endpoint, accessKey, secret string) *s3.Client {
 const testPrefix = "anchor/head"
 
 func TestAnchor_Conformance(t *testing.T) {
-	endpoint, accessKey, secret := miniotest.Fixture(t)
-	const bucket = "ledger-anchor-conformance"
-	createLockedBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	newAnchor := func() core.Anchor {
 		a, err := r2.New(r2.Config{
@@ -158,9 +113,7 @@ func TestNew_ValidatesConfig(t *testing.T) {
 //     overwritten;
 //   - re-publishing it with identical bytes is an idempotent success.
 func TestAnchor_PublishIsCreateOnlyPerSeq(t *testing.T) {
-	endpoint, accessKey, secret := miniotest.Fixture(t)
-	const bucket = "ledger-anchor-create-only"
-	createLockedBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	a, err := r2.New(r2.Config{
 		Endpoint:        endpoint,
@@ -214,9 +167,7 @@ func TestAnchor_PublishIsCreateOnlyPerSeq(t *testing.T) {
 // confident number. Silently skipping it would mean answering "the head is
 // 2" about a prefix somebody else is also writing to.
 func TestAnchor_HeadFailsClosedOnAForeignObject(t *testing.T) {
-	endpoint, accessKey, secret := miniotest.Fixture(t)
-	const bucket = "ledger-anchor-foreign-object"
-	createLockedBucket(t, endpoint, accessKey, secret, bucket)
+	endpoint, accessKey, secret, bucket := testBucket(t)
 
 	a, err := r2.New(r2.Config{
 		Endpoint:        endpoint,
@@ -246,67 +197,6 @@ func TestAnchor_HeadFailsClosedOnAForeignObject(t *testing.T) {
 	if _, _, err := a.Head(ctx); err == nil {
 		t.Fatal("Head with a foreign object under the prefix: expected an error, got nil")
 	}
-}
-
-// TestAnchor_ObjectLockRefusesDeletingAPublishedVersion is the WORM
-// assertion this package's tests were missing entirely (2026-09-02 audit,
-// F-m11): the bucket had Object Lock "enabled" with no retention, so nothing
-// was actually protected and the suite proved nothing about immutability.
-//
-// It also documents the guarantee's real boundary, which the audit's M-4
-// hinges on: retention stops deletion of a specific VERSION, and does NOT
-// stop a plain DELETE from writing a delete marker that hides the object
-// from a listing. That is why docs/RUNBOOK.md's ledger-side credential must
-// not carry DeleteObject at all -- and why service.VerifyLedger records
-// every anchor observation (migration 018) instead of trusting the carrier
-// to be un-erasable.
-func TestAnchor_ObjectLockRefusesDeletingAPublishedVersion(t *testing.T) {
-	endpoint, accessKey, secret := miniotest.Fixture(t)
-	const bucket = "ledger-anchor-worm"
-	createLockedBucket(t, endpoint, accessKey, secret, bucket)
-
-	a, err := r2.New(r2.Config{
-		Endpoint:        endpoint,
-		AccessKeyID:     accessKey,
-		SecretAccessKey: secret,
-		Bucket:          bucket,
-		Key:             testPrefix,
-		Region:          "us-east-1",
-	})
-	if err != nil {
-		t.Fatalf("new anchor: %v", err)
-	}
-	ctx := context.Background()
-	head1 := []byte("11111111111111111111111111111111")
-	if err := a.Publish(ctx, 1, head1); err != nil {
-		t.Fatalf("Publish(1, ...): %v", err)
-	}
-
-	raw := newRawClient(endpoint, accessKey, secret)
-	key := fmt.Sprintf("%s/seq-%020d.json", testPrefix, 1)
-	got, err := raw.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
-	if err != nil {
-		t.Fatalf("head object: %v", err)
-	}
-	versionID := aws.ToString(got.VersionId)
-	if versionID == "" {
-		t.Fatal("the bucket must be versioned for Object Lock to mean anything; got no version id")
-	}
-	if got.ObjectLockMode != types.ObjectLockModeCompliance {
-		t.Fatalf("published object lock mode = %q, want COMPLIANCE -- the default retention is not being applied, "+
-			"so this suite would be testing plain S3 semantics", got.ObjectLockMode)
-	}
-
-	if _, err := raw.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket:    aws.String(bucket),
-		Key:       aws.String(key),
-		VersionId: aws.String(versionID),
-	}); err == nil {
-		t.Fatal("deleting a retained version of a published seq: expected the lock to refuse it, got nil")
-	}
-
-	// The published head is still readable and unchanged.
-	assertHead(t, a, 1, head1)
 }
 
 func assertHead(t *testing.T, a core.Anchor, wantSeq int64, wantHead []byte) {

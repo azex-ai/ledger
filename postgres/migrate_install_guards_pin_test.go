@@ -120,6 +120,7 @@ func TestMigrate_SecondInstallWithoutAdminOptionFailsBeforeTouchingAnything(t *t
 	var dbName string
 	require.NoError(t, admin.QueryRow(ctx, "SELECT current_database()").Scan(&dbName))
 
+	holdRoleGraphTestLock(t)
 	name := fmt.Sprintf("ledger_noadmin_%d", time.Now().UnixNano())
 	const password = "no-admin-option-test-not-a-real-secret" //nolint:gosec // test-only credential
 	_, err = admin.Exec(ctx, fmt.Sprintf("CREATE ROLE %s LOGIN CREATEROLE PASSWORD '%s'", pgxIdent(name), password))
