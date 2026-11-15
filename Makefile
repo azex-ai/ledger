@@ -1,4 +1,4 @@
-.PHONY: build test test-short test-submodules test-e2e test-consumer vet lint sqlc sqlc-diff db openapi-check
+.PHONY: build test test-clean-db test-short test-submodules test-e2e test-consumer vet lint sqlc sqlc-diff db openapi-check
 
 build:
 	go build ./...
@@ -16,22 +16,29 @@ test-consumer:
 # does not cross module boundaries (go.work notwithstanding) -- see
 # test-submodules for chains/evm and anchors/r2, which this target does not
 # touch, same as CI's separate steps for them.
-# The docker probe is F-9 (2026-09-03 independent review): the postgres
-# package's integration tests used to SKIP when the daemon was down, so
-# this target printed `ok` for a package whose 100+ tests had not run.
-# postgrestest now fails instead of skipping, and this probe turns that
-# from a wall of failures deep in the run into one line before it starts.
-# DATABASE_URL plus LEDGER_TEST_ISOLATED_DATABASE_URL on a dedicated second
-# cluster run the complete suite without Docker (see docs/TESTING.md);
-# make test-short is the documented way to run without one at all.
+# PostgreSQL: one server, no Docker. The integration tests connect to
+# DATABASE_URL, or by default to the shared local instance
+# postgres://dev:dev@127.0.0.1:5432/postgres (internal/pgtestenv), and isolate
+# by database name -- every test creates and drops its own -- and, for the
+# destructive full-migration roundtrip, by role name (docs/TESTING.md). An
+# unreachable server FAILS the run (F-9, 2026-09-03 independent review: a
+# suite that did not execute is not a suite that passed); `make test-short` is
+# the explicit way to run without one.
+# pgtestclean runs afterwards, whatever go test returned. Unless another
+# ledger test process still holds the run lock (then that run cleans up), it
+# drops leftover ledger test databases/roles and the shared
+# ledger_owner/ledger_app/ledger_ro roles once nothing on the server depends
+# on them.
+# The recipe exits with go test's status, or pgtestclean's if go test passed.
 test:
-	@if { [ -z "$$DATABASE_URL" ] || [ -z "$$LEDGER_TEST_ISOLATED_DATABASE_URL" ]; } && ! docker info >/dev/null 2>&1; then \
-		echo "make test: the Docker daemon is not reachable, and the integration tests need PostgreSQL."; \
-		echo "  Start Docker, or set DATABASE_URL and LEDGER_TEST_ISOLATED_DATABASE_URL to two dedicated test clusters (docs/TESTING.md),"; \
-		echo "  or run 'make test-short' to skip every integration test (and know that you did)."; \
-		exit 1; \
-	fi
-	go test -race -timeout 15m -count=1 ./...
+	status=0; go test -race -timeout 15m -count=1 ./... || status=$$?; \
+	go run ./internal/pgtestenv/pgtestclean || { [ $$status -ne 0 ] || status=1; }; \
+	exit $$status
+
+# Removes leftover ledger test databases/roles from the test server without
+# running the suite (e.g. after a killed run or a direct `go test`).
+test-clean-db:
+	go run ./internal/pgtestenv/pgtestclean
 
 test-short:
 	go test -short -race -count=1 ./...

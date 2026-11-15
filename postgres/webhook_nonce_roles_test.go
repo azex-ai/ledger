@@ -26,7 +26,7 @@ import (
 // ingestion feature were mutually exclusive.
 //
 // It went unnoticed because the two halves were never run together: every
-// other test connects as the container superuser, for which the DELETE
+// other test connects as the test superuser, for which the DELETE
 // succeeds and the whole path looks healthy.
 //
 // Migration 002 grants the one DELETE the baseline's own comment already
@@ -35,7 +35,7 @@ func TestWebhookNonce_WorksAsLedgerApp(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	const appPassword = "webhook-nonce-test-app-password-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 
@@ -85,7 +85,7 @@ func TestWebhookNonce_SurvivesRevokedPrunePrivilege(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	const appPassword = "webhook-nonce-revoked-test-password-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, "REVOKE DELETE ON public.webhook_nonces FROM ledger_app")
@@ -139,7 +139,7 @@ func TestWebhookNonce_PruneDegradationLeavesATrace(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	const appPassword = "webhook-nonce-prune-warn-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 

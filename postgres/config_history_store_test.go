@@ -37,7 +37,7 @@ func TestConfigHistory_ReadsBackATamperedRule(t *testing.T) {
 	require.NoError(t, err)
 	history := svc.ConfigHistory()
 
-	appPool := newAppPool(t, pool, "config-history-app-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	// The attack from the threat model: an application credential that can
 	// reach the database directly unfreezes an account and moves its overdraft
@@ -139,7 +139,7 @@ func TestConfigHistory_ReadsScanCursorWrites(t *testing.T) {
 	svc, err := ledger.New(pool)
 	require.NoError(t, err)
 	history := svc.ConfigHistory()
-	appPool := newAppPool(t, pool, "config-history-cursor-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO reconcile_scan_cursors (check_name, after_holder, after_currency, lap_dirty)

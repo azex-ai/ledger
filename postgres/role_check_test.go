@@ -33,14 +33,14 @@ func TestAssertRuntimeRole_CatchesAConnectionTheACLsDoNotConstrain(t *testing.T)
 	pool := postgrestest.SetupDB(t)
 
 	t.Run("as ledger_app the check passes", func(t *testing.T) {
-		appPool := newAppPool(t, pool, "role-check-app-not-a-real-secret") //nolint:gosec
+		appPool := newAppPool(t, pool) //nolint:gosec
 		svc, err := ledger.New(appPool)
 		require.NoError(t, err)
 		require.NoError(t, svc.AssertRuntimeRole(ctx))
 	})
 
 	t.Run("as any other role it reports the mismatch, naming both", func(t *testing.T) {
-		// The test container's own superuser stands in for "whatever the
+		// The test server's superuser stands in for "whatever the
 		// operator actually wired": the point is not which role it is, only
 		// that it is not the one the grants name.
 		svc, err := ledger.New(pool)
@@ -108,6 +108,6 @@ func TestCheckRuntimeRole_IsUsableWithoutTheFacade(t *testing.T) {
 
 	require.Error(t, postgres.CheckRuntimeRole(ctx, pool, postgres.AppRole))
 
-	appPool := newAppPool(t, pool, "role-check-direct-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 	require.NoError(t, postgres.CheckRuntimeRole(ctx, appPool, postgres.AppRole))
 }

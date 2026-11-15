@@ -354,7 +354,7 @@ func TestPresetSolvency_EveryShippedTemplate(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// One currency per case: solvency is per-currency, so distinct
-			// currencies isolate the cases without a fresh container each.
+			// currencies isolate the cases without a fresh database each.
 			curUID := postgrestest.SeedCurrency(t,
 				pool,
 				fmt.Sprintf("SOLV%02d", i),

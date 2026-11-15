@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -62,7 +63,7 @@ func TestLedgerAppIsLeastPrivilege(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	const appPassword = "roles-test-app-password-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 
@@ -278,7 +279,7 @@ func TestLedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
 
-	const appPassword = "roles-test-app-password-2-not-a-real-secret" //nolint:gosec // test-only credential
+	const appPassword = postgrestest.SharedRolePassword
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", appPassword))
 	require.NoError(t, err)
 
@@ -337,7 +338,7 @@ func TestLedgerAppInsertsIntoPartitionCreatedAfterGrant(t *testing.T) {
 
 // roleURLFromPool derives a connection string from an already-connected
 // pool's resolved config, so callers can build role-specific URLs against
-// the same (dynamically-assigned, testcontainers) host/port/database
+// the same test server host/port and per-test database
 // without re-parsing a DSN string.
 func roleURLFromPool(pool *pgxpool.Pool) string {
 	cfg := pool.Config().ConnConfig
@@ -497,8 +498,9 @@ func holdACLGuard(t *testing.T, pool *pgxpool.Pool) {
 	t.Cleanup(unlock)
 }
 
-func newAppPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool {
+func newAppPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
+	password := postgrestest.SharedRolePassword
 	holdACLGuard(t, pool)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_app WITH PASSWORD '%s'", password))
@@ -511,8 +513,9 @@ func newAppPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool
 }
 
 // newRoPool is newAppPool's ledger_ro counterpart.
-func newRoPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool {
+func newRoPool(t *testing.T, pool *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
+	password := postgrestest.SharedRolePassword
 	holdACLGuard(t, pool)
 	ctx := context.Background()
 	_, err := pool.Exec(ctx, fmt.Sprintf("ALTER ROLE ledger_ro WITH PASSWORD '%s'", password))
@@ -535,7 +538,7 @@ func newRoPool(t *testing.T, pool *pgxpool.Pool, password string) *pgxpool.Pool 
 func TestAccountPoliciesGuard(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-policies-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	var policyUID string
 	require.NoError(t, pool.QueryRow(ctx, `
@@ -566,7 +569,7 @@ func TestAccountPoliciesGuard(t *testing.T) {
 func TestBookingsAndEventsGuards(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-bookevt-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	currencyUID := postgrestest.SeedCurrency(t, pool, "BEG", "BookEventGuard")
 	classUID := postgrestest.SeedClassification(t, pool, "beg_wallet", "BEG Wallet", "debit", false)
@@ -658,7 +661,7 @@ func TestBookingsAndEventsGuards(t *testing.T) {
 func TestIdempotencyReceiptTablesRefuseTheAppCredential(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-receipts-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	currencyUID := postgrestest.SeedCurrency(t, pool, "RCT", "ReceiptGuard")
 	currencyID := postgrestest.InternalID(t, pool, "currencies", currencyUID)
@@ -754,7 +757,7 @@ func TestIdempotencyReceiptTablesRefuseTheAppCredential(t *testing.T) {
 func TestReconcileScanCursorChangesAudited(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-cursor-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	_, err := pool.Exec(ctx, "INSERT INTO reconcile_scan_cursors (check_name, lap_dirty) VALUES ('rt_checkpoint_balance', true)")
 	require.NoError(t, err)
@@ -801,7 +804,7 @@ func TestReconcileScanCursorChangesAudited(t *testing.T) {
 func TestConfigTableChangesAudited(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-cfgaudit-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	currencyUID := postgrestest.SeedCurrency(t, pool, "CTC", "ConfigTableChangeGuard")
 
@@ -845,7 +848,7 @@ func TestConfigTableChangesAudited(t *testing.T) {
 func TestLedgerRoCannotReadWebhookSecret(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	roPool := newRoPool(t, pool, "roles-test-ro-webhook-not-a-real-secret") //nolint:gosec
+	roPool := newRoPool(t, pool) //nolint:gosec
 
 	_, err := pool.Exec(ctx, "INSERT INTO webhook_subscribers (name, url, secret) VALUES ('acme', 'https://acme.test/hook', 'super-secret-hmac-key')")
 	require.NoError(t, err)
@@ -895,39 +898,32 @@ func TestLedgerRoCannotReadWebhookSecret(t *testing.T) {
 // permission-denied assertion it makes then fails) or could run its own
 // Migrate and reset the attribute out from under the sanity check below.
 //
-// (a) is fixed by driving the real migration set. (b) is fixed by holding the
-// cluster-wide advisory lock Migrate holds for its whole run (I-47), which
-// makes this test and every concurrent Migrate mutually exclusive -- and, as
-// of m-3 (W3 adversarial review of the gates), by every ACL-asserting test
-// taking that same lock in SHARED mode through newAppPool/newRoPool. This
-// comment previously said (b) was fixed by the exclusive lock alone; it was
-// not. Migrate was excluded, the six files asserting permission-denied
-// against ledger_app were not, and during the window below ledger_app really
-// is a superuser to them. The
-// migration is driven through golang-migrate directly rather than through
-// postgres.Migrate for exactly one reason: postgres.Migrate would try to take
-// that same lock and deadlock against this test's own hold.
+// (a) is fixed by driving the real migration set. (b) used to be fixed by
+// holding the cluster migration lock exclusively (I-47) while every
+// ACL-asserting test held it shared -- but tests that never take the lock
+// (and other worktrees' runs on a shared server) could still see the shared
+// ledger_app as SUPERUSER. Since 2026-11-15 the test does not touch the
+// shared roles at all: it installs through postgrestest's role-rewriting
+// migration source, so the "pre-existing" role it elevates and the role 007
+// then hardens are this test's private ledger_test_<pid>_<n>_app. Only the
+// name differs; the statements are the real migration set's.
 func TestRoleAttributeHardeningResetsPreExistingPrivileges(t *testing.T) {
 	ctx := context.Background()
-	pool := postgrestest.SetupDB(t)
+	isolated := postgrestest.SetupRoleIsolatedRawDB(t)
+	admin, err := pgxpool.New(ctx, isolated.ConnString)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	app := isolated.Roles.App
 
-	unlock, err := postgres.AcquireClusterLockForTest(pool.Config().ConnString())
-	require.NoError(t, err, "role attributes are cluster-wide; this test must not race a concurrent Migrate")
-	defer unlock()
-
-	_, err = pool.Exec(ctx, "ALTER ROLE ledger_app SUPERUSER CREATEROLE CREATEDB REPLICATION BYPASSRLS")
+	_, err = admin.Exec(ctx, "CREATE ROLE "+pgx.Identifier{app}.Sanitize()+
+		" LOGIN SUPERUSER CREATEROLE CREATEDB REPLICATION BYPASSRLS")
 	require.NoError(t, err, "simulating a role this install did not create with elevated attributes already set")
-	t.Cleanup(func() {
-		// Belt and braces: if the assertions below fail, the role must still
-		// not be left SUPERUSER for whatever runs next on this cluster.
-		_, _ = pool.Exec(context.Background(), "ALTER ROLE ledger_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
-	})
 
 	attrs := func() (super, createRole, createDB, replication, bypassRLS bool) {
-		require.NoError(t, pool.QueryRow(ctx, `
+		require.NoError(t, admin.QueryRow(ctx, `
 			SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
-			FROM pg_roles WHERE rolname = 'ledger_app'
-		`).Scan(&super, &createRole, &createDB, &replication, &bypassRLS))
+			FROM pg_roles WHERE rolname = $1
+		`, app).Scan(&super, &createRole, &createDB, &replication, &bypassRLS))
 		return
 	}
 
@@ -935,12 +931,11 @@ func TestRoleAttributeHardeningResetsPreExistingPrivileges(t *testing.T) {
 	require.True(t, super && createRole && createDB && replication && bypassRLS,
 		"sanity: the simulated over-privileged state must actually be in place")
 
-	// A real install onto this already-populated cluster: a fresh database,
-	// the whole migration set, the actual statements in 007.
-	raw := postgrestest.SetupRawDB(t)
-	src, err := postgres.NewMigrationSource()
+	// A real install onto a cluster where the app role already exists: the
+	// whole migration set, the actual statements in 007.
+	src, err := postgrestest.NewRoleRewritingMigrationSource(isolated.Prefix)
 	require.NoError(t, err)
-	m, err := migrate.NewWithSourceInstance("iofs", src, strings.Replace(raw, "postgres://", "pgx5://", 1))
+	m, err := migrate.NewWithSourceInstance("iofs", src, strings.Replace(isolated.ConnString, "postgres://", "pgx5://", 1))
 	require.NoError(t, err)
 	defer m.Close()
 	require.NoError(t, m.Up())
@@ -961,7 +956,7 @@ func TestRoleAttributeHardeningResetsPreExistingPrivileges(t *testing.T) {
 func TestPartitionMaintenanceRejectsUnshapedPartitionNames(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-partname-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	t.Run("rejects a name that does not match the monthly-partition shape", func(t *testing.T) {
 		var created bool

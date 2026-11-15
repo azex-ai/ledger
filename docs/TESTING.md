@@ -1,49 +1,74 @@
 # Testing the checkout
 
 Run `make test` for the root module's uncached race suite. Integration tests use
-real PostgreSQL 17. The normal fixture shares a server but creates and cleans up
-a separate database for each test. Docker is the default; `DATABASE_URL` can
-point to an externally provided **test** server instead.
+real PostgreSQL — no mocked DB — on **one server**, with no Docker,
+testcontainers or second cluster:
 
-## Destructive migration roundtrip
+- `DATABASE_URL` unset: the shared local instance
+  `postgres://dev:dev@127.0.0.1:5432/postgres?sslmode=disable`
+  (`internal/pgtestenv.DefaultDatabaseURL`; Homebrew `postgresql@18`).
+- `DATABASE_URL` set: that **test** server instead (CI uses a service container).
 
-`TestMigrations_FullDownChainAndReapply` executes Up → full Down → Up, including
-dropping cluster-wide ledger roles. A separate database on the normal test
-server is insufficient. `SetupIsolatedRawDB` therefore starts a separate temporary
-PostgreSQL 17 container and terminates it with `t.Cleanup`, even when ordinary
-tests use an external `DATABASE_URL`.
+The connecting user must be able to `CREATE DATABASE`, `CREATE ROLE` and run the
+migrations' privileged statements; use a test superuser. An unreachable server
+fails the run. Only `make test-short` / `go test -short` explicitly skips
+PostgreSQL tests; neither a missing server nor a missing Docker daemon may turn
+a full suite into a successful skip.
 
-To run the complete suite without Docker, provide **two independently initialized
-PostgreSQL clusters**:
+## Isolation on a shared server
+
+- **Databases.** Every test creates its own database
+  `ledger_test_<pid>_<n>` and drops it in `t.Cleanup`. The pid keeps names
+  unique across the package binaries of one `go test ./...` and across
+  concurrent runs from different worktrees on the same server.
+- **Shared roles.** The production migrations create the cluster-wide roles
+  `ledger_owner` / `ledger_app` / `ledger_ro` idempotently, exactly as a
+  second ledger database on a production cluster would. Ordinary tests share
+  them. Tests never change the shared roles' attributes (the hardening test
+  uses private role names), and a test that logs in as `ledger_app` /
+  `ledger_ro` sets only `postgrestest.SharedRolePassword`, so concurrent
+  processes cannot invalidate each other's credentials.
+- **Destructive roundtrip.** `TestMigrations_FullDownChainAndReapply` runs
+  Up → full Down → Up, and the baseline's down script drops its roles. It runs
+  on the same server through `postgrestest.SetupRoleIsolatedRawDB` and
+  `postgrestest.NewRoleRewritingMigrationSource`: the embedded migrations are
+  served with `ledger_owner` / `ledger_app` / `ledger_ro` rewritten to private
+  `ledger_test_<pid>_<n>_{owner,app,ro}`, so the down chain drops only this
+  test's roles. Production never goes through the rewrite:
+  `postgres.NewMigrationSource` and `postgres.Migrate` serve the embedded files
+  verbatim. `TestRoleRewritingSource_RenamesOnlyTheThreeRoles` pins that the
+  rewrite renames every role token and nothing else.
+  The test keeps an ordinary fixture (shared roles) alive throughout and
+  asserts that its canary row, table owner and the shared `ledger_owner` OID
+  are unchanged, that the private roles exist after each Up and are gone after
+  the full Down, and that no roundtrip object is owned by or granted to a
+  shared role.
+- **Run lock and cleanup.** Every test process holds advisory lock
+  `pgtestenv.RunLockKey` in shared mode (on the server's `postgres` database)
+  from its first PostgreSQL test until it exits. `make test` then runs
+  `go run ./internal/pgtestenv/pgtestclean`, whatever `go test` returned. It
+  takes the cluster migration lock and the run lock exclusively, without
+  waiting, and does nothing if either is busy — some ledger test process (any
+  run, any worktree, any machine on that server) is still alive, and that
+  run's own cleanup finishes the job. Holding both, it drops leftover
+  `ledger_test_<pid>_<n>` databases, the suite's own test roles
+  (`ledger_test_<pid>_<n>_{owner,app,ro}`, `ledger_noadmin_<n>`,
+  `ledger_bootstrap_<n>`), and the shared `ledger_owner` / `ledger_app` /
+  `ledger_ro` only when nothing in any database on the server depends on them
+  (another project that installed the ledger into its own database keeps
+  them). It touches no other names. A direct `go test` does not clean up;
+  `make test-clean-db` runs the cleanup alone.
+
+To check the server afterwards:
 
 ```sh
-DATABASE_URL=postgres://test_admin:password@127.0.0.1:55432/postgres?sslmode=disable \
-LEDGER_TEST_ISOLATED_DATABASE_URL=postgres://test_admin:password@127.0.0.1:55433/postgres?sslmode=disable \
-make test
+psql -h 127.0.0.1 -U dev -d postgres -c \
+  "SELECT datname FROM pg_database WHERE datname LIKE 'ledger\_test\_%';" -c \
+  "SELECT rolname FROM pg_roles WHERE rolname LIKE 'ledger\_%';"
 ```
 
-These are test-only inputs, never production connection strings. The isolated
-cluster must be dedicated to this destructive test and must not be used by a
-concurrent test run. Both test administrators need database creation/cleanup
-privileges; the full down chain is a privileged DBA operation and should use a
-test superuser. The fixture must also be able to read
-`pg_control_system().system_identifier` on both clusters. Matching cluster IDs,
-unreadable identity or unavailable infrastructure fail the test. Different URL
-strings, database names, host aliases or ports alone do not establish isolation.
-Physical clones retaining the same system identifier are conservatively rejected;
-use separate `initdb` clusters. The identity is cluster-wide, as documented by
-[PostgreSQL 17](https://www.postgresql.org/docs/17/functions-info.html#FUNCTIONS-CONTROLDATA).
-
-Container startup uses the existing cross-process flock and the installed
-testcontainers PostgreSQL module's `BasicWaitStrategies`: final readiness logs
-and the mapped listening port. Startup and cleanup have explicit time limits.
-The ordinary fixture's canary row, table owner and role OID remain live throughout
-the isolated roundtrip and must be unchanged afterwards.
-
-Only `make test-short` / `go test -short` explicitly skips PostgreSQL tests.
-Missing Docker or a bad isolation configuration must never turn a full suite
-into a successful skip. Neither global package serialization nor retries are a
-substitute for isolation.
+Neither global package serialization nor retries are a substitute for
+isolation.
 
 ## Modules and consumers
 

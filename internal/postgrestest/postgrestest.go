@@ -1,7 +1,9 @@
-// Package postgrestest hosts the testcontainers-backed PostgreSQL fixture used
-// by the ledger's integration tests. A test process shares one server while
-// every test gets a fresh database, preserving isolation without repeatedly
-// paying container startup cost.
+// Package postgrestest hosts the PostgreSQL fixture used by the ledger's
+// integration tests. Every test process connects to ONE server -- DATABASE_URL,
+// or by default the shared local instance pgtestenv.DefaultDatabaseURL -- and
+// every test gets a fresh database there, dropped on cleanup. No container,
+// no second cluster: isolation is by database name (and, for the destructive
+// migration roundtrip, by role name -- see roles.go). See docs/TESTING.md.
 package postgrestest
 
 import (
@@ -15,49 +17,57 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azex-ai/ledger/internal/pgtestenv"
 	ledgerpg "github.com/azex-ai/ledger/postgres"
 )
 
-var sharedServer struct {
-	once    sync.Once
-	connStr string
-	err     error
-}
-
 var databaseCounter atomic.Int64
+
+// SharedRolePassword is the one password tests may set on the shared roles
+// ledger_app / ledger_ro (ALTER ROLE ... PASSWORD) to log in as them. Roles
+// are cluster-wide and every test process on the server shares them, so a
+// per-test password would let one process invalidate another's credential
+// mid-run; with a single value, concurrent ALTERs are interchangeable.
+// Test-only; never a real secret.
+const SharedRolePassword = "ledger-test-shared-role-password-not-a-real-secret" //nolint:gosec // test-only credential
 
 func baseConnection(t testing.TB) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("short mode: skipping PostgreSQL integration test")
 	}
-	if configured := os.Getenv("DATABASE_URL"); configured != "" {
-		return strings.Replace(configured, "pgx5://", "postgres://", 1)
-	}
-	sharedServer.once.Do(func() {
-		// Ryuk removes this process-scoped ordinary container at exit.
-		_, sharedServer.connStr, sharedServer.err = startContainer(t)
+	// F-9 (2026-09-03 independent review): an unreachable database must FAIL
+	// the test, never skip it -- a suite that did not execute is not a suite
+	// that passed. The only explicit way to run without a database is -short
+	// (above). Reachability is checked by createNamedDatabase's Ping, which
+	// fails the test through require.NoErrorf.
+	base := pgtestenv.BaseURL()
+	runLock.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		// The connection is deliberately never closed: the shared run lock
+		// must outlive every test in this process, and the server releases it
+		// when the process exits. See pgtestenv.RunLockKey.
+		runLock.conn, runLock.err = pgtestenv.HoldRunLock(ctx, base)
 	})
-	// F-9 (2026-09-03 independent review): this used to t.Skip when the
-	// Docker daemon was unreachable, which made `make test` on a machine
-	// with Docker stopped print `ok` for the postgres package while running
-	// none of its 100+ integration tests. Not-run read as pass -- the exact
-	// shape working-agreements.md §3 forbids, and the same shape the
-	// -count=1 comment in the Makefile already governs for cached passes.
-	//
-	// There are two legitimate ways to say "I do not have a database": run
-	// with -short (handled above), or point DATABASE_URL at one. Neither is
-	// silent. Anything else is an environment failure, and an environment
-	// failure must fail the run.
-	require.NoErrorf(t, sharedServer.err,
-		"could not start the PostgreSQL test container, so the integration tests below cannot run.\n\n"+
-			"This is a failure, not a skip: a suite that did not execute is not a suite that passed. Either start Docker, "+
-			"or say so explicitly -- `make test-short` (skips every integration test) or DATABASE_URL=... (runs them against "+
-			"a server you provide; the full destructive suite also needs LEDGER_TEST_ISOLATED_DATABASE_URL).")
-	return sharedServer.connStr
+	require.NoErrorf(t, runLock.err,
+		"cannot reach the test PostgreSQL server (or take its test-run lock), so this integration test cannot run. "+
+			"This is a failure, not a skip: start the shared local instance (docs/TESTING.md), point DATABASE_URL at a "+
+			"test server, or run `make test-short` to skip every integration test explicitly")
+	return base
+}
+
+// runLock is this process's shared hold on pgtestenv.RunLockKey, taken before
+// its first database is created; while any test process holds it,
+// pgtestclean removes nothing.
+var runLock struct {
+	once sync.Once
+	conn *pgx.Conn
+	err  error
 }
 
 func isolatedConnection(t testing.TB) string {
@@ -67,22 +77,29 @@ func isolatedConnection(t testing.TB) string {
 
 func createDatabase(t testing.TB, base string) string {
 	t.Helper()
+	return createNamedDatabase(t, base, nextDatabaseName())
+}
+
+// nextDatabaseName is unique across every process sharing the server: the
+// counter alone resets in each package's test binary, and `go test ./...`
+// (or a second worktree's run) points all of them at the same server, so the
+// pid is part of the name (F-X1, 2026-09-02 audit).
+func nextDatabaseName() string {
+	return pgtestenv.DatabaseName(os.Getpid(), databaseCounter.Add(1))
+}
+
+func createNamedDatabase(t testing.TB, base, name string) string {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	// The counter alone is process-scoped (resets to 1 in every test binary),
-	// which collides in shared-Postgres mode: `go test ./...` runs one binary
-	// per package, and CI's DATABASE_URL points every one of them at the same
-	// server, so package A's "ledger_test_1" and package B's "ledger_test_1"
-	// race the same CREATE DATABASE. os.Getpid() is unique per test binary
-	// (each package's test process is a distinct OS process), so pairing it
-	// with the counter makes the name unique across the whole `go test ./...`
-	// run, not just within one package (F-X1, 2026-09-02 audit).
-	name := fmt.Sprintf("ledger_test_%d_%d", os.Getpid(), databaseCounter.Add(1))
 	admin, err := pgxpool.New(ctx, base)
 	require.NoError(t, err)
 	defer admin.Close()
-	require.NoError(t, admin.Ping(ctx))
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
+	require.NoErrorf(t, admin.Ping(ctx),
+		"cannot reach the test PostgreSQL server, so this integration test cannot run. This is a failure, not a skip: "+
+			"start the shared local instance (docs/TESTING.md), point DATABASE_URL at a test server, or run "+
+			"`make test-short` to skip every integration test explicitly")
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
 	require.NoError(t, err)
 
 	u, err := url.Parse(base)
@@ -90,7 +107,7 @@ func createDatabase(t testing.TB, base string) string {
 	u.Path = "/" + name
 	connStr := u.String()
 	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		admin, err := pgxpool.New(cleanupCtx, base)
 		if err != nil {
@@ -98,7 +115,7 @@ func createDatabase(t testing.TB, base string) string {
 			return
 		}
 		defer admin.Close()
-		if _, err := admin.Exec(cleanupCtx, "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
+		if _, err := admin.Exec(cleanupCtx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)"); err != nil {
 			t.Errorf("drop test database %s: %v", name, err)
 		}
 	})
@@ -107,15 +124,15 @@ func createDatabase(t testing.TB, base string) string {
 
 // SetupRawDB creates an isolated PostgreSQL database WITHOUT running migrations
 // and returns its connection string. For tests that drive golang-migrate
-// manually (e.g. migrate to an intermediate version, seed, continue). Without
-// Docker or DATABASE_URL the fixture fails; only explicit -short skips it.
+// manually (e.g. migrate to an intermediate version, seed, continue). An
+// unreachable server fails the test; only explicit -short skips it.
 func SetupRawDB(t testing.TB) string {
 	t.Helper()
 	return isolatedConnection(t)
 }
 
-// SetupDB starts a PostgreSQL container, runs ledger migrations, and returns
-// a *pgxpool.Pool. Without Docker or DATABASE_URL the fixture fails. Only
+// SetupDB creates a fresh database on the test server, runs ledger migrations,
+// and returns a *pgxpool.Pool. An unreachable server fails the test. Only
 // explicit -short skips integration tests.
 //
 // Accepts testing.TB so it can be reused from benchmarks as well as tests.

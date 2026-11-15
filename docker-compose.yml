@@ -2,8 +2,8 @@
 #
 # This repository is a Go library. It ships no server to run, so this file
 # only provides the PostgreSQL a consumer's own binary — or this repo's
-# examples — can point at. The integration tests do not use it: they start
-# their own container through testcontainers.
+# examples — can point at. The integration tests do not use it: they run
+# against DATABASE_URL or the shared local PostgreSQL (docs/TESTING.md).
 services:
   postgres:
     image: postgres:17.2-alpine

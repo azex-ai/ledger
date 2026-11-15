@@ -109,7 +109,7 @@ func TestPartialGuardTablesAreAudited(t *testing.T) {
 func TestAccountPolicyEnforcementKnobChangeIsAudited(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "audit-trail-app-policy-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	var policyUID string
 	require.NoError(t, pool.QueryRow(ctx, `
@@ -151,7 +151,7 @@ func TestAccountPolicyEnforcementKnobChangeIsAudited(t *testing.T) {
 func TestLedgerAppCannotWriteTheAuditTrail(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "audit-trail-app-forge-not-a-real-secret") //nolint:gosec
+	appPool := newAppPool(t, pool) //nolint:gosec
 
 	t.Run("cannot forge a config change attributed to another role at another time", func(t *testing.T) {
 		_, err := appPool.Exec(ctx, `

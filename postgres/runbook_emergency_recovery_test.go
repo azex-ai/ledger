@@ -31,7 +31,7 @@ import (
 func TestRunbookEmergencyRecovery_NaiveGrantReopensIDColumn(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-runbook-naive-not-a-real-secret") //nolint:gosec // test-only credential
+	appPool := newAppPool(t, pool) //nolint:gosec // test-only credential
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT-RBN", "Tether USD Runbook Naive")
 	jtID := postgrestest.SeedJournalType(t, pool, "transfer_rbn", "Transfer Runbook Naive")
@@ -84,7 +84,7 @@ func TestRunbookEmergencyRecovery_NaiveGrantReopensIDColumn(t *testing.T) {
 func TestRunbookEmergencyRecovery_CorrectedGrantKeepsIDColumnClosed(t *testing.T) {
 	ctx := context.Background()
 	pool := postgrestest.SetupDB(t)
-	appPool := newAppPool(t, pool, "roles-test-app-runbook-fixed-not-a-real-secret") //nolint:gosec // test-only credential
+	appPool := newAppPool(t, pool) //nolint:gosec // test-only credential
 
 	curID := postgrestest.SeedCurrency(t, pool, "USDT-RBF", "Tether USD Runbook Fixed")
 	jtID := postgrestest.SeedJournalType(t, pool, "transfer_rbf", "Transfer Runbook Fixed")

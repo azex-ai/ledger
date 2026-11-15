@@ -478,7 +478,7 @@ func TestOnchain_Recheck_ForgedBookingIsNotCredited(t *testing.T) {
 
 	// The attack, as the audit ran it: one INSERT, no chain event anywhere.
 	// Written with the migration credential here only because the
-	// testcontainer has no separate ledger_app connection -- the audit
+	// test fixture has no separate ledger_app connection -- the audit
 	// proved the grant, this pin is about what the honest job does next.
 	//
 	// `pending`, not `confirming`: migration 029's BEFORE INSERT guard

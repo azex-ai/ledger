@@ -110,8 +110,8 @@ replace github.com/azex-ai/ledger => ../ledger
 
 Run `go mod tidy` and build in the consuming module, without `go.work` if desired.
 The PostgreSQL test fixture is an internal package of the root module, not a
-separately versioned dependency. Its testcontainers dependencies can appear in
-module metadata/checksums, but do not enter a production import of `ledger`.
+separately versioned dependency; it needs no container runtime and does not
+enter a production import of `ledger`.
 The optional EVM/R2 modules keep their own dependency boundaries.
 
 Run `make test-consumer` to check the checkout from three independent host
@@ -1241,16 +1241,17 @@ Other timing parameters (rollup interval, reservation TTL, reconcile / snapshot 
 
 ## Testing
 
-Integration tests use `testcontainers-go` against real PostgreSQL -- no mocked DB.
-See [Testing the checkout](docs/TESTING.md) for all four Go modules, consumers and
-web checks. Without Docker, the complete PostgreSQL suite requires both
-`DATABASE_URL` and `LEDGER_TEST_ISOLATED_DATABASE_URL` on **different clusters**:
-the full migration rollback drops cluster-wide roles. A second database on the
-same server is not sufficient; only `-short` intentionally skips those tests.
+Integration tests use real PostgreSQL on one server -- `DATABASE_URL`, or by
+default the shared local `postgres://dev:dev@127.0.0.1:5432/postgres` -- with no
+mocked DB, Docker or second cluster. Every test uses its own database, and the
+full migration rollback runs under private role names so it never drops the
+shared `ledger_*` roles. See [Testing the checkout](docs/TESTING.md) for the
+isolation rules, all four Go modules, consumers and web checks; only `-short`
+intentionally skips the PostgreSQL tests.
 
 ```bash
-# Full suite (requires Docker)
-go test ./... -race -count=1
+# Full suite (PostgreSQL at DATABASE_URL or 127.0.0.1:5432; cleans up afterwards)
+make test
 
 # Unit-only (no DB)
 go test ./core/... ./presets/... ./channel/... ./service/delivery/... -count=1

@@ -42,7 +42,7 @@ import (
 func TestJournalEntries_DuplicateIDAcrossPartitions_Rejected(t *testing.T) {
 	pool := postgrestest.SetupDB(t)
 	ctx := context.Background()
-	appPool := newAppPool(t, pool, "roles-test-app-iddup-not-a-real-secret") //nolint:gosec // test-only credential
+	appPool := newAppPool(t, pool) //nolint:gosec // test-only credential
 
 	ledgerStore := postgres.NewLedgerStore(pool)
 	adapter := postgres.NewRollupAdapter(pool)

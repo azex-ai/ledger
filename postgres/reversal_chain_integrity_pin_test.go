@@ -89,7 +89,7 @@ func seedReversalChainFixture(t *testing.T, ctx context.Context) reversalChainFi
 	fx := reversalChainFixture{
 		pool:         pool,
 		store:        store,
-		attacker:     ledgerAppPool(t, ctx, pool, "reversal-chain-app-credential"),
+		attacker:     ledgerAppPool(t, ctx, pool),
 		holder:       holder,
 		journalUID:   journal.UID,
 		currencyUID:  curUID,
